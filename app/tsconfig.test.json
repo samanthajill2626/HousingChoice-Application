@@ -1,0 +1,11 @@
+{
+  // Typecheck-only config for the vitest suites in app/test (they import
+  // app/src with types via vitest/tsx, outside the build rootDir). No emit.
+  // Root `npm run typecheck` runs this — test code is held to the same
+  // compiler options as src.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["test", "src"]
+}

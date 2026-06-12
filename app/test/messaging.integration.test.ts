@@ -142,6 +142,20 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
       expect(page.filter((m) => m.provider_sid === 'SMdup1')).toHaveLength(1);
     });
 
+    it('a redelivery with a DIFFERENT provider ts still dedupes and returns the FIRST write\'s tsMsgId', async () => {
+      // Inbound redeliveries carry no provider timestamp, so the second
+      // delivery computes a NEW first-seen ts — the SID pointer still
+      // collides, and the result must carry the PERSISTED key.
+      const first = await messages.append(outbound(convId, 'SMdiffts1', '2026-06-12T10:05:00.000Z', 'first'));
+      expect(first).toEqual({ deduped: false, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1' });
+
+      const second = await messages.append(outbound(convId, 'SMdiffts1', '2026-06-12T10:06:11.000Z', 'first'));
+      expect(second).toEqual({ deduped: true, tsMsgId: '2026-06-12T10:05:00.000Z#SMdiffts1' });
+
+      const page = await messages.listByConversation(convId);
+      expect(page.filter((m) => m.provider_sid === 'SMdiffts1')).toHaveLength(1);
+    });
+
     it('getByProviderSid resolves a message via the SID pointer (doc §9 lookup)', async () => {
       await messages.append(outbound(convId, 'SMptr1', '2026-06-12T10:01:00.000Z', 'find me'));
       const found = await messages.getByProviderSid('SMptr1');

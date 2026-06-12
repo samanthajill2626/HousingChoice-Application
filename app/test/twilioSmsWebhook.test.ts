@@ -4,7 +4,7 @@
 // in-memory fakes. Covers the doc-§7.1 echo defenses, redelivery dedupe,
 // STOP/START recording, and MMS mirroring.
 import { describe, expect, it } from 'vitest';
-import { createSendMessageService } from '../src/services/sendMessage.js';
+import { ContactOptedOutError, createSendMessageService } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -136,6 +136,7 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
     });
     const outcome = await send({ conversationId: conversation.conversationId, body: 'our outbound reply' });
     expect(world.messages).toHaveLength(1);
@@ -158,7 +159,7 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     expect(world.flagWrites).toHaveLength(0);
   });
 
-  it('REDELIVERY: the identical inbound webhook twice persists exactly one message', async () => {
+  it('REDELIVERY: the identical inbound webhook twice persists exactly one message and re-runs the idempotent side effects', async () => {
     const { app, world } = makeWebhookHarness();
     const params = inboundSmsParams({ MessageSid: 'SMredeliver01' });
 
@@ -169,8 +170,60 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     expect(second.status).toBe(200);
     expect(world.messages).toHaveLength(1);
     expect(world.conversations.size).toBe(1);
-    // The redelivery acked BEFORE the side-effect pipeline: one touch only.
-    expect(world.touches).toHaveLength(1);
+    // The dedupe path does NOT early-return: the side effects re-run (they
+    // are idempotent), so both deliveries touch the inbox.
+    expect(world.touches).toHaveLength(2);
+  });
+
+  it('REDELIVERY completes a first delivery that died after the append: media + STOP side effects land on retry', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+    const params = inboundSmsParams({
+      MessageSid: 'MMcrash01',
+      Body: 'STOP',
+      OptOutType: 'STOP',
+      NumMedia: '1',
+      MediaUrl0: 'https://api.twilio.com/media/crash',
+      MediaContentType0: 'image/jpeg',
+    });
+
+    // First delivery: the media fetch throws (per-attachment failure path) —
+    // the message persists but its media never reaches S3.
+    world.failMediaUrls.add('https://api.twilio.com/media/crash');
+    const first = await signedTwilioPost(app, SMS_PATH, params);
+    expect(first.status).toBe(200);
+    expect(world.messages).toHaveLength(1);
+    expect(world.mediaPuts).toHaveLength(0);
+    expect(world.messages[0]!.media_s3_keys).toBeUndefined();
+
+    // Twilio redelivers: the append dedupes, but the pipeline continues —
+    // the persisted message lacks media_s3_keys, so mirroring runs this time.
+    world.failMediaUrls.delete('https://api.twilio.com/media/crash');
+    const second = await signedTwilioPost(app, SMS_PATH, params);
+    expect(second.status).toBe(200);
+
+    expect(world.messages).toHaveLength(1); // still exactly one message
+    const conv = [...world.conversations.values()][0]!;
+    expect(world.mediaPuts.map((p) => p.key)).toEqual([`media/${conv.conversationId}/MMcrash01/0`]);
+    expect(world.messages[0]!.media_s3_keys).toEqual([`media/${conv.conversationId}/MMcrash01/0`]);
+    // STOP recording ran on BOTH deliveries (idempotent re-set, no harm).
+    expect(conv.sms_opt_out).toBe(true);
+    expect(world.contacts[0]!.sms_opt_out).toBe(true);
+  });
+
+  it('REDELIVERY with already-mirrored media does NOT re-fetch or re-annotate', async () => {
+    const { app, world } = makeWebhookHarness();
+    const params = inboundSmsParams({
+      MessageSid: 'MMonce01',
+      NumMedia: '1',
+      MediaUrl0: 'https://api.twilio.com/media/once',
+    });
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    expect(world.mediaPuts).toHaveLength(1);
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    expect(world.mediaPuts).toHaveLength(1); // mirrored exactly once
   });
 });
 
@@ -251,14 +304,86 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     expect(world.contacts[0]!.sms_opt_out).toBe(false);
   });
 
-  it('a STOP from an unknown phone WARNs (nothing to flag) but the message persists', async () => {
-    const { app, world, capture } = makeWebhookHarness();
-    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'STOP' }));
+  it('STOP also flags the CONVERSATION (contact and conversation suppression travel together)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
 
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP' }));
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.sms_opt_out).toBe(true);
+    expect(world.optOutSets).toEqual([{ conversationId: conv.conversationId, value: true }]);
+  });
+
+  it('a STOP from an UNKNOWN phone still suppresses: conversation flagged, audit written, later send refused', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'STOP', MessageSid: 'SMstopunknown' }));
+
+    // No contact to flag (auto-capture is M1.2) — WARN, not silence…
     expect(world.flagWrites).toHaveLength(0);
-    expect(world.messages).toHaveLength(1);
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('no contact record'));
     expect(warn).toBeDefined();
+    expect(world.messages).toHaveLength(1);
+
+    // …but the CONVERSATION carries the suppression + the audit trail entry
+    // (entityKey = the conversationId when no contact exists).
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.sms_opt_out).toBe(true);
+    expect(world.auditEvents).toEqual([
+      expect.objectContaining({
+        entityKey: conv.conversationId,
+        eventType: 'sms_opt_out_recorded',
+        payload: expect.objectContaining({ providerSid: 'SMstopunknown', source: 'keyword' }),
+      }),
+    ]);
+
+    // And the send wrapper refuses the conversation from now on.
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    await expect(send({ conversationId: conv.conversationId, body: 'hi again' })).rejects.toBeInstanceOf(
+      ContactOptedOutError,
+    );
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('a START from an UNKNOWN phone clears the conversation flag and audits the re-subscribe', async () => {
+    const { app, world } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'STOP', MessageSid: 'SMstopu2' }));
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.sms_opt_out).toBe(true);
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'START', MessageSid: 'SMstartu2' }));
+
+    expect(conv.sms_opt_out).toBe(false);
+    expect(world.optOutSets).toEqual([
+      { conversationId: conv.conversationId, value: true },
+      { conversationId: conv.conversationId, value: false },
+    ]);
+    expect(world.auditEvents[1]).toMatchObject({
+      entityKey: conv.conversationId,
+      eventType: 'sms_opt_out_cleared',
+    });
+
+    // Cleared = sendable again.
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    await expect(send({ conversationId: conv.conversationId, body: 'welcome back' })).resolves.toMatchObject({
+      conversationId: conv.conversationId,
+    });
   });
 
   it('an ordinary message containing "stop" mid-sentence is NOT an opt-out', async () => {

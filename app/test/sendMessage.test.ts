@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { MessagingAdapter, SendMessageParams } from '../src/adapters/messaging.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
+import type { AuditRepo } from '../src/repos/auditRepo.js';
 import type { ContactItem, ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { MessagesRepo, NewMessage } from '../src/repos/messagesRepo.js';
@@ -27,6 +28,7 @@ interface Fakes {
   appended: NewMessage[];
   touched: { previewText: string | undefined; ts: string }[];
   modeSets: string[];
+  auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   counterValue: number;
   capture: LogCapture;
   service: ReturnType<typeof createSendMessageService>;
@@ -55,6 +57,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     appended: [] as NewMessage[],
     touched: [] as { previewText: string | undefined; ts: string }[],
     modeSets: [] as string[],
+    auditEvents: [] as Fakes['auditEvents'],
     counterValue: 0,
   };
 
@@ -68,6 +71,9 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;
     },
+    setSmsOptOut: async (_id, value) => {
+      conversation.sms_opt_out = value;
+    },
     incrementAutomatedSendCount: async () => {
       fakes.counterValue += 1;
       return fakes.counterValue;
@@ -76,6 +82,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
     setFlag: async () => {},
+    clearFlag: async () => {},
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
@@ -85,6 +92,12 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     getByProviderSid: async () => undefined,
     updateDeliveryStatus: async () => true,
     listByConversation: async () => [],
+    annotateMessage: async () => {},
+  };
+  const auditRepo: AuditRepo = {
+    append: async (entityKey, eventType, payload) => {
+      fakes.auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
+    },
   };
   const adapter: MessagingAdapter = {
     sendMessage: async (params) => {
@@ -104,6 +117,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     conversationsRepo,
     messagesRepo,
     contactsRepo,
+    auditRepo,
   });
 
   // NOTE: the closures above mutate `fakes` — return it (augmented), never a copy.
@@ -160,10 +174,42 @@ describe('sendMessage service', () => {
     expect(f.appended).toHaveLength(0);
   });
 
+  it('refuses sends when the CONVERSATION has sms_opt_out — even with no contact record (STOP from unknown phone)', async () => {
+    const f = makeFakes({ conversation: { sms_opt_out: true }, contact: null });
+    await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
+      ContactOptedOutError,
+    );
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
   it('allows sends when the phone resolves to no contact yet (auto-capture is M1.2)', async () => {
     const f = makeFakes({ contact: null });
     await expect(f.service({ conversationId: 'conv-1', body: 'x' })).resolves.toMatchObject({
       providerSid: 'SMfake-1',
+    });
+  });
+
+  it('writes a message_sent audit event after a successful send (IDs only, never the body)', async () => {
+    const f = makeFakes();
+    await f.service({ conversationId: 'conv-1', body: 'audit me' });
+    expect(f.auditEvents).toEqual([
+      {
+        entityKey: 'conv-1',
+        eventType: 'message_sent',
+        payload: { providerSid: 'SMfake-1', automated: false, author: 'teammate' },
+      },
+    ]);
+    expect(JSON.stringify(f.auditEvents)).not.toContain('audit me');
+  });
+
+  it('persists + audits the caller-supplied author (ai) — the Phase 2 seam', async () => {
+    const f = makeFakes();
+    await f.service({ conversationId: 'conv-1', body: 'from the ai', automated: true, author: 'ai' });
+    expect(f.appended[0]).toMatchObject({ author: 'ai' });
+    expect(f.auditEvents[0]).toMatchObject({
+      eventType: 'message_sent',
+      payload: { providerSid: 'SMfake-1', automated: true, author: 'ai' },
     });
   });
 
@@ -181,6 +227,15 @@ describe('sendMessage service', () => {
 
       expect(f.sent).toHaveLength(3); // the tripping send never reached the provider
       expect(f.modeSets).toEqual(['manual']);
+      // The mode flip is an audit-trail event (§5) — alongside the three
+      // message_sent events from the allowed sends.
+      expect(f.auditEvents.filter((e) => e.eventType === 'mode_changed')).toEqual([
+        {
+          entityKey: 'conv-1',
+          eventType: 'mode_changed',
+          payload: { from: 'auto', to: 'manual', reason: 'breaker_trip' },
+        },
+      ]);
       // The trip line must be ERROR level — that's what the hc-<env>-error-logs
       // alarm picks up.
       const errors = f.capture.atLevel(ERROR);

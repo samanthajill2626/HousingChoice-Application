@@ -146,6 +146,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       throw new Error(`OUR_PHONE_NUMBERS entries must be E.164 (+1...), got: ${n}`);
     }
   }
+  // Echo defense #1 (doc §7.1) must be un-misconfigurable: a production stack
+  // talking to real Twilio with an empty OUR_PHONE_NUMBERS would silently run
+  // on SID-dedupe alone — fail fast instead (same pattern as TWILIO_* above).
+  if (messagingDriver === 'twilio' && nodeEnv === 'production' && ourPhoneNumbers.length === 0) {
+    throw new Error(
+      'OUR_PHONE_NUMBERS is required when MESSAGING_DRIVER=twilio and NODE_ENV=production — it must ' +
+        'list every owned number (echo/author defense 1). Hydrate from Parameter Store (npm run ' +
+        'secrets:push). Refusing to start without it.',
+    );
+  }
 
   return {
     nodeEnv,

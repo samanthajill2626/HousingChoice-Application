@@ -84,6 +84,31 @@ key lands in `.env.<env>.example` FIRST (placeholder + comment), then gets merge
 `.env.<env>` — append only, never overwrite existing lines. `secrets:push`/`secrets:check` print a
 warning whenever the key sets drift.
 
+### Twilio
+
+The messaging stack (M1.1) has a Twilio-console side that Terraform does NOT manage — this wiring
+must hold or messages silently stop flowing:
+
+- **Messaging Service inbound webhook** → `https://<cloudfront>/webhooks/twilio/sms` (the
+  Messaging Service's Integration settings, "Send a webhook").
+- **Delivery status callback** (same Integration page) → `https://<cloudfront>/webhooks/twilio/status`
+  — without it, delivery outcomes (including failures that trigger retries/contact flags) never
+  arrive.
+- **The phone number must sit in the live A2P campaign's sender pool** of that Messaging Service —
+  a number outside the pool can't send campaign traffic.
+- **Voice URLs on the number** stay configured on the number itself (calls are not handled by the
+  app yet; the number-level voice config is what answers).
+
+The env keys that feed the app live in the gitignored `.env.<env>` and reach Parameter Store via
+`npm run secrets:push -- <env>` (then a deploy to go live — see [Secrets](#secrets)):
+`TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` (REST), `TWILIO_AUTH_TOKEN`
+(webhook signature validation ONLY), `TWILIO_MESSAGING_SERVICE_SID`, and `OUR_PHONE_NUMBERS`.
+
+**`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
+defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing
+number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
+list refuses to boot.
+
 ### What the health-check gate does
 
 Every deploy (build, `--tag`, `--promote`) runs this gate **on the instance** before declaring success:
@@ -281,6 +306,8 @@ Tracked here so nothing silently becomes permanent:
 | Orphan boot-log lines | **Fixed 2026-06-12** | Lifecycle lines (boot/shutdown/process-level errors) now run inside a per-process `bootId` correlation context, so container starts no longer trip `hc-<env>-orphan-logs`. Any orphan hit is now a real bug. (Images tagged before 2026-06-12 still carry the old behavior.) |
 | Custom domain + ACM | Deferred until the DNS question is settled | CloudFront serves on the default `*.cloudfront.net` cert. No Route 53 zone exists. |
 | SNS prod confirmation | **Action needed once:** click the confirmation email for `hc-prod-alerts` | See the Alarms section note. |
+| Messaging delivery alarms | M1.1 gap | Metric filter + alarm for webhook signature rejections and for undelivered-rate / 429-30022 throttling errors (the doc-§9 alarm table) — today only 30007 carrier filtering and breaker trips reach ERROR/the error-logs alarm. |
+| /api rate limiting | Before M1.3 auth lands | Express rate limit on the /api manual-send route — it is origin-secret-protected only until OAuth/RBAC (M1.3), so a leaked origin secret currently means unthrottled sends. |
 
 ## State & bootstrap
 

@@ -97,11 +97,14 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     try {
       // automated: true on purpose — retries are machine-initiated and
       // breaker-metered by design (a retry storm must trip the breaker).
+      // The retried message keeps the ORIGINAL author (the retry is the same
+      // logical message, not a new teammate action).
       outcome = await sendMessage({
         conversationId: payload.conversationId,
         ...(original.body !== undefined && { body: original.body }),
         ...(original.mediaUrls !== undefined && { mediaUrls: original.mediaUrls }),
         automated: true,
+        author: original.author === 'ai' ? 'ai' : 'teammate',
       });
     } catch (err) {
       if (err instanceof SendRefusedError) {
@@ -118,6 +121,9 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
 
     // Lineage: the new message records what it retried and how deep the
     // chain is — the next 30003 callback reads retry_attempt for the cap.
+    // Accepted risk: if this annotate loses the race to the NEXT 30003
+    // callback for the new SID, that callback sees no retry_attempt and the
+    // chain counter resets — the 60s+ backoff makes that window unrealistic.
     await messages.annotateMessage(payload.conversationId, outcome.tsMsgId, {
       retryOf: original.tsMsgId,
       retryAttempt: payload.attempt,

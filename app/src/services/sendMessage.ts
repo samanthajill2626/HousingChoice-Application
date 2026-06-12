@@ -16,6 +16,7 @@ import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
   type ContactsRepo,
@@ -84,6 +85,12 @@ export interface SendMessageInput {
    * dashboard route sends are human (false): always allowed, never counted.
    */
   automated?: boolean;
+  /**
+   * Who authored this outbound message (persisted + audited). Defaults to
+   * `teammate`; Phase 2's AI passes `ai`, and retries carry the ORIGINAL
+   * message's author through.
+   */
+  author?: 'teammate' | 'ai';
 }
 
 export interface SendMessageOutcome {
@@ -100,6 +107,7 @@ export interface SendMessageServiceDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
+  auditRepo?: AuditRepo;
 }
 
 export type SendMessageService = (input: SendMessageInput) => Promise<SendMessageOutcome>;
@@ -111,18 +119,28 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, automated = false } = input;
+    const { conversationId, body, mediaUrls, automated = false, author = 'teammate' } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
     if (!conversation) throw new ConversationNotFoundError(conversationId);
 
     // (1) Opt-out gate — suppression beats everything (doc §7.1 / 21610).
+    // EITHER flag refuses: the conversation-level flag covers STOPs from
+    // phones with no contact record yet (auto-capture is M1.2).
     const contact = await contacts.findByPhone(conversation.participant_phone);
-    if (contact?.sms_opt_out === true) {
-      log.warn({ conversationId, contactId: contact.contactId }, 'send refused: contact has sms_opt_out');
+    if (conversation.sms_opt_out === true || contact?.sms_opt_out === true) {
+      log.warn(
+        {
+          conversationId,
+          contactId: contact?.contactId,
+          conversationOptOut: conversation.sms_opt_out === true,
+        },
+        'send refused: sms_opt_out is set (conversation and/or contact)',
+      );
       throw new ContactOptedOutError(conversationId);
     }
 
@@ -133,6 +151,12 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       const count = await conversations.incrementAutomatedSendCount(conversationId, minuteBucket());
       if (count > config.sendBreakerMaxPerMinute) {
         await conversations.setMode(conversationId, 'manual');
+        // §5 mandate: mode flips are audit-trail events.
+        await audit.append(conversationId, 'mode_changed', {
+          from: 'auto',
+          to: 'manual',
+          reason: 'breaker_trip',
+        });
         // ERROR on purpose: the hc-<env>-error-logs metric alarm (pino level
         // >= 50) is what pages on breaker trips — this line IS the alarm.
         log.error(
@@ -158,14 +182,20 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       providerTs: result.providerTs,
       type: mediaUrls !== undefined && mediaUrls.length > 0 ? 'mms' : 'sms',
       direction: 'outbound',
-      author: 'teammate',
+      author,
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
       deliveryStatus: result.status,
     });
 
-    // (5) Inbox touch — denormalized last-activity + preview (doc §5).
+    // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and
+    // the §5 audit-trail entry for the send (IDs only, never the body).
     await conversations.touchLastActivity(conversationId, body, result.providerTs);
+    await audit.append(conversationId, 'message_sent', {
+      providerSid: result.providerSid,
+      automated,
+      author,
+    });
 
     log.info(
       { conversationId, providerSid: result.providerSid, status: result.status, automated },

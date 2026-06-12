@@ -7,6 +7,7 @@
 //
 // PII (doc §9): message bodies and media URLs are NEVER logged — log lines
 // carry SIDs/IDs/lengths only, correlated via the pino mixin.
+import { setTimeout as delay } from 'node:timers/promises';
 import { Router } from 'express';
 import type { MediaStore } from '../../adapters/mediaStore.js';
 import { createMediaStore } from '../../adapters/mediaStore.js';
@@ -55,7 +56,15 @@ export interface TwilioWebhookDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  /**
+   * How long the status callback waits before retrying an unknown-SID lookup
+   * once (the send/append race window). Injectable for tests; default 2500ms.
+   */
+  statusUnknownSidRetryDelayMs?: number;
 }
+
+/** Default wait before the one unknown-SID retry in /status (see above). */
+const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 
 export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
@@ -67,6 +76,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const ourNumbers = new Set(config.ourPhoneNumbers);
+  const statusRetryDelayMs = deps.statusUnknownSidRetryDelayMs ?? STATUS_UNKNOWN_SID_RETRY_DELAY_MS;
 
   const router = Router();
   const verifySignature = twilioSignatureMiddleware({
@@ -137,16 +147,48 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
+    // Where the persisted message actually lives (== the fresh append unless
+    // deduped, where the FIRST delivery's keys win) + whether media was
+    // already mirrored.
+    let persistedConversationId = conversation.conversationId;
+    let persistedTsMsgId = appended.tsMsgId;
+    let mediaAlreadyMirrored = false;
     if (appended.deduped) {
-      log.info({ providerSid: MessageSid }, 'twilio inbound webhook deduped (redelivery or send-time copy) — acknowledged');
-      res.type('text/xml').send(EMPTY_TWIML);
-      return;
+      // Dedupe must NOT skip the side effects below: a redelivery usually
+      // means the FIRST delivery 5xx'd/crashed AFTER the append but before
+      // finishing this pipeline. Every remaining step is idempotent — STOP
+      // recording re-sets the same flags, media mirroring is skipped when the
+      // persisted message already has its keys, touchLastActivity re-stamps —
+      // so re-running them completes the crashed delivery. (For the
+      // echo-of-our-own-send dedupe these are harmless no-ops by design; the
+      // From-check above stays the true first gate for echoes.)
+      const persisted = await messages.getByProviderSid(MessageSid);
+      if (!persisted) {
+        // The append deduped, so the SID pointer exists — failing to read the
+        // message back is never expected. ERROR (alarmed) + ack so Twilio
+        // stops redelivering into a broken read path.
+        log.error(
+          { providerSid: MessageSid },
+          'twilio inbound webhook deduped but the persisted message could not be read back — acknowledged',
+        );
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
+      persistedConversationId = persisted.conversationId;
+      persistedTsMsgId = persisted.tsMsgId;
+      mediaAlreadyMirrored = (persisted.media_s3_keys?.length ?? 0) > 0;
+      mergeContext({ conversationId: persistedConversationId });
+      log.info(
+        { providerSid: MessageSid },
+        'twilio inbound webhook deduped (redelivery or send-time copy) — re-running idempotent side effects',
+      );
     }
 
     // From here on the message is persisted: side-effect failures must never
-    // crash the webhook (a 5xx would trigger a redelivery that dedupes at the
-    // append and SKIPS these steps — so failures are ERROR-logged + alarmed,
-    // not retried-by-Twilio).
+    // crash the webhook — a 5xx would trigger a redelivery, which dedupes at
+    // the append and RE-RUNS these idempotent steps. Failures are still
+    // ERROR-logged + alarmed (Twilio's redelivery is best-effort backup, not
+    // the recovery plan).
 
     // (4) STOP/opt-out recording (doc §7.1; Twilio Advanced Opt-Out already
     // auto-replied at the provider). The message itself stays on the
@@ -156,24 +198,30 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const optedOut = OptOutType === 'STOP' || STOP_KEYWORDS.has(keyword);
       const optedIn = !optedOut && (OptOutType === 'START' || START_KEYWORDS.has(keyword));
       if (optedOut || optedIn) {
-        if (!contact) {
-          log.warn(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in received from a phone with no contact record — nothing to flag (auto-capture is M1.2)',
-          );
-        } else if (optedOut) {
-          await contacts.setFlag(contact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${contact.contactId}`, 'sms_opt_out_recorded', {
+        // The CONVERSATION flag is always written — a STOP from a phone with
+        // no contact record yet (auto-capture is M1.2) must still suppress
+        // every later send. The send wrapper gates on either flag.
+        await conversations.setSmsOptOut(conversation.conversationId, optedOut);
+        const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
+        const source =
+          OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
+        if (contact) {
+          if (optedOut) await contacts.setFlag(contact.contactId, 'sms_opt_out');
+          else await contacts.clearFlag(contact.contactId, 'sms_opt_out');
+          await audit.append(`contacts#${contact.contactId}`, eventType, {
             providerSid: MessageSid,
             conversationId: conversation.conversationId,
-            source: OptOutType === 'STOP' ? 'OptOutType' : 'keyword',
+            source,
           });
         } else {
-          await contacts.clearFlag(contact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${contact.contactId}`, 'sms_opt_out_cleared', {
+          log.warn(
+            { providerSid: MessageSid, optOut: optedOut },
+            'opt-out/in from a phone with no contact record — conversation flagged, no contact to flag (auto-capture is M1.2)',
+          );
+          await audit.append(conversation.conversationId, eventType, {
             providerSid: MessageSid,
             conversationId: conversation.conversationId,
-            source: OptOutType === 'START' ? 'OptOutType' : 'keyword',
+            source,
           });
         }
       }
@@ -187,7 +235,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // inside Twilio's 15s webhook window, and a failure here must leave a
     // usable message record (the provider mediaUrls stay on the item) plus a
     // correlated ERROR — never a crash, never a dropped message.
-    if (mediaUrls.length > 0) {
+    if (mediaUrls.length > 0 && !mediaAlreadyMirrored) {
       if (!mediaStore) {
         const line = 'inbound MMS media NOT mirrored — MEDIA_BUCKET is not configured';
         if (config.nodeEnv === 'production') log.error({ providerSid: MessageSid, mediaCount: mediaUrls.length }, line);
@@ -195,7 +243,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       } else {
         const keys: string[] = [];
         for (const [i, url] of mediaUrls.entries()) {
-          const key = `media/${conversation.conversationId}/${MessageSid}/${i}`;
+          const key = `media/${persistedConversationId}/${MessageSid}/${i}`;
           try {
             const stream = await adapter.getMediaStream(url);
             await mediaStore.put(key, stream, params[`MediaContentType${i}`]);
@@ -209,7 +257,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         if (keys.length > 0) {
           try {
-            await messages.annotateMessage(conversation.conversationId, appended.tsMsgId, { mediaS3Keys: keys });
+            await messages.annotateMessage(persistedConversationId, persistedTsMsgId, { mediaS3Keys: keys });
           } catch (err) {
             log.error({ err, providerSid: MessageSid }, 'failed to record mirrored media keys on the message');
           }
@@ -219,7 +267,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
 
     // (6) Inbox touch, then acknowledge with empty TwiML.
     try {
-      await conversations.touchLastActivity(conversation.conversationId, Body || undefined, providerTs);
+      await conversations.touchLastActivity(persistedConversationId, Body || undefined, providerTs);
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'touchLastActivity failed — message persisted, inbox stale');
     }
@@ -252,11 +300,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
 
     // Context recovery by lookup (doc §9): status callbacks cannot carry the
     // correlation envelope — MessageSid → message → conversation.
-    const message = await messages.getByProviderSid(MessageSid);
+    let message = await messages.getByProviderSid(MessageSid);
     if (!message) {
-      // Unknown SID is a WARN + 200, never a 500 (e.g. a message sent
-      // outside the platform, or a race with the send-time persist).
-      log.warn({ providerSid: MessageSid, providerStatus: MessageStatus }, 'status callback for unknown provider SID — ignored');
+      // Unknown SID: usually the callback outran the send wrapper's
+      // persist-at-send (Twilio can fire the first status before
+      // messages.append commits). Wait once and retry the lookup before
+      // declaring the message lost.
+      await delay(statusRetryDelayMs);
+      message = await messages.getByProviderSid(MessageSid);
+    }
+    if (!message) {
+      // Still unknown after the retry: either the send/append race lasted
+      // longer than the window, or the process crashed between provider send
+      // and append (the crash-orphan window) — a delivery outcome we cannot
+      // attach to any message. ERROR on purpose (feeds the
+      // hc-<env>-error-logs alarm): this is the §7.1 "closing the loop"
+      // backstop — a silently dropped status would otherwise hide a failed
+      // send forever. Still ack 200 so Twilio doesn't redeliver into the
+      // same gap.
+      log.error(
+        { providerSid: MessageSid, providerStatus: MessageStatus },
+        'status callback for unknown provider SID after retry — delivery outcome dropped',
+      );
       res.status(200).end();
       return;
     }

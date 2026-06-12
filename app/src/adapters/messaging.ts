@@ -58,6 +58,29 @@ export interface MessagingAdapter {
   getMediaStream(mediaUrl: string): Promise<Readable>;
 }
 
+/** Twilio media host allowlist — MediaUrl{i} values always live here. */
+const TWILIO_MEDIA_HOST = 'api.twilio.com';
+
+/** Mirrored media size cap: anything bigger than this is refused, not streamed. */
+export const MAX_MEDIA_CONTENT_LENGTH = 25 * 1024 * 1024; // 25 MB
+
+/**
+ * Typed refusal for media fetches the Twilio driver will not perform: a
+ * non-Twilio/non-https URL (SSRF guard — webhook params are attacker-shaped
+ * input and the fetch carries our basic-auth credentials) or an oversize
+ * Content-Length. The webhook media loop treats this like any other
+ * per-attachment failure: ERROR + continue.
+ */
+export class MediaFetchRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly reason: 'host_not_allowed' | 'too_large',
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Twilio driver — production path (Programmable Messaging REST).
 // ---------------------------------------------------------------------------
@@ -140,10 +163,34 @@ export class TwilioMessagingDriver implements MessagingAdapter {
   }
 
   async getMediaStream(mediaUrl: string): Promise<Readable> {
+    // SSRF guard FIRST — before any credentials are attached: MediaUrl{i}
+    // comes off a webhook form, so an exact-host https-only allowlist keeps
+    // a forged URL from pointing our authenticated fetch anywhere else.
+    const url = new URL(mediaUrl);
+    if (url.protocol !== 'https:' || url.hostname !== TWILIO_MEDIA_HOST) {
+      throw new MediaFetchRefusedError(
+        `getMediaStream: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
+        'host_not_allowed',
+      );
+    }
     const auth = Buffer.from(`${this.deps.apiKeySid}:${this.deps.apiKeySecret}`).toString('base64');
-    const res = await fetch(mediaUrl, { headers: { authorization: `Basic ${auth}` } });
+    const controller = new AbortController();
+    const res = await fetch(url, {
+      headers: { authorization: `Basic ${auth}` },
+      signal: controller.signal,
+    });
     if (!res.ok || !res.body) {
       throw new Error(`getMediaStream: ${res.status} ${res.statusText} fetching Twilio media`);
+    }
+    // Size cap: refuse oversize media up front instead of streaming 25MB+
+    // into S3 (MMS media is carrier-capped far below this anyway).
+    const contentLength = Number(res.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_MEDIA_CONTENT_LENGTH) {
+      controller.abort();
+      throw new MediaFetchRefusedError(
+        `getMediaStream: Content-Length ${contentLength} exceeds the ${MAX_MEDIA_CONTENT_LENGTH}-byte cap`,
+        'too_large',
+      );
     }
     return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
   }

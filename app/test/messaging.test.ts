@@ -1,9 +1,11 @@
 // M1.1 unit tests: MessagingAdapter drivers + factory. No network calls —
 // the Twilio driver gets a fake injected client (TwilioClientLike, same
 // pattern as SchedulerClientLike in scheduler.test.ts).
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ConsoleMessagingDriver,
+  MAX_MEDIA_CONTENT_LENGTH,
+  MediaFetchRefusedError,
   TwilioMessagingDriver,
   createMessagingAdapter,
   mapTwilioStatus,
@@ -40,7 +42,15 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
   it('defaults to console for local NODE_ENVs and twilio for production', () => {
     expect(loadConfig({ NODE_ENV: 'development' }).messagingDriver).toBe('console');
     expect(loadConfig({ NODE_ENV: 'test' }).messagingDriver).toBe('console');
-    expect(loadConfig({ ...TWILIO_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's', MESSAGING_DRIVER: undefined }).messagingDriver).toBe('twilio');
+    expect(
+      loadConfig({
+        ...TWILIO_ENV,
+        NODE_ENV: 'production',
+        CF_ORIGIN_SECRET: 's',
+        MESSAGING_DRIVER: undefined,
+        OUR_PHONE_NUMBERS: '+15550009999',
+      }).messagingDriver,
+    ).toBe('twilio');
   });
 
   it('honors an explicit MESSAGING_DRIVER and rejects unknown values', () => {
@@ -54,6 +64,22 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
     expect(() => loadConfig({ NODE_ENV: 'development', MESSAGING_DRIVER: 'twilio' })).toThrow(
       /TWILIO_ACCOUNT_SID.*TWILIO_MESSAGING_SERVICE_SID/,
     );
+  });
+
+  it('fail-fasts when twilio runs in production with an empty OUR_PHONE_NUMBERS (echo defense 1)', () => {
+    const prodTwilio = { ...TWILIO_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's' };
+    expect(() => loadConfig(prodTwilio)).toThrow(/OUR_PHONE_NUMBERS/);
+    // Configured list → boots.
+    expect(loadConfig({ ...prodTwilio, OUR_PHONE_NUMBERS: '+15550009999' }).ourPhoneNumbers).toEqual([
+      '+15550009999',
+    ]);
+    // The guard is twilio+production only: console-in-production and
+    // twilio-in-dev both still boot with an empty list (SID dedupe is layer 2).
+    expect(
+      loadConfig({ NODE_ENV: 'production', CF_ORIGIN_SECRET: 's', MESSAGING_DRIVER: 'console' })
+        .ourPhoneNumbers,
+    ).toEqual([]);
+    expect(loadConfig(TWILIO_ENV).ourPhoneNumbers).toEqual([]);
   });
 
   it('builds the matching driver for each config', () => {
@@ -111,6 +137,73 @@ describe('TwilioMessagingDriver', () => {
     expect(mapTwilioStatus('failed')).toBe('failed');
     expect(mapTwilioStatus('canceled')).toBe('failed');
     expect(mapTwilioStatus('something-new')).toBe('queued');
+  });
+});
+
+describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () => {
+  function makeDriver() {
+    return new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client: makeFakeTwilioClient().client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+  }
+
+  /** Minimal fetch-Response shape the driver reads (ok/status/headers/body). */
+  function fakeResponse(contentLength: number) {
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-length': String(contentLength) }),
+      body: {}, // truthy is enough — refusal throws before the stream is touched
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses a non-Twilio host with a typed error BEFORE fetching (credentials never leave)', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(makeDriver().getMediaStream('https://attacker.example/media/0')).rejects.toMatchObject({
+      name: 'MediaFetchRefusedError',
+      reason: 'host_not_allowed',
+    });
+    // Subdomain confusion must not pass the exact-host check either.
+    await expect(
+      makeDriver().getMediaStream('https://api.twilio.com.attacker.example/media/0'),
+    ).rejects.toBeInstanceOf(MediaFetchRefusedError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses plain http even on the Twilio host (no basic auth over cleartext)', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(makeDriver().getMediaStream('http://api.twilio.com/media/0')).rejects.toMatchObject({
+      reason: 'host_not_allowed',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses an oversize Content-Length (> 25 MB) after the fetch, before streaming', async () => {
+    const fetchSpy = vi.fn(async () => fakeResponse(MAX_MEDIA_CONTENT_LENGTH + 1));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(makeDriver().getMediaStream('https://api.twilio.com/media/big')).rejects.toMatchObject({
+      name: 'MediaFetchRefusedError',
+      reason: 'too_large',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The guard runs first, so the allowed URL did reach fetch with basic auth.
+    const [, init] = fetchSpy.mock.calls[0] as unknown as [URL, RequestInit];
+    expect((init.headers as Record<string, string>)['authorization']).toMatch(/^Basic /);
   });
 });
 

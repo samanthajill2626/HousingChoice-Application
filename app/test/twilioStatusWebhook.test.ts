@@ -2,6 +2,7 @@
 // the messaging.retrySend job. Real signed posts (HMAC via the twilio
 // package); in-memory fakes; the jobs gates run for real against the
 // InMemorySchedulerAdapter (envelope machinery, never raw scheduler calls).
+import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { InMemorySchedulerAdapter } from '../src/adapters/scheduler.js';
 import {
@@ -89,17 +90,38 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(message?.delivery_status).toBe('delivered');
   });
 
-  it('unknown SID → 200 + WARN (context recovery found nothing), never a 500', async () => {
-    const { app, capture } = makeWebhookHarness();
+  it('unknown SID that appears WITHIN the retry window (send/append race) is processed normally', async () => {
+    // Shrunken window for tests; production default is 2500ms.
+    const { app, world } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 120 });
+
+    // The callback arrives BEFORE the send wrapper's append commits…
+    const [res] = await Promise.all([
+      signedTwilioPost(app, STATUS_PATH, statusParams({ MessageSid: 'SMlate', MessageStatus: 'sent' })),
+      (async () => {
+        await delay(30); // …and the append lands inside the retry window.
+        await seedOutbound(world, 'SMlate');
+      })(),
+    ]);
+
+    expect(res.status).toBe(200);
+    expect((await world.messagesRepo.getByProviderSid('SMlate'))?.delivery_status).toBe('sent');
+  });
+
+  it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {
+    const { app, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 10 });
     const res = await signedTwilioPost(
       app,
       STATUS_PATH,
       statusParams({ MessageSid: 'SMghost', MessageStatus: 'delivered' }),
     );
     expect(res.status).toBe(200);
-    const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('unknown provider SID'))!;
-    expect(warn).toBeDefined();
-    expect(typeof warn['correlationId']).toBe('string');
+    // ERROR on purpose: a status we cannot attach is a silently-lost delivery
+    // outcome — this line feeds the hc-<env>-error-logs alarm (§7.1 backstop).
+    const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID'))!;
+    expect(err).toBeDefined();
+    expect(err['providerSid']).toBe('SMghost');
+    expect(err['providerStatus']).toBe('delivered');
+    expect(typeof err['correlationId']).toBe('string');
   });
 
   it('recovers conversation context by SID lookup — processing logs carry the conversationId (doc §9)', async () => {
@@ -282,6 +304,7 @@ describe('messaging.retrySend job (worker side)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
     });
     registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
     await scheduler.deliverAll(dispatchJob);
@@ -294,6 +317,34 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(retried.retry_of).toBe(buildTsMsgId(seeded.provider_ts, 'SMout0001'));
     expect(retried.retry_attempt).toBe(1);
     expect(retried.direction).toBe('outbound');
+  });
+
+  it('a retry carries the ORIGINAL message author through (ai stays ai)', async () => {
+    const scheduler = new InMemorySchedulerAdapter();
+    configureScheduler(scheduler);
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    await seedOutbound(world, 'SMout0001', { author: 'ai' });
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
+
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    await scheduler.deliverAll(dispatchJob);
+
+    const retried = world.messages.find((m) => m.retry_of !== undefined)!;
+    expect(retried).toBeDefined();
+    expect(retried.author).toBe('ai'); // not reset to teammate by the retry
   });
 
   it('a refused retry (contact opted out meanwhile) WARNs and stops the chain — no throw, no send', async () => {
@@ -318,6 +369,7 @@ describe('messaging.retrySend job (worker side)', () => {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
     });
     registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
     await scheduler.deliverAll(dispatchJob);

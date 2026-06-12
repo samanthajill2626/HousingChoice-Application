@@ -47,6 +47,8 @@ export interface FakeWorld {
   messages: MessageItem[];
   contacts: ContactItem[];
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
+  /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
+  optOutSets: { conversationId: string; value: boolean }[];
   auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   touches: { conversationId: string; previewText: string | undefined; ts: string }[];
   sent: SendMessageParams[];
@@ -66,6 +68,7 @@ export function createFakeWorld(): FakeWorld {
   const messages: MessageItem[] = [];
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
+  const optOutSets: FakeWorld['optOutSets'] = [];
   const auditEvents: FakeWorld['auditEvents'] = [];
   const touches: FakeWorld['touches'] = [];
   const sent: SendMessageParams[] = [];
@@ -102,6 +105,12 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (conv) conv.ai_mode = mode;
     },
+    async setSmsOptOut(conversationId, value) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw new Error(`setSmsOptOut: no conversation ${conversationId}`);
+      conv.sms_opt_out = value;
+      optOutSets.push({ conversationId, value });
+    },
     async incrementAutomatedSendCount() {
       return 1; // breaker untested here (covered by sendMessage.test.ts)
     },
@@ -114,8 +123,10 @@ export function createFakeWorld(): FakeWorld {
     async append(message) {
       const tsMsgId = buildTsMsgId(message.providerTs, message.providerSid);
       // The SID-pointer conditional write: same provider SID never persists
-      // twice, even when providerTs differs across redeliveries.
-      if (findBySid(message.providerSid)) return { deduped: true, tsMsgId };
+      // twice, even when providerTs differs across redeliveries — and the
+      // dedupe result carries the PERSISTED (first write's) tsMsgId.
+      const existing = findBySid(message.providerSid);
+      if (existing) return { deduped: true, tsMsgId: existing.tsMsgId };
       messages.push({
         conversationId: message.conversationId,
         tsMsgId,
@@ -209,6 +220,7 @@ export function createFakeWorld(): FakeWorld {
     messages,
     contacts,
     flagWrites,
+    optOutSets,
     auditEvents,
     touches,
     sent,
@@ -233,6 +245,8 @@ export interface HarnessOptions {
   world?: FakeWorld;
   /** Omit the media store (simulates MEDIA_BUCKET unset). */
   withoutMediaStore?: boolean;
+  /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
+  statusUnknownSidRetryDelayMs?: number;
 }
 
 export interface Harness {
@@ -267,6 +281,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
+      ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
+        statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
+      }),
     },
   });
   return { app, world, capture, config };

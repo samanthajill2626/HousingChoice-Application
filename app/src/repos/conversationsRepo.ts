@@ -41,6 +41,13 @@ export interface ConversationItem {
   last_activity_at: string;
   type: ConversationType;
   ai_mode: ConversationMode;
+  /**
+   * Conversation-level STOP suppression (doc §7.1): set even when the phone
+   * has no contact record yet (auto-capture is M1.2), so a STOP from an
+   * unknown phone still refuses every later send. The send wrapper gates on
+   * EITHER this OR the contact's sms_opt_out flag.
+   */
+  sms_opt_out?: boolean;
   /** Denormalized preview of the latest message (truncated; never logged). */
   last_message_preview?: string;
   created_at: string;
@@ -56,7 +63,13 @@ const PREVIEW_MAX_CHARS = 120;
 
 export function toPreview(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
-  return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
+  // Truncate by CODE POINTS (Array.from), not UTF-16 units — a string slice
+  // could split a surrogate pair (emoji) at the boundary into a lone
+  // surrogate that breaks downstream JSON/display.
+  const points = Array.from(text);
+  return points.length > PREVIEW_MAX_CHARS
+    ? `${points.slice(0, PREVIEW_MAX_CHARS - 1).join('')}…`
+    : text;
 }
 
 /** UTC minute bucket (`2026-06-12T15:04`) for the breaker counter. */
@@ -85,6 +98,8 @@ export interface ConversationsRepo {
   /** Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview. */
   touchLastActivity(conversationId: string, previewText: string | undefined, ts: string): Promise<void>;
   setMode(conversationId: string, mode: ConversationMode): Promise<void>;
+  /** Set/clear the conversation-level STOP suppression flag (doc §7.1). */
+  setSmsOptOut(conversationId: string, value: boolean): Promise<void>;
   /**
    * Circuit-breaker support (doc §7.1): atomically count an automated send
    * against the conversation's CURRENT minute bucket and return the new
@@ -175,7 +190,22 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       log.info({ conversationId, mode }, 'conversation mode set');
     },
 
+    async setSmsOptOut(conversationId, value) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'SET sms_opt_out = :v',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeValues: { ':v': value },
+        }),
+      );
+      log.info({ conversationId, smsOptOut: value }, 'conversation sms_opt_out set');
+    },
+
     async incrementAutomatedSendCount(conversationId, bucket) {
+      // Accepted risk (M1.1): this is a FIXED minute window — a burst
+      // straddling a bucket boundary can reach ~2x the cap before tripping.
       // Two conditional shapes, retried: (a) ADD when the item is already on
       // this bucket; (b) SET/reset when the bucket changed (or never existed).
       // A loser of either race re-enters the loop; two passes settle it in

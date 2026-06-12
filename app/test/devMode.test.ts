@@ -3,8 +3,8 @@
 // scripts/dev.mjs and are not exercised here.
 import { describe, expect, it } from 'vitest';
 
-// @ts-expect-error — plain .mjs module outside the app workspace (same
-// pattern as secretsCore.test.ts); vitest resolves it fine.
+// Plain .mjs module outside the app workspace (typed by devMode.d.mts);
+// vitest resolves it fine, tsc checks it via tsconfig.test.json.
 import {
   LIVE_AWS_PROFILE,
   LIVE_TABLE_PREFIX,

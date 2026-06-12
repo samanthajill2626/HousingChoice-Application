@@ -108,6 +108,7 @@ export interface MessageAnnotations {
 export interface AppendResult {
   /** False = fresh write; true = this provider SID was already persisted. */
   deduped: boolean;
+  /** The PERSISTED message's SK — on dedupe, the FIRST write's key (which can differ from this call's providerTs). */
   tsMsgId: string;
 }
 
@@ -146,11 +147,18 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
   const table = tableName('messages', deps.env);
   const log = deps.logger ?? defaultLogger;
 
-  async function getByProviderSid(sid: string): Promise<MessageItem | undefined> {
+  /** Read the SID pointer item: where the persisted message actually lives. */
+  async function getSidPointer(
+    sid: string,
+  ): Promise<{ ref_conversationId: string; ref_tsMsgId: string } | undefined> {
     const pointer = await doc.send(
       new GetCommand({ TableName: table, Key: { conversationId: sidPk(sid), tsMsgId: 'ptr' } }),
     );
-    const ptr = pointer.Item as { conversationId: string; ref_conversationId: string; ref_tsMsgId: string } | undefined;
+    return pointer.Item as { ref_conversationId: string; ref_tsMsgId: string } | undefined;
+  }
+
+  async function getByProviderSid(sid: string): Promise<MessageItem | undefined> {
+    const ptr = await getSidPointer(sid);
     if (!ptr) return undefined;
     const { Item } = await doc.send(
       new GetCommand({
@@ -215,11 +223,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             (r) => r.Code === 'ConditionalCheckFailed',
           );
           if (conditionFailed) {
+            // The PERSISTED tsMsgId can differ from the one computed above:
+            // inbound redeliveries carry no provider timestamp, so a
+            // redelivered webhook computes a NEW first-seen providerTs.
+            // Resolve the real key via the SID pointer (written in the same
+            // transaction as the original message, so it must exist here).
+            const ptr = await getSidPointer(message.providerSid);
             log.info(
               { conversationId: message.conversationId, providerSid: message.providerSid },
               'message append deduped (provider SID already persisted)',
             );
-            return { deduped: true, tsMsgId };
+            return { deduped: true, tsMsgId: ptr?.ref_tsMsgId ?? tsMsgId };
           }
         }
         throw err;

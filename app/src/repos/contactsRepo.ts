@@ -40,6 +40,8 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
   return {
     async findByPhone(phone) {
+      // Accepted risk: duplicate phones return the FIRST item the GSI yields
+      // (arbitrary order) — M1.2 auto-capture will dedupe contacts by phone.
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,

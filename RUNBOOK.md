@@ -77,8 +77,9 @@ only then writes the released tag to SSM `/hc/<env>/app/DEPLOYED_TAG`.
   on-instance gate and the CloudFront check. So `DEPLOYED_TAG` always answers "what was last
   *successfully* released", even mid-incident.
 - The previously running image is not pruned, so rollback is a fast re-pull (cached layers).
-- Expect a transient `hc-<env>-orphan-logs` ALARM around any container start — see
-  [Alarms](#alarms), it self-clears within ~10 minutes.
+- Lifecycle log lines (`app listening`, `worker ready`, shutdown) carry a per-process `bootId`
+  as their correlationId, so container starts do NOT trip the orphan-log alarm (fixed
+  2026-06-12; images tagged before that date still have the transient ALARM→OK wart).
 
 ## Rollback
 
@@ -124,9 +125,9 @@ fields @timestamp, @logStream, correlationId, msg, err.stack
 | sort @timestamp desc
 ```
 
-**(c) Orphan lines (no correlationId)** — these should be **ZERO** during steady state and they
-alarm (`hc-<env>-orphan-logs`). Known exception: the boot lines `app listening` / `worker ready`
-are emitted before any context exists, so every container start produces them (see Alarms):
+**(c) Orphan lines (no correlationId)** — these should be **ZERO**, always, and they alarm
+(`hc-<env>-orphan-logs`). Boot/shutdown lines carry a `bootId` correlationId since 2026-06-12,
+so ANY hit from this query is a real bug — a code path logging outside the context gates:
 
 ```
 fields @timestamp, @logStream, level, msg
@@ -224,7 +225,7 @@ Tracked here so nothing silently becomes permanent:
 | SES sandbox exit | Phase 1 | Both SES identities are sandboxed (verified recipients only). Production-access request goes in when Phase 1 needs real outbound mail. |
 | CloudWatch agent (disk metric) | **Not installed** — disk alarms can't fire (no data → `notBreaching` → OK) | Install via user-data or SSM Distributor; config must emit `CWAgent disk_used_percent` with dimensions `InstanceId, path="/", fstype="xfs"` to match the alarm. Until then disk is only protected by deploy-time pruning. |
 | OTLP exporter wiring | **OTel SDK currently runs with no exporter in BOTH envs** | Reality check 2026-06-11: neither `/hc/dev/app` nor `/hc/prod/app` sets `OTEL_SDK_DISABLED`, so the SDK starts and instruments http/express in both envs — but `app/src/lib/otel.ts` configures no `traceExporter`/`metricReader`, so traces/metrics are exported **nowhere** (locally `OTEL_SDK_DISABLED=true` makes it a true no-op). Wire OTLP → CloudWatch Application Signals via the existing `OTEL_EXPORTER_OTLP_ENDPOINT` seam. |
-| Orphan boot-log lines | Known wart | `app listening` / `worker ready` are logged before any correlation context exists, so **every container start trips `hc-<env>-orphan-logs`** (ALARM→OK within ~10 min). Fix: stamp a synthetic boot correlationId on startup lines (app change → must ride the normal dev→promote train). Until then, a deploy-time orphan alarm followed by OK is expected noise. |
+| Orphan boot-log lines | **Fixed 2026-06-12** | Lifecycle lines (boot/shutdown/process-level errors) now run inside a per-process `bootId` correlation context, so container starts no longer trip `hc-<env>-orphan-logs`. Any orphan hit is now a real bug. (Images tagged before 2026-06-12 still carry the old behavior.) |
 | Custom domain + ACM | Deferred until the DNS question is settled | CloudFront serves on the default `*.cloudfront.net` cert. No Route 53 zone exists. |
 | SNS prod confirmation | **Action needed once:** click the confirmation email for `hc-prod-alerts` | See the Alarms section note. |
 

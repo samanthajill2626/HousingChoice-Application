@@ -1,9 +1,11 @@
 // Structured JSON logging core (pino → stdout).
 //
 // Every line emitted while a correlation context is active carries the full
-// context plus a `correlationId` field (jobRunId ?? requestId). Lines without
-// a correlationId are "orphan logs" — M0.4 adds a CloudWatch metric filter
-// that mirrors isOrphanLogLine() below.
+// context plus a `correlationId` field (jobRunId ?? requestId ?? bootId).
+// Lines without a correlationId are "orphan logs" — a CloudWatch metric filter
+// mirrors isOrphanLogLine() below and alarms when any appear. Entrypoints wrap
+// process lifecycle (boot/shutdown) in a bootId context so even those lines
+// are correlated.
 import { pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { getContext } from './context.js';
 
@@ -35,7 +37,7 @@ export function createLogger(opts: CreateLoggerOptions = {}): Logger {
     mixin() {
       const ctx = getContext();
       if (!ctx) return {};
-      const correlationId = ctx.jobRunId ?? ctx.requestId;
+      const correlationId = ctx.jobRunId ?? ctx.requestId ?? ctx.bootId;
       return correlationId !== undefined ? { ...ctx, correlationId } : { ...ctx };
     },
   };

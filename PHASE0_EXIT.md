@@ -37,7 +37,7 @@ Legend: ✅ met · ⚠️ partially met (gap stated) · ❌ not met
 | ECR | ✅ | `hc-dev-app` / `hc-prod-app`; same-digest image promoted (sha256:9ae40ac5…3279 in both) |
 | SES | ✅ | Sender identity per env (`infra/modules/ses`) — sandbox mode; production-access exit is Phase 1 (RUNBOOK backlog) |
 | Parameter Store | ✅ | `/hc/<env>/app/*` (CF_ORIGIN_SECRET SecureString, LOG_LEVEL, NODE_ENV, PORT, TABLE_PREFIX) + deploy-written DEPLOYED_TAG |
-| budgets/alarms | ⚠️ | $40/mo budget + 8 alarms + dashboards exist and `OrphanLogs`/`ErrorLogs`/`StatusCheckFailed` are live. **Gaps:** disk alarm cannot fire (CloudWatch agent not installed → metric absent → `notBreaching`); `hc-prod-alerts` email subscription still `PendingConfirmation` (one click outstanding); orphan alarm trips transiently on every container boot (boot lines carry no correlationId). All three in RUNBOOK backlog. |
+| budgets/alarms | ⚠️ | $40/mo budget + 8 alarms + dashboards exist and `OrphanLogs`/`ErrorLogs`/`StatusCheckFailed` are live. **Gaps:** disk alarm cannot fire (CloudWatch agent not installed → metric absent → `notBreaching`); `hc-prod-alerts` email subscription still `PendingConfirmation` (one click outstanding). Orphan-alarm boot noise FIXED 2026-06-12 (bootId lifecycle context). Remaining gaps in RUNBOOK backlog. |
 | one AWS account, separate dev/prod stacks | ✅ | Account 938565869261 only (hard guard in `scripts/lib/hcAws.mjs`); two stacks `hc-dev-`/`hc-prod-` with separate state buckets, both applied, both drift-clean (exit 0, 2026-06-11) |
 
 ## 3. npm tooling

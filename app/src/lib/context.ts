@@ -6,6 +6,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 export interface CorrelationContext {
   requestId?: string;
   jobRunId?: string;
+  /**
+   * Process-lifecycle correlation: entrypoints generate one bootId per process
+   * start and wrap startup/shutdown in it, so lifecycle log lines ("app
+   * listening", "worker ready", shutdown) are never orphans. Lowest-precedence
+   * correlationId source — request/job ids always win.
+   */
+  bootId?: string;
   conversationId?: string;
   tenantId?: string;
   caseId?: string;
@@ -38,6 +45,10 @@ export function newRequestId(): string {
 }
 
 export function newJobRunId(): string {
+  return randomUUID();
+}
+
+export function newBootId(): string {
   return randomUUID();
 }
 

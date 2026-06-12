@@ -13,20 +13,28 @@ await startOtel();
 
 const { installProcessErrorHandlers } = await import('./lib/errors.js');
 const { logger } = await import('./lib/logger.js');
+const { newBootId, runWithContext } = await import('./lib/context.js');
 const { defineJobHandler, registeredJobNames } = await import('./jobs/jobs.js');
 
-installProcessErrorHandlers();
+// Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
+// their correlationId so container starts never trip the orphan-log alarm.
+const bootContext = { bootId: newBootId() };
+
+installProcessErrorHandlers(logger, bootContext);
 
 // PLACEHOLDER handler — demo no-op so the registry isn't empty. Remove once
-// real job handlers land (Phase 1).
+// real job handlers land (Phase 1). Dispatch-time logs use the JOB context
+// (fresh jobRunId), not the boot context.
 defineJobHandler('noop.ping', (payload) => {
   logger.info({ payload }, 'noop.ping handled (placeholder)');
 });
 
-logger.info(
-  { handlers: registeredJobNames() },
-  `worker ready - job handlers registered: [${registeredJobNames().join(', ')}]`,
-);
+runWithContext(bootContext, () => {
+  logger.info(
+    { handlers: registeredJobNames() },
+    `worker ready - job handlers registered: [${registeredJobNames().join(', ')}]`,
+  );
+});
 
 // Keep the process alive until a shutdown signal arrives.
 const keepAlive = setInterval(() => {
@@ -34,9 +42,11 @@ const keepAlive = setInterval(() => {
 }, 60_000);
 
 function shutdown(signal: NodeJS.Signals): void {
-  logger.info({ signal }, 'shutdown signal received — worker exiting');
-  clearInterval(keepAlive);
-  process.exit(0);
+  runWithContext(bootContext, () => {
+    logger.info({ signal }, 'shutdown signal received — worker exiting');
+    clearInterval(keepAlive);
+    process.exit(0);
+  });
 }
 
 process.on('SIGTERM', shutdown);

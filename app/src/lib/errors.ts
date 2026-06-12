@@ -1,6 +1,12 @@
 // Errors are first-class logs (binding guideline 4): process-level handlers
 // and the Express error middleware all log full stack + correlation context.
 import type { ErrorRequestHandler } from 'express';
+import {
+  getContext,
+  newBootId,
+  runWithContext,
+  type CorrelationContext,
+} from './context.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 
 function toError(value: unknown): Error {
@@ -11,10 +17,23 @@ function toError(value: unknown): Error {
  * Install uncaughtException / unhandledRejection handlers.
  * uncaughtException: log fatal (full stack), flush, exit 1.
  * unhandledRejection: log error (full stack) and keep running.
+ *
+ * Process-level events don't reliably inherit AsyncLocalStorage context, so a
+ * fallback context (the entrypoint's boot context) keeps these lines from
+ * being orphans: when the throwing code's context survived, it wins; otherwise
+ * the error is attributed to the process lifecycle.
  */
-export function installProcessErrorHandlers(log: Logger = defaultLogger): void {
+export function installProcessErrorHandlers(
+  log: Logger = defaultLogger,
+  fallbackContext: CorrelationContext = { bootId: newBootId() },
+): void {
+  const withFallback = (fn: () => void): void => {
+    if (getContext()) fn();
+    else runWithContext(fallbackContext, fn);
+  };
+
   process.on('uncaughtException', (err) => {
-    log.fatal({ err }, 'uncaughtException — exiting');
+    withFallback(() => log.fatal({ err }, 'uncaughtException — exiting'));
     // Flush pino's buffer before exiting; fall back to a hard exit if the
     // flush callback never fires.
     const forceExit = setTimeout(() => process.exit(1), 2000);
@@ -23,7 +42,9 @@ export function installProcessErrorHandlers(log: Logger = defaultLogger): void {
   });
 
   process.on('unhandledRejection', (reason, promise) => {
-    log.error({ err: toError(reason), promise: String(promise) }, 'unhandledRejection');
+    withFallback(() =>
+      log.error({ err: toError(reason), promise: String(promise) }, 'unhandledRejection'),
+    );
   });
 }
 

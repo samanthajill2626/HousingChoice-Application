@@ -25,6 +25,8 @@ This table is the changelog of every place the build intentionally deviates from
 | Date | Area | Doc says | We chose | Why |
 |---|---|---|---|---|
 | 2026-06-11 | Runtime | Node.js 22 LTS | Node.js 24 LTS | Node 22 is maintenance-mode (EOL Apr 2027); Node 24 is active LTS through Apr 2028, fully compatible with the Phase 0 stack, and matches local dev. |
+| 2026-06-11 | Terraform state | One shared state bucket, created manually as a one-time step | Two per-env buckets (`hc-dev-tfstate-…`, `hc-prod-tfstate-…`) created by the idempotent, account-guarded `npm run bootstrap` | Per-stack IAM isolation (prod role can't read dev state), names follow the `hc-dev-`/`hc-prod-` prefix rule, and nothing infrastructure-shaped is typed by hand. |
+| 2026-06-11 | Admin access | IAM admin via Identity Center, MFA on | Long-lived IAM-user keys (CLI profile `housingchoice`); MFA on root only, IAM-user MFA deferred | Solo operator; daily `aws sso login` rejected as unacceptable dev friction. Mitigations: account-ID guard in all mutating scripts, named profile (default chain never used), IAM-user MFA tracked as a RUNBOOK hardening item. |
 
 ## Repo layout
 
@@ -65,6 +67,7 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm test` | Vitest across all workspaces (DynamoDB integration suite auto-skips when DynamoDB Local isn't running) | M0.1 |
 | `npm run lint` | ESLint (flat config), incl. the streams-only `readFileSync` ban in app/src | M0.1 |
 | `npm run typecheck` | `tsc --noEmit` across workspaces | M0.1 |
+| `npm run bootstrap` | One-time account bootstrap: creates/enforces the two versioned, encrypted, public-blocked TF state buckets — idempotent and account-guarded; `bootstrap:check` is the read-only dry run. The ONLY infra not managed by Terraform (backend chicken-and-egg). | M0.4 |
 | `npm run plan` | Terraform plan for a stack | M0.4 (stub until then) |
 | `npm run apply` | Terraform apply for a stack | M0.4 (stub until then) |
 | `npm run drift` | Detect infra drift vs. state | M0.4 (stub until then) |

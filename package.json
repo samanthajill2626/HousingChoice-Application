@@ -11,6 +11,8 @@
     "dashboard"
   ],
   "scripts": {
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "bootstrap:check": "node scripts/bootstrap.mjs --check",
     "dev": "node scripts/dev.mjs",
     "dev:app": "npm run dev -w app",
     "dev:worker": "npm run dev:worker -w app",
@@ -28,6 +30,9 @@
     "drift": "node scripts/stub.mjs drift M0.4"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-sts": "^3.0.0",
+    "@aws-sdk/credential-providers": "^3.0.0",
     "@types/node": "^24.0.0",
     "concurrently": "^10.0.3",
     "eslint": "^9.28.0",

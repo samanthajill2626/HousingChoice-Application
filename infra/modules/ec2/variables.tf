@@ -15,9 +15,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_gb" {
-  description = "Root EBS volume size (gp3, encrypted)."
+  description = "Root EBS volume size (gp3, encrypted). 10GB is ample for AL2023 (~3GB) + one app image, PROVIDED deploys prune old images (deploy path does)."
   type        = number
-  default     = 20
+  default     = 10
 }
 
 variable "subnet_id" {

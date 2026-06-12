@@ -14,7 +14,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 | M0.1 | ✅ | Repo scaffold: workspaces, lint/tsconfig, placeholder entrypoints, Docker/compose, seams (git remote: Azure, to be added) |
 | M0.2 | ✅ | Express 5 server + locked middleware chain, pino logging core (correlation context + orphan-log detection), OTel seam, jobs.enqueue()/defineJobHandler() gates with scheduler adapters |
 | M0.3 | ✅ | Full local dev loop: `npm run dev` = DynamoDB Local (auto-start) + table create/seed + app & worker in watch mode; 9-table contract in `app/src/lib/tables.ts` |
-| M0.4 | 🚧 | Terraform: both stacks (network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget), `plan`/`apply`/`drift` — code complete + dev plan verified; first apply pending |
+| M0.4 | ✅ | Terraform baseline applied to dev (54 resources): network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget; account-guarded `plan`/`apply`/`drift`; drift clean. Prod stack applies in M0.6 |
 | M0.5 | ☐ | Deploy path: buildx ARM64 image → ECR → EC2, .env hydration from Parameter Store, `deploy:dev`/`deploy:prod` |
 | M0.6 | ☐ | Prod stack apply, same-image-tag deploy, RUNBOOK.md (deploy/rollback/logs/drift/alarms/cost), Phase 0 exit checklist |
 

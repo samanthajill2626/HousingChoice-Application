@@ -20,6 +20,7 @@
     "db:stop": "node scripts/db.mjs stop",
     "db:create": "tsx app/scripts/db-create.ts",
     "db:seed": "tsx app/scripts/db-seed.ts",
+    "gen:tables": "tsx app/scripts/gen-tables.ts",
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",

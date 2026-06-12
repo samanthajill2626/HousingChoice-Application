@@ -28,6 +28,7 @@ This table is the changelog of every place the build intentionally deviates from
 |---|---|---|---|---|
 | 2026-06-11 | Runtime | Node.js 22 LTS | Node.js 24 LTS | Node 22 is maintenance-mode (EOL Apr 2027); Node 24 is active LTS through Apr 2028, fully compatible with the Phase 0 stack, and matches local dev. |
 | 2026-06-11 | Terraform state | One shared state bucket, created manually as a one-time step | Two per-env buckets (`hc-dev-tfstate-…`, `hc-prod-tfstate-…`) created by the idempotent, account-guarded `npm run bootstrap` | Per-stack IAM isolation (prod role can't read dev state), names follow the `hc-dev-`/`hc-prod-` prefix rule, and nothing infrastructure-shaped is typed by hand. |
+| 2026-06-12 | Source hosting | GitHub (private repo) | Azure DevOps | Org standard. Remote being configured — until the first push lands, this machine holds the only copy of the repo. |
 | 2026-06-11 | Admin access | IAM admin via Identity Center, MFA on | Long-lived IAM-user keys (CLI profile `housingchoice`); MFA on root only, IAM-user MFA deferred | Solo operator; daily `aws sso login` rejected as unacceptable dev friction. Mitigations: account-ID guard in all mutating scripts, named profile (default chain never used), IAM-user MFA tracked as a RUNBOOK hardening item. |
 
 ## Repo layout
@@ -70,7 +71,8 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run lint` | ESLint (flat config), incl. the streams-only `readFileSync` ban in app/src | M0.1 |
 | `npm run typecheck` | `tsc --noEmit` across workspaces | M0.1 |
 | `npm run bootstrap` | One-time account bootstrap: creates/enforces the two versioned, encrypted, public-blocked TF state buckets — idempotent and account-guarded; `bootstrap:check` is the read-only dry run. The ONLY infra not managed by Terraform (backend chicken-and-egg). | M0.4 |
-| `npm run plan` | Terraform plan for a stack (`-- dev` default, `-- prod`): account-guard first, idempotent `terraform init`, then `terraform plan -out=tfplan` — the saved plan is what apply executes | M0.4 |
+| `npm run gen:tables` | Regenerate `infra/envs/{dev,prod}/tables.auto.tfvars.json` from `app/src/lib/tables.ts` (the DynamoDB source of truth). Deterministic output — commit the JSON alongside any tables.ts change. `plan`/`drift` run the same generator in `--check` mode and FAIL if the files are stale; never hand-edit them | M0.4 |
+| `npm run plan` | Terraform plan for a stack (`-- dev` default, `-- prod`): account-guard first, then refuses to run if the generated DynamoDB tfvars are stale (`gen:tables --check`), idempotent `terraform init`, then `terraform plan -out=tfplan` — the saved plan is what apply executes | M0.4 |
 | `npm run apply` | Applies ONLY an existing `tfplan` saved by a prior `npm run plan` for that stack (refuses otherwise), then deletes the plan file so a stale plan can never be re-applied | M0.4 |
 | `npm run drift` | `terraform plan -detailed-exitcode` drift check: exit 0 = clean, exit 2 = "DRIFT DETECTED" with the diff printed | M0.4 |
 | `npm run deploy:dev` | Build+push the ARM64 image to ECR, then roll the dev box via SSM Run Command with a health-check gate and CloudFront verification. `-- --tag <t>` re-deploys an EXISTING ECR tag (the rollback path — no build); `-- --list` prints the last 10 ECR tags + the current `DEPLOYED_TAG` | M0.5 |
@@ -85,12 +87,12 @@ Modules (all resources name-prefixed `hc-<env>-`, region us-east-1):
 | Module | What it manages |
 |---|---|
 | `network` | Dedicated VPC (10.0.0.0/16), one public subnet (us-east-1a), IGW, route table; app SG admits TCP 8080 only from the CloudFront origin-facing prefix list — no SSH anywhere (SSM only) |
-| `dynamodb` | The 9 on-demand tables mirrored 1:1 from `app/src/lib/tables.ts` (the contractual source of truth): PITR + deletion protection on all, GSIs project ALL, streams on messages/cases, TTL on matches |
+| `dynamodb` | The 9 on-demand tables, GENERATED from `app/src/lib/tables.ts` (the contractual source of truth): `npm run gen:tables` writes `infra/envs/*/tables.auto.tfvars.json` (committed; auto-loaded; never hand-edited) and the module `for_each`es over it — `plan`/`drift` fail if the JSON is stale. PITR + deletion protection on all, GSIs project ALL, streams on messages/cases, TTL on matches |
 | `s3_media` | Versioned private media bucket (`hc-<env>-media-<account>`), SSE-S3, full public-access block |
 | `ecr` | App image repository (`hc-<env>-app`), scan-on-push, lifecycle keeps last 10 images |
 | `ses` | Sender email identity (sandbox; apply sends a verification email) |
 | `params` | Parameter Store under `/hc/<env>/app/`: generated `CF_ORIGIN_SECRET` (SecureString) + LOG_LEVEL / TABLE_PREFIX / PORT / NODE_ENV — M0.5's deploy hydrates `.env` from this path; Terraform owns all values |
-| `ec2` | t4g.small (AL2023 ARM64), EIP for a stable origin DNS, IMDSv2, encrypted gp3 20GB root, `hc-<env>-instance` role (SSM core + least-privilege Dynamo/S3/SSM/ECR/logs/metrics), user-data installs docker + compose only |
+| `ec2` | t4g.small (AL2023 ARM64), EIP for a stable origin DNS, IMDSv2, encrypted gp3 10GB root (deploys prune old images after each health-gated roll — accumulated image history, not the running container, is what fills small disks), `hc-<env>-instance` role (SSM core + least-privilege Dynamo/S3/SSM/ECR/logs/metrics), user-data installs docker + compose only |
 | `cloudfront` | The https entry point (default cert, price class 100, HTTP/2+3): origin = the EIP public DNS on HTTP:8080; `/api/*` + `/webhooks/*` and (for now) the default behavior all use CachingDisabled |
 | `observability` | `/hc/<env>/app` + `/hc/<env>/worker` log groups, OrphanLogs (missing correlationId) and ErrorLogs (pino level ≥ 50) metric filters + alarms, EC2 status-check and disk alarms, `hc-<env>-alerts` SNS topic (email), CloudWatch dashboard |
 | `budget` | Monthly USD 40 cost budget; email at 80% actual / 100% forecasted |

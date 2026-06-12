@@ -14,6 +14,9 @@ coverage/
 *.tfstate
 *.tfstate.*
 *.tfvars
+# Generated table definitions (`npm run gen:tables`) MUST be committed — they
+# are inputs to plan/apply and plan fails when they are stale.
+!*.auto.tfvars.json
 crash.log
 # Saved plan files from `npm run plan` (consumed by `npm run apply`)
 infra/envs/*/tfplan

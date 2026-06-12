@@ -5,11 +5,16 @@
 // matches TTL. Everything else about items is a flexible document — only keys
 // and GSI key attributes are contractual; schema churn needs no migrations.
 //
-// M0.4 NOTE — Terraform must MIRROR this module exactly (one aws_dynamodb_table
-// per entry: same keys, same GSIs with ALL projection, same stream/TTL
-// settings). If this module and Terraform ever disagree, this module wins and
-// Terraform is wrong. Any change here is a contract change: log it in the
-// README "Deviations" table and update both places in the same change.
+// TERRAFORM — this module is consumed LITERALLY: `npm run gen:tables`
+// (app/scripts/gen-tables.ts) generates infra/envs/{dev,prod}/
+// tables.auto.tfvars.json from TABLES, terraform auto-loads it, and the
+// dynamodb module for_eaches over the map (one aws_dynamodb_table per entry;
+// GSI projection ALL, stream view NEW_AND_OLD_IMAGES, and on-demand billing
+// stay fixed in the module). `npm run plan`/`drift` fail when the generated
+// JSON is stale, so the two can never disagree. NEVER hand-edit the JSON —
+// change THIS file, run `npm run gen:tables`, commit both, plan/apply. Any
+// change here is still a contract change: log it in the README "Deviations"
+// table.
 //
 // Table NAME resolution: physical names are `${TABLE_PREFIX}${baseName}` —
 // hc-local- on dev machines (default), hc-dev- / hc-prod- from Terraform in

@@ -12,6 +12,6 @@ output "stream_arns" {
   description = "Map of base table name -> stream ARN for stream-enabled tables (messages, cases)."
   value = {
     for base, t in aws_dynamodb_table.this : base => t.stream_arn
-    if local.tables[base].stream
+    if var.tables[base].stream
   }
 }

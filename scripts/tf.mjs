@@ -13,6 +13,9 @@
 //   3. apply NEVER plans for itself: it requires the tfplan file from a prior
 //      `npm run plan`, and deletes it afterwards so a stale plan can't be
 //      applied twice or after the world has moved.
+//   4. plan/drift refuse to run while the generated DynamoDB tfvars
+//      (infra/envs/*/tables.auto.tfvars.json) are stale relative to
+//      app/src/lib/tables.ts — fix with `npm run gen:tables` and re-plan.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
@@ -69,6 +72,32 @@ function terraformOrDie(tfArgs) {
   if (status !== 0) process.exit(status);
 }
 
+// plan/drift gate: the generated infra/envs/*/tables.auto.tfvars.json files
+// must match app/src/lib/tables.ts (the DynamoDB source of truth) BEFORE
+// terraform runs, or the plan would silently encode stale table definitions.
+// (apply is exempt: it only executes an already-reviewed saved tfplan.)
+function assertGeneratedTablesFresh() {
+  console.error('[tf] checking generated DynamoDB tfvars (gen-tables --check)...');
+  // npx resolves to npx.cmd on Windows, which needs a shell; pass ONE string
+  // so node doesn't warn about unescaped args (the command is fully static).
+  const genCheck = 'npx tsx app/scripts/gen-tables.ts --check';
+  const result = process.platform === 'win32'
+    ? spawnSync(genCheck, { cwd: repoRoot, stdio: 'inherit', shell: true })
+    : spawnSync('npx', ['tsx', 'app/scripts/gen-tables.ts', '--check'], {
+        cwd: repoRoot,
+        stdio: 'inherit',
+        shell: false,
+      });
+  if (result.error) fail(`[tf] failed to run gen-tables --check: ${result.error.message}`);
+  if ((result.status ?? 1) !== 0) {
+    fail(
+      `[tf] STALE generated tfvars — tables.auto.tfvars.json no longer matches ` +
+        `app/src/lib/tables.ts.\n` +
+        `Run \`npm run gen:tables\`, review the diff, then re-run \`npm run ${mode} -- ${env}\`.`,
+    );
+  }
+}
+
 function initIfNeeded() {
   // A bare `.terraform/` dir is not enough — `init -backend=false` (used for
   // validate) creates it WITHOUT the backend config cache, and plan would then
@@ -88,6 +117,7 @@ console.error(`[tf] account guard OK: ${identity.Arn} (${identity.Account})`);
 console.error(`[tf] ${mode} for stack hc-${env} (${envDir})`);
 
 if (mode === 'plan') {
+  assertGeneratedTablesFresh(); // never plan against stale table defs (safety #4)
   initIfNeeded();
   terraformOrDie(['plan', '-input=false', `-out=${planFile}`]);
   console.error(
@@ -115,6 +145,7 @@ if (mode === 'plan') {
   process.exit(status);
 } else {
   // drift: plan without -out; -detailed-exitcode => 0 clean, 2 drift, 1 error.
+  assertGeneratedTablesFresh(); // same gate as plan — drift also re-plans
   initIfNeeded();
   const status = terraform(['plan', '-detailed-exitcode', '-input=false']);
   if (status === 0) {

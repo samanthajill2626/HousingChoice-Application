@@ -1,0 +1,54 @@
+# HousingChoice — Phase 1 Build Prompt (paste into the build agent)
+
+You are building **Phase 1 — Feature Parity on the Platform** on top of the completed Phase 0 foundations in this repo. The authoritative spec is `documentation/HousingChoice_Architecture_and_Build_Plan.docx` (v2.13) — read §7.1 (messaging/voice/relay design), §5 (data model), §9 (logging/envelopes), and §11.3 (Phase 1 workstreams) before writing code. Repo conventions live in `README.md` (including the **deviations table — any departure from the doc gets a row in the same change**) and `RUNBOOK.md`. `PHASE0_EXIT.md` shows what already exists; do not rebuild it.
+
+**Exit criterion (doc §11.3):** everything the team does today happens manually through the platform — texting and calling tenants and landlords (masked relay group threads included), every message and call transcript tracked, contacts auto-captured, records maintained, properties shared by filtered broadcast, boards current — and Quo is fully retired. **No AI in the loop in Phase 1.**
+
+## How to work
+
+- **Incremental with hard checkpoints.** One milestone at a time; at each checkpoint summarize, give me a verification script/steps I run myself, and STOP for my go-ahead. Mark every step I must do outside the codebase with 🖐 and walk me through it click-by-click, then wait.
+- **Use subagents deliberately.** You are a frontier model with subagent support — manage your own context. Suggested pattern (worked well in Phase 0): parallel builder agents for independent workstreams within a milestone; after each milestone, spawn an **adversarial review agent** with fresh context whose brief is to find what the builder got wrong (spec deviations vs. the docx, security holes, missing tests, guideline violations — it should READ the doc sections itself, not trust the builder's summary); then YOU re-review the adversary's findings, fix what's real, and present both reports at the checkpoint.
+- **Tests and guards are load-bearing**: the five binding guidelines in README §"Binding engineering guidelines" apply to every line (streams-only media, locked middleware order, enqueue/handler envelopes, correlated errors, OTel). Extend the golden test suites as you go — echo-loop, throttle, and voicemail-gate scenarios are required tests, not nice-to-haves.
+- **Money is real now.** Twilio spend starts this phase. Use test credentials/magic numbers where Twilio supports them; before any live-traffic milestone, tell me the expected spend.
+
+## Decisions already made (do not re-open; details in the docx)
+
+- **Groups are masked relay threads** (doc §7.1, Figures 4–5): pool number per placement, members[] in DB, store-once fan-out with sender-name prefixes, intro messages naming everyone, 30-day pool-number quarantine, replies-to-closed-threads flagged. Native group MMS is documented-not-built. No personal numbers ever cross sides.
+- **Webhook defenses are mandatory middleware**: author-check echo suppression, MessageSid idempotency (conditional writes), per-conversation send circuit breaker (trips → conversation flips to Manual + alarm), Twilio HMAC signature verification using the raw body.
+- **Broadcast throttling**: every fan-out (broadcasts, relays, reminders) goes through the worker's outbound queue — token bucket sized from the A2P tier stored in Parameter Store (conservative 1 msg/sec default), jittered, exponential backoff on 429/30022; never retry 30007 (carrier filtering).
+- **Delivery states in the UI**: per-message queued→sent→delivered / failure badges with human-readable reasons; per-recipient chips on relay threads; transient failures auto-retry, permanent ones flag the contact (`sms_unreachable`), failures on active cases escalate to a human task. "Sent" ≠ "delivered".
+- **Voice**: inbound rings the founder's cell with whisper + **press-1 keypress gate** (defeats carrier-voicemail collision); no keypress → platform voicemail (recorded, transcribed, logged as a timeline message). Outbound = click-to-call (platform rings teammate first, business caller ID out) + dial-through access number for registered cells. Calls are messages: same timeline, recording S3 key + transcript attached. Transcripts are saved verbatim — **no field extraction (that's Phase 2)**.
+- **Auth**: direct Google OAuth (openid-client), allowlist of **two Workspace domains** (I'll provide both at M1.0), sessions app-managed, RBAC in the `users` table (founder_admin | va). Thin middleware so Cognito could swap in later.
+- **UI**: fresh, clean, mobile-first design from the v2 spec's descriptions — no dependency on the old MVP code. Installable PWA with web push.
+- **Flyer/listing link default fields** (founder can edit per unit): photos, beds/baths, area/subzone, voucher size accepted, listing URL. Keep it deliberately simple.
+- **Data import is in scope**: one-time CSV import (Airtable/Supabase exports → contacts/units), idempotent, dry-run mode, reported in a summary I can show the founder. Old systems become read-only archives.
+
+## Milestones
+
+**M1.0 — Intake & gates.** Read the doc sections above. Ask me for: the two OAuth domains + launch user emails/roles; the founder's cell number (voice bridging) and registered dial-through cells; confirmation of **A2P brand/campaign approval status** (was pending — if not yet approved, build against test credentials and re-check at every checkpoint; live-traffic milestones are blocked until approved). 🖐 Walk me through: putting Twilio account SID/auth token into Parameter Store (SecureString, per env), confirming the temp number, pointing its webhooks at the dev CloudFront URL.
+
+**M1.1 — Messaging core (1:1).** Twilio Conversations adapter behind the existing adapter seam; signed webhook route with the full defense stack (HMAC, echo suppression, idempotency, breaker); inbound/outbound persisted to `conversations`/`messages`; MMS media streamed to S3 (streams-only lint applies); delivery callbacks → message states; opt-in/opt-out logging with STOP handling; console driver for local dev. Tests: echo-loop, redelivery dedupe, signature rejection.
+
+**M1.2 — Hub backend.** Contact auto-capture ("First Last - N Bed" convention), conversation assignment, SSE live updates, unread/last-activity index. The inbox query must be one DynamoDB query (byLastActivity), not a scan.
+
+**M1.3 — Auth + shell.** Google OAuth (two-domain allowlist), sessions, RBAC middleware, login flow in the dashboard shell. 🖐 Walk me through creating the Google Cloud OAuth client (redirect URIs for dev/prod CloudFront + localhost) and storing client ID/secret in Parameter Store.
+
+**M1.4 — Hub UI + PWA.** Inbox, thread view (texts + calls interleaved), delivery badges + retry/call-instead actions, contact side panel, manual send box; PWA manifest, service worker, web push (VAPID keys in Parameter Store). 🖐 I install it on phones and we verify push end-to-end.
+
+**M1.5 — Records & intake.** Contacts/units CRUD with per-property `tour_process`/`application_process` free-form fields; property intake forms; public (unauthenticated, rate-limited) housing-fair form → contact + auto welcome text; flyer page per unit with the default field set.
+
+**M1.6 — Data import.** CSV importers (contacts, units) with dry-run, validation report, idempotent re-run. 🖐 I bring exports from Airtable/Supabase; we run dry-run together, review, then import into prod.
+
+**M1.7 — Relay group threads.** Pool-number manager (purchase via Twilio API, tagged per placement, 30-day quarantine on release), relay fan-out through the throttled queue, intro messages, per-recipient delivery chips, closed-thread reply flagging. Tests: membership change mid-thread, removed-member reply, quarantine reuse collision.
+
+**M1.8 — Filtered broadcast.** Share Properties: bedroom-size + housing-authority filters, merge fields, flyer link, suppression/save-for-later, token-bucket throttle + backoff wired to the Parameter Store tier value. Test: 100-recipient broadcast trickles correctly and survives synthetic 429s.
+
+**M1.9 — Voice.** Inbound TwiML flow (whisper + press-1 gate → bridge, recorded; no answer/no keypress → platform voicemail), recording + transcription callbacks → call logged as timeline message; click-to-call; dial-through access number with registered-cell verification. 🖐 Live test calls with my cell and the founder's; verify the voicemail-collision behavior with a phone in airplane mode.
+
+**M1.10 — Boards (parity).** Placement calendar (placed/changed-mind), tour schedule view, RTA board lite — all manually updated views over `cases`.
+
+**M1.11 — Cutover & exit.** 🖐 Port the Quo number (founder supplies Quo account info + LOA; number keeps working on Quo until the port lands), re-point A2P campaign + webhooks to the ported number, full rehearsal with the team, retire Quo. Update RUNBOOK (new alarms, Twilio ops, pool-number management, monthly cost actuals vs. doc §11.7), write `PHASE1_EXIT.md` against doc §11.3 with the same honest ✅/⚠️/❌ format as Phase 0, and update the README status + deviations tables.
+
+## Out of scope — do not build
+
+Anything AI (orchestrator, prescreening, feedback parsing, extraction), the scored matching engine (broadcast filters are the only "matching" in P1), tour automation/reminders, application ladders, RTA/approval tracking beyond the lite board, invoicing, geocoding, the native call app. Leave seams; build nothing.

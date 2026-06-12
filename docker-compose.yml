@@ -1,0 +1,38 @@
+# PRODUCTION composition — this file runs on the EC2 instance (t4g.small, ARM64).
+# It is NOT a local-dev compose file. The deploy script (M0.5) sets HC_IMAGE to
+# the ECR image tag being released and hydrates .env from Parameter Store.
+services:
+  app:
+    image: ${HC_IMAGE:?HC_IMAGE must be set by the deploy script}
+    command: ["node", "dist/index.js"]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    # .env is hydrated from Parameter Store by the deploy path in M0.5.
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HC_PROCESS: app
+    # CloudWatch agent ships these json-file logs in M0.4.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  worker:
+    image: ${HC_IMAGE:?HC_IMAGE must be set by the deploy script}
+    command: ["node", "dist/worker.js"]
+    # No ports — the worker serves no HTTP traffic.
+    restart: unless-stopped
+    # .env is hydrated from Parameter Store by the deploy path in M0.5.
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HC_PROCESS: worker
+    # CloudWatch agent ships these json-file logs in M0.4.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

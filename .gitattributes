@@ -1,0 +1,12 @@
+# Normalize all text to LF in the repo and on checkout — this code runs in Linux containers.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary

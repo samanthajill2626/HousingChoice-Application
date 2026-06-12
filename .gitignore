@@ -1,0 +1,27 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment files — .env.example is the documented template and IS committed
+.env
+.env.*
+!.env.example
+
+# Terraform — note: .terraform.lock.hcl must be committed, so it is NOT ignored
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Local-only Claude Code settings
+.claude/settings.local.json

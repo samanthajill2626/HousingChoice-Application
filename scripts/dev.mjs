@@ -1,26 +1,66 @@
-// npm run dev — the full local dev loop (M0.3):
+// npm run dev — the local dev loop, two modes:
 //
-//   1. db:start   ensure the DynamoDB Local container is up (the only local container)
-//   2. db:create  ensure all 9 tables exist (idempotent)
-//   3. db:seed    ensure seed data exists   (idempotent)
-//   4. run app (tsx watch, :8080) + worker (tsx watch) concurrently with
-//      prefixed/colorized output. Ctrl-C stops both processes; the DynamoDB
-//      Local container stays up (npm run db:stop to stop it).
+//   live (default)        app + worker on this machine against the REAL dev
+//                         backend (hc-dev- DynamoDB tables in us-east-1,
+//                         AWS profile housingchoice). Account-guarded: the
+//                         script hard-fails unless the profile resolves to
+//                         the pinned HousingChoice account. Inbound Twilio
+//                         webhooks still hit the DEPLOYED dev stack — they
+//                         can't reach localhost.
+//   --local (hermetic)    npm run dev -- --local:
+//                           1. db:start   DynamoDB Local container
+//                           2. db:create  all tables (idempotent)
+//                           3. db:seed    seed data   (idempotent)
+//                         No AWS credentials needed. Also selected whenever
+//                         DYNAMODB_ENDPOINT is set (env or .env).
 //
-// Granular escape hatches: npm run dev:app / dev:worker / db:* individually.
+// Either way, step "run": app (tsx watch, :8080) + worker (tsx watch)
+// concurrently with prefixed output. Ctrl-C stops both. `.env` at the repo
+// root is loaded here (real environment variables win over the file).
+//
+// Granular escape hatches: npm run dev:app / dev:worker / db:* individually
+// (note: those do NOT load .env or apply mode defaults).
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import concurrently from 'concurrently';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
+import { assertHousingChoiceAccount } from './lib/hcAws.mjs';
+import { resolveDevEnv } from './lib/devMode.mjs';
+import { parseDotenv } from './lib/secretsCore.mjs';
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-// Children must see the local endpoint even with no .env present, and find
-// tsx on PATH even when this script is run outside npm.
+const dotenvPath = path.join(repoRoot, '.env');
+let fileEnv = {};
+if (existsSync(dotenvPath)) {
+  try {
+    fileEnv = parseDotenv(readFileSync(dotenvPath, 'utf8'));
+  } catch (err) {
+    console.error(`dev — .env is not valid dotenv: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+let resolved;
+try {
+  resolved = resolveDevEnv({
+    local: process.argv.includes('--local'),
+    processEnv: process.env,
+    fileEnv,
+    localEndpoint: LOCAL_ENDPOINT,
+  });
+} catch (err) {
+  console.error(`dev — ${err.message}`);
+  process.exit(1);
+}
+const { mode, overlay } = resolved;
+
+// Children also need tsx on PATH even when this script runs outside npm.
 const childEnv = {
   ...process.env,
-  DYNAMODB_ENDPOINT: process.env.DYNAMODB_ENDPOINT ?? LOCAL_ENDPOINT,
+  ...overlay,
   PATH: `${path.join(repoRoot, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
 };
 
@@ -39,14 +79,35 @@ function runTsx(scriptRelPath) {
   });
 }
 
-console.log('dev — step 1/4: DynamoDB Local container');
-await ensureDbStarted();
-console.log('dev — step 2/4: tables');
-await runTsx('app/scripts/db-create.ts');
-console.log('dev — step 3/4: seed data');
-await runTsx('app/scripts/db-seed.ts');
+if (mode === 'local') {
+  console.log('dev — mode: hermetic (DynamoDB Local; no AWS touched)');
+  console.log('dev — step 1/4: DynamoDB Local container');
+  await ensureDbStarted();
+  console.log('dev — step 2/4: tables');
+  await runTsx('app/scripts/db-create.ts');
+  console.log('dev — step 3/4: seed data');
+  await runTsx('app/scripts/db-seed.ts');
+} else {
+  console.log(
+    `dev — mode: live dev backend (tables ${childEnv.TABLE_PREFIX}*, profile ${childEnv.AWS_PROFILE}; ` +
+      'use `npm run dev -- --local` for the hermetic DynamoDB Local loop)',
+  );
+  console.log('dev — step 1/2: account guard');
+  try {
+    const identity = await assertHousingChoiceAccount();
+    console.log(`dev — account guard OK: ${identity.Arn} (${identity.Account})`);
+  } catch (err) {
+    console.error(`dev — ${err.message}`);
+    process.exit(1);
+  }
+}
 
-console.log('dev — step 4/4: app (:8080) + worker, watch mode (Ctrl-C stops both; container stays up)');
+const runStep = mode === 'local' ? 'step 4/4' : 'step 2/2';
+console.log(
+  `dev — ${runStep}: app (:8080) + worker, watch mode (Ctrl-C stops both${
+    mode === 'local' ? '; container stays up' : ''
+  })`,
+);
 const { result } = concurrently(
   [
     {
@@ -75,4 +136,8 @@ try {
 } catch {
   // Normal teardown path (Ctrl-C / one process exiting kills the other).
 }
-console.log('dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it).');
+console.log(
+  mode === 'local'
+    ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it).'
+    : 'dev — stopped.',
+);

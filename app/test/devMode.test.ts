@@ -1,0 +1,94 @@
+// Mode/env resolution for the local dev loop — scripts/lib/devMode.mjs.
+// Pure logic only; the AWS account guard and process spawning live in
+// scripts/dev.mjs and are not exercised here.
+import { describe, expect, it } from 'vitest';
+
+// @ts-expect-error — plain .mjs module outside the app workspace (same
+// pattern as secretsCore.test.ts); vitest resolves it fine.
+import {
+  LIVE_AWS_PROFILE,
+  LIVE_TABLE_PREFIX,
+  LOCAL_TABLE_PREFIX,
+  resolveDevEnv,
+} from '../../scripts/lib/devMode.mjs';
+
+const LOCAL_ENDPOINT = 'http://localhost:8000';
+
+function resolve(opts: {
+  local?: boolean;
+  processEnv?: Record<string, string | undefined>;
+  fileEnv?: Record<string, string>;
+}) {
+  return resolveDevEnv({
+    local: opts.local ?? false,
+    processEnv: opts.processEnv ?? {},
+    fileEnv: opts.fileEnv ?? {},
+    localEndpoint: LOCAL_ENDPOINT,
+  });
+}
+
+describe('resolveDevEnv', () => {
+  it('defaults to live mode with hc-dev- tables and the housingchoice profile', () => {
+    const { mode, overlay } = resolve({});
+    expect(mode).toBe('live');
+    expect(overlay.TABLE_PREFIX).toBe(LIVE_TABLE_PREFIX);
+    expect(overlay.AWS_PROFILE).toBe(LIVE_AWS_PROFILE);
+    expect(overlay.DYNAMODB_ENDPOINT).toBeUndefined();
+  });
+
+  it('--local selects hermetic mode with the local endpoint and hc-local- prefix', () => {
+    const { mode, overlay } = resolve({ local: true });
+    expect(mode).toBe('local');
+    expect(overlay.DYNAMODB_ENDPOINT).toBe(LOCAL_ENDPOINT);
+    expect(overlay.TABLE_PREFIX).toBe(LOCAL_TABLE_PREFIX);
+    expect(overlay.AWS_PROFILE).toBeUndefined();
+  });
+
+  it('DYNAMODB_ENDPOINT in the environment forces hermetic mode', () => {
+    const { mode, overlay } = resolve({
+      processEnv: { DYNAMODB_ENDPOINT: 'http://localhost:9999' },
+    });
+    expect(mode).toBe('local');
+    // already set in the environment — the overlay must not duplicate it
+    expect(overlay.DYNAMODB_ENDPOINT).toBeUndefined();
+    expect(overlay.TABLE_PREFIX).toBe(LOCAL_TABLE_PREFIX);
+  });
+
+  it('DYNAMODB_ENDPOINT in .env forces hermetic mode and rides the overlay', () => {
+    const { mode, overlay } = resolve({
+      fileEnv: { DYNAMODB_ENDPOINT: 'http://localhost:9999' },
+    });
+    expect(mode).toBe('local');
+    expect(overlay.DYNAMODB_ENDPOINT).toBe('http://localhost:9999');
+  });
+
+  it('real environment variables win over .env values', () => {
+    const { overlay } = resolve({
+      processEnv: { LOG_LEVEL: 'info' },
+      fileEnv: { LOG_LEVEL: 'debug', PORT: '8081' },
+    });
+    expect(overlay.LOG_LEVEL).toBeUndefined(); // env wins; not in overlay
+    expect(overlay.PORT).toBe('8081'); // .env value passes through
+  });
+
+  it('.env values win over mode defaults', () => {
+    const { mode, overlay } = resolve({
+      fileEnv: { TABLE_PREFIX: 'hc-custom-', AWS_PROFILE: 'other-profile' },
+    });
+    expect(mode).toBe('live');
+    expect(overlay.TABLE_PREFIX).toBe('hc-custom-');
+    expect(overlay.AWS_PROFILE).toBe('other-profile');
+  });
+
+  it('refuses live mode pointed at prod tables', () => {
+    expect(() => resolve({ fileEnv: { TABLE_PREFIX: 'hc-prod-' } })).toThrowError(/PROD/);
+    expect(() =>
+      resolve({ processEnv: { TABLE_PREFIX: 'hc-prod-' } }),
+    ).toThrowError(/PROD/);
+  });
+
+  it('allows hc-prod- prefix in hermetic mode (DynamoDB Local cannot hit prod)', () => {
+    const { mode } = resolve({ local: true, fileEnv: { TABLE_PREFIX: 'hc-prod-' } });
+    expect(mode).toBe('local');
+  });
+});

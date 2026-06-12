@@ -14,7 +14,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 | M0.1 | ✅ | Repo scaffold: workspaces, lint/tsconfig, placeholder entrypoints, Docker/compose, seams (git remote: Azure, to be added) |
 | M0.2 | ✅ | Express 5 server + locked middleware chain, pino logging core (correlation context + orphan-log detection), OTel seam, jobs.enqueue()/defineJobHandler() gates with scheduler adapters |
 | M0.3 | ✅ | Full local dev loop: `npm run dev` = DynamoDB Local (auto-start) + table create/seed + app & worker in watch mode; 9-table contract in `app/src/lib/tables.ts` |
-| M0.4 | ☐ | Terraform: both stacks (network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget), `plan`/`apply`/`drift` |
+| M0.4 | 🚧 | Terraform: both stacks (network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget), `plan`/`apply`/`drift` — code complete + dev plan verified; first apply pending |
 | M0.5 | ☐ | Deploy path: buildx ARM64 image → ECR → EC2, .env hydration from Parameter Store, `deploy:dev`/`deploy:prod` |
 | M0.6 | ☐ | Prod stack apply, same-image-tag deploy, RUNBOOK.md (deploy/rollback/logs/drift/alarms/cost), Phase 0 exit checklist |
 
@@ -68,11 +68,34 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run lint` | ESLint (flat config), incl. the streams-only `readFileSync` ban in app/src | M0.1 |
 | `npm run typecheck` | `tsc --noEmit` across workspaces | M0.1 |
 | `npm run bootstrap` | One-time account bootstrap: creates/enforces the two versioned, encrypted, public-blocked TF state buckets — idempotent and account-guarded; `bootstrap:check` is the read-only dry run. The ONLY infra not managed by Terraform (backend chicken-and-egg). | M0.4 |
-| `npm run plan` | Terraform plan for a stack | M0.4 (stub until then) |
-| `npm run apply` | Terraform apply for a stack | M0.4 (stub until then) |
-| `npm run drift` | Detect infra drift vs. state | M0.4 (stub until then) |
+| `npm run plan` | Terraform plan for a stack (`-- dev` default, `-- prod`): account-guard first, idempotent `terraform init`, then `terraform plan -out=tfplan` — the saved plan is what apply executes | M0.4 |
+| `npm run apply` | Applies ONLY an existing `tfplan` saved by a prior `npm run plan` for that stack (refuses otherwise), then deletes the plan file so a stale plan can never be re-applied | M0.4 |
+| `npm run drift` | `terraform plan -detailed-exitcode` drift check: exit 0 = clean, exit 2 = "DRIFT DETECTED" with the diff printed | M0.4 |
 | `npm run deploy:dev` | Build/push ARM64 image, hydrate .env from Parameter Store, roll EC2 dev | M0.5 (stub until then) |
 | `npm run deploy:prod` | Same, prod stack | M0.5 (stub until then) |
+
+## Infrastructure
+
+Two identical Terraform stacks — `hc-dev-` and `hc-prod-` — composed from the same modules in `infra/modules/`; the env roots (`infra/envs/dev`, `infra/envs/prod`) differ only in backend bucket and a small `locals` block (env name, log retention 30d/90d). Each stack has its OWN S3 backend (`hc-dev-tfstate-938565869261` / `hc-prod-tfstate-938565869261`, created by `npm run bootstrap`) with S3-native lockfile locking. **The AWS console is read-only — every infrastructure change goes through `npm run plan` / `npm run apply`** (both account-guarded to 938565869261 via the `housingchoice` profile; the default credential chain is never used).
+
+Modules (all resources name-prefixed `hc-<env>-`, region us-east-1):
+
+| Module | What it manages |
+|---|---|
+| `network` | Dedicated VPC (10.0.0.0/16), one public subnet (us-east-1a), IGW, route table; app SG admits TCP 8080 only from the CloudFront origin-facing prefix list — no SSH anywhere (SSM only) |
+| `dynamodb` | The 9 on-demand tables mirrored 1:1 from `app/src/lib/tables.ts` (the contractual source of truth): PITR + deletion protection on all, GSIs project ALL, streams on messages/cases, TTL on matches |
+| `s3_media` | Versioned private media bucket (`hc-<env>-media-<account>`), SSE-S3, full public-access block |
+| `ecr` | App image repository (`hc-<env>-app`), scan-on-push, lifecycle keeps last 10 images |
+| `ses` | Sender email identity (sandbox; apply sends a verification email) |
+| `params` | Parameter Store under `/hc/<env>/app/`: generated `CF_ORIGIN_SECRET` (SecureString) + LOG_LEVEL / TABLE_PREFIX / PORT / NODE_ENV — M0.5's deploy hydrates `.env` from this path; Terraform owns all values |
+| `ec2` | t4g.small (AL2023 ARM64), EIP for a stable origin DNS, IMDSv2, encrypted gp3 20GB root, `hc-<env>-instance` role (SSM core + least-privilege Dynamo/S3/SSM/ECR/logs/metrics), user-data installs docker + compose only |
+| `cloudfront` | The https entry point (default cert, price class 100, HTTP/2+3): origin = the EIP public DNS on HTTP:8080; `/api/*` + `/webhooks/*` and (for now) the default behavior all use CachingDisabled |
+| `observability` | `/hc/<env>/app` + `/hc/<env>/worker` log groups, OrphanLogs (missing correlationId) and ErrorLogs (pino level ≥ 50) metric filters + alarms, EC2 status-check and disk alarms, `hc-<env>-alerts` SNS topic (email), CloudWatch dashboard |
+| `budget` | Monthly USD 40 cost budget; email at 80% actual / 100% forecasted |
+
+**Origin-secret flow:** Terraform generates a random 32-char secret and stores it as SecureString `/hc/<env>/app/CF_ORIGIN_SECRET`; CloudFront stamps it on every origin request as the `x-origin-verify` header; app middleware rejects requests without it (`GET /health` exempt). Combined with the SG's CloudFront-only ingress, the instance never serves anyone but CloudFront.
+
+Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent`, which only starts reporting once the agent is installed in M0.5/M0.6 (alarm treats missing data as OK until then). SNS/SES email subscriptions require one-time confirmation clicks after the first apply.
 
 ## Local development
 

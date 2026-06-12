@@ -25,9 +25,9 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "deploy:dev": "node scripts/stub.mjs deploy:dev M0.5",
     "deploy:prod": "node scripts/stub.mjs deploy:prod M0.5",
-    "plan": "node scripts/stub.mjs plan M0.4",
-    "apply": "node scripts/stub.mjs apply M0.4",
-    "drift": "node scripts/stub.mjs drift M0.4"
+    "plan": "node scripts/tf.mjs plan",
+    "apply": "node scripts/tf.mjs apply",
+    "drift": "node scripts/tf.mjs drift"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.0.0",

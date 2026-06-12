@@ -30,8 +30,8 @@ export interface RequestWithRawBody extends Request {
 export interface BuildAppDeps {
   config?: AppConfig;
   logger?: Logger;
-  /** Test seam: injected /api dependencies (fake send service, no DynamoDB). */
-  api?: Pick<ApiRouterDeps, 'sendMessageService'>;
+  /** Test seam: injected /api dependencies (fake send service/repos/bus, no DynamoDB). */
+  api?: Omit<ApiRouterDeps, 'config' | 'logger'>;
   /** Test seam: injected /webhooks dependencies (fake repos/adapter/media store). */
   webhooks?: Omit<WebhooksRouterDeps, 'config' | 'logger'>;
   /** Test seam: register extra routes after the built-ins, before the error handler. */

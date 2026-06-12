@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MessagingAdapter, SendMessageParams } from '../src/adapters/messaging.js';
 import { loadConfig } from '../src/lib/config.js';
+import { createEventBus, type AppEventName } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { AuditRepo } from '../src/repos/auditRepo.js';
 import type { ContactItem, ContactsRepo } from '../src/repos/contactsRepo.js';
@@ -29,6 +30,7 @@ interface Fakes {
   touched: { previewText: string | undefined; ts: string }[];
   modeSets: string[];
   auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
+  emitted: { event: AppEventName; payload: unknown }[];
   counterValue: number;
   capture: LogCapture;
   service: ReturnType<typeof createSendMessageService>;
@@ -58,6 +60,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     touched: [] as { previewText: string | undefined; ts: string }[],
     modeSets: [] as string[],
     auditEvents: [] as Fakes['auditEvents'],
+    emitted: [] as Fakes['emitted'],
     counterValue: 0,
   };
 
@@ -66,7 +69,15 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
     touchLastActivity: async (_id, previewText, ts) => {
       fakes.touched.push({ previewText, ts });
+      conversation.last_activity_at = ts;
+      if (previewText !== undefined) conversation.last_message_preview = previewText;
+      return conversation;
     },
+    setParticipantsIfAbsent: async () => true,
+    incrementUnread: async () => 1,
+    resetUnread: async () => conversation,
+    setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
+    listByLastActivity: async () => ({ items: [conversation] }),
     setMode: async (_id, mode) => {
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;
@@ -81,6 +92,8 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
+    getById: async (id) => (contact?.contactId === id ? contact : undefined),
+    createIfAbsent: async () => true,
     setFlag: async () => {},
     clearFlag: async () => {},
   };
@@ -109,6 +122,10 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     },
   };
 
+  const events = createEventBus();
+  events.on('conversation.updated', (payload) => fakes.emitted.push({ event: 'conversation.updated', payload }));
+  events.on('message.persisted', (payload) => fakes.emitted.push({ event: 'message.persisted', payload }));
+
   const capture = createLogCapture();
   const service = createSendMessageService({
     config: loadConfig({ NODE_ENV: 'test', SEND_BREAKER_MAX_PER_MINUTE: '3' }),
@@ -118,6 +135,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     messagesRepo,
     contactsRepo,
     auditRepo,
+    events,
   });
 
   // NOTE: the closures above mutate `fakes` — return it (augmented), never a copy.
@@ -201,6 +219,44 @@ describe('sendMessage service', () => {
       },
     ]);
     expect(JSON.stringify(f.auditEvents)).not.toContain('audit me');
+  });
+
+  it('emits message.persisted + conversation.updated after a successful send (M1.2 SSE), unread untouched', async () => {
+    const f = makeFakes({ conversation: { unread_count: 2 } });
+    await f.service({ conversationId: 'conv-1', body: 'live update' });
+
+    expect(f.emitted).toEqual([
+      {
+        event: 'message.persisted',
+        payload: {
+          conversationId: 'conv-1',
+          tsMsgId: '2026-06-12T10:00:00.000Z#SMfake-1',
+          direction: 'outbound',
+          deliveryStatus: 'queued',
+        },
+      },
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: 'conv-1',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          // Outbound sends never touch unread_count — the event carries the
+          // existing value through.
+          unread_count: 2,
+          preview: 'live update',
+        },
+      },
+    ]);
+  });
+
+  it('emits NOTHING when the send is refused (opt-out gate)', async () => {
+    const f = makeFakes({
+      contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+    });
+    await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
+      ContactOptedOutError,
+    );
+    expect(f.emitted).toHaveLength(0);
   });
 
   it('persists + audits the caller-supplied author (ai) — the Phase 2 seam', async () => {

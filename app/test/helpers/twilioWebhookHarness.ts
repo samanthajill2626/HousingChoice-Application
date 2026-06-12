@@ -4,6 +4,7 @@
 // values with the twilio package — signature verification is exercised for
 // real, never mocked out.
 import { Readable } from 'node:stream';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express } from 'express';
 import request, { type Test } from 'supertest';
 import twilio from 'twilio';
@@ -15,13 +16,15 @@ import type {
   SendMessageResult,
 } from '../../src/adapters/messaging.js';
 import { loadConfig, type AppConfig } from '../../src/lib/config.js';
+import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
 import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import type { ContactFlag, ContactItem, ContactsRepo } from '../../src/repos/contactsRepo.js';
-import type {
-  ConversationItem,
-  ConversationsRepo,
-  ConversationType,
+import {
+  toPreview,
+  type ConversationItem,
+  type ConversationsRepo,
+  type ConversationType,
 } from '../../src/repos/conversationsRepo.js';
 import {
   allowedPriorStatuses,
@@ -51,10 +54,18 @@ export interface FakeWorld {
   optOutSets: { conversationId: string; value: boolean }[];
   auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   touches: { conversationId: string; previewText: string | undefined; ts: string }[];
+  /** contactIds actually CREATED by createIfAbsent (M1.2 auto-capture). */
+  contactCreates: string[];
+  /** conversationIds whose unread counter was bumped, in order (M1.2). */
+  unreadIncrements: string[];
   sent: SendMessageParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
+  /** The bus injected into the app — emit/subscribe like production code. */
+  events: EventBus;
+  /** Every bus emission, in order (the harness subscribes to both events). */
+  emitted: { event: AppEventName; payload: unknown }[];
   conversationsRepo: ConversationsRepo;
   messagesRepo: MessagesRepo;
   contactsRepo: ContactsRepo;
@@ -71,11 +82,22 @@ export function createFakeWorld(): FakeWorld {
   const optOutSets: FakeWorld['optOutSets'] = [];
   const auditEvents: FakeWorld['auditEvents'] = [];
   const touches: FakeWorld['touches'] = [];
+  const contactCreates: string[] = [];
+  const unreadIncrements: string[] = [];
   const sent: SendMessageParams[] = [];
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const failMediaUrls = new Set<string>();
   let convCounter = 0;
   let sidCounter = 0;
+
+  const events = createEventBus();
+  const emitted: FakeWorld['emitted'] = [];
+  events.on('conversation.updated', (payload) => emitted.push({ event: 'conversation.updated', payload }));
+  events.on('message.persisted', (payload) => emitted.push({ event: 'message.persisted', payload }));
+
+  /** The real repos throw the SDK's conditional-check error — mirror it. */
+  const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
+    new ConditionalCheckFailedException({ message, $metadata: {} });
 
   const conversationsRepo: ConversationsRepo = {
     async createOrGetByParticipantPhone(phone: string, type: ConversationType) {
@@ -100,6 +122,48 @@ export function createFakeWorld(): FakeWorld {
     },
     async touchLastActivity(conversationId, previewText, ts) {
       touches.push({ conversationId, previewText, ts });
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`touchLastActivity: no conversation ${conversationId}`);
+      conv.status = 'open';
+      conv.last_activity_at = ts;
+      const preview = toPreview(previewText);
+      if (preview !== undefined) conv.last_message_preview = preview;
+      return conv;
+    },
+    async setParticipantsIfAbsent(conversationId, participants) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw new Error(`setParticipantsIfAbsent: conversation not found: ${conversationId}`);
+      if (conv.participants !== undefined) return false;
+      conv.participants = participants;
+      return true;
+    },
+    async incrementUnread(conversationId) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`incrementUnread: no conversation ${conversationId}`);
+      conv.unread_count = (conv.unread_count ?? 0) + 1;
+      unreadIncrements.push(conversationId);
+      return conv.unread_count;
+    },
+    async resetUnread(conversationId) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`resetUnread: no conversation ${conversationId}`);
+      conv.unread_count = 0;
+      return conv;
+    },
+    async setAssignment(conversationId, assigneeUserId) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setAssignment: no conversation ${conversationId}`);
+      const previousAssigneeUserId = typeof conv.assignment === 'string' ? conv.assignment : null;
+      if (assigneeUserId === null) delete conv.assignment;
+      else conv.assignment = assigneeUserId;
+      return { conversation: conv, previousAssigneeUserId };
+    },
+    async listByLastActivity({ status, limit }) {
+      const items = [...conversations.values()]
+        .filter((c) => c.status === status)
+        .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
+        .slice(0, limit ?? 50);
+      return { items };
     },
     async setMode(conversationId, mode) {
       const conv = conversations.get(conversationId);
@@ -154,10 +218,12 @@ export function createFakeWorld(): FakeWorld {
       if (errorCode !== undefined) existing.error_code = errorCode;
       return true;
     },
-    async listByConversation(conversationId) {
+    async listByConversation(conversationId, opts = {}) {
       return messages
         .filter((m) => m.conversationId === conversationId)
-        .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1));
+        .filter((m) => (opts.before === undefined ? true : m.tsMsgId < opts.before))
+        .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1))
+        .slice(0, opts.limit ?? 50);
     },
     async annotateMessage(conversationId, tsMsgId, annotations) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
@@ -171,6 +237,15 @@ export function createFakeWorld(): FakeWorld {
   const contactsRepo: ContactsRepo = {
     async findByPhone(phone) {
       return contacts.find((c) => c.phone === phone);
+    },
+    async getById(contactId) {
+      return contacts.find((c) => c.contactId === contactId);
+    },
+    async createIfAbsent(item) {
+      if (contacts.some((c) => c.contactId === item.contactId)) return false;
+      contacts.push({ ...item });
+      contactCreates.push(item.contactId);
+      return true;
     },
     async setFlag(contactId, flag) {
       const contact = contacts.find((c) => c.contactId === contactId);
@@ -223,9 +298,13 @@ export function createFakeWorld(): FakeWorld {
     optOutSets,
     auditEvents,
     touches,
+    contactCreates,
+    unreadIncrements,
     sent,
     mediaPuts,
     failMediaUrls,
+    events,
+    emitted,
     conversationsRepo,
     messagesRepo,
     contactsRepo,
@@ -247,6 +326,8 @@ export interface HarnessOptions {
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
+  /** SSE heartbeat override for /api/events tests (default 25s). */
+  sseHeartbeatMs?: number;
 }
 
 export interface Harness {
@@ -274,6 +355,15 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
   const app = buildApp({
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
+    // The /api router shares the same fakes + bus, so hub-API and SSE tests
+    // can drive the FULL loop (webhook in → bus → SSE out) on one app.
+    api: {
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      auditRepo: world.auditRepo,
+      events: world.events,
+      ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
+    },
     webhooks: {
       adapter: world.adapter,
       ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
@@ -281,6 +371,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
+      events: world.events,
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

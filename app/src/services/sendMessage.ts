@@ -14,6 +14,7 @@
 // scheduler calls (binding guideline 3).
 import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -108,6 +109,8 @@ export interface SendMessageServiceDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  /** SSE live-update bus (M1.2); the process singleton by default. */
+  events?: EventBus;
 }
 
 export type SendMessageService = (input: SendMessageInput) => Promise<SendMessageOutcome>;
@@ -120,6 +123,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
     const { conversationId, body, mediaUrls, automated = false, author = 'teammate' } = input;
@@ -190,11 +194,29 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
 
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and
     // the §5 audit-trail entry for the send (IDs only, never the body).
-    await conversations.touchLastActivity(conversationId, body, result.providerTs);
+    const touched = await conversations.touchLastActivity(conversationId, body, result.providerTs);
     await audit.append(conversationId, 'message_sent', {
       providerSid: result.providerSid,
       automated,
       author,
+    });
+
+    // (6) SSE live updates (M1.2): dashboards see this send (their own and
+    // other operators') without polling. Outbound NEVER touches unread_count
+    // — the event just carries the current value from the touch's ALL_NEW.
+    events.emit('message.persisted', {
+      conversationId,
+      tsMsgId: appended.tsMsgId,
+      direction: 'outbound',
+      deliveryStatus: result.status,
+    });
+    events.emit('conversation.updated', {
+      conversationId,
+      last_activity_at: touched.last_activity_at,
+      unread_count: touched.unread_count ?? 0,
+      ...(touched.last_message_preview !== undefined && {
+        preview: touched.last_message_preview,
+      }),
     });
 
     log.info(

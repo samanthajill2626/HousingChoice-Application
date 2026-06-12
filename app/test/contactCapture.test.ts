@@ -1,0 +1,256 @@
+// M1.2 unit tests: the contact auto-capture service — stub creation for
+// unknown phones, link backfill for known ones, the no-overwrite guarantee,
+// and the conversation-anchored race handling (the byPhone GSI is eventually
+// consistent; the participants claim is the arbiter). In-memory fakes mirror
+// the repos' conditional-write semantics.
+import { describe, expect, it } from 'vitest';
+import { createLogger } from '../src/lib/logger.js';
+import type { AuditRepo } from '../src/repos/auditRepo.js';
+import type { ContactItem, ContactsRepo } from '../src/repos/contactsRepo.js';
+import type {
+  ConversationItem,
+  ConversationParticipant,
+  ConversationsRepo,
+} from '../src/repos/conversationsRepo.js';
+import { createContactCapture } from '../src/services/contactCapture.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+const PHONE = '+15550100001';
+
+interface CaptureFakes {
+  conversation: ConversationItem;
+  contacts: ContactItem[];
+  /** contactIds actually created by createIfAbsent. */
+  creates: string[];
+  /** setParticipantsIfAbsent call count (race-path assertions). */
+  claimAttempts: number;
+  /** When true, findByPhone returns nothing even for stored contacts (GSI lag). */
+  simulateGsiLag: boolean;
+  auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
+  contactsRepo: ContactsRepo;
+  conversationsRepo: ConversationsRepo;
+  auditRepo: AuditRepo;
+  capture: ReturnType<typeof createContactCapture>;
+}
+
+function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; contacts?: ContactItem[] } = {}): CaptureFakes {
+  const conversation: ConversationItem = {
+    conversationId: 'conv-1',
+    participant_phone: PHONE,
+    status: 'open',
+    last_activity_at: '2026-06-12T09:00:00.000Z',
+    type: 'tenant_1to1',
+    ai_mode: 'auto',
+    created_at: '2026-06-12T09:00:00.000Z',
+    ...(seed.participants !== undefined && { participants: seed.participants }),
+  };
+  const contacts: ContactItem[] = seed.contacts ?? [];
+  const creates: string[] = [];
+  const auditEvents: CaptureFakes['auditEvents'] = [];
+
+  const fakes = {
+    conversation,
+    contacts,
+    creates,
+    claimAttempts: 0,
+    simulateGsiLag: false,
+    auditEvents,
+  } as CaptureFakes;
+
+  const contactsRepo: ContactsRepo = {
+    async findByPhone(phone) {
+      if (fakes.simulateGsiLag) return undefined;
+      return contacts.find((c) => c.phone === phone);
+    },
+    async getById(contactId) {
+      return contacts.find((c) => c.contactId === contactId);
+    },
+    async createIfAbsent(item) {
+      if (contacts.some((c) => c.contactId === item.contactId)) return false;
+      contacts.push({ ...item });
+      creates.push(item.contactId);
+      return true;
+    },
+    async setFlag() {},
+    async clearFlag() {},
+  };
+
+  const conversationsRepo: ConversationsRepo = {
+    async getById(id) {
+      return id === conversation.conversationId ? conversation : undefined;
+    },
+    async setParticipantsIfAbsent(conversationId, participants) {
+      fakes.claimAttempts += 1;
+      if (conversationId !== conversation.conversationId) {
+        throw new Error(`setParticipantsIfAbsent: conversation not found: ${conversationId}`);
+      }
+      if (conversation.participants !== undefined) return false;
+      conversation.participants = participants;
+      return true;
+    },
+    // Unused by the capture service:
+    createOrGetByParticipantPhone: async () => conversation,
+    touchLastActivity: async () => conversation,
+    incrementUnread: async () => 1,
+    resetUnread: async () => conversation,
+    setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
+    listByLastActivity: async () => ({ items: [] }),
+    setMode: async () => {},
+    setSmsOptOut: async () => {},
+    incrementAutomatedSendCount: async () => 1,
+  };
+
+  const auditRepo: AuditRepo = {
+    async append(entityKey, eventType, payload) {
+      auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
+    },
+  };
+
+  const capture = createContactCapture({
+    contactsRepo,
+    conversationsRepo,
+    auditRepo,
+    logger: createLogger({ destination: createLogCapture().stream }),
+  });
+
+  return Object.assign(fakes, { contactsRepo, conversationsRepo, auditRepo, capture });
+}
+
+describe('contactCapture — unknown phone', () => {
+  it('creates a tenant/new stub with capture metadata, links it, and audits once', async () => {
+    const f = makeCaptureFakes();
+    const contact = await f.capture(f.conversation);
+
+    expect(f.contacts).toHaveLength(1);
+    expect(contact).toMatchObject({
+      type: 'tenant',
+      status: 'new',
+      phone: PHONE,
+      capture_source: 'inbound_sms',
+    });
+    expect(typeof contact.captured_at).toBe('string');
+    expect(contact.contactId).toMatch(/^contact-/);
+    expect(f.conversation.participants).toEqual([{ contactId: contact.contactId, phone: PHONE }]);
+    expect(f.auditEvents).toEqual([
+      {
+        entityKey: `contacts#${contact.contactId}`,
+        eventType: 'contact_auto_captured',
+        payload: { conversationId: 'conv-1', source: 'inbound_sms' },
+      },
+    ]);
+  });
+
+  it('a second capture (already linked + contact exists) is a pure read — no writes, no audit', async () => {
+    const f = makeCaptureFakes();
+    const first = await f.capture(f.conversation);
+    const second = await f.capture(f.conversation);
+
+    expect(second.contactId).toBe(first.contactId);
+    expect(f.contacts).toHaveLength(1);
+    expect(f.creates).toHaveLength(1);
+    expect(f.auditEvents).toHaveLength(1);
+    expect(f.claimAttempts).toBe(1); // no second claim
+  });
+
+  it('steady state with knownContact passed: zero repo calls beyond the inputs', async () => {
+    const f = makeCaptureFakes();
+    const stub = await f.capture(f.conversation);
+
+    const claimsBefore = f.claimAttempts;
+    const result = await f.capture(f.conversation, stub);
+    expect(result).toBe(stub); // the known contact is returned as-is
+    expect(f.claimAttempts).toBe(claimsBefore);
+    expect(f.creates).toHaveLength(1);
+  });
+});
+
+describe('contactCapture — known contact (backfill only)', () => {
+  it('backfills the participants link and NEVER touches the contact record', async () => {
+    const existing: ContactItem = {
+      contactId: 'contact-known',
+      type: 'landlord',
+      status: 'active',
+      phone: PHONE,
+      notes: 'must survive',
+    };
+    const f = makeCaptureFakes({ contacts: [existing] });
+
+    const result = await f.capture(f.conversation, existing);
+
+    expect(result.contactId).toBe('contact-known');
+    expect(f.conversation.participants).toEqual([{ contactId: 'contact-known', phone: PHONE }]);
+    expect(f.creates).toHaveLength(0); // no contact write of any kind
+    expect(f.contacts[0]).toEqual(existing); // field-for-field untouched
+    expect(f.auditEvents).toHaveLength(0); // backfill is not a capture event
+  });
+
+  it('resolves the contact itself when the caller passes none', async () => {
+    const existing: ContactItem = { contactId: 'contact-known', type: 'tenant', phone: PHONE };
+    const f = makeCaptureFakes({ contacts: [existing] });
+
+    const result = await f.capture(f.conversation);
+    expect(result.contactId).toBe('contact-known');
+    expect(f.conversation.participants?.[0]?.contactId).toBe('contact-known');
+  });
+});
+
+describe('contactCapture — race handling (the byPhone GSI eventual-consistency window)', () => {
+  it('two CONCURRENT first-message captures create exactly one contact + one audit (claim arbitration)', async () => {
+    const f = makeCaptureFakes();
+    f.simulateGsiLag = true; // both captures miss findByPhone, like a lagging GSI
+
+    const [a, b] = await Promise.all([f.capture(f.conversation), f.capture(f.conversation)]);
+
+    expect(a.contactId).toBe(b.contactId); // the loser adopted the winner's id
+    expect(f.contacts).toHaveLength(1);
+    expect(f.creates).toHaveLength(1);
+    expect(f.auditEvents.filter((e) => e.eventType === 'contact_auto_captured')).toHaveLength(1);
+    expect(f.conversation.participants).toHaveLength(1);
+  });
+
+  it('claim loser with an EXISTING contact adopts the linked contactId over its own', async () => {
+    // The conversation snapshot has no participants (stale read), but the
+    // authoritative row was linked to a different contact meanwhile.
+    const existing: ContactItem = { contactId: 'contact-mine', type: 'tenant', phone: PHONE };
+    const winner: ContactItem = { contactId: 'contact-winner', type: 'tenant', phone: PHONE };
+    const f = makeCaptureFakes({ contacts: [existing, winner] });
+    f.conversation.participants = [{ contactId: 'contact-winner', phone: PHONE }];
+    const staleSnapshot: ConversationItem = { ...f.conversation };
+    delete staleSnapshot.participants;
+
+    const result = await f.capture(staleSnapshot, existing);
+
+    expect(result.contactId).toBe('contact-winner');
+    expect(f.creates).toHaveLength(0);
+    expect(f.conversation.participants).toEqual([{ contactId: 'contact-winner', phone: PHONE }]);
+  });
+
+  it('heals the crash window: link exists but the contact row is missing → stub recreated under the LINKED id', async () => {
+    const f = makeCaptureFakes({ participants: [{ contactId: 'contact-orphan-link', phone: PHONE }] });
+
+    const result = await f.capture(f.conversation);
+
+    expect(result.contactId).toBe('contact-orphan-link'); // deterministic, not a fresh uuid
+    expect(f.contacts).toHaveLength(1);
+    expect(f.contacts[0]).toMatchObject({
+      contactId: 'contact-orphan-link',
+      type: 'tenant',
+      status: 'new',
+      phone: PHONE,
+    });
+    expect(f.auditEvents).toEqual([
+      expect.objectContaining({
+        entityKey: 'contacts#contact-orphan-link',
+        eventType: 'contact_auto_captured',
+      }),
+    ]);
+  });
+
+  it('throws (for the webhook to ERROR-log) when the claim fails yet no link is readable', async () => {
+    const f = makeCaptureFakes();
+    f.conversationsRepo.setParticipantsIfAbsent = async () => false; // claim "lost"…
+    f.conversationsRepo.getById = async () => f.conversation; // …but no participants anywhere
+
+    await expect(f.capture(f.conversation)).rejects.toThrow(/no link is readable/);
+  });
+});

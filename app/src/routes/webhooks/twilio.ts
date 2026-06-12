@@ -18,15 +18,18 @@ import {
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
+import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../../repos/contactsRepo.js';
 import {
   createConversationsRepo,
+  type ConversationItem,
   type ConversationsRepo,
 } from '../../repos/conversationsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../../repos/messagesRepo.js';
+import { createContactCapture } from '../../services/contactCapture.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -56,6 +59,8 @@ export interface TwilioWebhookDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  /** SSE live-update bus (M1.2); the process singleton by default. */
+  events?: EventBus;
   /**
    * How long the status callback waits before retrying an unknown-SID lookup
    * once (the send/append race window). Injectable for tests; default 2500ms.
@@ -75,6 +80,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const events = deps.events ?? appEvents;
+  const captureContact = createContactCapture({
+    contactsRepo: contacts,
+    conversationsRepo: conversations,
+    auditRepo: audit,
+    logger: deps.logger,
+  });
   const ourNumbers = new Set(config.ourPhoneNumbers);
   const statusRetryDelayMs = deps.statusUnknownSidRetryDelayMs ?? STATUS_UNKNOWN_SID_RETRY_DELAY_MS;
 
@@ -190,6 +202,23 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // ERROR-logged + alarmed (Twilio's redelivery is best-effort backup, not
     // the recovery plan).
 
+    // (3.5) Contact auto-capture (M1.2): every inbound conversation ends up
+    // linked to a contact — a stub is created for unknown phones (race-safe
+    // via the conversation's participants claim; see
+    // services/contactCapture.ts) and the link is backfilled for known ones.
+    // Idempotent, so the dedupe path re-runs it harmlessly (no double
+    // capture). The captured contact also serves the STOP recording below,
+    // so an opt-out from a previously unknown phone flags the contact too.
+    let effectiveContact = contact;
+    try {
+      effectiveContact = await captureContact(conversation, contact);
+    } catch (err) {
+      log.error(
+        { err, providerSid: MessageSid },
+        'contact auto-capture failed — message persisted, conversation not linked',
+      );
+    }
+
     // (4) STOP/opt-out recording (doc §7.1; Twilio Advanced Opt-Out already
     // auto-replied at the provider). The message itself stays on the
     // timeline either way (persisted above).
@@ -205,18 +234,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
         const source =
           OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
-        if (contact) {
-          if (optedOut) await contacts.setFlag(contact.contactId, 'sms_opt_out');
-          else await contacts.clearFlag(contact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${contact.contactId}`, eventType, {
+        if (effectiveContact) {
+          if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
+          else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
+          await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
             providerSid: MessageSid,
             conversationId: conversation.conversationId,
             source,
           });
         } else {
+          // Only reachable when auto-capture itself failed above — the
+          // conversation flag still suppresses every later send.
           log.warn(
             { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in from a phone with no contact record — conversation flagged, no contact to flag (auto-capture is M1.2)',
+            'opt-out/in from a phone with no contact record — conversation flagged, no contact to flag (auto-capture failed)',
           );
           await audit.append(conversation.conversationId, eventType, {
             providerSid: MessageSid,
@@ -265,11 +296,42 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
     }
 
-    // (6) Inbox touch, then acknowledge with empty TwiML.
+    // (6) Inbox touch + unread + SSE live updates, then acknowledge with
+    // empty TwiML. unread_count increments ONLY on a fresh append — a
+    // redelivered webhook (dedupe) must never double-count the same message.
+    // The increment runs BEFORE the touch so the touch's ALL_NEW snapshot
+    // carries the new count into the conversation.updated event.
+    let touched: ConversationItem | undefined;
     try {
-      await conversations.touchLastActivity(persistedConversationId, Body || undefined, providerTs);
+      if (!appended.deduped) await conversations.incrementUnread(persistedConversationId);
+      touched = await conversations.touchLastActivity(
+        persistedConversationId,
+        Body || undefined,
+        providerTs,
+      );
     } catch (err) {
-      log.error({ err, providerSid: MessageSid }, 'touchLastActivity failed — message persisted, inbox stale');
+      log.error({ err, providerSid: MessageSid }, 'touchLastActivity/unread failed — message persisted, inbox stale');
+    }
+    if (!appended.deduped) {
+      // SSE emits are fresh-append-only: a redelivery would push a duplicate
+      // UI event for a message the dashboard already rendered (clients
+      // reconcile via GET /api/conversations anyway).
+      events.emit('message.persisted', {
+        conversationId: persistedConversationId,
+        tsMsgId: persistedTsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) {
+        events.emit('conversation.updated', {
+          conversationId: persistedConversationId,
+          last_activity_at: touched.last_activity_at,
+          unread_count: touched.unread_count ?? 0,
+          ...(touched.last_message_preview !== undefined && {
+            preview: touched.last_message_preview,
+          }),
+        });
+      }
     }
     log.info(
       {
@@ -330,15 +392,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // Forward-only transition; false = regression/duplicate → side effects
     // are SKIPPED, which also makes redelivered failure callbacks enqueue
     // exactly one retry.
-    const transitioned = await messages.updateDeliveryStatus(
-      MessageSid,
-      mapTwilioStatus(MessageStatus),
-      ErrorCode,
-    );
+    const mappedStatus = mapTwilioStatus(MessageStatus);
+    const transitioned = await messages.updateDeliveryStatus(MessageSid, mappedStatus, ErrorCode);
     log.info(
       { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned },
       'twilio delivery status callback processed',
     );
+
+    if (transitioned) {
+      // SSE (M1.2): a REAL transition updates delivery badges live.
+      // Regressions/duplicates were no-ops above and emit nothing — so a
+      // redelivered callback never re-fires the dashboard.
+      events.emit('message.persisted', {
+        conversationId: message.conversationId,
+        tsMsgId: message.tsMsgId,
+        direction: message.direction,
+        deliveryStatus: mappedStatus,
+      });
+    }
 
     if (transitioned && ErrorCode) {
       // TODO(M1.10) escalation-queue seam: a failed send on an ACTIVE CASE

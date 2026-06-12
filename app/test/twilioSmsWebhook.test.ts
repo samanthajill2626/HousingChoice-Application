@@ -315,23 +315,28 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     expect(world.optOutSets).toEqual([{ conversationId: conv.conversationId, value: true }]);
   });
 
-  it('a STOP from an UNKNOWN phone still suppresses: conversation flagged, audit written, later send refused', async () => {
-    const { app, world, capture } = makeWebhookHarness();
+  it('a STOP from an UNKNOWN phone suppresses AND flags the auto-captured stub (M1.2), later send refused', async () => {
+    const { app, world } = makeWebhookHarness();
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'STOP', MessageSid: 'SMstopunknown' }));
 
-    // No contact to flag (auto-capture is M1.2) — WARN, not silence…
-    expect(world.flagWrites).toHaveLength(0);
-    const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('no contact record'));
-    expect(warn).toBeDefined();
+    // M1.2: the unknown phone is auto-captured BEFORE opt-out recording, so
+    // the stub contact carries the suppression flag alongside the conversation.
+    expect(world.contacts).toHaveLength(1);
+    const stub = world.contacts[0]!;
+    expect(world.flagWrites).toEqual([{ contactId: stub.contactId, flag: 'sms_opt_out', value: true }]);
     expect(world.messages).toHaveLength(1);
 
-    // …but the CONVERSATION carries the suppression + the audit trail entry
-    // (entityKey = the conversationId when no contact exists).
+    // The CONVERSATION carries the suppression + both audit trail entries
+    // (capture first, then the opt-out against the captured contact).
     const conv = [...world.conversations.values()][0]!;
     expect(conv.sms_opt_out).toBe(true);
     expect(world.auditEvents).toEqual([
       expect.objectContaining({
-        entityKey: conv.conversationId,
+        entityKey: `contacts#${stub.contactId}`,
+        eventType: 'contact_auto_captured',
+      }),
+      expect.objectContaining({
+        entityKey: `contacts#${stub.contactId}`,
         eventType: 'sms_opt_out_recorded',
         payload: expect.objectContaining({ providerSid: 'SMstopunknown', source: 'keyword' }),
       }),
@@ -346,6 +351,7 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
+      events: world.events,
     });
     await expect(send({ conversationId: conv.conversationId, body: 'hi again' })).rejects.toBeInstanceOf(
       ContactOptedOutError,
@@ -366,8 +372,18 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
       { conversationId: conv.conversationId, value: true },
       { conversationId: conv.conversationId, value: false },
     ]);
-    expect(world.auditEvents[1]).toMatchObject({
-      entityKey: conv.conversationId,
+    // M1.2: both deliveries resolve the SAME auto-captured contact (no second
+    // stub), and the clear lands on it.
+    expect(world.contacts).toHaveLength(1);
+    const stub = world.contacts[0]!;
+    expect(stub.sms_opt_out).toBe(false);
+    expect(world.auditEvents.map((e) => e.eventType)).toEqual([
+      'contact_auto_captured',
+      'sms_opt_out_recorded',
+      'sms_opt_out_cleared',
+    ]);
+    expect(world.auditEvents[2]).toMatchObject({
+      entityKey: `contacts#${stub.contactId}`,
       eventType: 'sms_opt_out_cleared',
     });
 
@@ -391,6 +407,153 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'please stop by the unit at 5' }));
     expect(world.flagWrites).toHaveLength(0);
+  });
+});
+
+describe('POST /webhooks/twilio/sms — M1.2 contact auto-capture', () => {
+  it('UNKNOWN phone → stub contact (tenant/new/capture metadata) + participants link + audit', async () => {
+    const { app, world } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcapture01' }));
+
+    expect(world.contacts).toHaveLength(1);
+    const stub = world.contacts[0]!;
+    expect(stub).toMatchObject({
+      type: 'tenant', // default for unknown inbound; landlords get typed at intake/import
+      status: 'new',
+      phone: TENANT_PHONE,
+      capture_source: 'inbound_sms',
+    });
+    expect(typeof stub.captured_at).toBe('string');
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.participants).toEqual([{ contactId: stub.contactId, phone: TENANT_PHONE }]);
+    expect(world.auditEvents).toEqual([
+      {
+        entityKey: `contacts#${stub.contactId}`,
+        eventType: 'contact_auto_captured',
+        payload: { conversationId: conv.conversationId, source: 'inbound_sms' },
+      },
+    ]);
+  });
+
+  it('KNOWN contact without a link → backfills the link ONLY: no new contact, no overwrite, no capture audit', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-known',
+      type: 'landlord',
+      status: 'active',
+      phone: TENANT_PHONE,
+      notes: 'pre-existing field that must survive',
+    });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMbackfill01' }));
+
+    expect(world.contacts).toHaveLength(1); // nothing created
+    expect(world.contactCreates).toHaveLength(0);
+    // NEVER overwrite existing contact fields:
+    expect(world.contacts[0]).toMatchObject({
+      contactId: 'contact-known',
+      type: 'landlord',
+      status: 'active',
+      notes: 'pre-existing field that must survive',
+    });
+    expect(world.contacts[0]!.capture_source).toBeUndefined();
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.participants).toEqual([{ contactId: 'contact-known', phone: TENANT_PHONE }]);
+    expect(world.auditEvents.filter((e) => e.eventType === 'contact_auto_captured')).toHaveLength(0);
+  });
+
+  it('DEDUPE path (redelivery) → no double capture: one contact, one link, one audit', async () => {
+    const { app, world } = makeWebhookHarness();
+    const params = inboundSmsParams({ MessageSid: 'SMcapdup01' });
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    expect(world.contacts).toHaveLength(1);
+    expect(world.contactCreates).toHaveLength(1);
+    expect(
+      world.auditEvents.filter((e) => e.eventType === 'contact_auto_captured'),
+    ).toHaveLength(1);
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.participants).toHaveLength(1);
+  });
+
+  it('capture failure never crashes the webhook: 200 TwiML, ERROR logged, message persisted', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    // Only the capture path calls the participants claim — fail it there.
+    world.conversationsRepo.setParticipantsIfAbsent = async () => {
+      throw new Error('participants claim write exploded');
+    };
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcapfail01' }));
+
+    expect(res.status).toBe(200);
+    expect(world.messages).toHaveLength(1);
+    const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('contact auto-capture failed'))!;
+    expect(err).toBeDefined();
+    expect(typeof err['correlationId']).toBe('string');
+  });
+});
+
+describe('POST /webhooks/twilio/sms — M1.2 unread tracking + SSE emits', () => {
+  it('a fresh inbound increments unread_count and emits message.persisted + conversation.updated', async () => {
+    const { app, world } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMunread01' }));
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.unread_count).toBe(1);
+    expect(world.unreadIncrements).toEqual([conv.conversationId]);
+
+    const message = world.messages[0]!;
+    expect(world.emitted).toEqual([
+      {
+        event: 'message.persisted',
+        payload: {
+          conversationId: conv.conversationId,
+          tsMsgId: message.tsMsgId,
+          direction: 'inbound',
+          deliveryStatus: 'delivered',
+        },
+      },
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: conv.conversationId,
+          last_activity_at: conv.last_activity_at,
+          unread_count: 1,
+          preview: 'hello, looking for a 2 bed',
+        },
+      },
+    ]);
+  });
+
+  it('the DEDUPE path does NOT double-increment unread and does NOT re-emit', async () => {
+    const { app, world } = makeWebhookHarness();
+    const params = inboundSmsParams({ MessageSid: 'SMunread02' });
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    await signedTwilioPost(app, SMS_PATH, params); // redelivery → dedupe
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.unread_count).toBe(1); // incremented exactly once
+    expect(world.unreadIncrements).toHaveLength(1);
+    expect(world.touches).toHaveLength(2); // the idempotent touch still re-ran
+    expect(world.emitted).toHaveLength(2); // one message.persisted + one conversation.updated
+  });
+
+  it('each distinct inbound message keeps counting until a read resets it', async () => {
+    const { app, world } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcount01' }));
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcount02' }));
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcount03' }));
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.unread_count).toBe(3);
+
+    const reset = await world.conversationsRepo.resetUnread(conv.conversationId);
+    expect(reset.unread_count).toBe(0);
   });
 });
 

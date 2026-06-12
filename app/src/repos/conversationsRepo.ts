@@ -18,6 +18,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  type QueryCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
@@ -29,6 +30,12 @@ export type ConversationType = 'tenant_1to1' | 'landlord_1to1';
 
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';
+
+/** A linked external participant (M1.2 auto-capture): contact + phone pair. */
+export interface ConversationParticipant {
+  contactId: string;
+  phone: string;
+}
 
 /** The contractual + commonly read attributes; items stay flexible documents. */
 export interface ConversationItem {
@@ -50,6 +57,16 @@ export interface ConversationItem {
   sms_opt_out?: boolean;
   /** Denormalized preview of the latest message (truncated; never logged). */
   last_message_preview?: string;
+  /**
+   * Participants → contactIds (doc §5; M1.2 auto-capture). 1:1 threads carry
+   * exactly one entry; the array shape is the relay-group seam. Written once
+   * via setParticipantsIfAbsent — the auto-capture race anchor.
+   */
+  participants?: ConversationParticipant[];
+  /** Inbound messages since the last POST /:id/read (M1.2 unread tracking). */
+  unread_count?: number;
+  /** Assigned team member's userId (M1.2; users-table validation is M1.3). */
+  assignment?: string;
   created_at: string;
   /** Circuit-breaker minute bucket (`YYYY-MM-DDTHH:mm`, UTC). */
   outbound_minute_bucket?: string;
@@ -60,6 +77,9 @@ export interface ConversationItem {
 
 /** Previews are denormalized inbox furniture, not transcripts — keep them short. */
 const PREVIEW_MAX_CHARS = 120;
+
+/** Default inbox page size (GET /api/conversations passes its own limit). */
+const DEFAULT_INBOX_PAGE_LIMIT = 50;
 
 export function toPreview(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
@@ -95,8 +115,55 @@ export interface ConversationsRepo {
    */
   createOrGetByParticipantPhone(phone: string, type: ConversationType): Promise<ConversationItem>;
   getById(conversationId: string): Promise<ConversationItem | undefined>;
-  /** Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview. */
-  touchLastActivity(conversationId: string, previewText: string | undefined, ts: string): Promise<void>;
+  /**
+   * Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview.
+   * Returns the post-update item (ALL_NEW) — the fresh inbox row the M1.2
+   * SSE conversation.updated event is built from.
+   */
+  touchLastActivity(
+    conversationId: string,
+    previewText: string | undefined,
+    ts: string,
+  ): Promise<ConversationItem>;
+  /**
+   * Atomically claim the participants link IFF none exists yet — the M1.2
+   * auto-capture race anchor (the conversation row is unique per phone; the
+   * contacts byPhone GSI is NOT trustworthy mid-race). True when THIS call
+   * set the link; false when a link already existed (read it via getById).
+   * Throws when the conversation does not exist.
+   */
+  setParticipantsIfAbsent(
+    conversationId: string,
+    participants: ConversationParticipant[],
+  ): Promise<boolean>;
+  /** Atomic unread bump on a FRESH inbound persist; returns the new count. */
+  incrementUnread(conversationId: string): Promise<number>;
+  /**
+   * Zero the unread counter (POST /:id/read); returns the updated item.
+   * Throws ConditionalCheckFailedException for unknown conversations.
+   */
+  resetUnread(conversationId: string): Promise<ConversationItem>;
+  /**
+   * Set (string) or clear (null) the assignee. Returns the updated item plus
+   * the previous assignee — captured atomically (ALL_OLD) for the
+   * assignment_changed audit event. Throws ConditionalCheckFailedException
+   * for unknown conversations.
+   */
+  setAssignment(
+    conversationId: string,
+    assigneeUserId: string | null,
+  ): Promise<{ conversation: ConversationItem; previousAssigneeUserId: string | null }>;
+  /**
+   * THE inbox read (M1.2): ONE DynamoDB Query on the byLastActivity GSI
+   * (status partition, last_activity_at descending) — never a Scan.
+   * Pagination via the raw LastEvaluatedKey; routes base64 it into an
+   * opaque cursor.
+   */
+  listByLastActivity(opts: {
+    status: string;
+    limit?: number;
+    exclusiveStartKey?: Record<string, unknown>;
+  }): Promise<{ items: ConversationItem[]; lastEvaluatedKey?: Record<string, unknown> }>;
   setMode(conversationId: string, mode: ConversationMode): Promise<void>;
   /** Set/clear the conversation-level STOP suppression flag (doc §7.1). */
   setSmsOptOut(conversationId: string, value: boolean): Promise<void>;
@@ -157,7 +224,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
     async touchLastActivity(conversationId, previewText, ts) {
       const preview = toPreview(previewText);
-      await doc.send(
+      const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
@@ -173,8 +240,122 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             ':ts': ts,
             ...(preview !== undefined && { ':preview': preview }),
           },
+          ReturnValues: 'ALL_NEW',
         }),
       );
+      return Attributes as ConversationItem;
+    },
+
+    async setParticipantsIfAbsent(conversationId, participants) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET participants = :p',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND attribute_not_exists(participants)',
+            ExpressionAttributeValues: { ':p': participants },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // Either a link already exists (the normal race-loser case) or the
+          // conversation is missing — disambiguate with a read.
+          const existing = await getById(conversationId);
+          if (!existing) {
+            throw new Error(`setParticipantsIfAbsent: conversation not found: ${conversationId}`);
+          }
+          return false;
+        }
+        throw err;
+      }
+      log.info(
+        { conversationId, contactId: participants[0]?.contactId },
+        'conversation participants linked',
+      );
+      return true;
+    },
+
+    async incrementUnread(conversationId) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'ADD unread_count :one',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeValues: { ':one': 1 },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return (Attributes as ConversationItem).unread_count ?? 1;
+    },
+
+    async resetUnread(conversationId) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'SET unread_count = :zero',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeValues: { ':zero': 0 },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ conversationId }, 'conversation unread reset');
+      return Attributes as ConversationItem;
+    },
+
+    async setAssignment(conversationId, assigneeUserId) {
+      // ALL_OLD captures the previous assignee atomically with the write —
+      // the assignment_changed audit event needs an honest old → new pair
+      // even under concurrent PATCHes.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: assigneeUserId === null ? 'REMOVE assignment' : 'SET assignment = :a',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ...(assigneeUserId !== null && {
+            ExpressionAttributeValues: { ':a': assigneeUserId },
+          }),
+          ReturnValues: 'ALL_OLD',
+        }),
+      );
+      const previous = Attributes as ConversationItem;
+      const previousAssigneeUserId =
+        typeof previous.assignment === 'string' ? previous.assignment : null;
+      const conversation: ConversationItem = { ...previous };
+      if (assigneeUserId === null) delete conversation.assignment;
+      else conversation.assignment = assigneeUserId;
+      log.info(
+        { conversationId, assigneeUserId, previousAssigneeUserId },
+        'conversation assignment set',
+      );
+      return { conversation, previousAssigneeUserId };
+    },
+
+    async listByLastActivity({ status, limit, exclusiveStartKey }) {
+      // M1.2 mandate: the inbox is ONE Query on byLastActivity (status
+      // partition, last_activity_at DESC) — NEVER a Scan, at any size.
+      const { Items, LastEvaluatedKey } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byLastActivity',
+          KeyConditionExpression: '#s = :status',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':status': status },
+          ScanIndexForward: false, // newest activity first
+          Limit: limit ?? DEFAULT_INBOX_PAGE_LIMIT,
+          ...(exclusiveStartKey !== undefined && {
+            ExclusiveStartKey: exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],
+          }),
+        }),
+      );
+      return {
+        items: (Items ?? []) as ConversationItem[],
+        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
+      };
     },
 
     async setMode(conversationId, mode) {

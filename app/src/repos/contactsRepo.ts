@@ -1,7 +1,9 @@
-// contacts repo — MINIMAL for M1.1: resolve a phone to a person (the hottest
-// lookup in the system, doc §5) and set messaging flags. Full auto-capture
-// ("First Last - N Bed" phone saving etc.) is M1.2 — deliberately not here.
-import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+// contacts repo — resolve a phone to a person (the hottest lookup in the
+// system, doc §5), set messaging flags, and (M1.2) the conditional-create
+// primitive auto-capture is built on. Items stay flexible documents; only
+// keys/GSI attributes are contractual (lib/tables.ts).
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -22,12 +24,25 @@ export interface ContactItem {
   phone?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /** How the record came to exist (M1.2 auto-capture: 'inbound_sms'). */
+  capture_source?: string;
+  /** When auto-capture created the stub (ISO 8601). */
+  captured_at?: string;
+  created_at?: string;
   [key: string]: unknown;
 }
 
 export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
+  getById(contactId: string): Promise<ContactItem | undefined>;
+  /**
+   * Conditional create (attribute_not_exists(contactId)): true when THIS
+   * call created the item, false when the contact already existed. An
+   * existing contact's fields are NEVER overwritten — this is the M1.2
+   * auto-capture no-overwrite guarantee, enforced at the write.
+   */
+  createIfAbsent(item: ContactItem): Promise<boolean>;
   setFlag(contactId: string, flag: ContactFlag): Promise<void>;
   /** Clear a flag (START/UNSTOP re-subscribes after a STOP, doc §7.1). */
   clearFlag(contactId: string, flag: ContactFlag): Promise<void>;
@@ -51,6 +66,31 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         }),
       );
       return (Items as ContactItem[] | undefined)?.[0];
+    },
+
+    async getById(contactId) {
+      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { contactId } }));
+      return Item as ContactItem | undefined;
+    },
+
+    async createIfAbsent(item) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(contactId)',
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // Already exists — by contract we never overwrite a single field.
+          return false;
+        }
+        throw err;
+      }
+      log.info({ contactId: item.contactId, type: item.type }, 'contact created');
+      return true;
     },
 
     async setFlag(contactId, flag) {

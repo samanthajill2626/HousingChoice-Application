@@ -70,7 +70,11 @@ function terraformOrDie(tfArgs) {
 }
 
 function initIfNeeded() {
-  if (reconfigure || !existsSync(path.join(envDir, '.terraform'))) {
+  // A bare `.terraform/` dir is not enough — `init -backend=false` (used for
+  // validate) creates it WITHOUT the backend config cache, and plan would then
+  // fail asking for reinitialization. The backend cache file is the real tell.
+  const backendInitialized = existsSync(path.join(envDir, '.terraform', 'terraform.tfstate'));
+  if (reconfigure || !backendInitialized) {
     console.error(`[tf] terraform init (${env})...`);
     terraformOrDie(['init', '-input=false', ...(reconfigure ? ['-reconfigure'] : [])]);
   }

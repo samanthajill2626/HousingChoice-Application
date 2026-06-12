@@ -16,7 +16,9 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 | M0.3 | ✅ | Full local dev loop: `npm run dev` = DynamoDB Local (auto-start) + table create/seed + app & worker in watch mode; 9-table contract in `app/src/lib/tables.ts` |
 | M0.4 | ✅ | Terraform baseline applied to dev (54 resources): network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget; account-guarded `plan`/`apply`/`drift`; drift clean. Prod stack applies in M0.6 |
 | M0.5 | ✅ | Deploy path live: `deploy:dev` builds the ARM64 image → pushes ECR → rolls EC2 via SSM Run Command (.env hydrated from Parameter Store, health-check gate, prune on success), container logs ship to CloudWatch via the awslogs driver, rollback proven via `-- --tag` |
-| M0.6 | ☐ | Prod stack apply, same-image-tag deploy, RUNBOOK.md (deploy/rollback/logs/drift/alarms/cost), Phase 0 exit checklist |
+| M0.6 | ✅ | Prod stack applied (54 resources, drift-clean) and live: dev's exact image promoted to prod via `deploy:prod -- --promote <tag>` (ECR manifest copy, identical digest — prod is never rebuilt), CloudFront `/health` 200. Operator manual in [RUNBOOK.md](./RUNBOOK.md); §11.2 exit checklist in [PHASE0_EXIT.md](./PHASE0_EXIT.md) |
+
+**Phase 0 is complete.** Day-2 operations live in [`RUNBOOK.md`](./RUNBOOK.md) (deploy/promote/rollback, Logs Insights queries, drift, the 8 alarms, honest idle-cost estimate, hardening backlog); the doc-§11.2 exit status is [`PHASE0_EXIT.md`](./PHASE0_EXIT.md) (18 ✅ / 3 ⚠️ / 0 ❌).
 
 ## Deviations from the Architecture Doc (v2.12)
 
@@ -72,7 +74,7 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run apply` | Applies ONLY an existing `tfplan` saved by a prior `npm run plan` for that stack (refuses otherwise), then deletes the plan file so a stale plan can never be re-applied | M0.4 |
 | `npm run drift` | `terraform plan -detailed-exitcode` drift check: exit 0 = clean, exit 2 = "DRIFT DETECTED" with the diff printed | M0.4 |
 | `npm run deploy:dev` | Build+push the ARM64 image to ECR, then roll the dev box via SSM Run Command with a health-check gate and CloudFront verification. `-- --tag <t>` re-deploys an EXISTING ECR tag (the rollback path — no build); `-- --list` prints the last 10 ECR tags + the current `DEPLOYED_TAG` | M0.5 |
-| `npm run deploy:prod` | Same flow against the prod stack — cleanly refuses until the prod stack is applied (M0.6) | M0.5 |
+| `npm run deploy:prod` | Same flow against the prod stack. **The prod path is `-- --promote <dev-tag>`** (M0.6): verifies the tag exists in `hc-dev-app`, copies it into `hc-prod-app` at the registry level (manifest + blobs, digest-verified — no docker pull/push, never a rebuild), then runs the normal existing-tag deploy. `--tag`/`--list` work as in dev | M0.5 |
 
 ## Infrastructure
 
@@ -95,7 +97,7 @@ Modules (all resources name-prefixed `hc-<env>-`, region us-east-1):
 
 **Origin-secret flow:** Terraform generates a random 32-char secret and stores it as SecureString `/hc/<env>/app/CF_ORIGIN_SECRET`; CloudFront stamps it on every origin request as the `x-origin-verify` header; app middleware rejects requests without it (`GET /health` exempt). Combined with the SG's CloudFront-only ingress, the instance never serves anyone but CloudFront.
 
-Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent`, which only starts reporting once the agent is installed in M0.6 (alarm treats missing data as OK until then). SNS/SES email subscriptions require one-time confirmation clicks after the first apply.
+Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent` — the agent is **not yet installed** (tracked in the [RUNBOOK hardening backlog](./RUNBOOK.md#security--hardening-backlog)), so that alarm treats missing data as OK and cannot fire yet. SNS/SES email subscriptions require one-time confirmation clicks after the first apply.
 
 ## Deploy & rollback
 
@@ -112,6 +114,8 @@ Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent`, whi
 npm run deploy:dev -- --list                 # see recent tags + what's deployed
 npm run deploy:dev -- --tag <previous-tag>   # roll back (verified against ECR first)
 ```
+
+**Prod promotes, never rebuilds** (M0.6, per the architecture doc): `npm run deploy:prod -- --promote <dev-tag>` copies the dev-verified image into `hc-prod-app` under the same tag at the ECR registry level (manifest + blobs; the prod digest is hard-verified to equal dev's before the roll), then runs the identical SSM/health-gate/CloudFront flow. Full operating procedures — including rollback one-liners, Logs Insights queries, drift response, and what each alarm means — are in [`RUNBOOK.md`](./RUNBOOK.md).
 
 Additive notes (not deviations — the doc's deploy flow is unchanged): container logs ship straight to CloudWatch via the docker `awslogs` log driver (daemon-side, using the instance role's `logs:CreateLogStream/PutLogEvents` on `/hc/<env>/app` + `/hc/<env>/worker`; stream names `app/<container-id>` / `worker/<container-id>`), replacing the interim json-file config; and `DEPLOYED_TAG` exists so "what is running right now" is answerable without touching the box.
 

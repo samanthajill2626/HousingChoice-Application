@@ -1,8 +1,11 @@
-// Deploy driver (M0.5). Powers:
-//   npm run deploy:dev                  build ARM64 image -> push ECR -> roll EC2
-//   npm run deploy:dev -- --tag <t>     re-deploy an EXISTING ECR tag (rollback path)
-//   npm run deploy:dev -- --list        list recent ECR tags + current DEPLOYED_TAG
-//   npm run deploy:prod ...             same, prod (refuses until the stack exists, M0.6)
+// Deploy driver (M0.5/M0.6). Powers:
+//   npm run deploy:dev                    build ARM64 image -> push ECR -> roll EC2
+//   npm run deploy:dev -- --tag <t>       re-deploy an EXISTING ECR tag (rollback path)
+//   npm run deploy:dev -- --list          list recent ECR tags + current DEPLOYED_TAG
+//   npm run deploy:prod -- --promote <t>  PROD ONLY: copy tag <t> from hc-dev-app to
+//                                         hc-prod-app (ECR manifest copy — no docker
+//                                         pull/push, same bytes), then deploy it
+//   npm run deploy:prod -- --tag/--list   same as dev, against the prod stack
 //
 // Flow (no --tag):
 //   1. account guard (assertHousingChoiceAccount) + terraform outputs for the env
@@ -32,8 +35,11 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const USAGE = `usage: node scripts/deploy.mjs <dev|prod> [--tag <existing-ecr-tag>] [--list]
-  (via npm: npm run deploy:dev, npm run deploy:dev -- --tag dev-abc1234-20260611120000, npm run deploy:dev -- --list)`;
+const USAGE = `usage: node scripts/deploy.mjs <dev|prod> [--tag <existing-ecr-tag>] [--promote <dev-ecr-tag>] [--list]
+  (via npm: npm run deploy:dev, npm run deploy:dev -- --tag dev-abc1234-20260611120000,
+   npm run deploy:prod -- --promote dev-abc1234-20260611120000, npm run deploy:prod -- --list)
+  --promote is prod-only: it copies the tag's manifest from hc-dev-app into hc-prod-app
+  (same digest, no rebuild) and then deploys it — the M0.6 promote-don't-rebuild path.`;
 
 function fail(message) {
   console.error(message);
@@ -46,6 +52,7 @@ const env = args.shift();
 if (!STACK_ENVS.includes(env ?? '')) fail(USAGE);
 
 let requestedTag;
+let promoteTag;
 let listOnly = false;
 while (args.length > 0) {
   const arg = args.shift();
@@ -53,7 +60,19 @@ while (args.length > 0) {
   else if (arg === '--tag') {
     requestedTag = args.shift();
     if (!requestedTag) fail(`--tag requires a value.\n${USAGE}`);
+  } else if (arg === '--promote') {
+    promoteTag = args.shift();
+    if (!promoteTag) fail(`--promote requires a value.\n${USAGE}`);
   } else fail(`Unknown argument "${arg}".\n${USAGE}`);
+}
+
+if (promoteTag && requestedTag) fail(`--promote and --tag are mutually exclusive.\n${USAGE}`);
+if (promoteTag && listOnly) fail(`--promote and --list are mutually exclusive.\n${USAGE}`);
+if (promoteTag && env !== 'prod') {
+  fail(
+    `[deploy] --promote is prod-only: it copies an image from hc-dev-app into hc-prod-app.\n` +
+      `For dev, re-deploy an existing tag with: npm run deploy:dev -- --tag <tag>`,
+  );
 }
 
 // --- child-process helpers ----------------------------------------------------
@@ -160,6 +179,217 @@ if (listOnly) {
   }
   console.log(`\nRollback: npm run deploy:${env} -- --tag <tag>`);
   process.exit(0);
+}
+
+// --- 2a. --promote: ECR manifest copy hc-dev-app -> hc-prod-app (same tag) ------
+// No docker pull/push: batch-get-image hands us the manifest dev runs, put-image
+// registers the IDENTICAL manifest (same digest) in the prod repo. ECR's PutImage
+// refuses unless every referenced blob already exists in the TARGET repo
+// (LayersNotFoundException), so each blob is first cross-repo MOUNTED via the
+// registry API (POST /v2/<dest>/blobs/uploads/?mount=<digest>&from=<source>) —
+// a server-side, zero-byte-transfer operation ECR supports natively. With
+// --provenance=false builds this is a single manifest; manifest lists / OCI
+// indexes are handled anyway by copying each referenced child manifest first.
+const ECR_MANIFEST_MEDIA_TYPES = [
+  'application/vnd.docker.distribution.manifest.v2+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.oci.image.index.v1+json',
+];
+
+/** batch-get-image for one imageId (e.g. "imageTag=x" / "imageDigest=sha256:..."). */
+function ecrGetManifest(repository, imageId, what) {
+  const json = aws(
+    ['ecr', 'batch-get-image', '--repository-name', repository,
+      '--image-ids', imageId,
+      '--accepted-media-types', ...ECR_MANIFEST_MEDIA_TYPES],
+    what,
+  );
+  const parsed = JSON.parse(json);
+  const image = parsed.images?.[0];
+  if (!image?.imageManifest) {
+    fail(`${what}: no manifest returned for ${imageId} in ${repository}:\n` +
+      JSON.stringify(parsed.failures ?? parsed, null, 2));
+  }
+  return image; // { imageManifest, imageManifestMediaType, imageId: { imageDigest, imageTag? } }
+}
+
+/**
+ * Ensure every blob a (non-index) manifest references exists in destRepo.
+ * Tries the registry-API cross-repo mount first (zero-byte, 201 on success);
+ * ECR currently declines mounts (202 = plain upload session), so the fallback
+ * streams the blob registry->registry through this machine with the sha256
+ * verified before commit. Either way the digests are bit-identical — this is
+ * a copy of what dev runs, never a rebuild. Idempotent (HEAD skips existing).
+ */
+async function ecrEnsureBlobs(sourceRepo, destRepo, manifestJson, registryHost, authHeader) {
+  const { createHash } = await import('node:crypto');
+  const blobs = [
+    ...(manifestJson.config ? [manifestJson.config] : []),
+    ...(manifestJson.layers ?? []),
+  ];
+  for (const { digest, size } of blobs) {
+    const head = await fetch(`https://${registryHost}/v2/${destRepo}/blobs/${digest}`, {
+      method: 'HEAD',
+      headers: { Authorization: authHeader },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (head.status === 200) continue; // already there
+
+    // Open an upload session, asking for a cross-repo mount.
+    const open = await fetch(
+      `https://${registryHost}/v2/${destRepo}/blobs/uploads/` +
+        `?mount=${encodeURIComponent(digest)}&from=${encodeURIComponent(sourceRepo)}`,
+      { method: 'POST', headers: { Authorization: authHeader }, signal: AbortSignal.timeout(60_000) },
+    );
+    if (open.status === 201) {
+      console.error(`[promote]   mounted blob ${digest} (server-side)`);
+      continue;
+    }
+    if (open.status !== 202) {
+      fail(`[promote] could not open upload session for ${digest} -> ${destRepo}: ` +
+        `HTTP ${open.status}\n${await open.text()}`);
+    }
+    const uploadUrl = new URL(open.headers.get('location'), `https://${registryHost}`);
+
+    // Mount declined (ECR does not support cross-repo mounts) — copy the blob.
+    console.error(`[promote]   copying blob ${digest} (${((size ?? 0) / 1024 / 1024).toFixed(1)} MB)...`);
+    const get = await fetch(`https://${registryHost}/v2/${sourceRepo}/blobs/${digest}`, {
+      headers: { Authorization: authHeader },
+      signal: AbortSignal.timeout(300_000),
+    });
+    if (get.status !== 200) {
+      fail(`[promote] blob download ${sourceRepo}@${digest} failed: HTTP ${get.status}`);
+    }
+    const body = Buffer.from(await get.arrayBuffer());
+    const actual = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+    if (actual !== digest) {
+      fail(`[promote] blob ${digest} digest mismatch after download (got ${actual}) — aborting.`);
+    }
+
+    const patch = await fetch(uploadUrl, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authHeader,
+        'Content-Type': 'application/octet-stream',
+        'Content-Range': `0-${body.length - 1}`,
+      },
+      body,
+      signal: AbortSignal.timeout(300_000),
+    });
+    // Spec says PATCH -> 202 then PUT?digest= -> 201, but ECR returns 201
+    // straight from the PATCH for uploads it commits in one chunk. Accept
+    // both, then confirm the blob is registered (HEAD) and PUT only if not.
+    if (patch.status !== 202 && patch.status !== 201) {
+      fail(`[promote] blob upload (PATCH) for ${digest} failed: HTTP ${patch.status}\n${await patch.text()}`);
+    }
+    const registered = await fetch(`https://${registryHost}/v2/${destRepo}/blobs/${digest}`, {
+      method: 'HEAD',
+      headers: { Authorization: authHeader },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (registered.status !== 200) {
+      const commitUrl = new URL(patch.headers.get('location') ?? uploadUrl, `https://${registryHost}`);
+      commitUrl.searchParams.set('digest', digest);
+      const put = await fetch(commitUrl, {
+        method: 'PUT',
+        headers: { Authorization: authHeader },
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (put.status !== 201) {
+        fail(`[promote] blob commit (PUT) for ${digest} failed: HTTP ${put.status}\n${await put.text()}`);
+      }
+    }
+    console.error(`[promote]   copied blob ${digest}`);
+  }
+}
+
+/** put-image, tolerating ImageAlreadyExistsException (identical manifest = done). */
+function ecrPutManifest(repository, image, imageTag) {
+  const putArgs = ['ecr', 'put-image', '--repository-name', repository,
+    '--image-manifest', image.imageManifest,
+    '--region', HC_REGION, '--output', 'json'];
+  if (image.imageManifestMediaType) {
+    putArgs.push('--image-manifest-media-type', image.imageManifestMediaType);
+  }
+  if (imageTag) putArgs.push('--image-tag', imageTag);
+  const put = capture('aws', putArgs);
+  if (put.status !== 0) {
+    if ((put.stderr ?? '').includes('ImageAlreadyExistsException')) {
+      console.error(`[promote]   ${repository}: manifest already present — OK (idempotent)`);
+      return;
+    }
+    fail(`[promote] ecr put-image to ${repository} failed:\n${put.stderr ?? ''}${put.stdout ?? ''}`);
+  }
+}
+
+if (promoteTag) {
+  const sourceRepo = 'hc-dev-app';
+  console.error(`[promote] copying ${sourceRepo}:${promoteTag} -> ${repoName}:${promoteTag} (manifest copy, no rebuild)`);
+
+  // The tag must exist in the DEV repo — that is the thing being promoted.
+  const src = capture('aws', ['ecr', 'describe-images', '--repository-name', sourceRepo,
+    '--image-ids', `imageTag=${promoteTag}`, '--region', HC_REGION, '--output', 'json']);
+  if (src.status !== 0) {
+    fail(
+      `[promote] tag "${promoteTag}" not found in ${sourceRepo} — refusing.\n` +
+        `List candidates with: npm run deploy:dev -- --list`,
+    );
+  }
+  const srcDigest = JSON.parse(src.stdout).imageDetails[0].imageDigest;
+
+  const dst = capture('aws', ['ecr', 'describe-images', '--repository-name', repoName,
+    '--image-ids', `imageTag=${promoteTag}`, '--region', HC_REGION, '--output', 'json']);
+  if (dst.status === 0) {
+    const dstDigest = JSON.parse(dst.stdout).imageDetails[0].imageDigest;
+    if (dstDigest !== srcDigest) {
+      fail(
+        `[promote] tag "${promoteTag}" already exists in ${repoName} with a DIFFERENT digest\n` +
+          `  ${sourceRepo}: ${srcDigest}\n  ${repoName}: ${dstDigest}\n` +
+          `Refusing to overwrite — investigate before promoting.`,
+      );
+    }
+    console.error(`[promote] already promoted (digest ${srcDigest}) — skipping copy`);
+  } else {
+    const topImage = ecrGetManifest(sourceRepo, `imageTag=${promoteTag}`, 'ecr batch-get-image (dev)');
+    const mediaType = topImage.imageManifestMediaType ?? '';
+
+    // Registry-API auth for the blob mounts (same token docker login would use).
+    const ecrPassword = captureOrDie(
+      'aws', ['ecr', 'get-login-password', '--region', HC_REGION], 'ecr get-login-password');
+    const authHeader = `Basic ${Buffer.from(`AWS:${ecrPassword}`).toString('base64')}`;
+
+    // Manifest list / OCI index: register every referenced child manifest in the
+    // prod repo FIRST (by digest, untagged), or putting the index would fail.
+    if (mediaType.includes('manifest.list') || mediaType.includes('image.index')) {
+      const children = (JSON.parse(topImage.imageManifest).manifests ?? []);
+      console.error(`[promote] manifest list/index with ${children.length} child manifest(s)`);
+      for (const child of children) {
+        console.error(`[promote]   copying child ${child.digest} (${child.mediaType ?? 'unknown'})`);
+        const childImage = ecrGetManifest(sourceRepo, `imageDigest=${child.digest}`,
+          `ecr batch-get-image (dev child ${child.digest})`);
+        await ecrEnsureBlobs(sourceRepo, repoName, JSON.parse(childImage.imageManifest),
+          registry, authHeader);
+        ecrPutManifest(repoName, childImage);
+      }
+    } else {
+      await ecrEnsureBlobs(sourceRepo, repoName, JSON.parse(topImage.imageManifest),
+        registry, authHeader);
+    }
+    ecrPutManifest(repoName, topImage, promoteTag);
+
+    // Hard verification: the promoted tag in prod must resolve to the SAME digest.
+    const verify = aws(['ecr', 'describe-images', '--repository-name', repoName,
+      '--image-ids', `imageTag=${promoteTag}`], 'ecr describe-images (prod, post-promote)');
+    const promotedDigest = JSON.parse(verify).imageDetails[0].imageDigest;
+    if (promotedDigest !== srcDigest) {
+      fail(`[promote] digest mismatch after copy:\n  dev:  ${srcDigest}\n  prod: ${promotedDigest}`);
+    }
+    console.error(`[promote] done — ${repoName}:${promoteTag} digest ${promotedDigest} (matches dev)`);
+  }
+
+  // From here on this is exactly an existing-tag deploy against prod.
+  requestedTag = promoteTag;
 }
 
 // --- 2/3. resolve tag: build+push, or verify an existing one (rollback) --------
@@ -388,7 +618,7 @@ const totalS = Math.round((Date.now() - startedAt) / 1000);
 console.log(`
 ========================= deploy summary =========================
   env:           ${env}
-  deployed tag:  ${tag}${requestedTag ? '  (existing image — rollback/redeploy)' : ''}
+  deployed tag:  ${tag}${promoteTag ? '  (promoted from hc-dev-app — same digest)' : requestedTag ? '  (existing image — rollback/redeploy)' : ''}
   previous tag:  ${previousTag || '(none — first deploy)'}
   cloudfront:    ${cfStatus}
   DEPLOYED_TAG:  ${deployedTagParam} = ${tag}

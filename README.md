@@ -15,7 +15,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 | M0.2 | ✅ | Express 5 server + locked middleware chain, pino logging core (correlation context + orphan-log detection), OTel seam, jobs.enqueue()/defineJobHandler() gates with scheduler adapters |
 | M0.3 | ✅ | Full local dev loop: `npm run dev` = DynamoDB Local (auto-start) + table create/seed + app & worker in watch mode; 9-table contract in `app/src/lib/tables.ts` |
 | M0.4 | ✅ | Terraform baseline applied to dev (54 resources): network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget; account-guarded `plan`/`apply`/`drift`; drift clean. Prod stack applies in M0.6 |
-| M0.5 | ☐ | Deploy path: buildx ARM64 image → ECR → EC2, .env hydration from Parameter Store, `deploy:dev`/`deploy:prod` |
+| M0.5 | ✅ | Deploy path live: `deploy:dev` builds the ARM64 image → pushes ECR → rolls EC2 via SSM Run Command (.env hydrated from Parameter Store, health-check gate, prune on success), container logs ship to CloudWatch via the awslogs driver, rollback proven via `-- --tag` |
 | M0.6 | ☐ | Prod stack apply, same-image-tag deploy, RUNBOOK.md (deploy/rollback/logs/drift/alarms/cost), Phase 0 exit checklist |
 
 ## Deviations from the Architecture Doc (v2.12)
@@ -71,8 +71,8 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run plan` | Terraform plan for a stack (`-- dev` default, `-- prod`): account-guard first, idempotent `terraform init`, then `terraform plan -out=tfplan` — the saved plan is what apply executes | M0.4 |
 | `npm run apply` | Applies ONLY an existing `tfplan` saved by a prior `npm run plan` for that stack (refuses otherwise), then deletes the plan file so a stale plan can never be re-applied | M0.4 |
 | `npm run drift` | `terraform plan -detailed-exitcode` drift check: exit 0 = clean, exit 2 = "DRIFT DETECTED" with the diff printed | M0.4 |
-| `npm run deploy:dev` | Build/push ARM64 image, hydrate .env from Parameter Store, roll EC2 dev | M0.5 (stub until then) |
-| `npm run deploy:prod` | Same, prod stack | M0.5 (stub until then) |
+| `npm run deploy:dev` | Build+push the ARM64 image to ECR, then roll the dev box via SSM Run Command with a health-check gate and CloudFront verification. `-- --tag <t>` re-deploys an EXISTING ECR tag (the rollback path — no build); `-- --list` prints the last 10 ECR tags + the current `DEPLOYED_TAG` | M0.5 |
+| `npm run deploy:prod` | Same flow against the prod stack — cleanly refuses until the prod stack is applied (M0.6) | M0.5 |
 
 ## Infrastructure
 
@@ -95,7 +95,25 @@ Modules (all resources name-prefixed `hc-<env>-`, region us-east-1):
 
 **Origin-secret flow:** Terraform generates a random 32-char secret and stores it as SecureString `/hc/<env>/app/CF_ORIGIN_SECRET`; CloudFront stamps it on every origin request as the `x-origin-verify` header; app middleware rejects requests without it (`GET /health` exempt). Combined with the SG's CloudFront-only ingress, the instance never serves anyone but CloudFront.
 
-Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent`, which only starts reporting once the agent is installed in M0.5/M0.6 (alarm treats missing data as OK until then). SNS/SES email subscriptions require one-time confirmation clicks after the first apply.
+Notes: the disk-used alarm reads the CloudWatch agent's `disk_used_percent`, which only starts reporting once the agent is installed in M0.6 (alarm treats missing data as OK until then). SNS/SES email subscriptions require one-time confirmation clicks after the first apply.
+
+## Deploy & rollback
+
+`npm run deploy:dev` (account-guarded like every mutating script) does, in order:
+
+1. **Build & push** — tags the image `dev-<git short sha>-<UTC timestamp>` and runs `docker buildx build --platform linux/arm64 --provenance=false --push` to ECR (a dirty working tree only warns — solo dev). `--provenance=false` keeps images single-manifest so ECR lifecycle counting and `--list` stay sane.
+2. **Roll the instance** — one SSM Run Command (base64-encoded payload; no SSH anywhere): ECR login with the instance role, hydrate `/opt/hc/.env` (chmod 600) from everything under `/hc/<env>/app/` plus computed `HC_IMAGE` / `HC_LOG_GROUP_*` / `AWS_REGION`, write `/opt/hc/docker-compose.yml` from the repo copy (the repo file is the single source of truth), `docker compose pull && up -d --remove-orphans`.
+3. **Health-check gate** — `curl localhost:8080/health` (up to 12×5s), then both containers must be `running` and the worker must show its boot log line. **Only after** the gate passes does the script `docker image prune -af` (the 10GB root volume depends on this). On failure the command exits non-zero with the last 50 log lines dumped and the operator is pointed at the rollback one-liner — the previous image is NOT pruned.
+4. **Operator-side verification** — `https://<cloudfront domain>/health` must return 200, then the released tag is written to SSM `/hc/<env>/app/DEPLOYED_TAG` (the rollback pointer; unmanaged by Terraform on purpose).
+
+**Rollback** is the same deploy with an existing image (no build):
+
+```powershell
+npm run deploy:dev -- --list                 # see recent tags + what's deployed
+npm run deploy:dev -- --tag <previous-tag>   # roll back (verified against ECR first)
+```
+
+Additive notes (not deviations — the doc's deploy flow is unchanged): container logs ship straight to CloudWatch via the docker `awslogs` log driver (daemon-side, using the instance role's `logs:CreateLogStream/PutLogEvents` on `/hc/<env>/app` + `/hc/<env>/worker`; stream names `app/<container-id>` / `worker/<container-id>`), replacing the interim json-file config; and `DEPLOYED_TAG` exists so "what is running right now" is answerable without touching the box.
 
 ## Local development
 

@@ -1,6 +1,15 @@
 # PRODUCTION composition — this file runs on the EC2 instance (t4g.small, ARM64).
-# It is NOT a local-dev compose file. The deploy script (M0.5) sets HC_IMAGE to
-# the ECR image tag being released and hydrates .env from Parameter Store.
+# It is NOT a local-dev compose file (local dev is `npm run dev` = tsx watch;
+# compose is never used locally). The deploy script (scripts/deploy.mjs) sets
+# HC_IMAGE / HC_LOG_GROUP_* in .env, hydrates the rest from Parameter Store,
+# and ships THIS file to /opt/hc/docker-compose.yml — the repo copy is the
+# single source of truth.
+#
+# Logging: containers write straight to CloudWatch Logs via the awslogs driver.
+# The docker DAEMON does the shipping with the INSTANCE role's credentials
+# (logs:CreateLogStream/PutLogEvents on /hc/<env>/*). Groups are Terraform-
+# managed, hence awslogs-create-group=false. Docker's dual-logging cache keeps
+# `docker compose logs` working on-box for the deploy health-check.
 services:
   app:
     image: ${HC_IMAGE:?HC_IMAGE must be set by the deploy script}
@@ -8,31 +17,36 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
-    # .env is hydrated from Parameter Store by the deploy path in M0.5.
+    # .env is hydrated from Parameter Store by the deploy script.
     env_file: .env
     environment:
       NODE_ENV: production
       HC_PROCESS: app
-    # CloudWatch agent ships these json-file logs in M0.4.
     logging:
-      driver: json-file
+      driver: awslogs
       options:
-        max-size: 10m
-        max-file: "5"
+        awslogs-region: us-east-1
+        awslogs-group: ${HC_LOG_GROUP_APP:?set by the deploy script}
+        awslogs-create-group: "false"
+        # Stream name template (the docker driver has no awslogs-stream-prefix;
+        # `tag` is how stream names are shaped): app/<container-id>.
+        tag: "app/{{.ID}}"
 
   worker:
     image: ${HC_IMAGE:?HC_IMAGE must be set by the deploy script}
     command: ["node", "dist/worker.js"]
     # No ports — the worker serves no HTTP traffic.
     restart: unless-stopped
-    # .env is hydrated from Parameter Store by the deploy path in M0.5.
+    # .env is hydrated from Parameter Store by the deploy script.
     env_file: .env
     environment:
       NODE_ENV: production
       HC_PROCESS: worker
-    # CloudWatch agent ships these json-file logs in M0.4.
     logging:
-      driver: json-file
+      driver: awslogs
       options:
-        max-size: 10m
-        max-file: "5"
+        awslogs-region: us-east-1
+        awslogs-group: ${HC_LOG_GROUP_WORKER:?set by the deploy script}
+        awslogs-create-group: "false"
+        # Stream name template: worker/<container-id>.
+        tag: "worker/{{.ID}}"

@@ -1,0 +1,18 @@
+# Keep the build context lean: the Dockerfile copies manifests + app sources
+# explicitly, so everything heavy or irrelevant stays out of the context.
+.git
+node_modules
+**/node_modules
+app/dist
+app/test
+documentation
+infra
+scripts
+dashboard/*
+!dashboard/package.json
+*.md
+.env
+.env.*
+.claude
+.dockerignore
+docker-compose.yml

@@ -56,6 +56,29 @@ npm run deploy:prod -- --list     # same for prod
 
 The currently-released tag is marked `<== DEPLOYED`.
 
+### Secrets
+
+Operator-managed secrets (Twilio etc.) live in the gitignored `.env.dev` / `.env.prod` at the repo
+root — template: the "Deployed secrets" section of `.env.example` — and reach AWS by script only.
+Nobody hand-runs `aws ssm put-parameter`:
+
+```powershell
+npm run secrets:push -- dev       # .env.dev -> SecureString /hc/dev/app/<KEY> (account-guarded)
+npm run secrets:check -- prod     # read-only diff: exit 0 in sync, 2 drift, 1 error
+```
+
+The flow: edit `.env.<env>` → `secrets:push` writes each key as SecureString under
+`/hc/<env>/app/` (prints a created/updated/unchanged summary; values only ever appear masked, like
+`AC…1234`) → the **next deploy** hydrates them into `/opt/hc/.env` on the instance. Pushing alone
+restarts nothing — follow with a deploy (re-deploying the current `DEPLOYED_TAG` works) to make new
+values live. `secrets:check` is the drift report: per-key missing/differs/matches against Parameter
+Store, plus any unexpected extra params under the path (report-only).
+
+Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `LOG_LEVEL`, `NODE_ENV`, `PORT`, `TABLE_PREFIX`,
+`DEPLOYED_TAG`) are **refused** in the .env files — those belong to `plan`/`apply` and the deploy
+script, and this tool can never overwrite them. `.env.dev` / `.env.prod` are gitignored; never
+commit them.
+
 ### What the health-check gate does
 
 Every deploy (build, `--tag`, `--promote`) runs this gate **on the instance** before declaring success:

@@ -81,6 +81,31 @@ only then writes the released tag to SSM `/hc/<env>/app/DEPLOYED_TAG`.
   as their correlationId, so container starts do NOT trip the orphan-log alarm (fixed
   2026-06-12; images tagged before that date still have the transient ALARM→OK wart).
 
+### Troubleshooting: disk full after repeated failed deploys
+
+Images are this box's only meaningful disk-growth vector (builds happen on the operator machine;
+container logs ship to CloudWatch via the awslogs driver, not to local files). The deploy script
+runs `docker image prune -af` **only after a successful health-gated deploy** — failures
+deliberately don't prune, so a long streak of consecutive failed deploys can fill the 10 GB root
+until the next image pull itself fails (`no space left on device` in the SSM/deploy output).
+
+Recovery (~2 minutes, no data at risk — rollback images live in ECR, not on disk):
+
+```powershell
+aws ssm start-session --target <instance-id> --profile housingchoice --region us-east-1
+```
+
+then on the box:
+
+```bash
+sudo docker image prune -af     # frees everything not used by a running container
+df -h /                          # confirm
+```
+
+Exit and re-run the deploy. A successful deploy's own prune also sweeps ALL accumulated junk
+(every image not in use by the now-running containers), so the disk resets to ~one image on
+every green deploy — this section is only needed when the failure streak wins the race.
+
 ## Rollback
 
 One-liner per env (re-deploys an EXISTING ECR tag — no build, ~20–25 s end to end):

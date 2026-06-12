@@ -45,6 +45,16 @@ variable "ecr_repository_arn" {
   type        = string
 }
 
+variable "jobs_queue_arn" {
+  description = "SQS jobs queue ARN (from the jobs module) — worker consume + app send (M1.2)."
+  type        = string
+}
+
+variable "scheduler_role_arn" {
+  description = "Scheduler role ARN (from the jobs module) — the only role the instance may pass to EventBridge Scheduler (M1.2)."
+  type        = string
+}
+
 variable "compose_version" {
   description = "docker compose v2 release tag installed by user-data (pinned for reproducible boots)."
   type        = string

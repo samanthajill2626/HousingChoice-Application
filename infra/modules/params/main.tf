@@ -74,3 +74,24 @@ resource "aws_ssm_parameter" "media_bucket" {
   type        = "String"
   value       = var.media_bucket
 }
+
+resource "aws_ssm_parameter" "jobs_queue_url" {
+  name        = "/hc/${var.env}/app/JOBS_QUEUE_URL"
+  description = "SQS jobs queue URL (jobs module) the worker long-polls for job envelopes (M1.2)."
+  type        = "String"
+  value       = var.jobs_queue_url
+}
+
+resource "aws_ssm_parameter" "scheduler_target_arn" {
+  name        = "/hc/${var.env}/app/SCHEDULER_TARGET_ARN"
+  description = "EventBridge Scheduler target ARN for jobs.enqueue() one-off schedules — the jobs queue ARN (M1.2)."
+  type        = "String"
+  value       = var.scheduler_target_arn
+}
+
+resource "aws_ssm_parameter" "scheduler_role_arn" {
+  name        = "/hc/${var.env}/app/SCHEDULER_ROLE_ARN"
+  description = "IAM role EventBridge Scheduler assumes to SendMessage to the jobs queue (M1.2)."
+  type        = "String"
+  value       = var.scheduler_role_arn
+}

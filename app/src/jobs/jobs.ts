@@ -100,22 +100,41 @@ export function registeredJobNames(): string[] {
   return [...registry.keys()];
 }
 
+/**
+ * Thrown by dispatchJob() when the raw event is not a valid JobEnvelope.
+ * Marker for POISON messages: redelivery can never fix a malformed envelope,
+ * so transport consumers (the worker's SqsJobConsumer) delete instead of
+ * cycling the message to the DLQ. Handler failures stay plain errors and DO
+ * retry.
+ */
+export class MalformedJobEnvelopeError extends Error {}
+
 function validateEnvelope(rawEvent: unknown): JobEnvelope {
   if (typeof rawEvent !== 'object' || rawEvent === null) {
-    throw new Error('dispatchJob: event is not an object');
+    throw new MalformedJobEnvelopeError('dispatchJob: event is not an object');
   }
   const e = rawEvent as Partial<JobEnvelope>;
-  if (e.v !== JOB_ENVELOPE_VERSION) throw new Error(`dispatchJob: unsupported envelope version ${String(e.v)}`);
-  if (typeof e.jobId !== 'string' || e.jobId.length === 0) throw new Error('dispatchJob: missing jobId');
-  if (typeof e.jobName !== 'string' || e.jobName.length === 0) throw new Error('dispatchJob: missing jobName');
+  if (e.v !== JOB_ENVELOPE_VERSION) {
+    throw new MalformedJobEnvelopeError(`dispatchJob: unsupported envelope version ${String(e.v)}`);
+  }
+  if (typeof e.jobId !== 'string' || e.jobId.length === 0) {
+    throw new MalformedJobEnvelopeError('dispatchJob: missing jobId');
+  }
+  if (typeof e.jobName !== 'string' || e.jobName.length === 0) {
+    throw new MalformedJobEnvelopeError('dispatchJob: missing jobName');
+  }
   if (typeof e.correlationContext !== 'object' || e.correlationContext === null) {
-    throw new Error('dispatchJob: missing correlationContext');
+    throw new MalformedJobEnvelopeError('dispatchJob: missing correlationContext');
   }
-  if (typeof e.traceparent !== 'string') throw new Error('dispatchJob: missing traceparent');
+  if (typeof e.traceparent !== 'string') {
+    throw new MalformedJobEnvelopeError('dispatchJob: missing traceparent');
+  }
   if (typeof e.hopCount !== 'number' || !Number.isInteger(e.hopCount) || e.hopCount < 1) {
-    throw new Error('dispatchJob: invalid hopCount');
+    throw new MalformedJobEnvelopeError('dispatchJob: invalid hopCount');
   }
-  if (typeof e.enqueuedAt !== 'string') throw new Error('dispatchJob: missing enqueuedAt');
+  if (typeof e.enqueuedAt !== 'string') {
+    throw new MalformedJobEnvelopeError('dispatchJob: missing enqueuedAt');
+  }
   return e as JobEnvelope;
 }
 

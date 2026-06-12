@@ -22,9 +22,12 @@ installProcessErrorHandlers(logger, bootContext);
 const config = loadConfig();
 
 // jobs.enqueue() needs a SchedulerAdapter (M1.1: the status webhook enqueues
-// 30003 retry sends). EventBridge when Terraform has wired the target/role
-// ARNs; until then (and locally) the in-memory adapter accepts envelopes so
-// enqueue never throws — undelivered, since no event source exists yet.
+// 30003 retry sends). In AWS, Terraform's jobs module (M1.2) wires
+// SCHEDULER_TARGET_ARN (the SQS jobs queue ARN) + SCHEDULER_ROLE_ARN, and
+// one-off EventBridge schedules deliver each envelope as an SQS message the
+// worker long-polls and dispatches. Locally both are unset: the in-memory
+// adapter accepts envelopes so enqueue never throws, but nothing delivers
+// them (deliverAll is test-only) — hence the WARN.
 if (config.schedulerTargetArn && config.schedulerRoleArn) {
   const { SchedulerClient } = await import('@aws-sdk/client-scheduler');
   const { EventBridgeSchedulerAdapter } = await import('./adapters/scheduler.js');
@@ -35,12 +38,18 @@ if (config.schedulerTargetArn && config.schedulerRoleArn) {
       roleArn: config.schedulerRoleArn,
     }),
   );
+  runWithContext(bootContext, () => {
+    logger.info(
+      { schedulerTargetArn: config.schedulerTargetArn },
+      'EventBridge scheduler adapter configured — enqueued jobs deliver via SQS to the worker',
+    );
+  });
 } else {
   const { InMemorySchedulerAdapter } = await import('./adapters/scheduler.js');
   configureScheduler(new InMemorySchedulerAdapter());
   runWithContext(bootContext, () => {
     logger.warn(
-      'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered to the worker (EventBridge wiring is a later milestone)',
+      'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered (expected locally; in AWS it means the Terraform-managed params did not hydrate)',
     );
   });
 }

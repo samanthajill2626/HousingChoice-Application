@@ -34,3 +34,8 @@ variable "instance_id" {
   description = "App EC2 instance id (StatusCheckFailed / CPU / disk widgets and alarms)."
   type        = string
 }
+
+variable "jobs_dlq_name" {
+  description = "Jobs dead-letter queue name (jobs module) — the DLQ-depth alarm dimension (M1.2)."
+  type        = string
+}

@@ -77,6 +77,43 @@ data "aws_iam_policy_document" "app" {
     resources = [var.media_bucket_arn]
   }
 
+  # Jobs queue (M1.2): the worker consumes (Receive/Delete/GetQueueAttributes);
+  # SendMessage so the app can also write direct-to-queue later. Queue ARN only.
+  statement {
+    sid = "JobsQueue"
+    actions = [
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+      "sqs:SendMessage",
+    ]
+    resources = [var.jobs_queue_arn]
+  }
+
+  # jobs.enqueue() creates one-off EventBridge schedules (ActionAfterCompletion
+  # DELETE — the service deletes fired schedules itself, the instance never
+  # needs scheduler:DeleteSchedule). Adapter names are `hc-<job>-<uuid>` in the
+  # default group; both stacks share the account, so the real isolation is
+  # PassRole below — this instance can only hand Scheduler ITS stack's role,
+  # which can only SendMessage to ITS stack's queue.
+  statement {
+    sid     = "SchedulerCreate"
+    actions = ["scheduler:CreateSchedule"]
+    resources = [
+      "arn:aws:scheduler:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:schedule/default/hc-*",
+    ]
+  }
+  statement {
+    sid       = "SchedulerPassRole"
+    actions   = ["iam:PassRole"]
+    resources = [var.scheduler_role_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
+  }
+
   # Config/secret hydration from Parameter Store (/hc/<env>/...). SecureString
   # decryption uses the AWS-managed aws/ssm key, which needs no extra grant.
   statement {

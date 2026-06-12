@@ -12,6 +12,7 @@ Quick reference (authoritative source: `terraform -chdir=infra/envs/<env> output
 | EC2 instance | `i-0ad45daa858632001` | `i-087fd4eda3e2804c1` |
 | ECR repo | `hc-dev-app` | `hc-prod-app` |
 | Log groups | `/hc/dev/app`, `/hc/dev/worker` | `/hc/prod/app`, `/hc/prod/worker` |
+| Jobs queue / DLQ | `hc-dev-jobs` / `hc-dev-jobs-dlq` | `hc-prod-jobs` / `hc-prod-jobs-dlq` |
 | Released-tag pointer | SSM `/hc/dev/app/DEPLOYED_TAG` | SSM `/hc/prod/app/DEPLOYED_TAG` |
 | Alerts topic | `hc-dev-alerts` | `hc-prod-alerts` |
 
@@ -74,8 +75,9 @@ restarts nothing — follow with a deploy (re-deploying the current `DEPLOYED_TA
 values live. `secrets:check` is the drift report: per-key missing/differs/matches against Parameter
 Store, plus any unexpected extra params under the path (report-only).
 
-Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `LOG_LEVEL`, `NODE_ENV`, `PORT`, `TABLE_PREFIX`,
-`DEPLOYED_TAG`) are **refused** in the .env files — those belong to `plan`/`apply` and the deploy
+Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `JOBS_QUEUE_URL`, `LOG_LEVEL`, `MEDIA_BUCKET`,
+`NODE_ENV`, `PORT`, `PUBLIC_BASE_URL`, `SCHEDULER_ROLE_ARN`, `SCHEDULER_TARGET_ARN`,
+`TABLE_PREFIX`, `DEPLOYED_TAG`) are **refused** in the .env files — those belong to `plan`/`apply` and the deploy
 script, and this tool can never overwrite them. `.env.dev` / `.env.prod` are gitignored; never
 commit them.
 
@@ -108,6 +110,42 @@ The env keys that feed the app live in the gitignored `.env.<env>` and reach Par
 defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
+
+### Jobs (async delivery path)
+
+Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule
+(`ActionAfterCompletion: DELETE`, named `hc-<jobName>-<jobId>`; fires no sooner than ~60 s out —
+Scheduler rejects past times, so "run now" is clamped to its floor) → SQS `hc-<env>-jobs` (the JSON
+job envelope IS the message body) → worker long-poll → `dispatchJob()` → handler. A failed handler
+does **not** delete the message: it redelivers after the 120 s visibility timeout and dead-letters
+into `hc-<env>-jobs-dlq` after 5 receives, which trips `hc-<env>-jobs-dlq-depth`.
+
+Inspect queue/DLQ depth (queue URLs: `terraform -chdir=infra/envs/<env> output`):
+
+```powershell
+aws sqs get-queue-attributes --queue-url (terraform -chdir=infra/envs/dev output -raw jobs_queue_url) --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible --profile housingchoice --region us-east-1 --no-cli-pager
+aws sqs get-queue-attributes --queue-url (terraform -chdir=infra/envs/dev output -raw jobs_dlq_url) --attribute-names ApproximateNumberOfMessages --profile housingchoice --region us-east-1 --no-cli-pager
+```
+
+Peek at dead-lettered envelopes (read-only — peeked messages reappear after the visibility timeout):
+
+```powershell
+aws sqs receive-message --queue-url (terraform -chdir=infra/envs/dev output -raw jobs_dlq_url) --max-number-of-messages 10 --profile housingchoice --region us-east-1 --no-cli-pager
+```
+
+**DLQ redrive** (after fixing the cause — messages move back to the jobs queue and the worker
+retries them; omitting `--destination-arn` means "back to the source queue"):
+
+```powershell
+aws sqs start-message-move-task --source-arn arn:aws:sqs:us-east-1:938565869261:hc-dev-jobs-dlq --profile housingchoice --region us-east-1
+aws sqs list-message-move-tasks --source-arn arn:aws:sqs:us-east-1:938565869261:hc-dev-jobs-dlq --profile housingchoice --region us-east-1 --no-cli-pager
+```
+
+**Local dev:** `JOBS_QUEUE_URL` / `SCHEDULER_*` are unset, so the app uses the in-memory scheduler
+(enqueues are accepted with a boot WARN but never delivered) and the local worker starts no poll
+loop — exercising handlers locally is what the test suite's `InMemorySchedulerAdapter.deliverAll`
+is for. To consume REAL dev-queue messages from a local worker, set `JOBS_QUEUE_URL` in `.env`
+(live mode) — note it then competes with the deployed dev worker for messages.
 
 ### What the health-check gate does
 
@@ -250,7 +288,7 @@ purpose** — it never shows up as drift.
 
 ## Alarms
 
-8 alarms (4 per env), all notifying SNS `hc-<env>-alerts` (email) on both ALARM and OK.
+10 alarms (5 per env), all notifying SNS `hc-<env>-alerts` (email) on both ALARM and OK.
 
 > **SNS subscription note:** email subscriptions need a one-time confirmation click.
 > `hc-dev-alerts` is confirmed; **`hc-prod-alerts` is still `PendingConfirmation`** as of
@@ -264,6 +302,7 @@ purpose** — it never shows up as drift.
 | `hc-dev-orphan-logs` / `hc-prod-orphan-logs` | `OrphanLogs` sum > 0 over 5 min | A code path logged outside the correlation context (binding guideline #4 says this must be zero) | Run Insights query (c) above to find the offending lines. If they are only the `app listening` / `worker ready` boot lines, this is the known deploy-time artifact — it clears at the next 5-min evaluation that sees log traffic (observed: ~6–15 min; with zero traffic it can linger until the next request, so hit `/health` once to hurry it). Fix tracked in the backlog below. Anything else: find the code path and fix the gate (route the log through the correlation context / `jobs` envelope). |
 | `hc-dev-error-logs` / `hc-prod-error-logs` | `ErrorLogs` sum >= 5 over 5 min | App/worker emitting error/fatal (pino level >= 50) at volume | Insights query (b) for the stacks; every error line carries a `correlationId` — pivot to query (a)/(d) for the full story. Roll back (`-- --tag <previous>`) if a deploy caused it. |
 | `hc-dev-status-check-failed` / `hc-prod-status-check-failed` | EC2 `StatusCheckFailed` >= 1 (missing data = breaching) | Instance or underlying AWS hardware/network problem — also fires if the instance stops reporting entirely | Check SSM: `aws ssm describe-instance-information --profile housingchoice --region us-east-1`. If unreachable, reboot **via CLI** (console stays read-only): `aws ec2 reboot-instances --instance-ids <id> --profile housingchoice --region us-east-1`. Containers restart on boot (`restart: unless-stopped`). If the instance is truly dead, `npm run plan/apply -- <env>` will recreate it; then re-deploy the current `DEPLOYED_TAG`. |
+| `hc-dev-jobs-dlq-depth` / `hc-prod-jobs-dlq-depth` | `ApproximateNumberOfMessagesVisible` > 0 on `hc-<env>-jobs-dlq` | A job envelope failed all 5 worker dispatch attempts and was dead-lettered — reminders/follow-ups are revenue-critical (doc §9 "Job/DLQ depth") | Worker ERROR logs first: Insights query (b) — the `job failed` lines carry `jobName`, stack, and the originating request's correlation IDs. Peek the DLQ to see the stuck envelopes, fix the handler/data (deploy), then redrive — exact one-liners in [Jobs](#jobs-async-delivery-path). The alarm clears once the DLQ drains. |
 | `hc-dev-disk-used` / `hc-prod-disk-used` | `disk_used_percent` (root) > 80% | 10 GB root volume filling — usually Docker images/layers | Inspect via SSM Run Command (no SSH): `docker system df`, then `docker image prune -af` (safe: the running containers' images are in use). **Caveat:** this metric comes from the CloudWatch agent, which is NOT installed yet — the alarm currently sees no data and `notBreaching` keeps it quietly OK. It cannot actually fire until the agent ships (backlog below). The deploy's prune-on-success keeps disk in check meanwhile (post-deploy: 26% used). |
 
 ## Costs

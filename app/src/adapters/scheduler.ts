@@ -46,7 +46,11 @@ export class InMemorySchedulerAdapter implements SchedulerAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// EventBridge Scheduler adapter — production path.
+// EventBridge Scheduler adapter — production path (M1.2).
+//
+// Target = the SQS jobs queue: for SQS targets, Target.Input becomes the SQS
+// message BODY verbatim, so the worker's long-poll receives the JSON
+// JobEnvelope exactly as enqueued and hands it to dispatchJob().
 // ---------------------------------------------------------------------------
 
 /** Minimal client surface so tests can inject a fake (no AWS calls). */
@@ -57,13 +61,24 @@ export interface SchedulerClientLike {
 export interface EventBridgeSchedulerAdapterDeps {
   /** Injected so unit tests can use a fake; real SchedulerClient in prod. */
   client: SchedulerClientLike;
-  /** Target ARN the schedule invokes. TODO(M0.4): real ARN from Terraform via config. */
+  /** Target ARN the schedule delivers to — the jobs QUEUE ARN (Terraform jobs module -> SCHEDULER_TARGET_ARN). */
   targetArn: string;
-  /** IAM role EventBridge assumes to invoke the target. TODO(M0.4): real ARN. */
+  /** IAM role Scheduler assumes to sqs:SendMessage (Terraform jobs module -> SCHEDULER_ROLE_ARN). */
   roleArn: string;
-  /** Optional schedule group. */
+  /** Optional schedule group (default group when unset). */
   groupName?: string;
 }
+
+/**
+ * Minimum lead time for one-off schedules. EventBridge Scheduler REJECTS
+ * `at(...)` times in the past (ValidationException) — and "now" truncated to
+ * the second is already in the past by the time CreateSchedule lands — so
+ * immediate/near-term enqueues are clamped to now + this lead. 60s matches
+ * Scheduler's ~minute-level delivery granularity and means "run ASAP" fires
+ * on the service's first realistic slot; backoff retries (60s+) pass through
+ * unclamped.
+ */
+export const MIN_SCHEDULE_LEAD_MS = 60_000;
 
 /** EventBridge `at(...)` expressions take `yyyy-mm-ddThh:mm:ss` (UTC, no ms/zone). */
 function toAtExpression(runAt: Date): string {
@@ -74,7 +89,9 @@ export class EventBridgeSchedulerAdapter implements SchedulerAdapter {
   constructor(private readonly deps: EventBridgeSchedulerAdapterDeps) {}
 
   async scheduleOnce(envelope: JobEnvelope, opts?: ScheduleOnceOptions): Promise<void> {
-    const runAt = opts?.runAt ?? new Date();
+    const earliest = Date.now() + MIN_SCHEDULE_LEAD_MS;
+    const requested = opts?.runAt?.getTime() ?? 0; // unset = "now" = run ASAP
+    const runAt = new Date(Math.max(requested, earliest));
     const command = new CreateScheduleCommand({
       // Schedule names: [0-9a-zA-Z-_.]+, max 64 chars. jobId is a UUID (36).
       Name: `hc-${envelope.jobName.replace(/[^0-9a-zA-Z\-_.]/g, '-')}-${envelope.jobId}`.slice(

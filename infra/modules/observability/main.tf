@@ -142,6 +142,29 @@ resource "aws_cloudwatch_metric_alarm" "disk_used" {
   }
 }
 
+# Jobs DLQ depth (doc §9 "Job/DLQ depth"): a job envelope lands in the DLQ
+# only after maxReceiveCount (5) failed worker dispatches — reminders and
+# follow-ups are revenue-critical, so ANY dead-lettered job pages. Recovery:
+# RUNBOOK "Jobs" section (inspect, fix the handler, redrive).
+resource "aws_cloudwatch_metric_alarm" "jobs_dlq_depth" {
+  alarm_name          = "${var.name_prefix}jobs-dlq-depth"
+  alarm_description   = "Jobs dead-letter queue is non-empty — a job failed all 5 delivery attempts (doc §9 Job/DLQ depth). See RUNBOOK 'Jobs'."
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching" # SQS stops emitting on idle queues; empty = OK
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    QueueName = var.jobs_dlq_name
+  }
+}
+
 # --- Dashboard --------------------------------------------------------------
 
 resource "aws_cloudwatch_dashboard" "stack" {

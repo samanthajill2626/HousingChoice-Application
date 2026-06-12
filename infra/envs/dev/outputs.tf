@@ -40,6 +40,16 @@ output "param_path_prefix" {
   value       = module.params.param_path_prefix
 }
 
+output "jobs_queue_url" {
+  description = "SQS jobs queue URL (worker long-polls; JOBS_QUEUE_URL param)."
+  value       = module.jobs.queue_url
+}
+
+output "jobs_dlq_url" {
+  description = "Jobs dead-letter queue URL (inspect/redrive — RUNBOOK 'Jobs')."
+  value       = module.jobs.dlq_url
+}
+
 output "alerts_topic_arn" {
   description = "SNS alerts topic (email subscription needs one-time confirmation)."
   value       = module.observability.sns_topic_arn

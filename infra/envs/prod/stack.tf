@@ -42,6 +42,12 @@ module "ses" {
   sender_email = local.alert_email
 }
 
+module "jobs" {
+  source = "../../modules/jobs"
+
+  name_prefix = local.name_prefix
+}
+
 module "params" {
   source = "../../modules/params"
 
@@ -52,6 +58,11 @@ module "params" {
   # Terraform graphs at resource granularity, so this resolves cleanly.
   public_base_url = "https://${module.cloudfront.domain_name}"
   media_bucket    = module.s3_media.bucket_name
+  # M1.2 job delivery: the queue the worker long-polls + the Scheduler
+  # target/role jobs.enqueue() creates one-off schedules with.
+  jobs_queue_url       = module.jobs.queue_url
+  scheduler_target_arn = module.jobs.queue_arn
+  scheduler_role_arn   = module.jobs.scheduler_role_arn
 }
 
 module "ec2" {
@@ -64,6 +75,8 @@ module "ec2" {
   table_arns         = module.dynamodb.table_arns
   media_bucket_arn   = module.s3_media.bucket_arn
   ecr_repository_arn = module.ecr.repository_arn
+  jobs_queue_arn     = module.jobs.queue_arn
+  scheduler_role_arn = module.jobs.scheduler_role_arn
 }
 
 module "cloudfront" {
@@ -82,6 +95,7 @@ module "observability" {
   log_retention_days = local.log_retention_days
   alert_email        = local.alert_email
   instance_id        = module.ec2.instance_id
+  jobs_dlq_name      = module.jobs.dlq_name
 }
 
 module "budget" {

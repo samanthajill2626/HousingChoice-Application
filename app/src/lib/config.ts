@@ -26,9 +26,19 @@ export interface AppConfig {
   tablePrefix: string;
   /** OTLP export endpoint — wired to CloudWatch Application Signals in M0.4/M0.6. */
   otelExporterOtlpEndpoint?: string;
-  /** EventBridge Scheduler target/role ARNs — real values land with Terraform in M0.4. */
+  /**
+   * EventBridge Scheduler target/role ARNs (Terraform jobs module, M1.2):
+   * target = the SQS jobs queue ARN, role = what Scheduler assumes to
+   * SendMessage. Both unset locally (in-memory scheduler adapter).
+   */
   schedulerTargetArn?: string;
   schedulerRoleArn?: string;
+  /**
+   * SQS jobs queue URL the WORKER long-polls for job envelopes
+   * (JOBS_QUEUE_URL — Terraform jobs module, M1.2). Unset locally: the worker
+   * starts no poll loop.
+   */
+  jobsQueueUrl?: string;
   /**
    * Which MessagingAdapter driver to use (M1.1). MESSAGING_DRIVER env;
    * defaults to `twilio` when NODE_ENV=production (both deployed stacks) and
@@ -169,6 +179,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     otelExporterOtlpEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,
     schedulerTargetArn: env.SCHEDULER_TARGET_ARN,
     schedulerRoleArn: env.SCHEDULER_ROLE_ARN,
+    jobsQueueUrl: env.JOBS_QUEUE_URL,
     messagingDriver,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,

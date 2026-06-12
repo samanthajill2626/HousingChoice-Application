@@ -11,7 +11,13 @@
     "dashboard"
   ],
   "scripts": {
-    "dev": "npm run dev -w app",
+    "dev": "node scripts/dev.mjs",
+    "dev:app": "npm run dev -w app",
+    "dev:worker": "npm run dev:worker -w app",
+    "db:start": "node scripts/db.mjs start",
+    "db:stop": "node scripts/db.mjs stop",
+    "db:create": "tsx app/scripts/db-create.ts",
+    "db:seed": "tsx app/scripts/db-seed.ts",
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
@@ -23,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "concurrently": "^10.0.3",
     "eslint": "^9.28.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",

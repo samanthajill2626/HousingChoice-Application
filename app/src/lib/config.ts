@@ -15,6 +15,11 @@ export interface AppConfig {
   awsRegion: string;
   /** DynamoDB Local endpoint for local dev (M0.3). Unset in AWS. */
   dynamodbEndpoint?: string;
+  /**
+   * Physical-table-name prefix: hc-local- on dev machines (default),
+   * hc-dev- / hc-prod- set by Terraform in M0.4. See tableName().
+   */
+  tablePrefix: string;
   /** OTLP export endpoint — wired to CloudWatch Application Signals in M0.4/M0.6. */
   otelExporterOtlpEndpoint?: string;
   /** EventBridge Scheduler target/role ARNs — real values land with Terraform in M0.4. */
@@ -24,6 +29,17 @@ export interface AppConfig {
 
 /** Dev-only fallback; matches .env.example. Never used when NODE_ENV=production. */
 const DEV_ORIGIN_SECRET_DEFAULT = 'dev-placeholder-not-a-secret';
+
+/** Default table prefix for local dev; M0.4 Terraform sets hc-dev-/hc-prod-. */
+export const DEFAULT_TABLE_PREFIX = 'hc-local-';
+
+/**
+ * Resolve a table's physical name from its base name (see lib/tables.ts):
+ * `${TABLE_PREFIX}${base}`. Never hardcode physical table names.
+ */
+export function tableName(base: string, env: NodeJS.ProcessEnv = process.env): string {
+  return `${env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX}${base}`;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV ?? 'development';
@@ -49,6 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     otelSdkDisabled: (env.OTEL_SDK_DISABLED ?? '').toLowerCase() === 'true',
     awsRegion: env.AWS_REGION ?? 'us-east-1',
     dynamodbEndpoint: env.DYNAMODB_ENDPOINT,
+    tablePrefix: env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX,
     otelExporterOtlpEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,
     schedulerTargetArn: env.SCHEDULER_TARGET_ARN,
     schedulerRoleArn: env.SCHEDULER_ROLE_ARN,

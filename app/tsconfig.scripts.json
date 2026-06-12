@@ -1,0 +1,9 @@
+{
+  // Typecheck-only config for the dev-loop scripts in app/scripts (they import
+  // app/src with types via tsx, outside the build rootDir). No emit.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["scripts", "src"]
+}

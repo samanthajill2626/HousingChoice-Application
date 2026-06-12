@@ -13,7 +13,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 | M0.0 | ✅ | Decisions locked: TypeScript, Vitest, us-east-1, Node 24 |
 | M0.1 | ✅ | Repo scaffold: workspaces, lint/tsconfig, placeholder entrypoints, Docker/compose, seams (git remote: Azure, to be added) |
 | M0.2 | ✅ | Express 5 server + locked middleware chain, pino logging core (correlation context + orphan-log detection), OTel seam, jobs.enqueue()/defineJobHandler() gates with scheduler adapters |
-| M0.3 | ☐ | Full local dev loop: multi-process dev, DynamoDB Local, repos layer |
+| M0.3 | ✅ | Full local dev loop: `npm run dev` = DynamoDB Local (auto-start) + table create/seed + app & worker in watch mode; 9-table contract in `app/src/lib/tables.ts` |
 | M0.4 | ☐ | Terraform: both stacks (network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget), `plan`/`apply`/`drift` |
 | M0.5 | ☐ | Deploy path: buildx ARM64 image → ECR → EC2, .env hydration from Parameter Store, `deploy:dev`/`deploy:prod` |
 | M0.6 | ☐ | Prod stack apply, same-image-tag deploy, RUNBOOK.md (deploy/rollback/logs/drift/alarms/cost), Phase 0 exit checklist |
@@ -56,8 +56,13 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 
 | Script | What it does | Active since |
 |---|---|---|
-| `npm run dev` | Runs the app workspace in watch mode (full multi-process dev loop arrives in M0.3) | M0.1 |
-| `npm test` | Vitest across all workspaces | M0.1 |
+| `npm run dev` | Full local loop: starts DynamoDB Local, creates+seeds the 9 tables, then runs app (`:8080`) + worker concurrently in watch mode (Ctrl-C stops the processes; container stays up) | M0.3 |
+| `npm run dev:app` / `dev:worker` | Just the app / just the worker in watch mode (no DB orchestration) | M0.3 |
+| `npm run db:start` | Start (or create) the `hc-dynamodb-local` container and wait until port 8000 answers — idempotent | M0.3 |
+| `npm run db:stop` | Stop the container (in-memory data is discarded) | M0.3 |
+| `npm run db:create` | Create all 9 tables from `app/src/lib/tables.ts` against `DYNAMODB_ENDPOINT` (default `http://localhost:8000`); existing tables skipped | M0.3 |
+| `npm run db:seed` | Write fixed-ID fake seed data exercising every GSI — idempotent, safe to re-run | M0.3 |
+| `npm test` | Vitest across all workspaces (DynamoDB integration suite auto-skips when DynamoDB Local isn't running) | M0.1 |
 | `npm run lint` | ESLint (flat config), incl. the streams-only `readFileSync` ban in app/src | M0.1 |
 | `npm run typecheck` | `tsc --noEmit` across workspaces | M0.1 |
 | `npm run plan` | Terraform plan for a stack | M0.4 (stub until then) |
@@ -65,6 +70,29 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run drift` | Detect infra drift vs. state | M0.4 (stub until then) |
 | `npm run deploy:dev` | Build/push ARM64 image, hydrate .env from Parameter Store, roll EC2 dev | M0.5 (stub until then) |
 | `npm run deploy:prod` | Same, prod stack | M0.5 (stub until then) |
+
+## Local development
+
+Prerequisite: **Docker Desktop running** (DynamoDB Local is the only local container). Then the whole loop is one command:
+
+```powershell
+npm run dev
+```
+
+This (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-sharedDb -inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, and (4) runs the app on `http://localhost:8080` and the worker, both under `tsx watch` with prefixed colorized logs. Edit a file → instant reload; every request logs a correlated JSON line (`requestId`/`correlationId`). Ctrl-C stops app+worker; the container stays up.
+
+Query DynamoDB Local from PowerShell (DynamoDB Local accepts any credentials — dummy values satisfy the CLI):
+
+```powershell
+$env:AWS_ACCESS_KEY_ID = 'local'; $env:AWS_SECRET_ACCESS_KEY = 'local'
+aws dynamodb scan --table-name hc-local-contacts --endpoint-url http://localhost:8000 --region us-east-1 --no-cli-pager
+```
+
+(Or use a configured `--profile` instead of the env vars; the values never matter locally.)
+
+**Data is in-memory:** stopping/restarting the container wipes all tables. `npm run dev` (or `npm run db:create && npm run db:seed`) rebuilds everything in seconds.
+
+The 9-table schema (keys/GSIs are contractual) lives in [`app/src/lib/tables.ts`](./app/src/lib/tables.ts) — the single source of truth that M0.4 Terraform must mirror.
 
 ## Local toolchain
 

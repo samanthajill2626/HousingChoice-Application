@@ -4,10 +4,13 @@ dist/
 coverage/
 *.tsbuildinfo
 
-# Environment files — .env.example is the documented template and IS committed
+# Environment files — only the committed templates are exempt: .env.example
+# (local dev) and .env.<env>.example (deployed secrets for secrets:push)
 .env
 .env.*
 !.env.example
+!.env.dev.example
+!.env.prod.example
 
 # Terraform — note: .terraform.lock.hcl must be committed, so it is NOT ignored
 .terraform/

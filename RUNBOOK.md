@@ -59,8 +59,8 @@ The currently-released tag is marked `<== DEPLOYED`.
 ### Secrets
 
 Operator-managed secrets (Twilio etc.) live in the gitignored `.env.dev` / `.env.prod` at the repo
-root — template: the "Deployed secrets" section of `.env.example` — and reach AWS by script only.
-Nobody hand-runs `aws ssm put-parameter`:
+root — templates: `.env.dev.example` / `.env.prod.example` (copy, rename, fill in) — and reach AWS
+by script only. Nobody hand-runs `aws ssm put-parameter`:
 
 ```powershell
 npm run secrets:push -- dev       # .env.dev -> SecureString /hc/dev/app/<KEY> (account-guarded)

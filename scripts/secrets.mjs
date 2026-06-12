@@ -14,8 +14,8 @@
 //     scripts/lib/secretsCore.mjs) are refused in the .env files, so this
 //     script can never stomp CF_ORIGIN_SECRET, DEPLOYED_TAG, etc.
 //   - secret values are NEVER printed — every display goes through maskValue().
-//   - .env.dev/.env.prod are gitignored; the committed template is the
-//     "Deployed secrets" section of .env.example.
+//   - .env.dev/.env.prod are gitignored; the committed templates are
+//     .env.dev.example / .env.prod.example.
 //
 // The next deploy hydrates /hc/<env>/app/* into /opt/hc/.env on the instance —
 // pushing alone changes nothing on a running box.
@@ -95,8 +95,8 @@ const envFile = path.join(repoRoot, envFileName);
 if (!existsSync(envFile)) {
   fail(
     `[secrets] ${envFileName} not found at the repo root.\n` +
-      `Create it from the "Deployed secrets" section of .env.example (copy ONLY that\n` +
-      `section, fill in real values), then re-run. The file is gitignored — never commit it.`,
+      `Copy ${envFileName}.example to ${envFileName}, fill in real values, then re-run.\n` +
+      `The file is gitignored — never commit it.`,
   );
 }
 

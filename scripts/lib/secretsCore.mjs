@@ -86,3 +86,21 @@ export function maskValue(value) {
 export function findDenylistedKeys(keys) {
   return keys.filter((key) => MANAGED_BY_OTHERS.includes(key));
 }
+
+/**
+ * Key-set drift between a real .env.<env> file and its committed
+ * .env.<env>.example template (values are irrelevant — the template holds
+ * placeholders). The example is the source of truth for STRUCTURE: new keys
+ * are added template-first, then merged into the real file.
+ *
+ * @param {string[]} realKeys    keys present in .env.<env>
+ * @param {string[]} exampleKeys keys present in .env.<env>.example
+ * @returns {{ missing: string[], extra: string[] }} missing = in the example
+ *   but not the real file; extra = in the real file but not the example.
+ */
+export function diffKeySets(realKeys, exampleKeys) {
+  return {
+    missing: exampleKeys.filter((key) => !realKeys.includes(key)).sort(),
+    extra: realKeys.filter((key) => !exampleKeys.includes(key)).sort(),
+  };
+}

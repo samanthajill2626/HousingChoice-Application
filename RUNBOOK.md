@@ -79,6 +79,11 @@ Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `LOG_LEVEL`, `NODE_ENV`, `POR
 script, and this tool can never overwrite them. `.env.dev` / `.env.prod` are gitignored; never
 commit them.
 
+**Template-first rule:** the real files must mirror the key set of their committed templates. A new
+key lands in `.env.<env>.example` FIRST (placeholder + comment), then gets merged into the real
+`.env.<env>` — append only, never overwrite existing lines. `secrets:push`/`secrets:check` print a
+warning whenever the key sets drift.
+
 ### What the health-check gate does
 
 Every deploy (build, `--tag`, `--promote`) runs this gate **on the instance** before declaring success:

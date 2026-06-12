@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_BY_OTHERS,
+  diffKeySets,
   findDenylistedKeys,
   maskValue,
   parseDotenv,
@@ -119,5 +120,20 @@ describe('findDenylistedKeys (Terraform/deploy-managed params)', () => {
 
   it('is case-sensitive like SSM param names (lowercase port is not the managed PORT)', () => {
     expect(findDenylistedKeys(['port'])).toEqual([]);
+  });
+});
+
+describe('diffKeySets (.env.<env> vs .env.<env>.example sync rule)', () => {
+  it('reports keys missing from the real file and extras not in the example, sorted', () => {
+    expect(
+      diffKeySets(['B_EXTRA', 'A_EXTRA', 'SHARED'], ['SHARED', 'Z_MISSING', 'C_MISSING']),
+    ).toEqual({
+      missing: ['C_MISSING', 'Z_MISSING'],
+      extra: ['A_EXTRA', 'B_EXTRA'],
+    });
+  });
+
+  it('is empty-empty when the key sets match (values are irrelevant)', () => {
+    expect(diffKeySets(['A', 'B'], ['B', 'A'])).toEqual({ missing: [], extra: [] });
   });
 });

@@ -33,6 +33,7 @@ import {
 } from './lib/hcAws.mjs';
 import {
   MANAGED_BY_OTHERS,
+  diffKeySets,
   findDenylistedKeys,
   maskValue,
   parseDotenv,
@@ -116,6 +117,27 @@ if (denylisted.length > 0) {
       `Those params are owned by \`npm run plan\`/\`apply\` (DEPLOYED_TAG by the deploy script)\n` +
       `and must never be set via the .env files. Remove them and re-run — nothing was written.`,
   );
+}
+
+// Template sync warning (operator rule: .env.<env> mirrors .env.<env>.example;
+// new keys land in the example FIRST, then merge into the real file). Warning
+// only — it never changes behavior or exit codes.
+const examplePath = path.join(repoRoot, `${envFileName}.example`);
+if (existsSync(examplePath)) {
+  try {
+    const exampleKeys = Object.keys(parseDotenv(readFileSync(examplePath, 'utf8')));
+    const { missing, extra } = diffKeySets(keys, exampleKeys);
+    if (missing.length > 0 || extra.length > 0) {
+      console.error(
+        `[secrets] WARNING: ${envFileName} is out of sync with ${envFileName}.example` +
+          (missing.length > 0 ? `\n  missing (in example, not in ${envFileName}): ${missing.join(', ')}` : '') +
+          (extra.length > 0 ? `\n  extra (in ${envFileName}, not in example): ${extra.join(', ')}` : '') +
+          `\n  Rule: add new keys to ${envFileName}.example first, then merge into ${envFileName}.`,
+      );
+    }
+  } catch (err) {
+    console.error(`[secrets] WARNING: could not parse ${envFileName}.example — ${err.message}`);
+  }
 }
 
 const emptyKeys = keys.filter((key) => entries[key] === '');

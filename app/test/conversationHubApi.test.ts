@@ -87,9 +87,17 @@ describe('GET /api/conversations — the inbox', () => {
       const res = await request(app).get(`/api/conversations?${qs}`).set('x-origin-verify', SECRET);
       expect(res.status, qs).toBe(400);
     }
+    const wrongShape = (key: Record<string, unknown>): string =>
+      Buffer.from(JSON.stringify(key), 'utf8').toString('base64url');
     const garbageCursors = [
       Buffer.from('not json', 'utf8').toString('base64url'), // decodes, fails to parse
       Buffer.from('[1,2]', 'utf8').toString('base64url'), // parses, but not a key object
+      // Structurally valid JSON objects that are NOT the exact byLastActivity
+      // ExclusiveStartKey shape — must 400, never reach DynamoDB:
+      wrongShape({ conversationId: 'c', status: 'open' }), // missing last_activity_at
+      wrongShape({ conversationId: 'c', status: 'open', last_activity_at: 't', extra: 'x' }), // extra key
+      wrongShape({ conversationId: 5, status: 'open', last_activity_at: 't' }), // wrong type
+      wrongShape({}), // empty object
     ];
     for (const cursor of garbageCursors) {
       const res = await request(app)
@@ -98,6 +106,22 @@ describe('GET /api/conversations — the inbox', () => {
       expect(res.status, cursor).toBe(400);
       expect(res.body).toEqual({ error: 'invalid cursor' });
     }
+  });
+
+  it('rejects a ?status= outside the allowlist with 400 (the value is a raw GSI partition key)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+
+    for (const status of ['closed', 'bogus', 'OPEN', 'open%20OR%201']) {
+      const res = await request(app)
+        .get(`/api/conversations?status=${status}`)
+        .set('x-origin-verify', SECRET);
+      expect(res.status, status).toBe(400);
+    }
+    const ok = await request(app)
+      .get('/api/conversations?status=open')
+      .set('x-origin-verify', SECRET);
+    expect(ok.status).toBe(200);
   });
 
   it('stays behind the origin-secret middleware', async () => {
@@ -246,9 +270,9 @@ describe('GET /api/conversations/:conversationId/messages', () => {
 });
 
 describe('POST /api/conversations/:conversationId/read — unread reset', () => {
-  it('zeroes unread_count and returns the conversation', async () => {
+  it('zeroes unread_count, returns the conversation, and emits conversation.updated on the bus', async () => {
     const { app, world } = makeWebhookHarness();
-    seedConversation(world, 'conv-1', { unread_count: 7 });
+    seedConversation(world, 'conv-1', { unread_count: 7, last_message_preview: 'seen now' });
 
     const res = await request(app)
       .post('/api/conversations/conv-1/read')
@@ -257,15 +281,29 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
     expect(res.status).toBe(200);
     expect(res.body.conversation).toMatchObject({ conversationId: 'conv-1', unread_count: 0 });
     expect(world.conversations.get('conv-1')!.unread_count).toBe(0);
+    // SSE (M1.2): other dashboards drop their unread badge live — same
+    // payload shape as every other conversation.updated.
+    expect(world.emitted).toEqual([
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: 'conv-1',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          unread_count: 0,
+          preview: 'seen now',
+        },
+      },
+    ]);
   });
 
-  it('404s for unknown conversations (conditional write failed)', async () => {
-    const { app } = makeWebhookHarness();
+  it('404s for unknown conversations (conditional write failed) and emits nothing', async () => {
+    const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/conversations/conv-nope/read')
       .set('x-origin-verify', SECRET);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'conversation_not_found' });
+    expect(world.emitted).toHaveLength(0);
   });
 });
 
@@ -297,10 +335,23 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
     expect(world.conversations.get('conv-1')!.assignment).toBeUndefined();
 
     expect(world.auditEvents).toEqual([
-      { entityKey: 'conv-1', eventType: 'assignment_changed', payload: { from: null, to: 'user-va-1' } },
-      { entityKey: 'conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-1', to: 'user-va-2' } },
-      { entityKey: 'conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-2', to: null } },
+      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: null, to: 'user-va-1' } },
+      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-1', to: 'user-va-2' } },
+      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-2', to: null } },
     ]);
+
+    // SSE (M1.2): each assignment change pushes one conversation.updated
+    // (shared event shape; clients re-read the summary for the assignee).
+    expect(world.emitted).toEqual([
+      expect.objectContaining({ event: 'conversation.updated' }),
+      expect.objectContaining({ event: 'conversation.updated' }),
+      expect.objectContaining({ event: 'conversation.updated' }),
+    ]);
+    expect(world.emitted[0]!.payload).toEqual({
+      conversationId: 'conv-1',
+      last_activity_at: '2026-06-12T10:00:00.000Z',
+      unread_count: 0,
+    });
   });
 
   it('400s on malformed payloads without touching the conversation or audit trail', async () => {

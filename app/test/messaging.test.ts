@@ -25,6 +25,14 @@ const TWILIO_ENV = {
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
 };
 
+// NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring —
+// production-shaped configs in this suite must carry it.
+const JOB_DELIVERY_ENV = {
+  JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
+  SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
+  SCHEDULER_ROLE_ARN: 'arn:aws:iam::000000000000:role/hc-test-scheduler',
+};
+
 function makeFakeTwilioClient() {
   const created: Record<string, unknown>[] = [];
   const client: TwilioClientLike = {
@@ -45,6 +53,7 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
     expect(
       loadConfig({
         ...TWILIO_ENV,
+        ...JOB_DELIVERY_ENV,
         NODE_ENV: 'production',
         CF_ORIGIN_SECRET: 's',
         MESSAGING_DRIVER: undefined,
@@ -67,7 +76,7 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
   });
 
   it('fail-fasts when twilio runs in production with an empty OUR_PHONE_NUMBERS (echo defense 1)', () => {
-    const prodTwilio = { ...TWILIO_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's' };
+    const prodTwilio = { ...TWILIO_ENV, ...JOB_DELIVERY_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's' };
     expect(() => loadConfig(prodTwilio)).toThrow(/OUR_PHONE_NUMBERS/);
     // Configured list → boots.
     expect(loadConfig({ ...prodTwilio, OUR_PHONE_NUMBERS: '+15550009999' }).ourPhoneNumbers).toEqual([
@@ -76,8 +85,12 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
     // The guard is twilio+production only: console-in-production and
     // twilio-in-dev both still boot with an empty list (SID dedupe is layer 2).
     expect(
-      loadConfig({ NODE_ENV: 'production', CF_ORIGIN_SECRET: 's', MESSAGING_DRIVER: 'console' })
-        .ourPhoneNumbers,
+      loadConfig({
+        ...JOB_DELIVERY_ENV,
+        NODE_ENV: 'production',
+        CF_ORIGIN_SECRET: 's',
+        MESSAGING_DRIVER: 'console',
+      }).ourPhoneNumbers,
     ).toEqual([]);
     expect(loadConfig(TWILIO_ENV).ourPhoneNumbers).toEqual([]);
   });

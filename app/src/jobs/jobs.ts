@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type { SchedulerAdapter, ScheduleOnceOptions } from '../adapters/scheduler.js';
 import {
   currentTraceparent,
+  generateTraceparent,
   getContext,
   newJobRunId,
   runWithContext,
@@ -101,77 +102,118 @@ export function registeredJobNames(): string[] {
 }
 
 /**
- * Thrown by dispatchJob() when the raw event is not a valid JobEnvelope.
- * Marker for POISON messages: redelivery can never fix a malformed envelope,
- * so transport consumers (the worker's SqsJobConsumer) delete instead of
- * cycling the message to the DLQ. Handler failures stay plain errors and DO
- * retry.
+ * Thrown by dispatchJob() when the raw event is truly UNDISPATCHABLE: not an
+ * object, no resolvable jobName (missing/unknown), or no payload object to
+ * hand a handler. Marker for POISON messages: redelivery can never fix
+ * these, so transport consumers (the worker's SqsJobConsumer) delete instead
+ * of cycling the message to the DLQ. Handler failures stay plain errors and
+ * DO retry. Dispatchable payloads that merely lack the correlation envelope
+ * are NOT malformed — they run under a synthesized context (doc §9).
  */
 export class MalformedJobEnvelopeError extends Error {}
 
-function validateEnvelope(rawEvent: unknown): JobEnvelope {
+/** True when every envelope field (incl. the correlation set) is present and valid. */
+function isCompleteEnvelope(e: Partial<JobEnvelope>): e is JobEnvelope {
+  return (
+    e.v === JOB_ENVELOPE_VERSION &&
+    typeof e.jobId === 'string' &&
+    e.jobId.length > 0 &&
+    typeof e.jobName === 'string' &&
+    e.jobName.length > 0 &&
+    typeof e.correlationContext === 'object' &&
+    e.correlationContext !== null &&
+    typeof e.traceparent === 'string' &&
+    typeof e.hopCount === 'number' &&
+    Number.isInteger(e.hopCount) &&
+    e.hopCount >= 1 &&
+    typeof e.enqueuedAt === 'string'
+  );
+}
+
+/**
+ * Validate a raw wire event into a runnable envelope (doc §9):
+ *   - complete envelope            → run as-is
+ *   - dispatchable but envelope-less (registered jobName + payload object,
+ *     correlation fields missing/invalid) → SYNTHESIZE a fresh context
+ *     (new jobId/traceparent, originType `synthesized`) and run anyway —
+ *     never blind, never dropped
+ *   - undispatchable (not an object / missing or unknown jobName / no
+ *     payload object)              → MalformedJobEnvelopeError (poison)
+ */
+function validateEnvelope(rawEvent: unknown): { envelope: JobEnvelope; synthesized: boolean } {
   if (typeof rawEvent !== 'object' || rawEvent === null) {
     throw new MalformedJobEnvelopeError('dispatchJob: event is not an object');
   }
   const e = rawEvent as Partial<JobEnvelope>;
-  if (e.v !== JOB_ENVELOPE_VERSION) {
-    throw new MalformedJobEnvelopeError(`dispatchJob: unsupported envelope version ${String(e.v)}`);
-  }
-  if (typeof e.jobId !== 'string' || e.jobId.length === 0) {
-    throw new MalformedJobEnvelopeError('dispatchJob: missing jobId');
-  }
   if (typeof e.jobName !== 'string' || e.jobName.length === 0) {
     throw new MalformedJobEnvelopeError('dispatchJob: missing jobName');
   }
-  if (typeof e.correlationContext !== 'object' || e.correlationContext === null) {
-    throw new MalformedJobEnvelopeError('dispatchJob: missing correlationContext');
+  if (!registry.has(e.jobName)) {
+    throw new MalformedJobEnvelopeError(
+      `dispatchJob: no handler registered for job '${e.jobName}'`,
+    );
   }
-  if (typeof e.traceparent !== 'string') {
-    throw new MalformedJobEnvelopeError('dispatchJob: missing traceparent');
+  if (isCompleteEnvelope(e)) return { envelope: e, synthesized: false };
+  if (typeof e.payload !== 'object' || e.payload === null) {
+    throw new MalformedJobEnvelopeError('dispatchJob: payload is not an object');
   }
-  if (typeof e.hopCount !== 'number' || !Number.isInteger(e.hopCount) || e.hopCount < 1) {
-    throw new MalformedJobEnvelopeError('dispatchJob: invalid hopCount');
-  }
-  if (typeof e.enqueuedAt !== 'string') {
-    throw new MalformedJobEnvelopeError('dispatchJob: missing enqueuedAt');
-  }
-  return e as JobEnvelope;
+  return {
+    envelope: {
+      v: JOB_ENVELOPE_VERSION,
+      jobId: randomUUID(),
+      jobName: e.jobName,
+      payload: e.payload,
+      correlationContext: {},
+      traceparent: generateTraceparent(),
+      hopCount: 1,
+      enqueuedAt: new Date().toISOString(),
+    },
+    synthesized: true,
+  };
 }
 
 /**
  * Consumer gate, part 2: dispatch a raw event from the wire.
- * Validates the envelope (malformed envelope / unknown jobName => logged
- * error + throw), generates a FRESH jobRunId, re-hydrates AsyncLocalStorage
- * with the envelope's correlation context + the new jobRunId BEFORE any
- * business logic, times the handler, and logs start/success/failure
- * (failure with full stack).
+ * Validates the envelope (undispatchable event => logged error + throw;
+ * envelope-less-but-dispatchable => synthesized context + WARN, doc §9),
+ * generates a FRESH jobRunId, re-hydrates AsyncLocalStorage with the
+ * envelope's correlation context + the new jobRunId + the stable jobId
+ * BEFORE any business logic, times the handler, and logs
+ * start/success/failure (failure with full stack).
  */
 export async function dispatchJob(rawEvent: unknown): Promise<void> {
   let envelope: JobEnvelope;
+  let synthesized: boolean;
   try {
-    envelope = validateEnvelope(rawEvent);
+    ({ envelope, synthesized } = validateEnvelope(rawEvent));
   } catch (err) {
     log.error({ err }, 'dispatchJob: malformed job envelope rejected');
     throw err;
   }
 
-  const handler = registry.get(envelope.jobName);
-  if (!handler) {
-    const err = new Error(`dispatchJob: no handler registered for job '${envelope.jobName}'`);
-    log.error({ err, jobName: envelope.jobName, jobId: envelope.jobId }, 'dispatchJob: unknown job name rejected');
-    throw err;
-  }
+  // validateEnvelope guarantees registration — this lookup cannot miss.
+  const handler = registry.get(envelope.jobName)!;
 
   const jobRunId = newJobRunId();
   const ctx: CorrelationContext = {
     ...envelope.correlationContext,
     jobRunId,
+    jobId: envelope.jobId,
     hopCount: envelope.hopCount,
     traceparent: envelope.traceparent,
+    ...(synthesized && { originType: 'synthesized' as const }),
   };
 
   await runWithContext(ctx, async () => {
     const startedAt = performance.now();
+    if (synthesized) {
+      // §9 mandate: a dispatchable payload with no correlation envelope is
+      // run, not dropped — flagged loudly so the producer gets fixed.
+      log.warn(
+        { jobName: envelope.jobName, jobId: envelope.jobId },
+        'envelope-less payload — context synthesized',
+      );
+    }
     log.info({ jobName: envelope.jobName, jobId: envelope.jobId, hopCount: envelope.hopCount }, 'job started');
     try {
       await handler(envelope.payload);

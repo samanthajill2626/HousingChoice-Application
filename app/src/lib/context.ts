@@ -7,6 +7,17 @@ export interface CorrelationContext {
   requestId?: string;
   jobRunId?: string;
   /**
+   * The envelope's jobId — STABLE across SQS redeliveries of the same
+   * enqueued job (jobRunId is fresh per run). dispatchJob stamps it so
+   * handlers can key duplicate-execution guards on it (M1.2 retrySend).
+   */
+  jobId?: string;
+  /**
+   * How this context came to exist. `synthesized` marks a doc-§9
+   * envelope-less payload whose context dispatchJob had to mint fresh.
+   */
+  originType?: 'synthesized';
+  /**
    * Process-lifecycle correlation: entrypoints generate one bootId per process
    * start and wrap startup/shutdown in it, so lifecycle log lines ("app
    * listening", "worker ready", shutdown) are never orphans. Lowest-precedence

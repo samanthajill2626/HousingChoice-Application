@@ -379,6 +379,76 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(warn).toBeDefined();
   });
 
+  it('EXECUTION GUARD: a redelivered job (same jobId) sends NOTHING and resolves (consumer can delete)', async () => {
+    const scheduler = new InMemorySchedulerAdapter();
+    configureScheduler(scheduler);
+    const capture = createLogCapture();
+    const logger = createLogger({ destination: capture.stream });
+    configureJobsLogger(logger);
+
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    await seedOutbound(world, 'SMout0001');
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
+    const envelope = scheduler.scheduled[0]!.envelope;
+
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+
+    // First delivery: marker written (keyed by the envelope jobId), send happens.
+    await dispatchJob(JSON.parse(JSON.stringify(envelope)));
+    expect(world.sent).toHaveLength(1);
+    expect([...world.jobExecutionMarkers.keys()]).toEqual([envelope.jobId]);
+
+    // SQS redelivery of the SAME message (DeleteMessage failure / visibility
+    // overrun / SIGTERM mid-flight): must resolve SUCCESSFULLY — so the
+    // consumer deletes it — without re-texting the human.
+    await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).resolves.toBeUndefined();
+    expect(world.sent).toHaveLength(1); // nothing re-sent
+    const suppressed = capture.lines.find((l) =>
+      String(l['msg']).includes('duplicate delivery suppressed'),
+    );
+    expect(suppressed).toBeDefined();
+    expect(suppressed?.['jobId']).toBe(envelope.jobId);
+  });
+
+  it('EXECUTION GUARD: a non-conditional marker write failure propagates as a handler failure (redelivery)', async () => {
+    const scheduler = new InMemorySchedulerAdapter();
+    configureScheduler(scheduler);
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    await seedOutbound(world, 'SMout0001');
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
+    const envelope = scheduler.scheduled[0]!.envelope;
+
+    world.messagesRepo.putJobExecutionMarker = async () => {
+      throw new Error('marker write exploded');
+    };
+    registerRetrySendJobHandler({
+      sendMessage: async () => {
+        throw new Error('must not be reached — guard precedes the send');
+      },
+      messagesRepo: world.messagesRepo,
+      logger,
+    });
+
+    await expect(dispatchJob(JSON.parse(JSON.stringify(envelope)))).rejects.toThrow(
+      'marker write exploded',
+    );
+    expect(world.sent).toHaveLength(0); // marker failure stops BEFORE the provider
+  });
+
   it('a missing original message WARNs and does nothing', async () => {
     const scheduler = new InMemorySchedulerAdapter();
     configureScheduler(scheduler);

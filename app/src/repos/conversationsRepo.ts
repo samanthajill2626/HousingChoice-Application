@@ -1,9 +1,13 @@
 // conversations repo — thread headers + inbox index (doc §5).
 //
 // One ACTIVE 1:1 conversation per external phone: createOrGetByParticipantPhone
-// queries the byParticipantPhone GSI before creating. Item shape is a flexible
-// document; only keys/GSI attributes (conversationId, participant_phone,
-// status, last_activity_at) are contractual (lib/tables.ts).
+// queries the byParticipantPhone GSI as the fast path, with a phone-keyed
+// CLAIM item (PK `phone#<E164>`, the same pointer pattern as the messages
+// repo's SID items) as the correctness backstop — the GSI is eventually
+// consistent, so two near-concurrent first messages can both miss it. Item
+// shape is a flexible document; only keys/GSI attributes (conversationId,
+// participant_phone, status, last_activity_at) are contractual
+// (lib/tables.ts).
 //
 // Circuit-breaker state (doc §7.1) lives ON the conversation item as a
 // minute-bucketed counter pair (outbound_minute_bucket + outbound_minute_count)
@@ -97,6 +101,14 @@ export function minuteBucket(at: Date = new Date()): string {
   return at.toISOString().slice(0, 16);
 }
 
+/**
+ * Claim-item partition key for a phone (the per-phone create lock). Claim
+ * partitions (`phone#…`) never collide with real `conv-…` partitions.
+ */
+function phoneClaimPk(phone: string): string {
+  return `phone#${phone}`;
+}
+
 export interface RepoDeps {
   /** Injectable for tests (throwaway prefixes against DynamoDB Local). */
   doc?: DynamoDBDocumentClient;
@@ -108,10 +120,13 @@ export interface RepoDeps {
 export interface ConversationsRepo {
   /**
    * The one active 1:1 conversation for an external phone — found via the
-   * byParticipantPhone GSI, created (status `open`, ai_mode `auto`) when none
-   * exists. NOTE: the GSI is eventually consistent, so two concurrent firsts
-   * can race a duplicate; M1.1 traffic (single webhook + single operator)
-   * makes that acceptable — revisit if fan-out ever creates conversations.
+   * byParticipantPhone GSI (fast path), created (status `open`, ai_mode
+   * `auto`) when none exists. The GSI is eventually consistent, so creation
+   * is arbitrated by a conditional put on a phone-keyed claim item
+   * (`phone#<E164>` → ref_conversationId): the winner creates the real row,
+   * losers adopt the claimed id — two concurrent firsts can never create two
+   * conversations. A crash between claim and row create self-heals on the
+   * next call (the claimed id is recreated).
    */
   createOrGetByParticipantPhone(phone: string, type: ConversationType): Promise<ConversationItem>;
   getById(conversationId: string): Promise<ConversationItem | undefined>;
@@ -186,10 +201,40 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     return Item as ConversationItem | undefined;
   }
 
+  /**
+   * Create the real conversation row under an agreed (claimed) id. Losing
+   * the conditional put just means another caller created it first — read
+   * it back and return it (both callers end up with the same row).
+   */
+  async function createConversationRow(item: ConversationItem): Promise<ConversationItem> {
+    try {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(conversationId)',
+        }),
+      );
+    } catch (err) {
+      if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      const existing = await getById(item.conversationId);
+      if (!existing) {
+        throw new Error(
+          `createOrGetByParticipantPhone: conversation ${item.conversationId} exists per the conditional put but is unreadable`,
+        );
+      }
+      return existing;
+    }
+    log.info({ conversationId: item.conversationId, type: item.type }, 'conversation created');
+    return item;
+  }
+
   return {
     getById,
 
     async createOrGetByParticipantPhone(phone, type) {
+      // Fast path: the byParticipantPhone GSI. Eventually consistent — a
+      // miss here is NOT proof the conversation doesn't exist.
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,
@@ -211,15 +256,39 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         ai_mode: 'auto',
         created_at: now,
       };
-      await doc.send(
-        new PutCommand({
-          TableName: table,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(conversationId)',
-        }),
-      );
-      log.info({ conversationId: item.conversationId, type }, 'conversation created');
-      return item;
+      // Correctness backstop (the SID-pointer pattern from messagesRepo):
+      // conditionally claim the phone before creating. The claim item
+      // carries ONLY the key + ref_conversationId — no participant_phone,
+      // status, or last_activity_at on purpose, so the sparse GSIs
+      // (byParticipantPhone, byLastActivity) never index it.
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: { conversationId: phoneClaimPk(phone), ref_conversationId: item.conversationId },
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Claim taken: another caller won (now or in the past). Adopt the
+        // claimed id; if the winner crashed before creating the row, the
+        // conditional create below self-heals it under the SAME id.
+        const claim = await doc.send(
+          new GetCommand({ TableName: table, Key: { conversationId: phoneClaimPk(phone) } }),
+        );
+        const ref = (claim.Item as { ref_conversationId?: unknown } | undefined)
+          ?.ref_conversationId;
+        if (typeof ref !== 'string' || ref.length === 0) {
+          throw new Error(
+            'createOrGetByParticipantPhone: phone claim exists but carries no ref_conversationId',
+          );
+        }
+        const existing = await getById(ref);
+        if (existing) return existing;
+        return createConversationRow({ ...item, conversationId: ref });
+      }
+      return createConversationRow(item);
     },
 
     async touchLastActivity(conversationId, previewText, ts) {
@@ -292,6 +361,9 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async resetUnread(conversationId) {
+      // Accepted risk (M1.2): SET-to-zero is last-write-wins vs in-flight
+      // inbound increments — a read racing an inbound can drop that bump
+      // (a watermark design fixes it if this ever bites).
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,

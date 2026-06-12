@@ -251,6 +251,23 @@ describe('contactCapture — race handling (the byPhone GSI eventual-consistency
     f.conversationsRepo.setParticipantsIfAbsent = async () => false; // claim "lost"…
     f.conversationsRepo.getById = async () => f.conversation; // …but no participants anywhere
 
-    await expect(f.capture(f.conversation)).rejects.toThrow(/no link is readable/);
+    await expect(f.capture(f.conversation)).rejects.toThrow(/no link.*readable/);
+  });
+
+  it('NEVER adopts a participants entry for a DIFFERENT phone (mismatch = unlinked, claim path runs)', async () => {
+    // The conversation carries a link, but for some OTHER phone — adopting
+    // participants[0] here would hand this phone the wrong person's contact.
+    const wrongLink = { contactId: 'contact-of-other-phone', phone: '+15550999999' };
+    const existing: ContactItem = { contactId: 'contact-right', type: 'tenant', phone: PHONE };
+    const f = makeCaptureFakes({ participants: [wrongLink], contacts: [existing] });
+
+    const result = await f.capture(f.conversation, existing);
+
+    // The known (phone-matching) contact wins; the mismatched link is never
+    // adopted and never overwritten (the claim is first-writer-wins).
+    expect(result.contactId).toBe('contact-right');
+    expect(f.claimAttempts).toBe(1); // treated as unlinked → the claim path ran
+    expect(f.conversation.participants).toEqual([wrongLink]); // untouched
+    expect(f.creates).toHaveLength(0); // no contact writes of any kind
   });
 });

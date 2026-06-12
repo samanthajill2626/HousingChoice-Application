@@ -7,6 +7,9 @@ import type { Server } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Express } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createEventBus } from '../src/lib/events.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 import {
   inboundSmsParams,
   makeWebhookHarness,
@@ -155,6 +158,71 @@ describe('GET /api/events — stream mechanics', () => {
     }
     expect(world.events.listenerCount('conversation.updated')).toBe(baseline);
     expect(world.events.listenerCount('message.persisted')).toBe(baseline);
+  });
+});
+
+describe('event bus — listener isolation (M1.2)', () => {
+  it('a throwing listener never breaks the emit or the other listeners (correlated ERROR instead)', () => {
+    const capture = createLogCapture();
+    const bus = createEventBus({ logger: createLogger({ level: 'info', destination: capture.stream }) });
+    const seen: string[] = [];
+    bus.on('conversation.updated', () => {
+      seen.push('first');
+      throw new Error('listener exploded');
+    });
+    bus.on('conversation.updated', () => {
+      seen.push('second');
+    });
+
+    // The emitter's caller (a webhook/send pipeline in production) must
+    // never observe the listener's throw.
+    expect(() =>
+      bus.emit('conversation.updated', {
+        conversationId: 'conv-iso',
+        last_activity_at: '2026-06-12T12:00:00.000Z',
+        unread_count: 0,
+      }),
+    ).not.toThrow();
+
+    expect(seen).toEqual(['first', 'second']); // the second listener still ran
+    const err = capture.atLevel(50).find((l) => String(l['msg']).includes('event bus listener threw'))!;
+    expect(err).toBeDefined();
+    expect(err['event']).toBe('conversation.updated');
+    // The payload (PII: preview) is never logged.
+    expect(JSON.stringify(err)).not.toContain('conv-iso');
+  });
+});
+
+describe('GET /api/events — connection cap (H4 partial)', () => {
+  it('beyond SSE_MAX_CONNECTIONS → 503 + correlated WARN; a close frees the slot', async () => {
+    const { app, capture } = makeWebhookHarness({ env: { SSE_MAX_CONNECTIONS: '1' } });
+    const port = await startServer(app);
+
+    const first = await connectSse(port);
+    expect(first.response.status).toBe(200);
+    await first.waitFor(': connected');
+
+    const second = await connectSse(port);
+    expect(second.response.status).toBe(503);
+    const warn = capture
+      .atLevel(40)
+      .find((l) => String(l['msg']).includes('sse connection cap reached'))!;
+    expect(warn).toBeDefined();
+    expect(typeof warn['correlationId']).toBe('string');
+
+    // Disconnecting the first stream frees its slot (close is async — poll).
+    first.abort();
+    const deadline = Date.now() + 3_000;
+    let reconnected = false;
+    while (!reconnected && Date.now() < deadline) {
+      const retry = await connectSse(port);
+      if (retry.response.status === 200) {
+        reconnected = true;
+        break;
+      }
+      await delay(10);
+    }
+    expect(reconnected).toBe(true);
   });
 });
 

@@ -56,7 +56,10 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
   return {
     async findByPhone(phone) {
       // Accepted risk: duplicate phones return the FIRST item the GSI yields
-      // (arbitrary order) — M1.2 auto-capture will dedupe contacts by phone.
+      // (arbitrary order). M1.2 auto-capture only prevents NEW duplicates
+      // per phone (the conversation participants claim is the anchor);
+      // pre-existing duplicates (e.g. imports) stay first-match until the
+      // M1.6 import dedupe resolves them.
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,

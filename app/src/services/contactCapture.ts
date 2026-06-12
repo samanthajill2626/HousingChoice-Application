@@ -103,10 +103,11 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
 
     // (1) Already linked? The link is the race anchor — trust it over the
     // (possibly lagging) byPhone GSI. Heal the crash window where the link
-    // committed but the contact row never did.
-    const linked =
-      conversation.participants?.find((p) => p.phone === phone) ??
-      conversation.participants?.[0];
+    // committed but the contact row never did. Match by PHONE only: a
+    // participants array with no entry for this phone (relay-group seam /
+    // bad data) is treated as UNLINKED — adopting participants[0] blindly
+    // would link the WRONG contact.
+    const linked = conversation.participants?.find((p) => p.phone === phone);
     if (linked) {
       if (knownContact && knownContact.contactId === linked.contactId) return knownContact;
       return ensureContact(linked.contactId, phone, conversationId);
@@ -127,9 +128,11 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
         return existing;
       }
       // A concurrent capture linked first (or our conversation snapshot was a
-      // stale GSI projection) — adopt whatever the authoritative row links.
+      // stale GSI projection) — adopt what the authoritative row links FOR
+      // THIS PHONE (never participants[0]: an entry for another phone is
+      // someone else's contact).
       const fresh = await conversations.getById(conversationId);
-      const adopted = fresh?.participants?.[0];
+      const adopted = fresh?.participants?.find((p) => p.phone === phone);
       if (adopted && adopted.contactId !== existing.contactId) {
         return ensureContact(adopted.contactId, phone, conversationId);
       }
@@ -144,13 +147,14 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     ]);
     if (claimed) return ensureContact(contactId, phone, conversationId);
     const fresh = await conversations.getById(conversationId);
-    const winner = fresh?.participants?.[0];
+    const winner = fresh?.participants?.find((p) => p.phone === phone);
     if (!winner) {
-      // The claim only fails when participants exists — unreadable link is
-      // never expected. Surface it; the webhook turns this into a correlated
-      // ERROR without crashing the pipeline.
+      // The claim only fails when participants exists — no entry for THIS
+      // phone (unreadable link, or a link to some other phone's contact) is
+      // never expected and must not be adopted. Surface it; the webhook
+      // turns this into a correlated ERROR without crashing the pipeline.
       throw new Error(
-        `contact capture: participants claim failed but no link is readable on ${conversationId}`,
+        `contact capture: participants claim failed but no link for this phone is readable on ${conversationId}`,
       );
     }
     return ensureContact(winner.contactId, phone, conversationId);

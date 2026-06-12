@@ -34,7 +34,8 @@ registerRetrySendJobHandler();
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker
-// long-polls the jobs queue.
+// long-polls the jobs queue. NODE_ENV=production without it never reaches
+// this point — loadConfig() fails fast.
 //
 // Local dev (JOBS_QUEUE_URL unset): NO poll loop. The app process runs the
 // InMemorySchedulerAdapter, which only RECORDS envelopes — nothing calls its

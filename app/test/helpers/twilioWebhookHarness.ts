@@ -48,6 +48,8 @@ export const TENANT_PHONE = '+15550100001';
 export interface FakeWorld {
   conversations: Map<string, ConversationItem>;
   messages: MessageItem[];
+  /** jobIds recorded by putJobExecutionMarker (the M1.2 execution guard). */
+  jobExecutionMarkers: Map<string, string>;
   contacts: ContactItem[];
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
   /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
@@ -77,6 +79,7 @@ export interface FakeWorld {
 export function createFakeWorld(): FakeWorld {
   const conversations = new Map<string, ConversationItem>();
   const messages: MessageItem[] = [];
+  const jobExecutionMarkers = new Map<string, string>();
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
@@ -232,6 +235,12 @@ export function createFakeWorld(): FakeWorld {
       if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
       if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
     },
+    async putJobExecutionMarker(jobId, conversationId) {
+      // Mirrors the conditional put: true only on the FIRST write per jobId.
+      if (jobExecutionMarkers.has(jobId)) return false;
+      jobExecutionMarkers.set(jobId, conversationId);
+      return true;
+    },
   };
 
   const contactsRepo: ContactsRepo = {
@@ -293,6 +302,7 @@ export function createFakeWorld(): FakeWorld {
   return {
     conversations,
     messages,
+    jobExecutionMarkers,
     contacts,
     flagWrites,
     optOutSets,

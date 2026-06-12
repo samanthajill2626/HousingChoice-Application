@@ -16,6 +16,7 @@
 // (already truncated by toPreview). They are DATA for authenticated dashboard
 // clients — they must never be logged.
 import { EventEmitter } from 'node:events';
+import { logger as defaultLogger, type Logger } from './logger.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
@@ -52,15 +53,27 @@ export interface EventBus {
 }
 
 /** Fresh isolated bus (tests); production shares the appEvents singleton. */
-export function createEventBus(): EventBus {
+export function createEventBus(deps: { logger?: Logger } = {}): EventBus {
   const emitter = new EventEmitter();
+  const log = deps.logger ?? defaultLogger;
   // One listener pair per connected SSE client: the default max-listeners
   // warning (10) would fire at five open dashboards. Uncapped is safe here —
   // the SSE route removes its listeners on every disconnect.
   emitter.setMaxListeners(0);
   return {
     emit(event, payload) {
-      emitter.emit(event, payload);
+      // Per-listener isolation: a throwing listener (e.g. one broken SSE
+      // client's write) must never propagate into the EMITTER's caller —
+      // the webhook/send pipelines — or starve the other listeners. ERROR
+      // is correlated via the pino mixin (the emitter's active context);
+      // the payload is never logged (it carries the preview — PII, doc §9).
+      for (const listener of emitter.listeners(event)) {
+        try {
+          (listener as (p: AppEventMap[typeof event]) => void)(payload);
+        } catch (err) {
+          log.error({ err, event }, 'event bus listener threw — isolated, other listeners unaffected');
+        }
+      }
     },
     on(event, listener) {
       emitter.on(event, listener);

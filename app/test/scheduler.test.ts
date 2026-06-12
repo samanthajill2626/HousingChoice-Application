@@ -1,17 +1,25 @@
-// Acceptance test 6 (M0.2): EventBridgeSchedulerAdapter unit test with a fake
-// injected client — asserts ActionAfterCompletion: 'DELETE' and the JSON
-// envelope in the command input. No AWS calls.
+// Acceptance test 6 (M0.2) + M1.2 SQS-target verification:
+// EventBridgeSchedulerAdapter unit tests with a fake injected client —
+// asserts ActionAfterCompletion: 'DELETE', the JSON envelope as Target.Input
+// (for SQS targets the Input becomes the message BODY verbatim), the
+// queue/role ARNs, and the near-term clamp (Scheduler rejects at() times in
+// the past, so "now"/past runAts move to now + MIN_SCHEDULE_LEAD_MS). No AWS
+// calls.
 import type {
   CreateScheduleCommand,
   CreateScheduleCommandOutput,
 } from '@aws-sdk/client-scheduler';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EventBridgeSchedulerAdapter,
   InMemorySchedulerAdapter,
+  MIN_SCHEDULE_LEAD_MS,
   type SchedulerClientLike,
 } from '../src/adapters/scheduler.js';
 import type { JobEnvelope } from '../src/jobs/types.js';
+
+const QUEUE_ARN = 'arn:aws:sqs:us-east-1:000000000000:hc-dev-jobs';
+const ROLE_ARN = 'arn:aws:iam::000000000000:role/hc-dev-scheduler';
 
 function makeEnvelope(): JobEnvelope {
   return {
@@ -26,23 +34,39 @@ function makeEnvelope(): JobEnvelope {
   };
 }
 
+function makeFakeClient(): { client: SchedulerClientLike; sent: CreateScheduleCommand[] } {
+  const sent: CreateScheduleCommand[] = [];
+  const client: SchedulerClientLike = {
+    send: async (command) => {
+      sent.push(command);
+      return { $metadata: {} } as CreateScheduleCommandOutput;
+    },
+  };
+  return { client, sent };
+}
+
 describe('EventBridgeSchedulerAdapter', () => {
+  // Fake clock: the adapter clamps against Date.now(), so wall-clock tests
+  // would go stale the moment the hardcoded runAt slips into the past.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-12T15:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('sends CreateScheduleCommand with ActionAfterCompletion DELETE and the JSON envelope as target input', async () => {
-    const sent: CreateScheduleCommand[] = [];
-    const fakeClient: SchedulerClientLike = {
-      send: async (command) => {
-        sent.push(command);
-        return { $metadata: {} } as CreateScheduleCommandOutput;
-      },
-    };
+    const { client, sent } = makeFakeClient();
     const adapter = new EventBridgeSchedulerAdapter({
-      client: fakeClient,
-      targetArn: 'arn:aws:lambda:us-east-1:000000000000:function:hc-dev-worker-dispatch',
-      roleArn: 'arn:aws:iam::000000000000:role/hc-dev-scheduler-invoke',
+      client,
+      targetArn: QUEUE_ARN,
+      roleArn: ROLE_ARN,
     });
 
     const envelope = makeEnvelope();
-    const runAt = new Date('2026-06-12T15:30:00.000Z');
+    const runAt = new Date('2026-06-12T15:30:00.000Z'); // 30 min out — no clamp
     await adapter.scheduleOnce(envelope, { runAt });
 
     expect(sent).toHaveLength(1);
@@ -52,11 +76,75 @@ describe('EventBridgeSchedulerAdapter', () => {
     expect(input.ScheduleExpression).toBe('at(2026-06-12T15:30:00)');
     expect(input.FlexibleTimeWindow).toEqual({ Mode: 'OFF' });
     expect(input.Name).toMatch(/^hc-demo\.echo-11111111/);
-    expect(input.Target?.Arn).toBe(
-      'arn:aws:lambda:us-east-1:000000000000:function:hc-dev-worker-dispatch',
-    );
-    expect(input.Target?.RoleArn).toBe('arn:aws:iam::000000000000:role/hc-dev-scheduler-invoke');
+    // SQS target: the queue ARN + the role Scheduler assumes to SendMessage;
+    // Input becomes the SQS message body verbatim — the worker's wire format.
+    expect(input.Target?.Arn).toBe(QUEUE_ARN);
+    expect(input.Target?.RoleArn).toBe(ROLE_ARN);
     expect(JSON.parse(input.Target?.Input ?? '')).toEqual(envelope);
+  });
+
+  it('clamps an immediate enqueue (no runAt) to now + MIN_SCHEDULE_LEAD_MS — Scheduler rejects past at() times', async () => {
+    const { client, sent } = makeFakeClient();
+    const adapter = new EventBridgeSchedulerAdapter({
+      client,
+      targetArn: QUEUE_ARN,
+      roleArn: ROLE_ARN,
+    });
+
+    await adapter.scheduleOnce(makeEnvelope());
+
+    expect(MIN_SCHEDULE_LEAD_MS).toBe(60_000);
+    expect(sent[0]!.input.ScheduleExpression).toBe('at(2026-06-12T15:01:00)');
+  });
+
+  it('clamps a runAt in the past the same way', async () => {
+    const { client, sent } = makeFakeClient();
+    const adapter = new EventBridgeSchedulerAdapter({
+      client,
+      targetArn: QUEUE_ARN,
+      roleArn: ROLE_ARN,
+    });
+
+    await adapter.scheduleOnce(makeEnvelope(), { runAt: new Date('2026-06-12T14:00:00.000Z') });
+
+    expect(sent[0]!.input.ScheduleExpression).toBe('at(2026-06-12T15:01:00)');
+  });
+
+  it('never truncates the jobId tail of the schedule name — a long jobName loses ITS characters instead', async () => {
+    const { client, sent } = makeFakeClient();
+    const adapter = new EventBridgeSchedulerAdapter({
+      client,
+      targetArn: QUEUE_ARN,
+      roleArn: ROLE_ARN,
+    });
+
+    const envelope: JobEnvelope = {
+      ...makeEnvelope(),
+      jobName: 'messaging.aVeryLongJobNameThatWouldPushTheScheduleNamePastSixtyFourCharacters',
+    };
+    await adapter.scheduleOnce(envelope, { runAt: new Date('2026-06-12T15:30:00.000Z') });
+
+    const name = sent[0]!.input.Name!;
+    expect(name.length).toBeLessThanOrEqual(64);
+    // The UUID is the UNIQUE part — slicing it off would collide schedules
+    // of long-named jobs. It must survive verbatim at the tail.
+    expect(name.endsWith(`-${envelope.jobId}`)).toBe(true);
+    expect(name.startsWith('hc-messaging.aVeryLongJobName')).toBe(false); // name segment truncated to fit
+    expect(name.startsWith('hc-messaging.')).toBe(true);
+  });
+
+  it('passes a 60s-backoff retry (runAt exactly now + 60s) through unclamped', async () => {
+    const { client, sent } = makeFakeClient();
+    const adapter = new EventBridgeSchedulerAdapter({
+      client,
+      targetArn: QUEUE_ARN,
+      roleArn: ROLE_ARN,
+    });
+
+    // retrySend attempt 1: new Date(Date.now() + 60_000).
+    await adapter.scheduleOnce(makeEnvelope(), { runAt: new Date(Date.now() + 60_000) });
+
+    expect(sent[0]!.input.ScheduleExpression).toBe('at(2026-06-12T15:01:00)');
   });
 });
 

@@ -1,9 +1,11 @@
 // Typed runtime configuration, read from process.env.
 //
-// Fail-fast policy: in production NODE_ENV, CF_ORIGIN_SECRET is mandatory and
-// startup throws without it; when MESSAGING_DRIVER resolves to `twilio`, all
-// TWILIO_* credentials are mandatory too. Locally a dev placeholder / console
-// driver is allowed so the dev loop boots with no .env present.
+// Fail-fast policy: in production NODE_ENV, CF_ORIGIN_SECRET and the job-
+// delivery wiring (JOBS_QUEUE_URL + SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN)
+// are mandatory and startup throws without them; when MESSAGING_DRIVER
+// resolves to `twilio`, all TWILIO_* credentials are mandatory too. Locally a
+// dev placeholder / console driver / in-memory job path is allowed so the dev
+// loop boots with no .env present.
 
 /** Outbound messaging driver: real Twilio REST vs the local console fake. */
 export type MessagingDriverName = 'twilio' | 'console';
@@ -81,6 +83,12 @@ export interface AppConfig {
    * media mirroring is skipped with a log instead.
    */
   mediaBucket?: string;
+  /**
+   * Max concurrent GET /api/events SSE streams (SSE_MAX_CONNECTIONS,
+   * default 50) — each stream holds a socket/timer/listeners until close;
+   * beyond the cap new streams get 503.
+   */
+  sseMaxConnections: number;
 }
 
 /** Dev-only fallback; matches .env.example. Never used when NODE_ENV=production. */
@@ -143,6 +151,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  const sseMaxConnections = Number(env.SSE_MAX_CONNECTIONS ?? 50);
+  if (!Number.isInteger(sseMaxConnections) || sseMaxConnections <= 0) {
+    throw new Error(
+      `SSE_MAX_CONNECTIONS must be a positive integer, got: ${env.SSE_MAX_CONNECTIONS}`,
+    );
+  }
+
+  // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
+  // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
+  // would accept enqueues into the in-memory adapter (silently undelivered)
+  // and the worker would start no poll loop. Local NODE_ENVs keep the
+  // WARN + in-memory path (expected: nothing delivers jobs on a laptop).
+  if (nodeEnv === 'production') {
+    const missingJobDelivery = [
+      'JOBS_QUEUE_URL',
+      'SCHEDULER_TARGET_ARN',
+      'SCHEDULER_ROLE_ARN',
+    ].filter((key) => !env[key]);
+    if (missingJobDelivery.length > 0) {
+      throw new Error(
+        `NODE_ENV=production requires ${missingJobDelivery.join(', ')} (job delivery wiring, ` +
+          'Terraform jobs module → Parameter Store). Refusing to start without them.',
+      );
+    }
+  }
+
   // Comma-separated E.164 list; whitespace tolerated; empty/unset = none
   // (the echo defense then relies on SID dedupe alone — layer 2).
   const ourPhoneNumbers = (env.OUR_PHONE_NUMBERS ?? '')
@@ -190,5 +224,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,
     mediaBucket: env.MEDIA_BUCKET,
+    sseMaxConnections,
   };
 }

@@ -14,7 +14,12 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 export interface AuditRepo {
-  /** Append one audit event. Payload lives in DynamoDB, never in logs. */
+  /**
+   * Append one audit event. Payload lives in DynamoDB, never in logs.
+   * entityKey convention (BINDING for all call sites): `<table>#<id>` —
+   * e.g. `conversations#conv-…`, `contacts#contact-…` — never a bare id,
+   * so one partition reads back every event for an entity unambiguously.
+   */
   append(entityKey: string, eventType: string, payload?: Record<string, unknown>): Promise<void>;
 }
 

@@ -156,7 +156,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       if (count > config.sendBreakerMaxPerMinute) {
         await conversations.setMode(conversationId, 'manual');
         // §5 mandate: mode flips are audit-trail events.
-        await audit.append(conversationId, 'mode_changed', {
+        await audit.append(`conversations#${conversationId}`, 'mode_changed', {
           from: 'auto',
           to: 'manual',
           reason: 'breaker_trip',
@@ -195,7 +195,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and
     // the §5 audit-trail entry for the send (IDs only, never the body).
     const touched = await conversations.touchLastActivity(conversationId, body, result.providerTs);
-    await audit.append(conversationId, 'message_sent', {
+    await audit.append(`conversations#${conversationId}`, 'message_sent', {
       providerSid: result.providerSid,
       automated,
       author,

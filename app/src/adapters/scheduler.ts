@@ -85,6 +85,21 @@ function toAtExpression(runAt: Date): string {
   return `at(${runAt.toISOString().slice(0, 19)})`;
 }
 
+/** Schedule names allow [0-9a-zA-Z-_.]+ up to this length. */
+const MAX_SCHEDULE_NAME_LENGTH = 64;
+
+/**
+ * Schedule name: `hc-<jobName>-<jobId>`. The jobId (UUID) is the UNIQUE
+ * tail and must survive whole — two long-named jobs whose names only differ
+ * past the cap would otherwise collide on CreateSchedule — so length is
+ * absorbed by truncating the jobName segment, never the jobId.
+ */
+function scheduleName(envelope: JobEnvelope): string {
+  const sanitized = envelope.jobName.replace(/[^0-9a-zA-Z\-_.]/g, '-');
+  const maxNameSegment = MAX_SCHEDULE_NAME_LENGTH - 'hc-'.length - 1 - envelope.jobId.length;
+  return `hc-${sanitized.slice(0, Math.max(maxNameSegment, 0))}-${envelope.jobId}`;
+}
+
 export class EventBridgeSchedulerAdapter implements SchedulerAdapter {
   constructor(private readonly deps: EventBridgeSchedulerAdapterDeps) {}
 
@@ -93,11 +108,7 @@ export class EventBridgeSchedulerAdapter implements SchedulerAdapter {
     const requested = opts?.runAt?.getTime() ?? 0; // unset = "now" = run ASAP
     const runAt = new Date(Math.max(requested, earliest));
     const command = new CreateScheduleCommand({
-      // Schedule names: [0-9a-zA-Z-_.]+, max 64 chars. jobId is a UUID (36).
-      Name: `hc-${envelope.jobName.replace(/[^0-9a-zA-Z\-_.]/g, '-')}-${envelope.jobId}`.slice(
-        0,
-        64,
-      ),
+      Name: scheduleName(envelope),
       GroupName: this.deps.groupName,
       ScheduleExpression: toAtExpression(runAt),
       ScheduleExpressionTimezone: 'UTC',

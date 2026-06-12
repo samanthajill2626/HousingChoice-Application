@@ -148,4 +148,33 @@ describe('config fail-fast', () => {
     expect(config.cfOriginSecret.length).toBeGreaterThan(0);
     expect(config.port).toBe(8080);
   });
+
+  describe('job-delivery wiring (M1.2)', () => {
+    // Production-shaped base that clears every OTHER fail-fast gate.
+    const prodBase = { NODE_ENV: 'production', CF_ORIGIN_SECRET: 's', MESSAGING_DRIVER: 'console' };
+    const jobDelivery = {
+      JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
+      SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
+      SCHEDULER_ROLE_ARN: 'arn:aws:iam::000000000000:role/hc-test-scheduler',
+    };
+
+    it('production throws when ANY of JOBS_QUEUE_URL / SCHEDULER_TARGET_ARN / SCHEDULER_ROLE_ARN is missing', () => {
+      expect(() => loadConfig(prodBase)).toThrow(/JOBS_QUEUE_URL.*SCHEDULER_TARGET_ARN.*SCHEDULER_ROLE_ARN/);
+      for (const missing of Object.keys(jobDelivery)) {
+        const env = { ...prodBase, ...jobDelivery, [missing]: undefined };
+        expect(() => loadConfig(env), missing).toThrow(new RegExp(missing));
+      }
+    });
+
+    it('production boots with the full wiring; local NODE_ENVs keep the in-memory path (no throw)', () => {
+      const config = loadConfig({ ...prodBase, ...jobDelivery });
+      expect(config.jobsQueueUrl).toBe(jobDelivery.JOBS_QUEUE_URL);
+      expect(config.schedulerTargetArn).toBe(jobDelivery.SCHEDULER_TARGET_ARN);
+      expect(config.schedulerRoleArn).toBe(jobDelivery.SCHEDULER_ROLE_ARN);
+
+      // development/test without any wiring still boot (WARN + in-memory).
+      expect(loadConfig({ NODE_ENV: 'development' }).jobsQueueUrl).toBeUndefined();
+      expect(loadConfig({ NODE_ENV: 'test' }).schedulerTargetArn).toBeUndefined();
+    });
+  });
 });

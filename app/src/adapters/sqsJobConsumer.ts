@@ -9,14 +9,17 @@
 // Delete semantics (SQS is at-least-once — handlers must tolerate the rare
 // duplicate delivery, e.g. a job overrunning the 120s visibility timeout):
 //   - handler success           -> DeleteMessage
-//   - handler/unknown-job throw -> NO delete: the visibility timeout
+//   - handler throw             -> NO delete: the visibility timeout
 //                                  redelivers; after maxReceiveCount (5) SQS
 //                                  dead-letters the message and the
 //                                  hc-<env>-jobs-dlq-depth alarm pages
-//   - unparseable body or       -> ERROR + DeleteMessage: a poison message
-//     malformed envelope           can never succeed on redelivery. Per doc
-//                                  §9, envelope-less payloads get a
-//                                  synthesized context plus a warning —
+//   - undispatchable body       -> ERROR + DeleteMessage: unparseable JSON
+//     (poison)                     and missing/unknown jobName can never
+//                                  succeed on redelivery (dispatchJob throws
+//                                  MalformedJobEnvelopeError for them).
+//                                  Envelope-less but DISPATCHABLE payloads
+//                                  are NOT poison: dispatchJob synthesizes a
+//                                  context, WARNs, and runs them (doc §9) —
 //                                  never blind, never crashed.
 import {
   DeleteMessageCommand,
@@ -26,7 +29,7 @@ import {
   type ReceiveMessageCommandOutput,
 } from '@aws-sdk/client-sqs';
 import { MalformedJobEnvelopeError } from '../jobs/jobs.js';
-import { newBootId, runWithContext, type CorrelationContext } from '../lib/context.js';
+import { newBootId, newJobRunId, runWithContext, type CorrelationContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 
 /** Minimal client surface so tests can inject a fake (no AWS calls). */
@@ -46,11 +49,13 @@ export interface SqsJobConsumerDeps {
   dispatch: (rawEvent: unknown) => Promise<void>;
   /**
    * Correlation context for CONSUMER-level log lines (the worker passes its
-   * bootContext): transport errors, poison-message deletions. Handler-side
-   * logs never use it — dispatchJob rehydrates the envelope's own context
-   * with a fresh jobRunId. Default: a synthesized bootId context (doc §9 —
-   * these lines must never be orphans). Falls back per-line, so it cannot
-   * trip the orphan-log alarm.
+   * bootContext): transport errors at this level directly; per-message
+   * dispatch lines (including dispatchJob's rejection ERRORs) get a fresh
+   * jobRunId layered on top. Handler-side logs never use it — dispatchJob
+   * rehydrates the envelope's own context with its own fresh jobRunId.
+   * Default: a synthesized bootId context (doc §9 — these lines must never
+   * be orphans). Falls back per-line, so it cannot trip the orphan-log
+   * alarm.
    */
   baseContext?: CorrelationContext;
   logger?: Logger;
@@ -140,13 +145,21 @@ export class SqsJobConsumer {
       return;
     }
 
+    // Base correlation context for the dispatch AND its error logging:
+    // dispatchJob's rejection ERRORs (malformed/undispatchable events) fire
+    // BEFORE any envelope context can be rehydrated — without this wrapper
+    // they would be orphan logs (doc §9 / the orphan-log alarm). The
+    // envelope's own context (fresh jobRunId minted inside dispatchJob)
+    // still wins for handler-side lines.
+    const messageContext: CorrelationContext = { ...this.baseContext, jobRunId: newJobRunId() };
     try {
-      await this.deps.dispatch(parsed);
+      await runWithContext(messageContext, () => this.deps.dispatch(parsed));
     } catch (err) {
       if (err instanceof MalformedJobEnvelopeError) {
-        // dispatchJob already ERROR-logged the rejection; redelivery can
-        // never fix a malformed envelope — delete instead of DLQ-cycling.
-        this.runInBase(() =>
+        // dispatchJob already ERROR-logged the rejection (unparseable shape
+        // or missing/unknown jobName); redelivery can never fix an
+        // undispatchable message — delete instead of DLQ-cycling.
+        runWithContext(messageContext, () =>
           this.log.warn(
             { sqsMessageId },
             'jobs consumer: malformed job envelope — deleting poison message',
@@ -155,11 +168,11 @@ export class SqsJobConsumer {
         await this.deleteMessage(message, 'poison');
         return;
       }
-      // Handler (or unknown-job) failure. dispatchJob ERROR-logged it inside
-      // the job's own correlation context — warn (not error) here so one
-      // failure costs exactly one ERROR line. NO delete: visibility timeout
-      // redelivers; the 5th receive dead-letters (DLQ-depth alarm).
-      this.runInBase(() =>
+      // Handler failure. dispatchJob ERROR-logged it inside the job's own
+      // correlation context — warn (not error) here so one failure costs
+      // exactly one ERROR line. NO delete: visibility timeout redelivers;
+      // the 5th receive dead-letters (DLQ-depth alarm).
+      runWithContext(messageContext, () =>
         this.log.warn(
           { sqsMessageId },
           'jobs consumer: dispatch failed — message left for redelivery (DLQ after 5 receives)',

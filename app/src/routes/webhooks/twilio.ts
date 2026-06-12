@@ -249,7 +249,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             { providerSid: MessageSid, optOut: optedOut },
             'opt-out/in from a phone with no contact record — conversation flagged, no contact to flag (auto-capture failed)',
           );
-          await audit.append(conversation.conversationId, eventType, {
+          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
             providerSid: MessageSid,
             conversationId: conversation.conversationId,
             source,
@@ -303,6 +303,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // carries the new count into the conversation.updated event.
     let touched: ConversationItem | undefined;
     try {
+      // Accepted risk (M1.2): the increment is skipped on dedupe re-runs, so
+      // a crash between append and increment permanently undercounts by one
+      // (per-message increment markers would fix it if it ever matters).
       if (!appended.deduped) await conversations.incrementUnread(persistedConversationId);
       touched = await conversations.touchLastActivity(
         persistedConversationId,

@@ -17,6 +17,7 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import { getContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
@@ -91,6 +92,32 @@ export function registerRetrySendJobHandler(deps: RetrySendJobDeps = {}): void {
     if (original.direction !== 'outbound') {
       log.warn({ providerSid: payload.providerSid }, 'retrySend: original message is not outbound — refusing');
       return;
+    }
+
+    // Execution guard (M1.2): SQS is at-least-once — a DeleteMessage
+    // failure, visibility overrun, or SIGTERM mid-flight redelivers this
+    // job, and re-running it would TEXT THE HUMAN AGAIN. The envelope's
+    // jobId (stable across redeliveries; dispatchJob stamps it into the
+    // context) is conditionally marked as executed BEFORE the provider
+    // send; a duplicate delivery resolves successfully so the consumer
+    // deletes the message instead of DLQ-cycling it.
+    const jobId = getContext()?.jobId;
+    if (typeof jobId === 'string' && jobId.length > 0) {
+      const firstExecution = await messages.putJobExecutionMarker(jobId, payload.conversationId);
+      if (!firstExecution) {
+        log.info(
+          { jobId, providerSid: payload.providerSid, conversationId: payload.conversationId },
+          'duplicate delivery suppressed',
+        );
+        return;
+      }
+    } else {
+      // Only reachable when invoked outside dispatchJob (which always
+      // stamps a jobId — real or synthesized) — flag it, don't refuse.
+      log.warn(
+        { providerSid: payload.providerSid },
+        'retrySend: no jobId in context — duplicate-delivery guard skipped',
+      );
     }
 
     let outcome;

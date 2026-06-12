@@ -9,7 +9,7 @@
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -68,6 +68,71 @@ describe.skipIf(!reachable)('conversation hub repos against DynamoDB Local (thro
     doc.destroy();
     client.destroy();
   }, 120_000);
+
+  describe('createOrGetByParticipantPhone — the phone-keyed claim (M1.2 race backstop)', () => {
+    it('two CONCURRENT creates for one new phone yield exactly one conversation, same id for both', async () => {
+      const phone = '+15550208888';
+      const [a, b] = await Promise.all([
+        conversations.createOrGetByParticipantPhone(phone, 'tenant_1to1'),
+        conversations.createOrGetByParticipantPhone(phone, 'tenant_1to1'),
+      ]);
+
+      expect(a.conversationId).toBe(b.conversationId);
+
+      // Exactly one real conversation row exists, matching the claim's ref.
+      const claim = await doc.send(
+        new GetCommand({
+          TableName: tableName('conversations', testEnv),
+          Key: { conversationId: `phone#${phone}` },
+        }),
+      );
+      expect(claim.Item?.['ref_conversationId']).toBe(a.conversationId);
+      const row = await conversations.getById(a.conversationId);
+      expect(row).toMatchObject({ participant_phone: phone, status: 'open', ai_mode: 'auto' });
+
+      // The claim must stay OUT of both GSIs: no participant_phone (sparse
+      // byParticipantPhone) and no status/last_activity_at (sparse
+      // byLastActivity) on the claim item.
+      expect(claim.Item).toEqual({
+        conversationId: `phone#${phone}`,
+        ref_conversationId: a.conversationId,
+      });
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: tableName('conversations', testEnv),
+          IndexName: 'byParticipantPhone',
+          KeyConditionExpression: 'participant_phone = :p',
+          ExpressionAttributeValues: { ':p': phone },
+        }),
+      );
+      expect(Items?.map((i) => i['conversationId'])).toEqual([a.conversationId]);
+    });
+
+    it('self-heals the claim-then-crash window: claim exists, row missing → next call creates the claimed id', async () => {
+      const phone = '+15550209999';
+      // Simulate a winner that claimed the phone and crashed before writing
+      // the conversation row.
+      await doc.send(
+        new PutCommand({
+          TableName: tableName('conversations', testEnv),
+          Item: { conversationId: `phone#${phone}`, ref_conversationId: 'conv-crashed-claim' },
+        }),
+      );
+
+      const healed = await conversations.createOrGetByParticipantPhone(phone, 'tenant_1to1');
+
+      expect(healed.conversationId).toBe('conv-crashed-claim'); // the claimed id, not a fresh one
+      expect(await conversations.getById('conv-crashed-claim')).toMatchObject({
+        participant_phone: phone,
+        status: 'open',
+        type: 'tenant_1to1',
+      });
+
+      // And a later call settles on the same conversation.
+      const again = await conversations.createOrGetByParticipantPhone(phone, 'tenant_1to1');
+      expect(again.conversationId).toBe('conv-crashed-claim');
+    });
+  });
 
   describe('setParticipantsIfAbsent — the auto-capture race anchor', () => {
     it('claims once; every later claim loses without overwriting the link', async () => {

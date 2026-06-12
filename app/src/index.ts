@@ -25,9 +25,10 @@ const config = loadConfig();
 // 30003 retry sends). In AWS, Terraform's jobs module (M1.2) wires
 // SCHEDULER_TARGET_ARN (the SQS jobs queue ARN) + SCHEDULER_ROLE_ARN, and
 // one-off EventBridge schedules deliver each envelope as an SQS message the
-// worker long-polls and dispatches. Locally both are unset: the in-memory
-// adapter accepts envelopes so enqueue never throws, but nothing delivers
-// them (deliverAll is test-only) — hence the WARN.
+// worker long-polls and dispatches. NODE_ENV=production without them never
+// reaches this point — loadConfig() fails fast. Locally both are unset: the
+// in-memory adapter accepts envelopes so enqueue never throws, but nothing
+// delivers them (deliverAll is test-only) — hence the WARN.
 if (config.schedulerTargetArn && config.schedulerRoleArn) {
   const { SchedulerClient } = await import('@aws-sdk/client-scheduler');
   const { EventBridgeSchedulerAdapter } = await import('./adapters/scheduler.js');
@@ -49,7 +50,7 @@ if (config.schedulerTargetArn && config.schedulerRoleArn) {
   configureScheduler(new InMemorySchedulerAdapter());
   runWithContext(bootContext, () => {
     logger.warn(
-      'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered (expected locally; in AWS it means the Terraform-managed params did not hydrate)',
+      'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered (local NODE_ENVs only; production fails fast at loadConfig instead)',
     );
   });
 }

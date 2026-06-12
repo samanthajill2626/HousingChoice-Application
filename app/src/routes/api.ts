@@ -10,7 +10,7 @@
 // LOG LINES never do — logs are IDs/counts only, correlated via the pino mixin.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
-import type { AppConfig } from '../lib/config.js';
+import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
@@ -45,6 +45,15 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
+ * The statuses conversations actually use (conversationsRepo: `open` is the
+ * only value any code path writes — create, touchLastActivity). ?status= is
+ * the byLastActivity partition key, so anything else is allowlisted here
+ * before it reaches DynamoDB; extend this set when a close/archive flow
+ * lands.
+ */
+const CONVERSATION_STATUSES = new Set(['open']);
+
+/**
  * SSE heartbeat period. CloudFront severs idle origin reads at 30s by
  * default — 25s comment frames keep the stream alive through it.
  */
@@ -72,11 +81,24 @@ function encodeCursor(lastEvaluatedKey: Record<string, unknown>): string {
   return Buffer.from(JSON.stringify(lastEvaluatedKey), 'utf8').toString('base64url');
 }
 
+/**
+ * Decode + validate a cursor against the EXACT ExclusiveStartKey shape for
+ * byLastActivity: { conversationId, status, last_activity_at }, all strings,
+ * nothing else. Anything off-shape is a 400 upstream — a client-tampered
+ * cursor must never reach DynamoDB as a malformed key.
+ */
 function decodeCursor(cursor: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+      const key = parsed as Record<string, unknown>;
+      const expected = ['conversationId', 'status', 'last_activity_at'];
+      if (
+        Object.keys(key).length === expected.length &&
+        expected.every((field) => typeof key[field] === 'string')
+      ) {
+        return key;
+      }
     }
   } catch {
     // fall through — malformed cursors are a 400, not a crash
@@ -96,6 +118,16 @@ function parseLimit(raw: unknown): number | undefined {
   return limit;
 }
 
+/** The shared conversation.updated payload (lib/events.ts shape) for a fresh item. */
+function toConversationUpdatedEvent(item: ConversationItem): ConversationUpdatedEvent {
+  return {
+    conversationId: item.conversationId,
+    last_activity_at: item.last_activity_at,
+    unread_count: item.unread_count ?? 0,
+    ...(item.last_message_preview !== undefined && { preview: item.last_message_preview }),
+  };
+}
+
 /** The denormalized summary the hub's inbox list renders (doc §5). */
 function toConversationSummary(item: ConversationItem): Record<string, unknown> {
   return {
@@ -113,6 +145,7 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
 
 export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
+  const config = deps.config ?? loadConfig();
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
@@ -121,7 +154,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const sendMessage =
     deps.sendMessageService ??
     createSendMessageService({
-      config: deps.config,
+      config,
       logger: deps.logger,
       conversationsRepo: conversations,
       messagesRepo: messages,
@@ -173,6 +206,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const rawStatus = req.query['status'];
     const status =
       typeof rawStatus === 'string' && rawStatus.length > 0 ? rawStatus : 'open';
+    if (!CONVERSATION_STATUSES.has(status)) {
+      res.status(400).json({
+        error: `status must be one of: ${[...CONVERSATION_STATUSES].join(', ')}`,
+      });
+      return;
+    }
 
     const limit = parseLimit(req.query['limit']);
     if (limit === undefined) {
@@ -243,6 +282,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     mergeContext({ conversationId });
     try {
       const conversation = await conversations.resetUnread(conversationId);
+      // SSE (M1.2): other connected dashboards drop their unread badge for
+      // this thread live (same event shape as every inbox-row change).
+      events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
       res.json({ conversation });
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
@@ -275,10 +317,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         assigneeUserId,
       );
       // §5 mandate: assignment flips are audit-trail events (old → new).
-      await audit.append(conversationId, 'assignment_changed', {
+      await audit.append(`conversations#${conversationId}`, 'assignment_changed', {
         from: previousAssigneeUserId,
         to: assigneeUserId,
       });
+      // SSE (M1.2): assignment changes refresh the inbox row live (clients
+      // re-read the summary; the event shape stays the shared one).
+      events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
       res.json({ conversation });
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
@@ -302,7 +347,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // untouched, so res.write() flushes straight to the socket. The headers
   // below keep CloudFront (and any future proxy) from buffering or
   // transforming the stream; heartbeat comments keep it from idling out.
+  //
+  // Connection cap (SSE_MAX_CONNECTIONS, default 50): each stream holds a
+  // socket + heartbeat timer + bus listener pair forever — unbounded
+  // accepts would let one misbehaving client exhaust the single t4g.small.
+  // Beyond the cap → 503 (clients retry/poll); a close frees its slot.
+  let sseConnections = 0;
   router.get('/events', (req, res) => {
+    if (sseConnections >= config.sseMaxConnections) {
+      log.warn(
+        { sseConnections, sseMaxConnections: config.sseMaxConnections },
+        'sse connection cap reached — rejecting new stream with 503',
+      );
+      res.status(503).json({ error: 'too many event streams' });
+      return;
+    }
+    sseConnections += 1;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -339,6 +399,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // trip the orphan-log alarm.
     const ctx = getContext() ?? {};
     res.on('close', () => {
+      sseConnections -= 1; // free the cap slot ('close' fires exactly once)
       clearInterval(heartbeat);
       events.off('conversation.updated', onConversationUpdated);
       events.off('message.persisted', onMessagePersisted);

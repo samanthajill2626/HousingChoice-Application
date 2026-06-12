@@ -71,12 +71,16 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
   });
 
   it('unconfigured validation FAILS CLOSED in production (403 + ERROR), allows with WARN in development', async () => {
-    // production, no TWILIO_AUTH_TOKEN / PUBLIC_BASE_URL
+    // production, no TWILIO_AUTH_TOKEN / PUBLIC_BASE_URL (job-delivery vars
+    // present — production fail-fasts without them since M1.2)
     const prod = makeWebhookHarness({
       env: {
         NODE_ENV: 'production',
         TWILIO_AUTH_TOKEN: undefined,
         PUBLIC_BASE_URL: undefined,
+        JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
+        SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
+        SCHEDULER_ROLE_ARN: 'arn:aws:iam::000000000000:role/hc-test-scheduler',
       },
     });
     const prodRes = await signedTwilioPost(prod.app, SMS_PATH, inboundSmsParams());

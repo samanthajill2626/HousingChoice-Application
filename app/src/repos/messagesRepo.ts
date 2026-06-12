@@ -10,13 +10,15 @@
 // SID→location pointer: every append also writes `{ PK: sid#<providerSid>,
 // SK: ptr }` carrying conversationId + tsMsgId, in the SAME transaction —
 // Twilio status callbacks identify messages by SID alone and recover context
-// by lookup (doc §9). Pointer partitions (`sid#…`) never collide with real
-// conversation partitions, so listByConversation never sees them.
+// by lookup (doc §9). Pointer partitions (`sid#…`, and the `job#…` execution
+// markers below) never collide with real conversation partitions, so
+// listByConversation never sees them.
 //
 // PII: message bodies must NEVER be logged (doc §9) — IDs and lengths only.
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
   GetCommand,
+  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
@@ -133,6 +135,14 @@ export interface MessagesRepo {
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
+  /**
+   * Execution guard for duplicate-sensitive jobs (M1.2): conditionally
+   * record that the job with this envelope jobId ran — `{ PK: job#<jobId>,
+   * SK: ran }`, the same pointer-partition trick as the SID items. True =
+   * first execution (proceed); false = this jobId already ran (an SQS
+   * redelivery — suppress the side effect).
+   */
+  putJobExecutionMarker(jobId: string, conversationId: string): Promise<boolean>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -140,6 +150,11 @@ const DEFAULT_PAGE_LIMIT = 50;
 /** Pointer partition key for a provider SID. */
 function sidPk(providerSid: string): string {
   return `sid#${providerSid}`;
+}
+
+/** Marker partition key for a job execution (see putJobExecutionMarker). */
+function jobPk(jobId: string): string {
+  return `job#${jobId}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -328,6 +343,27 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         },
         'message annotated',
       );
+    },
+
+    async putJobExecutionMarker(jobId, conversationId) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: jobPk(jobId),
+              tsMsgId: 'ran',
+              ref_conversationId: conversationId,
+              executed_at: new Date().toISOString(),
+            },
+            ConditionExpression: 'attribute_not_exists(tsMsgId)',
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+      return true;
     },
 
     async listByConversation(conversationId, opts = {}) {

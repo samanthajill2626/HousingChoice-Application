@@ -103,10 +103,10 @@ describe('jobs: context survives a job round-trip', () => {
     expect(observed).toBe(traceparent);
   });
 
-  it('rejects malformed envelopes and unknown job names', async () => {
+  it('rejects undispatchable events: no jobName, not an object, unknown job names', async () => {
     defineJobHandler('demo.echo', () => undefined);
 
-    await expect(dispatchJob({ not: 'an envelope' })).rejects.toThrow(/envelope version/);
+    await expect(dispatchJob({ not: 'an envelope' })).rejects.toThrow(/missing jobName/);
     await expect(dispatchJob(null)).rejects.toThrow(/not an object/);
 
     await runWithContext({ requestId: newRequestId() }, () => enqueue('demo.echo', {}));
@@ -116,5 +116,56 @@ describe('jobs: context survives a job round-trip', () => {
     await expect(dispatchJob(JSON.parse(JSON.stringify(tampered)))).rejects.toThrow(
       /no handler registered/,
     );
+  });
+
+  describe('envelope-less payloads (§9 synthesize-and-run)', () => {
+    it('runs a dispatchable bare payload under a synthesized context and WARNs', async () => {
+      const capture = createLogCapture();
+      configureJobsLogger(createLogger({ level: 'info', destination: capture.stream }));
+      let observed: CorrelationContext | undefined;
+      let observedPayload: unknown;
+      defineJobHandler('demo.echo', (payload) => {
+        observed = getContext();
+        observedPayload = payload;
+      });
+
+      // Resolvable jobName + payload object, NO correlation fields at all.
+      await dispatchJob({ jobName: 'demo.echo', payload: { hello: 'bare' } });
+
+      expect(observedPayload).toEqual({ hello: 'bare' });
+      expect(observed?.originType).toBe('synthesized');
+      expect(observed?.jobRunId).toBeDefined();
+      expect(observed?.jobId).toBeDefined(); // fresh — bare payloads carry none
+      expect(observed?.traceparent).toMatch(TRACEPARENT_RE);
+      const warn = capture
+        .atLevel(40)
+        .find((l) => String(l['msg']).includes('envelope-less payload — context synthesized'));
+      expect(warn).toBeDefined();
+      expect(typeof warn?.['correlationId']).toBe('string'); // never an orphan
+    });
+
+    it('synthesizes when correlation fields are INVALID (not just missing)', async () => {
+      configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
+      let ran = false;
+      defineJobHandler('demo.echo', () => {
+        ran = true;
+      });
+
+      await dispatchJob({
+        jobName: 'demo.echo',
+        payload: {},
+        correlationContext: 'not-an-object',
+        traceparent: 42,
+        enqueuedAt: null,
+      });
+      expect(ran).toBe(true);
+    });
+
+    it('still rejects a bare payload that is not an object (undispatchable)', async () => {
+      defineJobHandler('demo.echo', () => undefined);
+      await expect(dispatchJob({ jobName: 'demo.echo', payload: 'just a string' })).rejects.toThrow(
+        /payload is not an object/,
+      );
+    });
   });
 });

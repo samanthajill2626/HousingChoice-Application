@@ -77,15 +77,17 @@ data "aws_iam_policy_document" "app" {
     resources = [var.media_bucket_arn]
   }
 
-  # Jobs queue (M1.2): the worker consumes (Receive/Delete/GetQueueAttributes);
-  # SendMessage so the app can also write direct-to-queue later. Queue ARN only.
+  # Jobs queue (M1.2): the worker consumes ONLY (Receive/Delete/
+  # GetQueueAttributes). No sqs:SendMessage — nothing app-side sends
+  # direct-to-queue (guideline: ALL job traffic goes through jobs.enqueue()
+  # -> EventBridge Scheduler, which writes to the queue via ITS role below).
+  # Queue ARN only.
   statement {
     sid = "JobsQueue"
     actions = [
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes",
-      "sqs:SendMessage",
     ]
     resources = [var.jobs_queue_arn]
   }

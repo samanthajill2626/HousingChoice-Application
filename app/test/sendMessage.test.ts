@@ -106,6 +106,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     updateDeliveryStatus: async () => true,
     listByConversation: async () => [],
     annotateMessage: async () => {},
+    putJobExecutionMarker: async () => true,
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {
@@ -213,7 +214,7 @@ describe('sendMessage service', () => {
     await f.service({ conversationId: 'conv-1', body: 'audit me' });
     expect(f.auditEvents).toEqual([
       {
-        entityKey: 'conv-1',
+        entityKey: 'conversations#conv-1',
         eventType: 'message_sent',
         payload: { providerSid: 'SMfake-1', automated: false, author: 'teammate' },
       },
@@ -287,7 +288,7 @@ describe('sendMessage service', () => {
       // message_sent events from the allowed sends.
       expect(f.auditEvents.filter((e) => e.eventType === 'mode_changed')).toEqual([
         {
-          entityKey: 'conv-1',
+          entityKey: 'conversations#conv-1',
           eventType: 'mode_changed',
           payload: { from: 'auto', to: 'manual', reason: 'breaker_trip' },
         },

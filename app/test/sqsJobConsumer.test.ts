@@ -196,6 +196,58 @@ describe('SqsJobConsumer', () => {
     ).toBe(true);
   });
 
+  it('deletes an UNKNOWN jobName as poison (ERROR from the gate, warn + delete here) — never DLQ-cycled', async () => {
+    const envelope = { ...makeEnvelope(), jobName: 'demo.unregistered' };
+    const { client, deletes } = makeFakeSqs([[makeMessage('m1', JSON.stringify(envelope))]]);
+
+    const consumer = makeConsumer(client, dispatchJob);
+    consumer.start();
+    await consumer.stop();
+
+    expect(deletes).toHaveLength(1); // redelivery can never register the handler
+    expect(
+      capture.atLevel(50).some((l) => String(l['msg']).includes('malformed job envelope rejected')),
+    ).toBe(true);
+    expect(
+      capture.atLevel(40).some((l) => String(l['msg']).includes('deleting poison message')),
+    ).toBe(true);
+  });
+
+  it('runs an envelope-less but DISPATCHABLE payload (synthesized context) and deletes on success', async () => {
+    const { client, deletes } = makeFakeSqs([
+      [makeMessage('m1', JSON.stringify({ jobName: 'demo.echo', payload: { hello: 'bare' } }))],
+    ]);
+    let observedPayload: unknown;
+    defineJobHandler('demo.echo', (payload) => {
+      observedPayload = payload;
+    });
+
+    const consumer = makeConsumer(client, dispatchJob);
+    consumer.start();
+    await consumer.stop();
+
+    expect(observedPayload).toEqual({ hello: 'bare' }); // ran, not deleted as poison
+    expect(deletes).toHaveLength(1); // success delete
+    expect(
+      capture.atLevel(40).some((l) => String(l['msg']).includes('context synthesized')),
+    ).toBe(true);
+  });
+
+  it('M3: the gate rejection ERROR always carries a correlationId (never an orphan log)', async () => {
+    const { client } = makeFakeSqs([[makeMessage('m1', '{"not":"an envelope"}')]]);
+
+    const consumer = makeConsumer(client, dispatchJob);
+    consumer.start();
+    await consumer.stop();
+
+    const rejection = capture
+      .atLevel(50)
+      .find((l) => String(l['msg']).includes('malformed job envelope rejected'))!;
+    expect(rejection).toBeDefined();
+    expect(typeof rejection['correlationId']).toBe('string');
+    expect((rejection['correlationId'] as string).length).toBeGreaterThan(0);
+  });
+
   it('graceful shutdown: stop() waits for in-flight dispatches (and their deletes) to finish', async () => {
     const envelope = makeEnvelope();
     const { client, deletes } = makeFakeSqs([[makeMessage('m1', JSON.stringify(envelope))]]);

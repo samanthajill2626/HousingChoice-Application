@@ -51,6 +51,7 @@ module "params" {
   # distribution; cloudfront's origin_secret input depends on random_password.
   # Terraform graphs at resource granularity, so this resolves cleanly.
   public_base_url = "https://${module.cloudfront.domain_name}"
+  media_bucket    = module.s3_media.bucket_name
 }
 
 module "ec2" {

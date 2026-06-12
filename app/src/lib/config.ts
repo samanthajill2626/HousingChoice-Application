@@ -58,6 +58,19 @@ export interface AppConfig {
    * conversation per minute before the breaker trips (doc §7.1).
    */
   sendBreakerMaxPerMinute: number;
+  /**
+   * OUR business phone numbers (E.164, from comma-separated
+   * OUR_PHONE_NUMBERS). The webhook echo/author check (doc §7.1 defense 1):
+   * an inbound webhook whose From matches one of these is our own outbound
+   * projected back — acknowledged and dropped, never processed.
+   */
+  ourPhoneNumbers: string[];
+  /**
+   * S3 bucket inbound MMS media is mirrored into (MEDIA_BUCKET) —
+   * Terraform-managed in AWS (the s3_media module's bucket). Unset locally:
+   * media mirroring is skipped with a log instead.
+   */
+  mediaBucket?: string;
 }
 
 /** Dev-only fallback; matches .env.example. Never used when NODE_ENV=production. */
@@ -120,6 +133,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  // Comma-separated E.164 list; whitespace tolerated; empty/unset = none
+  // (the echo defense then relies on SID dedupe alone — layer 2).
+  const ourPhoneNumbers = (env.OUR_PHONE_NUMBERS ?? '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter((n) => n.length > 0);
+  for (const n of ourPhoneNumbers) {
+    if (!/^\+[1-9]\d{1,14}$/.test(n)) {
+      // Fail fast on a malformed list: a silently-dropped business number
+      // disables the echo/author defense for that number.
+      throw new Error(`OUR_PHONE_NUMBERS entries must be E.164 (+1...), got: ${n}`);
+    }
+  }
+
   return {
     nodeEnv,
     port,
@@ -140,5 +167,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
+    ourPhoneNumbers,
+    mediaBucket: env.MEDIA_BUCKET,
   };
 }

@@ -85,7 +85,24 @@ export interface MessageItem {
   delivery_status: DeliveryStatus;
   error_code?: string;
   created_at: string;
+  /** S3 keys of mirrored MMS media (M1.1 webhook path), index-aligned-by-key. */
+  media_s3_keys?: string[];
+  /** Set on a 30003 retry send: the tsMsgId of the message being retried. */
+  retry_of?: string;
+  /** 1-based retry attempt number (caps the 30003 retry chain, doc §7.1). */
+  retry_attempt?: number;
   [key: string]: unknown;
+}
+
+/**
+ * Post-append annotations (M1.1 Builder B). The timeline stays append-only in
+ * the doc-§5 sense — content (body/author/direction) is never rewritten;
+ * these add operational metadata the same way delivery_status updates do.
+ */
+export interface MessageAnnotations {
+  mediaS3Keys?: string[];
+  retryOf?: string;
+  retryAttempt?: number;
 }
 
 export interface AppendResult {
@@ -113,6 +130,8 @@ export interface MessagesRepo {
   updateDeliveryStatus(sid: string, status: DeliveryStatus, errorCode?: string): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
+  /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
+  annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -258,6 +277,43 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
       log.info({ providerSid: sid, status, errorCode }, 'delivery status updated');
       return true;
+    },
+
+    async annotateMessage(conversationId, tsMsgId, annotations) {
+      const sets: string[] = [];
+      const values: Record<string, unknown> = {};
+      if (annotations.mediaS3Keys !== undefined) {
+        sets.push('media_s3_keys = :mediaKeys');
+        values[':mediaKeys'] = annotations.mediaS3Keys;
+      }
+      if (annotations.retryOf !== undefined) {
+        sets.push('retry_of = :retryOf');
+        values[':retryOf'] = annotations.retryOf;
+      }
+      if (annotations.retryAttempt !== undefined) {
+        sets.push('retry_attempt = :retryAttempt');
+        values[':retryAttempt'] = annotations.retryAttempt;
+      }
+      if (sets.length === 0) return;
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId, tsMsgId },
+          UpdateExpression: `SET ${sets.join(', ')}`,
+          ConditionExpression: 'attribute_exists(tsMsgId)',
+          ExpressionAttributeValues: values,
+        }),
+      );
+      log.info(
+        {
+          conversationId,
+          tsMsgId,
+          mediaKeyCount: annotations.mediaS3Keys?.length,
+          retryOf: annotations.retryOf,
+          retryAttempt: annotations.retryAttempt,
+        },
+        'message annotated',
+      );
     },
 
     async listByConversation(conversationId, opts = {}) {

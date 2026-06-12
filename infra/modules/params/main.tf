@@ -67,3 +67,10 @@ resource "aws_ssm_parameter" "public_base_url" {
   type        = "String"
   value       = var.public_base_url
 }
+
+resource "aws_ssm_parameter" "media_bucket" {
+  name        = "/hc/${var.env}/app/MEDIA_BUCKET"
+  description = "S3 media bucket (s3_media module) the app mirrors inbound MMS media into (M1.1)."
+  type        = "String"
+  value       = var.media_bucket
+}

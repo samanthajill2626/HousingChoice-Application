@@ -14,7 +14,8 @@ await startOtel();
 const { installProcessErrorHandlers } = await import('./lib/errors.js');
 const { logger } = await import('./lib/logger.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
-const { defineJobHandler, registeredJobNames } = await import('./jobs/jobs.js');
+const { registeredJobNames } = await import('./jobs/jobs.js');
+const { registerRetrySendJobHandler } = await import('./jobs/retrySend.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -22,12 +23,10 @@ const bootContext = { bootId: newBootId() };
 
 installProcessErrorHandlers(logger, bootContext);
 
-// PLACEHOLDER handler — demo no-op so the registry isn't empty. Remove once
-// real job handlers land (Phase 1). Dispatch-time logs use the JOB context
-// (fresh jobRunId), not the boot context.
-defineJobHandler('noop.ping', (payload) => {
-  logger.info({ payload }, 'noop.ping handled (placeholder)');
-});
+// M1.1: transient-delivery-failure (30003) retry sends, enqueued by the
+// Twilio status webhook. Dispatch-time logs use the JOB context (fresh
+// jobRunId rehydrated from the envelope), not the boot context.
+registerRetrySendJobHandler();
 
 runWithContext(bootContext, () => {
   logger.info(

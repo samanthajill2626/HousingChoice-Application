@@ -11,6 +11,7 @@ const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { buildApp } = await import('./app.js');
+const { configureScheduler } = await import('./jobs/jobs.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -19,6 +20,31 @@ const bootContext = { bootId: newBootId() };
 installProcessErrorHandlers(logger, bootContext);
 
 const config = loadConfig();
+
+// jobs.enqueue() needs a SchedulerAdapter (M1.1: the status webhook enqueues
+// 30003 retry sends). EventBridge when Terraform has wired the target/role
+// ARNs; until then (and locally) the in-memory adapter accepts envelopes so
+// enqueue never throws — undelivered, since no event source exists yet.
+if (config.schedulerTargetArn && config.schedulerRoleArn) {
+  const { SchedulerClient } = await import('@aws-sdk/client-scheduler');
+  const { EventBridgeSchedulerAdapter } = await import('./adapters/scheduler.js');
+  configureScheduler(
+    new EventBridgeSchedulerAdapter({
+      client: new SchedulerClient({ region: config.awsRegion }),
+      targetArn: config.schedulerTargetArn,
+      roleArn: config.schedulerRoleArn,
+    }),
+  );
+} else {
+  const { InMemorySchedulerAdapter } = await import('./adapters/scheduler.js');
+  configureScheduler(new InMemorySchedulerAdapter());
+  runWithContext(bootContext, () => {
+    logger.warn(
+      'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered to the worker (EventBridge wiring is a later milestone)',
+    );
+  });
+}
+
 const app = buildApp({ config });
 
 const server = runWithContext(bootContext, () =>

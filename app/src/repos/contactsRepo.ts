@@ -29,6 +29,8 @@ export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
   setFlag(contactId: string, flag: ContactFlag): Promise<void>;
+  /** Clear a flag (START/UNSTOP re-subscribes after a STOP, doc §7.1). */
+  clearFlag(contactId: string, flag: ContactFlag): Promise<void>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -61,6 +63,20 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         }),
       );
       log.info({ contactId, flag }, 'contact flag set');
+    },
+
+    async clearFlag(contactId, flag) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { contactId },
+          UpdateExpression: 'SET #flag = :false',
+          ConditionExpression: 'attribute_exists(contactId)',
+          ExpressionAttributeNames: { '#flag': flag },
+          ExpressionAttributeValues: { ':false': false },
+        }),
+      );
+      log.info({ contactId, flag }, 'contact flag cleared');
     },
   };
 }

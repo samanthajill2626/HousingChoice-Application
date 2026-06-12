@@ -12,6 +12,7 @@ export const MANAGED_BY_OTHERS = Object.freeze([
   'CF_ORIGIN_SECRET',
   'DEPLOYED_TAG',
   'LOG_LEVEL',
+  'MEDIA_BUCKET',
   'NODE_ENV',
   'PORT',
   'PUBLIC_BASE_URL',

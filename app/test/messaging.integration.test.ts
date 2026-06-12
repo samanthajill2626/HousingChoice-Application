@@ -14,6 +14,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
+import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo, minuteBucket } from '../src/repos/conversationsRepo.js';
 import { createMessagesRepo, type NewMessage } from '../src/repos/messagesRepo.js';
@@ -63,9 +64,10 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
   const conversations = createConversationsRepo(repoDeps);
   const messages = createMessagesRepo(repoDeps);
   const contacts = createContactsRepo(repoDeps);
+  const audit = createAuditRepo(repoDeps);
 
-  // Only the three tables the messaging repos touch.
-  const bases = ['contacts', 'conversations', 'messages'] as const;
+  // Only the four tables the messaging repos touch.
+  const bases = ['contacts', 'conversations', 'messages', 'audit_events'] as const;
 
   beforeAll(async () => {
     for (const base of bases) {
@@ -173,6 +175,26 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
       expect(await messages.updateDeliveryStatus('SMghost', 'delivered')).toBe(false);
     });
 
+    it('annotateMessage stamps media keys / retry lineage onto an existing message (M1.1 webhooks)', async () => {
+      await messages.append(outbound(convId, 'SMannotate1', '2026-06-12T10:04:00.000Z', 'annotate me'));
+      await messages.annotateMessage(convId, '2026-06-12T10:04:00.000Z#SMannotate1', {
+        mediaS3Keys: [`media/${convId}/SMannotate1/0`],
+        retryOf: '2026-06-12T10:00:00.000Z#SMdup1',
+        retryAttempt: 1,
+      });
+      const annotated = await messages.getByProviderSid('SMannotate1');
+      expect(annotated).toMatchObject({
+        media_s3_keys: [`media/${convId}/SMannotate1/0`],
+        retry_of: '2026-06-12T10:00:00.000Z#SMdup1',
+        retry_attempt: 1,
+        body: 'annotate me', // content untouched — annotations only
+      });
+      // annotating a nonexistent message fails the conditional write
+      await expect(
+        messages.annotateMessage(convId, '2026-06-12T10:04:00.000Z#SMnope', { retryAttempt: 1 }),
+      ).rejects.toThrow();
+    });
+
     it('listByConversation pages newest-first and never returns sid pointer items', async () => {
       const page = await messages.listByConversation(convId, { limit: 10 });
       expect(page.length).toBeGreaterThanOrEqual(4);
@@ -201,6 +223,41 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
 
       await contacts.setFlag('contact-it-1', 'sms_opt_out');
       expect((await contacts.findByPhone('+15550105555'))?.sms_opt_out).toBe(true);
+    });
+
+    it('clearFlag flips a suppression flag back off (START/UNSTOP, M1.1)', async () => {
+      await contacts.clearFlag('contact-it-1', 'sms_opt_out');
+      expect((await contacts.findByPhone('+15550105555'))?.sms_opt_out).toBe(false);
+      // conditional on the contact existing, like setFlag
+      await expect(contacts.clearFlag('contact-ghost', 'sms_opt_out')).rejects.toThrow();
+    });
+  });
+
+  describe('auditRepo', () => {
+    it('appends events under PK entityKey / SK ts, chronologically sortable and collision-free', async () => {
+      const { QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+      await audit.append('contacts#contact-it-1', 'sms_opt_out_recorded', { providerSid: 'SMaudit1' });
+      await audit.append('contacts#contact-it-1', 'sms_opt_out_cleared', { providerSid: 'SMaudit2' });
+
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: tableName('audit_events', testEnv),
+          KeyConditionExpression: 'entityKey = :k',
+          ExpressionAttributeValues: { ':k': 'contacts#contact-it-1' },
+        }),
+      );
+      const items = (Items ?? []) as { ts: string; event_type: string; payload: Record<string, unknown> }[];
+      expect(items).toHaveLength(2);
+      // Same-millisecond appends must not collide: the random SK suffix keeps
+      // both, so order within a millisecond is unspecified — assert contents.
+      expect(new Set(items.map((i) => i.ts)).size).toBe(2);
+      expect(items.map((i) => i.event_type).sort()).toEqual([
+        'sms_opt_out_cleared',
+        'sms_opt_out_recorded',
+      ]);
+      const recorded = items.find((i) => i.event_type === 'sms_opt_out_recorded')!;
+      expect(recorded.payload).toEqual({ providerSid: 'SMaudit1' });
+      expect(items.every((i) => /^\d{4}-\d{2}-\d{2}T.*#.{8}$/.test(i.ts))).toBe(true);
     });
   });
 });

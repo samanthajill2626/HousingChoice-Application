@@ -1,6 +1,34 @@
-// housingchoice app — placeholder entrypoint.
-// Express server, middleware chain, and logging core (pino) arrive in M0.2.
-console.log(
-  'housingchoice app — placeholder entrypoint. Express server, middleware chain, and logging core arrive in M0.2.',
-);
-process.exit(0);
+// app process entrypoint: HTTP/API/webhooks.
+//
+// OTel must be loaded/started FIRST (before express/http are imported), so
+// everything below the startOtel() call uses dynamic imports.
+import { startOtel } from './lib/otel.js';
+
+await startOtel();
+
+const { installProcessErrorHandlers } = await import('./lib/errors.js');
+const { logger } = await import('./lib/logger.js');
+const { loadConfig } = await import('./lib/config.js');
+const { buildApp } = await import('./app.js');
+
+installProcessErrorHandlers();
+
+const config = loadConfig();
+const app = buildApp({ config });
+
+const server = app.listen(config.port, () => {
+  logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'app listening');
+});
+
+function shutdown(signal: NodeJS.Signals): void {
+  logger.info({ signal }, 'shutdown signal received — closing server');
+  server.close(() => {
+    logger.info('server closed — exiting');
+    process.exit(0);
+  });
+  // Don't hang forever on stuck keep-alive sockets.
+  setTimeout(() => process.exit(0), 10_000).unref();
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

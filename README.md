@@ -12,7 +12,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 |---|---|---|
 | M0.0 | ✅ | Decisions locked: TypeScript, Vitest, us-east-1, Node 24 |
 | M0.1 | ✅ | Repo scaffold: workspaces, lint/tsconfig, placeholder entrypoints, Docker/compose, seams (git remote: Azure, to be added) |
-| M0.2 | ☐ | Express server + locked middleware chain, pino logging core, jobs.enqueue()/defineJobHandler() gates |
+| M0.2 | ✅ | Express 5 server + locked middleware chain, pino logging core (correlation context + orphan-log detection), OTel seam, jobs.enqueue()/defineJobHandler() gates with scheduler adapters |
 | M0.3 | ☐ | Full local dev loop: multi-process dev, DynamoDB Local, repos layer |
 | M0.4 | ☐ | Terraform: both stacks (network, EC2, DynamoDB x9, S3, ECR, SES, Parameter Store, CloudFront, observability, budget), `plan`/`apply`/`drift` |
 | M0.5 | ☐ | Deploy path: buildx ARM64 image → ECR → EC2, .env hydration from Parameter Store, `deploy:dev`/`deploy:prod` |
@@ -31,10 +31,11 @@ This table is the changelog of every place the build intentionally deviates from
 ```
 app/                  @housingchoice/app — the monolith (both processes)
   src/
-    index.ts          app process entrypoint (placeholder until M0.2)
-    worker.ts         worker process entrypoint (placeholder until M0.2)
-    routes/           Express routers (M0.2+)
+    index.ts          app process entrypoint (Express server, M0.2)
+    worker.ts         worker process entrypoint (job registry + keep-alive, M0.2)
+    routes/           Express routers (health since M0.2)
       webhooks/       inbound provider webhooks — seam for Twilio etc. (Phase 1)
+    middleware/       the locked Express middleware chain (correlation, request logger, origin secret)
     services/         business logic, vendor-agnostic
     adapters/         thin wrappers around external systems (Twilio, EventBridge, SES, AI) — only place vendor SDKs are imported
     repos/            DynamoDB data access (M0.3)

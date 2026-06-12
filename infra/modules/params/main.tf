@@ -60,3 +60,10 @@ resource "aws_ssm_parameter" "node_env" {
   type        = "String"
   value       = "production"
 }
+
+resource "aws_ssm_parameter" "public_base_url" {
+  name        = "/hc/${var.env}/app/PUBLIC_BASE_URL"
+  description = "Public https entry point (the CloudFront domain) — Twilio webhook signature reconstruction needs the exact public URL (M1.1)."
+  type        = "String"
+  value       = var.public_base_url
+}

@@ -47,6 +47,10 @@ module "params" {
 
   env          = local.env
   table_prefix = local.name_prefix
+  # NOT a cycle: only the PUBLIC_BASE_URL param resource depends on the
+  # distribution; cloudfront's origin_secret input depends on random_password.
+  # Terraform graphs at resource granularity, so this resolves cleanly.
+  public_base_url = "https://${module.cloudfront.domain_name}"
 }
 
 module "ec2" {

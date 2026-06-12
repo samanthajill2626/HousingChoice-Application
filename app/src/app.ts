@@ -16,6 +16,7 @@ import { logger as defaultLogger, type Logger } from './lib/logger.js';
 import { correlationMiddleware } from './middleware/correlation.js';
 import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
+import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { healthRouter } from './routes/health.js';
 import { webhooksRouter } from './routes/webhooks/index.js';
 
@@ -27,6 +28,8 @@ export interface RequestWithRawBody extends Request {
 export interface BuildAppDeps {
   config?: AppConfig;
   logger?: Logger;
+  /** Test seam: injected /api dependencies (fake send service, no DynamoDB). */
+  api?: Pick<ApiRouterDeps, 'sendMessageService'>;
   /** Test seam: register extra routes after the built-ins, before the error handler. */
   configureRoutes?: (app: Express) => void;
 }
@@ -56,6 +59,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // (4) routes
   app.use(healthRouter);
   app.use('/webhooks', webhooksRouter);
+  app.use('/api', createApiRouter({ config, logger: log, ...deps.api }));
   deps.configureRoutes?.(app);
 
   // (last) error handler

@@ -30,6 +30,7 @@ This table is the changelog of every place the build intentionally deviates from
 | 2026-06-11 | Terraform state | One shared state bucket, created manually as a one-time step | Two per-env buckets (`hc-dev-tfstate-…`, `hc-prod-tfstate-…`) created by the idempotent, account-guarded `npm run bootstrap` | Per-stack IAM isolation (prod role can't read dev state), names follow the `hc-dev-`/`hc-prod-` prefix rule, and nothing infrastructure-shaped is typed by hand. |
 | 2026-06-12 | Source hosting | GitHub (private repo) | Azure DevOps | Org standard. Remote being configured — until the first push lands, this machine holds the only copy of the repo. |
 | 2026-06-11 | Admin access | IAM admin via Identity Center, MFA on | Long-lived IAM-user keys (CLI profile `housingchoice`); MFA on root only, IAM-user MFA deferred | Solo operator; daily `aws sso login` rejected as unacceptable dev friction. Mitigations: account-ID guard in all mutating scripts, named profile (default chain never used), IAM-user MFA tracked as a RUNBOOK hardening item. |
+| 2026-06-12 | Messaging (M1.1) | Twilio Conversations product for 1:1 threads (§5 "1:1 Conversation SID" binding; §7.1 Conversations webhooks) | Twilio Programmable Messaging for everything — all sends via the A2P Messaging Service; the DynamoDB `conversations` table is the only thread model | The masked-relay decision already removed the group-MMS need that motivated Conversations; one integration instead of two; the `conversations` table stores participant phone numbers, not Conversation SIDs. |
 
 ## Repo layout
 

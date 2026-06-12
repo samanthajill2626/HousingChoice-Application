@@ -96,13 +96,14 @@ describe('maskValue', () => {
 });
 
 describe('findDenylistedKeys (Terraform/deploy-managed params)', () => {
-  it('the denylist is exactly the six managed params', () => {
+  it('the denylist is exactly the seven managed params', () => {
     expect([...MANAGED_BY_OTHERS].sort()).toEqual([
       'CF_ORIGIN_SECRET',
       'DEPLOYED_TAG',
       'LOG_LEVEL',
       'NODE_ENV',
       'PORT',
+      'PUBLIC_BASE_URL',
       'TABLE_PREFIX',
     ]);
   });

@@ -20,7 +20,8 @@
     "@opentelemetry/instrumentation-http": "^0.219.0",
     "@opentelemetry/sdk-node": "^0.219.0",
     "express": "^5.2.1",
-    "pino": "^9.14.0"
+    "pino": "^9.14.0",
+    "twilio": "^6.0.2"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

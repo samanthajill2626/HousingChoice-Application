@@ -14,6 +14,7 @@ export const MANAGED_BY_OTHERS = Object.freeze([
   'LOG_LEVEL',
   'NODE_ENV',
   'PORT',
+  'PUBLIC_BASE_URL',
   'TABLE_PREFIX',
 ]);
 

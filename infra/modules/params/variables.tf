@@ -19,3 +19,8 @@ variable "app_port" {
   type        = number
   default     = 8080
 }
+
+variable "public_base_url" {
+  description = "Public https base URL of the stack (https://<cloudfront domain>)."
+  type        = string
+}

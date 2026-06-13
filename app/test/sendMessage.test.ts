@@ -67,6 +67,10 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
   const conversationsRepo: ConversationsRepo = {
     createOrGetByParticipantPhone: async () => conversation,
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
+    findByParticipantPhone: async () => [conversation],
+    setType: async (_id, type) => {
+      conversation.type = type;
+    },
     touchLastActivity: async (_id, previewText, ts) => {
       fakes.touched.push({ previewText, ts });
       conversation.last_activity_at = ts;
@@ -96,6 +100,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     createIfAbsent: async () => true,
     setFlag: async () => {},
     clearFlag: async () => {},
+    update: async () => contact!,
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

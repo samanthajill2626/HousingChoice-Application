@@ -73,12 +73,19 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     },
     async setFlag() {},
     async clearFlag() {},
+    async update(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
   };
 
   const conversationsRepo: ConversationsRepo = {
     async getById(id) {
       return id === conversation.conversationId ? conversation : undefined;
     },
+    async findByParticipantPhone() {
+      return [];
+    },
+    async setType() {},
     async setParticipantsIfAbsent(conversationId, participants) {
       fakes.claimAttempts += 1;
       if (conversationId !== conversation.conversationId) {

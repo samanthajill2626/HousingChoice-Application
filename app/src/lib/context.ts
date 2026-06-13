@@ -25,6 +25,8 @@ export interface CorrelationContext {
    */
   bootId?: string;
   conversationId?: string;
+  /** Contact under triage (M1.4 contact-triage route). */
+  contactId?: string;
   tenantId?: string;
   caseId?: string;
   /** Authenticated session user (M1.3) — stamped by the session middleware. */

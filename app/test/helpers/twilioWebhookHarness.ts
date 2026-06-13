@@ -21,6 +21,11 @@ import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import type { ContactFlag, ContactItem, ContactsRepo } from '../../src/repos/contactsRepo.js';
 import {
+  DEFAULT_ORG_SETTINGS,
+  type OrgSettings,
+  type SettingsRepo,
+} from '../../src/repos/settingsRepo.js';
+import {
   toPreview,
   type ConversationItem,
   type ConversationsRepo,
@@ -32,7 +37,12 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
-import { makeFakeUsersRepo, testUserItem, type FakeUsersRepo } from './authSession.js';
+import {
+  adminUserItem,
+  makeFakeUsersRepo,
+  testUserItem,
+  type FakeUsersRepo,
+} from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
@@ -73,6 +83,9 @@ export interface FakeWorld {
   messagesRepo: MessagesRepo;
   contactsRepo: ContactsRepo;
   auditRepo: AuditRepo;
+  /** In-memory org-settings (M1.4); starts at DEFAULT_ORG_SETTINGS. */
+  settings: OrgSettings;
+  settingsRepo: SettingsRepo;
   adapter: MessagingAdapter;
   mediaStore: MediaStore;
 }
@@ -168,6 +181,14 @@ export function createFakeWorld(): FakeWorld {
         .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
         .slice(0, limit ?? 50);
       return { items };
+    },
+    async findByParticipantPhone(phone) {
+      return [...conversations.values()].filter((c) => c.participant_phone === phone);
+    },
+    async setType(conversationId, type) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setType: no conversation ${conversationId}`);
+      conv.type = type;
     },
     async setMode(conversationId, mode) {
       const conv = conversations.get(conversationId);
@@ -269,11 +290,37 @@ export function createFakeWorld(): FakeWorld {
       contact[flag] = false;
       flagWrites.push({ contactId, flag, value: false });
     },
+    async update(contactId, patch) {
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact) {
+        throw conditionalCheckFailed(`update: no contact ${contactId}`);
+      }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value !== undefined) contact[key] = value;
+      }
+      return contact;
+    },
   };
 
   const auditRepo: AuditRepo = {
     async append(entityKey, eventType, payload) {
       auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
+    },
+  };
+
+  // In-memory org settings (M1.4): starts at the CO2 defaults; putOrgSettings
+  // merges a partial patch (field-level) exactly like the real repo.
+  const settings: OrgSettings = { ...DEFAULT_ORG_SETTINGS };
+  const settingsRepo: SettingsRepo = {
+    async getOrgSettings() {
+      return { ...settings };
+    },
+    async putOrgSettings(patch) {
+      if (patch.missedCallAutoText !== undefined) settings.missedCallAutoText = patch.missedCallAutoText;
+      if (patch.missedCallAutoTextEnabled !== undefined)
+        settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
+      if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
+      return { ...settings };
     },
   };
 
@@ -320,6 +367,8 @@ export function createFakeWorld(): FakeWorld {
     messagesRepo,
     contactsRepo,
     auditRepo,
+    settings,
+    settingsRepo,
     adapter,
     mediaStore,
   };
@@ -379,18 +428,24 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
   const world = opts.world ?? createFakeWorld();
   const capture = createLogCapture();
   // The epoch check re-reads the session user through the 60s cache: seed a
-  // users repo that knows TEST_SESSION_USER so authed requests stay authed.
-  const fakeUsers = makeFakeUsersRepo([testUserItem()]);
+  // users repo that knows BOTH the 'va' and 'admin' test users so authed
+  // requests (incl. the M1.4 admin surfaces) stay authed.
+  const fakeUsers = makeFakeUsersRepo([testUserItem(), adminUserItem()]);
   const app = buildApp({
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
     auth: { usersRepo: fakeUsers.repo },
     // The /api router shares the same fakes + bus, so hub-API and SSE tests
-    // can drive the FULL loop (webhook in → bus → SSE out) on one app.
+    // can drive the FULL loop (webhook in → bus → SSE out) on one app. The
+    // M1.4 surfaces (contacts triage, admin users) share the SAME world
+    // contacts + the session user repo so triage/role tests run end-to-end.
     api: {
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       auditRepo: world.auditRepo,
+      contactsRepo: world.contactsRepo,
+      settingsRepo: world.settingsRepo,
+      usersRepo: fakeUsers.repo,
       events: world.events,
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
     },

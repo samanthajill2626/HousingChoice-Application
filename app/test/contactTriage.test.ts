@@ -1,0 +1,190 @@
+// M1.4 unit tests: the contact-triage routes —
+//   GET   /api/contacts/:contactId
+//   PATCH /api/contacts/:contactId
+// Asserts the needs_review resolution flow: setting type=tenant|landlord
+// PROPAGATES the conversation type (unknown_1to1 → tenant_1to1/landlord_1to1),
+// the contact_updated audit, validation, the "First Last - N Bed" parse, and
+// the no-overwrite-of-an-unset-field merge.
+import request from 'supertest';
+import { describe, expect, it } from 'vitest';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+
+const SECRET = ORIGIN_SECRET;
+const PHONE = '+15550100777';
+
+function seedUnknownContactAndThread(world: ReturnType<typeof createFakeWorld>) {
+  world.contacts.push({
+    contactId: 'contact-triage-1',
+    type: 'unknown',
+    status: 'needs_review',
+    phone: PHONE,
+    capture_source: 'inbound_sms',
+    captured_at: '2026-06-12T10:00:00.000Z',
+    created_at: '2026-06-12T10:00:00.000Z',
+  });
+  world.conversations.set('conv-triage-1', {
+    conversationId: 'conv-triage-1',
+    participant_phone: PHONE,
+    status: 'open',
+    last_activity_at: '2026-06-12T10:00:00.000Z',
+    type: 'unknown_1to1',
+    ai_mode: 'auto',
+    created_at: '2026-06-12T09:00:00.000Z',
+    participants: [{ contactId: 'contact-triage-1', phone: PHONE }],
+  });
+}
+
+describe('GET /api/contacts/:contactId', () => {
+  it('returns the contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .get('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ contactId: 'contact-triage-1', type: 'unknown' });
+  });
+
+  it('404s an unknown contact', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/contacts/nope')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('PATCH /api/contacts/:contactId — triage', () => {
+  it('setting type=tenant propagates the unknown_1to1 thread → tenant_1to1 and audits', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', firstName: 'Keisha', lastName: 'Jones', voucherSize: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ type: 'tenant', firstName: 'Keisha', lastName: 'Jones', voucherSize: 2 });
+    // PROPAGATION: the linked thread's type flips.
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
+
+    const audit = world.auditEvents.find((e) => e.eventType === 'contact_updated');
+    expect(audit?.entityKey).toBe('contacts#contact-triage-1');
+    expect(audit?.payload).toMatchObject({
+      fields: ['type', 'firstName', 'lastName', 'voucherSize'],
+      propagatedConversations: 1,
+      conversationType: 'tenant_1to1',
+    });
+    expect(audit?.payload?.['actor']).toBe('usr_testva00000000000000000');
+  });
+
+  it('setting type=landlord propagates → landlord_1to1', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord' });
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('landlord_1to1');
+  });
+
+  it('does NOT re-type a thread already resolved to a different identity', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    // Pre-resolve the thread to tenant_1to1.
+    world.conversations.get('conv-triage-1')!.type = 'tenant_1to1';
+    await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord' });
+    // Stays tenant_1to1 — only unknown_1to1 threads are flipped (conflict left
+    // for the human to reconcile, never silently overwritten).
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
+  });
+
+  it('setting type=pm/team_member/unknown does NOT propagate a 1:1 type', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'pm' });
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('unknown_1to1');
+  });
+
+  it('a partial patch (only status) leaves an already-set name untouched', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-named',
+      type: 'tenant',
+      status: 'needs_review',
+      phone: '+15550100888',
+      firstName: 'Existing',
+      lastName: 'Name',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-named')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ status: 'active' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ firstName: 'Existing', lastName: 'Name', status: 'active' });
+  });
+
+  it('accepts a raw "First Last - N Bed" string via contactName', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactName: 'Anna Smith-Jones - 3 Bed', type: 'tenant' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({
+      firstName: 'Anna',
+      lastName: 'Smith-Jones',
+      voucherSize: 3,
+      type: 'tenant',
+    });
+  });
+
+  it('400s validation failures', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    for (const body of [
+      {}, // no updatable fields
+      { type: 'wizard' }, // bad type
+      { voucherSize: -1 }, // out of range
+      { voucherSize: 1.5 }, // not integer
+      { status: '' }, // empty status
+      { contactName: 'SingleToken - 2 Bed' }, // not "First Last"
+      { firstName: 5 }, // wrong type
+    ]) {
+      const res = await request(app)
+        .patch('/api/contacts/contact-triage-1')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+  });
+
+  it('404s patching an unknown contact', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .patch('/api/contacts/nope')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant' });
+    expect(res.status).toBe(404);
+  });
+});

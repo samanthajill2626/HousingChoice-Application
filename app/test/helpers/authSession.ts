@@ -11,6 +11,7 @@ import { DEV_SESSION_SECRET_DEFAULT } from '../../src/lib/config.js';
 import { seal, SESSION_COOKIE_NAME } from '../../src/lib/sessionCookie.js';
 import { SESSION_TTL_MS, type SessionUser } from '../../src/middleware/auth.js';
 import {
+  MAX_PUSH_SUBSCRIPTIONS,
   normalizeEmail,
   sessionEpochOf,
   userIdForEmail,
@@ -23,6 +24,31 @@ export const TEST_SESSION_USER: SessionUser = {
   email: 'test-va@housingchoice.org',
   role: 'va',
 };
+
+/**
+ * An ADMIN session user — the first requireRole('admin') surfaces land in
+ * M1.4 (admin user-management, the settings PUT), so the suites need an admin
+ * cookie next to the existing 'va' one.
+ */
+export const TEST_ADMIN_USER: SessionUser = {
+  userId: 'usr_testadmin000000000000000',
+  email: 'test-admin@housingchoice.org',
+  role: 'admin',
+};
+
+/** A users-table item for TEST_ADMIN_USER (active, epoch 1). */
+export function adminUserItem(overrides: Partial<UserItem> = {}): UserItem {
+  return {
+    userId: TEST_ADMIN_USER.userId,
+    email: TEST_ADMIN_USER.email,
+    google_sub: 'test-google-sub-admin',
+    role: 'admin',
+    status: 'active',
+    session_epoch: 1,
+    created_at: '2026-06-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
 
 /**
  * A users-table item for TEST_SESSION_USER (epoch 1) — the standard seed. The
@@ -84,6 +110,9 @@ export function sessionCookieFor(
 
 /** The shared authed Cookie header for the /api suites (a fresh 'va' session). */
 export const TEST_SESSION_COOKIE = sessionCookieFor();
+
+/** An admin Cookie header (the requireRole('admin') suites — M1.4). */
+export const TEST_ADMIN_COOKIE = sessionCookieFor(TEST_ADMIN_USER);
 
 export interface FakeUsersRepo {
   users: Map<string, UserItem>;
@@ -152,6 +181,29 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       if (!user) throw new Error(`bumpSessionEpoch: no user ${userId}`);
       user.session_epoch = sessionEpochOf(user) + 1;
       return user.session_epoch;
+    },
+    async listAll() {
+      return [...users.values()].map((u) => ({ ...u }));
+    },
+    async addPushSubscription(userId, sub) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`addPushSubscription: no user ${userId}`);
+      const existing = user.push_subscriptions ?? [];
+      const deduped = existing.filter((s) => s.endpoint !== sub.endpoint);
+      deduped.push(sub);
+      const capped = deduped
+        .slice()
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+        .slice(0, MAX_PUSH_SUBSCRIPTIONS);
+      user.push_subscriptions = capped;
+      return capped;
+    },
+    async removePushSubscription(userId, endpoint) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`removePushSubscription: no user ${userId}`);
+      const remaining = (user.push_subscriptions ?? []).filter((s) => s.endpoint !== endpoint);
+      user.push_subscriptions = remaining;
+      return remaining;
     },
   };
   return { users, creates, activations, findByIdCalls, repo };

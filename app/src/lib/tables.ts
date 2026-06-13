@@ -1,4 +1,6 @@
-// SINGLE SOURCE OF TRUTH for the 9 DynamoDB table definitions.
+// SINGLE SOURCE OF TRUTH for the DynamoDB table definitions (the doc §5
+// 9-table model + `settings`, added in M1.4 — see the README deviations row
+// 2026-06-12: CO2's founder-editable templates need a DB home).
 //
 // CONTRACTUAL (architecture doc v2.12 §5, p.11–12): table base names, key
 // schemas (PK/SK), GSI names, stream settings (messages, cases), and the
@@ -67,7 +69,10 @@ export interface TableSpec {
   ttlAttribute?: string;
 }
 
-/** The 9 tables. Order matches the architecture doc's table (§5, p.11). */
+/**
+ * The tables. Order matches the architecture doc's table (§5, p.11); `settings`
+ * (M1.4, a deviation — see the module header) is appended last.
+ */
 export const TABLES: readonly TableSpec[] = [
   {
     // Every external person: tenant | landlord | pm | team_member.
@@ -193,6 +198,16 @@ export const TABLES: readonly TableSpec[] = [
         rangeKey: { name: 'ts', type: 'S' },
       },
     ],
+  },
+  {
+    // NEW in M1.4 (NOT in the doc §5 9-table model — README deviation
+    // 2026-06-12): a DB home for the founder-editable settings CO2 introduced
+    // (missed-call auto-text + quick replies). Flexible document keyed by a
+    // singleton id (`org`); PK `settingId` keeps the shape open to per-user
+    // rows later. No GSIs — every read is a point GetItem on a known id.
+    baseName: 'settings',
+    hashKey: { name: 'settingId', type: 'S' },
+    gsis: [],
   },
 ] as const;
 

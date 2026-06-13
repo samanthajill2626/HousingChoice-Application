@@ -1,0 +1,182 @@
+// M1.4 integration tests against DynamoDB Local — the new persistence:
+//   - settingsRepo: defaults when absent, field-level merge on putOrgSettings
+//   - usersRepo push-subscription ARRAY writes: add (dedupe + cap), remove
+//   - conversation-type propagation: contactsRepo.update + conversationsRepo
+//     findByParticipantPhone/setType (the triage seam) on real conditional
+//     writes
+//
+// Self-skipping like the other integration suites: when nothing answers at
+// DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
+// `npm test` stays green without Docker (`npm run db:start` to run for real).
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { tableName } from '../src/lib/config.js';
+import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
+import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { createLogger } from '../src/lib/logger.js';
+import { getTableSpec } from '../src/lib/tables.js';
+import { createContactsRepo } from '../src/repos/contactsRepo.js';
+import { createConversationsRepo, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import {
+  createSettingsRepo,
+  DEFAULT_ORG_SETTINGS,
+} from '../src/repos/settingsRepo.js';
+import { createUsersRepo, MAX_PUSH_SUBSCRIPTIONS, type PushSubscriptionRecord } from '../src/repos/usersRepo.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
+
+async function endpointReachable(): Promise<boolean> {
+  try {
+    await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const reachable = await endpointReachable();
+if (!reachable) {
+  console.warn(
+    `[m14.integration] SKIPPED — no DynamoDB Local at ${endpoint}. ` +
+      'Run `npm run db:start` to exercise this suite.',
+  );
+}
+
+function pushSub(endpointUrl: string, createdAt: string): PushSubscriptionRecord {
+  return { endpoint: endpointUrl, keys: { p256dh: `p-${endpointUrl}`, auth: `a-${endpointUrl}` }, created_at: createdAt };
+}
+
+describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const repoDeps = { doc, env: testEnv, logger };
+
+  const settings = createSettingsRepo(repoDeps);
+  const users = createUsersRepo(repoDeps);
+  const contacts = createContactsRepo(repoDeps);
+  const conversations = createConversationsRepo(repoDeps);
+
+  const bases = ['settings', 'users', 'contacts', 'conversations'] as const;
+
+  beforeAll(async () => {
+    for (const base of bases) {
+      await ensureTable(client, getTableSpec(base), tableName(base, testEnv));
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    for (const base of bases) {
+      await deleteTableIfExists(client, tableName(base, testEnv));
+    }
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  describe('settingsRepo', () => {
+    it('returns CO2 defaults when no item exists', async () => {
+      const s = await settings.getOrgSettings();
+      expect(s).toEqual(DEFAULT_ORG_SETTINGS);
+    });
+
+    it('putOrgSettings merges field-level (an omitted field is untouched)', async () => {
+      await settings.putOrgSettings({ missedCallAutoTextEnabled: false });
+      let s = await settings.getOrgSettings();
+      expect(s.missedCallAutoTextEnabled).toBe(false);
+      // quickReplies still the default (not blanked by a partial patch).
+      expect(s.quickReplies).toEqual(DEFAULT_ORG_SETTINGS.quickReplies);
+
+      await settings.putOrgSettings({ missedCallAutoText: 'Updated text' });
+      s = await settings.getOrgSettings();
+      expect(s.missedCallAutoText).toBe('Updated text');
+      expect(s.missedCallAutoTextEnabled).toBe(false); // prior patch preserved
+    });
+  });
+
+  describe('usersRepo push-subscription array writes', () => {
+    it('adds (deduping by endpoint) and removes subscriptions', async () => {
+      const { user } = await users.invite({ email: `push-${randomUUID()}@housingchoice.org`, role: 'admin' });
+      const userId = user.userId;
+
+      await users.addPushSubscription(userId, pushSub('https://push/a', '2026-06-01T00:00:00.000Z'));
+      await users.addPushSubscription(userId, pushSub('https://push/b', '2026-06-02T00:00:00.000Z'));
+      // Re-add /a (dedupe by endpoint) — count stays 2.
+      const afterDedupe = await users.addPushSubscription(
+        userId,
+        pushSub('https://push/a', '2026-06-03T00:00:00.000Z'),
+      );
+      expect(afterDedupe.map((s) => s.endpoint).sort()).toEqual(['https://push/a', 'https://push/b']);
+
+      const afterRemove = await users.removePushSubscription(userId, 'https://push/a');
+      expect(afterRemove.map((s) => s.endpoint)).toEqual(['https://push/b']);
+      // Removing an absent endpoint is a no-op.
+      const stillB = await users.removePushSubscription(userId, 'https://push/absent');
+      expect(stillB.map((s) => s.endpoint)).toEqual(['https://push/b']);
+    });
+
+    it('caps at MAX_PUSH_SUBSCRIPTIONS, dropping the OLDEST (LRU by created_at)', async () => {
+      const { user } = await users.invite({ email: `cap-${randomUUID()}@housingchoice.org`, role: 'va' });
+      const userId = user.userId;
+      // Add MAX+3, each newer than the last.
+      for (let i = 0; i < MAX_PUSH_SUBSCRIPTIONS + 3; i++) {
+        const ts = `2026-06-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`;
+        await users.addPushSubscription(userId, pushSub(`https://push/${i}`, ts));
+      }
+      const fresh = await users.findById(userId);
+      expect(fresh?.push_subscriptions).toHaveLength(MAX_PUSH_SUBSCRIPTIONS);
+      // The three OLDEST (0,1,2) are dropped; the newest remain.
+      const endpoints = fresh?.push_subscriptions?.map((s) => s.endpoint) ?? [];
+      expect(endpoints).not.toContain('https://push/0');
+      expect(endpoints).toContain(`https://push/${MAX_PUSH_SUBSCRIPTIONS + 2}`);
+    });
+  });
+
+  describe('conversation-type propagation (triage seam)', () => {
+    it('contactsRepo.update merges, and setType flips the linked unknown_1to1 thread', async () => {
+      const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+      const contactId = `contact-${randomUUID()}`;
+      const conversationId = `conv-${randomUUID()}`;
+
+      await contacts.createIfAbsent({
+        contactId,
+        type: 'unknown',
+        status: 'needs_review',
+        phone,
+        created_at: new Date().toISOString(),
+      });
+      const conv: ConversationItem = {
+        conversationId,
+        participant_phone: phone,
+        status: 'open',
+        last_activity_at: new Date().toISOString(),
+        type: 'unknown_1to1',
+        ai_mode: 'auto',
+        created_at: new Date().toISOString(),
+        participants: [{ contactId, phone }],
+      };
+      await conversations.createOrGetByParticipantPhone(phone, 'unknown_1to1');
+      // Use the real row the repo created (it owns the id); set our known type/link.
+      const created = (await conversations.findByParticipantPhone(phone)).find(
+        (c) => c.status === 'open',
+      );
+      expect(created).toBeDefined();
+      const realConvId = created!.conversationId;
+      void conv;
+
+      // Triage: set the contact type to tenant (merge — name untouched if absent).
+      const updated = await contacts.update(contactId, { type: 'tenant', firstName: 'Keisha' });
+      expect(updated.type).toBe('tenant');
+      expect(updated.firstName).toBe('Keisha');
+
+      // Propagate to the linked thread(s).
+      const linked = await conversations.findByParticipantPhone(phone);
+      for (const c of linked) {
+        if (c.type === 'unknown_1to1') await conversations.setType(c.conversationId, 'tenant_1to1');
+      }
+      const after = await conversations.getById(realConvId);
+      expect(after?.type).toBe('tenant_1to1');
+    });
+  });
+});

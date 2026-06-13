@@ -55,6 +55,15 @@ export interface ContactsRepo {
   setFlag(contactId: string, flag: ContactFlag): Promise<void>;
   /** Clear a flag (START/UNSTOP re-subscribes after a STOP, doc §7.1). */
   clearFlag(contactId: string, flag: ContactFlag): Promise<void>;
+  /**
+   * Merge-update a contact (M1.4 triage). Only the supplied fields are
+   * written (a SET update, never a full Put) — an absent field is LEFT as
+   * stored, so a triage that sets only `type` never blanks a name. Pass a
+   * field explicitly to clear it (the route decides what an empty value
+   * means). Returns the post-update item (ALL_NEW). Throws
+   * ConditionalCheckFailedException for unknown contacts.
+   */
+  update(contactId: string, patch: Record<string, unknown>): Promise<ContactItem>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -131,6 +140,49 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         }),
       );
       log.info({ contactId, flag }, 'contact flag cleared');
+    },
+
+    async update(contactId, patch) {
+      // SET-only merge: each supplied field is written; omitted fields are
+      // untouched (no-overwrite of a name a prior triage set). Names are
+      // expression-aliased so reserved words (`status`, `type`) are legal.
+      const sets: string[] = [];
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      let i = 0;
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) continue;
+        const nameKey = `#k${i}`;
+        const valueKey = `:v${i}`;
+        names[nameKey] = key;
+        values[valueKey] = value;
+        sets.push(`${nameKey} = ${valueKey}`);
+        i += 1;
+      }
+      if (sets.length === 0) {
+        // Nothing to change — read the current item back (still 404s if gone).
+        const existing = await this.getById(contactId);
+        if (!existing) {
+          throw new ConditionalCheckFailedException({
+            message: `contact ${contactId} not found`,
+            $metadata: {},
+          });
+        }
+        return existing;
+      }
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { contactId },
+          UpdateExpression: `SET ${sets.join(', ')}`,
+          ConditionExpression: 'attribute_exists(contactId)',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ contactId, fields: Object.keys(values).length }, 'contact updated');
+      return Attributes as ContactItem;
     },
   };
 }

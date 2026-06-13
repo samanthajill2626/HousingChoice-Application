@@ -16,8 +16,8 @@ function gsiNames(s: TableSpec): string[] {
   return s.gsis.map((g) => g.indexName);
 }
 
-describe('tables.ts — the 9-table contract', () => {
-  it('defines exactly the 9 contractual tables', () => {
+describe('tables.ts — the table contract', () => {
+  it('defines exactly the 9 doc-§5 tables plus settings (M1.4 deviation)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -28,7 +28,17 @@ describe('tables.ts — the 9-table contract', () => {
       'invoices',
       'users',
       'audit_events',
+      'settings',
     ]);
+  });
+
+  it('settings: PK settingId; no GSIs (M1.4 — founder-editable templates home)', () => {
+    const t = spec('settings');
+    expect(t.hashKey.name).toBe('settingId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(t.gsis).toEqual([]);
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('contacts: PK contactId; GSIs byPhone, byTypeStatus, byHousingAuthority', () => {

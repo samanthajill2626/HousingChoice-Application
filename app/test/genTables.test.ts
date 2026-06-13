@@ -9,7 +9,7 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains exactly the 9 tables, alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'audit_events',
       'cases',
@@ -18,9 +18,19 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'invoices',
       'matches',
       'messages',
+      'settings',
       'units',
       'users',
     ]);
+  });
+
+  it('settings: PK settingId, no GSIs, no stream, no TTL (M1.4 founder-templates home)', () => {
+    expect(tables['settings']).toEqual({
+      hash_key: { name: 'settingId', type: 'S' },
+      gsis: [],
+      stream: false,
+      pitr: true,
+    });
   });
 
   it('carries the contractual GSI names per table', () => {

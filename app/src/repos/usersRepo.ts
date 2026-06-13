@@ -22,7 +22,13 @@
 // winner's). The byEmail GSI is a lookup, not a guard.
 import { createHash } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  ScanCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -45,6 +51,22 @@ export function isUserRole(value: unknown): value is UserRole {
  */
 export type UserStatus = 'invited' | 'active';
 
+/**
+ * A stored Web Push subscription (M1.4) — the browser PushSubscription shape
+ * a device hands us via POST /api/push/subscriptions. Identified by its
+ * endpoint URL (dedupe key). Multiple per user (one per device); capped at
+ * MAX_PUSH_SUBSCRIPTIONS so a churning device can't grow the item unbounded.
+ */
+export interface PushSubscriptionRecord {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  /** When this device subscribed (ISO 8601) — the LRU key for the cap. */
+  created_at: string;
+}
+
+/** Per-user device cap: oldest subscriptions are dropped past this (LRU by created_at). */
+export const MAX_PUSH_SUBSCRIPTIONS = 10;
+
 export interface UserItem {
   userId: string;
   /** Normalized login email — the byEmail GSI key (normalizeEmail). */
@@ -57,6 +79,13 @@ export interface UserItem {
   role: UserRole;
   /** Lifecycle status (see UserStatus). */
   status?: UserStatus;
+  /**
+   * Web Push subscriptions, one per device (M1.4). ABSENT until the user
+   * subscribes a device. Capped at MAX_PUSH_SUBSCRIPTIONS, deduped by
+   * endpoint. NEVER returned by the admin GET /api/users list (device
+   * endpoints are not admin-relevant and are not someone else's business).
+   */
+  push_subscriptions?: PushSubscriptionRecord[];
   /**
    * Server-side session kill switch: sealed into every session cookie at
    * login and re-checked by sessionMiddleware. Bumping it (logout, role
@@ -129,6 +158,27 @@ export interface UsersRepo {
    * cache). Throws if the user does not exist.
    */
   bumpSessionEpoch(userId: string): Promise<number>;
+  /**
+   * List every user (M1.4 admin user-management). A SCAN — acceptable because
+   * the users table is TINY and bounded (the team: a founder + a handful of
+   * VAs). Returns full items; the route projects out secrets (google_sub,
+   * push_subscriptions) before responding.
+   */
+  listAll(): Promise<UserItem[]>;
+  /**
+   * Add a Web Push subscription to a user (M1.4), deduped by endpoint and
+   * capped at MAX_PUSH_SUBSCRIPTIONS (oldest dropped, LRU by created_at).
+   * Read-modify-write under attribute_exists(userId); returns the new list.
+   * Throws if the user does not exist.
+   */
+  addPushSubscription(userId: string, sub: PushSubscriptionRecord): Promise<PushSubscriptionRecord[]>;
+  /**
+   * Remove a Web Push subscription by endpoint (M1.4 — explicit unsubscribe
+   * OR pushService pruning a Gone subscription). Idempotent: removing an
+   * absent endpoint is a no-op. Returns the new list. Throws if the user does
+   * not exist.
+   */
+  removePushSubscription(userId: string, endpoint: string): Promise<PushSubscriptionRecord[]>;
 }
 
 export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
@@ -257,6 +307,81 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       }
       log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped — all prior sessions revoked');
       return epoch;
+    },
+
+    async listAll() {
+      // SCAN is acceptable here ONLY because the users table is tiny and
+      // bounded (the team — a founder + a handful of VAs). Paginate anyway so
+      // a future >1MB page (never expected at team size) is not silently
+      // truncated.
+      const items: UserItem[] = [];
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(
+          new ScanCommand({
+            TableName: table,
+            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+          }),
+        );
+        items.push(...((page.Items as UserItem[] | undefined) ?? []));
+        exclusiveStartKey = page.LastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+      // The byEmail GSI's claim-style items don't exist for users (users have
+      // no claim pattern) — every base-table item is a real user. Filter to
+      // items that actually carry a role, defensively.
+      return items.filter((u) => isUserRole(u.role));
+    },
+
+    async addPushSubscription(userId, sub) {
+      // Read-modify-write: dedupe by endpoint, then cap at the device limit
+      // (drop OLDEST by created_at — LRU). The condition keeps a deleted user
+      // from getting a resurrected push list. Device-count contention on one
+      // user is not a real concern (a person adds devices serially), so a
+      // plain RMW is fine; no optimistic-version loop needed.
+      const current = await repo.findById(userId);
+      if (!current) throw new Error(`addPushSubscription: no user ${userId}`);
+      const existing = current.push_subscriptions ?? [];
+      // Dedupe: replace any prior record for the same endpoint (refreshes keys).
+      const deduped = existing.filter((s) => s.endpoint !== sub.endpoint);
+      deduped.push(sub);
+      // Cap: keep the most-recent MAX_PUSH_SUBSCRIPTIONS by created_at.
+      const capped = deduped
+        .slice()
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+        .slice(0, MAX_PUSH_SUBSCRIPTIONS);
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression: 'SET push_subscriptions = :subs',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeValues: { ':subs': capped },
+        }),
+      );
+      // IDs + count only — never the endpoint (a push-service URL with a token).
+      log.info({ userId, subscriptionCount: capped.length }, 'push subscription added');
+      return capped;
+    },
+
+    async removePushSubscription(userId, endpoint) {
+      const current = await repo.findById(userId);
+      if (!current) throw new Error(`removePushSubscription: no user ${userId}`);
+      const existing = current.push_subscriptions ?? [];
+      const remaining = existing.filter((s) => s.endpoint !== endpoint);
+      // No-op when nothing changed (idempotent unsubscribe / prune).
+      if (remaining.length !== existing.length) {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { userId },
+            UpdateExpression: 'SET push_subscriptions = :subs',
+            ConditionExpression: 'attribute_exists(userId)',
+            ExpressionAttributeValues: { ':subs': remaining },
+          }),
+        );
+        log.info({ userId, subscriptionCount: remaining.length }, 'push subscription removed');
+      }
+      return remaining;
     },
   };
 

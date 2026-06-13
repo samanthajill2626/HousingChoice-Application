@@ -136,6 +136,20 @@ export interface ConversationsRepo {
   createOrGetByParticipantPhone(phone: string, type: ConversationType): Promise<ConversationItem>;
   getById(conversationId: string): Promise<ConversationItem | undefined>;
   /**
+   * All conversations for an external phone via the byParticipantPhone GSI
+   * (M1.4 contact triage: when a contact's type is resolved, the linked
+   * conversation's type is propagated). Filters out the phone-claim items
+   * (they don't project participant_phone, so they never appear in the GSI —
+   * but the filter is defensive). Returns [] when none.
+   */
+  findByParticipantPhone(phone: string): Promise<ConversationItem[]>;
+  /**
+   * Set a conversation's type (M1.4 contact triage: unknown_1to1 →
+   * tenant_1to1/landlord_1to1 once a human resolves the contact's identity).
+   * Throws ConditionalCheckFailedException for unknown conversations.
+   */
+  setType(conversationId: string, type: ConversationType): Promise<void>;
+  /**
    * Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview.
    * Returns the post-update item (ALL_NEW) — the fresh inbox row the M1.2
    * SSE conversation.updated event is built from.
@@ -294,6 +308,32 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         return createConversationRow({ ...item, conversationId: ref });
       }
       return createConversationRow(item);
+    },
+
+    async findByParticipantPhone(phone) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byParticipantPhone',
+          KeyConditionExpression: 'participant_phone = :p',
+          ExpressionAttributeValues: { ':p': phone },
+        }),
+      );
+      return (Items as ConversationItem[] | undefined) ?? [];
+    },
+
+    async setType(conversationId, type) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'SET #t = :type',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeNames: { '#t': 'type' },
+          ExpressionAttributeValues: { ':type': type },
+        }),
+      );
+      log.info({ conversationId, type }, 'conversation type set');
     },
 
     async touchLastActivity(conversationId, previewText, ts) {

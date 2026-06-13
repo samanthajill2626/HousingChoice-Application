@@ -27,11 +27,19 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { type ContactsRepo } from '../repos/contactsRepo.js';
+import { type SettingsRepo } from '../repos/settingsRepo.js';
+import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import { type PushService } from '../services/pushService.js';
+import { createAdminUsersRouter } from './adminUsers.js';
+import { createContactsRouter } from './contacts.js';
+import { createPushRouter } from './push.js';
+import { createSettingsRouter } from './settings.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -68,6 +76,11 @@ export interface ApiRouterDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   auditRepo?: AuditRepo;
+  /** M1.4 surfaces — injected in tests; default to the real repos/services. */
+  contactsRepo?: ContactsRepo;
+  settingsRepo?: SettingsRepo;
+  usersRepo?: UsersRepo;
+  pushService?: PushService;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -164,6 +177,47 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     });
 
   const router = Router();
+
+  // --- M1.4 sub-routers (all behind requireAuth via the /api mount; the
+  // admin-only gate lives inside adminUsers + the settings PUT) ---
+  // Push (web push subscriptions, vapid key, test send).
+  router.use(
+    '/push',
+    createPushRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
+      ...(deps.pushService !== undefined && { pushService: deps.pushService }),
+    }),
+  );
+  // Founder settings (GET requireAuth, PUT requireRole admin).
+  router.use(
+    '/settings',
+    createSettingsRouter({
+      logger: deps.logger,
+      ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
+      auditRepo: audit,
+    }),
+  );
+  // Admin user-management (requireRole admin on every route).
+  router.use(
+    '/users',
+    createAdminUsersRouter({
+      logger: deps.logger,
+      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
+      auditRepo: audit,
+    }),
+  );
+  // Contact triage (requireAuth — VAs triage; propagates conversation type).
+  router.use(
+    '/contacts',
+    createContactsRouter({
+      logger: deps.logger,
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      conversationsRepo: conversations,
+      auditRepo: audit,
+    }),
+  );
 
   // POST /api/conversations/:conversationId/messages  { body?, mediaUrls? }
   // A manual human send (automated sends come from jobs, not this route).

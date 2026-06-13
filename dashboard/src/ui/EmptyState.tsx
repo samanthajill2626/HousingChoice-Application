@@ -10,11 +10,20 @@ export interface EmptyStateProps {
   description?: ReactNode;
   /** Action slot — e.g. a retry or primary Button. */
   action?: ReactNode;
+  /** ARIA role for the outer container. Defaults to 'status' so a
+   *  loading→empty/error swap is announced by screen readers. */
+  role?: string;
 }
 
-export function EmptyState({ icon, title, description, action }: EmptyStateProps): React.JSX.Element {
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+  role = 'status',
+}: EmptyStateProps): React.JSX.Element {
   return (
-    <div className={styles.empty}>
+    <div className={styles.empty} role={role}>
       {icon && <div className={styles.icon}>{icon}</div>}
       <div className={styles.title}>{title}</div>
       {description && <div className={styles.description}>{description}</div>}

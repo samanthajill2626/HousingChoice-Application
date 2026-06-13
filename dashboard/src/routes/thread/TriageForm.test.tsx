@@ -46,9 +46,22 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe('<TriageForm> dirty-tracking', () => {
-  it('disables Save until a field changes', () => {
+  it('disables Save until a field changes, with a reason in the title', () => {
     renderForm(makeContact());
-    expect(screen.getByRole('button', { name: /save contact/i })).toBeDisabled();
+    const save = screen.getByRole('button', { name: /save contact/i });
+    expect(save).toBeDisabled();
+    // The disabled-until-dirty button explains itself (read as "broken" otherwise).
+    expect(save).toHaveAttribute('title', 'Change a field to enable saving');
+  });
+
+  it('does NOT enable Save when only blanking a previously-set voucher (no clear in the contract)', () => {
+    renderForm(makeContact({ voucherSize: 2 }));
+    const save = screen.getByRole('button', { name: /save contact/i });
+    expect(save).toBeDisabled();
+    // Blank the voucher only → still disabled (buildPatch can't express a clear,
+    // so dirty must agree and stay false).
+    fireEvent.change(screen.getByLabelText('Voucher size'), { target: { value: '' } });
+    expect(save).toBeDisabled();
   });
 
   it('PATCHes ONLY { type } when only the type changed — no stale status/name/notes', async () => {
@@ -96,6 +109,57 @@ describe('<TriageForm> status options', () => {
     const legacyOption = Array.from(statusSelect.options).find((o) => o.value === 'new');
     expect(legacyOption).toBeDefined();
     expect(legacyOption?.textContent).toMatch(/legacy/i);
+  });
+});
+
+describe('<TriageForm> voucher validation', () => {
+  it('shows a FIELD error (not a silent no-op) for an out-of-range voucher and does not save', async () => {
+    renderForm(makeContact());
+
+    // 13 is out of the backend range (0..12). Type it; that makes the form dirty.
+    const voucher = screen.getByLabelText('Voucher size');
+    fireEvent.change(voucher, { target: { value: '13' } });
+    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
+
+    // An inline field error appears (bound to the Voucher field) …
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/0 to 12/i);
+    // … the Voucher input is marked invalid + described by the error …
+    expect(voucher).toHaveAttribute('aria-invalid', 'true');
+    expect(voucher).toHaveAttribute('aria-describedby', expect.stringContaining('-error'));
+    // … and crucially NO save was attempted (not a silent no-op, not a save).
+    expect(api.updateContact).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-integer voucher as a field error', async () => {
+    renderForm(makeContact());
+    fireEvent.change(screen.getByLabelText('Voucher size'), { target: { value: '2.5' } });
+    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/0 to 12/i);
+    expect(api.updateContact).not.toHaveBeenCalled();
+  });
+
+  it('clears the voucher field error on change', async () => {
+    renderForm(makeContact());
+    const voucher = screen.getByLabelText('Voucher size');
+    fireEvent.change(voucher, { target: { value: '99' } });
+    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
+    await screen.findByRole('alert');
+
+    // Typing a valid value clears the error.
+    fireEvent.change(voucher, { target: { value: '3' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('saves a valid in-range voucher', async () => {
+    renderForm(makeContact());
+    fireEvent.change(screen.getByLabelText('Voucher size'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
+
+    await waitFor(() => expect(api.updateContact).toHaveBeenCalledTimes(1));
+    const [, patch] = api.updateContact.mock.calls[0]!;
+    expect(patch).toEqual({ voucherSize: 3 });
   });
 });
 

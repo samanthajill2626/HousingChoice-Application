@@ -113,6 +113,8 @@ describe('GET /api/events — stream mechanics', () => {
       last_activity_at: '2026-06-12T12:00:00.000Z',
       unread_count: 3,
       preview: 'hi there',
+      type: 'tenant_1to1',
+      assignment: null,
     });
     world.events.emit('message.persisted', {
       conversationId: 'conv-sse-1',
@@ -129,6 +131,8 @@ describe('GET /api/events — stream mechanics', () => {
         last_activity_at: '2026-06-12T12:00:00.000Z',
         unread_count: 3,
         preview: 'hi there',
+        type: 'tenant_1to1',
+        assignment: null,
       })}`,
     );
   });
@@ -184,6 +188,8 @@ describe('event bus — listener isolation (M1.2)', () => {
         conversationId: 'conv-iso',
         last_activity_at: '2026-06-12T12:00:00.000Z',
         unread_count: 0,
+        type: 'unknown_1to1',
+        assignment: null,
       }),
     ).not.toThrow();
 

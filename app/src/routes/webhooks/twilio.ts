@@ -18,7 +18,7 @@ import {
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
-import { appEvents, type EventBus } from '../../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -352,14 +352,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         deliveryStatus: 'delivered',
       });
       if (touched) {
-        events.emit('conversation.updated', {
-          conversationId: persistedConversationId,
-          last_activity_at: touched.last_activity_at,
-          unread_count: touched.unread_count ?? 0,
-          ...(touched.last_message_preview !== undefined && {
-            preview: touched.last_message_preview,
-          }),
-        });
+        events.emit('conversation.updated', toConversationUpdatedEvent(touched));
       }
     }
     log.info(

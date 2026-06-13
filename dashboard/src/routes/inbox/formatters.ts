@@ -50,15 +50,16 @@ export function formatRelativeTime(iso: string | null | undefined, now: Date = n
 }
 
 /**
- * The honest display name for a conversation row. The inbox summary wire shape
- * carries no contact name (only participant phones), so we present the formatted
- * phone — we never fabricate a person's name. If a real name source is added to
- * the summary later, prefer it here.
- *
- * NOTE(foundation): ConversationSummary has no contact `name` field — see the
- * shared-type gap flagged in the M1.4 handoff. We format `participant_phone`.
+ * The honest display name for a conversation row. The backend now denormalizes
+ * the resolved contact name onto the summary as `participant_display_name`; we
+ * prefer it when present, else fall back to the formatted participant phone. We
+ * NEVER fabricate a person's name (an un-triaged participant has a null name and
+ * shows their phone).
  */
 export function displayName(c: ConversationSummary): string {
+  if (c.participant_display_name !== null && c.participant_display_name.length > 0) {
+    return c.participant_display_name;
+  }
   return formatPhone(c.participant_phone ?? c.participants[0]?.phone);
 }
 

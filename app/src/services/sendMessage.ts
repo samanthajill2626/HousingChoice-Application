@@ -14,7 +14,7 @@
 // scheduler calls (binding guideline 3).
 import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
-import { appEvents, type EventBus } from '../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -210,14 +210,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       direction: 'outbound',
       deliveryStatus: result.status,
     });
-    events.emit('conversation.updated', {
-      conversationId,
-      last_activity_at: touched.last_activity_at,
-      unread_count: touched.unread_count ?? 0,
-      ...(touched.last_message_preview !== undefined && {
-        preview: touched.last_message_preview,
-      }),
-    });
+    events.emit('conversation.updated', toConversationUpdatedEvent(touched));
 
     log.info(
       { conversationId, providerSid: result.providerSid, status: result.status, automated },

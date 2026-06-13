@@ -72,6 +72,13 @@ export interface ConversationItem {
    * via setParticipantsIfAbsent — the auto-capture race anchor.
    */
   participants?: ConversationParticipant[];
+  /**
+   * Denormalized resolved display name of the 1:1 participant (M1.4 triage):
+   * the inbox is ONE Query and the conversation record carries no name, so the
+   * resolved "First Last" is copied here when triage names the contact. Absent
+   * when no name is known — the inbox falls back to the phone, never a guess.
+   */
+  participant_display_name?: string;
   /** Inbound messages since the last POST /:id/read (M1.2 unread tracking). */
   unread_count?: number;
   /** Assigned team member's userId (M1.2; users-table validation is M1.3). */
@@ -146,9 +153,24 @@ export interface ConversationsRepo {
   /**
    * Set a conversation's type (M1.4 contact triage: unknown_1to1 →
    * tenant_1to1/landlord_1to1 once a human resolves the contact's identity).
-   * Throws ConditionalCheckFailedException for unknown conversations.
+   * Returns the post-update item (ALL_NEW) — the fresh inbox row the
+   * conversation.updated SSE event is built from. Throws
+   * ConditionalCheckFailedException for unknown conversations.
    */
-  setType(conversationId: string, type: ConversationType): Promise<void>;
+  setType(conversationId: string, type: ConversationType): Promise<ConversationItem>;
+  /**
+   * M1.4 triage write: set the resolved type (when it changes) and/or the
+   * denormalized participant_display_name (when a name is known) in ONE
+   * update, returning the post-update item (ALL_NEW) for the
+   * conversation.updated SSE event. Pass `displayName: null` to leave the
+   * name untouched (only known names are ever written — auto-capture never
+   * guesses a name). Throws ConditionalCheckFailedException for unknown
+   * conversations.
+   */
+  applyTriage(
+    conversationId: string,
+    fields: { type?: ConversationType; displayName?: string | null },
+  ): Promise<ConversationItem>;
   /**
    * Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview.
    * Returns the post-update item (ALL_NEW) — the fresh inbox row the M1.2
@@ -323,7 +345,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async setType(conversationId, type) {
-      await doc.send(
+      const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
@@ -331,9 +353,58 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
           ConditionExpression: 'attribute_exists(conversationId)',
           ExpressionAttributeNames: { '#t': 'type' },
           ExpressionAttributeValues: { ':type': type },
+          ReturnValues: 'ALL_NEW',
         }),
       );
       log.info({ conversationId, type }, 'conversation type set');
+      return Attributes as ConversationItem;
+    },
+
+    async applyTriage(conversationId, fields) {
+      // SET only the fields supplied: type (when triage resolves identity) and
+      // participant_display_name (when a name is known). At least one is
+      // present by the caller's contract; if neither were, this would be an
+      // empty SET — guarded against by returning the current item.
+      const sets: string[] = [];
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      if (fields.type !== undefined) {
+        names['#t'] = 'type';
+        values[':type'] = fields.type;
+        sets.push('#t = :type');
+      }
+      if (fields.displayName !== undefined && fields.displayName !== null) {
+        names['#dn'] = 'participant_display_name';
+        values[':dn'] = fields.displayName;
+        sets.push('#dn = :dn');
+      }
+      if (sets.length === 0) {
+        const existing = await getById(conversationId);
+        if (!existing) {
+          throw new ConditionalCheckFailedException({
+            message: `applyTriage: conversation ${conversationId} not found`,
+            $metadata: {},
+          });
+        }
+        return existing;
+      }
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: `SET ${sets.join(', ')}`,
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      // PII (doc §9): log the FACT of a name write, never the name itself.
+      log.info(
+        { conversationId, typeSet: fields.type ?? null, nameSet: ':dn' in values },
+        'conversation triage applied',
+      );
+      return Attributes as ConversationItem;
     },
 
     async touchLastActivity(conversationId, previewText, ts) {

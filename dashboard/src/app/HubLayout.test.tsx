@@ -73,6 +73,7 @@ function summary(over: Partial<ConversationSummary> = {}): ConversationSummary {
     unread_count: 0,
     assignment: null,
     sms_opt_out: false,
+    participant_display_name: null,
     ...over,
   };
 }

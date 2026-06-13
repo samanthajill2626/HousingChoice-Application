@@ -7,8 +7,9 @@
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
-  /* Fill the content area between the sticky topbar and (mobile) tabbar. */
-  height: 100%;
+  /* No explicit height: with the shell now a definite height, the
+   * flex:1 1 auto; min-height:0 chain bounds this pane so it fills the content
+   * area between the sticky topbar and (mobile) tabbar and scrolls internally. */
 }
 
 /* --- Mobile (< 900px = --hc-hub-breakpoint): stacked, one pane at a time. --- */
@@ -66,6 +67,19 @@
 
 .emptyHint {
   font-size: var(--hc-font-size-sm);
+}
+
+/* --- Tablet (≥ 640px): the bottom tab bar is hidden (see AppLayout), so the
+ * panes no longer need to reserve room for it. The two-pane reset only happens
+ * at 900px, so reset the tab-bar padding here for the 640–899px single-pane
+ * range. Placed BEFORE the 900px block so the desktop rules still win. --- */
+@media (min-width: 640px) {
+  .listPane {
+    padding-bottom: var(--hc-space-4);
+  }
+  .threadPane {
+    padding-bottom: 0;
+  }
 }
 
 /* --- Desktop (≥ 900px = --hc-hub-breakpoint): two panes side-by-side. --- */

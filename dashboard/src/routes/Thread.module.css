@@ -2,9 +2,10 @@
   display: flex;
   flex-direction: column;
   /* Fill the hub's right pane (or the mobile full screen); the timeline scrolls
-   * internally so the page itself never double-scrolls. */
+   * internally so the page itself never double-scrolls. With the shell now a
+   * definite height, the flex:1 1 auto; min-height:0 chain bounds this level —
+   * no explicit height:100% needed (it broke the chain). */
   flex: 1 1 auto;
-  height: 100%;
   min-height: 0;
 }
 

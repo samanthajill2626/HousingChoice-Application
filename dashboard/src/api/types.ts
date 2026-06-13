@@ -67,6 +67,9 @@ export interface ConversationSummary {
   /** Assigned team member's userId, or null when unassigned. */
   assignment: string | null;
   sms_opt_out: boolean;
+  /** Resolved contact name denormalized onto the conversation, or null when the
+   *  participant is un-triaged (we never fabricate a name — fall back to phone). */
+  participant_display_name: string | null;
 }
 
 /** Inbox page (GET /api/conversations). */
@@ -218,6 +221,12 @@ export interface ConversationUpdatedEvent {
   last_activity_at: string;
   unread_count: number;
   preview?: string;
+  /** Conversation type carried on the event so the inbox can re-evaluate the
+   *  needs-review chip live (e.g. unknown_1to1 → tenant_1to1 after triage). */
+  type: ConversationType;
+  /** Assigned team member's userId, or null when unassigned — so the Assigned
+   *  chip re-evaluates live. */
+  assignment: string | null;
 }
 
 /** GET /api/events 'message.persisted' payload. */

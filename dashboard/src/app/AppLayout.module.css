@@ -1,7 +1,13 @@
 .shell {
   display: flex;
   flex-direction: column;
+  /* A DEFINITE height bounds the whole layout so child panes (the conversation
+   * hub's list + thread timeline) scroll internally instead of the page itself
+   * double-scrolling. min-height stays as a fallback; dvh corrects for the
+   * mobile URL bar. */
   min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
 }
 
 .topbar {

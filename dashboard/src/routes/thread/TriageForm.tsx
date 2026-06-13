@@ -41,6 +41,18 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 
 const STATUS_ALLOWLIST = new Set(STATUS_OPTIONS.map((o) => o.value));
 
+/** Backend voucher rule (app/src/routes/contacts.ts): an integer 0..12. A blank
+ *  voucher is allowed (it simply isn't sent); a non-blank one must be valid. */
+function validateVoucher(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined; // blank → not sent, not an error
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 0 || n > 12) {
+    return 'Enter a whole number of bedrooms from 0 to 12.';
+  }
+  return undefined;
+}
+
 export interface TriageFormProps {
   contact: Contact;
   /** Called after a successful PATCH — the parent refetches contact + conversation. */
@@ -80,6 +92,9 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
   const [form, setForm] = useState<FormState>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
+  // Voucher validation error, bound to the Voucher FIELD (not the form-level
+  // region) — mirrors how AdminUsers wires its email Field error.
+  const [voucherError, setVoucherError] = useState<string | undefined>(undefined);
 
   // Re-sync the editor to the loaded snapshot when the contact prop changes
   // (e.g. after a triage save → parent refetch). `initial` is memoized on
@@ -88,6 +103,7 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
   useEffect(() => {
     setForm(initial);
     setError(undefined);
+    setVoucherError(undefined);
   }, [initial]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
@@ -124,28 +140,42 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
     return patch;
   }
 
-  // True when at least one field differs from the loaded snapshot.
+  // True when at least one field differs from the loaded snapshot. Voucher is
+  // dirty ONLY when its trimmed value is non-empty AND differs — so blanking a
+  // previously-set voucher (which buildPatch can't express as a "clear") does
+  // NOT enable Save. Keeps `dirty` in agreement with buildPatch.
   const dirty = useMemo(() => {
+    const voucherTrimmed = form.voucherSize.trim();
+    const voucherDirty = voucherTrimmed.length > 0 && voucherTrimmed !== initial.voucherSize.trim();
     return (
       form.type !== initial.type ||
       form.firstName.trim() !== initial.firstName.trim() ||
       form.lastName.trim() !== initial.lastName.trim() ||
       form.status !== initial.status ||
       form.notes !== initial.notes ||
-      form.voucherSize.trim() !== initial.voucherSize.trim()
+      voucherDirty
     );
   }, [form, initial]);
 
   async function handleSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     if (saving) return;
+    // Validate the voucher FIRST (full backend rule: integer 0..12), BEFORE
+    // building the patch / the empty-patch early-return — so an invalid voucher
+    // surfaces an inline field error instead of a silent no-op.
+    const voucherErr = validateVoucher(form.voucherSize);
+    if (voucherErr !== undefined) {
+      setVoucherError(voucherErr);
+      return;
+    }
+    setVoucherError(undefined);
+
     const patch = buildPatch();
-    // Nothing changed → no-op (Save is also disabled in this state).
-    if (Object.keys(patch).length === 0) return;
-    // Keep the voucher-size client check.
-    const voucher = form.voucherSize.trim();
-    if (voucher.length > 0 && !Number.isFinite(Number(voucher))) {
-      setError('Voucher size must be a number.');
+    // Belt-and-suspenders: an enabled Save that somehow yields an empty patch
+    // surfaces a clear message instead of silently doing nothing. (Save is also
+    // disabled while !dirty, so this normally can't be reached.)
+    if (Object.keys(patch).length === 0) {
+      setError('No changes to save.');
       return;
     }
     setSaving(true);
@@ -163,8 +193,12 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
     }
   }
 
+  // noValidate: our JS validation owns the rules (full backend voucher rule + a
+  // clear inline field error). The Input's min/max/step stay as defense-in-depth
+  // UI hints, but native constraint validation must not silently block submit
+  // before our handler runs. Mirrors AdminUsers' invite form.
   return (
-    <form className={styles.form} onSubmit={(e) => void handleSubmit(e)}>
+    <form className={styles.form} noValidate onSubmit={(e) => void handleSubmit(e)}>
       <div className={styles.row}>
         <Field label="First name">
           {({ id }) => (
@@ -196,13 +230,26 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
       </Field>
 
       <div className={styles.row}>
-        <Field label="Voucher size" hint="Bedrooms (e.g. 2)">
-          {({ id }) => (
+        <Field
+          label="Voucher size"
+          hint="Bedrooms, 0–12 (e.g. 2)"
+          {...(voucherError !== undefined && { error: voucherError })}
+        >
+          {({ id, describedBy, invalid }) => (
             <Input
               id={id}
+              type="number"
               inputMode="numeric"
+              min={0}
+              max={12}
+              step={1}
               value={form.voucherSize}
-              onChange={(e) => set('voucherSize', e.target.value)}
+              invalid={invalid}
+              {...(describedBy !== undefined && { 'aria-describedby': describedBy })}
+              onChange={(e) => {
+                set('voucherSize', e.target.value);
+                if (voucherError !== undefined) setVoucherError(undefined);
+              }}
             />
           )}
         </Field>
@@ -242,7 +289,13 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
         </p>
       )}
 
-      <Button type="submit" loading={saving} disabled={!dirty} block>
+      <Button
+        type="submit"
+        loading={saving}
+        disabled={!dirty}
+        title={!dirty ? 'Change a field to enable saving' : undefined}
+        block
+      >
         Save contact
       </Button>
     </form>

@@ -172,13 +172,70 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
       expect(updated.type).toBe('tenant');
       expect(updated.firstName).toBe('Keisha');
 
-      // Propagate to the linked thread(s).
+      // Propagate to the linked thread(s) — setType now returns ALL_NEW.
       const linked = await conversations.findByParticipantPhone(phone);
       for (const c of linked) {
-        if (c.type === 'unknown_1to1') await conversations.setType(c.conversationId, 'tenant_1to1');
+        if (c.type === 'unknown_1to1') {
+          const fresh = await conversations.setType(c.conversationId, 'tenant_1to1');
+          expect(fresh.type).toBe('tenant_1to1'); // ALL_NEW returns the post-update item
+        }
       }
       const after = await conversations.getById(realConvId);
       expect(after?.type).toBe('tenant_1to1');
+    });
+
+    it('applyTriage flips type AND denormalizes participant_display_name in one write (ALL_NEW)', async () => {
+      const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+      await conversations.createOrGetByParticipantPhone(phone, 'unknown_1to1');
+      const created = (await conversations.findByParticipantPhone(phone)).find(
+        (c) => c.status === 'open',
+      );
+      expect(created).toBeDefined();
+      const convId = created!.conversationId;
+
+      // Type + name together (the triage resolve-identity path).
+      const resolved = await conversations.applyTriage(convId, {
+        type: 'tenant_1to1',
+        displayName: 'Keisha Jones',
+      });
+      expect(resolved.type).toBe('tenant_1to1');
+      expect(resolved.participant_display_name).toBe('Keisha Jones');
+
+      // Name-only (no type change): the stored type is preserved, name updated.
+      const renamed = await conversations.applyTriage(convId, { displayName: 'Keisha J Jones' });
+      expect(renamed.type).toBe('tenant_1to1'); // untouched
+      expect(renamed.participant_display_name).toBe('Keisha J Jones');
+
+      // displayName: null leaves the name untouched (honesty: never blanked here).
+      const unchanged = await conversations.applyTriage(convId, {
+        type: 'landlord_1to1',
+        displayName: null,
+      });
+      expect(unchanged.type).toBe('landlord_1to1');
+      expect(unchanged.participant_display_name).toBe('Keisha J Jones'); // preserved
+    });
+
+    it('triage PATCH end-to-end: contactsRepo.update auto-advances status to active', async () => {
+      // The route layer adds status:'active'; assert the repo write the route
+      // makes lands the contact off the needs_review queue.
+      const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;
+      const contactId = `contact-${randomUUID()}`;
+      await contacts.createIfAbsent({
+        contactId,
+        type: 'unknown',
+        status: 'needs_review',
+        phone,
+        created_at: new Date().toISOString(),
+      });
+      // Mirror the route's auto-advance patch (type resolved → status active).
+      const updated = await contacts.update(contactId, {
+        type: 'tenant',
+        firstName: 'Keisha',
+        lastName: 'Jones',
+        status: 'active',
+      });
+      expect(updated.status).toBe('active');
+      expect(updated.type).toBe('tenant');
     });
   });
 

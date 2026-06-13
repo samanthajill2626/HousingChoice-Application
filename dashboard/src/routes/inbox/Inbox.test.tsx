@@ -47,6 +47,7 @@ function summary(over: Partial<ConversationSummary> = {}): ConversationSummary {
     unread_count: 0,
     assignment: null,
     sms_opt_out: false,
+    participant_display_name: null,
     ...over,
   };
 }
@@ -187,6 +188,8 @@ describe('<Inbox>', () => {
       last_activity_at: '2026-06-13T11:00:00.000Z',
       unread_count: 2,
       preview: 'fresh preview',
+      type: 'tenant_1to1',
+      assignment: null,
     });
 
     // Row patched in place and re-sorted to the top; no refetch.
@@ -199,6 +202,34 @@ describe('<Inbox>', () => {
     expect(screen.getByText('fresh preview')).toBeInTheDocument();
     expect(screen.getByLabelText('2 unread')).toBeInTheDocument();
     // listConversations called once (initial) — no refetch for a known row.
+    expect(listConversationsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-evaluates the needs-review and Assigned chips live from a known-row update (C/D)', async () => {
+    // Starts as an un-triaged, unassigned conversation → "Needs review", no
+    // "Assigned" chip.
+    listConversationsMock.mockResolvedValue(
+      page([summary({ conversationId: 'c1', type: 'unknown_1to1', assignment: null })]),
+    );
+
+    renderInbox();
+
+    expect(await screen.findByText('Needs review')).toBeInTheDocument();
+    expect(screen.queryByText('Assigned')).not.toBeInTheDocument();
+
+    // A live update resolves the type (→ tenant_1to1) and assigns the row. The
+    // applyUpdate merge of type+assignment must flip both chips without a refetch.
+    fireUpdate({
+      conversationId: 'c1',
+      last_activity_at: '2026-06-13T11:00:00.000Z',
+      unread_count: 0,
+      type: 'tenant_1to1',
+      assignment: 'u_va1',
+    });
+
+    await waitFor(() => expect(screen.queryByText('Needs review')).not.toBeInTheDocument());
+    expect(screen.getByText('Assigned')).toBeInTheDocument();
+    // Patched in place — no refetch.
     expect(listConversationsMock).toHaveBeenCalledTimes(1);
   });
 
@@ -228,6 +259,8 @@ describe('<Inbox>', () => {
       conversationId: 'cN',
       last_activity_at: '2026-06-13T12:00:00.000Z',
       unread_count: 1,
+      type: 'unknown_1to1',
+      assignment: null,
     });
 
     // The debounced refetch (real timers) surfaces the new row at the top.

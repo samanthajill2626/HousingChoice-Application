@@ -49,6 +49,19 @@
   flex: none;
 }
 
+/* The "Contact details" trigger opens the contact Sheet — only useful below
+ * 1200px. At ≥1200px the inline `.side` contact column (see Thread.module.css)
+ * is visible, so hide this trigger to avoid a redundant Sheet on top of it. */
+.contactTrigger {
+  display: inline-flex;
+}
+
+@media (min-width: 1200px) {
+  .contactTrigger {
+    display: none;
+  }
+}
+
 /* On narrow screens, keep the header compact: drop the assignment label-heavy
  * controls to the essentials. The contact button + back stay reachable. */
 @media (max-width: 599px) {

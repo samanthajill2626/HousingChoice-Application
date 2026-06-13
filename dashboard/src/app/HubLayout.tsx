@@ -37,7 +37,7 @@ export function HubLayout(): React.JSX.Element {
         {threadSelected ? (
           <Outlet />
         ) : (
-          <div className={styles.empty} role="note">
+          <div className={styles.empty}>
             <InboxIcon size={32} />
             <p className={styles.emptyTitle}>Select a conversation</p>
             <p className={styles.emptyHint}>Pick a thread on the left to read and reply.</p>

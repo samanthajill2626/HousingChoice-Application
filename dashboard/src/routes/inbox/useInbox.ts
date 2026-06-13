@@ -131,6 +131,11 @@ export function useInbox(): InboxState {
             ...row,
             last_activity_at: patch.last_activity_at,
             unread_count: patch.unread_count,
+            // Merge type + assignment from the event so the needs-review chip
+            // and Assigned chip re-evaluate live (e.g. unknown_1to1 → tenant_1to1
+            // after triage, or assignment changing).
+            type: patch.type,
+            assignment: patch.assignment,
             ...(patch.preview !== undefined && { preview: patch.preview }),
           }
         : row,

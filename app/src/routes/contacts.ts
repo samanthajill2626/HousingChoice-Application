@@ -14,12 +14,14 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { parseContactName } from '../lib/contactName.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
+  type ContactItem,
   type ContactsRepo,
   type ContactType,
 } from '../repos/contactsRepo.js';
@@ -34,6 +36,8 @@ export interface ContactsRouterDeps {
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
   auditRepo?: AuditRepo;
+  /** SSE live-update bus (M1.2); the process singleton by default. */
+  events?: EventBus;
 }
 
 /** The contact types triage may set (the full union incl. 'unknown'). */
@@ -64,6 +68,20 @@ function conversationTypeFor(contactType: ContactType): ConversationType | undef
   if (contactType === 'landlord') return 'landlord_1to1';
   // pm/team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
+}
+
+/**
+ * The denormalized inbox display name from a contact's resolved fields:
+ * `firstName`/`lastName` joined and trimmed → a non-empty string, else null.
+ * HONEST: returns null when no name is known — the inbox falls back to the
+ * phone; a name is NEVER invented. PII (doc §9): the name is data, never
+ * logged here.
+ */
+function displayNameOf(contact: ContactItem): string | null {
+  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : null;
 }
 
 interface TriagePatch {
@@ -155,6 +173,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const events = deps.events ?? appEvents;
 
   const router = Router();
 
@@ -181,6 +200,21 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
+    // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
+    const newType = parsed.patch['type'];
+    const convType = isContactType(newType) ? conversationTypeFor(newType) : undefined;
+
+    // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord moves the
+    // contact off the needs_review triage queue at the moment the identity is
+    // known — but only when the caller didn't set status itself (an explicit
+    // status always wins). 'active' is allowlisted in CONTACT_STATUSES. We
+    // never auto-advance for unknown/pm/team_member (they don't resolve a 1:1
+    // identity) — and we never fabricate a name to do it.
+    if (convType !== undefined && !('status' in parsed.patch)) {
+      parsed.patch['status'] = 'active';
+      parsed.changedFields.push('status');
+    }
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -192,23 +226,34 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       throw err;
     }
 
-    // PROPAGATE resolved identity to the linked conversation(s) (the M1.5
-    // seam): when type was set to tenant|landlord, every open unknown_1to1
-    // thread on this contact's phone becomes tenant_1to1/landlord_1to1.
+    // DENORMALIZE (Cluster D): the inbox is one Query and the conversation row
+    // carries no name — copy the resolved "First Last" onto the linked
+    // thread(s) so rows show the person, not the phone. HONEST: null when no
+    // name is known (the inbox falls back to the phone, never a guess).
+    const displayName = displayNameOf(updated);
+
+    // PROPAGATE resolved identity + name to the linked conversation(s) (the
+    // M1.5 seam) and EMIT a live conversation.updated for each touched thread
+    // so connected inboxes update without a reload (Cluster C).
     let propagatedConversations = 0;
-    const newType = parsed.patch['type'];
-    const convType = isContactType(newType) ? conversationTypeFor(newType) : undefined;
     const phone = typeof updated.phone === 'string' ? updated.phone : undefined;
-    if (convType !== undefined && phone !== undefined) {
+    // Touch threads when EITHER identity resolved (flip unknown_1to1) OR a name
+    // is known to denormalize (so naming a contact without typing it still
+    // surfaces in the inbox).
+    if (phone !== undefined && (convType !== undefined || displayName !== null)) {
       const linked = await conversations.findByParticipantPhone(phone);
       for (const conv of linked) {
-        // Only flip an UNKNOWN thread — never re-type a thread already
-        // resolved to a different identity (that would be a triage conflict
-        // the human must reconcile, not something to silently overwrite).
-        if (conv.type === 'unknown_1to1') {
-          await conversations.setType(conv.conversationId, convType);
-          propagatedConversations += 1;
-        }
+        // Only FLIP an UNKNOWN thread — never re-type a thread already resolved
+        // to a different identity (a triage conflict the human must reconcile,
+        // never silently overwritten). The name still denormalizes onto it.
+        const flipType = convType !== undefined && conv.type === 'unknown_1to1';
+        if (!flipType && displayName === null) continue; // nothing to write
+        const fresh = await conversations.applyTriage(conv.conversationId, {
+          ...(flipType && { type: convType }),
+          displayName, // null leaves the name untouched
+        });
+        if (flipType) propagatedConversations += 1;
+        events.emit('conversation.updated', toConversationUpdatedEvent(fresh));
       }
     }
 

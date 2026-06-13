@@ -17,6 +17,7 @@
 // clients — they must never be logged.
 import { EventEmitter } from 'node:events';
 import { logger as defaultLogger, type Logger } from './logger.js';
+import type { ConversationItem, ConversationType } from '../repos/conversationsRepo.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
@@ -26,6 +27,32 @@ export interface ConversationUpdatedEvent {
   unread_count: number;
   /** Denormalized preview (truncated); absent when the conversation has none. */
   preview?: string;
+  /**
+   * Current thread type (M1.4 triage live-update): the inbox chip re-renders
+   * when triage flips unknown_1to1 → tenant_1to1/landlord_1to1.
+   */
+  type: ConversationType;
+  /** Assigned team member's userId, or null when unassigned. */
+  assignment: string | null;
+}
+
+/**
+ * The shared conversation.updated payload for a fresh ConversationItem. THE
+ * one builder every emit site uses (api.ts /read + /assignment, the contacts
+ * triage router) so the wire shape stays identical across all of them.
+ *
+ * PII (doc §9): the payload carries the denormalized preview and display name
+ * — it is DATA for authenticated dashboard clients, never logged.
+ */
+export function toConversationUpdatedEvent(item: ConversationItem): ConversationUpdatedEvent {
+  return {
+    conversationId: item.conversationId,
+    last_activity_at: item.last_activity_at,
+    unread_count: item.unread_count ?? 0,
+    ...(item.last_message_preview !== undefined && { preview: item.last_message_preview }),
+    type: item.type,
+    assignment: item.assignment ?? null,
+  };
 }
 
 /** A message landed on the timeline, or its delivery status really moved. */

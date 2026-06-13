@@ -15,6 +15,7 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
+  toConversationUpdatedEvent,
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
@@ -132,16 +133,6 @@ function parseLimit(raw: unknown): number | undefined {
   return limit;
 }
 
-/** The shared conversation.updated payload (lib/events.ts shape) for a fresh item. */
-function toConversationUpdatedEvent(item: ConversationItem): ConversationUpdatedEvent {
-  return {
-    conversationId: item.conversationId,
-    last_activity_at: item.last_activity_at,
-    unread_count: item.unread_count ?? 0,
-    ...(item.last_message_preview !== undefined && { preview: item.last_message_preview }),
-  };
-}
-
 /** The denormalized summary the hub's inbox list renders (doc §5). */
 function toConversationSummary(item: ConversationItem): Record<string, unknown> {
   return {
@@ -150,6 +141,7 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
     participant_phone: item.participant_phone,
     participants: item.participants ?? [],
     preview: item.last_message_preview ?? null,
+    participant_display_name: item.participant_display_name ?? null,
     last_activity_at: item.last_activity_at,
     unread_count: item.unread_count ?? 0,
     assignment: item.assignment ?? null,
@@ -208,7 +200,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
-  // Contact triage (requireAuth — VAs triage; propagates conversation type).
+  // Contact triage (requireAuth — VAs triage; propagates conversation type
+  // and emits conversation.updated so connected inboxes update live).
   router.use(
     '/contacts',
     createContactsRouter({
@@ -216,6 +209,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
       auditRepo: audit,
+      events,
     }),
   );
 

@@ -70,6 +70,14 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     findByParticipantPhone: async () => [conversation],
     setType: async (_id, type) => {
       conversation.type = type;
+      return conversation;
+    },
+    applyTriage: async (_id, fields) => {
+      if (fields.type !== undefined) conversation.type = fields.type;
+      if (fields.displayName !== undefined && fields.displayName !== null) {
+        conversation.participant_display_name = fields.displayName;
+      }
+      return conversation;
     },
     touchLastActivity: async (_id, previewText, ts) => {
       fakes.touched.push({ previewText, ts });
@@ -250,6 +258,10 @@ describe('sendMessage service', () => {
           // existing value through.
           unread_count: 2,
           preview: 'live update',
+          // M1.4 wire fields (shared builder): the thread's current type +
+          // assignment ride along on every conversation.updated.
+          type: 'tenant_1to1',
+          assignment: null,
         },
       },
     ]);

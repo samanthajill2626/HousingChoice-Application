@@ -58,7 +58,7 @@ describe('GET /api/contacts/:contactId', () => {
 });
 
 describe('PATCH /api/contacts/:contactId — triage', () => {
-  it('setting type=tenant propagates the unknown_1to1 thread → tenant_1to1 and audits', async () => {
+  it('setting type=tenant propagates the unknown_1to1 thread → tenant_1to1, auto-advances status, denormalizes the name, emits, and audits', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
 
@@ -70,28 +70,87 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.contact).toMatchObject({ type: 'tenant', firstName: 'Keisha', lastName: 'Jones', voucherSize: 2 });
+    // AUTO-ADVANCE (Cluster A): resolving identity clears needs_review.
+    expect(res.body.contact.status).toBe('active');
     // PROPAGATION: the linked thread's type flips.
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
+    // DENORMALIZE (Cluster D): the resolved "First Last" lands on the thread.
+    expect(world.conversations.get('conv-triage-1')?.participant_display_name).toBe('Keisha Jones');
+
+    // LIVE EMIT (Cluster C): one conversation.updated carrying the new wire
+    // shape (type + assignment) for the touched thread.
+    expect(world.emitted).toEqual([
+      {
+        event: 'conversation.updated',
+        payload: {
+          conversationId: 'conv-triage-1',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          type: 'tenant_1to1',
+          unread_count: 0,
+          assignment: null,
+        },
+      },
+    ]);
 
     const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
     expect(audit?.entityKey).toBe('contacts#contact-triage-1');
     expect(audit?.payload).toMatchObject({
-      fields: ['type', 'firstName', 'lastName', 'voucherSize'],
+      // 'status' is appended by the auto-advance (the audit records it).
+      fields: ['type', 'firstName', 'lastName', 'voucherSize', 'status'],
       propagatedConversations: 1,
       conversationType: 'tenant_1to1',
     });
     expect(audit?.payload?.['actor']).toBe('usr_testva00000000000000000');
   });
 
-  it('setting type=landlord propagates → landlord_1to1', async () => {
+  it('setting type=landlord propagates → landlord_1to1 and auto-advances status', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
-    await request(app)
+    const res = await request(app)
       .patch('/api/contacts/contact-triage-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'landlord' });
     expect(world.conversations.get('conv-triage-1')?.type).toBe('landlord_1to1');
+    expect(res.body.contact.status).toBe('active');
+  });
+
+  it('does NOT auto-advance status when the caller set status explicitly (explicit status wins)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', status: 'needs_review' });
+    expect(res.status).toBe(200);
+    // Explicit status is honored, not overwritten by the auto-advance.
+    expect(res.body.contact.status).toBe('needs_review');
+    // Type still propagates.
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
+    // 'status' appears once (the explicit one), not duplicated by auto-advance.
+    expect(audit?.payload?.['fields']).toEqual(['type', 'status']);
+  });
+
+  it('a name-only PATCH denormalizes participant_display_name WITHOUT flipping the type', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ firstName: 'Keisha', lastName: 'Jones' });
+    expect(res.status).toBe(200);
+    // No type was set — the thread stays unknown_1to1 (identity unresolved)…
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('unknown_1to1');
+    // …but the name still surfaces in the inbox (Cluster D).
+    expect(world.conversations.get('conv-triage-1')?.participant_display_name).toBe('Keisha Jones');
+    // Naming alone does NOT resolve identity → status is untouched.
+    expect(res.body.contact.status).toBe('needs_review');
+    // And the inbox got a live update for the name change.
+    expect(world.emitted).toHaveLength(1);
+    expect(world.emitted[0]).toMatchObject({ event: 'conversation.updated' });
   });
 
   it('does NOT re-type a thread already resolved to a different identity', async () => {
@@ -109,15 +168,19 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
   });
 
-  it('setting type=pm/team_member/unknown does NOT propagate a 1:1 type', async () => {
+  it('setting type=pm/team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
-    await request(app)
+    const res = await request(app)
       .patch('/api/contacts/contact-triage-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'pm' });
     expect(world.conversations.get('conv-triage-1')?.type).toBe('unknown_1to1');
+    // pm/team_member/unknown do not resolve a 1:1 identity → no auto-advance.
+    expect(res.body.contact.status).toBe('needs_review');
+    // No name known and no type flip → nothing to denormalize → no live emit.
+    expect(world.emitted).toHaveLength(0);
   });
 
   it('a partial patch (only status) leaves an already-set name untouched', async () => {

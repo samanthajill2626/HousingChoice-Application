@@ -85,10 +85,21 @@ export default function Thread(): React.JSX.Element {
   const unreadRef = useRef(0);
   unreadRef.current = conversation?.unread_count ?? 0;
 
+  // F: a short-lived latch so THIS client's own markRead (which the backend
+  // echoes back as a conversation.updated with unread_count 0) doesn't trigger a
+  // redundant self-refetch. We only suppress when our markRead actually drove
+  // unread → 0; the echo (unread_count 0) consumes the latch exactly once. Other
+  // dashboards still need unread→0 events, so we do NOT blanket-skip them.
+  const selfReadEchoRef = useRef(false);
+
   const doMarkRead = useCallback(() => {
     if (conversationId.length === 0) return;
+    // Only arm the self-echo latch when there is actually unread to clear (an
+    // already-read mark-read produces no unread→0 transition to echo).
+    if (unreadRef.current > 0) selfReadEchoRef.current = true;
     markRead(conversationId).catch(() => {
       // Non-fatal: the unread badge will clear on the next successful read.
+      selfReadEchoRef.current = false;
     });
   }, [conversationId]);
 
@@ -102,6 +113,7 @@ export default function Thread(): React.JSX.Element {
 
   useEffect(() => {
     markReadRef.current = false;
+    selfReadEchoRef.current = false;
   }, [conversationId]);
 
   useEffect(() => {
@@ -126,6 +138,14 @@ export default function Thread(): React.JSX.Element {
   const onConversationUpdated = useCallback(
     (event: ConversationUpdatedEvent) => {
       if (event.conversationId !== conversationId) return;
+      // Skip exactly the self-echo from THIS client's markRead (unread → 0): it
+      // carries no header/assignment/type change we don't already have, so the
+      // refetch would be redundant. Consume the latch once; any later unread→0
+      // (e.g. another dashboard) still refetches.
+      if (selfReadEchoRef.current && event.unread_count === 0) {
+        selfReadEchoRef.current = false;
+        return;
+      }
       // Header/assignment/type may have changed — refetch the header.
       refetchConversation();
     },

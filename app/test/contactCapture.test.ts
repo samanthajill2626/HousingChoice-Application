@@ -85,7 +85,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async findByParticipantPhone() {
       return [];
     },
-    async setType() {},
+    async setType() {
+      return conversation;
+    },
+    async applyTriage() {
+      return conversation;
+    },
     async setParticipantsIfAbsent(conversationId, participants) {
       fakes.claimAttempts += 1;
       if (conversationId !== conversation.conversationId) {

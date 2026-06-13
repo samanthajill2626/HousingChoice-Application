@@ -100,9 +100,13 @@ export function ThreadHeader({
           Call instead
         </Button>
 
-        <IconButton label="Contact details" size="sm" onClick={onOpenContact}>
-          <UsersIcon />
-        </IconButton>
+        {/* Only below 1200px: at ≥1200px the inline `.side` contact column is
+         * visible, so this trigger would open a redundant Sheet on top of it. */}
+        <span className={styles.contactTrigger}>
+          <IconButton label="Contact details" size="sm" onClick={onOpenContact}>
+            <UsersIcon />
+          </IconButton>
+        </span>
       </div>
     </header>
   );

@@ -13,6 +13,7 @@ function summary(over: Partial<ConversationSummary> = {}): ConversationSummary {
     unread_count: 0,
     assignment: null,
     sms_opt_out: false,
+    participant_display_name: null,
     ...over,
   };
 }
@@ -67,8 +68,16 @@ describe('formatRelativeTime', () => {
 });
 
 describe('displayName / needsReview', () => {
-  it('uses the formatted participant phone (no name in the wire shape)', () => {
+  it('falls back to the formatted participant phone when no resolved name', () => {
     expect(displayName(summary())).toBe('(415) 555-0142');
+  });
+
+  it('prefers the denormalized participant_display_name when present', () => {
+    expect(displayName(summary({ participant_display_name: 'Keisha Jones' }))).toBe('Keisha Jones');
+  });
+
+  it('never fabricates a name — an empty resolved name falls back to the phone', () => {
+    expect(displayName(summary({ participant_display_name: '' }))).toBe('(415) 555-0142');
   });
 
   it('flags unknown_1to1 conversations as needing review', () => {

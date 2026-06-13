@@ -68,6 +68,7 @@ describe('GET /api/conversations — the inbox', () => {
       participant_phone: '+15550100001',
       participants: [{ contactId: 'contact-1', phone: '+15550100001' }],
       preview: 'newest preview',
+      participant_display_name: null,
       last_activity_at: '2026-06-12T11:00:00.000Z',
       unread_count: 4,
       assignment: 'user-va-1',
@@ -77,11 +78,25 @@ describe('GET /api/conversations — the inbox', () => {
     expect(res.body.conversations[1]).toMatchObject({
       participants: [],
       preview: null,
+      participant_display_name: null,
       unread_count: 0,
       assignment: null,
       sms_opt_out: false,
     });
     expect(res.body.nextCursor).toBeNull();
+  });
+
+  it('surfaces the denormalized participant_display_name when set (else null)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-named', { participant_display_name: 'Keisha Jones' });
+
+    const res = await request(app).get('/api/conversations').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const named = res.body.conversations.find(
+      (c: { conversationId: string }) => c.conversationId === 'conv-named',
+    );
+    // The inbox row shows the resolved person, not the raw phone (Cluster D).
+    expect(named.participant_display_name).toBe('Keisha Jones');
   });
 
   it('rejects bad limits and garbage cursors with 400', async () => {
@@ -288,7 +303,8 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
     expect(res.body.conversation).toMatchObject({ conversationId: 'conv-1', unread_count: 0 });
     expect(world.conversations.get('conv-1')!.unread_count).toBe(0);
     // SSE (M1.2): other dashboards drop their unread badge live — same
-    // payload shape as every other conversation.updated.
+    // payload shape as every other conversation.updated (incl. the M1.4
+    // type + assignment wire fields).
     expect(world.emitted).toEqual([
       {
         event: 'conversation.updated',
@@ -297,6 +313,8 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
           last_activity_at: '2026-06-12T10:00:00.000Z',
           unread_count: 0,
           preview: 'seen now',
+          type: 'tenant_1to1',
+          assignment: null,
         },
       },
     ]);
@@ -357,6 +375,8 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
       conversationId: 'conv-1',
       last_activity_at: '2026-06-12T10:00:00.000Z',
       unread_count: 0,
+      type: 'tenant_1to1',
+      assignment: 'user-va-1',
     });
   });
 

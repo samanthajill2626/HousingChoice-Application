@@ -200,6 +200,16 @@ export function createFakeWorld(): FakeWorld {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setType: no conversation ${conversationId}`);
       conv.type = type;
+      return conv;
+    },
+    async applyTriage(conversationId, fields) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`applyTriage: no conversation ${conversationId}`);
+      if (fields.type !== undefined) conv.type = fields.type;
+      if (fields.displayName !== undefined && fields.displayName !== null) {
+        conv.participant_display_name = fields.displayName;
+      }
+      return conv;
     },
     async setMode(conversationId, mode) {
       const conv = conversations.get(conversationId);

@@ -261,7 +261,7 @@ describe('<Thread> identity + triage', () => {
     ).toBeNull();
   });
 
-  it('PATCHes the contact on triage save and refetches the conversation (badge clears)', async () => {
+  it('a TYPE-ONLY triage clears the needs-review badge and the header shows the resolved type (no fabricated name)', async () => {
     renderThread();
     await screen.findByText(/no messages yet/i);
 
@@ -274,12 +274,13 @@ describe('<Thread> identity + triage', () => {
     const typeSelect = await screen.findByLabelText('Type');
     fireEvent.change(typeSelect, { target: { value: 'tenant' } });
 
-    // After save, the refetches return a resolved (tenant_1to1) thread + a named,
-    // active contact — so the needs-review cue should clear.
+    // REAL backend behavior on a type-only triage: it auto-advances the contact
+    // status to 'active' BECAUSE the type resolved to tenant, and flips the
+    // conversation to tenant_1to1 — but NO name was entered, so the refetched
+    // contact carries no name (the UI must not fabricate one). The post-save
+    // refetch reflects exactly that: status:'active', type:'tenant', NO name.
     api.getConversation.mockResolvedValue(makeConversation({ type: 'tenant_1to1' }));
-    api.getContact.mockResolvedValue(
-      makeContact({ type: 'tenant', status: 'active', firstName: 'Keisha', lastName: 'Jones' }),
-    );
+    api.getContact.mockResolvedValue(makeContact({ type: 'tenant', status: 'active' }));
 
     const saveButtons = screen.getAllByRole('button', { name: /save contact/i });
     fireEvent.click(saveButtons[0]!);
@@ -289,10 +290,15 @@ describe('<Thread> identity + triage', () => {
     expect(api.updateContact).toHaveBeenCalledWith('contact-1', { type: 'tenant' });
     // Conversation refetched after the type flip.
     await waitFor(() => expect(api.getConversation.mock.calls.length).toBeGreaterThan(1));
-    // The header needs-review Badge clears once the identity resolves.
+    // Regression: the header needs-review Badge clears once the identity resolves
+    // (the backend auto-advanced status → 'active', so needs_review is gone).
     await waitFor(() =>
       expect(document.querySelector('[title="Identity not yet confirmed"]')).toBeNull(),
     );
+    // …and the header now shows the RESOLVED TYPE ("Tenant"), not a fabricated
+    // name: with no contact name, the label stays the formatted phone.
+    expect(screen.getAllByText('Tenant').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('(313) 555-1234').length).toBeGreaterThan(0);
   });
 });
 

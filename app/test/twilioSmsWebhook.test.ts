@@ -298,7 +298,7 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     expect(world.auditEvents).toHaveLength(1);
     expect(world.auditEvents[0]).toMatchObject({
       entityKey: 'contacts#contact-T',
-      eventType: 'sms_opt_out_recorded',
+      event_type: 'sms_opt_out_recorded',
     });
     expect(world.messages).toHaveLength(1); // the STOP itself is on the timeline
     expect(world.messages[0]!.body).toBe('STOP');
@@ -326,7 +326,7 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     );
 
     expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: false }]);
-    expect(world.auditEvents[0]).toMatchObject({ eventType: 'sms_opt_out_cleared' });
+    expect(world.auditEvents[0]).toMatchObject({ event_type: 'sms_opt_out_cleared' });
     expect(world.contacts[0]!.sms_opt_out).toBe(false);
   });
 
@@ -359,11 +359,11 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     expect(world.auditEvents).toEqual([
       expect.objectContaining({
         entityKey: `contacts#${stub.contactId}`,
-        eventType: 'contact_auto_captured',
+        event_type: 'contact_auto_captured',
       }),
       expect.objectContaining({
         entityKey: `contacts#${stub.contactId}`,
-        eventType: 'sms_opt_out_recorded',
+        event_type: 'sms_opt_out_recorded',
         payload: expect.objectContaining({ providerSid: 'SMstopunknown', source: 'keyword' }),
       }),
     ]);
@@ -403,14 +403,14 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     expect(world.contacts).toHaveLength(1);
     const stub = world.contacts[0]!;
     expect(stub.sms_opt_out).toBe(false);
-    expect(world.auditEvents.map((e) => e.eventType)).toEqual([
+    expect(world.auditEvents.map((e) => e.event_type)).toEqual([
       'contact_auto_captured',
       'sms_opt_out_recorded',
       'sms_opt_out_cleared',
     ]);
     expect(world.auditEvents[2]).toMatchObject({
       entityKey: `contacts#${stub.contactId}`,
-      eventType: 'sms_opt_out_cleared',
+      event_type: 'sms_opt_out_cleared',
     });
 
     // Cleared = sendable again.
@@ -456,7 +456,7 @@ describe('POST /webhooks/twilio/sms — M1.2 contact auto-capture', () => {
     expect(world.auditEvents).toEqual([
       {
         entityKey: `contacts#${stub.contactId}`,
-        eventType: 'contact_auto_captured',
+        event_type: 'contact_auto_captured',
         payload: { conversationId: conv.conversationId, source: 'inbound_sms' },
       },
     ]);
@@ -487,7 +487,7 @@ describe('POST /webhooks/twilio/sms — M1.2 contact auto-capture', () => {
 
     const conv = [...world.conversations.values()][0]!;
     expect(conv.participants).toEqual([{ contactId: 'contact-known', phone: TENANT_PHONE }]);
-    expect(world.auditEvents.filter((e) => e.eventType === 'contact_auto_captured')).toHaveLength(0);
+    expect(world.auditEvents.filter((e) => e.event_type === 'contact_auto_captured')).toHaveLength(0);
   });
 
   it('DEDUPE path (redelivery) → no double capture: one contact, one link, one audit', async () => {
@@ -500,7 +500,7 @@ describe('POST /webhooks/twilio/sms — M1.2 contact auto-capture', () => {
     expect(world.contacts).toHaveLength(1);
     expect(world.contactCreates).toHaveLength(1);
     expect(
-      world.auditEvents.filter((e) => e.eventType === 'contact_auto_captured'),
+      world.auditEvents.filter((e) => e.event_type === 'contact_auto_captured'),
     ).toHaveLength(1);
     const conv = [...world.conversations.values()][0]!;
     expect(conv.participants).toHaveLength(1);

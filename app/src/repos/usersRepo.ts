@@ -153,6 +153,16 @@ export interface UsersRepo {
   /** Flip the role; throws if the user does not exist (ops script path). */
   setRole(userId: string, role: UserRole): Promise<void>;
   /**
+   * Flip the role AND bump session_epoch in ONE conditional update (M1.4 H1):
+   * a role change and the session revocation that must accompany it can never
+   * partially apply (role changed but sessions not revoked). Mirrors the ops
+   * script's combined update (scripts/lib/userRoleCore.mjs buildRoleUpdate)
+   * byte-for-byte. Returns the NEW session epoch. Throws if the user does not
+   * exist. Use this from the in-app PATCH role route instead of a separate
+   * setRole + bumpSessionEpoch pair.
+   */
+  setRoleAndRevoke(userId: string, role: UserRole): Promise<number>;
+  /**
    * +1 the session epoch and return the NEW value — revokes every session
    * sealed with the old epoch (effective within the middleware's 60s epoch
    * cache). Throws if the user does not exist.
@@ -285,6 +295,35 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
         }),
       );
       log.info({ userId, role }, 'user role set');
+    },
+
+    async setRoleAndRevoke(userId, role) {
+      // ONE update: SET role AND bump session_epoch — atomic, so a role change
+      // can never land without revoking the user's sessions (H1). The epoch
+      // expression mirrors bumpSessionEpoch + the ops-script buildRoleUpdate
+      // exactly: if_not_exists(…, 1) + 1 (NOT ADD), so a legacy item lacking
+      // the attribute (read as epoch 1) first bumps to 2.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression:
+            'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeNames: { '#role': 'role' },
+          ExpressionAttributeValues: { ':role': role, ':base': 1, ':one': 1 },
+          ReturnValues: 'UPDATED_NEW',
+        }),
+      );
+      const epoch = (Attributes as Pick<UserItem, 'session_epoch'> | undefined)?.session_epoch;
+      if (typeof epoch !== 'number') {
+        throw new Error(`setRoleAndRevoke(${userId}): UPDATED_NEW returned no session_epoch`);
+      }
+      log.info(
+        { userId, role, sessionEpoch: epoch },
+        'user role set + session epoch bumped — all prior sessions revoked',
+      );
+      return epoch;
     },
 
     async bumpSessionEpoch(userId) {

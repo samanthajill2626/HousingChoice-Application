@@ -15,6 +15,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import {
@@ -58,8 +59,9 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
   const users = createUsersRepo(repoDeps);
   const contacts = createContactsRepo(repoDeps);
   const conversations = createConversationsRepo(repoDeps);
+  const audit = createAuditRepo(repoDeps);
 
-  const bases = ['settings', 'users', 'contacts', 'conversations'] as const;
+  const bases = ['settings', 'users', 'contacts', 'conversations', 'audit_events'] as const;
 
   beforeAll(async () => {
     for (const base of bases) {
@@ -177,6 +179,40 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
       }
       const after = await conversations.getById(realConvId);
       expect(after?.type).toBe('tenant_1to1');
+    });
+  });
+
+  describe('auditRepo byActor GSI (M1)', () => {
+    it('lifts payload.actor to a top-level actorId so "all actions by actor X" is queryable', async () => {
+      const { QueryCommand } = await import('@aws-sdk/lib-dynamodb');
+      const actor = `usr_${randomUUID().slice(0, 16)}`;
+
+      // Append events for this actor (the convention: actor inside payload).
+      await audit.append('users#target-1', 'role_changed', { from: 'va', to: 'admin', actor });
+      await audit.append('contacts#c-1', 'contact_updated', { fields: ['type'], actor });
+      // A system event with NO actor must stay OFF the sparse GSI.
+      await audit.append('conversations#conv-1', 'assignment_changed', { from: null, to: 'x' });
+
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: tableName('audit_events', testEnv),
+          IndexName: 'byActor',
+          KeyConditionExpression: 'actorId = :a',
+          ExpressionAttributeValues: { ':a': actor },
+        }),
+      );
+      const items = (Items ?? []) as {
+        actorId: string;
+        event_type: string;
+        payload: Record<string, unknown>;
+      }[];
+      // BOTH of this actor's events come back via the GSI (the actorless one does not).
+      expect(items).toHaveLength(2);
+      expect(items.every((i) => i.actorId === actor)).toBe(true);
+      expect(items.map((i) => i.event_type).sort()).toEqual(['contact_updated', 'role_changed']);
+      // The actor also stays in the payload (call sites/tests read it there).
+      const roleChange = items.find((i) => i.event_type === 'role_changed')!;
+      expect(roleChange.payload).toMatchObject({ from: 'va', to: 'admin', actor });
     });
   });
 });

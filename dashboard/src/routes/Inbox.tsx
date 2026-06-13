@@ -9,17 +9,22 @@
 // Private components/hooks/styles live in src/routes/inbox/.
 import { Button, EmptyState, InboxIcon, Spinner } from '../ui/index.js';
 import { useEventStream } from '../api/index.js';
+import { useAuth } from '../app/AuthContext.js';
 import { ConversationRow } from './inbox/ConversationRow.js';
 import { useInbox } from './inbox/useInbox.js';
 import styles from './inbox/Inbox.module.css';
 
 export default function Inbox(): React.JSX.Element {
+  const { status } = useAuth();
   const { conversations, loading, error, retry, hasMore, loadingMore, loadMore, applyUpdate } =
     useInbox();
 
   // Live updates: keep rows fresh (patch-in-place for known threads; coalesced
   // first-page refetch for unknown ones — see useInbox).
-  useEventStream({ onConversationUpdated: applyUpdate });
+  // M2: only stream while authenticated. This screen already renders only when
+  // authenticated, but gating explicitly means a mid-session expiry stops the
+  // EventSource reconnect loop (no retry storm against a 401'd /api/events).
+  useEventStream({ onConversationUpdated: applyUpdate, enabled: status === 'authenticated' });
 
   return (
     <section className={styles.screen} aria-labelledby="inbox-heading">

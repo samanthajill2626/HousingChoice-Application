@@ -22,7 +22,10 @@ const VAPID_ENV = {
   VAPID_SUBJECT: 'mailto:ops@housingchoice.org',
 };
 
-function validSubscription(endpoint = 'https://push.example/device-1') {
+// A real-shaped FCM endpoint (an allowlisted web-push vendor host — C1).
+const FCM_ENDPOINT = 'https://fcm.googleapis.com/fcm/send/device-1';
+
+function validSubscription(endpoint = FCM_ENDPOINT) {
   return { endpoint, keys: { p256dh: 'p256dh-key', auth: 'auth-key' } };
 }
 
@@ -48,7 +51,7 @@ describe('push routes — VAPID configured', () => {
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ subscriptionCount: 1 });
     const user = fakeUsers.users.get(TEST_SESSION_USER.userId);
-    expect(user?.push_subscriptions?.[0]?.endpoint).toBe('https://push.example/device-1');
+    expect(user?.push_subscriptions?.[0]?.endpoint).toBe(FCM_ENDPOINT);
     // created_at is stamped server-side.
     expect(typeof user?.push_subscriptions?.[0]?.created_at).toBe('string');
   });
@@ -83,19 +86,60 @@ describe('push routes — VAPID configured', () => {
     }
   });
 
+  it('POST /api/push/subscriptions 400s a disallowed endpoint host (C1 SSRF guard)', async () => {
+    const { app, fakeUsers } = makeWebhookHarness({ env: VAPID_ENV });
+    for (const endpoint of [
+      'https://169.254.169.254/latest/meta-data/', // cloud metadata
+      'https://localhost/x',
+      'https://10.0.0.5/x', // RFC-1918
+      'https://attacker.example.com/collect', // arbitrary host
+      'http://fcm.googleapis.com/fcm/send/abc', // right host, wrong scheme
+    ]) {
+      const res = await request(app)
+        .post('/api/push/subscriptions')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ subscription: validSubscription(endpoint) });
+      expect(res.status, endpoint).toBe(400);
+      expect(res.body.error, endpoint).toBe('invalid push endpoint host');
+    }
+    // Nothing was stored on the caller.
+    expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions ?? []).toEqual([]);
+  });
+
+  it('POST /api/push/subscriptions 400s an over-length endpoint or key (L2 caps)', async () => {
+    const { app } = makeWebhookHarness({ env: VAPID_ENV });
+    const longEndpoint = `https://fcm.googleapis.com/fcm/send/${'a'.repeat(2100)}`;
+    const longKey = 'k'.repeat(300);
+    for (const sub of [
+      { endpoint: longEndpoint, keys: { p256dh: 'a', auth: 'b' } },
+      { endpoint: FCM_ENDPOINT, keys: { p256dh: longKey, auth: 'b' } },
+      { endpoint: FCM_ENDPOINT, keys: { p256dh: 'a', auth: longKey } },
+    ]) {
+      const res = await request(app)
+        .post('/api/push/subscriptions')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ subscription: sub });
+      expect(res.status, JSON.stringify(sub).slice(0, 60)).toBe(400);
+      expect(res.body.error).toMatch(/length/);
+    }
+  });
+
   it('DELETE /api/push/subscriptions removes one device and 204s', async () => {
     const { app, fakeUsers } = makeWebhookHarness({ env: VAPID_ENV });
+    const deviceEndpoint = 'https://fcm.googleapis.com/fcm/send/d';
     await request(app)
       .post('/api/push/subscriptions')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ subscription: validSubscription('https://push.example/d') });
+      .send({ subscription: validSubscription(deviceEndpoint) });
 
     const res = await request(app)
       .delete('/api/push/subscriptions')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ endpoint: 'https://push.example/d' });
+      .send({ endpoint: deviceEndpoint });
 
     expect(res.status).toBe(204);
     expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toEqual([]);

@@ -41,6 +41,59 @@ export interface WebPushAdapter {
 const GONE_STATUSES = new Set([404, 410]);
 
 /**
+ * SSRF guard (M1.4 security review C1): a browser hands us whatever `endpoint`
+ * URL it likes, and web-push later POSTs to it — so an attacker who can store a
+ * subscription (POST /api/push/subscriptions, or a missed-call push in M1.9)
+ * could aim our server at an internal address (169.254.169.254, localhost, an
+ * RFC-1918 host) unless we constrain it. The real push services live on a tiny
+ * set of vendor domains, so we ALLOWLIST those rather than try to blocklist
+ * every internal range. A hostname is accepted only when it equals or is a
+ * subdomain of one of these suffixes:
+ *   - googleapis.com   FCM:     fcm.googleapis.com
+ *   - mozilla.com / mozaws.net  Mozilla autopush: updates.push.services.mozilla.com
+ *   - windows.com      WNS:     *.notify.windows.com
+ *   - apple.com        Apple:   *.push.apple.com
+ * Everything else — IP literals, loopback, link-local, private ranges, an
+ * arbitrary attacker host, and any non-https scheme — is rejected.
+ */
+const ALLOWED_PUSH_ENDPOINT_SUFFIXES: readonly string[] = [
+  'googleapis.com',
+  'mozilla.com',
+  'mozaws.net',
+  'windows.com',
+  'apple.com',
+] as const;
+
+/** A hostname matches a suffix when it equals it or ends in `.<suffix>` (a true subdomain). */
+function hostnameMatchesSuffix(hostname: string, suffix: string): boolean {
+  return hostname === suffix || hostname.endsWith(`.${suffix}`);
+}
+
+/**
+ * Pure, testable SSRF allowlist check for a stored push endpoint. Returns true
+ * ONLY for an https URL whose hostname is one of the known web-push vendor
+ * domains (above). Enforced BOTH at subscribe time (routes/push.ts) AND
+ * defensively before every send (services/pushService.ts) — defense in depth,
+ * so a bad endpoint stored before this guard existed is still never POSTed to.
+ */
+export function isAllowedPushEndpoint(urlString: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return false;
+  }
+  // Push services are always https; this also rejects http://, file://, etc.
+  if (url.protocol !== 'https:') return false;
+  const hostname = url.hostname.toLowerCase();
+  // An IPv6 literal (URL keeps the brackets in hostname) or an IPv4 literal is
+  // never a vendor domain — the suffix check below would reject them anyway,
+  // but bail explicitly so the intent is unmistakable.
+  if (hostname.length === 0) return false;
+  return ALLOWED_PUSH_ENDPOINT_SUFFIXES.some((suffix) => hostnameMatchesSuffix(hostname, suffix));
+}
+
+/**
  * Build the adapter, or undefined when VAPID is unconfigured (push off).
  *
  * Deliberately does NOT call the process-global `setVapidDetails` at
@@ -61,6 +114,12 @@ export function createWebPushAdapter(config: AppConfig): WebPushAdapter | undefi
 
   return {
     async sendToSubscription(subscription, payload) {
+      // Defense in depth (C1): never POST to an endpoint that isn't a known
+      // web-push vendor host, even if a bad one was stored before the guard.
+      // Treat it as a dead subscription so the caller prunes it.
+      if (!isAllowedPushEndpoint(subscription.endpoint)) {
+        return { result: 'gone' };
+      }
       try {
         const res = await webpush.sendNotification(subscription, payload, { vapidDetails });
         return { result: 'sent', statusCode: res.statusCode };

@@ -138,11 +138,32 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
       return;
     }
 
-    await users.setRole(userId, role);
-    // Bump the session epoch so the new role takes effect ≤60s (matching
-    // `npm run user:role`) — the user's active sessions re-read at their next
-    // request within the epoch-cache TTL.
-    await users.bumpSessionEpoch(userId);
+    // ATOMIC role change + session revocation (H1): ONE write flips the role
+    // and bumps the session epoch, so the new role can never land without
+    // revoking the user's sessions (the new role takes effect ≤60s, matching
+    // `npm run user:role`). Replaces the old setRole-then-bumpSessionEpoch pair.
+    await users.setRoleAndRevoke(userId, role);
+
+    // ZERO-ADMIN LOCKOUT — verify-after-write-and-rollback (C2). The pre-write
+    // last-admin guard above is the fast path, but two admins demoting each
+    // other CONCURRENTLY can both pass it (each sees the other still admin) and
+    // race to zero admins. So after a demotion, RE-LIST admins; if none remain,
+    // the write we just made was the one that emptied the table — roll it back
+    // (re-promote, atomic) and 409. Each concurrent demoter runs this check, so
+    // whichever lands last heals the table: the end state always has ≥1 admin.
+    if (isDemotion) {
+      const adminsNow = (await users.listAll()).filter((u) => u.role === 'admin');
+      if (adminsNow.length === 0) {
+        await users.setRoleAndRevoke(userId, 'admin'); // undo — re-promote
+        log.warn(
+          { userId, actor: req.user?.userId },
+          'demotion would leave zero admins — rolled back (verify-after-write)',
+        );
+        res.status(409).json({ error: 'cannot_demote_last_admin' });
+        return;
+      }
+    }
+
     await audit.append(`users#${userId}`, 'role_changed', {
       from,
       to: role,

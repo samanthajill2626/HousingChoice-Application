@@ -49,6 +49,15 @@ function isContactType(value: unknown): value is ContactType {
   return typeof value === 'string' && (CONTACT_TYPES as readonly string[]).includes(value);
 }
 
+/**
+ * Allowed contact lifecycle statuses (L1). Triage previously accepted ANY
+ * string, which polluted the byTypeStatus GSI (the human-triage queue keys on
+ * (type, status)) with arbitrary values. These are the lifecycle values the
+ * codebase actually writes: 'needs_review' (auto-capture stub) → 'active'
+ * (resolved). An unknown status is a 400.
+ */
+const CONTACT_STATUSES: readonly string[] = ['needs_review', 'active'] as const;
+
 /** A resolved-identity 1:1 type for the conversation, or undefined when not propagatable. */
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
@@ -122,7 +131,9 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   }
   if ('status' in b) {
     const v = b['status'];
-    if (typeof v !== 'string' || v.length === 0) return { error: 'status must be a non-empty string' };
+    if (typeof v !== 'string' || !CONTACT_STATUSES.includes(v)) {
+      return { error: `status must be one of: ${CONTACT_STATUSES.join(', ')}` };
+    }
     patch['status'] = v;
     changedFields.push('status');
   }

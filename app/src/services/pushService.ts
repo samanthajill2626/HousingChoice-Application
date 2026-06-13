@@ -14,6 +14,7 @@
 // never depend on this — the founder still gets her texts even with push off.
 import {
   createWebPushAdapter,
+  isAllowedPushEndpoint,
   type PushSubscription,
   type WebPushAdapter,
 } from '../adapters/webPush.js';
@@ -114,6 +115,19 @@ export function createPushService(deps: PushServiceDeps): PushService {
       // there's no fan-out worth parallelizing, and serial keeps prune
       // read-modify-writes from racing each other on the one user item.
       for (const record of subscriptions) {
+        // SSRF defense in depth (C1): never send to an endpoint that isn't a
+        // known web-push vendor host. A bad endpoint stored before the
+        // subscribe-time guard existed is pruned here, BEFORE any POST — so the
+        // server is never aimed at an internal/attacker address.
+        if (!isAllowedPushEndpoint(record.endpoint)) {
+          await users.removePushSubscription(userId, record.endpoint);
+          pruned += 1;
+          log.warn(
+            { userId, kind: notification.kind },
+            'push: stored endpoint failed the host allowlist — pruned, not sent',
+          );
+          continue;
+        }
         try {
           const outcome = await adapter.sendToSubscription(toBrowserSubscription(record), body);
           if (outcome.result === 'gone') {

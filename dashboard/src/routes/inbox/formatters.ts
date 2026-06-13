@@ -68,6 +68,14 @@ export function displayName(c: ConversationSummary): string {
  * `unknown_1to1` (an un-triaged participant). The per-contact `needs_review`
  * status is NOT in the summary wire shape, so we cannot surface it from the
  * list alone — see the flagged shared-type gap.
+ *
+ * BOUNDARY (review H3 — intentional, do NOT add a per-row contact fetch): the
+ * inbox is served by a SINGLE DynamoDB query and keys its review cue purely on
+ * the conversation's `unknown_1to1` type — fetching each row's contact to read
+ * its `needs_review` status would turn one query into N+1 lookups. The richer
+ * per-CONTACT `needs_review` cue (a typed contact still awaiting human review)
+ * is surfaced where the contact is already loaded: the Thread side panel /
+ * header. The two cues are complementary, not duplicative.
  */
 export function needsReview(c: ConversationSummary): boolean {
   return c.type === 'unknown_1to1';

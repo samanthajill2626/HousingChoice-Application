@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ApiError,
+  getContact,
   getConversation,
   markRead,
   setAssignment,
@@ -35,7 +36,7 @@ export default function Thread(): React.JSX.Element {
   const conversationId = id ?? '';
   const navigate = useNavigate();
   const toast = useToast();
-  const { me } = useAuth();
+  const { me, status: authStatus } = useAuth();
 
   // --- Conversation header (refetchable so triage type-flips reflect) --------
   const {
@@ -49,14 +50,41 @@ export default function Thread(): React.JSX.Element {
   const timeline = useThreadMessages(conversationId);
 
   // --- Contact (side panel) --------------------------------------------------
+  // H1: the contact is fetched HERE (lifted up) so the header identity can show
+  // the real name post-triage — not just in the side panel. ContactPanel
+  // receives the fetched contact + refetch as props (it no longer fetches).
   const contactId = conversation?.participants?.[0]?.contactId;
+  const {
+    data: contact,
+    loading: contactLoading,
+    error: contactError,
+    refetch: refetchContact,
+  } = useApi<Contact>(
+    (signal) => {
+      if (contactId === undefined) return Promise.reject(new ApiError(0, 'no_contact', 'no contact'));
+      return getContact(contactId, signal);
+    },
+    [contactId],
+  );
+
   const identity = useMemo(
-    () => resolveIdentity(conversation, undefined),
-    [conversation],
+    // Feed the resolved contact so a triaged tenant/landlord shows their real
+    // name and the "needs review" cue clears; unknown/needs_review still shows
+    // the phone (resolveIdentity never fabricates a name).
+    () => resolveIdentity(conversation, contact),
+    [conversation, contact],
   );
 
   // --- Mark read on open + on window focus -----------------------------------
+  // M3: don't POST /read when the thread is already read. The on-open mark-read
+  // fires once per conversation (markReadRef latch); the focus handler only
+  // re-marks when there is actually unread AND the on-open pass has completed
+  // (so the two don't race a redundant double-POST on the same open+focus).
   const markReadRef = useRef(false);
+  // Latest unread_count, read inside the focus handler without re-subscribing.
+  const unreadRef = useRef(0);
+  unreadRef.current = conversation?.unread_count ?? 0;
+
   const doMarkRead = useCallback(() => {
     if (conversationId.length === 0) return;
     markRead(conversationId).catch(() => {
@@ -65,7 +93,7 @@ export default function Thread(): React.JSX.Element {
   }, [conversationId]);
 
   useEffect(() => {
-    // Once messages have loaded for this conversation, mark it read.
+    // Once messages have loaded for this conversation, mark it read (once).
     if (!timeline.loading && !markReadRef.current && conversationId.length > 0) {
       markReadRef.current = true;
       doMarkRead();
@@ -77,7 +105,11 @@ export default function Thread(): React.JSX.Element {
   }, [conversationId]);
 
   useEffect(() => {
-    const onFocus = (): void => doMarkRead();
+    const onFocus = (): void => {
+      // Only re-mark on focus if the on-open pass ran AND there is unread —
+      // avoids racing the on-open mark-read and refiring /read when already read.
+      if (markReadRef.current && unreadRef.current > 0) doMarkRead();
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [doMarkRead]);
@@ -100,7 +132,13 @@ export default function Thread(): React.JSX.Element {
     [conversationId, refetchConversation],
   );
 
-  useEventStream({ onMessagePersisted, onConversationUpdated });
+  // M2: only stream while authenticated, so a mid-session session expiry stops
+  // the EventSource reconnect loop instead of hammering a 401'd /api/events.
+  useEventStream({
+    onMessagePersisted,
+    onConversationUpdated,
+    enabled: authStatus === 'authenticated',
+  });
 
   // --- Assignment ------------------------------------------------------------
   const [assigning, setAssigning] = useState(false);
@@ -144,12 +182,14 @@ export default function Thread(): React.JSX.Element {
     (_updated: Contact): void => {
       void _updated;
       // The backend may have flipped the conversation type (unknown_1to1 →
-      // tenant/landlord_1to1) — refetch so the header badge + "needs review"
-      // cue update. Close the mobile sheet.
+      // tenant/landlord_1to1) — refetch the conversation so the header badge
+      // updates, AND refetch the contact so the lifted header identity picks up
+      // the new name/type. Close the mobile sheet.
       refetchConversation();
+      refetchContact();
       setSheetOpen(false);
     },
-    [refetchConversation],
+    [refetchConversation, refetchContact],
   );
 
   // --- Render states ---------------------------------------------------------
@@ -236,13 +276,25 @@ export default function Thread(): React.JSX.Element {
 
         {/* Side column on wide screens. */}
         <aside className={styles.side}>
-          <ContactPanel contactId={contactId} onResolved={handleContactResolved} />
+          <ContactPanel
+            contactId={contactId}
+            contact={contact}
+            loading={contactLoading}
+            error={contactError}
+            onResolved={handleContactResolved}
+          />
         </aside>
       </div>
 
       {/* Bottom sheet on mobile. */}
       <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)} title="Contact">
-        <ContactPanel contactId={contactId} onResolved={handleContactResolved} />
+        <ContactPanel
+          contactId={contactId}
+          contact={contact}
+          loading={contactLoading}
+          error={contactError}
+          onResolved={handleContactResolved}
+        />
       </Sheet>
     </section>
   );

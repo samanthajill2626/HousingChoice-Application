@@ -341,9 +341,9 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
     expect(world.conversations.get('conv-1')!.assignment).toBeUndefined();
 
     expect(world.auditEvents).toEqual([
-      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: null, to: 'user-va-1' } },
-      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-1', to: 'user-va-2' } },
-      { entityKey: 'conversations#conv-1', eventType: 'assignment_changed', payload: { from: 'user-va-2', to: null } },
+      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: null, to: 'user-va-1' } },
+      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: 'user-va-1', to: 'user-va-2' } },
+      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: 'user-va-2', to: null } },
     ]);
 
     // SSE (M1.2): each assignment change pushes one conversation.updated

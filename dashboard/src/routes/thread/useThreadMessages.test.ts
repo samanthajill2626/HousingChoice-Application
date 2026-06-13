@@ -4,6 +4,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message, SendMessageResult } from '../../api';
+// (Message is also used to cast timeline entries in the retry-reconcile tests.)
 
 const api = vi.hoisted(() => ({
   listMessages: vi.fn(),
@@ -147,5 +148,71 @@ describe('useThreadMessages', () => {
       await result.current.retry(msg({ tsMsgId: 'tf#f', direction: 'outbound', body: 'retry me', delivery_status: 'failed' }));
     });
     expect(api.sendMessage).toHaveBeenCalledWith(CONV, { body: 'retry me' });
+  });
+
+  it('retry RECONCILES the failed bubble in place (no second bubble; clears failure) — H2/L5', async () => {
+    // Seed one FAILED outbound message.
+    api.listMessages.mockResolvedValue([
+      msg({
+        tsMsgId: 'tf#f',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'retry me',
+        delivery_status: 'failed',
+        error_code: '30005',
+      }),
+    ]);
+    api.sendMessage.mockResolvedValue({
+      conversationId: CONV,
+      providerSid: 'SM-retry',
+      tsMsgId: 't9#SM-retry',
+      status: 'queued',
+    } satisfies SendMessageResult);
+
+    const { result } = renderHook(() => useThreadMessages(CONV));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.retry(result.current.messages[0] as Message);
+    });
+
+    // Exactly ONE bubble for this body — the original was reconciled in place,
+    // not duplicated by a fresh optimistic append.
+    const matches = result.current.messages.filter((m) => m.body === 'retry me');
+    expect(matches).toHaveLength(1);
+    const reconciled = matches[0]!;
+    // Reconciled to the server's new tsMsgId/status; failure reason cleared.
+    expect(reconciled.tsMsgId).toBe('t9#SM-retry');
+    expect(reconciled.delivery_status).toBe('queued');
+    expect(reconciled.error_code).toBeUndefined();
+    expect(isPending(reconciled)).toBe(false);
+  });
+
+  it('retry restores the failed bubble on a re-send failure (still one bubble) — H2/L5', async () => {
+    api.listMessages.mockResolvedValue([
+      msg({
+        tsMsgId: 'tf#f',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'retry me',
+        delivery_status: 'failed',
+        error_code: '30005',
+      }),
+    ]);
+    const { ApiError } = await vi.importActual<typeof import('../../api')>('../../api');
+    api.sendMessage.mockRejectedValue(new ApiError(500, 'send_failed', 'nope'));
+
+    const { result } = renderHook(() => useThreadMessages(CONV));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await expect(result.current.retry(result.current.messages[0] as Message)).rejects.toBeTruthy();
+    });
+
+    // The original failed bubble is restored — exactly one bubble, still failed.
+    const matches = result.current.messages.filter((m) => m.body === 'retry me');
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.delivery_status).toBe('failed');
+    expect(matches[0]!.error_code).toBe('30005');
   });
 });

@@ -224,11 +224,67 @@ export function useThreadMessages(conversationId: string): UseThreadMessages {
       if (body.length === 0) {
         throw new ApiError(0, 'nothing_to_retry', 'This message has no text to re-send');
       }
-      // Re-POST the same body (there is no dedicated retry endpoint). The send
-      // path already does optimistic-append + reconcile + dedupe.
-      await send(body);
+
+      // H2/L5: RECONCILE THE ORIGINAL FAILED BUBBLE IN PLACE rather than calling
+      // send() (which would append a SECOND optimistic bubble and leave the
+      // failed one on screen forever). We flip the existing failed message to a
+      // pending state (clearing its error_code), then on success swap it for the
+      // server's persisted message — so exactly one bubble is ever shown.
+      //
+      // TODO(idempotency): the residual risk is a transient where the POST
+      // reached Twilio but the client saw a network failure — the user then
+      // retries and the SMS goes out TWICE. The real fix is a server-honored
+      // idempotency key on POST /api/conversations/:id/messages: the client
+      // generates a stable key per logical send (the original tsMsgId/localId)
+      // and threads it to sendMessage so the server dedupes a re-POST. That is a
+      // BACKEND change (out of this milestone's frontend scope). Manual human
+      // resends are low-volume, so the residual double-send is ACCEPTED for M1.4.
+      const failedId = message.tsMsgId;
+      const localId = nextPendingId();
+
+      // Flip the failed bubble → pending (in place). Drop error_code so the
+      // failure reason clears immediately and the "Sending…" cue shows.
+      apply((prev) =>
+        prev.map((m) => {
+          if (isPending(m) || m.tsMsgId !== failedId) return m;
+          const pendingCopy: PendingMessage = {
+            ...m,
+            pending: true,
+            localId,
+            delivery_status: 'queued',
+          };
+          delete (pendingCopy as Partial<Message>).error_code;
+          return pendingCopy;
+        }),
+      );
+
+      try {
+        const result = await sendMessage(conversationId, { body });
+        // Success: replace the in-place pending bubble with the persisted message
+        // (new tsMsgId/status). The old failed copy is gone — no duplicate.
+        apply((prev) => {
+          const without = prev.filter((m) => !(isPending(m) && m.localId === localId));
+          const reconciled: Message = {
+            ...message,
+            tsMsgId: result.tsMsgId,
+            provider_sid: result.providerSid,
+            delivery_status: result.status,
+          };
+          delete (reconciled as Partial<Message>).error_code;
+          return mergeById(without, [reconciled]);
+        });
+      } catch (err) {
+        // Failure: restore the original failed bubble (status + error_code) so
+        // the user can retry again — still exactly one bubble.
+        apply((prev) =>
+          prev.map((m) =>
+            isPending(m) && m.localId === localId ? ({ ...message } as TimelineMessage) : m,
+          ),
+        );
+        throw err;
+      }
     },
-    [send],
+    [conversationId, apply],
   );
 
   const ingestEvent = useCallback(

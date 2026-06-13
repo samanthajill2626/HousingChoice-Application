@@ -51,7 +51,9 @@ export default function QuickReply(): React.JSX.Element {
   const toast = useToast();
 
   // The action id (if any) that brought us here — Android action tap via the SW.
-  const action = useNotificationAction();
+  // Keyed by callId (M4) so navigating to a second missed-call deep-link picks
+  // up that call's action instead of the first's stale latch.
+  const action = useNotificationAction(callId);
 
   // Resolve the target conversation (the M1.9 seam lives in this hook).
   const target = useQuickReplyTarget(callId, conversationId);
@@ -66,10 +68,24 @@ export default function QuickReply(): React.JSX.Element {
 
   const [send, setSend] = useState<SendState>({ phase: 'idle' });
 
-  // Guard: the auto-send (Android action path) must fire at most once per view,
+  // Guard: the auto-send (Android action path) must fire at most once PER callId,
   // even across re-renders / the async send window. A ref latch — never state —
   // so React re-renders can't replay it.
+  //
+  // M4: keyed by callId. Navigating between two missed-call deep-links within
+  // one client keeps this component mounted (only :callId changes), so a
+  // per-mount latch would carry a stale "sent" state into the second call and
+  // swallow its auto-send. Reset the latch (and any stale sent confirmation)
+  // when callId changes — preserving "send exactly once per callId".
   const autoSentRef = useRef(false);
+  const latchCallIdRef = useRef<string | undefined>(callId);
+  useEffect(() => {
+    if (latchCallIdRef.current !== callId) {
+      latchCallIdRef.current = callId;
+      autoSentRef.current = false;
+      setSend({ phase: 'idle' });
+    }
+  }, [callId]);
 
   const doSend = useCallback(
     async (option: Sendable): Promise<void> => {

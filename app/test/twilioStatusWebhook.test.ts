@@ -245,7 +245,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
 
       expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: true }]);
       expect(world.auditEvents).toEqual([
-        expect.objectContaining({ entityKey: 'contacts#contact-T', eventType: 'sms_opt_out_recorded' }),
+        expect.objectContaining({ entityKey: 'contacts#contact-T', event_type: 'sms_opt_out_recorded' }),
       ]);
       expect(scheduler.scheduled).toHaveLength(0);
     });

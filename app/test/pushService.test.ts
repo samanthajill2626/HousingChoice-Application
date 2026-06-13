@@ -48,8 +48,8 @@ describe('pushService.sendToUser', () => {
     const fakeUsers = makeFakeUsersRepo([
       testUserItem({
         push_subscriptions: [
-          { ...sub('https://push.example/a'), created_at: '2026-06-01T00:00:00.000Z' },
-          { ...sub('https://push.example/b'), created_at: '2026-06-02T00:00:00.000Z' },
+          { ...sub('https://fcm.googleapis.com/fcm/send/a'), created_at: '2026-06-01T00:00:00.000Z' },
+          { ...sub('https://fcm.googleapis.com/fcm/send/b'), created_at: '2026-06-02T00:00:00.000Z' },
         ],
       }),
     ]);
@@ -62,7 +62,7 @@ describe('pushService.sendToUser', () => {
     });
 
     expect(result).toEqual({ configured: true, attempted: 2, sent: 2, pruned: 0, failed: 0 });
-    expect(sentTo.sort()).toEqual(['https://push.example/a', 'https://push.example/b']);
+    expect(sentTo.sort()).toEqual(['https://fcm.googleapis.com/fcm/send/a', 'https://fcm.googleapis.com/fcm/send/b']);
   });
 
   it('prunes Gone (404/410) subscriptions from the user record', async () => {
@@ -70,13 +70,13 @@ describe('pushService.sendToUser', () => {
     const fakeUsers = makeFakeUsersRepo([
       testUserItem({
         push_subscriptions: [
-          { ...sub('https://push.example/live'), created_at: '2026-06-01T00:00:00.000Z' },
-          { ...sub('https://push.example/dead'), created_at: '2026-06-02T00:00:00.000Z' },
+          { ...sub('https://fcm.googleapis.com/fcm/send/live'), created_at: '2026-06-01T00:00:00.000Z' },
+          { ...sub('https://fcm.googleapis.com/fcm/send/dead'), created_at: '2026-06-02T00:00:00.000Z' },
         ],
       }),
     ]);
     const { adapter } = fakeAdapter({
-      'https://push.example/dead': { result: 'gone' },
+      'https://fcm.googleapis.com/fcm/send/dead': { result: 'gone' },
     });
     const service = createPushService({ config, usersRepo: fakeUsers.repo, adapter });
 
@@ -88,17 +88,17 @@ describe('pushService.sendToUser', () => {
     expect(result).toMatchObject({ sent: 1, pruned: 1, failed: 0 });
     // The dead subscription is removed; the live one remains.
     const user = fakeUsers.users.get(TEST_SESSION_USER.userId);
-    expect(user?.push_subscriptions?.map((s) => s.endpoint)).toEqual(['https://push.example/live']);
+    expect(user?.push_subscriptions?.map((s) => s.endpoint)).toEqual(['https://fcm.googleapis.com/fcm/send/live']);
   });
 
   it('keeps (does not prune) a subscription on a transient send failure', async () => {
     const config = loadConfig(VAPID_ENV);
     const fakeUsers = makeFakeUsersRepo([
       testUserItem({
-        push_subscriptions: [{ ...sub('https://push.example/x'), created_at: '2026-06-01T00:00:00.000Z' }],
+        push_subscriptions: [{ ...sub('https://fcm.googleapis.com/fcm/send/x'), created_at: '2026-06-01T00:00:00.000Z' }],
       }),
     ]);
-    const { adapter } = fakeAdapter({ 'https://push.example/x': 'throw' });
+    const { adapter } = fakeAdapter({ 'https://fcm.googleapis.com/fcm/send/x': 'throw' });
     const service = createPushService({ config, usersRepo: fakeUsers.repo, adapter });
 
     const result = await service.sendToUser(TEST_SESSION_USER.userId, {
@@ -111,11 +111,39 @@ describe('pushService.sendToUser', () => {
     expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions).toHaveLength(1);
   });
 
+  it('NEVER sends to a stored endpoint whose host is not allowlisted — prunes it instead (C1 defense in depth)', async () => {
+    const config = loadConfig(VAPID_ENV);
+    const fakeUsers = makeFakeUsersRepo([
+      testUserItem({
+        push_subscriptions: [
+          // A bad endpoint that predates the subscribe-time guard (e.g. cloud
+          // metadata) — must never be POSTed to.
+          { ...sub('https://169.254.169.254/x'), created_at: '2026-06-01T00:00:00.000Z' },
+          { ...sub('https://fcm.googleapis.com/fcm/send/good'), created_at: '2026-06-02T00:00:00.000Z' },
+        ],
+      }),
+    ]);
+    const { adapter, sentTo } = fakeAdapter({});
+    const service = createPushService({ config, usersRepo: fakeUsers.repo, adapter });
+
+    const result = await service.sendToUser(TEST_SESSION_USER.userId, {
+      kind: 'missed_call',
+      payload: { title: 'x' },
+    });
+
+    // The disallowed endpoint was pruned, NOT sent; the good one was sent.
+    expect(sentTo).toEqual(['https://fcm.googleapis.com/fcm/send/good']);
+    expect(result).toMatchObject({ sent: 1, pruned: 1, failed: 0 });
+    expect(
+      fakeUsers.users.get(TEST_SESSION_USER.userId)?.push_subscriptions?.map((s) => s.endpoint),
+    ).toEqual(['https://fcm.googleapis.com/fcm/send/good']);
+  });
+
   it('is a no-op (configured:false) when VAPID is unset, never throwing', async () => {
     const config = loadConfig({ NODE_ENV: 'test' } as NodeJS.ProcessEnv);
     const fakeUsers = makeFakeUsersRepo([
       testUserItem({
-        push_subscriptions: [{ ...sub('https://push.example/x'), created_at: '2026-06-01T00:00:00.000Z' }],
+        push_subscriptions: [{ ...sub('https://fcm.googleapis.com/fcm/send/x'), created_at: '2026-06-01T00:00:00.000Z' }],
       }),
     ]);
     const capture = createLogCapture();
@@ -156,7 +184,7 @@ describe('pushService.sendToUser', () => {
     const config = loadConfig(VAPID_ENV);
     const fakeUsers = makeFakeUsersRepo([
       testUserItem({
-        push_subscriptions: [{ ...sub('https://push.example/a'), created_at: '2026-06-01T00:00:00.000Z' }],
+        push_subscriptions: [{ ...sub('https://fcm.googleapis.com/fcm/send/a'), created_at: '2026-06-01T00:00:00.000Z' }],
       }),
     ]);
     const capture = createLogCapture();

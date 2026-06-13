@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { logout } from '../api/index.js';
+import { unsubscribeFromPush } from '../push/index.js';
 import { Avatar, Button, InboxIcon, LogoutIcon, SettingsIcon, UsersIcon } from '../ui/index.js';
 import { useAuth } from './AuthContext.js';
 import styles from './AppLayout.module.css';
@@ -28,6 +29,15 @@ export function AppLayout(): React.JSX.Element {
   const items = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
 
   async function handleSignOut(): Promise<void> {
+    // M1: clear THIS device's push subscription before logging out, so on a
+    // shared device the next user does NOT keep receiving the prior user's
+    // missed-call / message pushes (PII leak). Best-effort — a failure here must
+    // never block sign-out, so we swallow it.
+    try {
+      await unsubscribeFromPush();
+    } catch {
+      // Tolerate: the browser subscription may already be gone or unsupported.
+    }
     try {
       await logout();
     } finally {

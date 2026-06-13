@@ -1,6 +1,7 @@
 // SentConfirmation — the post-send acknowledgement shown in the sheet. No undo
 // (per spec — just a clear confirmation): the reply went out from the business
 // number; offer to open the full conversation or dismiss back to the inbox.
+import { Link } from 'react-router-dom';
 import { Button } from '../../ui/index.js';
 import styles from './QuickReply.module.css';
 
@@ -43,14 +44,10 @@ export function SentConfirmation({
       </div>
       <div className={styles.sentActions}>
         {conversationId !== undefined && conversationId !== '' && (
-          <Button
-            as="a"
-            href={`/conversations/${encodeURIComponent(conversationId)}`}
-            variant="secondary"
-            block
-          >
+          // L1: in-app navigation via the router (SPA), not a full-page reload.
+          <Link to={`/conversations/${encodeURIComponent(conversationId)}`} className={styles.navLink}>
             Open conversation
-          </Button>
+          </Link>
         )}
         <Button variant="ghost" block onClick={onClose}>
           Done

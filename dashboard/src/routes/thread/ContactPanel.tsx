@@ -1,18 +1,27 @@
-// ContactPanel — the contact side panel. Fetches GET /api/contacts/:id, shows
-// the contact details, and hosts the needs-review TriageForm. Rendered into a
-// side column on wide screens and into a Sheet on mobile (the parent picks the
-// container). When triage saves, onResolved() bubbles up so the parent refetches
-// the conversation (the backend may have flipped its type) and the header
-// updates.
+// ContactPanel — the contact side panel. Shows the contact details and hosts
+// the needs-review TriageForm. Rendered into a side column on wide screens and
+// into a Sheet on mobile (the parent picks the container).
+//
+// H1: the contact is fetched by the PARENT (Thread) and passed in as props, so
+// the same fetched contact feeds the lifted header identity (the header shows
+// the real name post-triage, not just the phone). When triage saves,
+// onResolved() bubbles up so the parent refetches BOTH the conversation (the
+// backend may have flipped its type) and the contact, and the header updates.
 import { Avatar, Badge, EmptyState, Spinner } from '../../ui';
-import { getContact, useApi, type Contact } from '../../api';
+import { type ApiError, type Contact } from '../../api';
 import { TriageForm } from './TriageForm';
 import { contactFullName, formatPhone, isContactNeedsReview } from './identity';
 import styles from './ContactPanel.module.css';
 
 export interface ContactPanelProps {
   contactId: string | undefined;
-  /** Called after triage saves with the updated contact (parent refetches convo). */
+  /** The contact, fetched by the parent (Thread) and shared with the header. */
+  contact: Contact | undefined;
+  /** True while the parent's contact fetch is in flight. */
+  loading: boolean;
+  /** The parent's contact-fetch error, if any. */
+  error: ApiError | undefined;
+  /** Called after triage saves with the updated contact (parent refetches convo+contact). */
   onResolved: (updated: Contact) => void;
 }
 
@@ -24,15 +33,13 @@ const TYPE_LABEL: Record<string, string> = {
   unknown: 'Unknown',
 };
 
-export function ContactPanel({ contactId, onResolved }: ContactPanelProps): React.JSX.Element {
-  const { data: contact, loading, error, refetch } = useApi(
-    (signal) => {
-      if (contactId === undefined) return Promise.reject(new Error('no contact'));
-      return getContact(contactId, signal);
-    },
-    [contactId],
-  );
-
+export function ContactPanel({
+  contactId,
+  contact,
+  loading,
+  error,
+  onResolved,
+}: ContactPanelProps): React.JSX.Element {
   if (contactId === undefined) {
     return (
       <div className={styles.panel}>
@@ -65,8 +72,8 @@ export function ContactPanel({ contactId, onResolved }: ContactPanelProps): Reac
   const phone = formatPhone(contact.phone);
 
   function handleSaved(updated: Contact): void {
-    // Reflect the save locally and tell the parent to refetch the conversation.
-    refetch();
+    // The parent owns the fetch now (H1) — tell it to refetch the conversation
+    // AND the contact so both the header identity and this panel update.
     onResolved(updated);
   }
 

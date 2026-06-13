@@ -142,8 +142,11 @@ describe('<Thread> timeline + bubbles', () => {
 
     expect(await screen.findByText('incoming question')).toBeInTheDocument();
     expect(screen.getByText('replying')).toBeInTheDocument();
-    expect(screen.getByText('Tenant')).toBeInTheDocument();
-    expect(screen.getByText('Teammate')).toBeInTheDocument();
+    // Scope the author labels to the message bubbles — "Tenant"/"Landlord" also
+    // appear as <option> labels in the triage <select>, so a bare getByText is
+    // ambiguous. The bubble exposes an aria-label "<Author> message".
+    expect(screen.getByLabelText('Tenant message')).toBeInTheDocument();
+    expect(screen.getByLabelText('Teammate message')).toBeInTheDocument();
   });
 
   it('shows a DeliveryBadge on outbound and a failure reason + Retry that re-sends the body', async () => {
@@ -166,6 +169,12 @@ describe('<Thread> timeline + bubbles', () => {
     fireEvent.click(retry);
 
     await waitFor(() => expect(api.sendMessage).toHaveBeenCalledWith(CONV_ID, { body: 'undeliverable text' }));
+
+    // H2/L5: the retry reconciles the SAME bubble in place — no second bubble,
+    // and the failure reason clears on success (reconciled to "Queued").
+    await waitFor(() => expect(screen.getByText('Queued')).toBeInTheDocument());
+    expect(screen.getAllByText('undeliverable text')).toHaveLength(1);
+    expect(screen.queryByText(/Failed/)).not.toBeInTheDocument();
   });
 
   it('renders a media-attachment placeholder chip for an MMS (no broken img)', async () => {
@@ -223,6 +232,35 @@ describe('<Thread> identity + triage', () => {
     expect(screen.getAllByText('(313) 555-1234').length).toBeGreaterThan(0);
   });
 
+  it('header shows the phone + needs-review cue when the contact is unknown (H1)', async () => {
+    // Default makeContact is type 'unknown' / needs_review → no fabricated name.
+    renderThread();
+    // The header (and panel) carry the needs-review badge.
+    expect((await screen.findAllByText(/needs review/i)).length).toBeGreaterThan(0);
+    // The header label is the formatted phone — never a fabricated name.
+    expect(screen.getAllByText('(313) 555-1234').length).toBeGreaterThan(0);
+    // No name fabricated anywhere.
+    expect(screen.queryByText('Keisha Jones')).not.toBeInTheDocument();
+  });
+
+  it('header shows the real name once the contact is named + triaged (H1)', async () => {
+    // A resolved tenant_1to1 conversation whose linked contact carries a name.
+    api.getConversation.mockResolvedValue(makeConversation({ type: 'tenant_1to1' }));
+    api.getContact.mockResolvedValue(
+      makeContact({ type: 'tenant', status: 'active', firstName: 'Keisha', lastName: 'Jones' }),
+    );
+    renderThread();
+
+    // The lifted contact feeds the header identity → the real name shows (in
+    // BOTH the header and the side panel summary, hence findAllByText).
+    expect((await screen.findAllByText('Keisha Jones')).length).toBeGreaterThan(0);
+    // The needs-review cue is cleared for a resolved identity: no review Badge
+    // (scoped via its title so the triage <option> labels don't false-match).
+    expect(
+      document.querySelector('[title="Identity not yet confirmed"]'),
+    ).toBeNull();
+  });
+
   it('PATCHes the contact on triage save and refetches the conversation (badge clears)', async () => {
     renderThread();
     await screen.findByText(/no messages yet/i);
@@ -247,6 +285,33 @@ describe('<Thread> identity + triage', () => {
     );
     // Conversation refetched after the type flip.
     await waitFor(() => expect(api.getConversation.mock.calls.length).toBeGreaterThan(1));
+  });
+});
+
+describe('<Thread> mark read (M3)', () => {
+  it('marks read once on open, and does NOT refire on focus when already read', async () => {
+    // unread_count 0 → after the on-open mark-read, a window focus must not POST again.
+    api.getConversation.mockResolvedValue(makeConversation({ unread_count: 0 }));
+    renderThread();
+    await screen.findByText(/no messages yet/i);
+
+    await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new Event('focus'));
+    // Still exactly one — no redundant /read for an already-read thread.
+    await Promise.resolve();
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-marks read on focus when there is unread', async () => {
+    api.getConversation.mockResolvedValue(makeConversation({ unread_count: 3 }));
+    renderThread();
+    await screen.findByText(/no messages yet/i);
+
+    await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(1));
+
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -313,5 +378,42 @@ describe('<Thread> assignment', () => {
     const call = await screen.findByRole('button', { name: /call instead/i });
     expect(call).toBeDisabled();
     expect(call).toHaveAttribute('title', 'Calling arrives in M1.9');
+  });
+});
+
+describe('<Thread> XSS regression — hostile content renders as inert text', () => {
+  const IMG_PAYLOAD = '<img src=x onerror=alert(1)>';
+  const JS_PAYLOAD = 'javascript:alert(document.cookie)';
+
+  it('renders a hostile MESSAGE BODY as text — no <img> / element injected', async () => {
+    api.listMessages.mockResolvedValue([
+      makeMessage({ tsMsgId: 't1#SM1', direction: 'inbound', author: 'tenant', body: IMG_PAYLOAD }),
+    ]);
+    renderThread();
+
+    // The payload appears verbatim as TEXT (React escaped it on render)…
+    expect(await screen.findByText(IMG_PAYLOAD)).toBeInTheDocument();
+    // …and crucially NO live <img> element was injected from the body.
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('renders a hostile CONTACT NAME as text — no script/anchor injected', async () => {
+    // A triaged contact whose name carries hostile markup + a javascript: URL.
+    api.getConversation.mockResolvedValue(makeConversation({ type: 'tenant_1to1' }));
+    api.getContact.mockResolvedValue(
+      makeContact({
+        type: 'tenant',
+        status: 'active',
+        firstName: IMG_PAYLOAD,
+        lastName: JS_PAYLOAD,
+      }),
+    );
+    renderThread();
+
+    // The hostile name shows as escaped text (header + side panel) …
+    expect((await screen.findAllByText(`${IMG_PAYLOAD} ${JS_PAYLOAD}`)).length).toBeGreaterThan(0);
+    // … with no injected <img> and no <a href="javascript:..."> anchor.
+    expect(document.querySelector('img')).toBeNull();
+    expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
   });
 });

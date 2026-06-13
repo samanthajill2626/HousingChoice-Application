@@ -5,7 +5,7 @@
 //   - a malformed VAPID key does NOT crash adapter construction (push is a
 //     feature, not core — bad keys surface at send time, never at boot)
 import { describe, expect, it } from 'vitest';
-import { createWebPushAdapter } from '../src/adapters/webPush.js';
+import { createWebPushAdapter, isAllowedPushEndpoint } from '../src/adapters/webPush.js';
 import { isPushConfigured, loadConfig } from '../src/lib/config.js';
 
 const ALL = {
@@ -50,6 +50,42 @@ describe('VAPID config', () => {
     ).toThrowError(/VAPID_SUBJECT/);
     // mailto: and https: are accepted.
     expect(() => loadConfig({ ...ALL, VAPID_SUBJECT: 'https://housingchoice.org' } as NodeJS.ProcessEnv)).not.toThrow();
+  });
+});
+
+describe('isAllowedPushEndpoint (C1 SSRF allowlist)', () => {
+  it('accepts the known web-push vendor hosts', () => {
+    for (const url of [
+      'https://fcm.googleapis.com/fcm/send/abc123', // FCM
+      'https://updates.push.services.mozilla.com/wpush/v2/xyz', // Mozilla autopush
+      'https://db5p.notify.windows.com/w/?token=abc', // WNS
+      'https://web.push.apple.com/QABC123', // Apple
+      'https://push.services.mozilla.com/abc', // mozilla.com subdomain
+      'https://updates.push.services.mozaws.net/abc', // mozaws.net (Mozilla)
+    ]) {
+      expect(isAllowedPushEndpoint(url), url).toBe(true);
+    }
+  });
+
+  it('rejects internal/loopback/private/attacker hosts and non-https', () => {
+    for (const url of [
+      'https://169.254.169.254/latest/meta-data/', // cloud metadata (SSRF classic)
+      'https://localhost/x',
+      'http://localhost/x',
+      'https://127.0.0.1/x',
+      'https://10.0.0.5/x', // RFC-1918
+      'https://192.168.1.1/x',
+      'https://[::1]/x', // IPv6 loopback
+      'https://attacker.example.com/collect', // arbitrary host
+      'http://fcm.googleapis.com/fcm/send/abc', // right host, wrong scheme
+      'https://googleapis.com.attacker.com/x', // suffix-spoof: NOT a googleapis.com subdomain
+      'https://notgoogleapis.com/x', // substring, not a suffix match
+      'ftp://fcm.googleapis.com/x',
+      'not a url',
+      '',
+    ]) {
+      expect(isAllowedPushEndpoint(url), url).toBe(false);
+    }
   });
 });
 

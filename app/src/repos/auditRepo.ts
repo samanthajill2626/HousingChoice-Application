@@ -31,6 +31,16 @@ export function createAuditRepo(deps: RepoDeps = {}): AuditRepo {
   return {
     async append(entityKey, eventType, payload) {
       const ts = `${new Date().toISOString()}#${randomUUID().slice(0, 8)}`;
+      // M1.4 M1: lift the acting user up to a TOP-LEVEL `actorId` so the
+      // byActor GSI (hash key actorId) is populated and "all actions by actor
+      // X" is queryable (§9). Call sites pass the actor inside the payload as
+      // `actor` (the established convention across M1.1/M1.2/M1.4); we hoist
+      // that single field here, centrally, so no call site has to change. The
+      // actor stays in the payload too (callers/tests read it there); only the
+      // GSI key is added. A non-string/absent actor simply leaves the item off
+      // the GSI (sparse) — exactly the right behavior for a system action.
+      const actor = payload?.['actor'];
+      const actorId = typeof actor === 'string' ? actor : undefined;
       await doc.send(
         new PutCommand({
           TableName: table,
@@ -38,6 +48,7 @@ export function createAuditRepo(deps: RepoDeps = {}): AuditRepo {
             entityKey,
             ts,
             event_type: eventType,
+            ...(actorId !== undefined && { actorId }),
             ...(payload !== undefined && { payload }),
           },
         }),

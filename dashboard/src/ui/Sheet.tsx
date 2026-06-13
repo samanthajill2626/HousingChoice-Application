@@ -24,8 +24,55 @@ export function Sheet({ open, onClose, title, hideClose = false, children }: She
 
   useEffect(() => {
     if (!open) return;
+
+    // The focusable elements inside the panel, in DOM order. Recomputed on each
+    // Tab so it stays correct as the sheet's content changes (e.g. a composer
+    // toggling open). Excludes anything explicitly removed from the tab order.
+    const focusable = (): HTMLElement[] => {
+      const panel = panelRef.current;
+      if (!panel) return [];
+      const selector =
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+      // Skip elements hidden via the `hidden` attribute; the selector already
+      // excludes disabled / tabindex=-1. (We avoid an offsetParent visibility
+      // check — it is always null under jsdom and would drop every candidate.)
+      return Array.from(panel.querySelectorAll<HTMLElement>(selector)).filter(
+        (el) => !el.hasAttribute('hidden'),
+      );
+    };
+
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        onClose();
+        return;
+      }
+      // L2: trap Tab focus within the dialog — cycle first↔last so focus can't
+      // escape to the (inert) background behind the modal.
+      if (e.key === 'Tab') {
+        const panel = panelRef.current;
+        if (!panel) return;
+        const items = focusable();
+        if (items.length === 0) {
+          // Nothing focusable but the panel itself — keep focus on it.
+          e.preventDefault();
+          panel.focus();
+          return;
+        }
+        const first = items[0]!;
+        const last = items[items.length - 1]!;
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          // Shift+Tab off the first element (or from the panel) → wrap to last.
+          if (active === first || active === panel || !panel.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || active === panel || !panel.contains(active)) {
+          // Tab off the last element (or from the panel) → wrap to first.
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     document.addEventListener('keydown', onKey);
     // Move focus into the panel for keyboard + screen-reader users.

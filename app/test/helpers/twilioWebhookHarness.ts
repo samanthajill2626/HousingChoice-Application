@@ -65,7 +65,18 @@ export interface FakeWorld {
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
   /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
   optOutSets: { conversationId: string; value: boolean }[];
-  auditEvents: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
+  /**
+   * Audit events as the REAL repo writes them (M1.4 M2): attribute names match
+   * the actual DynamoDB item shape — `event_type` (NOT eventType), a top-level
+   * `actorId` lifted from payload.actor (the byActor GSI key), and the nested
+   * `payload`. Asserting against this shape exercises what production stores.
+   */
+  auditEvents: {
+    entityKey: string;
+    event_type: string;
+    actorId?: string;
+    payload?: Record<string, unknown>;
+  }[];
   touches: { conversationId: string; previewText: string | undefined; ts: string }[];
   /** contactIds actually CREATED by createIfAbsent (M1.2 auto-capture). */
   contactCreates: string[];
@@ -304,7 +315,17 @@ export function createFakeWorld(): FakeWorld {
 
   const auditRepo: AuditRepo = {
     async append(entityKey, eventType, payload) {
-      auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
+      // Mirror the REAL item shape (M2): `event_type`, plus a top-level
+      // `actorId` lifted from payload.actor (the byActor GSI key, M1), so tests
+      // exercise the actual attributes production writes — not a fake alias.
+      const actor = payload?.['actor'];
+      const actorId = typeof actor === 'string' ? actor : undefined;
+      auditEvents.push({
+        entityKey,
+        event_type: eventType,
+        ...(actorId !== undefined && { actorId }),
+        ...(payload !== undefined && { payload }),
+      });
     },
   };
 

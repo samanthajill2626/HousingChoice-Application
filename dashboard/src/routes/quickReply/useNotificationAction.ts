@@ -44,22 +44,41 @@ function isNotificationClickMessage(value: unknown): value is NotificationClickM
 }
 
 /**
- * Returns the (latched) notification action id, or null if the view was opened
- * without one. Reads the URL hash synchronously on first render and also listens
- * for the SW postMessage for the focused-client case.
+ * Returns the (latched) notification action id for the CURRENT callId, or null
+ * if the view was opened without one. Reads the URL hash synchronously on first
+ * render and also listens for the SW postMessage for the focused-client case.
+ *
+ * M4: the latch is keyed by `callId`. Navigating between two missed-call
+ * deep-links within one client (the component stays mounted, only :callId
+ * changes) RESETS the latch and re-reads the hash, so the second call's action
+ * is honoured instead of being swallowed by the first call's stale latch.
  */
-export function useNotificationAction(): string | null {
-  // Latch: once set, never overwritten — the action that opened this view.
+export function useNotificationAction(callId: string | undefined): string | null {
+  // Latch: the action that opened THIS callId's view; reset when callId changes.
   const latched = useRef<string | null>(parseActionHash(window.location.hash));
+  // Remember which callId the latch belongs to.
+  const latchedCallId = useRef<string | undefined>(callId);
   const [action, setAction] = useState<string | null>(latched.current);
 
+  // When the callId changes, reset the latch and re-read the hash for the new
+  // deep-link (a fresh #action=<id> the SW navigated us to).
+  useEffect(() => {
+    if (latchedCallId.current !== callId) {
+      latchedCallId.current = callId;
+      const next = parseActionHash(window.location.hash);
+      latched.current = next;
+      setAction(next);
+    }
+  }, [callId]);
+
   // Clear the #action from the URL so a refresh can't replay the auto-send.
+  // Re-runs per callId so the new deep-link's hash is stripped after capture.
   useEffect(() => {
     if (latched.current !== null && window.location.hash !== '') {
       const url = window.location.pathname + window.location.search;
       window.history.replaceState(null, '', url);
     }
-  }, []);
+  }, [callId]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return undefined;
@@ -67,7 +86,8 @@ export function useNotificationAction(): string | null {
       if (!isNotificationClickMessage(event.data)) return;
       const incoming = event.data.action;
       if (incoming === null || incoming === '') return;
-      // Only the first action ever wins; later messages are ignored.
+      // Only the first action for the current callId wins; later messages are
+      // ignored until the callId changes (which resets the latch above).
       if (latched.current === null) {
         latched.current = incoming;
         setAction(incoming);

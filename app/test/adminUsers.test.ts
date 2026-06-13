@@ -10,6 +10,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import {
   adminUserItem,
+  sessionCookieFor,
   TEST_ADMIN_COOKIE,
   TEST_ADMIN_USER,
   TEST_SESSION_COOKIE,
@@ -82,7 +83,7 @@ describe('POST /api/users — invite', () => {
     expect(res.body.user).toMatchObject({ email: 'new.hire@housingchoice.org', role: 'va', status: 'invited' });
     expect(fakeUsers.users.has(userIdForEmail('new.hire@housingchoice.org'))).toBe(true);
 
-    const audit = world.auditEvents.find((e) => e.eventType === 'user_invited');
+    const audit = world.auditEvents.find((e) => e.event_type === 'user_invited');
     expect(audit?.payload).toMatchObject({
       email: 'new.hire@housingchoice.org',
       role: 'va',
@@ -138,7 +139,7 @@ describe('PATCH /api/users/:userId/role', () => {
     // Epoch bumped → the target's sessions are revoked within the cache TTL.
     expect(fakeUsers.users.get(TEST_SESSION_USER.userId)?.session_epoch).toBe((epochBefore ?? 1) + 1);
 
-    const audit = world.auditEvents.find((e) => e.eventType === 'role_changed');
+    const audit = world.auditEvents.find((e) => e.event_type === 'role_changed');
     expect(audit?.payload).toMatchObject({ from: 'va', to: 'admin', actor: TEST_ADMIN_USER.userId });
   });
 
@@ -188,6 +189,78 @@ describe('PATCH /api/users/:userId/role', () => {
     expect(res.status).toBe(200);
     expect(res.body.changed).toBe(true);
     expect(fakeUsers.users.get('usr_secondadmin')?.role).toBe('va');
+  });
+
+  it('promoting a VA to admin changes role AND bumps the epoch in ONE write (H1 atomic)', async () => {
+    // The fake's setRoleAndRevoke does both in one call — assert the route uses
+    // it (role flipped, epoch +1) rather than a role-set with no revocation.
+    const { app, fakeUsers } = makeWebhookHarness();
+    const before = fakeUsers.users.get(TEST_SESSION_USER.userId);
+    expect(before?.role).toBe('va');
+    const epochBefore = before?.session_epoch ?? 1;
+
+    const res = await request(app)
+      .patch(`/api/users/${TEST_SESSION_USER.userId}/role`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ role: 'admin' });
+
+    expect(res.status).toBe(200);
+    const after = fakeUsers.users.get(TEST_SESSION_USER.userId);
+    // BOTH changed together: role and the revocation epoch.
+    expect(after?.role).toBe('admin');
+    expect(after?.session_epoch).toBe(epochBefore + 1);
+  });
+
+  it('concurrent cross-demotion of two admins never reaches zero admins (C2 verify-after-rollback)', async () => {
+    // Exactly TWO admins (A = the harness admin, B = a second). Each demotes the
+    // OTHER concurrently — both pass the pre-write last-admin guard (each sees
+    // the other still admin), so WITHOUT the verify-after-write-and-rollback the
+    // table races to ZERO admins. The post-write re-check must heal it.
+    //
+    // We first WARM the session-epoch cache for both A and B with a cheap authed
+    // GET: a cross-demote bumps each victim's epoch, which would otherwise
+    // revoke that victim's own in-flight session (a 401 auth artifact, not the
+    // invariant under test). With the cache warmed (epoch 1, 60s TTL) both PATCH
+    // auth checks pass, so the race actually reaches the route logic.
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set(
+      'usr_secondadmin',
+      adminUserItem({ userId: 'usr_secondadmin', email: 'a2@housingchoice.org' }),
+    );
+    const secondAdminCookie = sessionCookieFor({
+      userId: 'usr_secondadmin',
+      email: 'a2@housingchoice.org',
+      role: 'admin',
+    });
+
+    // Warm the epoch cache for BOTH admins (so the mid-flight epoch bumps don't
+    // revoke either actor's own session).
+    await request(app).get('/api/users').set('x-origin-verify', SECRET).set('cookie', TEST_ADMIN_COOKIE);
+    await request(app).get('/api/users').set('x-origin-verify', SECRET).set('cookie', secondAdminCookie);
+
+    // A demotes B; B demotes A — fired together so they interleave at awaits.
+    const [resAdemotesB, resBdemotesA] = await Promise.all([
+      request(app)
+        .patch('/api/users/usr_secondadmin/role')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_ADMIN_COOKIE)
+        .send({ role: 'va' }),
+      request(app)
+        .patch(`/api/users/${TEST_ADMIN_USER.userId}/role`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', secondAdminCookie)
+        .send({ role: 'va' }),
+    ]);
+
+    // Both requests authenticated past the gate (warmed cache).
+    expect([resAdemotesB.status, resBdemotesA.status].every((s) => s === 200 || s === 409)).toBe(true);
+    // INVARIANT (the C2 fix): at least one admin remains — no zero-admin end
+    // state, even though both demotions passed the pre-write guard.
+    const adminsRemaining = [...fakeUsers.users.values()].filter((u) => u.role === 'admin');
+    expect(adminsRemaining.length).toBeGreaterThanOrEqual(1);
+    // And the heal returned a 409 on the demotion that would have emptied it.
+    expect([resAdemotesB.status, resBdemotesA.status]).toContain(409);
   });
 
   it('404s an unknown target user', async () => {

@@ -17,7 +17,17 @@
  *
  * Pushed payload shape (server sends JSON):
  *   { title, body, kind: 'missed_call' | 'message' | 'test' | string,
- *     callId?, conversationId?, actions?: [{ action, title }], url? }
+ *     callId?, conversationId?, actions?: [{ action, title }] }
+ *
+ * SECURITY (C1): we NEVER navigate to a payload-supplied URL — that would be an
+ * open-redirect / phishing sink (`new URL(absolute, origin)` does not constrain
+ * an absolute off-origin url). The click target is derived ONLY from known
+ * fields (kind + callId/conversationId + action) into a fixed same-origin
+ * allow-list of paths, then re-asserted same-origin before navigate/openWindow.
+ * The routing/validation logic below is a VERBATIM MIRROR of the tested ES
+ * module dashboard/src/sw/route.ts (resolveSafePath / isPlausibleId /
+ * assertSameOriginPath) — this classic worker can't import it, so keep the two
+ * in sync (see route.test.ts for the security cases this locks).
  */
 
 self.addEventListener('install', () => {
@@ -46,12 +56,12 @@ self.addEventListener('push', (event) => {
     // The icons ship in the manifest set; reuse the maskable icon.
     icon: '/icons/icon-192.png',
     badge: '/icons/badge-72.png',
-    // Carry routing info to notificationclick.
+    // Carry ONLY the known routing fields to notificationclick — never a
+    // payload-supplied url (C1: no open-redirect sink).
     data: {
       kind: data.kind,
       callId: data.callId,
       conversationId: data.conversationId,
-      url: data.url,
     },
     // Android shows action buttons; iOS ignores them (tap deep-links instead).
     actions: Array.isArray(data.actions) ? data.actions.slice(0, 2) : undefined,
@@ -67,32 +77,72 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
   const data = event.notification.data || {};
-  const targetUrl = resolveTargetUrl(data, event.action);
+  // Derive a SAFE same-origin path from known fields only (never data.url),
+  // then re-assert it is same-origin + allow-listed before any navigation.
+  const safePath = assertSameOriginPath(resolveSafePath(data, event.action), self.location.origin);
 
-  event.waitUntil(focusOrOpen(targetUrl, data, event.action));
+  event.waitUntil(focusOrOpen(safePath, data, event.action));
 });
 
-/* Decide where a click should land. Action-button clicks (Android) and plain
- * taps (iOS) both route to the same deep link; the action id is forwarded to
- * the page (via the URL hash) so the quick-reply view can pre-select / auto-send
- * the chosen canned reply. */
-function resolveTargetUrl(data, action) {
-  if (data.url) return data.url;
-  if (data.kind === 'missed_call' && data.callId) {
-    const base = `/quick-reply/${encodeURIComponent(data.callId)}`;
+/* ===========================================================================
+ * MIRROR of dashboard/src/sw/route.ts (tested in route.test.ts). Keep in sync.
+ * A classic service worker can't import the ES module, so these pure functions
+ * are duplicated here verbatim. They guarantee the click target is same-origin
+ * and on a fixed allow-list — see the C1 note in the header comment.
+ * ======================================================================== */
+
+/* True when `id` is a plausible opaque id safe to embed in a path segment:
+ * non-empty, length-bounded, no slash/backslash/scheme-colon/whitespace/control. */
+function isPlausibleId(id) {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length <= 256 &&
+    !/[/\\:\s\x00-\x1f]/.test(id)
+  );
+}
+
+/* Resolve a same-origin, allow-listed in-app PATH from the untrusted payload.
+ * Action-button clicks (Android) and plain taps (iOS) both route to the same
+ * deep link; the action id is forwarded via the URL hash so the quick-reply
+ * view can pre-select / auto-send the chosen canned reply. */
+function resolveSafePath(data, action) {
+  const d = data || {};
+  if (d.kind === 'missed_call' && isPlausibleId(d.callId)) {
+    const base = `/quick-reply/${encodeURIComponent(d.callId)}`;
     return action ? `${base}#action=${encodeURIComponent(action)}` : base;
   }
-  if (data.conversationId) {
-    return `/conversations/${encodeURIComponent(data.conversationId)}`;
+  if (isPlausibleId(d.conversationId)) {
+    return `/conversations/${encodeURIComponent(d.conversationId)}`;
   }
   return '/';
 }
 
+/* Last gate before navigate/openWindow: assert same-origin + allow-listed path,
+ * else fall back to '/'. */
+function assertSameOriginPath(path, origin) {
+  try {
+    const url = new URL(path, origin);
+    if (url.origin !== origin) return '/';
+    if (
+      url.pathname === '/' ||
+      /^\/quick-reply\/[^/]+$/.test(url.pathname) ||
+      /^\/conversations\/[^/]+$/.test(url.pathname)
+    ) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+    return '/';
+  } catch {
+    return '/';
+  }
+}
+
 /* Focus an existing PWA window if one is open (navigating it to the target),
- * else open a new one. */
-async function focusOrOpen(targetUrl, data, action) {
+ * else open a new one. `safePath` is already validated same-origin. */
+async function focusOrOpen(safePath, data, action) {
   const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  const absolute = new URL(targetUrl, self.location.origin).href;
+  // Resolve against our own origin; safePath is a validated leading-'/' path.
+  const absolute = new URL(safePath, self.location.origin).href;
 
   for (const client of allClients) {
     if ('focus' in client) {

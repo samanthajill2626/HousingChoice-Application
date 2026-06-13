@@ -3,7 +3,7 @@
 // real useApi hook, ApiError, and the design-system primitives run. The Sheet
 // portals to document.body, which Testing Library queries by default.
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Conversation, OrgSettings, SendMessageResult } from '../../api/index.js';
 import { ToastProvider } from '../../ui/index.js';
@@ -177,5 +177,58 @@ describe('<QuickReply> — custom reply + open conversation', () => {
 
     const link = await screen.findByRole('link', { name: 'Open full conversation' });
     expect(link).toHaveAttribute('href', `/conversations/${FAKE_CONVERSATION_ID}`);
+  });
+});
+
+describe('<QuickReply> — per-callId auto-send latch (M4)', () => {
+  // A control that navigates to a SECOND missed-call deep-link (a new :callId +
+  // a fresh #action) while keeping QuickReply mounted — exercising the latch
+  // reset that must honour the second call's action instead of the first's.
+  function Navigator({ to, hash }: { to: string; hash: string }): React.JSX.Element {
+    const navigate = useNavigate();
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          // The SW appends #action to the URL; under MemoryRouter the hook reads
+          // window.location.hash directly, so set it alongside the route change.
+          window.location.hash = hash;
+          navigate(to);
+        }}
+      >
+        go-second
+      </button>
+    );
+  }
+
+  it('resets the latch on callId change and auto-sends the SECOND call exactly once', async () => {
+    // First deep-link: callId-1 + qr-0 → auto-sends 'Please text me' once.
+    window.location.hash = '#action=qr-0';
+    render(
+      <ToastProvider>
+        <MemoryRouter initialEntries={[`/quick-reply/call-1?conversationId=${FAKE_CONVERSATION_ID}`]}>
+          <Navigator to={`/quick-reply/call-2?conversationId=${FAKE_CONVERSATION_ID}`} hash="#action=qr-1" />
+          <Routes>
+            <Route path="/quick-reply/:callId" element={<QuickReply />} />
+            <Route path="/" element={<div>Inbox</div>} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(sendMessage).toHaveBeenLastCalledWith(FAKE_CONVERSATION_ID, { body: 'Please text me' });
+
+    // Navigate to the SECOND call with a different action — same mounted view.
+    await act(async () => {
+      fireEvent.click(screen.getByText('go-second'));
+    });
+
+    // The latch reset → the second call's action ('qr-1' → "I'll call you back
+    // soon") auto-sends exactly once (no stale "already sent" from call-1).
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
+    expect(sendMessage).toHaveBeenLastCalledWith(FAKE_CONVERSATION_ID, {
+      body: "I'll call you back soon",
+    });
   });
 });

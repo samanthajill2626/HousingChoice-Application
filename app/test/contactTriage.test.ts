@@ -73,7 +73,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     // PROPAGATION: the linked thread's type flips.
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
 
-    const audit = world.auditEvents.find((e) => e.eventType === 'contact_updated');
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
     expect(audit?.entityKey).toBe('contacts#contact-triage-1');
     expect(audit?.payload).toMatchObject({
       fields: ['type', 'firstName', 'lastName', 'voucherSize'],
@@ -157,6 +157,30 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     });
   });
 
+  it('allowlists status — accepts a known lifecycle value, rejects an unknown one (L1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+
+    // A known lifecycle value is accepted.
+    const ok = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ status: 'active' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.contact.status).toBe('active');
+
+    // An arbitrary status that would pollute the byTypeStatus GSI is refused.
+    const bad = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ status: 'totally_made_up' });
+    expect(bad.status).toBe(400);
+    // The stored status was NOT changed to the bogus value.
+    expect(world.contacts.find((c) => c.contactId === 'contact-triage-1')?.status).toBe('active');
+  });
+
   it('400s validation failures', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
@@ -166,6 +190,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       { voucherSize: -1 }, // out of range
       { voucherSize: 1.5 }, // not integer
       { status: '' }, // empty status
+      { status: 'bogus_status' }, // not an allowlisted lifecycle value (L1)
       { contactName: 'SingleToken - 2 Bed' }, // not "First Last"
       { firstName: 5 }, // wrong type
     ]) {

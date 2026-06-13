@@ -27,6 +27,12 @@ vi.mock('../../api/index.js', async (importActual) => {
   };
 });
 
+// AuthContext: mutable status so we can assert the M2 SSE enabled gate.
+const authState = vi.hoisted(() => ({ status: 'authenticated' as 'authenticated' | 'anonymous' }));
+vi.mock('../../app/AuthContext.js', () => ({
+  useAuth: () => ({ status: authState.status, me: undefined, isAdmin: false, refresh: vi.fn() }),
+}));
+
 // Import AFTER the mock is registered.
 const { default: Inbox } = await import('../Inbox.js');
 
@@ -70,6 +76,7 @@ function fireUpdate(event: ConversationUpdatedEvent): void {
 beforeEach(() => {
   listConversationsMock.mockReset();
   capturedHandlers.current = undefined;
+  authState.status = 'authenticated';
 });
 
 describe('<Inbox>', () => {
@@ -255,5 +262,20 @@ describe('<Inbox>', () => {
     expect(listConversationsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ cursor: 'cursor-2' }),
     );
+  });
+
+  it('enables the SSE stream while authenticated (M2)', async () => {
+    listConversationsMock.mockResolvedValue(page([]));
+    renderInbox();
+    await screen.findByText('No conversations yet');
+    expect(capturedHandlers.current?.enabled).toBe(true);
+  });
+
+  it('disables the SSE stream when not authenticated (M2 — stops reconnect loop)', async () => {
+    authState.status = 'anonymous';
+    listConversationsMock.mockResolvedValue(page([]));
+    renderInbox();
+    await screen.findByText('No conversations yet');
+    expect(capturedHandlers.current?.enabled).toBe(false);
   });
 });

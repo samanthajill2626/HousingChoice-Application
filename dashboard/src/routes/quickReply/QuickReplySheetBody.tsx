@@ -7,6 +7,7 @@
 // which performs the send (POST /api/conversations/:id/messages) from the
 // business number and shows the sent confirmation.
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Button, Textarea } from '../../ui/index.js';
 import type { Conversation } from '../../api/index.js';
 import type { QuickReplyOption } from './actions.js';
@@ -123,14 +124,10 @@ export function QuickReplySheetBody(props: QuickReplySheetBodyProps): React.JSX.
         )}
 
         {conversationId !== '' && (
-          <Button
-            as="a"
-            href={`/conversations/${encodeURIComponent(conversationId)}`}
-            variant="ghost"
-            block
-          >
+          // L1: in-app navigation via the router (SPA), not a full-page reload.
+          <Link to={`/conversations/${encodeURIComponent(conversationId)}`} className={styles.navLink}>
             Open full conversation
-          </Button>
+          </Link>
         )}
       </div>
     </div>

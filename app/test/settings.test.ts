@@ -60,7 +60,7 @@ describe('PUT /api/settings — admin only', () => {
     });
     expect(world.settings.missedCallAutoText).toBe('New auto-text');
 
-    const audit = world.auditEvents.find((e) => e.eventType === 'settings_updated');
+    const audit = world.auditEvents.find((e) => e.event_type === 'settings_updated');
     expect(audit).toBeDefined();
     expect(audit?.entityKey).toBe('settings#org');
     expect(audit?.payload).toMatchObject({

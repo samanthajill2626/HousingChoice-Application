@@ -37,6 +37,8 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
+import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
+import { createSendMessageService } from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
   makeFakeUsersRepo,
@@ -94,6 +96,9 @@ export interface FakeWorld {
   messagesRepo: MessagesRepo;
   contactsRepo: ContactsRepo;
   auditRepo: AuditRepo;
+  /** In-memory units (M1.5), keyed by unitId. */
+  units: Map<string, UnitItem>;
+  unitsRepo: UnitsRepo;
   /** In-memory org-settings (M1.4); starts at DEFAULT_ORG_SETTINGS. */
   settings: OrgSettings;
   settingsRepo: SettingsRepo;
@@ -293,6 +298,28 @@ export function createFakeWorld(): FakeWorld {
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
     },
+    async listByType(type, opts = {}) {
+      const items = contacts
+        .filter((c) => c.type === type)
+        .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: ContactItem = {
+        ...input,
+        contactId: input.contactId ?? `contact-fake-${contacts.length + 1}`,
+        type: input.type,
+        created_at: input.created_at ?? now,
+      };
+      if (contacts.some((c) => c.contactId === item.contactId)) {
+        throw conditionalCheckFailed(`create: contact ${item.contactId} exists`);
+      }
+      contacts.push({ ...item });
+      contactCreates.push(item.contactId);
+      return item;
+    },
     async createIfAbsent(item) {
       if (contacts.some((c) => c.contactId === item.contactId)) return false;
       contacts.push({ ...item });
@@ -355,6 +382,59 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory units (M1.5): mirror the repo's contractual semantics —
+  // generate-id create, SET-merge update (no-overwrite of unset fields),
+  // conditional 404 on update, GSI-shaped list queries.
+  const units = new Map<string, UnitItem>();
+  let unitCounter = 0;
+  const unitsRepo: UnitsRepo = {
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: UnitItem = {
+        ...input,
+        unitId: input.unitId ?? `unit-${++unitCounter}`,
+        created_at: typeof input.created_at === 'string' ? input.created_at : now,
+        updated_at: now,
+      };
+      units.set(item.unitId, item);
+      return item;
+    },
+    async getById(unitId) {
+      return units.get(unitId);
+    },
+    async update(unitId, patch) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`update: no unit ${unitId}`);
+      for (const [key, value] of Object.entries(patch)) {
+        if (value !== undefined) unit[key] = value;
+      }
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async listByLandlord(landlordId, opts = {}) {
+      const items = [...units.values()]
+        .filter((u) => u.landlordId === landlordId)
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async listByStatus(status, opts = {}) {
+      const items = [...units.values()]
+        .filter((u) => u.status === status)
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async listByJurisdiction(jurisdiction, opts = {}) {
+      const items = [...units.values()]
+        .filter((u) => u.jurisdiction === jurisdiction)
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async list(opts = {}) {
+      const items = [...units.values()].slice(0, opts.limit ?? 50);
+      return { items };
+    },
+  };
+
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
@@ -398,6 +478,8 @@ export function createFakeWorld(): FakeWorld {
     messagesRepo,
     contactsRepo,
     auditRepo,
+    units,
+    unitsRepo,
     settings,
     settingsRepo,
     adapter,
@@ -476,9 +558,30 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       auditRepo: world.auditRepo,
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
+      unitsRepo: world.unitsRepo,
       usersRepo: fakeUsers.repo,
       events: world.events,
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
+    },
+    // M1.5 public surface — shares the SAME world repos so a housing-fair
+    // signup writes the same contacts/conversations/units the authed API reads,
+    // and the welcome text goes through the world's fake adapter (world.sent)
+    // via a real send service wired to the world fakes (no DynamoDB/network).
+    public: {
+      contactsRepo: world.contactsRepo,
+      conversationsRepo: world.conversationsRepo,
+      unitsRepo: world.unitsRepo,
+      auditRepo: world.auditRepo,
+      sendMessageService: createSendMessageService({
+        config,
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+        adapter: world.adapter,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+      }),
     },
     webhooks: {
       adapter: world.adapter,

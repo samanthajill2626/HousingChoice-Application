@@ -2,8 +2,15 @@
 // system, doc §5), set messaging flags, and (M1.2) the conditional-create
 // primitive auto-capture is built on. Items stay flexible documents; only
 // keys/GSI attributes are contractual (lib/tables.ts).
+import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  type QueryCommandInput,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -41,10 +48,37 @@ export interface ContactItem {
   [key: string]: unknown;
 }
 
+/** One page of a contacts list query (opaque cursor handled at the route). */
+export interface ContactsPage {
+  items: ContactItem[];
+  lastEvaluatedKey?: Record<string, unknown>;
+}
+
+export interface ListContactsOpts {
+  /** Narrow to a single status within the type partition (byTypeStatus range). */
+  status?: string;
+  limit?: number;
+  exclusiveStartKey?: Record<string, unknown>;
+}
+
 export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
   getById(contactId: string): Promise<ContactItem | undefined>;
+  /**
+   * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
+   * optionally narrowed by status (the (type=unknown, status=needs_review)
+   * partition IS the triage queue). ONE Query per page — never a Scan.
+   */
+  listByType(type: ContactType, opts?: ListContactsOpts): Promise<ContactsPage>;
+  /**
+   * Manual create (M1.5): generate a contactId and conditionally put it. Phone
+   * dedupe is the CALLER's job (findByPhone first) — this is the raw create
+   * once the route has decided a new contact is warranted. Returns the stored
+   * item. The contactId is fresh + random, so the attribute_not_exists
+   * condition effectively never fails (it's belt-and-braces).
+   */
+  create(input: Partial<ContactItem> & { type: ContactType }): Promise<ContactItem>;
   /**
    * Conditional create (attribute_not_exists(contactId)): true when THIS
    * call created the item, false when the contact already existed. An
@@ -92,6 +126,54 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     async getById(contactId) {
       const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { contactId } }));
       return Item as ContactItem | undefined;
+    },
+
+    async listByType(type, opts = {}) {
+      // ONE Query on byTypeStatus: hash = type, optional range = status. `type`
+      // and `status` are DynamoDB reserved words → expression-aliased.
+      const names: Record<string, string> = { '#t': 'type' };
+      const values: Record<string, unknown> = { ':t': type };
+      let keyExpr = '#t = :t';
+      if (opts.status !== undefined) {
+        names['#s'] = 'status';
+        values[':s'] = opts.status;
+        keyExpr += ' AND #s = :s';
+      }
+      const input: QueryCommandInput = {
+        TableName: table,
+        IndexName: 'byTypeStatus',
+        KeyConditionExpression: keyExpr,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ...(opts.limit !== undefined && { Limit: opts.limit }),
+        ...(opts.exclusiveStartKey !== undefined && {
+          ExclusiveStartKey: opts.exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],
+        }),
+      };
+      const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
+      return {
+        items: (Items ?? []) as ContactItem[],
+        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
+      };
+    },
+
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: ContactItem = {
+        ...input,
+        contactId: input.contactId ?? `contact-${randomUUID()}`,
+        type: input.type,
+        created_at: input.created_at ?? now,
+      };
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(contactId)',
+        }),
+      );
+      log.info({ contactId: item.contactId, type: item.type }, 'contact created (manual)');
+      return item;
     },
 
     async createIfAbsent(item) {

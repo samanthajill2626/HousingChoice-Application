@@ -21,9 +21,11 @@ import { correlationMiddleware } from './middleware/correlation.js';
 import { csrfOriginMiddleware } from './middleware/csrfOrigin.js';
 import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
+import { createRateLimit } from './middleware/rateLimit.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
+import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
 
 /** Request with the raw body buffer captured by the JSON parser's verify hook. */
@@ -40,6 +42,8 @@ export interface BuildAppDeps {
   webhooks?: Omit<WebhooksRouterDeps, 'config' | 'logger'>;
   /** Test seam: injected /auth dependencies (fake provider/repos — no Google, no DynamoDB). */
   auth?: Omit<AuthRouterDeps, 'config' | 'logger'>;
+  /** Test seam: injected /public dependencies (fake repos/send service — no DynamoDB). */
+  public?: Omit<PublicRouterDeps, 'logger'>;
   /** Test seam: register extra routes after the built-ins, before the error handler. */
   configureRoutes?: (app: Express) => void;
 }
@@ -75,6 +79,23 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   });
   app.use(healthRouter);
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));
+  // M1.5 PUBLIC, UNAUTHENTICATED intake surface — the ONE place requireAuth is
+  // intentionally absent (housing-fair form + flyer have no session). Mounted
+  // HERE in the route stage, so the locked chain is intact: it still sits
+  // BEHIND the origin-secret validator (stage 2 — applies to everything but
+  // /health) and the body parsers (stage 3), and it is NEVER placed behind the
+  // /api requireAuth gate below. A per-IP rate limiter fronts ALL /public
+  // routes (the abuse fence on an unauthenticated, SMS-spending surface); the
+  // router itself re-validates everything and never logs PII.
+  app.use(
+    '/public',
+    createRateLimit({
+      max: config.publicRateLimitMax,
+      windowMs: config.publicRateLimitWindowMs,
+      logger: log,
+    }),
+    createPublicRouter({ logger: log, ...deps.public }),
+  );
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by
   // design (login/callback/logout/me); EVERY /api route including the SSE
@@ -138,7 +159,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth'].some(
+      const reserved = ['/api', '/webhooks', '/auth', '/public'].some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

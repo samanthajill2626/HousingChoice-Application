@@ -30,6 +30,7 @@ import {
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
+import { type UnitsRepo } from '../repos/unitsRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -41,6 +42,7 @@ import { createAdminUsersRouter } from './adminUsers.js';
 import { createContactsRouter } from './contacts.js';
 import { createPushRouter } from './push.js';
 import { createSettingsRouter } from './settings.js';
+import { createUnitsRouter } from './units.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -82,6 +84,8 @@ export interface ApiRouterDeps {
   settingsRepo?: SettingsRepo;
   usersRepo?: UsersRepo;
   pushService?: PushService;
+  /** M1.5 records & intake — injected in tests; default to the real repo. */
+  unitsRepo?: UnitsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -200,8 +204,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
-  // Contact triage (requireAuth — VAs triage; propagates conversation type
-  // and emits conversation.updated so connected inboxes update live).
+  // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation
+  // type and emits conversation.updated so connected inboxes update live).
   router.use(
     '/contacts',
     createContactsRouter({
@@ -210,6 +214,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       auditRepo: audit,
       events,
+    }),
+  );
+  // Units CRUD (M1.5; requireAuth — VAs maintain listings, no admin gate).
+  router.use(
+    '/units',
+    createUnitsRouter({
+      logger: deps.logger,
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      auditRepo: audit,
     }),
   );
 

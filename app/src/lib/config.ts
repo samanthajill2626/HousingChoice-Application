@@ -92,6 +92,15 @@ export interface AppConfig {
    */
   sseMaxConnections: number;
   /**
+   * Public-surface rate limit (M1.5): max requests per window per client IP on
+   * the unauthenticated /public routes (housing-fair intake + flyer). Safe
+   * defaults (PUBLIC_RATE_LIMIT_MAX=5, PUBLIC_RATE_LIMIT_WINDOW_MS=60000) so
+   * nothing is required to boot. Single-instance, in-memory (see
+   * middleware/rateLimit.ts).
+   */
+  publicRateLimitMax: number;
+  publicRateLimitWindowMs: number;
+  /**
    * Secret the session-cookie AES-256-GCM key is derived from (M1.3 auth).
    * Terraform-managed random SecureString /hc/<env>/app/SESSION_SECRET —
    * exactly the CF_ORIGIN_SECRET pattern. Never log.
@@ -216,6 +225,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!Number.isInteger(sseMaxConnections) || sseMaxConnections <= 0) {
     throw new Error(
       `SSE_MAX_CONNECTIONS must be a positive integer, got: ${env.SSE_MAX_CONNECTIONS}`,
+    );
+  }
+
+  // Public-surface rate limit (M1.5) — safe defaults so nothing is required.
+  const publicRateLimitMax = Number(env.PUBLIC_RATE_LIMIT_MAX ?? 5);
+  if (!Number.isInteger(publicRateLimitMax) || publicRateLimitMax <= 0) {
+    throw new Error(
+      `PUBLIC_RATE_LIMIT_MAX must be a positive integer, got: ${env.PUBLIC_RATE_LIMIT_MAX}`,
+    );
+  }
+  const publicRateLimitWindowMs = Number(env.PUBLIC_RATE_LIMIT_WINDOW_MS ?? 60_000);
+  if (!Number.isInteger(publicRateLimitWindowMs) || publicRateLimitWindowMs <= 0) {
+    throw new Error(
+      `PUBLIC_RATE_LIMIT_WINDOW_MS must be a positive integer (ms), got: ${env.PUBLIC_RATE_LIMIT_WINDOW_MS}`,
     );
   }
 
@@ -348,6 +371,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ourPhoneNumbers,
     mediaBucket: env.MEDIA_BUCKET,
     sseMaxConnections,
+    publicRateLimitMax,
+    publicRateLimitWindowMs,
     sessionSecret: env.SESSION_SECRET ?? DEV_SESSION_SECRET_DEFAULT,
     googleClientId: env.GOOGLE_CLIENT_ID,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET,

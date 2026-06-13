@@ -71,6 +71,18 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
       creates.push(item.contactId);
       return true;
     },
+    async listByType(type, opts = {}) {
+      const items = contacts
+        .filter((c) => c.type === type)
+        .filter((c) => (opts.status === undefined ? true : c.status === opts.status));
+      return { items };
+    },
+    async create(input) {
+      const item = { ...input, contactId: input.contactId ?? `contact-${contacts.length + 1}` };
+      contacts.push({ ...item });
+      creates.push(item.contactId);
+      return item;
+    },
     async setFlag() {},
     async clearFlag() {},
     async update(contactId) {

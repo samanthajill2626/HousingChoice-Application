@@ -121,6 +121,17 @@ export const TABLES: readonly TableSpec[] = [
         hashKey: { name: 'status', type: 'S' },
         rangeKey: { name: 'last_activity_at', type: 'S' },
       },
+      // Relay routing (M1.7): pool number → the active relay_group thread.
+      // The inbound SMS webhook reads To via this index (cheap point query,
+      // never a scan) and treats "found" as "this To is one of our pool
+      // numbers". Sparse by data convention — only relay_group items carry
+      // pool_number, so 1:1 threads never index here. One ACTIVE relay per
+      // pool number (a closed relay releases its number to quarantine).
+      {
+        indexName: 'byPoolNumber',
+        hashKey: { name: 'pool_number', type: 'S' },
+        sparse: true,
+      },
     ],
   },
   {
@@ -208,6 +219,37 @@ export const TABLES: readonly TableSpec[] = [
     baseName: 'settings',
     hashKey: { name: 'settingId', type: 'S' },
     gsis: [],
+  },
+  {
+    // NEW in M1.7 (NOT in the doc §5 9-table model — README deviation
+    // 2026-06-13): the pool-number lifecycle pool for relay group threads.
+    // A pool number is provisioned voice+sms-capable (M1.7 pre-wires voice
+    // for the M1.9 masked-calling bridge), claimed by exactly one active
+    // relay_group conversation, and released to a 30-day quarantine when the
+    // relay closes (carriers recycle freed numbers; quarantine stops us
+    // re-handing a number whose prior conversants might still text it).
+    // PK is the E.164 number itself. Item is a flexible document; only the
+    // key + the byLifecycleState GSI attrs are contractual (lib/tables.ts).
+    baseName: 'pool_numbers',
+    hashKey: { name: 'poolNumber', type: 'S' },
+    gsis: [
+      // Available-pool query (lifecycle_state='available') + quarantine
+      // reclaim sweep (lifecycle_state='quarantined' AND quarantine_until <=
+      // now): partition by lifecycle_state, sort by quarantine_until.
+      //
+      // NOT sparse: a DynamoDB GSI indexes an item only when BOTH key attrs
+      // are present, so quarantine_until is written on EVERY pool_numbers
+      // item (the repo sets a past-time sentinel for available/assigned and
+      // the real future timestamp once quarantined) — otherwise findAvailable
+      // could not query the 'available' partition. The reclaim sweep reads
+      // only the 'quarantined' partition, where the value is the live release
+      // deadline; sentinels in other partitions are never compared against.
+      {
+        indexName: 'byLifecycleState',
+        hashKey: { name: 'lifecycle_state', type: 'S' },
+        rangeKey: { name: 'quarantine_until', type: 'S' },
+      },
+    ],
   },
 ] as const;
 

@@ -13,6 +13,7 @@ import {
   ConversationNotFoundError,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
+import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -26,6 +27,14 @@ function makeApp(behavior?: (input: SendMessageInput) => never) {
     // The session-epoch check reads the users table — seed the session user.
     auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
     api: {
+      // FIX 2: the send route now reads the conversation to branch on type
+      // (relay vs 1:1). Stub getById → undefined so these 1:1 cases fall
+      // straight through to the faked sendMessage path (no DynamoDB touch).
+      conversationsRepo: {
+        async getById() {
+          return undefined;
+        },
+      } as unknown as ConversationsRepo,
       sendMessageService: async (input) => {
         calls.push(input);
         behavior?.(input);

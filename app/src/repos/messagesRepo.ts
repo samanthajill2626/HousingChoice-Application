@@ -58,6 +58,34 @@ export function allowedPriorStatuses(next: DeliveryStatus): DeliveryStatus[] {
   return ALLOWED_PRIOR[next];
 }
 
+/**
+ * Per-recipient delivery state for a relay-group fan-out (M1.7). The relayed
+ * message is stored ONCE (the inbound source message); this map records the
+ * outbound delivery to each OTHER member, keyed by member key
+ * (relayMemberKey() below). Each entry runs the SAME forward-only status
+ * machine as 1:1 delivery_status, independently per recipient.
+ */
+export interface RelayRecipientDelivery {
+  status: DeliveryStatus;
+  /** Provider SID of the per-recipient outbound send (Twilio SMxxx). */
+  sid?: string;
+  errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
+
+/**
+ * Stable member key for relay delivery maps + relaysid pointers: the
+ * contactId when the member has one, else `phone#<E164>`. Used as the
+ * delivery_recipients map key and stored on the relaysid pointer so a
+ * delivery callback can find the right recipient slot to update.
+ */
+export function relayMemberKey(member: { contactId?: string; phone: string }): string {
+  return member.contactId && member.contactId.length > 0
+    ? member.contactId
+    : `phone#${member.phone}`;
+}
+
 /** Deterministic SK: same provider message → same key, every delivery. */
 export function buildTsMsgId(providerTs: string, providerSid: string): string {
   return `${providerTs}#${providerSid}`;
@@ -77,6 +105,10 @@ export interface NewMessage {
   mediaUrls?: string[];
   deliveryStatus: DeliveryStatus;
   errorCode?: string;
+  /** Relay group (M1.7): sender member key on an inbound relay message. */
+  relaySenderKey?: string;
+  /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out). */
+  receivedOnClosedThread?: boolean;
 }
 
 export interface MessageItem {
@@ -98,6 +130,25 @@ export interface MessageItem {
   retry_of?: string;
   /** 1-based retry attempt number (caps the 30003 retry chain, doc §7.1). */
   retry_attempt?: number;
+  /**
+   * Relay group (M1.7): on an INBOUND relay message, the member key
+   * (relayMemberKey) of the sender — which member texted the pool number.
+   * Absent on 1:1 messages.
+   */
+  relay_sender_key?: string;
+  /**
+   * Relay group (M1.7): true when this inbound arrived on a CLOSED relay
+   * thread — persisted for the audit trail but NOT fanned out. Absent
+   * otherwise.
+   */
+  received_on_closed_thread?: boolean;
+  /**
+   * Relay group (M1.7): per-recipient delivery state for the fan-out of THIS
+   * (inbound source) message to the other members, keyed by member key. The
+   * relayed message is stored once; fan-out only updates this map. Absent on
+   * 1:1 messages (the single `delivery_status` is unchanged for those).
+   */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
   [key: string]: unknown;
 }
 
@@ -148,6 +199,53 @@ export interface MessagesRepo {
    * redelivery — suppress the side effect).
    */
   putJobExecutionMarker(jobId: string, conversationId: string): Promise<boolean>;
+
+  // --- Relay groups (M1.7) -------------------------------------------------
+
+  /**
+   * Record the per-recipient send result on the SOURCE message's
+   * delivery_recipients map (relay fan-out): sets `status` (+ optional sid /
+   * sentAt / errorCode) for `memberKey`. A blind SET on the nested map slot —
+   * the fan-out owns the initial queued→sent write per recipient; the
+   * forward-only state machine is enforced by updateRecipientDeliveryStatus
+   * (the callback path). No-op semantics are the caller's (idempotency check).
+   */
+  setRecipientDelivery(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    delivery: RelayRecipientDelivery,
+  ): Promise<void>;
+  /**
+   * Apply a delivery-callback transition to ONE recipient slot of a relay
+   * source message: forward-only (same machine as updateDeliveryStatus),
+   * keyed by memberKey, found via the relaysid pointer. Returns false (no-op)
+   * when the slot is unknown or the transition would regress.
+   */
+  updateRecipientDeliveryStatus(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    status: DeliveryStatus,
+    errorCode?: string,
+  ): Promise<boolean>;
+  /**
+   * Write the relaysid pointer for a per-recipient fan-out send: `{ PK:
+   * relaysid#<providerSid>, SK: ptr }` → conversationId + tsMsgId + memberKey.
+   * Delivery callbacks carry only the SID, so this is how a relay-recipient
+   * callback recovers WHICH source message + recipient slot to update. Same
+   * marker-partition convention as the sid# pointers (never collides with
+   * real conversation partitions). Conditional create — a redelivered
+   * fan-out never clobbers an existing pointer.
+   */
+  putRelaySidPointer(
+    providerSid: string,
+    ref: { conversationId: string; tsMsgId: string; memberKey: string },
+  ): Promise<void>;
+  /** Resolve a relay-recipient provider SID to its source message + member slot. */
+  getRelaySidPointer(
+    providerSid: string,
+  ): Promise<{ conversationId: string; tsMsgId: string; memberKey: string } | undefined>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -160,6 +258,11 @@ function sidPk(providerSid: string): string {
 /** Marker partition key for a job execution (see putJobExecutionMarker). */
 function jobPk(jobId: string): string {
   return `job#${jobId}`;
+}
+
+/** Pointer partition key for a relay-recipient provider SID (M1.7). */
+function relaySidPk(providerSid: string): string {
+  return `relaysid#${providerSid}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -208,6 +311,8 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         delivery_status: message.deliveryStatus,
         error_code: message.errorCode,
         created_at: now,
+        ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
+        ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
       };
       try {
         await doc.send(
@@ -387,6 +492,121 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         }),
       );
       return (Items ?? []) as MessageItem[];
+    },
+
+    // --- Relay groups (M1.7) -----------------------------------------------
+
+    async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
+      // SET the whole recipient slot (delivery_recipients.<memberKey>). Lazily
+      // initialise the parent map with if_not_exists so the first recipient
+      // write creates it. memberKey is attacker-free (derived from our own
+      // roster) but may contain `#` (phone keys) — bind it as a value, address
+      // the map slot via an aliased name to avoid dotted-path parsing issues.
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId, tsMsgId },
+          UpdateExpression:
+            'SET delivery_recipients = if_not_exists(delivery_recipients, :empty), delivery_recipients.#mk = :d',
+          ConditionExpression: 'attribute_exists(tsMsgId)',
+          ExpressionAttributeNames: { '#mk': memberKey },
+          ExpressionAttributeValues: { ':empty': {}, ':d': delivery },
+        }),
+      );
+    },
+
+    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId, tsMsgId } }),
+      );
+      const message = Item as MessageItem | undefined;
+      const slot = message?.delivery_recipients?.[memberKey];
+      if (!slot) {
+        log.warn(
+          { conversationId, tsMsgId, status },
+          'relay recipient delivery status for unknown recipient slot ignored',
+        );
+        return false;
+      }
+      const allowed = allowedPriorStatuses(status);
+      if (!allowed.includes(slot.status)) {
+        log.info(
+          { conversationId, tsMsgId, status, currentStatus: slot.status },
+          'relay recipient delivery status transition skipped (would regress)',
+        );
+        return false;
+      }
+      const now = new Date().toISOString();
+      const next: RelayRecipientDelivery = {
+        ...slot,
+        status,
+        ...(errorCode !== undefined && { errorCode }),
+        ...(status === 'delivered' && { deliveredAt: now }),
+      };
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET delivery_recipients.#mk = :d',
+            // Guard the read-modify-write: only commit if the slot is still on
+            // the status we just read (forward-only under concurrent callbacks).
+            ConditionExpression: 'delivery_recipients.#mk.#st = :prev',
+            ExpressionAttributeNames: { '#mk': memberKey, '#st': 'status' },
+            ExpressionAttributeValues: { ':d': next, ':prev': slot.status },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info(
+            { conversationId, tsMsgId, status },
+            'relay recipient delivery status transition lost a race (regressed)',
+          );
+          return false;
+        }
+        throw err;
+      }
+      log.info({ conversationId, tsMsgId, status, errorCode }, 'relay recipient delivery updated');
+      return true;
+    },
+
+    async putRelaySidPointer(providerSid, ref) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: relaySidPk(providerSid),
+              tsMsgId: 'ptr',
+              ref_conversationId: ref.conversationId,
+              ref_tsMsgId: ref.tsMsgId,
+              ref_member_key: ref.memberKey,
+            },
+            ConditionExpression: 'attribute_not_exists(tsMsgId)',
+          }),
+        );
+      } catch (err) {
+        // A redelivered fan-out re-sends to the same recipient under a NEW
+        // provider SID, so a collision here is unexpected — but never fatal:
+        // the existing pointer already routes the callback correctly.
+        if (err instanceof ConditionalCheckFailedException) return;
+        throw err;
+      }
+    },
+
+    async getRelaySidPointer(providerSid) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: relaySidPk(providerSid), tsMsgId: 'ptr' } }),
+      );
+      const ptr = Item as
+        | { ref_conversationId: string; ref_tsMsgId: string; ref_member_key: string }
+        | undefined;
+      if (!ptr) return undefined;
+      return {
+        conversationId: ptr.ref_conversationId,
+        tsMsgId: ptr.ref_tsMsgId,
+        memberKey: ptr.ref_member_key,
+      };
     },
   };
 }

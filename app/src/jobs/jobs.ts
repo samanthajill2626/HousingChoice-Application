@@ -3,7 +3,11 @@
 //   - defineJobHandler(jobName, handler) + dispatchJob(rawEvent) — consumer side
 // Nothing else may ever talk to EventBridge or hand events to handlers.
 import { randomUUID } from 'node:crypto';
-import type { SchedulerAdapter, ScheduleOnceOptions } from '../adapters/scheduler.js';
+import type {
+  OutboundQueueAdapter,
+  SchedulerAdapter,
+  ScheduleOnceOptions,
+} from '../adapters/scheduler.js';
 import {
   currentTraceparent,
   generateTraceparent,
@@ -23,11 +27,21 @@ export type JobHandler = (payload: unknown) => void | Promise<void>;
 // Module-scoped registry + wiring (reset via _resetForTests()).
 const registry = new Map<string, JobHandler>();
 let scheduler: SchedulerAdapter | undefined;
+let outboundQueue: OutboundQueueAdapter | undefined;
 let log: Logger = defaultLogger;
 
 /** Wire the scheduler adapter (in-memory locally; EventBridge in AWS). */
 export function configureScheduler(adapter: SchedulerAdapter): void {
   scheduler = adapter;
+}
+
+/**
+ * Wire the immediate-job adapter (M1.7): SQS-direct in AWS, in-process
+ * locally/in tests. Powers enqueueImmediate(), which skips the EventBridge
+ * 60s floor for latency-sensitive jobs (relay fan-out).
+ */
+export function configureOutboundQueue(adapter: OutboundQueueAdapter): void {
+  outboundQueue = adapter;
 }
 
 /** Test seam: swap the logger used by the gates. */
@@ -53,7 +67,35 @@ export async function enqueue(
   if (!scheduler) {
     throw new Error('jobs.enqueue: no SchedulerAdapter configured (call configureScheduler first)');
   }
+  const envelope = buildEnvelope(jobName, payload);
+  const scheduleOpts: ScheduleOnceOptions = {};
+  if (opts?.runAt) scheduleOpts.runAt = opts.runAt;
+  await scheduler.scheduleOnce(envelope, scheduleOpts);
+  log.info({ jobName, jobId: envelope.jobId, hopCount: envelope.hopCount, runAt: opts?.runAt?.toISOString() }, 'job enqueued');
+  return envelope;
+}
 
+/**
+ * IMMEDIATE producer gate (M1.7): same envelope machinery as enqueue(), but
+ * routed through the OutboundQueueAdapter (SQS-direct in AWS, in-process
+ * locally) — bypassing EventBridge Scheduler's ~60s delivery floor. Use for
+ * latency-sensitive jobs only (relay fan-out). Future-scheduled jobs MUST
+ * still use enqueue().
+ */
+export async function enqueueImmediate(jobName: string, payload: unknown): Promise<JobEnvelope> {
+  if (!outboundQueue) {
+    throw new Error(
+      'jobs.enqueueImmediate: no OutboundQueueAdapter configured (call configureOutboundQueue first)',
+    );
+  }
+  const envelope = buildEnvelope(jobName, payload);
+  await outboundQueue.enqueueImmediate(envelope);
+  log.info({ jobName, jobId: envelope.jobId, hopCount: envelope.hopCount }, 'job enqueued (immediate)');
+  return envelope;
+}
+
+/** Build a correlation-stamped JobEnvelope from the current context. */
+function buildEnvelope(jobName: string, payload: unknown): JobEnvelope {
   const ctx = getContext() ?? {};
   const hopCount = (ctx.hopCount ?? 0) + 1;
   if (hopCount > MAX_HOP_COUNT) {
@@ -61,7 +103,6 @@ export async function enqueue(
       `jobs.enqueue('${jobName}'): hopCount ${hopCount} exceeds MAX_HOP_COUNT ${MAX_HOP_COUNT} — runaway job loop guard`,
     );
   }
-
   // Stamp correlation fields only — jobRunId is per-run and generated fresh
   // at dispatch; hopCount/traceparent travel as top-level envelope fields.
   const correlationContext: CorrelationContext = {
@@ -70,8 +111,7 @@ export async function enqueue(
     ...(ctx.tenantId !== undefined && { tenantId: ctx.tenantId }),
     ...(ctx.caseId !== undefined && { caseId: ctx.caseId }),
   };
-
-  const envelope: JobEnvelope = {
+  return {
     v: JOB_ENVELOPE_VERSION,
     jobId: randomUUID(),
     jobName,
@@ -81,12 +121,6 @@ export async function enqueue(
     hopCount,
     enqueuedAt: new Date().toISOString(),
   };
-
-  const scheduleOpts: ScheduleOnceOptions = {};
-  if (opts?.runAt) scheduleOpts.runAt = opts.runAt;
-  await scheduler.scheduleOnce(envelope, scheduleOpts);
-  log.info({ jobName, jobId: envelope.jobId, hopCount, runAt: opts?.runAt?.toISOString() }, 'job enqueued');
-  return envelope;
 }
 
 /** Consumer gate, part 1: register a handler. Handlers receive (payload) only. */
@@ -240,5 +274,6 @@ export async function dispatchJob(rawEvent: unknown): Promise<void> {
 export function _resetForTests(): void {
   registry.clear();
   scheduler = undefined;
+  outboundQueue = undefined;
   log = defaultLogger;
 }

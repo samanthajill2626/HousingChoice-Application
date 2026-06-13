@@ -9,6 +9,7 @@
 //
 // PII (doc §9): responses carry bodies/previews to the authenticated client;
 // LOG LINES never do — logs are IDs/counts only, correlated via the pino mixin.
+import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
@@ -21,13 +22,19 @@ import {
   type MessagePersistedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
-import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  relayMemberKey,
+  type MessagesRepo,
+  type RelayRecipientDelivery,
+} from '../repos/messagesRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
@@ -38,9 +45,17 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { type PushService } from '../services/pushService.js';
+import { type PoolNumbersService } from '../services/poolNumbers.js';
+import { enqueueImmediate } from '../jobs/jobs.js';
+import {
+  RELAY_FANOUT_JOB,
+  TEAM_SENDER_KEY,
+  TEAM_SENDER_LABEL,
+} from '../jobs/relayFanOut.js';
 import { createAdminUsersRouter } from './adminUsers.js';
 import { createContactsRouter } from './contacts.js';
 import { createPushRouter } from './push.js';
+import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
 import { createUnitsRouter } from './units.js';
 
@@ -50,6 +65,7 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   contact_opted_out: 409,
   manual_mode: 409,
   breaker_open: 429,
+  relay_not_supported: 409,
 };
 
 /** Page-size bounds shared by the inbox and thread endpoints. */
@@ -86,6 +102,9 @@ export interface ApiRouterDeps {
   pushService?: PushService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
   unitsRepo?: UnitsRepo;
+  /** M1.7 relay groups — injected in tests; defaults to the real service. */
+  poolNumbersService?: PoolNumbersService;
+  contactsRepoForRelay?: ContactsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -225,11 +244,36 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
+  // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).
+  // Mounted at '/' so it owns /relay-groups AND the relay sub-routes on
+  // /conversations/:id (/members, /close). The relay router's
+  // /conversations/:id/* paths are DISTINCT segments from the 1:1 thread
+  // routes below, so there is no collision; relay routes are matched first.
+  router.use(
+    '/',
+    createRelayGroupsRouter({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      ...(deps.contactsRepoForRelay !== undefined && { contactsRepo: deps.contactsRepoForRelay }),
+      ...(deps.contactsRepo !== undefined &&
+        deps.contactsRepoForRelay === undefined && { contactsRepo: deps.contactsRepo }),
+      auditRepo: audit,
+      ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      events,
+    }),
+  );
 
   // POST /api/conversations/:conversationId/messages  { body?, mediaUrls? }
   // A manual human send (automated sends come from jobs, not this route).
+  //
+  // FIX 2: a relay_group thread is NOT a 1:1 send — the 1:1 wrapper would text
+  // participant_phone (the pool number). The team-send branch below persists
+  // ONE outbound message and fans it out to ALL members FROM the pool number
+  // via relay.fanOut, returning the same outcome shape as the 1:1 path.
   router.post('/conversations/:conversationId/messages', async (req, res) => {
     const { conversationId } = req.params;
+    mergeContext({ conversationId });
     const payload = (req.body ?? {}) as { body?: unknown; mediaUrls?: unknown };
 
     const body = typeof payload.body === 'string' && payload.body.length > 0 ? payload.body : undefined;
@@ -241,6 +285,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         : undefined;
     if (body === undefined && mediaUrls === undefined) {
       res.status(400).json({ error: 'body (non-empty string) or mediaUrls (string[]) is required' });
+      return;
+    }
+
+    // Relay branch: fetch the conversation to decide. A miss falls through to
+    // the 1:1 path (sendMessage throws ConversationNotFoundError → 404), so the
+    // existing behavior for unknown ids is unchanged.
+    const conversation = await conversations.getById(conversationId);
+    if (conversation?.type === 'relay_group') {
+      await sendRelayTeamMessage(req, res, conversation, body, mediaUrls);
       return;
     }
 
@@ -260,6 +313,119 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       throw err; // Express 5 forwards async throws to the error handler.
     }
   });
+
+  /**
+   * FIX 2 — team send into a relay group. Persists the outbound message ONCE on
+   * the relay thread (author 'teammate'), seeds delivery_recipients to 'queued'
+   * for ALL current members, then enqueues relay.fanOut to send to every member
+   * FROM the pool number (no member is the sender → none is excluded; the
+   * per-recipient prefix is the neutral team label, never a phone). Returns the
+   * same { conversationId, providerSid, tsMsgId, status } shape as the 1:1 send.
+   */
+  async function sendRelayTeamMessage(
+    req: import('express').Request,
+    res: import('express').Response,
+    conversation: ConversationItem,
+    bodyText: string | undefined,
+    mediaUrlList: string[] | undefined,
+  ): Promise<void> {
+    const conversationId = conversation.conversationId;
+    if (conversation.status !== 'open') {
+      res.status(409).json({ error: 'relay_closed' });
+      return;
+    }
+    const poolNumber = conversation.pool_number;
+    if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
+      // An open relay always carries a pool number; missing one is an anomaly.
+      log.error({ conversationId }, 'relay team send: open relay has no pool number — refusing');
+      res.status(409).json({ error: 'relay_closed' });
+      return;
+    }
+
+    // Persist the source message ONCE (the relayed message is stored once;
+    // fan-out only updates delivery_recipients). No provider send happens here —
+    // the per-recipient sends are the fan-out's job — so the SID/ts are
+    // synthesized for the source item's key. A team message has no member
+    // sender, so relay_sender_key is the TEAM sentinel.
+    const providerTs = new Date().toISOString();
+    const providerSid = `team-${randomUUID()}`;
+    const appended = await messages.append({
+      conversationId,
+      providerSid,
+      providerTs,
+      type: mediaUrlList !== undefined && mediaUrlList.length > 0 ? 'mms' : 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      deliveryStatus: 'queued',
+      relaySenderKey: TEAM_SENDER_KEY,
+      ...(bodyText !== undefined && { body: bodyText }),
+      ...(mediaUrlList !== undefined && { mediaUrls: mediaUrlList }),
+    });
+
+    // Seed every current member's delivery slot to 'queued' (member key =
+    // contactId else phone#<E164>, the shared convention).
+    const roster = conversation.participants ?? [];
+    const queued: RelayRecipientDelivery = { status: 'queued' };
+    for (const member of roster) {
+      try {
+        await messages.setRecipientDelivery(
+          conversationId,
+          appended.tsMsgId,
+          relayMemberKey(member),
+          queued,
+        );
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay team send: seeding a recipient slot failed — fan-out still re-sends');
+      }
+    }
+
+    // Fan out to ALL members FROM the pool number. TEAM_SENDER_KEY matches no
+    // member, so none is excluded; the neutral team label is the prefix.
+    try {
+      await enqueueImmediate(RELAY_FANOUT_JOB, {
+        relayConversationId: conversationId,
+        sourceTsMsgId: appended.tsMsgId,
+        senderKey: TEAM_SENDER_KEY,
+        senderNameOverride: TEAM_SENDER_LABEL,
+      });
+    } catch (err) {
+      log.error({ err, conversationId }, 'relay team send: fan-out enqueue failed — message persisted, not relayed');
+    }
+
+    // Inbox touch + audit + SSE — mirror the 1:1 send's tail (FIX 5: attribute
+    // the audit to the acting user).
+    let touched: ConversationItem | undefined;
+    try {
+      touched = await conversations.touchLastActivity(conversationId, bodyText, providerTs);
+    } catch (err) {
+      log.error({ err, conversationId }, 'relay team send: touchLastActivity failed — inbox stale');
+    }
+    await audit.append(`conversations#${conversationId}`, 'message_sent', {
+      actor: (req as AuthedRequest).user?.userId,
+      author: 'teammate',
+      relay: true,
+      memberCount: roster.length,
+    });
+
+    events.emit('message.persisted', {
+      conversationId,
+      tsMsgId: appended.tsMsgId,
+      direction: 'outbound',
+      deliveryStatus: 'queued',
+    });
+    if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+
+    log.info(
+      { conversationId, memberCount: roster.length, actor: (req as AuthedRequest).user?.userId },
+      'relay team message persisted + fanned out',
+    );
+    res.status(201).json({
+      conversationId,
+      providerSid,
+      tsMsgId: appended.tsMsgId,
+      status: 'queued',
+    });
+  }
 
   // GET /api/conversations?status=open&limit=50&cursor=...
   // THE inbox (M1.2): ONE DynamoDB Query on the byLastActivity GSI,

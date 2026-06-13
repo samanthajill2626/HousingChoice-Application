@@ -19,6 +19,8 @@ import {
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
+// FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
+// inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -29,12 +31,18 @@ import {
   type ConversationsRepo,
   type ConversationType,
 } from '../../repos/conversationsRepo.js';
-import { createMessagesRepo, type MessagesRepo } from '../../repos/messagesRepo.js';
+import {
+  createMessagesRepo,
+  relayMemberKey,
+  type MessagesRepo,
+} from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
 } from '../../jobs/retrySend.js';
+import { enqueueImmediate } from '../../jobs/jobs.js';
+import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
 
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -121,11 +129,111 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   });
 
   // ---------------------------------------------------------------------
+  // Relay-group inbound (M1.7): To is a pool number → persist ONCE on the
+  // relay thread + enqueue fan-out to the OTHER members. Never the 1:1 path.
+  // Side-effect failures NEVER 5xx (a redelivery dedupes at the append and
+  // re-runs the idempotent steps); failures are ERROR-logged + alarmed.
+  // ---------------------------------------------------------------------
+  async function handleRelayInbound(
+    relay: ConversationItem,
+    msg: {
+      MessageSid: string;
+      From: string;
+      To: string;
+      Body: string | undefined;
+      params: WebhookParams;
+    },
+  ): Promise<void> {
+    const { MessageSid, From, Body } = msg;
+    mergeContext({ conversationId: relay.conversationId });
+
+    // Identify the sender = the member whose phone == From. A former member
+    // (removed mid-thread) is NOT found here — we still persist for the audit
+    // trail but do NOT fan out (the message reached a number they were once
+    // on). The member key is contactId-or-phone (relayMemberKey).
+    const roster = relay.participants ?? [];
+    const sender = roster.find((m) => m.phone === From);
+    const senderKey = sender ? relayMemberKey(sender) : `phone#${From}`;
+
+    // Author honesty: only a reviewed contact type claims tenant/landlord;
+    // a stub/unknown sender is `unknown` (same rule as the 1:1 path).
+    const senderContact = sender?.contactId ? await contacts.getById(sender.contactId) : undefined;
+    const author =
+      senderContact?.type === 'landlord' || senderContact?.type === 'tenant'
+        ? senderContact.type
+        : 'unknown';
+
+    const isClosed = relay.status !== 'open';
+    const providerTs = new Date().toISOString();
+    // Persist the relay message ONCE on the relay thread (idempotent MessageSid
+    // append). Direction inbound; relay_sender_key records who sent it.
+    const appended = await messages.append({
+      conversationId: relay.conversationId,
+      providerSid: MessageSid,
+      providerTs,
+      type: 'sms',
+      direction: 'inbound',
+      author,
+      deliveryStatus: 'delivered',
+      relaySenderKey: senderKey,
+      ...(isClosed && { receivedOnClosedThread: true }),
+      ...(Body !== undefined && Body.length > 0 && { body: Body }),
+    });
+
+    // Closed-thread reply: flagged (receivedOnClosedThread above), NEVER fanned
+    // out — the conversation is over; the reply is kept for the record only.
+    if (isClosed) {
+      log.info({ providerSid: MessageSid }, 'relay inbound on a CLOSED thread — persisted, no fan-out');
+    } else if (!sender) {
+      // Removed-member reply: persisted for the audit trail, no fan-out (they
+      // are no longer a current participant).
+      log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
+    } else if (!appended.deduped) {
+      // Current member, open thread, fresh message → fan out immediately
+      // (skips EventBridge's 60s floor). A redelivery (deduped) does NOT
+      // re-enqueue: the original fan-out is guarded by its own job marker +
+      // per-recipient terminal skips.
+      try {
+        await enqueueImmediate(RELAY_FANOUT_JOB, {
+          relayConversationId: relay.conversationId,
+          sourceTsMsgId: appended.tsMsgId,
+          senderKey,
+        });
+      } catch (err) {
+        log.error({ err, providerSid: MessageSid }, 'relay fan-out enqueue failed — message persisted, not relayed');
+      }
+    }
+
+    // Inbox touch + unread + SSE — reuse the shared helpers (fresh-append only,
+    // same as the 1:1 path: a redelivery must not double-count/re-emit).
+    let touched: ConversationItem | undefined;
+    try {
+      if (!appended.deduped) await conversations.incrementUnread(relay.conversationId);
+      touched = await conversations.touchLastActivity(relay.conversationId, Body || undefined, providerTs);
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'relay touchLastActivity/unread failed — message persisted, inbox stale');
+    }
+    if (!appended.deduped) {
+      events.emit('message.persisted', {
+        conversationId: relay.conversationId,
+        tsMsgId: appended.tsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+    log.info(
+      { providerSid: MessageSid, direction: 'inbound', bodyLength: Body?.length ?? 0, closed: isClosed, fannedOut: !isClosed && Boolean(sender) && !appended.deduped },
+      'twilio relay inbound message processed',
+    );
+  }
+
+  // ---------------------------------------------------------------------
   // Inbound message webhook — pipeline order per doc §7.1.
   // ---------------------------------------------------------------------
   router.post('/sms', verifySignature, async (req, res) => {
     const params = asParams(req.body);
-    const { MessageSid, From, Body, OptOutType } = params;
+    const { MessageSid, From, To, Body, OptOutType } = params;
     if (!MessageSid || !From) {
       log.warn(
         { hasMessageSid: Boolean(MessageSid), hasFrom: Boolean(From) },
@@ -139,10 +247,30 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // OUR numbers means this is our own outbound projected back — acknowledge
     // and STOP, no side-effect pipeline. From-match is the deterministic
     // core; Direction/SmsStatus params can corroborate but are not relied on.
+    // M1.7: pool numbers are ALSO "ours" — a relay fan-out (From = pool
+    // number) projected back must drop here too, before any relay routing.
     if (ourNumbers.has(From)) {
       log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is our number) — acknowledged, dropped');
       res.type('text/xml').send(EMPTY_TWIML);
       return;
+    }
+    if (await conversations.getByPoolNumber(From)) {
+      log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is a pool number) — acknowledged, dropped');
+      res.type('text/xml').send(EMPTY_TWIML);
+      return;
+    }
+
+    // (1.5) Relay routing (M1.7): if To is one of our pool numbers, this is an
+    // inbound to a relay group — route it to the relay path (fan-out to the
+    // other members), NOT the 1:1 path. The byPoolNumber GSI read is the cheap
+    // lookup (never a scan); "found" means "To is a pool number".
+    if (To !== undefined && To.length > 0) {
+      const relay = await conversations.getByPoolNumber(To);
+      if (relay) {
+        await handleRelayInbound(relay, { MessageSid, From, To, Body, params });
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
     }
 
     // (2) Resolve contact + conversation. Unknown phones still get a
@@ -386,8 +514,41 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // correlation envelope — MessageSid → message → conversation.
     let message = await messages.getByProviderSid(MessageSid);
     if (!message) {
-      // Unknown SID: usually the callback outran the send wrapper's
-      // persist-at-send (Twilio can fire the first status before
+      // (M1.7) Before the slow send/append-race retry: the SID may belong to a
+      // relay-group fan-out, which sends N outbound provider messages but
+      // persists NONE as their own message — they live as delivery_recipients
+      // slots on the source message, found via the relaysid pointer (written
+      // synchronously at fan-out send time, so no race window to wait out).
+      const ptr = await messages.getRelaySidPointer(MessageSid);
+      if (ptr) {
+        mergeContext({ conversationId: ptr.conversationId });
+        const mapped = mapTwilioStatus(MessageStatus);
+        const transitioned = await messages.updateRecipientDeliveryStatus(
+          ptr.conversationId,
+          ptr.tsMsgId,
+          ptr.memberKey,
+          mapped,
+          ErrorCode,
+        );
+        log.info(
+          { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned, relay: true },
+          'twilio relay-recipient delivery status callback processed',
+        );
+        if (transitioned) {
+          // Refresh the UI: a per-recipient delivery move re-renders the relay
+          // thread (the source message's delivery_recipients changed).
+          events.emit('message.persisted', {
+            conversationId: ptr.conversationId,
+            tsMsgId: ptr.tsMsgId,
+            direction: 'inbound',
+            deliveryStatus: mapped,
+          });
+        }
+        res.status(200).end();
+        return;
+      }
+      // Unknown SID and not a relay recipient: usually the callback outran the
+      // send wrapper's persist-at-send (Twilio can fire the first status before
       // messages.append commits). Wait once and retry the lookup before
       // declaring the message lost.
       await delay(statusRetryDelayMs);

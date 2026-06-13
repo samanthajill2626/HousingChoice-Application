@@ -18,6 +18,8 @@ const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { registerRetrySendJobHandler } = await import('./jobs/retrySend.js');
+const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
+const { TokenBucket } = await import('./lib/tokenBucket.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -31,6 +33,25 @@ const config = loadConfig();
 // Twilio status webhook. Dispatch-time logs use the JOB context (fresh
 // jobRunId rehydrated from the envelope), not the boot context.
 registerRetrySendJobHandler();
+
+// M1.7: the shared A2P token bucket — ONE instance, sized from config
+// (a2pRateLimitPerSec, default ~1 msg/sec), shared by relay fan-out and the
+// future M1.8 broadcast so the COMBINED outbound rate stays under the
+// registered tier. BURST vs SUSTAINED (FIX 6): capacity == the per-second rate
+// (the EXACT value, not ceil — at a fractional rate like 0.5/s, ceil would let
+// a 1-token burst exceed the tier), floored at 1 so a sub-1/s rate can still
+// admit a single message. The bucket starts full, so the first burst is up to
+// `capacity` messages immediately; thereafter sends are paced at
+// `refillPerSec` tokens/sec (the sustained A2P rate).
+const a2pBucket = new TokenBucket({
+  capacity: Math.max(1, config.a2pRateLimitPerSec),
+  refillPerSec: config.a2pRateLimitPerSec,
+});
+
+// M1.7: relay group fan-out. The handler awaits the shared bucket per
+// recipient (SQS path) AND the in-process immediate adapter applies it before
+// dispatch (local path) — both paths are throttled.
+registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker

@@ -122,6 +122,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     setMode: async () => {},
     setSmsOptOut: async () => {},
     incrementAutomatedSendCount: async () => 1,
+    // Relay groups (M1.7) — unused by the capture service:
+    createRelayGroup: async () => conversation,
+    getByPoolNumber: async () => undefined,
+    addMember: async () => conversation,
+    removeMember: async () => conversation,
+    setRelayStatus: async () => conversation,
   };
 
   const auditRepo: AuditRepo = {

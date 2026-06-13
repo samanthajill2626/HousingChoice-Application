@@ -41,6 +41,27 @@ export interface SendMessageParams {
    * deterministic fake SIDs (console driver does).
    */
   idempotencyKey?: string;
+  /**
+   * Explicit sender number, E.164 (M1.7 relay fan-out): the pool number the
+   * relay message must originate FROM. When set, the Twilio driver sends
+   * `from` AS WELL AS messagingServiceSid (A2P compliance via the service's
+   * sender pool, pinned to this specific number); when unset, the service
+   * picks a sender (the 1:1 path is unchanged). Console driver echoes it.
+   */
+  from?: string;
+}
+
+/** Provisioned phone-number capabilities (M1.7). */
+export interface PhoneNumberCapabilities {
+  sms: boolean;
+  voice: boolean;
+}
+
+export interface ProvisionPhoneNumberResult {
+  phoneNumber: string;
+  capabilities: PhoneNumberCapabilities;
+  /** Provider resource SID (Twilio IncomingPhoneNumber PNxxx). */
+  sid: string;
 }
 
 export interface SendMessageResult {
@@ -56,6 +77,23 @@ export interface MessagingAdapter {
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Streams-only media fetch (Builder B: MMS → S3 mirroring). */
   getMediaStream(mediaUrl: string): Promise<Readable>;
+  /**
+   * Provision a NEW phone number for a relay group (M1.7). MUST return a
+   * voice+sms-capable number — M1.7 pre-wires the voice webhook so the M1.9
+   * masked-calling bridge is a config flip, not a re-provision. Throws
+   * VoiceCapabilityError when no voice-capable number is available, so a
+   * misconfigured account fails at provision time, not at call time.
+   */
+  provisionPhoneNumber(opts: {
+    voiceCapable: true;
+    areaCode?: string;
+  }): Promise<ProvisionPhoneNumberResult>;
+  /**
+   * Point a provisioned number's voice webhook at `voiceUrl` (M1.7 pre-wiring
+   * for M1.9). The Twilio driver sets VoiceUrl on the IncomingPhoneNumber;
+   * the console driver logs a no-op.
+   */
+  setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void>;
 }
 
 /** Twilio media host allowlist — MediaUrl{i} values always live here. */
@@ -81,19 +119,72 @@ export class MediaFetchRefusedError extends Error {
   }
 }
 
+/**
+ * Provisioning could not yield a voice-capable number (M1.7). A relay pool
+ * number MUST be voice-capable (M1.9 masked calling rides the same number), so
+ * a misconfigured account / exhausted inventory fails LOUD at provision time
+ * rather than silently handing out an SMS-only number that breaks calling
+ * later. The poolNumbers service surfaces it; the API route maps it to 503.
+ */
+export class VoiceCapabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Twilio driver — production path (Programmable Messaging REST).
 // ---------------------------------------------------------------------------
+
+/** A Twilio AvailablePhoneNumber search result row (the fields we read). */
+export interface TwilioAvailableNumber {
+  phoneNumber: string;
+  capabilities?: { SMS?: boolean; sms?: boolean; voice?: boolean; MMS?: boolean };
+}
+
+/** A purchased Twilio IncomingPhoneNumber resource (the fields we read/update). */
+export interface TwilioIncomingNumber {
+  sid: string;
+  phoneNumber: string;
+  capabilities?: { sms?: boolean; voice?: boolean; mms?: boolean };
+}
 
 /** Minimal client surface so tests inject a fake — no network, ever. */
 export interface TwilioClientLike {
   messages: {
     create(params: {
       to: string;
+      from?: string;
       body?: string;
       mediaUrl?: string[];
       messagingServiceSid: string;
     }): Promise<{ sid: string; status: string; dateCreated: Date | null }>;
+  };
+  /**
+   * Number provisioning (M1.7). Optional on the interface so the existing
+   * message-only fakes in the M1.1 tests keep compiling; the real twilio SDK
+   * provides all of these, and the driver guards with a clear error when a
+   * fake omits them.
+   */
+  availablePhoneNumbers?: (country: string) => {
+    local: {
+      list(params: {
+        voiceEnabled?: boolean;
+        smsEnabled?: boolean;
+        areaCode?: number;
+        limit?: number;
+      }): Promise<TwilioAvailableNumber[]>;
+    };
+  };
+  incomingPhoneNumbers?: {
+    create(params: {
+      phoneNumber: string;
+      smsUrl?: string;
+      voiceUrl?: string;
+    }): Promise<TwilioIncomingNumber>;
+    list(params: { phoneNumber: string; limit?: number }): Promise<TwilioIncomingNumber[]>;
+    (sid: string): { update(params: { voiceUrl?: string }): Promise<TwilioIncomingNumber> };
   };
 }
 
@@ -121,10 +212,21 @@ export interface TwilioMessagingDriverDeps {
   apiKeySid: string;
   apiKeySecret: string;
   messagingServiceSid: string;
+  /**
+   * Public https base URL (the CloudFront domain) — used to pre-wire a newly
+   * provisioned number's SmsUrl (inbound webhook) and VoiceUrl (M1.9 voice
+   * bridge, M1.7 pre-wiring). When unset, provisioning still purchases the
+   * number but skips webhook wiring with a WARN.
+   */
+  publicBaseUrl?: string;
   /** Injected fake in unit tests; defaults to the real twilio client. */
   client?: TwilioClientLike;
   logger?: Logger;
 }
+
+/** Webhook paths a provisioned relay pool number is pre-wired to (M1.7). */
+const SMS_WEBHOOK_PATH = '/webhooks/twilio/sms';
+const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 
 export class TwilioMessagingDriver implements MessagingAdapter {
   private readonly client: TwilioClientLike;
@@ -144,6 +246,10 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       // The Messaging Service is the sender (A2P sender pool) AND carries the
       // service-level status callback — no per-message statusCallback needed.
       messagingServiceSid: this.deps.messagingServiceSid,
+      // Relay fan-out (M1.7): pin the send to a specific pool number while
+      // staying inside the A2P service (the number is in the service's sender
+      // pool). Omitted for the 1:1 path — the service picks the sender.
+      ...(params.from !== undefined && { from: params.from }),
     });
     // Redacted by design: SID + lengths only — never the body (PII).
     this.log.info(
@@ -160,6 +266,75 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       status: mapTwilioStatus(message.status),
       providerTs: (message.dateCreated ?? new Date()).toISOString(),
     };
+  }
+
+  async provisionPhoneNumber(opts: {
+    voiceCapable: true;
+    areaCode?: string;
+  }): Promise<ProvisionPhoneNumberResult> {
+    const available = this.client.availablePhoneNumbers;
+    const incoming = this.client.incomingPhoneNumbers;
+    if (!available || !incoming) {
+      throw new Error('TwilioMessagingDriver: client lacks number-provisioning APIs');
+    }
+    // Search for a voice+sms-capable local number. A misconfigured account or
+    // exhausted inventory returns none — fail loud (relay needs voice).
+    const candidates = await available('US').local.list({
+      voiceEnabled: true,
+      smsEnabled: true,
+      ...(opts.areaCode !== undefined && { areaCode: Number(opts.areaCode) }),
+      limit: 1,
+    });
+    const candidate = candidates[0];
+    if (!candidate) {
+      throw new VoiceCapabilityError(
+        'provisionPhoneNumber: no voice+sms-capable number available to purchase',
+      );
+    }
+    // Pre-wire SmsUrl (inbound) + VoiceUrl (M1.9 bridge) at purchase time when
+    // the public base URL is known.
+    const base = this.deps.publicBaseUrl;
+    const purchased = await incoming.create({
+      phoneNumber: candidate.phoneNumber,
+      ...(base !== undefined && {
+        smsUrl: `${base}${SMS_WEBHOOK_PATH}`,
+        voiceUrl: `${base}${VOICE_WEBHOOK_PATH}`,
+      }),
+    });
+    const capabilities: PhoneNumberCapabilities = {
+      sms: purchased.capabilities?.sms ?? candidate.capabilities?.sms ?? false,
+      voice: purchased.capabilities?.voice ?? candidate.capabilities?.voice ?? false,
+    };
+    // Verify the purchased number really is voice-capable — never trust the
+    // search filter alone (the purchase is the source of truth).
+    if (!capabilities.voice) {
+      throw new VoiceCapabilityError(
+        `provisionPhoneNumber: purchased number ${purchased.sid} is not voice-capable`,
+      );
+    }
+    if (base === undefined) {
+      this.log.warn(
+        { sid: purchased.sid },
+        'provisioned number but PUBLIC_BASE_URL unset — webhooks NOT pre-wired',
+      );
+    }
+    this.log.info({ sid: purchased.sid }, 'twilio phone number provisioned (voice+sms)');
+    return { phoneNumber: purchased.phoneNumber, capabilities, sid: purchased.sid };
+  }
+
+  async setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void> {
+    const incoming = this.client.incomingPhoneNumbers;
+    if (!incoming) {
+      throw new Error('TwilioMessagingDriver: client lacks number-provisioning APIs');
+    }
+    // Look the number up by E.164 to get its resource SID, then update VoiceUrl.
+    const matches = await incoming.list({ phoneNumber, limit: 1 });
+    const match = matches[0];
+    if (!match) {
+      throw new Error('setVoiceWebhook: no IncomingPhoneNumber resource for the given number');
+    }
+    await incoming(match.sid).update({ voiceUrl });
+    this.log.info({ sid: match.sid }, 'twilio voice webhook set');
   }
 
   async getMediaStream(mediaUrl: string): Promise<Readable> {
@@ -202,6 +377,12 @@ export class TwilioMessagingDriver implements MessagingAdapter {
 
 export class ConsoleMessagingDriver implements MessagingAdapter {
   private readonly log: Logger;
+  /**
+   * Monotonic counter for deterministic fake provisioned numbers (M1.7) so
+   * tests are stable: each call yields a fresh +1555-prefixed E.164. Instance-
+   * scoped — a fresh driver per app/test starts the sequence over.
+   */
+  private provisionCounter = 0;
 
   constructor(deps: { logger?: Logger } = {}) {
     this.log = deps.logger ?? defaultLogger;
@@ -212,6 +393,7 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     this.log.info(
       {
         to: params.to,
+        ...(params.from !== undefined && { from: params.from }),
         bodyLength: params.body?.length ?? 0,
         mediaCount: params.mediaUrls?.length ?? 0,
       },
@@ -232,6 +414,33 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
       throw new Error(`getMediaStream: ${res.status} ${res.statusText} fetching media`);
     }
     return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+  }
+
+  async provisionPhoneNumber(opts: {
+    voiceCapable: true;
+    areaCode?: string;
+  }): Promise<ProvisionPhoneNumberResult> {
+    // NEVER hits Twilio: a deterministic, always voice+sms-capable fake. The
+    // areaCode (when supplied) is honored as a prefix hint so tests can assert
+    // it threads through; voiceCapable is always satisfied (the fake has voice).
+    this.provisionCounter += 1;
+    const seq = String(this.provisionCounter).padStart(4, '0');
+    const prefix = opts.areaCode !== undefined ? `+1${opts.areaCode}` : '+1555010';
+    const phoneNumber = `${prefix}${seq}`.slice(0, 15); // E.164, stable per-call
+    this.log.info({ sid: `PNconsole-${seq}` }, 'console messaging driver: phone number "provisioned"');
+    return {
+      phoneNumber,
+      capabilities: { sms: true, voice: true },
+      sid: `PNconsole-${seq}`,
+    };
+  }
+
+  async setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void> {
+    // No-op locally — there is no real number to wire. PII: never log the
+    // number or the URL host beyond confirming the wiring path ran.
+    void phoneNumber;
+    void voiceUrl;
+    this.log.info({ wired: true }, 'console messaging driver: voice webhook "set" (no-op)');
   }
 }
 
@@ -266,6 +475,7 @@ export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): M
     apiKeySid: config.twilioApiKeySid,
     apiKeySecret: config.twilioApiKeySecret,
     messagingServiceSid: config.twilioMessagingServiceSid,
+    ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
     client: deps.twilioClient,
     logger: deps.logger,
   });

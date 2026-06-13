@@ -30,33 +30,63 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 
 /**
- * Conversation thread types (doc §5; relay groups land with a later
- * milestone). `unknown_1to1` (2026-06-12 deviation) mirrors the contact-side
- * honesty rule: a thread with no resolved tenant/landlord identity is typed
- * `unknown_1to1`, never guessed.
+ * Conversation thread types (doc §5). `unknown_1to1` (2026-06-12 deviation)
+ * mirrors the contact-side honesty rule: a thread with no resolved
+ * tenant/landlord identity is typed `unknown_1to1`, never guessed.
+ * `relay_group` (M1.7) is a multi-party masked thread fronted by a pool
+ * number — inbound on the pool number fans out to the other members.
  */
-export type ConversationType = 'tenant_1to1' | 'landlord_1to1' | 'unknown_1to1';
+export type ConversationType =
+  | 'tenant_1to1'
+  | 'landlord_1to1'
+  | 'unknown_1to1'
+  | 'relay_group';
 
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';
 
-/** A linked external participant (M1.2 auto-capture): contact + phone pair. */
+/**
+ * A linked external participant (M1.2 auto-capture): contact + phone pair.
+ * For relay groups (M1.7) the array is the MUTABLE member roster — the
+ * "relay-group seam" the 1:1 comment names — and each member may carry an
+ * optional `name`, the sender-prefix display name resolved from the contact
+ * at member-add time (absent when no name is known; the fan-out then uses a
+ * neutral label and NEVER leaks the sender's phone).
+ */
 export interface ConversationParticipant {
   contactId: string;
   phone: string;
+  /** Sender-prefix display name (relay groups); resolved from the contact, may be absent. */
+  name?: string;
 }
 
 /** The contractual + commonly read attributes; items stay flexible documents. */
 export interface ConversationItem {
   conversationId: string;
-  /** External participant's phone, E.164 (byParticipantPhone GSI). */
+  /**
+   * External participant's phone, E.164 (byParticipantPhone GSI). 1:1 threads
+   * carry a real phone; relay_group threads have no single counterparty, so
+   * this is a synthetic placeholder (the pool number) — relay routing goes
+   * through pool_number / byPoolNumber, never this field.
+   */
   participant_phone: string;
-  /** byLastActivity GSI HASH. `open` is the only status M1.1 writes. */
+  /**
+   * byLastActivity GSI HASH. 1:1 threads only ever write `open`. relay_group
+   * threads use `open` | `closed` (close releases the pool number to
+   * quarantine; reopen re-provisions one).
+   */
   status: string;
   /** byLastActivity GSI RANGE (ISO 8601). */
   last_activity_at: string;
   type: ConversationType;
   ai_mode: ConversationMode;
+  /**
+   * Pool number fronting a relay_group thread (E.164; byPoolNumber GSI HASH).
+   * Set ONLY for relay_group conversations — absent on 1:1 threads, which is
+   * what keeps the byPoolNumber GSI sparse. Cleared on close (the number is
+   * released to quarantine); re-set on reopen.
+   */
+  pool_number?: string;
   /**
    * Conversation-level STOP suppression (doc §7.1): set even when the phone
    * has no contact record yet (auto-capture is M1.2), so a STOP from an
@@ -72,6 +102,12 @@ export interface ConversationItem {
    * via setParticipantsIfAbsent — the auto-capture race anchor.
    */
   participants?: ConversationParticipant[];
+  /**
+   * Optimistic-concurrency version for the relay roster (FIX 3): bumped on
+   * every real add/remove so concurrent roster mutations can't silently
+   * clobber each other. Absent until the first mutation (treated as 0).
+   */
+  participants_version?: number;
   /**
    * Denormalized resolved display name of the 1:1 participant (M1.4 triage):
    * the inbox is ONE Query and the conversation record carries no name, so the
@@ -90,6 +126,20 @@ export interface ConversationItem {
   outbound_minute_count?: number;
   [key: string]: unknown;
 }
+
+/**
+ * Roster mutation lost the optimistic-concurrency race past the retry bound
+ * (FIX 3). Routes map this to HTTP 409 — the caller should re-read and retry.
+ */
+export class RosterConflictError extends Error {
+  constructor(conversationId: string) {
+    super(`roster update for ${conversationId} conflicted after retries`);
+    this.name = new.target.name;
+  }
+}
+
+/** Bounded retries for the roster optimistic-concurrency loop (FIX 3). */
+const ROSTER_MAX_RETRIES = 3;
 
 /** Previews are denormalized inbox furniture, not transcripts — keep them short. */
 const PREVIEW_MAX_CHARS = 120;
@@ -230,6 +280,68 @@ export interface ConversationsRepo {
    * retry pair (ADD within the bucket; SET on bucket change).
    */
   incrementAutomatedSendCount(conversationId: string, bucket: string): Promise<number>;
+
+  // --- Relay groups (M1.7) -------------------------------------------------
+
+  /**
+   * Create a relay_group conversation fronted by `poolNumber` with the given
+   * member roster. status `open`, ai_mode `manual` (relay threads are never
+   * AI-driven). The pool number doubles as participant_phone (synthetic — see
+   * the field comment) so the inbox row renders, and is written to
+   * pool_number for the byPoolNumber GSI. `tag` is an optional placement
+   * label stored for operators. Returns the created item.
+   */
+  createRelayGroup(input: {
+    poolNumber: string;
+    members: ConversationParticipant[];
+    tag?: string;
+  }): Promise<ConversationItem>;
+  /**
+   * Resolve a pool number to its active relay_group via the byPoolNumber GSI
+   * (the inbound-webhook routing key). Expect 0 or 1 — one ACTIVE relay per
+   * pool number is the invariant (a closed relay clears pool_number). Returns
+   * the open relay when present, else undefined.
+   */
+  getByPoolNumber(poolNumber: string): Promise<ConversationItem | undefined>;
+  /**
+   * Idempotent member add (relay groups): appends the member unless an entry
+   * with the same phone already exists. OPTIMISTIC CONCURRENCY: the write is
+   * conditioned on the roster's `participants_version` being unchanged since
+   * the read, and bumps it — concurrent add/remove never silently clobber each
+   * other (a lost-version write retries on the fresh roster; exhausting the
+   * bounded retries surfaces RosterConflictError). Adding an existing member is
+   * a success no-op (no version bump). Returns the post-update item (ALL_NEW).
+   * Throws ConditionalCheckFailedException for unknown conversations.
+   */
+  addMember(conversationId: string, member: ConversationParticipant): Promise<ConversationItem>;
+  /**
+   * Idempotent member remove (relay groups): drops the entry whose phone
+   * matches. A no-op when no such member exists (no version bump). Same
+   * optimistic-concurrency version guard + bounded retry as addMember. Returns
+   * the post-update item. Throws ConditionalCheckFailedException for unknown
+   * conversations.
+   */
+  removeMember(conversationId: string, phone: string): Promise<ConversationItem>;
+  /**
+   * Flip a relay_group's status (open/closed) AND set/clear its pool_number
+   * in one write: closing clears pool_number (the number is released to
+   * quarantine by the caller); reopening writes the supplied (fresh) pool
+   * number back. Returns the post-update item (ALL_NEW). Throws
+   * ConditionalCheckFailedException for unknown conversations.
+   *
+   * `expectedStatus` (optional) makes the flip CONDITIONAL on the current
+   * status — close from `open`, reopen from `closed` — so concurrent
+   * close/reopen are idempotent: a flip whose precondition no longer holds
+   * throws ConditionalCheckFailedException and the caller no-ops (FIX 1 — the
+   * close/reopen race). When omitted, the flip is unconditional (existence
+   * only), preserving the original callers.
+   */
+  setRelayStatus(
+    conversationId: string,
+    status: 'open' | 'closed',
+    poolNumber: string | null,
+    expectedStatus?: 'open' | 'closed',
+  ): Promise<ConversationItem>;
 }
 
 export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo {
@@ -268,6 +380,67 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     }
     log.info({ conversationId: item.conversationId, type: item.type }, 'conversation created');
     return item;
+  }
+
+  /**
+   * FIX 3 — roster read-modify-write under optimistic concurrency. `mutate`
+   * returns the NEW roster, or undefined for an idempotent no-op (member
+   * already present / already absent). On a real change the write is
+   * conditioned on `participants_version` matching the value read (or absent on
+   * the very first mutation) and increments it; a concurrent mutation fails
+   * that condition, so we re-read and retry up to ROSTER_MAX_RETRIES before
+   * surfacing RosterConflictError. A missing conversation throws
+   * ConditionalCheckFailedException (the routes map it to 404).
+   */
+  async function rosterMutate(
+    conversationId: string,
+    op: string,
+    mutate: (roster: ConversationParticipant[]) => ConversationParticipant[] | undefined,
+  ): Promise<ConversationItem> {
+    for (let attempt = 0; attempt < ROSTER_MAX_RETRIES; attempt++) {
+      const existing = await getById(conversationId);
+      if (!existing) {
+        throw new ConditionalCheckFailedException({
+          message: `${op}: conversation ${conversationId} not found`,
+          $metadata: {},
+        });
+      }
+      const roster = existing.participants ?? [];
+      const next = mutate(roster);
+      if (next === undefined) {
+        log.info({ conversationId, op }, 'relay roster mutation is a no-op (idempotent)');
+        return existing; // nothing changed — no version bump, no write
+      }
+      const currentVersion =
+        typeof existing.participants_version === 'number' ? existing.participants_version : 0;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET participants = :p, participants_version = :nextV',
+            // Existence guard + the optimistic-concurrency check: the roster's
+            // version must be exactly what we read (or absent on first mutation).
+            ConditionExpression:
+              'attribute_exists(conversationId) AND (attribute_not_exists(participants_version) OR participants_version = :curV)',
+            ExpressionAttributeValues: {
+              ':p': next,
+              ':curV': currentVersion,
+              ':nextV': currentVersion + 1,
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ conversationId, op, memberCount: next.length }, 'relay roster mutated');
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Lost the version race: a concurrent add/remove committed first.
+        // Re-read and retry on the fresh roster (the loop re-reads at the top).
+        log.info({ conversationId, op, attempt }, 'relay roster mutation lost a version race — retrying');
+      }
+    }
+    throw new RosterConflictError(conversationId);
   }
 
   return {
@@ -614,6 +787,112 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       throw new Error(
         `incrementAutomatedSendCount: conditional updates kept failing for ${conversationId} — does the conversation exist?`,
       );
+    },
+
+    // --- Relay groups (M1.7) -----------------------------------------------
+
+    async createRelayGroup({ poolNumber, members, tag }) {
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId: `conv-${randomUUID()}`,
+        // Synthetic participant_phone: relay threads route on pool_number, but
+        // the inbox row + byParticipantPhone GSI still want a value. The pool
+        // number is the natural one (it is "the thread's number").
+        participant_phone: poolNumber,
+        pool_number: poolNumber,
+        status: 'open',
+        last_activity_at: now,
+        type: 'relay_group',
+        // Relay threads are operator-run, never AI-driven; manual keeps the
+        // automated-send breaker's manual-mode refusal off the relay path
+        // (fan-out sends are not breaker-metered — see relayFanOut).
+        ai_mode: 'manual',
+        participants: members,
+        created_at: now,
+        ...(tag !== undefined && { placement_tag: tag }),
+      };
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(conversationId)',
+        }),
+      );
+      log.info(
+        { conversationId: item.conversationId, memberCount: members.length },
+        'relay group created',
+      );
+      return item;
+    },
+
+    async getByPoolNumber(poolNumber) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byPoolNumber',
+          KeyConditionExpression: 'pool_number = :p',
+          ExpressionAttributeValues: { ':p': poolNumber },
+        }),
+      );
+      // One ACTIVE relay per pool number; a closed relay clears pool_number so
+      // it leaves the sparse GSI. Prefer an open match defensively.
+      const items = (Items as ConversationItem[] | undefined) ?? [];
+      return items.find((c) => c.status === 'open') ?? items[0];
+    },
+
+    async addMember(conversationId, member) {
+      // FIX 3 — optimistic concurrency. Read-modify-write the roster, but
+      // condition the write on `participants_version` being unchanged since the
+      // read and bump it. A concurrent add/remove invalidates the version, so
+      // this write loses its conditional and re-reads + retries (bounded) — no
+      // silent clobber. Idempotent on phone: re-adding an existing phone is a
+      // success no-op that never bumps the version (so it can't spuriously
+      // conflict with a concurrent change).
+      return rosterMutate(conversationId, 'addMember', (roster) => {
+        if (roster.some((p) => p.phone === member.phone)) return undefined; // no-op
+        return [...roster, member];
+      });
+    },
+
+    async removeMember(conversationId, phone) {
+      // FIX 3 — same optimistic-concurrency version guard as addMember.
+      // Idempotent: removing an absent phone is a success no-op (no bump).
+      return rosterMutate(conversationId, 'removeMember', (roster) => {
+        const next = roster.filter((p) => p.phone !== phone);
+        return next.length === roster.length ? undefined : next; // undefined = no-op
+      });
+    },
+
+    async setRelayStatus(conversationId, status, poolNumber, expectedStatus) {
+      // Closing clears pool_number (the number leaves the byPoolNumber GSI so
+      // a re-provision elsewhere can never resolve to this dead thread);
+      // reopening writes the supplied fresh number back. FIX 1: an optional
+      // `expectedStatus` makes the flip conditional on the current status so
+      // concurrent close/reopen are idempotent (the loser's precondition fails
+      // and it throws ConditionalCheckFailedException for the route to no-op).
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression:
+            poolNumber === null
+              ? 'SET #s = :status REMOVE pool_number'
+              : 'SET #s = :status, pool_number = :pn',
+          ConditionExpression:
+            expectedStatus === undefined
+              ? 'attribute_exists(conversationId)'
+              : 'attribute_exists(conversationId) AND #s = :expected',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: {
+            ':status': status,
+            ...(poolNumber !== null && { ':pn': poolNumber }),
+            ...(expectedStatus !== undefined && { ':expected': expectedStatus }),
+          },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ conversationId, status }, 'relay status set');
+      return Attributes as ConversationItem;
     },
   };
 }

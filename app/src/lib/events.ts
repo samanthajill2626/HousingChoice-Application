@@ -17,7 +17,11 @@
 // clients — they must never be logged.
 import { EventEmitter } from 'node:events';
 import { logger as defaultLogger, type Logger } from './logger.js';
-import type { ConversationItem, ConversationType } from '../repos/conversationsRepo.js';
+import type {
+  ConversationItem,
+  ConversationParticipant,
+  ConversationType,
+} from '../repos/conversationsRepo.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
@@ -41,17 +45,44 @@ export interface ConversationUpdatedEvent {
    * thread type never leaves unknown_1to1. Null → the inbox falls back to phone.
    */
   participant_display_name: string | null;
+  /**
+   * Relay group status (M1.7): `open` | `closed` for relay_group threads;
+   * null for 1:1 (whose status is always implicitly open). Lets the inbox
+   * grey out a closed relay live.
+   */
+  status?: string | null;
+  /**
+   * Relay group pool number (M1.7; E.164), or null. The masked number
+   * fronting the thread; absent/null on 1:1 threads.
+   */
+  pool_number?: string | null;
+  /**
+   * Relay group roster (M1.7), or null on 1:1 threads. The live member list so
+   * the relay UI updates rosters in place on add/remove. Each entry carries
+   * contactId/phone/name (name optional). 1:1 behavior is unchanged — this is
+   * null there.
+   */
+  members?: ConversationParticipant[] | null;
 }
 
 /**
- * The shared conversation.updated payload for a fresh ConversationItem. THE
- * one builder every emit site uses (api.ts /read + /assignment, the contacts
- * triage router) so the wire shape stays identical across all of them.
+ * THE ONE conversation.updated payload builder for a fresh ConversationItem —
+ * every emit site uses this (api.ts /read + /assignment + the relay-group send,
+ * the contacts triage router, the relay-group routes, the inbound webhook) so
+ * the wire shape stays identical across all of them.
+ *
+ * FIX 4: the relay fields (status / pool_number / members) live HERE so no
+ * emit site can forget them on a relay thread. For a relay_group they carry
+ * the live status, pool number, and roster; for a 1:1 thread they are
+ * null/[]/absent — the same wire behavior 1:1 clients already saw (the fields
+ * are optional/nullable, a strict superset). This is why /read and /assignment
+ * on a relay group now keep the roster fresh without a dedicated builder.
  *
  * PII (doc §9): the payload carries the denormalized preview and display name
  * — it is DATA for authenticated dashboard clients, never logged.
  */
 export function toConversationUpdatedEvent(item: ConversationItem): ConversationUpdatedEvent {
+  const isRelay = item.type === 'relay_group';
   return {
     conversationId: item.conversationId,
     last_activity_at: item.last_activity_at,
@@ -60,7 +91,24 @@ export function toConversationUpdatedEvent(item: ConversationItem): Conversation
     type: item.type,
     assignment: item.assignment ?? null,
     participant_display_name: item.participant_display_name ?? null,
+    // Relay fields (FIX 4): present (live status/pool/roster) ONLY for a
+    // relay_group; ABSENT on a 1:1 thread so the 1:1 wire shape is byte-for-byte
+    // unchanged (the type marks them optional). One builder, no relay drift.
+    ...(isRelay && {
+      status: item.status ?? null,
+      pool_number: item.pool_number ?? null,
+      members: item.participants ?? [],
+    }),
   };
+}
+
+/**
+ * @deprecated FIX 4 — kept as a thin alias so existing relay emit sites keep
+ * compiling; the relay fields now live in toConversationUpdatedEvent itself.
+ * Prefer toConversationUpdatedEvent at new call sites.
+ */
+export function toRelayRosterEvent(item: ConversationItem): ConversationUpdatedEvent {
+  return toConversationUpdatedEvent(item);
 }
 
 /** A message landed on the timeline, or its delivery status really moved. */

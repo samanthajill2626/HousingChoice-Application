@@ -1,0 +1,457 @@
+// relay.fanOut (M1.7) — fan an inbound relay-group message out to the OTHER
+// members, throttled and idempotent.
+//
+// The relayed message is stored ONCE (the inbound SOURCE message); this job
+// NEVER persists N outbound copies. It sends one provider message per
+// recipient FROM the pool number, sender-name-prefixed, and records each send
+// in the source message's delivery_recipients map + a relaysid pointer (so the
+// per-recipient delivery callback can find the right slot).
+//
+// Idempotency (SQS at-least-once + our own continuation re-enqueues):
+//   - the job execution marker (existing pattern) guards the WHOLE job per
+//     envelope jobId;
+//   - per recipient, a slot already in a TERMINAL state (sent/delivered/
+//     failed) is SKIPPED, so a redelivered/continuation job never double-sends.
+//
+// Error handling per recipient:
+//   - transient (429 / Twilio 30022) → re-enqueue a continuation relay.fanOut
+//     for the REMAINING recipients with exponential backoff (attempt cap 3);
+//   - 30007 (carrier filtering) → mark the recipient failed, NEVER retry;
+//   - SendRefusedError (opt-out / breaker / manual) → mark the recipient
+//     failed and CONTINUE with the others.
+//
+// PII (doc §9): never log the body, the sender's phone, or member phones —
+// IDs / member keys / counts only, correlated via the pino mixin.
+import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import { getContext } from '../lib/context.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { TokenBucket } from '../lib/tokenBucket.js';
+import {
+  createConversationsRepo,
+  type ConversationParticipant,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
+import {
+  createMessagesRepo,
+  relayMemberKey,
+  type MessagesRepo,
+  type RelayRecipientDelivery,
+} from '../repos/messagesRepo.js';
+import { SendRefusedError } from '../services/sendMessage.js';
+import { defineJobHandler, enqueue } from './jobs.js';
+
+export const RELAY_FANOUT_JOB = 'relay.fanOut';
+export const RELAY_INTRO_JOB = 'relay.intro';
+
+/** Continuation cap: a transient failure re-enqueues at most this many times. */
+export const MAX_FANOUT_ATTEMPTS = 3;
+
+/** Exponential backoff for the transient-failure continuation: 5s, 10s, 20s. */
+export function fanOutBackoffMs(attempt: number): number {
+  return 5_000 * 2 ** (attempt - 1);
+}
+
+/** Twilio transient error codes that warrant a backed-off continuation. */
+const TRANSIENT_CODES = new Set(['429', '30022']);
+/** Twilio carrier-filtering: NEVER retry (re-sending filtered content compounds harm). */
+const CARRIER_FILTERED_CODE = '30007';
+
+/** Neutral sender label when a member has no resolved name (never leak phone). */
+const ANONYMOUS_SENDER_LABEL = 'A member';
+
+/**
+ * FIX 2 — neutral team label prefixed on a TEAM-authored relay message (a
+ * teammate posting into the thread from the dashboard). There is no member
+ * sender, so the prefix must be this team label — NEVER a phone number.
+ */
+export const TEAM_SENDER_LABEL = 'Housing Choice';
+
+/**
+ * FIX 2 — senderKey sentinel for a TEAM message: it matches no member key, so
+ * the fan-out excludes NO member (every member receives the team message) and
+ * resolves the prefix from senderNameOverride instead of a member's name.
+ */
+export const TEAM_SENDER_KEY = 'team';
+
+export interface RelayFanOutPayload {
+  relayConversationId: string;
+  /** SK of the source (inbound) message whose body is being relayed. */
+  sourceTsMsgId: string;
+  /** Member key (relayMemberKey) of the sender — never a recipient. */
+  senderKey: string;
+  /**
+   * FIX 2 — explicit sender-prefix label for a TEAM message (a teammate posting
+   * from the dashboard): there is no member sender to derive a name from, so
+   * this neutral team label is the prefix. NEVER a phone. Absent on a normal
+   * member-relayed message (the prefix comes from the sender member's name).
+   */
+  senderNameOverride?: string;
+  /** 1-based continuation attempt (absent = first run, treated as 1). */
+  attempt?: number;
+  /**
+   * When set (continuation only), restrict fan-out to these recipient member
+   * keys — the remaining recipients after a transient failure. Absent = all
+   * non-sender members.
+   */
+  recipientKeys?: string[];
+}
+
+export function parseRelayFanOutPayload(payload: unknown): RelayFanOutPayload {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('relayFanOut: payload is not an object');
+  }
+  const p = payload as Partial<RelayFanOutPayload>;
+  if (typeof p.relayConversationId !== 'string' || p.relayConversationId.length === 0) {
+    throw new Error('relayFanOut: missing relayConversationId');
+  }
+  if (typeof p.sourceTsMsgId !== 'string' || p.sourceTsMsgId.length === 0) {
+    throw new Error('relayFanOut: missing sourceTsMsgId');
+  }
+  if (typeof p.senderKey !== 'string' || p.senderKey.length === 0) {
+    throw new Error('relayFanOut: missing senderKey');
+  }
+  const senderNameOverride =
+    typeof p.senderNameOverride === 'string' && p.senderNameOverride.length > 0
+      ? p.senderNameOverride
+      : undefined;
+  const attempt =
+    typeof p.attempt === 'number' && Number.isInteger(p.attempt) && p.attempt >= 1
+      ? p.attempt
+      : 1;
+  const recipientKeys =
+    Array.isArray(p.recipientKeys) && p.recipientKeys.every((k) => typeof k === 'string')
+      ? p.recipientKeys
+      : undefined;
+  return {
+    relayConversationId: p.relayConversationId,
+    sourceTsMsgId: p.sourceTsMsgId,
+    senderKey: p.senderKey,
+    ...(senderNameOverride !== undefined && { senderNameOverride }),
+    attempt,
+    ...(recipientKeys !== undefined && { recipientKeys }),
+  };
+}
+
+/** Terminal recipient states never re-sent (idempotency). */
+function isTerminal(status: RelayRecipientDelivery['status'] | undefined): boolean {
+  return status === 'sent' || status === 'delivered' || status === 'failed';
+}
+
+/** Compose the relayed body: "<SenderName>: <body>" — never leaks a phone. */
+export function composeRelayBody(senderName: string | undefined, body: string): string {
+  const label = senderName && senderName.trim().length > 0 ? senderName : ANONYMOUS_SENDER_LABEL;
+  return `${label}: ${body}`;
+}
+
+/**
+ * Intro body naming everyone connected (M1.7). Uses member display names where
+ * known, a neutral count phrasing otherwise — NEVER a phone number (PII). E.g.
+ * "You're connected with Alice, Bob, and Carol on this number."
+ */
+export function composeIntroBody(memberNames: (string | undefined)[]): string {
+  const named = memberNames
+    .map((n) => (n && n.trim().length > 0 ? n.trim() : undefined))
+    .filter((n): n is string => n !== undefined);
+  if (named.length === 0) {
+    const others = Math.max(memberNames.length - 1, 0);
+    return others > 0
+      ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
+      : `You're now connected on this number. Reply here and the group sees it.`;
+  }
+  const list =
+    named.length === 1
+      ? named[0]
+      : named.length === 2
+        ? `${named[0]} and ${named[1]}`
+        : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
+  return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
+}
+
+export interface RelayIntroPayload {
+  relayConversationId: string;
+}
+
+export function parseRelayIntroPayload(payload: unknown): RelayIntroPayload {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('relayIntro: payload is not an object');
+  }
+  const p = payload as Partial<RelayIntroPayload>;
+  if (typeof p.relayConversationId !== 'string' || p.relayConversationId.length === 0) {
+    throw new Error('relayIntro: missing relayConversationId');
+  }
+  return { relayConversationId: p.relayConversationId };
+}
+
+export interface RelayFanOutJobDeps {
+  adapter?: MessagingAdapter;
+  conversationsRepo?: ConversationsRepo;
+  messagesRepo?: MessagesRepo;
+  /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
+  tokenBucket?: TokenBucket;
+  logger?: Logger;
+}
+
+export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): void {
+  const log = deps.logger ?? defaultLogger;
+  // Lazy: repos/adapter touch config + DynamoDB only on first job run.
+  let adapter = deps.adapter;
+  let conversations = deps.conversationsRepo;
+  let messages = deps.messagesRepo;
+
+  defineJobHandler(RELAY_FANOUT_JOB, async (rawPayload) => {
+    const payload = parseRelayFanOutPayload(rawPayload);
+    adapter ??= createMessagingAdapter({ logger: deps.logger });
+    conversations ??= createConversationsRepo({ logger: deps.logger });
+    messages ??= createMessagesRepo({ logger: deps.logger });
+
+    // Whole-job duplicate-delivery guard (existing pattern): conditionally
+    // mark this envelope jobId executed BEFORE any send. A redelivery resolves
+    // as a no-op so the consumer deletes the message. Per-recipient terminal
+    // skips are the second layer (a continuation reuses recipientKeys).
+    const jobId = getContext()?.jobId;
+    if (typeof jobId === 'string' && jobId.length > 0) {
+      const first = await messages.putJobExecutionMarker(jobId, payload.relayConversationId);
+      if (!first) {
+        log.info({ jobId, conversationId: payload.relayConversationId }, 'relay fan-out duplicate delivery suppressed');
+        return;
+      }
+    } else {
+      log.warn(
+        { conversationId: payload.relayConversationId },
+        'relayFanOut: no jobId in context — duplicate-delivery guard skipped',
+      );
+    }
+
+    const conversation = await conversations.getById(payload.relayConversationId);
+    if (!conversation) {
+      log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation not found — nothing to fan out');
+      return;
+    }
+    const poolNumber = conversation.pool_number;
+    if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
+      log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation has no pool number — skipping');
+      return;
+    }
+
+    // Re-read the exact source message by SK (a tight window that includes it).
+    const window = await messages.listByConversation(payload.relayConversationId, {
+      before: bumpKey(payload.sourceTsMsgId),
+      limit: 5,
+    });
+    const sourceMessage = window.find((m) => m.tsMsgId === payload.sourceTsMsgId);
+    if (!sourceMessage) {
+      log.warn({ conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId }, 'relayFanOut: source message not found');
+      return;
+    }
+    const body = typeof sourceMessage.body === 'string' ? sourceMessage.body : '';
+    if (body.length === 0) {
+      // Nothing to relay (e.g. MMS-only). M1.7 relays text bodies; media relay
+      // is future work. Log and stop — never send an empty body.
+      log.info({ conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId }, 'relayFanOut: source has no text body — nothing relayed');
+      return;
+    }
+
+    // Resolve CURRENT membership at execution time (a mid-thread remove must
+    // take effect on the very next fan-out). Sender is excluded by key.
+    const roster = (conversation.participants ?? []) as ConversationParticipant[];
+    const senderMember = roster.find((m) => relayMemberKey(m) === payload.senderKey);
+    // FIX 2: a TEAM message carries an explicit override label (no member
+    // sender, senderKey matches nobody so no member is excluded); a normal
+    // member-relayed message derives the prefix from the sender's name.
+    const senderName = payload.senderNameOverride ?? senderMember?.name;
+
+    let recipients = roster.filter((m) => relayMemberKey(m) !== payload.senderKey);
+    if (payload.recipientKeys !== undefined) {
+      const allowed = new Set(payload.recipientKeys);
+      recipients = recipients.filter((m) => allowed.has(relayMemberKey(m)));
+    }
+
+    const relayBody = composeRelayBody(senderName, body);
+    const transientRemaining: string[] = [];
+    let sentCount = 0;
+
+    for (const member of recipients) {
+      const key = relayMemberKey(member);
+      const priorSlot = sourceMessage.delivery_recipients?.[key];
+      if (isTerminal(priorSlot?.status)) {
+        continue; // already delivered/sent/failed — never double-send
+      }
+
+      // A2P meter (FIX 6): ONE token per real outbound SMS — acquired here,
+      // per recipient, inside the handler (the correct per-message meter; the
+      // producers do not throttle). Paces the fan-out under the registered tier.
+      await deps.tokenBucket?.acquire(1);
+
+      let result;
+      try {
+        result = await adapter.sendMessage({ to: member.phone, from: poolNumber, body: relayBody });
+      } catch (err) {
+        if (err instanceof SendRefusedError) {
+          // Opt-out / breaker / manual — by-design refusal for THIS recipient.
+          await markRecipient(messages, payload, key, { status: 'failed', errorCode: err.code });
+          log.warn({ conversationId: payload.relayConversationId, memberKey: key, refusal: err.code }, 'relayFanOut: send refused for recipient — marked failed, continuing');
+          continue;
+        }
+        // Provider-shaped error: classify by code when present.
+        const code = errorCodeOf(err);
+        if (code === CARRIER_FILTERED_CODE) {
+          await markRecipient(messages, payload, key, { status: 'failed', errorCode: code });
+          log.error({ conversationId: payload.relayConversationId, memberKey: key, errorCode: code }, 'relayFanOut: carrier filtering (30007) — recipient failed, NOT retried');
+          continue;
+        }
+        if (code !== undefined && TRANSIENT_CODES.has(code)) {
+          // Defer this recipient to a backed-off continuation; keep the slot
+          // 'queued' so the continuation re-sends it.
+          await markRecipient(messages, payload, key, { status: 'queued', errorCode: code });
+          transientRemaining.push(key);
+          log.warn({ conversationId: payload.relayConversationId, memberKey: key, errorCode: code, attempt: payload.attempt }, 'relayFanOut: transient send error — deferring recipient to continuation');
+          continue;
+        }
+        // Unknown error: leave the recipient queued and let the job FAIL so
+        // SQS redelivers the whole envelope (the marker is per-jobId; the
+        // redelivery is a fresh jobId via the visibility timeout).
+        throw err;
+      }
+
+      // Success: record the per-recipient send result + the relaysid pointer.
+      const delivery: RelayRecipientDelivery = {
+        status: result.status === 'queued' ? 'queued' : 'sent',
+        sid: result.providerSid,
+        sentAt: result.providerTs,
+      };
+      await markRecipient(messages, payload, key, delivery);
+      await messages.putRelaySidPointer(result.providerSid, {
+        conversationId: payload.relayConversationId,
+        tsMsgId: payload.sourceTsMsgId,
+        memberKey: key,
+      });
+      sentCount += 1;
+    }
+
+    log.info(
+      {
+        conversationId: payload.relayConversationId,
+        tsMsgId: payload.sourceTsMsgId,
+        recipientCount: recipients.length,
+        sentCount,
+        deferred: transientRemaining.length,
+        attempt: payload.attempt,
+      },
+      'relay fan-out complete',
+    );
+
+    // Transient continuation: re-enqueue the remaining recipients with backoff,
+    // capped. (enqueue() with runAt — the future-scheduled path; the backoff is
+    // well above EventBridge's 60s floor only at higher attempts, but a relay
+    // continuation tolerating a short delay is correct — the alternative is
+    // dropping the recipient.)
+    if (transientRemaining.length > 0) {
+      const nextAttempt = (payload.attempt ?? 1) + 1;
+      if (nextAttempt > MAX_FANOUT_ATTEMPTS) {
+        // Cap reached: mark the still-deferred recipients failed so the thread
+        // shows the honest outcome (no silent black hole).
+        for (const key of transientRemaining) {
+          await markRecipient(messages, payload, key, { status: 'failed', errorCode: 'transient_cap' });
+        }
+        log.error(
+          { conversationId: payload.relayConversationId, deferred: transientRemaining.length, attempt: payload.attempt },
+          'relayFanOut: transient retry cap reached — remaining recipients marked failed',
+        );
+        return;
+      }
+      await enqueue(
+        RELAY_FANOUT_JOB,
+        {
+          relayConversationId: payload.relayConversationId,
+          sourceTsMsgId: payload.sourceTsMsgId,
+          senderKey: payload.senderKey,
+          ...(payload.senderNameOverride !== undefined && {
+            senderNameOverride: payload.senderNameOverride,
+          }),
+          attempt: nextAttempt,
+          recipientKeys: transientRemaining,
+        } satisfies RelayFanOutPayload,
+        { runAt: new Date(Date.now() + fanOutBackoffMs(payload.attempt ?? 1)) },
+      );
+    }
+  });
+
+  // relay.intro (M1.7): on relay-group creation, announce the group to each
+  // member FROM the pool number, throttled by the shared bucket. The intro
+  // names everyone connected (display names where known, never a phone). Not
+  // persisted as a relayed message — it is a system announcement; idempotent
+  // via the job execution marker so a redelivery never re-texts everyone.
+  defineJobHandler(RELAY_INTRO_JOB, async (rawPayload) => {
+    const payload = parseRelayIntroPayload(rawPayload);
+    adapter ??= createMessagingAdapter({ logger: deps.logger });
+    conversations ??= createConversationsRepo({ logger: deps.logger });
+    messages ??= createMessagesRepo({ logger: deps.logger });
+
+    const jobId = getContext()?.jobId;
+    if (typeof jobId === 'string' && jobId.length > 0) {
+      const first = await messages.putJobExecutionMarker(jobId, payload.relayConversationId);
+      if (!first) {
+        log.info({ jobId, conversationId: payload.relayConversationId }, 'relay intro duplicate delivery suppressed');
+        return;
+      }
+    }
+
+    const conversation = await conversations.getById(payload.relayConversationId);
+    const poolNumber = conversation?.pool_number;
+    if (!conversation || typeof poolNumber !== 'string' || poolNumber.length === 0) {
+      log.warn({ conversationId: payload.relayConversationId }, 'relayIntro: relay conversation/pool number missing — skipping');
+      return;
+    }
+    const roster = (conversation.participants ?? []) as ConversationParticipant[];
+    const body = composeIntroBody(roster.map((m) => m.name));
+    let sentCount = 0;
+    for (const member of roster) {
+      await deps.tokenBucket?.acquire(1);
+      try {
+        await adapter.sendMessage({ to: member.phone, from: poolNumber, body });
+        sentCount += 1;
+      } catch (err) {
+        // One member's intro failure must not block the others.
+        log.error({ err, conversationId: payload.relayConversationId, memberKey: relayMemberKey(member) }, 'relayIntro: intro send failed for a member — continuing');
+      }
+    }
+    log.info({ conversationId: payload.relayConversationId, memberCount: roster.length, sentCount }, 'relay intro sent');
+  });
+}
+
+/** Persist one recipient's delivery slot on the source message. */
+async function markRecipient(
+  messages: MessagesRepo,
+  payload: RelayFanOutPayload,
+  memberKey: string,
+  delivery: RelayRecipientDelivery,
+): Promise<void> {
+  await messages.setRecipientDelivery(
+    payload.relayConversationId,
+    payload.sourceTsMsgId,
+    memberKey,
+    delivery,
+  );
+}
+
+/**
+ * Exclusive `before` bound that INCLUDES the target SK: append the maximal
+ * BMP code point so `tsMsgId < before` is true for the target itself (and any
+ * later SK in the same second is excluded — relay sources are inbound, one at
+ * a time, so the 5-item window comfortably contains it).
+ */
+function bumpKey(tsMsgId: string): string {
+  return `${tsMsgId}￿`;
+}
+
+/** Best-effort provider error-code extraction (Twilio attaches `code`). */
+function errorCodeOf(err: unknown): string | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'number') return String(code);
+    if (typeof code === 'string' && code.length > 0) return code;
+    const status = (err as { status?: unknown }).status;
+    if (typeof status === 'number') return String(status);
+  }
+  return undefined;
+}

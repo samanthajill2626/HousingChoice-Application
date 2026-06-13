@@ -16,6 +16,7 @@ import {
   ContactOptedOutError,
   ConversationNotFoundError,
   ManualModeError,
+  RelaySendNotSupportedError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
@@ -101,6 +102,12 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
       fakes.counterValue += 1;
       return fakes.counterValue;
     },
+    // Relay groups (M1.7) — unused by the send service:
+    createRelayGroup: async () => conversation,
+    getByPoolNumber: async () => undefined,
+    addMember: async () => conversation,
+    removeMember: async () => conversation,
+    setRelayStatus: async () => conversation,
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
@@ -122,6 +129,11 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
+    // Relay groups (M1.7) — unused by the send service:
+    setRecipientDelivery: async () => {},
+    updateRecipientDeliveryStatus: async () => true,
+    putRelaySidPointer: async () => {},
+    getRelaySidPointer: async () => undefined,
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {
@@ -136,6 +148,12 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     getMediaStream: async () => {
       throw new Error('not used');
     },
+    provisionPhoneNumber: async () => ({
+      phoneNumber: '+15550109000',
+      capabilities: { sms: true, voice: true },
+      sid: 'PNfake-sm',
+    }),
+    setVoiceWebhook: async () => {},
   };
 
   const events = createEventBus();
@@ -195,6 +213,15 @@ describe('sendMessage service', () => {
       ConversationNotFoundError,
     );
     expect(f.sent).toHaveLength(0);
+  });
+
+  it('FIX 2: refuses a relay_group conversation (defense in depth) — never texts the pool number', async () => {
+    const f = makeFakes({ conversation: { type: 'relay_group', pool_number: '+15550109000' } });
+    await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
+      RelaySendNotSupportedError,
+    );
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
   });
 
   it('refuses sends to sms_opt_out contacts with a typed error (nothing sent, nothing persisted)', async () => {

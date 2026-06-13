@@ -9,7 +9,7 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'audit_events',
       'cases',
@@ -18,10 +18,26 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'invoices',
       'matches',
       'messages',
+      'pool_numbers',
       'settings',
       'units',
       'users',
     ]);
+  });
+
+  it('pool_numbers (M1.7): PK poolNumber; GSI byLifecycleState (lifecycle_state + quarantine_until); no stream/TTL', () => {
+    expect(tables['pool_numbers']).toEqual({
+      hash_key: { name: 'poolNumber', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byLifecycleState',
+          hash_key: { name: 'lifecycle_state', type: 'S' },
+          range_key: { name: 'quarantine_until', type: 'S' },
+        },
+      ],
+      stream: false,
+      pitr: true,
+    });
   });
 
   it('settings: PK settingId, no GSIs, no stream, no TTL (M1.4 founder-templates home)', () => {
@@ -37,7 +53,11 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     const gsiNames = (base: string) => tables[base]?.gsis.map((g) => g.index_name);
     expect(gsiNames('contacts')).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
     expect(gsiNames('units')).toEqual(['byLandlord', 'byStatus', 'byJurisdiction']);
-    expect(gsiNames('conversations')).toEqual(['byParticipantPhone', 'byLastActivity']);
+    expect(gsiNames('conversations')).toEqual([
+      'byParticipantPhone',
+      'byLastActivity',
+      'byPoolNumber',
+    ]);
     expect(gsiNames('messages')).toEqual([]);
     expect(gsiNames('matches')).toEqual(['byUnit']);
     expect(gsiNames('cases')).toEqual([

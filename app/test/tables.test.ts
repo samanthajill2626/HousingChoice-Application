@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines exactly the 9 doc-§5 tables plus settings (M1.4 deviation)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4) and pool_numbers (M1.7)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -29,7 +29,20 @@ describe('tables.ts — the table contract', () => {
       'users',
       'audit_events',
       'settings',
+      'pool_numbers',
     ]);
+  });
+
+  it('pool_numbers (M1.7): PK poolNumber; GSI byLifecycleState (lifecycle_state + quarantine_until); no stream/TTL', () => {
+    const t = spec('pool_numbers');
+    expect(t.hashKey.name).toBe('poolNumber');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byLifecycleState']);
+    const gsi = t.gsis.find((g) => g.indexName === 'byLifecycleState');
+    expect(gsi?.hashKey.name).toBe('lifecycle_state');
+    expect(gsi?.rangeKey?.name).toBe('quarantine_until');
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('settings: PK settingId; no GSIs (M1.4 — founder-editable templates home)', () => {
@@ -55,11 +68,13 @@ describe('tables.ts — the table contract', () => {
     expect(gsiNames(t)).toEqual(['byLandlord', 'byStatus', 'byJurisdiction']);
   });
 
-  it('conversations: PK conversationId; GSIs byParticipantPhone, byLastActivity', () => {
+  it('conversations: PK conversationId; GSIs byParticipantPhone, byLastActivity, byPoolNumber (M1.7)', () => {
     const t = spec('conversations');
     expect(t.hashKey.name).toBe('conversationId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byParticipantPhone', 'byLastActivity']);
+    expect(gsiNames(t)).toEqual(['byParticipantPhone', 'byLastActivity', 'byPoolNumber']);
+    expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.sparse).toBe(true);
+    expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.hashKey.name).toBe('pool_number');
   });
 
   it('messages: PK conversationId, SK ts#msgId; stream on; no GSIs', () => {

@@ -9,6 +9,8 @@
 // path / unconfigured OAuth is allowed so the dev loop boots with no .env
 // present.
 
+import { logger } from './logger.js';
+
 /** Outbound messaging driver: real Twilio REST vs the local console fake. */
 export type MessagingDriverName = 'twilio' | 'console';
 
@@ -100,6 +102,15 @@ export interface AppConfig {
    */
   publicRateLimitMax: number;
   publicRateLimitWindowMs: number;
+  /**
+   * A2P outbound throttle (M1.7): tokens/sec the shared TokenBucket admits
+   * before the worker dispatches each relay-fan-out / broadcast job
+   * (A2P_RATE_LIMIT_PER_SEC, default 1.0). DELIBERATELY conservative — below
+   * the registered A2P tier (sourced here / Parameter Store later). A missing
+   * or invalid value WARNs and falls back to the default; it never crashes
+   * boot (texting is core — a bad throttle value must not take the app down).
+   */
+  a2pRateLimitPerSec: number;
   /**
    * Secret the session-cookie AES-256-GCM key is derived from (M1.3 auth).
    * Terraform-managed random SecureString /hc/<env>/app/SESSION_SECRET —
@@ -242,6 +253,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  // A2P outbound throttle (M1.7). NOT fail-fast: a bad/missing value falls
+  // back to the conservative 1.0 msg/sec default (texting is core — a throttle
+  // typo must never take the app down). An explicitly-set-but-invalid value
+  // WARNs so the operator notices the fallback.
+  const A2P_RATE_LIMIT_DEFAULT = 1.0;
+  let a2pRateLimitPerSec = A2P_RATE_LIMIT_DEFAULT;
+  if (env.A2P_RATE_LIMIT_PER_SEC !== undefined && env.A2P_RATE_LIMIT_PER_SEC.length > 0) {
+    const parsed = Number(env.A2P_RATE_LIMIT_PER_SEC);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      a2pRateLimitPerSec = parsed;
+    } else {
+      logger.warn(
+        { value: env.A2P_RATE_LIMIT_PER_SEC, fallback: A2P_RATE_LIMIT_DEFAULT },
+        'A2P_RATE_LIMIT_PER_SEC is not a positive number — using the default',
+      );
+    }
+  }
+
   // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
   // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
   // would accept enqueues into the in-memory adapter (silently undelivered)
@@ -373,6 +402,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sseMaxConnections,
     publicRateLimitMax,
     publicRateLimitWindowMs,
+    a2pRateLimitPerSec,
     sessionSecret: env.SESSION_SECRET ?? DEV_SESSION_SECRET_DEFAULT,
     googleClientId: env.GOOGLE_CLIENT_ID,
     googleClientSecret: env.GOOGLE_CLIENT_SECRET,

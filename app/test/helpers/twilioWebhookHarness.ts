@@ -38,6 +38,7 @@ import {
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
 import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
+import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import { createSendMessageService } from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
@@ -63,6 +64,8 @@ export interface FakeWorld {
   messages: MessageItem[];
   /** jobIds recorded by putJobExecutionMarker (the M1.2 execution guard). */
   jobExecutionMarkers: Map<string, string>;
+  /** Relay-recipient SID pointers (M1.7): providerSid → source msg + member. */
+  relaySidPointers: Map<string, { conversationId: string; tsMsgId: string; memberKey: string }>;
   contacts: ContactItem[];
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
   /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
@@ -110,6 +113,10 @@ export function createFakeWorld(): FakeWorld {
   const conversations = new Map<string, ConversationItem>();
   const messages: MessageItem[] = [];
   const jobExecutionMarkers = new Map<string, string>();
+  const relaySidPointers = new Map<
+    string,
+    { conversationId: string; tsMsgId: string; memberKey: string }
+  >();
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
@@ -122,6 +129,7 @@ export function createFakeWorld(): FakeWorld {
   const failMediaUrls = new Set<string>();
   let convCounter = 0;
   let sidCounter = 0;
+  let provisionCounter = 0;
 
   const events = createEventBus();
   const emitted: FakeWorld['emitted'] = [];
@@ -229,6 +237,69 @@ export function createFakeWorld(): FakeWorld {
     async incrementAutomatedSendCount() {
       return 1; // breaker untested here (covered by sendMessage.test.ts)
     },
+
+    // --- Relay groups (M1.7) ---
+    async createRelayGroup({ poolNumber, members, tag }) {
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId: `conv-${++convCounter}`,
+        participant_phone: poolNumber,
+        pool_number: poolNumber,
+        status: 'open',
+        last_activity_at: now,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: members,
+        created_at: now,
+        ...(tag !== undefined && { placement_tag: tag }),
+      };
+      conversations.set(item.conversationId, item);
+      return item;
+    },
+    async getByPoolNumber(poolNumber) {
+      for (const conv of conversations.values()) {
+        if (conv.pool_number === poolNumber && conv.type === 'relay_group') return conv;
+      }
+      return undefined;
+    },
+    async addMember(conversationId, member) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`addMember: no conversation ${conversationId}`);
+      const roster = conv.participants ?? [];
+      // FIX 3: idempotent on phone; a real change bumps participants_version.
+      if (!roster.some((p) => p.phone === member.phone)) {
+        conv.participants = [...roster, member];
+        conv.participants_version = (conv.participants_version ?? 0) + 1;
+      }
+      return conv;
+    },
+    async removeMember(conversationId, phone) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`removeMember: no conversation ${conversationId}`);
+      const roster = conv.participants ?? [];
+      const next = roster.filter((p) => p.phone !== phone);
+      // FIX 3: only a real removal bumps the version (idempotent no-op otherwise).
+      if (next.length !== roster.length) {
+        conv.participants = next;
+        conv.participants_version = (conv.participants_version ?? 0) + 1;
+      }
+      return conv;
+    },
+    async setRelayStatus(conversationId, status, poolNumber, expectedStatus) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setRelayStatus: no conversation ${conversationId}`);
+      // FIX 1: honor the optional conditional flip (concurrent close/reopen
+      // idempotency) — a precondition mismatch throws like the real repo.
+      if (expectedStatus !== undefined && conv.status !== expectedStatus) {
+        throw conditionalCheckFailed(
+          `setRelayStatus: ${conversationId} expected status ${expectedStatus} but was ${conv.status}`,
+        );
+      }
+      conv.status = status;
+      if (poolNumber === null) delete conv.pool_number;
+      else conv.pool_number = poolNumber;
+      return conv;
+    },
   };
 
   const findBySid = (sid: string): MessageItem | undefined =>
@@ -255,6 +326,9 @@ export function createFakeWorld(): FakeWorld {
         delivery_status: message.deliveryStatus,
         ...(message.errorCode !== undefined && { error_code: message.errorCode }),
         created_at: new Date().toISOString(),
+        // Relay group (M1.7): preserve the inbound relay annotations.
+        ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
+        ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
       });
       return { deduped: false, tsMsgId };
     },
@@ -288,6 +362,33 @@ export function createFakeWorld(): FakeWorld {
       if (jobExecutionMarkers.has(jobId)) return false;
       jobExecutionMarkers.set(jobId, conversationId);
       return true;
+    },
+
+    // --- Relay groups (M1.7) ---
+    async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      if (!item) throw new Error(`setRecipientDelivery: no message ${conversationId}/${tsMsgId}`);
+      item.delivery_recipients = { ...(item.delivery_recipients ?? {}), [memberKey]: delivery };
+    },
+    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      const slot = item?.delivery_recipients?.[memberKey];
+      if (!item || !slot) return false;
+      if (!allowedPriorStatuses(status).includes(slot.status)) return false;
+      const next = {
+        ...slot,
+        status,
+        ...(errorCode !== undefined && { errorCode }),
+        ...(status === 'delivered' && { deliveredAt: new Date().toISOString() }),
+      };
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
+      return true;
+    },
+    async putRelaySidPointer(providerSid, ref) {
+      if (!relaySidPointers.has(providerSid)) relaySidPointers.set(providerSid, ref);
+    },
+    async getRelaySidPointer(providerSid) {
+      return relaySidPointers.get(providerSid);
     },
   };
 
@@ -448,6 +549,17 @@ export function createFakeWorld(): FakeWorld {
       if (failMediaUrls.has(mediaUrl)) throw new Error(`fake media fetch failed: 404`);
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
     },
+    async provisionPhoneNumber() {
+      const seq = String(++provisionCounter).padStart(4, '0');
+      return {
+        phoneNumber: `+1555010${seq}`,
+        capabilities: { sms: true, voice: true },
+        sid: `PNfake-${seq}`,
+      };
+    },
+    async setVoiceWebhook() {
+      // no-op fake
+    },
   };
 
   const mediaStore: MediaStore = {
@@ -462,6 +574,7 @@ export function createFakeWorld(): FakeWorld {
     conversations,
     messages,
     jobExecutionMarkers,
+    relaySidPointers,
     contacts,
     flagWrites,
     optOutSets,
@@ -501,6 +614,8 @@ export interface HarnessOptions {
   statusUnknownSidRetryDelayMs?: number;
   /** SSE heartbeat override for /api/events tests (default 25s). */
   sseHeartbeatMs?: number;
+  /** Injected pool-numbers service for the M1.7 relay API tests. */
+  poolNumbersService?: PoolNumbersService;
 }
 
 export interface Harness {
@@ -562,6 +677,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       usersRepo: fakeUsers.repo,
       events: world.events,
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
+      ...(opts.poolNumbersService !== undefined && {
+        poolNumbersService: opts.poolNumbersService,
+      }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair
     // signup writes the same contacts/conversations/units the authed API reads,

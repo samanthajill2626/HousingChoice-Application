@@ -40,7 +40,12 @@ export class SendRefusedError extends Error {
   constructor(
     message: string,
     /** Stable machine-readable refusal code. */
-    readonly code: 'conversation_not_found' | 'contact_opted_out' | 'breaker_open' | 'manual_mode',
+    readonly code:
+      | 'conversation_not_found'
+      | 'contact_opted_out'
+      | 'breaker_open'
+      | 'manual_mode'
+      | 'relay_not_supported',
   ) {
     super(message);
     this.name = new.target.name;
@@ -74,6 +79,21 @@ export class ManualModeError extends SendRefusedError {
   }
 }
 
+/**
+ * FIX 2 — defense in depth: this 1:1 wrapper sends TO participant_phone, which
+ * for a relay_group is the (synthetic) pool number — texting the thread's own
+ * number, never the members. Relay sends MUST go through the fan-out job. Any
+ * caller that hands a relay_group here is refused (mapped to HTTP 409).
+ */
+export class RelaySendNotSupportedError extends SendRefusedError {
+  constructor(conversationId: string) {
+    super(
+      `conversation ${conversationId} is a relay_group — use the relay fan-out path, not the 1:1 send wrapper`,
+      'relay_not_supported',
+    );
+  }
+}
+
 // --- Service ----------------------------------------------------------------
 
 export interface SendMessageInput {
@@ -92,6 +112,13 @@ export interface SendMessageInput {
    * message's author through.
    */
   author?: 'teammate' | 'ai';
+  /**
+   * Explicit sender number, E.164 (M1.7): the pool number a relay-group
+   * message must originate FROM. Threaded straight to the adapter; the
+   * opt-out gate, breaker, persist-at-send, and audit are unchanged.
+   * Unset for the 1:1 path (the messaging service picks the sender).
+   */
+  from?: string;
 }
 
 export interface SendMessageOutcome {
@@ -126,11 +153,15 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, automated = false, author = 'teammate' } = input;
+    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
     if (!conversation) throw new ConversationNotFoundError(conversationId);
+
+    // (0) Relay guard (FIX 2): this 1:1 wrapper would text participant_phone —
+    // the pool number for a relay_group. Refuse so no caller can misuse it.
+    if (conversation.type === 'relay_group') throw new RelaySendNotSupportedError(conversationId);
 
     // (1) Opt-out gate — suppression beats everything (doc §7.1 / 21610).
     // EITHER flag refuses: the conversation-level flag covers STOPs from
@@ -172,10 +203,12 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     }
 
     // (3) Provider send — synchronous single send (M1.1; no fan-out exists).
+    // M1.7: an explicit `from` pins the sender to a pool number (relay path).
     const result = await adapter.sendMessage({
       to: conversation.participant_phone,
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
+      ...(from !== undefined && { from }),
     });
 
     // (4) Persist at send time under the provider SID/timestamp — the

@@ -258,3 +258,140 @@ describe('ConsoleMessagingDriver', () => {
     expect(a.providerSid).not.toBe(b.providerSid);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M1.7 — pool-number provisioning + the `from` send param.
+// ---------------------------------------------------------------------------
+
+/** Fake Twilio client covering the number-provisioning + voice-webhook APIs. */
+function makeFakeProvisioningClient(opts: { voice?: boolean } = {}) {
+  const created: Record<string, unknown>[] = [];
+  const updated: { sid: string; params: { voiceUrl?: string } }[] = [];
+  const listed: { phoneNumber: string }[] = [];
+  const voice = opts.voice ?? true;
+  const incoming = ((sid: string) => ({
+    update: async (params: { voiceUrl?: string }) => {
+      updated.push({ sid, params });
+      return { sid, phoneNumber: '+15550109001', capabilities: { sms: true, voice: true } };
+    },
+  })) as TwilioClientLike['incomingPhoneNumbers'] & object;
+  Object.assign(incoming as object, {
+    create: async (params: { phoneNumber: string; smsUrl?: string; voiceUrl?: string }) => {
+      created.push(params);
+      return { sid: 'PN123', phoneNumber: params.phoneNumber, capabilities: { sms: true, voice } };
+    },
+    list: async (params: { phoneNumber: string }) => {
+      listed.push(params);
+      return [{ sid: 'PN123', phoneNumber: params.phoneNumber, capabilities: { sms: true, voice } }];
+    },
+  });
+  const client: TwilioClientLike = {
+    messages: {
+      create: async () => ({ sid: 'SM123', status: 'accepted', dateCreated: new Date() }),
+    },
+    availablePhoneNumbers: () => ({
+      local: {
+        list: async () => [
+          { phoneNumber: '+15550109001', capabilities: { sms: true, voice } },
+        ],
+      },
+    }),
+    incomingPhoneNumbers: incoming as TwilioClientLike['incomingPhoneNumbers'],
+  };
+  return { client, created, updated, listed };
+}
+
+describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
+  it('searches, purchases, pre-wires SmsUrl + VoiceUrl, and returns voice+sms capabilities', async () => {
+    const { client, created } = makeFakeProvisioningClient({ voice: true });
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      publicBaseUrl: 'https://dxxxx.cloudfront.example',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const result = await driver.provisionPhoneNumber({ voiceCapable: true });
+    expect(result.phoneNumber).toBe('+15550109001');
+    expect(result.capabilities).toEqual({ sms: true, voice: true });
+    expect(result.sid).toBe('PN123');
+    // Pre-wired both webhooks at purchase.
+    expect(created[0]).toMatchObject({
+      phoneNumber: '+15550109001',
+      smsUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/sms',
+      voiceUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/voice',
+    });
+  });
+
+  it('throws VoiceCapabilityError when the purchased number lacks voice', async () => {
+    const { client } = makeFakeProvisioningClient({ voice: false });
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const { VoiceCapabilityError } = await import('../src/adapters/messaging.js');
+    await expect(driver.provisionPhoneNumber({ voiceCapable: true })).rejects.toBeInstanceOf(
+      VoiceCapabilityError,
+    );
+  });
+
+  it('setVoiceWebhook resolves the resource SID then updates VoiceUrl', async () => {
+    const { client, updated } = makeFakeProvisioningClient();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    await driver.setVoiceWebhook('+15550109001', 'https://x.example/webhooks/twilio/voice');
+    expect(updated).toEqual([{ sid: 'PN123', params: { voiceUrl: 'https://x.example/webhooks/twilio/voice' } }]);
+  });
+
+  it('passes `from` straight through to messages.create (relay fan-out pins the pool number)', async () => {
+    const { client, created } = makeFakeTwilioClient();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    await driver.sendMessage({ to: '+15550100002', from: '+15550109001', body: 'relayed' });
+    expect(created[0]).toMatchObject({
+      to: '+15550100002',
+      from: '+15550109001',
+      messagingServiceSid: 'MGtest',
+    });
+  });
+});
+
+describe('ConsoleMessagingDriver — provisioning (M1.7)', () => {
+  it('returns a deterministic voice+sms-capable number with a PN sid, never hits Twilio', async () => {
+    const driver = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const a = await driver.provisionPhoneNumber({ voiceCapable: true });
+    const b = await driver.provisionPhoneNumber({ voiceCapable: true });
+    expect(a.capabilities).toEqual({ sms: true, voice: true });
+    expect(a.phoneNumber).toMatch(/^\+1555010\d{4}$/);
+    expect(a.sid).toMatch(/^PNconsole-/);
+    expect(a.phoneNumber).not.toBe(b.phoneNumber); // deterministic, monotonic
+    await expect(driver.setVoiceWebhook('+15550100001', 'https://x/voice')).resolves.toBeUndefined();
+  });
+
+  it('echoes `from` in the send (relay path)', async () => {
+    const capture = createLogCapture();
+    const driver = new ConsoleMessagingDriver({ logger: createLogger({ destination: capture.stream }) });
+    await driver.sendMessage({ to: '+15550100002', from: '+15550109001', body: 'x' });
+    expect(capture.lines[0]!['from']).toBe('+15550109001');
+  });
+});

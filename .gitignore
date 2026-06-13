@@ -33,3 +33,4 @@ Thumbs.db
 
 # Local-only Claude Code settings
 .claude/settings.local.json
+~$*.docx

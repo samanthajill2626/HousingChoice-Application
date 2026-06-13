@@ -11,7 +11,7 @@ const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { buildApp } = await import('./app.js');
-const { configureScheduler } = await import('./jobs/jobs.js');
+const { configureOutboundQueue, configureScheduler, dispatchJob } = await import('./jobs/jobs.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -51,6 +51,44 @@ if (config.schedulerTargetArn && config.schedulerRoleArn) {
   runWithContext(bootContext, () => {
     logger.warn(
       'SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN unset — using the in-memory scheduler: enqueued jobs are accepted but NOT delivered (local NODE_ENVs only; production fails fast at loadConfig instead)',
+    );
+  });
+}
+
+// M1.7: the IMMEDIATE job path (relay fan-out) bypasses EventBridge's ~60s
+// floor. In AWS the app SendMessages straight to the jobs queue the worker
+// long-polls (the worker throttles + dispatches). Locally there is no queue,
+// so the app dispatches relay fan-out IN-PROCESS — which means the relay
+// handler + the shared A2P token bucket must live here too (the worker process
+// is separate locally). Production never registers handlers in the app.
+if (config.jobsQueueUrl) {
+  const { SQSClient } = await import('@aws-sdk/client-sqs');
+  const { SqsOutboundQueueAdapter } = await import('./adapters/scheduler.js');
+  configureOutboundQueue(
+    new SqsOutboundQueueAdapter({
+      client: new SQSClient({ region: config.awsRegion }),
+      queueUrl: config.jobsQueueUrl,
+      logger,
+    }),
+  );
+} else {
+  const { InProcessOutboundQueueAdapter } = await import('./adapters/scheduler.js');
+  const { TokenBucket } = await import('./lib/tokenBucket.js');
+  const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
+  // FIX 6: capacity == the EXACT per-second rate (not ceil — at a fractional
+  // rate ceil would let a burst exceed the A2P tier), floored at 1. The bucket
+  // starts full → first burst up to `capacity`, then paced at `refillPerSec`/s.
+  const a2pBucket = new TokenBucket({
+    capacity: Math.max(1, config.a2pRateLimitPerSec),
+    refillPerSec: config.a2pRateLimitPerSec,
+  });
+  registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
+  configureOutboundQueue(
+    new InProcessOutboundQueueAdapter({ dispatch: dispatchJob, tokenBucket: a2pBucket }),
+  );
+  runWithContext(bootContext, () => {
+    logger.warn(
+      'JOBS_QUEUE_URL unset — relay fan-out runs IN-PROCESS in the app (local dev only; production uses SQS to the worker)',
     );
   });
 }

@@ -18,13 +18,20 @@
 // dashboard Vite dev server (:5173, HMR) concurrently with prefixed output.
 // Open http://localhost:5173 for the UI — Vite serves the React app and
 // proxies /api + /auth to the app on :8080 (which serves the API only in
-// local dev, not the built UI). Ctrl-C stops all three. `.env` at the repo
-// root is loaded here (real environment variables win over the file).
+// local dev, not the built UI). Ctrl-C stops all three.
 //
-// Flags: --local (hermetic DynamoDB Local), --no-web (skip the Vite server —
-// backend only). Granular escape hatches: npm run dev:app / dev:worker /
-// dev -w @housingchoice/dashboard / db:* individually (those do NOT load .env
-// or apply mode defaults).
+// Config layering (later wins): .env.dev (the dev stack's operator secrets —
+// Twilio, Google OAuth, VAPID — loaded in LIVE mode only) < .env (optional
+// local overrides) < real environment variables < mode defaults that must
+// hold locally (NODE_ENV=development, OTel off, PUBLIC_BASE_URL=:5173). So a
+// local live run is a true mirror of deployed dev: real dev data AND real
+// Google login / Twilio / push — except logs go to THIS terminal (pino
+// stdout), never CloudWatch (that's the deployed server's awslogs driver).
+//
+// Flags: --local (hermetic DynamoDB Local; no secrets/AWS), --no-web (skip the
+// Vite server — backend only). Granular escape hatches: npm run dev:app /
+// dev:worker / dev -w @housingchoice/dashboard / db:* (those do NOT load
+// .env/.env.dev or apply mode defaults).
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -37,16 +44,46 @@ import { parseDotenv } from './lib/secretsCore.mjs';
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-const dotenvPath = path.join(repoRoot, '.env');
-let fileEnv = {};
-if (existsSync(dotenvPath)) {
+function readDotenv(file, label) {
+  const p = path.join(repoRoot, file);
+  if (!existsSync(p)) return undefined;
   try {
-    fileEnv = parseDotenv(readFileSync(dotenvPath, 'utf8'));
+    return parseDotenv(readFileSync(p, 'utf8'));
   } catch (err) {
-    console.error(`dev — .env is not valid dotenv: ${err.message}`);
+    console.error(`dev — ${label} is not valid dotenv: ${err.message}`);
     process.exit(1);
   }
 }
+
+// Optional local overrides.
+const localEnv = readDotenv('.env', '.env') ?? {};
+
+// Live unless --local or a DynamoDB Local endpoint is in play (mirrors
+// resolveDevEnv's mode decision below).
+const liveMode =
+  !process.argv.includes('--local') &&
+  process.env.DYNAMODB_ENDPOINT === undefined &&
+  localEnv.DYNAMODB_ENDPOINT === undefined;
+
+// In live mode, load the dev stack's operator secrets so the local app can do
+// everything deployed dev can (real Google login, Twilio, push). These are the
+// SAME values pushed to Parameter Store for the dev deployment.
+let secretsEnv = {};
+if (liveMode) {
+  const loaded = readDotenv('.env.dev', '.env.dev');
+  if (loaded === undefined) {
+    console.warn(
+      'dev — .env.dev not found: the local app will run WITHOUT the dev operator\n' +
+        '       secrets, so Google login, Twilio, and web push are OFF. Copy\n' +
+        '       .env.dev.example → .env.dev and fill it in.',
+    );
+  } else {
+    secretsEnv = loaded;
+  }
+}
+
+// .env (local overrides) wins over .env.dev (dev secrets).
+const fileEnv = { ...secretsEnv, ...localEnv };
 
 let resolved;
 try {
@@ -82,6 +119,13 @@ if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BAS
   childEnv.PUBLIC_BASE_URL = 'http://localhost:5173';
 }
 
+// Local-dev invariants: development NODE_ENV (console messaging driver, non-
+// secure cookies) and OTel disabled — so app logs go to THIS terminal only
+// (pino stdout). CloudWatch is the deployed server's docker awslogs driver and
+// is never wired locally. Both are defaults: an explicit env value still wins.
+if (childEnv.NODE_ENV === undefined) childEnv.NODE_ENV = 'development';
+if (childEnv.OTEL_SDK_DISABLED === undefined) childEnv.OTEL_SDK_DISABLED = 'true';
+
 /** Run a one-shot tsx script (db:create / db:seed) and await success. */
 function runTsx(scriptRelPath) {
   return new Promise((resolve, reject) => {
@@ -106,10 +150,25 @@ if (mode === 'local') {
   console.log('dev — step 3/4: seed data');
   await runTsx('app/scripts/db-seed.ts');
 } else {
+  const driver =
+    childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');
+  const secretCount = Object.keys(secretsEnv).length;
+  console.log('dev — mode: live dev backend (real dev data + tools, run locally)');
+  console.log(`       tables:    ${childEnv.TABLE_PREFIX}*  (DynamoDB, us-east-1)`);
+  console.log(`       profile:   ${childEnv.AWS_PROFILE}  (account-guarded)`);
   console.log(
-    `dev — mode: live dev backend (tables ${childEnv.TABLE_PREFIX}*, profile ${childEnv.AWS_PROFILE}; ` +
-      'use `npm run dev -- --local` for the hermetic DynamoDB Local loop)',
+    secretCount > 0
+      ? `       secrets:   ${secretCount} keys from .env.dev (Google login, Twilio, push)`
+      : '       secrets:   .env.dev MISSING — login/Twilio/push OFF (see warning above)',
   );
+  console.log(
+    `       messaging: ${driver}` +
+      (driver === 'console'
+        ? ' (simulated; set MESSAGING_DRIVER=twilio in .env for real sends)'
+        : ' (REAL Twilio sends)'),
+  );
+  console.log('       logs:      this terminal (CloudWatch only on the deployed server)');
+  console.log('       (`npm run dev -- --local` for the offline DynamoDB Local loop)');
   console.log('dev — step 1/2: account guard');
   try {
     const identity = await assertHousingChoiceAccount();

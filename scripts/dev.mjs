@@ -14,12 +14,17 @@
 //                         No AWS credentials needed. Also selected whenever
 //                         DYNAMODB_ENDPOINT is set (env or .env).
 //
-// Either way, step "run": app (tsx watch, :8080) + worker (tsx watch)
-// concurrently with prefixed output. Ctrl-C stops both. `.env` at the repo
+// Either way, step "run": app (tsx watch, :8080) + worker (tsx watch) + the
+// dashboard Vite dev server (:5173, HMR) concurrently with prefixed output.
+// Open http://localhost:5173 for the UI — Vite serves the React app and
+// proxies /api + /auth to the app on :8080 (which serves the API only in
+// local dev, not the built UI). Ctrl-C stops all three. `.env` at the repo
 // root is loaded here (real environment variables win over the file).
 //
-// Granular escape hatches: npm run dev:app / dev:worker / db:* individually
-// (note: those do NOT load .env or apply mode defaults).
+// Flags: --local (hermetic DynamoDB Local), --no-web (skip the Vite server —
+// backend only). Granular escape hatches: npm run dev:app / dev:worker /
+// dev -w @housingchoice/dashboard / db:* individually (those do NOT load .env
+// or apply mode defaults).
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -102,34 +107,51 @@ if (mode === 'local') {
   }
 }
 
+const webEnabled = !process.argv.includes('--no-web');
+
 const runStep = mode === 'local' ? 'step 4/4' : 'step 2/2';
 console.log(
-  `dev — ${runStep}: app (:8080) + worker, watch mode (Ctrl-C stops both${
-    mode === 'local' ? '; container stays up' : ''
-  })`,
+  `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +
+    `watch mode (Ctrl-C stops all${mode === 'local' ? '; DB container stays up' : ''})`,
 );
-const { result } = concurrently(
-  [
-    {
-      command: 'tsx watch --clear-screen=false app/src/index.ts',
-      name: 'app',
-      prefixColor: 'cyan',
-      env: childEnv,
-    },
-    {
-      command: 'tsx watch --clear-screen=false app/src/worker.ts',
-      name: 'worker',
-      prefixColor: 'magenta',
-      env: childEnv,
-    },
-  ],
+if (webEnabled) {
+  // Printed as bare URLs so the terminal makes them clickable.
+  console.log('');
+  console.log('  ▶ Open the dashboard:  http://localhost:5173');
+  console.log('    (UI with hot-reload; proxies /api + /auth to the app on http://localhost:8080)');
+  console.log('');
+}
+
+const commands = [
   {
-    cwd: repoRoot,
-    prefix: 'name',
-    killOthersOn: ['failure', 'success'],
-    handleInput: false,
+    command: 'tsx watch --clear-screen=false app/src/index.ts',
+    name: 'app',
+    prefixColor: 'cyan',
+    env: childEnv,
   },
-);
+  {
+    command: 'tsx watch --clear-screen=false app/src/worker.ts',
+    name: 'worker',
+    prefixColor: 'magenta',
+    env: childEnv,
+  },
+];
+if (webEnabled) {
+  // The dashboard workspace's own `dev` script = Vite (:5173, vite.config.ts).
+  commands.push({
+    command: 'npm run dev -w @housingchoice/dashboard',
+    name: 'web',
+    prefixColor: 'green',
+    env: childEnv,
+  });
+}
+
+const { result } = concurrently(commands, {
+  cwd: repoRoot,
+  prefix: 'name',
+  killOthersOn: ['failure', 'success'],
+  handleInput: false,
+});
 
 try {
   await result;

@@ -66,7 +66,7 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 
 | Script | What it does | Active since |
 |---|---|---|
-| `npm run dev` | Local loop, app (`:8080`) + worker in watch mode. Default = **live mode** against the real dev backend (`hc-dev-*` tables, `housingchoice` profile, account-guarded). `-- --local` = hermetic mode: starts DynamoDB Local and creates+seeds the 9 `hc-local-*` tables, no AWS needed. Loads `.env` (environment wins) | M0.3 / P1 |
+| `npm run dev` | Local loop: app (`:8080`) + worker + dashboard Vite server (`:5173`, **open this for the UI**) in watch mode. Default = **live mode** against the real dev backend (`hc-dev-*` tables, `housingchoice` profile, account-guarded). `-- --local` = hermetic mode (DynamoDB Local + the 9 `hc-local-*` tables, no AWS); `-- --no-web` = backend only. Loads `.env` (environment wins) | M0.3 / P1 |
 | `npm run dev:app` / `dev:worker` | Just the app / just the worker in watch mode (no DB orchestration) | M0.3 |
 | `npm run db:start` | Start (or create) the `hc-dynamodb-local` container and wait until port 8000 answers — idempotent | M0.3 |
 | `npm run db:stop` | Stop the container (in-memory data is discarded) | M0.3 |
@@ -137,15 +137,18 @@ Additive notes (not deviations — the doc's deploy flow is unchanged): containe
 The whole loop is one command, with two modes (since Phase 1 — an amendment to Phase 0's zero-AWS-credentials local loop, by operator decision: local iteration targets the real dev backend):
 
 ```powershell
-npm run dev               # live mode (default): local app+worker against the REAL dev backend
+npm run dev               # live mode (default): app + worker + dashboard against the REAL dev backend
 npm run dev -- --local    # hermetic mode: DynamoDB Local, no AWS credentials needed
+npm run dev -- --no-web   # backend only (skip the dashboard Vite server)
 ```
 
-**Live mode (default)** runs the app on `http://localhost:8080` and the worker under `tsx watch` against the **real dev stack**: `hc-dev-*` DynamoDB tables in us-east-1 via the `housingchoice` profile (the account guard runs first and refuses any other account; `TABLE_PREFIX=hc-prod-` is refused outright). Iterating on server/UI code against real dev data is the normal loop. Caveats: inbound Twilio webhooks go to the *deployed* dev stack, never localhost; and local + deployed dev share the same tables.
+`npm run dev` runs three processes under one command: the **app** (`:8080`, the API), the **worker**, and the **dashboard** Vite dev server (`:5173`). **Open `http://localhost:5173` for the UI** — it printed as a clickable link in the dev output. Vite serves the React app with hot-reload and proxies `/api` + `/auth` to the app on `:8080`; the app serves the API only in local dev (the built UI is served by the app *in production*, inside the Docker image, not locally). Backend changes hot-reload via `tsx watch`; UI changes via Vite HMR.
 
-**Hermetic mode** (`-- --local`, or whenever `DYNAMODB_ENDPOINT` is set) needs **Docker Desktop running** and (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-sharedDb -inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, then (4) runs app + worker the same way. The integration test suite always uses DynamoDB Local.
+**Live mode (default)** runs against the **real dev stack**: `hc-dev-*` DynamoDB tables in us-east-1 via the `housingchoice` profile (the account guard runs first and refuses any other account; `TABLE_PREFIX=hc-prod-` is refused outright). Caveats: inbound Twilio webhooks go to the *deployed* dev stack, never localhost; and local + deployed dev share the same tables. Local Google login needs the `.env.example`-documented `PUBLIC_BASE_URL=http://localhost:5173` workaround (the callback must ride the Vite proxy to carry the origin-secret header); otherwise use the deployed dev stack for auth-gated testing.
 
-Both modes load `.env` at the repo root if present (real environment variables win; template: [`.env.example`](./.env.example)). Edit a file → instant reload; every request logs a correlated JSON line (`requestId`/`correlationId`). Ctrl-C stops app+worker; the container (hermetic mode) stays up.
+**Hermetic mode** (`-- --local`, or whenever `DYNAMODB_ENDPOINT` is set) needs **Docker Desktop running** and (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-sharedDb -inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, then runs the same three processes. The integration test suite always uses DynamoDB Local.
+
+All modes load `.env` at the repo root if present (real environment variables win; template: [`.env.example`](./.env.example)). Ctrl-C stops all processes; the container (hermetic mode) stays up. Use `-- --no-web` for backend-only, or `npm run dev -w @housingchoice/dashboard` to run just the dashboard.
 
 Query DynamoDB Local from PowerShell (DynamoDB Local accepts any credentials — dummy values satisfy the CLI):
 

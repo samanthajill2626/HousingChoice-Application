@@ -130,6 +130,25 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     );
   });
 
+  it('bumpSessionEpoch increments and returns the new epoch; legacy items (no attribute) land on 2', async () => {
+    // Provisioned-shaped item: explicit session_epoch 1.
+    const fresh = makeUser('epoch-fresh@housingchoice.org', { session_epoch: 1 });
+    await users.createIfAbsent(fresh);
+    expect(await users.bumpSessionEpoch(fresh.userId)).toBe(2);
+    expect(await users.bumpSessionEpoch(fresh.userId)).toBe(3);
+    expect((await users.findById(fresh.userId))!.session_epoch).toBe(3);
+
+    // Legacy item without the attribute: it reads as epoch 1 in the app
+    // (sessionEpochOf), so the FIRST bump must land on 2 — never 1.
+    const legacy = makeUser('epoch-legacy@housingchoice.org');
+    await users.createIfAbsent(legacy);
+    expect(await users.bumpSessionEpoch(legacy.userId)).toBe(2);
+
+    await expect(users.bumpSessionEpoch('usr_doesnotexist0000000000')).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+  });
+
   it('findOrCreateUser race on REAL conditional writes: one user, one created:true, both same id', async () => {
     const identity = {
       sub: 'sub-race-svc',
@@ -144,6 +163,11 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     expect(a.user.userId).toBe(b.user.userId);
     expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
     const item = await users.findById(userIdForEmail(identity.email));
-    expect(item).toMatchObject({ email: identity.email, google_sub: 'sub-race-svc', role: 'va' });
+    expect(item).toMatchObject({
+      email: identity.email,
+      google_sub: 'sub-race-svc',
+      role: 'va',
+      session_epoch: 1, // the kill switch starts at 1 on provisioning
+    });
   });
 });

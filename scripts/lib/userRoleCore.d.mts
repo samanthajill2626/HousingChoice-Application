@@ -9,6 +9,12 @@ export declare function parseUserRoleArgs(argv: string[]): {
   email: string;
   role: string;
 };
+export declare function buildRoleUpdate(role: string): {
+  updateExpression: string;
+  conditionExpression: string;
+  expressionAttributeNames: Record<string, string>;
+  expressionAttributeValues: Record<string, unknown>;
+};
 export declare function buildRoleChangedAuditItem(input: {
   userId: string;
   email: string;

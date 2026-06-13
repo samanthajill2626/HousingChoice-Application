@@ -35,9 +35,22 @@ export interface UserItem {
   /** Google OIDC subject (stable account id) recorded at provisioning. */
   google_sub: string;
   role: UserRole;
+  /**
+   * Server-side session kill switch: sealed into every session cookie at
+   * login and re-checked by sessionMiddleware. Bumping it (logout, role
+   * change) revokes ALL of the user's sessions everywhere. Provisioning
+   * writes 1; items provisioned before the field existed read as 1 via
+   * sessionEpochOf().
+   */
+  session_epoch?: number;
   created_at: string;
   last_login_at?: string;
   [key: string]: unknown;
+}
+
+/** The user's current session epoch — legacy items without the attribute read as 1. */
+export function sessionEpochOf(item: UserItem): number {
+  return typeof item.session_epoch === 'number' ? item.session_epoch : 1;
 }
 
 /**
@@ -64,6 +77,12 @@ export interface UsersRepo {
   touchLastLogin(userId: string, at?: string): Promise<void>;
   /** Flip the role; throws if the user does not exist (ops script path). */
   setRole(userId: string, role: UserRole): Promise<void>;
+  /**
+   * +1 the session epoch and return the NEW value — revokes every session
+   * sealed with the old epoch (effective within the middleware's 60s epoch
+   * cache). Throws if the user does not exist.
+   */
+  bumpSessionEpoch(userId: string): Promise<number>;
 }
 
 export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
@@ -134,6 +153,28 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
         }),
       );
       log.info({ userId, role }, 'user role set');
+    },
+
+    async bumpSessionEpoch(userId) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          // if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking the
+          // attribute read as epoch 1 (sessionEpochOf), so their first bump
+          // must land on 2 — ADD would mint 1 and revoke nothing.
+          UpdateExpression: 'SET session_epoch = if_not_exists(session_epoch, :base) + :one',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeValues: { ':base': 1, ':one': 1 },
+          ReturnValues: 'UPDATED_NEW',
+        }),
+      );
+      const epoch = (Attributes as Pick<UserItem, 'session_epoch'> | undefined)?.session_epoch;
+      if (typeof epoch !== 'number') {
+        throw new Error(`bumpSessionEpoch(${userId}): UPDATED_NEW returned no session_epoch`);
+      }
+      log.info({ userId, sessionEpoch: epoch }, 'session epoch bumped — all prior sessions revoked');
+      return epoch;
     },
   };
 }

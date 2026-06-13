@@ -16,8 +16,9 @@ import express, { type Express, type Request } from 'express';
 import { loadConfig, type AppConfig } from './lib/config.js';
 import { createExpressErrorHandler } from './lib/errors.js';
 import { logger as defaultLogger, type Logger } from './lib/logger.js';
-import { requireAuth, sessionMiddleware } from './middleware/auth.js';
+import { createSessionEpochCache, requireAuth, sessionMiddleware } from './middleware/auth.js';
 import { correlationMiddleware } from './middleware/correlation.js';
+import { csrfOriginMiddleware } from './middleware/csrfOrigin.js';
 import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
@@ -65,7 +66,13 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   app.use(express.json({ verify: captureRawBody }));
   app.use(express.urlencoded({ extended: false, verify: captureRawBody }));
 
-  // (4) routes
+  // (4) routes — every response carries nosniff (API/auth/webhook JSON and
+  // media must never be MIME-sniffed into something executable); the
+  // dashboard static/SPA block below adds the full browser-hardening set.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
   app.use(healthRouter);
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
@@ -74,10 +81,23 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // stream sits behind requireAuth (closing the accepted H4 exposure —
   // EventSource carries the session cookie fine). Webhooks keep their own
   // HMAC validation; GET /health stays public for the deploy gate.
-  app.use('/auth', createAuthRouter({ config, logger: log, ...deps.auth }));
+  //
+  // ONE session-epoch cache shared by the /auth and /api mounts, so a
+  // logout's eviction revokes on both immediately (middleware/auth.ts).
+  const sessionEpochCache = deps.auth?.sessionEpochCache ?? createSessionEpochCache();
+  app.use('/auth', createAuthRouter({ config, logger: log, ...deps.auth, sessionEpochCache }));
   app.use(
     '/api',
-    sessionMiddleware({ config, logger: log, usersRepo: deps.auth?.usersRepo }),
+    // CSRF origin check FIRST (a cheap header compare — no point opening
+    // session crypto for a request we refuse). See middleware/csrfOrigin.ts
+    // for the two-control design (this + SameSite=Lax).
+    csrfOriginMiddleware({ config, logger: log }),
+    sessionMiddleware({
+      config,
+      logger: log,
+      usersRepo: deps.auth?.usersRepo,
+      epochCache: sessionEpochCache,
+    }),
     requireAuth(),
     createApiRouter({ config, logger: log, ...deps.api }),
   );
@@ -91,6 +111,31 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // stream from disk — guideline 1 holds).
   if (config.dashboardDistDir) {
     const distDir = path.resolve(config.dashboardDistDir);
+    // Browser-hardening headers on everything the dashboard surface serves
+    // (assets + the SPA fallback — /api, /auth and /webhooks were routed
+    // above and never reach here). The CSP is the tightest one the Vite
+    // build output actually satisfies — verified against dashboard/dist:
+    // index.html loads only external /assets/*.js + *.css (no inline
+    // <script>/<style>), so script-src stays 'self'; the ONE allowance is
+    // style-src 'unsafe-inline', required because the React shell styles via
+    // inline style={} attributes (dashboard/src/App.tsx), which CSP governs
+    // as inline styles. frame-ancestors 'none' + X-Frame-Options DENY
+    // (legacy UAs) forbid framing; Referrer-Policy keeps paths out of
+    // cross-origin referrers; nosniff is already set app-wide above.
+    const spaCsp = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "frame-ancestors 'none'",
+    ].join('; ');
+    app.use((_req, res, next) => {
+      res.setHeader('Content-Security-Policy', spaCsp);
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      next();
+    });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
       const reserved = ['/api', '/webhooks', '/auth'].some(

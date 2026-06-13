@@ -117,6 +117,21 @@ describe('buildApp', () => {
     });
   });
 
+  describe('security headers (route stage)', () => {
+    it('responses carry X-Content-Type-Options: nosniff — health, routes and 500s alike', async () => {
+      expect((await request(app).get('/health')).headers['x-content-type-options']).toBe('nosniff');
+
+      const echoed = await request(app).post('/echo').set('x-origin-verify', SECRET).send({ a: 1 });
+      expect(echoed.status).toBe(200);
+      expect(echoed.headers['x-content-type-options']).toBe('nosniff');
+
+      // Errors too: the header is on the response before the route throws.
+      const boom = await request(app).get('/boom').set('x-origin-verify', SECRET);
+      expect(boom.status).toBe(500);
+      expect(boom.headers['x-content-type-options']).toBe('nosniff');
+    });
+  });
+
   describe('correlation + webhooks seam', () => {
     it('sets x-request-id on responses and the request log carries the same correlationId', async () => {
       const res = await request(app).get('/health');

@@ -86,6 +86,20 @@ key lands in `.env.<env>.example` FIRST (placeholder + comment), then gets merge
 `.env.<env>` — append only, never overwrite existing lines. `secrets:push`/`secrets:check` print a
 warning whenever the key sets drift.
 
+**Rotating `SESSION_SECRET`** (the sealed-session-cookie key; Terraform-generated, NOT an `.env`
+key): taint the generator, re-apply, deploy —
+
+```powershell
+$env:AWS_PROFILE = 'housingchoice'
+terraform -chdir=infra/envs/<env> taint module.params.random_password.session_secret
+npm run plan -- <env>; npm run apply -- <env>          # writes the new SecureString
+npm run deploy:<env> -- --tag <current DEPLOYED_TAG>   # hydrates it onto the instance
+```
+
+Effect: every outstanding session cookie stops opening = **forced global logout** (everyone signs
+back in via Google). No data loss — sessions live only inside the cookies themselves. Rotate on any
+suspicion the secret leaked.
+
 ### Twilio
 
 The messaging stack (M1.1) has a Twilio-console side that Terraform does NOT manage — this wiring

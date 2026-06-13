@@ -56,4 +56,49 @@ describe.skipIf(!built)('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
     const webhook = await request(app).get('/webhooks/nope').set('x-origin-verify', SECRET);
     expect(webhook.status).toBe(404);
   });
+
+  it('serves the browser-hardening headers on the SPA fallback (and / and assets)', async () => {
+    for (const path of ['/', '/some/client/route']) {
+      const res = await request(app).get(path).set('x-origin-verify', SECRET);
+      expect(res.status, path).toBe(200);
+      expect(res.headers['x-frame-options'], path).toBe('DENY');
+      expect(res.headers['referrer-policy'], path).toBe('strict-origin-when-cross-origin');
+      expect(res.headers['x-content-type-options'], path).toBe('nosniff');
+      const csp = res.headers['content-security-policy'];
+      expect(csp, path).toContain("default-src 'self'");
+      expect(csp, path).toContain("script-src 'self'");
+      // The ONE documented allowance: React inline style={} attributes.
+      expect(csp, path).toContain("style-src 'self' 'unsafe-inline'");
+      expect(csp, path).toContain("img-src 'self' data:");
+      expect(csp, path).toContain("connect-src 'self'");
+      expect(csp, path).toContain("frame-ancestors 'none'");
+    }
+  });
+
+  it('encoded path-traversal attempts never leak file contents (%2e%2e%2f and ..%5c variants)', async () => {
+    // dashboard/dist/../../package.json IS the repo-root package.json — the
+    // realistic exfiltration target on this exact tree (and ../package.json
+    // is the dashboard workspace manifest). /etc/passwd-style absolutes are
+    // covered by the same normalization.
+    for (const probe of [
+      '/%2e%2e%2f%2e%2e%2fpackage.json',
+      '/%2e%2e/%2e%2e/package.json',
+      '/..%2f..%2fpackage.json',
+      '/..%5c..%5cpackage.json', // backslash separators — meaningful on Windows hosts
+      '/assets/%2e%2e%2f%2e%2e%2f%2e%2e%2fpackage.json',
+      '/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd',
+    ]) {
+      const res = await request(app).get(probe).set('x-origin-verify', SECRET);
+      // Acceptable outcomes: the SPA fallback's index.html or a 4xx — never
+      // the target file. package.json bodies carry "version"/"private";
+      // index.html carries neither.
+      expect([200, 400, 403, 404], probe).toContain(res.status);
+      expect(res.text, probe).not.toContain('"version"');
+      expect(res.text, probe).not.toContain('"private"');
+      expect(res.text, probe).not.toContain('root:'); // /etc/passwd shape
+      if (res.status === 200) {
+        expect(res.text, probe).toContain('<div id="root">'); // it IS the SPA shell
+      }
+    }
+  });
 });

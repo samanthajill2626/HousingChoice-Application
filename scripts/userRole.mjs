@@ -13,8 +13,10 @@
 //     (entityKey users#<userId> — the auditRepo convention).
 //   - the user must already exist: they log in once (auto-provisioned 'va'),
 //     then get promoted. This script never creates users.
-//   - role changes take effect on the user's next login or session refresh
-//     (sessions re-validate against the users table daily — middleware/auth).
+//   - the role flip ALSO bumps session_epoch (one atomic update): the user's
+//     active sessions are revoked within the app's ~60s epoch-cache TTL
+//     (middleware/auth), so the new role applies at their next sign-in —
+//     never lingering for the old 24h cookie refresh.
 //
 // Pure logic (argv validation, audit-item shape) lives in
 // scripts/lib/userRoleCore.mjs and is unit-tested offline.
@@ -25,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { assertHousingChoiceAccount, HC_PROFILE, HC_REGION } from './lib/hcAws.mjs';
-import { buildRoleChangedAuditItem, parseUserRoleArgs } from './lib/userRoleCore.mjs';
+import { buildRoleChangedAuditItem, buildRoleUpdate, parseUserRoleArgs } from './lib/userRoleCore.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -102,16 +104,19 @@ if (currentRole === role) {
   process.exit(0);
 }
 
-// --- 3. conditional role update ----------------------------------------------------
+// --- 3. conditional role update + session-epoch bump (one atomic write) ------------
+// Bumping session_epoch revokes the user's active sessions within the app's
+// ~60s epoch cache, so the role change takes effect at their next sign-in.
+const roleUpdate = buildRoleUpdate(role);
 aws(
   [
     'dynamodb', 'update-item',
     '--table-name', usersTable,
     '--key', JSON.stringify({ userId: { S: userId } }),
-    '--update-expression', 'SET #role = :role',
-    '--condition-expression', 'attribute_exists(userId)',
-    '--expression-attribute-names', JSON.stringify({ '#role': 'role' }),
-    '--expression-attribute-values', JSON.stringify({ ':role': { S: role } }),
+    '--update-expression', roleUpdate.updateExpression,
+    '--condition-expression', roleUpdate.conditionExpression,
+    '--expression-attribute-names', JSON.stringify(roleUpdate.expressionAttributeNames),
+    '--expression-attribute-values', JSON.stringify(roleUpdate.expressionAttributeValues),
   ],
   `dynamodb update-item ${usersTable}`,
 );
@@ -149,5 +154,5 @@ aws(
 
 console.log(
   `[user:role] ${email} (${userId}): ${currentRole ?? '(unset)'} -> ${role} on ${env}.\n` +
-    `Takes effect on their next login or daily session refresh (active sessions re-validate within 24h).`,
+    `Active sessions are revoked within ~60s (session-epoch bump); the new role applies when they sign back in.`,
 );

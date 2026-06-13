@@ -2,9 +2,15 @@
 // the dev placeholder secret loadConfig() resolves for non-production
 // NODE_ENVs — exactly what harness-built apps verify against, so the /api
 // auth gate is exercised for real (never bypassed) at one header per request.
+//
+// Since the session-epoch revocation hardening, EVERY authenticated request
+// validates the cookie's sealed epoch against the users table (through the
+// 60s cache) — so apps under test need a users repo that actually KNOWS the
+// session user: seed makeFakeUsersRepo with testUserItem().
 import { DEV_SESSION_SECRET_DEFAULT } from '../../src/lib/config.js';
 import { seal, SESSION_COOKIE_NAME } from '../../src/lib/sessionCookie.js';
 import { SESSION_TTL_MS, type SessionUser } from '../../src/middleware/auth.js';
+import { sessionEpochOf, type UserItem, type UsersRepo } from '../../src/repos/usersRepo.js';
 
 export const TEST_SESSION_USER: SessionUser = {
   userId: 'usr_testva00000000000000000',
@@ -12,10 +18,25 @@ export const TEST_SESSION_USER: SessionUser = {
   role: 'va',
 };
 
+/** A users-table item for TEST_SESSION_USER (epoch 1) — the standard seed. */
+export function testUserItem(overrides: Partial<UserItem> = {}): UserItem {
+  return {
+    userId: TEST_SESSION_USER.userId,
+    email: TEST_SESSION_USER.email,
+    google_sub: 'test-google-sub',
+    role: TEST_SESSION_USER.role,
+    session_epoch: 1,
+    created_at: '2026-06-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
 export interface SessionCookieOptions {
   /** Defaults to the dev placeholder every non-production loadConfig() uses. */
   secret?: string;
   ttlMs?: number;
+  /** Sealed session epoch; defaults to 1 (what provisioning writes). */
+  epoch?: number;
   /** Clock override (epoch ms) — e.g. backdate iat to trigger the rolling refresh. */
   now?: number;
 }
@@ -26,9 +47,10 @@ export function sessionCookieFor(
   opts: SessionCookieOptions = {},
 ): string {
   const token = seal(
-    { ...TEST_SESSION_USER, ...user },
+    { ...TEST_SESSION_USER, ...user, epoch: opts.epoch ?? 1 },
     {
       secret: opts.secret ?? DEV_SESSION_SECRET_DEFAULT,
+      purpose: 'session',
       ttlMs: opts.ttlMs ?? SESSION_TTL_MS,
       ...(opts.now !== undefined && { now: opts.now }),
     },
@@ -38,3 +60,52 @@ export function sessionCookieFor(
 
 /** The shared authed Cookie header for the /api suites (a fresh 'va' session). */
 export const TEST_SESSION_COOKIE = sessionCookieFor();
+
+export interface FakeUsersRepo {
+  users: Map<string, UserItem>;
+  /** userIds actually CREATED by createIfAbsent, in order. */
+  creates: string[];
+  /** Every findById call, in order — asserts the epoch cache's read economy. */
+  findByIdCalls: string[];
+  repo: UsersRepo;
+}
+
+/** In-memory UsersRepo mirroring the real conditional-write semantics. */
+export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
+  const users = new Map<string, UserItem>(seed.map((u) => [u.userId, { ...u }]));
+  const creates: string[] = [];
+  const findByIdCalls: string[] = [];
+  const repo: UsersRepo = {
+    async findByEmail(email) {
+      const e = email.trim().toLowerCase();
+      return [...users.values()].find((u) => u.email === e);
+    },
+    async findById(userId) {
+      findByIdCalls.push(userId);
+      return users.get(userId);
+    },
+    async createIfAbsent(item) {
+      if (users.has(item.userId)) return false;
+      users.set(item.userId, { ...item });
+      creates.push(item.userId);
+      return true;
+    },
+    async touchLastLogin(userId, at = new Date().toISOString()) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`touchLastLogin: no user ${userId}`);
+      user.last_login_at = at;
+    },
+    async setRole(userId, role) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`setRole: no user ${userId}`);
+      user.role = role;
+    },
+    async bumpSessionEpoch(userId) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`bumpSessionEpoch: no user ${userId}`);
+      user.session_epoch = sessionEpochOf(user) + 1;
+      return user.session_epoch;
+    },
+  };
+  return { users, creates, findByIdCalls, repo };
+}

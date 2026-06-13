@@ -52,6 +52,7 @@ export async function findOrCreateUser(
     email,
     google_sub: identity.sub,
     role: 'va', // first login is ALWAYS a va; npm run user:role promotes
+    session_epoch: 1, // the session kill switch starts at 1 (usersRepo.bumpSessionEpoch)
     created_at: now,
     last_login_at: now,
   };

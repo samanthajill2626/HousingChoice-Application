@@ -32,6 +32,7 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
+import { makeFakeUsersRepo, testUserItem, type FakeUsersRepo } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
@@ -345,6 +346,8 @@ export interface Harness {
   world: FakeWorld;
   capture: LogCapture;
   config: AppConfig;
+  /** Fake users repo seeded with TEST_SESSION_USER (the epoch check reads it). */
+  fakeUsers: FakeUsersRepo;
 }
 
 export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
@@ -366,13 +369,22 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     ...opts.env,
   };
   for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+  // Production refuses the committed placeholder (L4 fail-fast) — swap in a
+  // non-placeholder value; production-shaped suites never mint sessions.
+  if (env.NODE_ENV === 'production' && env.SESSION_SECRET === DEV_SESSION_SECRET_DEFAULT) {
+    env.SESSION_SECRET = 'test-production-session-secret';
+  }
 
   const config = loadConfig(env as NodeJS.ProcessEnv);
   const world = opts.world ?? createFakeWorld();
   const capture = createLogCapture();
+  // The epoch check re-reads the session user through the 60s cache: seed a
+  // users repo that knows TEST_SESSION_USER so authed requests stay authed.
+  const fakeUsers = makeFakeUsersRepo([testUserItem()]);
   const app = buildApp({
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
+    auth: { usersRepo: fakeUsers.repo },
     // The /api router shares the same fakes + bus, so hub-API and SSE tests
     // can drive the FULL loop (webhook in → bus → SSE out) on one app.
     api: {
@@ -395,7 +407,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       }),
     },
   });
-  return { app, world, capture, config };
+  return { app, world, capture, config, fakeUsers };
 }
 
 export interface SignedPostOptions {

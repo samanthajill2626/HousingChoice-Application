@@ -6,10 +6,13 @@
 //   POST /auth/logout       session cleared
 //   GET  /auth/me           shapes (200 / 401)
 //   /api requireAuth        401 without/with-tampered session, SSE included
+//   /api CSRF origin check  cross-origin mutating requests 403
 //   requireRole             401/403/next
-//   rolling refresh         day-old sessions re-read the user (role changes
-//                           propagate; deleted users are revoked)
-//   config fail-fast        production requires the M1.3 auth wiring
+//   session epoch           server-side revocation: logout kills COPIED
+//                           cookies, role bumps revoke, cache read economy
+//   rolling refresh         day-old sessions re-issue with the current role
+//   config fail-fast        production requires the M1.3 auth wiring and
+//                           refuses the placeholder SESSION_SECRET
 //
 // The AuthProvider is a FAKE injected through buildApp deps — openid-client
 // is never touched (no network); the cookies and their crypto are real.
@@ -26,14 +29,25 @@ import {
   parseCookies,
   seal,
 } from '../src/lib/sessionCookie.js';
-import { requireRole, sessionMiddleware } from '../src/middleware/auth.js';
+import {
+  createSessionEpochCache,
+  requireRole,
+  sessionMiddleware,
+  type SessionEpochCache,
+} from '../src/middleware/auth.js';
 import { evaluateIdentity } from '../src/routes/auth.js';
-import type { UserItem, UsersRepo } from '../src/repos/usersRepo.js';
+import type { UserItem } from '../src/repos/usersRepo.js';
 import { userIdForEmail } from '../src/repos/usersRepo.js';
 import { findOrCreateUser } from '../src/services/userProvisioning.js';
-import { sessionCookieFor, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
+import {
+  makeFakeUsersRepo,
+  sessionCookieFor,
+  testUserItem,
+  TEST_SESSION_COOKIE,
+  TEST_SESSION_USER,
+} from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+import { makeWebhookHarness, ORIGIN_SECRET, PUBLIC_BASE_URL } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = 'test-origin-secret';
 const ALLOWED = 'housingchoice.org,abt-industries.com';
@@ -46,37 +60,9 @@ const VA_IDENTITY: AuthIdentity = {
 };
 
 // --- fakes -------------------------------------------------------------------
-
-function makeFakeUsersRepo(seed: UserItem[] = []) {
-  const users = new Map<string, UserItem>(seed.map((u) => [u.userId, { ...u }]));
-  const creates: string[] = [];
-  const repo: UsersRepo = {
-    async findByEmail(email) {
-      const e = email.trim().toLowerCase();
-      return [...users.values()].find((u) => u.email === e);
-    },
-    async findById(userId) {
-      return users.get(userId);
-    },
-    async createIfAbsent(item) {
-      if (users.has(item.userId)) return false;
-      users.set(item.userId, { ...item });
-      creates.push(item.userId);
-      return true;
-    },
-    async touchLastLogin(userId, at = new Date().toISOString()) {
-      const user = users.get(userId);
-      if (!user) throw new Error(`touchLastLogin: no user ${userId}`);
-      user.last_login_at = at;
-    },
-    async setRole(userId, role) {
-      const user = users.get(userId);
-      if (!user) throw new Error(`setRole: no user ${userId}`);
-      user.role = role;
-    },
-  };
-  return { users, creates, repo };
-}
+// The in-memory UsersRepo (with create/findById call tracking) lives in
+// helpers/authSession.ts — shared with the webhook harness since the
+// session-epoch check made every authed request read the users table.
 
 function makeFakeProvider(identity: AuthIdentity) {
   const completeCalls: { url: string; state: string; codeVerifier: string }[] = [];
@@ -103,6 +89,8 @@ interface AuthAppOptions {
   identity?: AuthIdentity;
   allowedDomains?: string;
   seedUsers?: UserItem[];
+  /** e.g. createSessionEpochCache(0) to force a users-table read per request. */
+  sessionEpochCache?: SessionEpochCache;
   env?: Record<string, string>;
 }
 
@@ -123,6 +111,7 @@ function makeAuthApp(opts: AuthAppOptions = {}) {
     auth: {
       authProvider: provider,
       usersRepo: fakeUsers.repo,
+      ...(opts.sessionEpochCache !== undefined && { sessionEpochCache: opts.sessionEpochCache }),
       auditRepo: {
         async append(entityKey, eventType, payload) {
           audits.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
@@ -137,7 +126,7 @@ function makeAuthApp(opts: AuthAppOptions = {}) {
 function stateCookie(overrides: Record<string, unknown> = {}, ttlMs = 600_000): string {
   const token = seal(
     { state: 'state-1', codeVerifier: 'verifier-1', ...overrides },
-    { secret: DEV_SESSION_SECRET_DEFAULT, ttlMs },
+    { secret: DEV_SESSION_SECRET_DEFAULT, purpose: 'oauth', ttlMs },
   );
   return `${OAUTH_STATE_COOKIE_NAME}=${token}`;
 }
@@ -243,6 +232,15 @@ describe('GET /auth/login', () => {
     const res = await request(app).get('/auth/login').set('x-origin-verify', SECRET);
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('oauth_not_configured');
+  });
+
+  it('403s WITHOUT the origin-secret header (a direct-to-EIP probe never reaches OAuth)', async () => {
+    const { app, completeCalls } = makeAuthApp();
+    const res = await request(app).get('/auth/login');
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'forbidden' });
+    expect(res.headers['set-cookie']).toBeUndefined(); // no state cookie minted
+    expect(completeCalls).toEqual([]);
   });
 });
 
@@ -463,6 +461,100 @@ describe('POST /auth/logout and GET /auth/me', () => {
       .set('cookie', TEST_SESSION_COOKIE.slice(0, -4) + 'AAAA');
     expect(res.status).toBe(401);
   });
+
+  it('me → 401 for an OAuth state token replayed as the session cookie (purpose mismatch)', async () => {
+    const { app } = makeAuthApp({ seedUsers: [testUserItem()] });
+    const oauthToken = seal(
+      { userId: TEST_SESSION_USER.userId, email: TEST_SESSION_USER.email, role: 'va', epoch: 1 },
+      { secret: DEV_SESSION_SECRET_DEFAULT, purpose: 'oauth', ttlMs: 600_000 },
+    );
+    const res = await request(app)
+      .get('/auth/me')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', `${SESSION_COOKIE_NAME}=${oauthToken}`);
+    expect(res.status).toBe(401);
+  });
+});
+
+// --- session epoch (server-side revocation) -----------------------------------------
+
+describe('session epoch — the server-side kill switch', () => {
+  it('a bumped epoch 401s an existing session (0-TTL cache = within the 60s window)', async () => {
+    const { app, fakeUsers } = makeAuthApp({
+      seedUsers: [testUserItem()],
+      sessionEpochCache: createSessionEpochCache(0), // every request re-reads
+    });
+    const me = () =>
+      request(app).get('/auth/me').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect((await me()).status).toBe(200); // epoch 1 vs epoch 1
+
+    await fakeUsers.repo.bumpSessionEpoch(TEST_SESSION_USER.userId); // → 2
+    const revoked = await me();
+    expect(revoked.status).toBe(401);
+    // The stale cookie is cleared so the browser stops sending it.
+    const cleared = (revoked.headers['set-cookie'] as unknown as string[]).find((c) =>
+      c.startsWith(`${SESSION_COOKIE_NAME}=`),
+    );
+    expect(cleared).toContain('Expires=Thu, 01 Jan 1970');
+  });
+
+  it('logout revokes a COPIED cookie too — global logout by design', async () => {
+    const { app } = makeAuthApp({ seedUsers: [testUserItem()] });
+    // The "attacker" copied the victim's cookie value (same sealed token).
+    const copiedCookie = TEST_SESSION_COOKIE;
+
+    const logout = await request(app)
+      .post('/auth/logout')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(logout.status).toBe(204);
+
+    // The copy dies with the original: logout bumped the epoch AND evicted
+    // the process cache, so the next check reads epoch 2 vs the sealed 1.
+    const res = await request(app)
+      .get('/auth/me')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', copiedCookie);
+    expect(res.status).toBe(401);
+  });
+
+  it('a role change + epoch bump (the user:role script) revokes within the window; the next login carries the new role', async () => {
+    const { app, fakeUsers } = makeAuthApp({
+      seedUsers: [testUserItem()],
+      sessionEpochCache: createSessionEpochCache(0),
+    });
+    const oldCookie = TEST_SESSION_COOKIE; // sealed as va, epoch 1
+
+    // What scripts/userRole.mjs does in one atomic update:
+    await fakeUsers.repo.setRole(TEST_SESSION_USER.userId, 'admin');
+    await fakeUsers.repo.bumpSessionEpoch(TEST_SESSION_USER.userId);
+
+    const revoked = await request(app)
+      .get('/auth/me')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', oldCookie);
+    expect(revoked.status).toBe(401); // ≤60s, not the old 24h refresh lag
+
+    // A fresh session (sealed with the current epoch) sees the new role.
+    const fresh = await request(app)
+      .get('/auth/me')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', sessionCookieFor({}, { epoch: 2 }));
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.role).toBe('admin');
+  });
+
+  it('cache hit avoids the users-table read (one findById per TTL window)', async () => {
+    const { app, fakeUsers } = makeAuthApp({ seedUsers: [testUserItem()] }); // default 60s cache
+    const me = () =>
+      request(app).get('/auth/me').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+    expect((await me()).status).toBe(200);
+    expect((await me()).status).toBe(200);
+    expect((await me()).status).toBe(200);
+    expect(fakeUsers.findByIdCalls).toEqual([TEST_SESSION_USER.userId]); // exactly one read
+  });
 });
 
 // --- the /api gate ------------------------------------------------------------------
@@ -518,10 +610,98 @@ describe('requireAuth on /api (closes the H4 exposure)', () => {
   });
 });
 
+// --- the /api CSRF origin check -------------------------------------------------------
+
+describe('CSRF origin check on mutating /api methods', () => {
+  // Harness PUBLIC_BASE_URL = https://dxxxx.cloudfront.example — the allowed origin.
+  async function makeAuthedHarness() {
+    const harness = makeWebhookHarness();
+    const conv = await harness.world.conversationsRepo.createOrGetByParticipantPhone(
+      '+15550100001',
+      'tenant_1to1',
+    );
+    return { ...harness, readPath: `/api/conversations/${conv.conversationId}/read` };
+  }
+
+  it('403s a cross-origin POST — even with a VALID session — and WARN-logs the origin', async () => {
+    const { app, capture, readPath } = await makeAuthedHarness();
+    const res = await request(app)
+      .post(readPath)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('origin', 'https://evil.example');
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'forbidden' });
+    const warn = capture
+      .atLevel(40)
+      .find((l) => String(l['msg']).includes('cross-origin mutating request rejected'));
+    expect(warn).toBeDefined();
+    expect(warn!['origin']).toBe('https://evil.example');
+    expect(typeof warn!['correlationId']).toBe('string');
+  });
+
+  it("rejects the literal 'null' origin (sandboxed/opaque initiators)", async () => {
+    const { app, readPath } = await makeAuthedHarness();
+    const res = await request(app)
+      .post(readPath)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('origin', 'null');
+    expect(res.status).toBe(403);
+  });
+
+  it('passes a same-origin POST (Origin = PUBLIC_BASE_URL origin)', async () => {
+    const { app, readPath } = await makeAuthedHarness();
+    const res = await request(app)
+      .post(readPath)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('origin', PUBLIC_BASE_URL);
+    expect(res.status).toBe(200);
+  });
+
+  it('passes an absent Origin (non-browser clients; SameSite=Lax is the backstop)', async () => {
+    const { app, readPath } = await makeAuthedHarness();
+    const res = await request(app)
+      .post(readPath)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+  });
+
+  it('passes localhost dev origins (the Vite dev server)', async () => {
+    const { app, readPath } = await makeAuthedHarness();
+    const res = await request(app)
+      .post(readPath)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('origin', 'http://localhost:5173');
+    expect(res.status).toBe(200);
+  });
+
+  it('does not gate non-mutating methods (cross-origin GET still answers)', async () => {
+    const { app } = await makeAuthedHarness();
+    const res = await request(app)
+      .get('/api/conversations')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('origin', 'https://evil.example');
+    expect(res.status).toBe(200); // SameSite=Lax means this cookie wouldn't ride along in a real browser anyway
+  });
+});
+
 // --- requireRole + rolling refresh ----------------------------------------------------
 
 describe('requireRole (built, deliberately unused on /api for now)', () => {
-  function makeRoleApp(seedUsers: UserItem[] = []) {
+  // Two REAL users — the epoch check reads roles from the users table, so a
+  // cookie can no longer claim a role its user item does not hold.
+  const ADMIN_USER = testUserItem({
+    userId: 'usr_testadmin0000000000000',
+    email: 'test-admin@housingchoice.org',
+    role: 'admin',
+  });
+
+  function makeRoleApp(seedUsers: UserItem[] = [testUserItem(), ADMIN_USER]) {
     const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET } as NodeJS.ProcessEnv);
     const { repo } = makeFakeUsersRepo(seedUsers);
     return buildApp({
@@ -554,19 +734,31 @@ describe('requireRole (built, deliberately unused on /api for now)', () => {
     const asAdmin = await request(app)
       .get('/admin-only')
       .set('x-origin-verify', SECRET)
-      .set('cookie', sessionCookieFor({ role: 'admin' }));
+      .set('cookie', sessionCookieFor({ userId: ADMIN_USER.userId, email: ADMIN_USER.email, role: 'admin' }));
     expect(asAdmin.status).toBe(200);
+  });
+
+  it("a cookie CLAIMING admin is overruled by the user item's actual role (va)", async () => {
+    const app = makeRoleApp();
+    // Sealed role says admin; the users table says va — the table wins.
+    const res = await request(app)
+      .get('/admin-only')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', sessionCookieFor({ role: 'admin' })); // TEST_SESSION_USER is a va
+    expect(res.status).toBe(403);
   });
 });
 
-describe('rolling refresh (day-old sessions re-validate against the users table)', () => {
+describe('rolling refresh (day-old sessions are re-issued with the current role)', () => {
   const dayOldCookie = () =>
     sessionCookieFor({}, { now: Date.now() - 25 * 60 * 60 * 1000 }); // iat 25h ago, well inside the 7d window
 
-  it('re-issues the cookie with the CURRENT role — user:role changes propagate within a day', async () => {
+  it('re-issues the cookie with the CURRENT role — a legacy item (no session_epoch) reads as epoch 1', async () => {
     const { app } = makeAuthApp({
       seedUsers: [
         {
+          // Deliberately NO session_epoch: pre-epoch items default to 1,
+          // matching the epoch sessionCookieFor() seals by default.
           userId: TEST_SESSION_USER.userId,
           email: TEST_SESSION_USER.email,
           google_sub: 's',
@@ -580,7 +772,7 @@ describe('rolling refresh (day-old sessions re-validate against the users table)
       .set('x-origin-verify', SECRET)
       .set('cookie', dayOldCookie());
     expect(res.status).toBe(200);
-    expect(res.body.role).toBe('admin'); // the refreshed truth, not the cookie's 'va'
+    expect(res.body.role).toBe('admin'); // the table's truth, not the cookie's 'va'
     expect(setCookieValue(res, SESSION_COOKIE_NAME)).toBeDefined(); // re-issued
   });
 
@@ -593,14 +785,15 @@ describe('rolling refresh (day-old sessions re-validate against the users table)
     expect(res.status).toBe(401);
   });
 
-  it('fresh sessions do NOT hit the users table (no refresh, no Set-Cookie)', async () => {
-    const { app } = makeAuthApp(); // empty users table — a lookup would 401
+  it('fresh sessions are NOT re-issued (no Set-Cookie before the daily refresh)', async () => {
+    const { app, fakeUsers } = makeAuthApp({ seedUsers: [testUserItem()] });
     const res = await request(app)
       .get('/auth/me')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(res.status).toBe(200); // trusted without a read
-    expect(setCookieValue(res, SESSION_COOKIE_NAME)).toBeUndefined();
+    expect(res.status).toBe(200);
+    expect(setCookieValue(res, SESSION_COOKIE_NAME)).toBeUndefined(); // no re-issue
+    expect(fakeUsers.findByIdCalls).toHaveLength(1); // only the epoch check's read
   });
 });
 
@@ -641,6 +834,16 @@ describe('config fail-fast (M1.3 auth wiring)', () => {
     expect(local.sessionSecret).toBe(DEV_SESSION_SECRET_DEFAULT);
     expect(local.oauthAllowedDomains).toEqual([]); // nobody
     expect(local.googleClientId).toBeUndefined();
+  });
+
+  it('production refuses the PLACEHOLDER SESSION_SECRET value, not just absence (it is committed in .env.example)', () => {
+    expect(() =>
+      loadConfig({ ...prodBase, ...authWiring, SESSION_SECRET: DEV_SESSION_SECRET_DEFAULT }),
+    ).toThrow(/placeholder/);
+    // The same value is fine outside production (it IS the local default).
+    expect(
+      loadConfig({ NODE_ENV: 'test', SESSION_SECRET: DEV_SESSION_SECRET_DEFAULT }).sessionSecret,
+    ).toBe(DEV_SESSION_SECRET_DEFAULT);
   });
 
   it('normalizes the allowlist (trim + lowercase) and rejects malformed entries', () => {

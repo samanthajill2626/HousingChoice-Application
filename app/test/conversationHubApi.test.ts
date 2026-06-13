@@ -14,7 +14,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -158,6 +158,9 @@ describe('GET /api/conversations — ONE Query on byLastActivity, never a Scan (
     return buildApp({
       config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET } as NodeJS.ProcessEnv),
       logger: createLogger({ destination: createLogCapture().stream }),
+      // The session-epoch check reads the users table — keep it OFF the fake
+      // doc client (whose commands this suite counts) with its own fake repo.
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
       api: { conversationsRepo: repo },
     });
   }

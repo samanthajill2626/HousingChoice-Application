@@ -13,7 +13,7 @@ import {
   ConversationNotFoundError,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { makeFakeUsersRepo, testUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const SECRET = 'test-origin-secret';
@@ -23,6 +23,8 @@ function makeApp(behavior?: (input: SendMessageInput) => never) {
   const app = buildApp({
     config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
     logger: createLogger({ destination: createLogCapture().stream }),
+    // The session-epoch check reads the users table — seed the session user.
+    auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
     api: {
       sendMessageService: async (input) => {
         calls.push(input);

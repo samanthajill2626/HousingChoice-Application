@@ -8,8 +8,10 @@
 //                          lived cookie (the browser is the only state store)
 //   GET  /auth/callback  → verify state/PKCE, exchange code, enforce the
 //                          domain allowlist, find-or-create the user, set the
-//                          session cookie, redirect /
-//   POST /auth/logout    → clear the session cookie (204)
+//                          session cookie (sealing the user's session_epoch),
+//                          redirect /
+//   POST /auth/logout    → bump the user's session_epoch (revokes ALL of
+//                          their sessions, everywhere) + clear the cookie (204)
 //   GET  /auth/me        → { userId, email, role } | 401
 //
 // ALLOWLIST DECISION (documented per the M1.3 brief): the EMAIL DOMAIN is
@@ -30,13 +32,15 @@ import {
   SESSION_COOKIE_NAME,
 } from '../lib/sessionCookie.js';
 import {
+  createSessionEpochCache,
   sealSession,
   sessionCookieOptions,
   sessionMiddleware,
   type AuthedRequest,
+  type SessionEpochCache,
 } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createUsersRepo, type UsersRepo } from '../repos/usersRepo.js';
+import { createUsersRepo, sessionEpochOf, type UsersRepo } from '../repos/usersRepo.js';
 import { findOrCreateUser } from '../services/userProvisioning.js';
 
 /** The login attempt's lifetime: state cookie sealed for 10 minutes. */
@@ -85,6 +89,8 @@ export interface AuthRouterDeps {
   authProvider?: AuthProvider;
   usersRepo?: UsersRepo;
   auditRepo?: AuditRepo;
+  /** Shared with the /api mount (app.ts) so logout's eviction is process-wide. */
+  sessionEpochCache?: SessionEpochCache;
 }
 
 export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
@@ -92,6 +98,7 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const usersRepo = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const auditRepo = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const epochCache = deps.sessionEpochCache ?? createSessionEpochCache();
 
   // The real provider exists only when OAuth is configured; the injected
   // fake wins regardless (so tests need no client credentials).
@@ -127,10 +134,11 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
     }
     const { url, state, codeVerifier } = await provider.startLogin(redirectUri);
     // The per-attempt secrets ride a sealed cookie — same primitive as the
-    // session, 10-minute TTL, scoped to /auth.
+    // session but purpose-tagged 'oauth' (never replayable as a session),
+    // 10-minute TTL, scoped to /auth.
     const stateToken = seal(
       { state, codeVerifier },
-      { secret: config.sessionSecret, ttlMs: OAUTH_STATE_TTL_MS },
+      { secret: config.sessionSecret, purpose: 'oauth', ttlMs: OAUTH_STATE_TTL_MS },
     );
     res.cookie(OAUTH_STATE_COOKIE_NAME, stateToken, stateCookieOptions);
     res.redirect(url);
@@ -145,7 +153,8 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
     }
 
     const stateToken = parseCookies(req.headers.cookie)[OAUTH_STATE_COOKIE_NAME];
-    const opened = stateToken !== undefined ? open(stateToken, config.sessionSecret) : undefined;
+    const opened =
+      stateToken !== undefined ? open(stateToken, config.sessionSecret, 'oauth') : undefined;
     const state = opened?.data['state'];
     const codeVerifier = opened?.data['codeVerifier'];
     if (typeof state !== 'string' || typeof codeVerifier !== 'string') {
@@ -190,31 +199,47 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
     const { user } = await findOrCreateUser({ usersRepo, auditRepo, logger: log }, identity);
     res.cookie(
       SESSION_COOKIE_NAME,
-      sealSession({ userId: user.userId, email: user.email, role: user.role }, config),
+      sealSession({ userId: user.userId, email: user.email, role: user.role }, config, {
+        epoch: sessionEpochOf(user),
+      }),
       sessionCookieOptions(config),
     );
     res.redirect('/');
   });
 
+  // One instance for /logout + /me: they share the epoch cache so a logout's
+  // eviction is immediately visible to /auth/me.
+  const sessionMw = sessionMiddleware({
+    config,
+    usersRepo,
+    epochCache,
+    ...(deps.logger !== undefined && { logger: deps.logger }),
+  });
+
   // POST /auth/logout — drop the session. POST (not GET) so prefetchers and
   // link scanners can never log anyone out.
-  router.post('/logout', (_req, res) => {
+  //
+  // Logout = GLOBAL revocation by design at this team size: bumping the
+  // user's session_epoch invalidates every cookie sealed with the old epoch
+  // — all browsers, all devices — within the 60s epoch-cache TTL ("log me
+  // out everywhere" and "this laptop was stolen" are the same button).
+  router.post('/logout', sessionMw, async (req: AuthedRequest, res) => {
+    if (req.user) {
+      await usersRepo.bumpSessionEpoch(req.user.userId);
+      epochCache.delete(req.user.userId); // this process enforces immediately
+    }
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
     res.status(204).end();
   });
 
   // GET /auth/me — who am I (the dashboard shell's session probe).
-  router.get(
-    '/me',
-    sessionMiddleware({ config, usersRepo, ...(deps.logger !== undefined && { logger: deps.logger }) }),
-    (req: AuthedRequest, res) => {
-      if (!req.user) {
-        res.status(401).json({ error: 'unauthorized' });
-        return;
-      }
-      res.json(req.user);
-    },
-  );
+  router.get('/me', sessionMw, (req: AuthedRequest, res) => {
+    if (!req.user) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    res.json(req.user);
+  });
 
   return router;
 }

@@ -46,6 +46,30 @@ export function parseUserRoleArgs(argv) {
 }
 
 /**
+ * The single conditional update that flips the role AND bumps session_epoch
+ * atomically (DynamoDB-JSON values for the aws CLI). The epoch bump revokes
+ * the user's active sessions within the app's ~60s epoch-cache TTL, so the
+ * new role applies at their next sign-in — not at the 24h cookie refresh.
+ * if_not_exists(…, 1) + 1, NOT ADD: legacy items lacking session_epoch read
+ * as epoch 1 in the app (usersRepo.sessionEpochOf), so the first bump must
+ * land on 2 — mirrors usersRepo.bumpSessionEpoch exactly.
+ *
+ * @param {string} role the new role ('admin' | 'va')
+ * @returns {{ updateExpression: string, conditionExpression: string,
+ *             expressionAttributeNames: Record<string, string>,
+ *             expressionAttributeValues: Record<string, unknown> }}
+ */
+export function buildRoleUpdate(role) {
+  return {
+    updateExpression:
+      'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+    conditionExpression: 'attribute_exists(userId)',
+    expressionAttributeNames: { '#role': 'role' },
+    expressionAttributeValues: { ':role': { S: role }, ':base': { N: '1' }, ':one': { N: '1' } },
+  };
+}
+
+/**
  * The role_changed audit event item (plain JS values — the caller marshals).
  * Follows the auditRepo conventions exactly: entityKey `users#<userId>`,
  * SK ts `<ISO ts>#<suffix>` (suffix keeps same-millisecond events from

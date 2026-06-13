@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildRoleChangedAuditItem,
+  buildRoleUpdate,
   normalizeEmail,
   parseUserRoleArgs,
   STACK_ENVS,
@@ -45,6 +46,26 @@ describe('parseUserRoleArgs', () => {
     expect(() => parseUserRoleArgs(['dev', 'a@b', 'va'])).toThrow(/email/);
     expect(() => parseUserRoleArgs(['dev', 'a@b.org', 'founder_admin'])).toThrow(/admin, va/);
     expect(() => parseUserRoleArgs(['dev', 'a@b.org', 'va', 'extra'])).toThrow(/extra/);
+  });
+});
+
+describe('buildRoleUpdate (one atomic write: role flip + session-epoch bump)', () => {
+  it('flips #role AND bumps session_epoch with the legacy-safe if_not_exists base', () => {
+    expect(buildRoleUpdate('admin')).toEqual({
+      updateExpression:
+        'SET #role = :role, session_epoch = if_not_exists(session_epoch, :base) + :one',
+      conditionExpression: 'attribute_exists(userId)',
+      expressionAttributeNames: { '#role': 'role' },
+      expressionAttributeValues: {
+        ':role': { S: 'admin' },
+        // base 1 (NOT ADD semantics): legacy items read as epoch 1 in the
+        // app, so their first bump must land on 2 — usersRepo.bumpSessionEpoch
+        // uses the identical expression.
+        ':base': { N: '1' },
+        ':one': { N: '1' },
+      },
+    });
+    expect(buildRoleUpdate('va').expressionAttributeValues[':role']).toEqual({ S: 'va' });
   });
 });
 

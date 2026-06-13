@@ -8,9 +8,12 @@
 // so the raw secret never doubles as key material.
 //
 // open() returns undefined for ANYTHING invalid — wrong shape, bad base64,
-// failed auth tag (tamper), expired — never throws on attacker input. The
-// expiry lives INSIDE the sealed envelope (iat/exp), so a client cannot
-// extend its own session by editing cookie attributes.
+// failed auth tag (tamper), expired, wrong purpose — never throws on attacker
+// input. The expiry lives INSIDE the sealed envelope (iat/exp), so a client
+// cannot extend its own session by editing cookie attributes. A `purpose`
+// discriminator is ALSO sealed inside: both cookies share one secret, so
+// without it a sealed OAuth-state token would open as a (garbage) session
+// token and vice versa — open() rejects any purpose mismatch outright.
 //
 // Pure crypto + parsing only: no Express types, no config reads — unit-tested
 // offline in app/test/sessionCookie.test.ts.
@@ -42,8 +45,15 @@ function deriveKey(secret: string): Buffer {
   return key;
 }
 
+/**
+ * What a sealed token is FOR — sealed inside the envelope so the two cookie
+ * kinds (which share SESSION_SECRET) can never be replayed as each other.
+ */
+export type SealedPurpose = 'session' | 'oauth';
+
 /** What seal() encrypts: caller data plus the tamper-proof validity window. */
 interface SealedEnvelope {
+  p: SealedPurpose;
   d: Record<string, unknown>;
   iat: number; // epoch ms
   exp: number; // epoch ms
@@ -52,16 +62,18 @@ interface SealedEnvelope {
 export interface SealOptions {
   /** SESSION_SECRET (config.sessionSecret). */
   secret: string;
+  /** What the token is for; open() rejects any mismatch. */
+  purpose: SealedPurpose;
   /** Validity window; exp = now + ttlMs, sealed into the token. */
   ttlMs: number;
   /** Test seam: clock override (epoch ms). */
   now?: number;
 }
 
-/** Seal data into an encrypted, authenticated, expiring token. */
+/** Seal data into an encrypted, authenticated, expiring, purpose-tagged token. */
 export function seal(data: Record<string, unknown>, opts: SealOptions): string {
   const now = opts.now ?? Date.now();
-  const envelope: SealedEnvelope = { d: data, iat: now, exp: now + opts.ttlMs };
+  const envelope: SealedEnvelope = { p: opts.purpose, d: data, iat: now, exp: now + opts.ttlMs };
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, deriveKey(opts.secret), iv);
   const ciphertext = Buffer.concat([
@@ -86,10 +98,15 @@ export interface OpenedToken {
 
 /**
  * Open a sealed token. Returns undefined for anything invalid — malformed,
- * tampered (auth-tag failure), wrong secret, or expired. Never throws on
- * attacker-shaped input.
+ * tampered (auth-tag failure), wrong secret, wrong purpose, or expired.
+ * Never throws on attacker-shaped input.
  */
-export function open(token: string, secret: string, now = Date.now()): OpenedToken | undefined {
+export function open(
+  token: string,
+  secret: string,
+  purpose: SealedPurpose,
+  now = Date.now(),
+): OpenedToken | undefined {
   const parts = token.split('.');
   if (parts.length !== 4 || parts[0] !== VERSION) return undefined;
   try {
@@ -102,7 +119,8 @@ export function open(token: string, secret: string, now = Date.now()): OpenedTok
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     const envelope: unknown = JSON.parse(plaintext.toString('utf8'));
     if (typeof envelope !== 'object' || envelope === null) return undefined;
-    const { d, iat, exp } = envelope as Partial<SealedEnvelope>;
+    const { p, d, iat, exp } = envelope as Partial<SealedEnvelope>;
+    if (p !== purpose) return undefined; // cross-purpose replay (e.g. oauth token as session)
     if (typeof d !== 'object' || d === null || Array.isArray(d)) return undefined;
     if (typeof iat !== 'number' || typeof exp !== 'number') return undefined;
     if (now >= exp) return undefined;

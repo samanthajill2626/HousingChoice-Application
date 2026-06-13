@@ -232,6 +232,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
           'secrets:push). Refusing to start without them.',
       );
     }
+    // The PLACEHOLDER value is as bad as absence: it is committed to the repo
+    // (.env.example), so anyone could mint valid session cookies with it.
+    if (env.SESSION_SECRET === DEV_SESSION_SECRET_DEFAULT) {
+      throw new Error(
+        'SESSION_SECRET is the committed dev placeholder — production refuses it. The real value ' +
+          'is the Terraform-generated SecureString /hc/<env>/app/SESSION_SECRET (params module); ' +
+          'the deploy hydrates it. Refusing to start.',
+      );
+    }
   }
 
   // Comma-separated Workspace domains, lowercased; empty/unset = NOBODY can

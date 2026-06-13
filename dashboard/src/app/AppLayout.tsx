@@ -7,7 +7,16 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { logout } from '../api/index.js';
 import { unsubscribeFromPush } from '../push/index.js';
-import { Avatar, Button, InboxIcon, LogoutIcon, SettingsIcon, UsersIcon } from '../ui/index.js';
+import {
+  Avatar,
+  Button,
+  ContactsIcon,
+  HomeIcon,
+  InboxIcon,
+  LogoutIcon,
+  SettingsIcon,
+  UsersIcon,
+} from '../ui/index.js';
 import { useAuth } from './AuthContext.js';
 import styles from './AppLayout.module.css';
 
@@ -20,6 +29,8 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Inbox', icon: <InboxIcon /> },
+  { to: '/contacts', label: 'Contacts', icon: <ContactsIcon /> },
+  { to: '/units', label: 'Properties', icon: <HomeIcon /> },
   { to: '/admin/users', label: 'Users', icon: <UsersIcon />, adminOnly: true },
   { to: '/settings', label: 'Settings', icon: <SettingsIcon />, adminOnly: true },
 ];

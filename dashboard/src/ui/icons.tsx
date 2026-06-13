@@ -94,3 +94,33 @@ export function LogoutIcon(props: IconProps): React.JSX.Element {
     </svg>
   );
 }
+
+/** Address-book / contacts glyph (distinct from UsersIcon, used for team). */
+export function ContactsIcon(props: IconProps): React.JSX.Element {
+  return (
+    <svg {...base(props)}>
+      <path d="M16 2H8a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="10" r="2" />
+      <path d="M8 18a4 4 0 0 1 8 0" />
+    </svg>
+  );
+}
+
+/** A home / property glyph for the Properties (units) section. */
+export function HomeIcon(props: IconProps): React.JSX.Element {
+  return (
+    <svg {...base(props)}>
+      <path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" />
+    </svg>
+  );
+}
+
+/** A plus glyph for "new" / add actions. */
+export function PlusIcon(props: IconProps): React.JSX.Element {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}

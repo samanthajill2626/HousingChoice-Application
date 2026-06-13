@@ -8,8 +8,13 @@ import type {
   ChangeRoleResult,
   Contact,
   ContactPatch,
+  ContactsPage,
+  ContactType,
   Conversation,
   ConversationsPage,
+  CreateContactBody,
+  CreateUnitBody,
+  HousingFairSignup,
   InviteUserResult,
   Me,
   Message,
@@ -17,6 +22,11 @@ import type {
   OrgSettingsPatch,
   PushTestResult,
   SendMessageResult,
+  UnitFlyer,
+  UnitItem,
+  UnitPatch,
+  UnitsPage,
+  UnitStatus,
   UserRole,
 } from './types.js';
 
@@ -134,6 +144,44 @@ export async function setAssignment(
 
 // --- Contacts (/api/contacts) -----------------------------------------------
 
+export interface ListContactsParams {
+  /** Required by the backend UNLESS `phone` (exact lookup) is supplied. */
+  type?: ContactType;
+  status?: string;
+  /** Exact-match phone lookup (E.164); skips the type requirement. */
+  phone?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+/** GET /api/contacts — the records list. `type` is required by the server
+ *  unless `phone` (exact lookup) is given. */
+export function listContacts(
+  params: ListContactsParams = {},
+  signal?: AbortSignal,
+): Promise<ContactsPage> {
+  return request<ContactsPage>('/api/contacts', {
+    query: {
+      type: params.type,
+      status: params.status,
+      phone: params.phone,
+      limit: params.limit,
+      cursor: params.cursor ?? undefined,
+    },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/contacts — create a contact. Throws ApiError(409,'contact_exists')
+ *  on a phone dedupe; the existing contact rides on `err.body.contact`. */
+export async function createContact(body: CreateContactBody): Promise<Contact> {
+  const res = await request<{ contact: Contact }>('/api/contacts', {
+    method: 'POST',
+    body,
+  });
+  return res.contact;
+}
+
 /** GET /api/contacts/:id — the side-panel contact item. */
 export async function getContact(contactId: string, signal?: AbortSignal): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -222,4 +270,77 @@ export function deletePushSubscription(endpoint: string): Promise<void> {
 /** POST /api/push/test — send a test notification to the caller's own devices. */
 export function sendPushTest(): Promise<PushTestResult> {
   return request<PushTestResult>('/api/push/test', { method: 'POST' });
+}
+
+// --- Units / properties (/api/units, requireAuth) ---------------------------
+
+export interface ListUnitsParams {
+  status?: UnitStatus;
+  jurisdiction?: string;
+  landlordId?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+/** GET /api/units — the properties list, paged. */
+export function listUnits(
+  params: ListUnitsParams = {},
+  signal?: AbortSignal,
+): Promise<UnitsPage> {
+  return request<UnitsPage>('/api/units', {
+    query: {
+      status: params.status,
+      jurisdiction: params.jurisdiction,
+      landlordId: params.landlordId,
+      limit: params.limit,
+      cursor: params.cursor ?? undefined,
+    },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/units — create a unit (landlordId required). → 201 { unit }. */
+export async function createUnit(body: CreateUnitBody): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>('/api/units', { method: 'POST', body });
+  return res.unit;
+}
+
+/** GET /api/units/:id — one unit, or throws ApiError(404,'unit_not_found'). */
+export async function getUnit(unitId: string, signal?: AbortSignal): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.unit;
+}
+
+/** PATCH /api/units/:id — partial update. → { unit } | 404. */
+export async function updateUnit(unitId: string, patch: UnitPatch): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}`,
+    { method: 'PATCH', body: patch },
+  );
+  return res.unit;
+}
+
+// --- Public (/public, NO auth — rate-limited) -------------------------------
+// These reach the backend WITHOUT a session (the dev Vite proxy stamps the
+// origin-secret header; see vite.config.ts). They still go through the shared
+// `request` transport (credentials: 'same-origin' is harmless when no cookie
+// exists) so they share the ApiError handling — never assume a logged-in user.
+
+/** POST /public/housing-fair — the public housing-fair signup. → { ok: true };
+ *  ApiError(400,'invalid request') on bad input; ApiError(429,'rate_limited'). */
+export function submitHousingFair(body: HousingFairSignup): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/public/housing-fair', { method: 'POST', body });
+}
+
+/** GET /public/units/:unitId/flyer — the shareable flyer. → { flyer } |
+ *  ApiError(404,'not_found'). */
+export async function getUnitFlyer(unitId: string, signal?: AbortSignal): Promise<UnitFlyer> {
+  const res = await request<{ flyer: UnitFlyer }>(
+    `/public/units/${encodeURIComponent(unitId)}/flyer`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.flyer;
 }

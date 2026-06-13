@@ -1,9 +1,9 @@
-// The route table. Every path is pre-wired here so the app compiles and every
-// route renders; the screens themselves are owned by the feature agents (the
-// placeholder files under src/routes/). Auth-gating: this <AppRouter> is only
-// rendered for an AUTHENTICATED session (App.tsx shows Login otherwise), so the
-// inbox/thread/quick-reply routes need no extra auth guard; the admin routes are
-// wrapped in <RequireAdmin>.
+// The AUTHENTICATED route table. This <AppRouter> is only rendered for an
+// authenticated session (App.tsx's Gate shows Login otherwise), so the
+// inbox/thread/quick-reply/records routes need no extra auth guard; the admin
+// routes are wrapped in <RequireAdmin>. The two PUBLIC routes (/flyer/:unitId,
+// /housing-fair) live ABOVE this in App.tsx — they are NOT in this table, so
+// they never sit behind the auth gate.
 //
 // Layout nesting (M1.4 responsive layout):
 //   <AppLayout>  topbar + (mobile) tabbar; full-height content area
@@ -25,6 +25,12 @@ import AdminUsers from '../routes/AdminUsers.js';
 import Settings from '../routes/Settings.js';
 import QuickReply from '../routes/QuickReply.js';
 import NotFound from '../routes/NotFound.js';
+import Contacts from '../routes/Contacts.js';
+import ContactDetail from '../routes/ContactDetail.js';
+import ContactNew from '../routes/ContactNew.js';
+import Units from '../routes/Units.js';
+import UnitDetail from '../routes/UnitDetail.js';
+import UnitForm from '../routes/UnitForm.js';
 
 export function AppRouter(): React.JSX.Element {
   return (
@@ -57,6 +63,19 @@ export function AppRouter(): React.JSX.Element {
             }
           />
           <Route path="quick-reply/:callId" element={<QuickReply />} />
+
+          {/* Records — Contacts (M1.5). new BEFORE :contactId so "new" is not
+           *  swallowed as an id. */}
+          <Route path="contacts" element={<Contacts />} />
+          <Route path="contacts/new" element={<ContactNew />} />
+          <Route path="contacts/:contactId" element={<ContactDetail />} />
+
+          {/* Records — Properties / units (M1.5). */}
+          <Route path="units" element={<Units />} />
+          <Route path="units/new" element={<UnitForm />} />
+          <Route path="units/:unitId" element={<UnitDetail />} />
+          <Route path="units/:unitId/edit" element={<UnitForm />} />
+
           <Route path="*" element={<NotFound />} />
         </Route>
       </Route>

@@ -167,6 +167,132 @@ export interface ContactPatch {
   contactName?: string;
 }
 
+/** GET /api/contacts page (the records list). */
+export interface ContactsPage {
+  contacts: Contact[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** POST /api/contacts body. `type` is required; the rest are optional. */
+export interface CreateContactBody {
+  type: ContactType;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  voucherSize?: number;
+  notes?: string;
+  status?: string;
+  /** "First Last - N Bed" convenience string; parsed server-side. */
+  contactName?: string;
+}
+
+// --- Units (properties) -----------------------------------------------------
+
+/** A unit's lifecycle status. */
+export type UnitStatus = 'available' | 'placed' | 'inactive';
+
+/** A property/unit record (GET /api/units → { units }, GET /api/units/:id →
+ *  { unit }). Flexible document on the server; the contractual fields are typed
+ *  and the index signature carries anything extra. Most fields are free-form /
+ *  optional because intake is partial-by-design. */
+export interface UnitItem {
+  unitId: string;
+  landlordId: string;
+  status: UnitStatus;
+  jurisdiction?: string;
+  /** Free-text address. */
+  address?: string;
+  accepted_programs?: string[];
+  beds?: number;
+  baths?: number;
+  area?: string;
+  subzone?: string;
+  rent_min?: number;
+  rent_max?: number;
+  payment_standard?: number;
+  deposit?: number;
+  lif?: string;
+  utilities?: string;
+  accessibility?: string;
+  pets?: string;
+  priority?: string;
+  /** S3 keys / URLs of listing media. */
+  media?: string[];
+  listing_link?: string;
+  tour_process?: string;
+  application_process?: string;
+  /** contactId of the landlord/pm to call (pending confirmation). */
+  primary_voice_contact?: string;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/units page. */
+export interface UnitsPage {
+  units: UnitItem[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** POST /api/units body — landlordId is required, status defaults to
+ *  'available' server-side; every other field is an optional intake field. */
+export interface CreateUnitBody {
+  landlordId: string;
+  status?: UnitStatus;
+  jurisdiction?: string;
+  address?: string;
+  accepted_programs?: string[];
+  beds?: number;
+  baths?: number;
+  area?: string;
+  subzone?: string;
+  rent_min?: number;
+  rent_max?: number;
+  payment_standard?: number;
+  deposit?: number;
+  lif?: string;
+  utilities?: string;
+  accessibility?: string;
+  pets?: string;
+  priority?: string;
+  media?: string[];
+  listing_link?: string;
+  tour_process?: string;
+  application_process?: string;
+  primary_voice_contact?: string;
+}
+
+/** PATCH /api/units/:id body — any subset of the create fields. */
+export type UnitPatch = Partial<CreateUnitBody>;
+
+// --- Public (no auth) -------------------------------------------------------
+
+/** GET /public/units/:unitId/flyer → { flyer }. The shareable public subset of
+ *  a unit (no internal fields). */
+export interface UnitFlyer {
+  unitId: string;
+  media: string[];
+  beds?: number;
+  baths?: number;
+  area?: string;
+  subzone?: string;
+  voucher_size?: number;
+  accepted_programs: string[];
+  listing_link?: string;
+  rent_min?: number;
+  rent_max?: number;
+}
+
+/** POST /public/housing-fair body — the public housing-fair signup. */
+export interface HousingFairSignup {
+  firstName: string;
+  lastName: string;
+  phone: string;
+  voucherSize?: number;
+}
+
 // --- Users (admin) ----------------------------------------------------------
 
 /** The admin-list projection of a user (GET /api/users). No secrets. */

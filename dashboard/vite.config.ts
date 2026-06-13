@@ -18,14 +18,18 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    // Launch the OS default browser (real Chrome/Edge) when the dev server is
-    // ready — NOT the IDE's embedded browser. Vite uses the `open` package
-    // (Windows `start`), which the IDE never intercepts. Opens once on start,
-    // not on HMR reloads.
-    open: true,
+    // Don't auto-launch a browser on start. `npm run dev` prints a clickable
+    // http://localhost:5173 link in the terminal (see scripts/dev.mjs) — click
+    // it to open the UI in your OS default browser when you want it.
+    open: false,
     proxy: {
       '/api': appProxy,
       '/auth': appProxy,
+      // Public, unauthenticated backend routes (housing-fair signup + the unit
+      // flyer). No session needed, but the app's validator still requires the
+      // origin-secret header — so these ride the SAME proxy (same target +
+      // x-origin-verify) as /api and /auth.
+      '/public': appProxy,
     },
   },
   build: {

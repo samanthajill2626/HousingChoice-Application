@@ -1,9 +1,7 @@
-// TriageForm unit tests (M1.4 triage fixes):
+// TriageForm unit tests (M1.4 triage fixes + M1.5 status-field removal):
+//   - the lifecycle Status field is NOT operator-visible and is never sent;
 //   - dirty-tracking: changing ONLY the type PATCHes only { type } (never
 //     re-sends an untouched status/name/notes — the legacy-status backend 400);
-//   - a legacy status (e.g. 'new', outside the backend allowlist) renders as a
-//     visible "(legacy)" option so the select reflects the real held value;
-//   - 'archived' is NOT offered (backend allowlist = needs_review | active);
 //   - Save is disabled until something changes;
 //   - a save error renders as a single form-level alert, NOT pinned to Notes.
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -40,10 +38,27 @@ function renderForm(contact: Contact, onSaved = vi.fn()): { onSaved: ReturnType<
 
 beforeEach(() => {
   api.updateContact.mockReset();
-  api.updateContact.mockResolvedValue(makeContact({ type: 'tenant', status: 'needs_review' }));
+  api.updateContact.mockResolvedValue(makeContact({ type: 'tenant', status: 'active' }));
 });
 
 afterEach(() => vi.clearAllMocks());
+
+describe('<TriageForm> status field is hidden (M1.5)', () => {
+  it('does NOT render a Status control (lifecycle status is internal)', () => {
+    renderForm(makeContact({ status: 'active' }));
+    expect(screen.queryByLabelText('Status')).not.toBeInTheDocument();
+  });
+
+  it('never sends `status` even when the type changes (backend auto-advances it)', async () => {
+    renderForm(makeContact({ status: 'needs_review' }));
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'tenant' } });
+    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
+
+    await waitFor(() => expect(api.updateContact).toHaveBeenCalledTimes(1));
+    const [, patch] = api.updateContact.mock.calls[0]!;
+    expect(patch).not.toHaveProperty('status');
+  });
+});
 
 describe('<TriageForm> dirty-tracking', () => {
   it('disables Save until a field changes, with a reason in the title', () => {
@@ -66,7 +81,8 @@ describe('<TriageForm> dirty-tracking', () => {
 
   it('PATCHes ONLY { type } when only the type changed — no stale status/name/notes', async () => {
     // A legacy contact whose status ('new') is NOT in the backend allowlist:
-    // re-sending it would 400. Dirty-tracking must omit it entirely.
+    // re-sending it would 400. The form never reads or sends status, and
+    // dirty-tracking omits the untouched name/notes.
     renderForm(makeContact({ status: 'new', firstName: 'Old', notes: 'prior note' }));
 
     fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'tenant' } });
@@ -78,37 +94,6 @@ describe('<TriageForm> dirty-tracking', () => {
     expect(patch).not.toHaveProperty('status');
     expect(patch).not.toHaveProperty('firstName');
     expect(patch).not.toHaveProperty('notes');
-  });
-
-  it('PATCHes only the changed status when only status changed', async () => {
-    renderForm(makeContact({ status: 'needs_review' }));
-
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'active' } });
-    fireEvent.click(screen.getByRole('button', { name: /save contact/i }));
-
-    await waitFor(() => expect(api.updateContact).toHaveBeenCalledTimes(1));
-    const [, patch] = api.updateContact.mock.calls[0]!;
-    expect(patch).toEqual({ status: 'active' });
-  });
-});
-
-describe('<TriageForm> status options', () => {
-  it('offers exactly the backend allowlist (needs_review, active) — no archived', () => {
-    renderForm(makeContact({ status: 'active' }));
-    const statusSelect = screen.getByLabelText('Status') as HTMLSelectElement;
-    const values = Array.from(statusSelect.options).map((o) => o.value);
-    expect(values).toEqual(['needs_review', 'active']);
-    expect(values).not.toContain('archived');
-  });
-
-  it('renders a legacy status as a visible "(legacy)" option so the select reflects reality', () => {
-    renderForm(makeContact({ status: 'new' }));
-    const statusSelect = screen.getByLabelText('Status') as HTMLSelectElement;
-    // The select VISIBLY holds 'new' (not silently snapped to needs_review).
-    expect(statusSelect.value).toBe('new');
-    const legacyOption = Array.from(statusSelect.options).find((o) => o.value === 'new');
-    expect(legacyOption).toBeDefined();
-    expect(legacyOption?.textContent).toMatch(/legacy/i);
   });
 });
 

@@ -1,20 +1,21 @@
 // TriageForm — the needs-review triage editor inside the contact side panel.
 // Edits firstName/lastName, type (tenant/landlord/pm/team_member/unknown),
-// voucherSize, status, and notes, then PATCHes /api/contacts/:id via
-// updateContact. We send STRUCTURED fields (not the contactName convenience
-// string) so the edits map 1:1; the foundation client accepts either.
+// voucherSize, and notes, then PATCHes /api/contacts/:id via updateContact. We
+// send STRUCTURED fields (not the contactName convenience string) so the edits
+// map 1:1; the foundation client accepts either.
+//
+// STATUS IS NOT OPERATOR-VISIBLE (M1.5 operator request): the backend
+// auto-advances status → 'active' when a real type is set, so the lifecycle
+// status is an internal field. We never render a status <select> and never send
+// `status` from triage. A contact whose STORED status is a legacy value is left
+// untouched — we simply don't read or re-send the field, so it can't be
+// corrupted.
 //
 // DIRTY-TRACKING (M1.4 fix): we PATCH only the fields the user ACTUALLY changed
 // from the loaded contact snapshot. Editing just the type sends `{ type }` only
-// — never re-sending an untouched (possibly legacy) status/name/notes that the
-// backend would reject. If nothing changed, Save is disabled (the backend
-// requires ≥1 field, which is guaranteed once something is dirty).
-//
-// STATUS allowlist: the backend (app/src/routes/contacts.ts) only accepts
-// `needs_review` and `active`. We offer exactly those. If the loaded contact
-// carries a legacy status (e.g. pre-honest-identity 'new') that is NOT in the
-// allowlist, we add it as a visible extra option labelled "(legacy)" so the
-// <select> never silently shows a different value than the one it holds.
+// — never re-sending an untouched (possibly legacy) name/notes that the backend
+// would reject. If nothing changed, Save is disabled (the backend requires ≥1
+// field, which is guaranteed once something is dirty).
 //
 // When the type is set to a real value (tenant/landlord), the backend flips the
 // owning conversation's type (unknown_1to1 → tenant_1to1/landlord_1to1). The
@@ -32,14 +33,6 @@ const TYPE_OPTIONS: { value: ContactType; label: string }[] = [
   { value: 'pm', label: 'Property manager' },
   { value: 'team_member', label: 'Team member' },
 ];
-
-/** The backend allowlist EXACTLY (app/src/routes/contacts.ts CONTACT_STATUSES). */
-const STATUS_OPTIONS: { value: string; label: string }[] = [
-  { value: 'needs_review', label: 'Needs review' },
-  { value: 'active', label: 'Active' },
-];
-
-const STATUS_ALLOWLIST = new Set(STATUS_OPTIONS.map((o) => o.value));
 
 /** Backend voucher rule (app/src/routes/contacts.ts): an integer 0..12. A blank
  *  voucher is allowed (it simply isn't sent); a non-blank one must be valid. */
@@ -64,7 +57,6 @@ interface FormState {
   lastName: string;
   type: ContactType;
   voucherSize: string;
-  status: string;
   notes: string;
 }
 
@@ -74,10 +66,6 @@ function initialState(contact: Contact): FormState {
     lastName: contact.lastName ?? '',
     type: contact.type,
     voucherSize: contact.voucherSize !== undefined ? String(contact.voucherSize) : '',
-    // Keep the contact's actual status — even a legacy value — so the select
-    // reflects reality. Dirty-tracking ensures an untouched legacy value is
-    // never re-sent (and never rejected) on save.
-    status: contact.status ?? 'needs_review',
     notes: contact.notes ?? '',
   };
 }
@@ -110,23 +98,13 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  // Status options = the backend allowlist, plus the contact's CURRENT status
-  // when it is a legacy value outside the allowlist (so the select visibly
-  // reflects the real held value rather than silently snapping to the first
-  // option). Compared against the snapshot, not the live form, so the legacy
-  // option doesn't vanish mid-edit.
-  const statusOptions = useMemo(() => {
-    if (STATUS_ALLOWLIST.has(initial.status)) return STATUS_OPTIONS;
-    return [...STATUS_OPTIONS, { value: initial.status, label: `${initial.status} (legacy)` }];
-  }, [initial.status]);
-
   // Build a patch from ONLY the fields that differ from the loaded snapshot.
+  // Status is intentionally absent (internal field — see header).
   function buildPatch(): ContactPatch {
     const patch: ContactPatch = {};
     if (form.type !== initial.type) patch.type = form.type;
     if (form.firstName.trim() !== initial.firstName.trim()) patch.firstName = form.firstName.trim();
     if (form.lastName.trim() !== initial.lastName.trim()) patch.lastName = form.lastName.trim();
-    if (form.status !== initial.status) patch.status = form.status;
     if (form.notes !== initial.notes) patch.notes = form.notes;
     if (form.voucherSize.trim() !== initial.voucherSize.trim()) {
       const trimmed = form.voucherSize.trim();
@@ -151,7 +129,6 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
       form.type !== initial.type ||
       form.firstName.trim() !== initial.firstName.trim() ||
       form.lastName.trim() !== initial.lastName.trim() ||
-      form.status !== initial.status ||
       form.notes !== initial.notes ||
       voucherDirty
     );
@@ -229,47 +206,29 @@ export function TriageForm({ contact, onSaved }: TriageFormProps): React.JSX.Ele
         )}
       </Field>
 
-      <div className={styles.row}>
-        <Field
-          label="Voucher size"
-          hint="Bedrooms, 0–12 (e.g. 2)"
-          {...(voucherError !== undefined && { error: voucherError })}
-        >
-          {({ id, describedBy, invalid }) => (
-            <Input
-              id={id}
-              type="number"
-              inputMode="numeric"
-              min={0}
-              max={12}
-              step={1}
-              value={form.voucherSize}
-              invalid={invalid}
-              {...(describedBy !== undefined && { 'aria-describedby': describedBy })}
-              onChange={(e) => {
-                set('voucherSize', e.target.value);
-                if (voucherError !== undefined) setVoucherError(undefined);
-              }}
-            />
-          )}
-        </Field>
-        <Field label="Status">
-          {({ id }) => (
-            <select
-              id={id}
-              className={styles.select}
-              value={form.status}
-              onChange={(e) => set('status', e.target.value)}
-            >
-              {statusOptions.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-      </div>
+      <Field
+        label="Voucher size"
+        hint="Bedrooms, 0–12 (e.g. 2)"
+        {...(voucherError !== undefined && { error: voucherError })}
+      >
+        {({ id, describedBy, invalid }) => (
+          <Input
+            id={id}
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={12}
+            step={1}
+            value={form.voucherSize}
+            invalid={invalid}
+            {...(describedBy !== undefined && { 'aria-describedby': describedBy })}
+            onChange={(e) => {
+              set('voucherSize', e.target.value);
+              if (voucherError !== undefined) setVoucherError(undefined);
+            }}
+          />
+        )}
+      </Field>
 
       <Field label="Notes">
         {({ id }) => (

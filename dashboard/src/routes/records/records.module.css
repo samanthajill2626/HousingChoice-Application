@@ -1,0 +1,236 @@
+/* Records screens (Contacts + Properties). Mobile-first, design-token only.
+ * A stack of cards for lists; a card surface for forms + detail. Mirrors the
+ * AdminUsers/Settings framing so the records UI feels native to the shell. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-4);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--hc-space-3);
+  flex-wrap: wrap;
+}
+
+.header h1 {
+  font-size: var(--hc-font-size-xl);
+  font-weight: var(--hc-font-weight-bold);
+  margin: 0 0 var(--hc-space-1);
+}
+
+.lead {
+  color: var(--hc-color-text-muted);
+  font-size: var(--hc-font-size-sm);
+  margin: 0;
+}
+
+/* A back link above a detail/form heading. */
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-1);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--hc-color-text-muted);
+  font-size: var(--hc-font-size-sm);
+  text-decoration: none;
+}
+.back:hover {
+  color: var(--hc-color-brand);
+}
+.back:focus-visible {
+  outline: none;
+  box-shadow: var(--hc-focus-ring);
+  border-radius: var(--hc-radius-sm);
+}
+
+/* Filter / search toolbar. */
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-3);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-3);
+  align-items: flex-end;
+}
+
+.filters > * {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+/* Native select styled to match the design-system Input control. */
+.select {
+  width: 100%;
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  padding: var(--hc-space-3);
+  font-size: var(--hc-font-size-md);
+  color: var(--hc-color-text);
+}
+.select:focus-visible {
+  outline: none;
+  border-color: var(--hc-color-brand);
+  box-shadow: var(--hc-focus-ring);
+}
+.select:disabled {
+  background-color: var(--hc-color-surface-alt);
+  cursor: not-allowed;
+}
+
+/* Card list. */
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+}
+
+.cardLink {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  padding: var(--hc-space-3);
+}
+.cardLink:hover {
+  border-color: var(--hc-color-border-strong);
+  background-color: var(--hc-color-surface-alt);
+}
+.cardLink:focus-visible {
+  outline: none;
+  box-shadow: var(--hc-focus-ring);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-3);
+}
+
+.rowMain {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.rowTitle {
+  font-weight: var(--hc-font-weight-semibold);
+  word-break: break-word;
+}
+
+.rowSub {
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text-muted);
+}
+
+.cues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-2);
+  margin-top: var(--hc-space-2);
+}
+
+.loadMore {
+  margin-top: var(--hc-space-2);
+}
+
+/* Card surface for forms + detail. */
+.surface {
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-lg);
+  padding: var(--hc-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-4);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-3);
+}
+
+/* A two-column field row that collapses on narrow screens. */
+.fieldRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--hc-space-3);
+}
+
+.sectionTitle {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-semibold);
+  margin: 0;
+}
+
+.formActions {
+  display: flex;
+  gap: var(--hc-space-3);
+  flex-wrap: wrap;
+}
+
+.formError {
+  margin: 0;
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-danger);
+  background-color: var(--hc-color-danger-bg);
+  border: 1px solid var(--hc-color-danger);
+  border-radius: var(--hc-radius-md);
+  padding: var(--hc-space-2) var(--hc-space-3);
+}
+
+/* Detail fact list. */
+.facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--hc-space-3);
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.fact dt {
+  font-size: var(--hc-font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--hc-color-text-muted);
+}
+.fact dd {
+  margin: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 599px) {
+  .fieldRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 600px) {
+  .facts {
+    grid-template-columns: 1fr 1fr;
+  }
+}

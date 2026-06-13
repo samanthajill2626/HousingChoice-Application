@@ -25,8 +25,23 @@
   text-decoration: none;
 }
 
+/* The content area fills the space between the sticky topbar and the (mobile)
+ * tabbar. It is a flex column with a constrained height so a child layout (the
+ * conversation hub) can own its own internal scrolling without the page itself
+ * double-scrolling. Per-route wrappers decide framing: NarrowContent centers a
+ * readable max-width card; HubLayout goes full-bleed and fills the height. */
 .content {
-  flex: 1;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Centered, readable max-width column for the non-hub screens (Admin, Settings,
+ * Quick reply, Not found). This is where the narrow --hc-content-max now lives —
+ * scoped OFF the full-bleed conversation hub. */
+.narrow {
   width: 100%;
   max-width: var(--hc-content-max);
   margin: 0 auto;
@@ -153,7 +168,7 @@
   .tabbar {
     display: none;
   }
-  .content {
+  .narrow {
     padding-bottom: var(--hc-space-5);
   }
 }

@@ -265,26 +265,34 @@ describe('<Thread> identity + triage', () => {
     renderThread();
     await screen.findByText(/no messages yet/i);
 
+    // The needs-review Badge is visible up front (unknown_1to1 + unknown contact).
+    expect(
+      document.querySelector('[title="Identity not yet confirmed"]'),
+    ).not.toBeNull();
+
     // The desktop side panel renders the triage form. Set type → Tenant, save.
     const typeSelect = await screen.findByLabelText('Type');
     fireEvent.change(typeSelect, { target: { value: 'tenant' } });
 
-    // After save, the conversation refetch returns a resolved (tenant_1to1) thread.
-    api.getConversation.mockResolvedValue(
-      makeConversation({ type: 'tenant_1to1' }),
+    // After save, the refetches return a resolved (tenant_1to1) thread + a named,
+    // active contact — so the needs-review cue should clear.
+    api.getConversation.mockResolvedValue(makeConversation({ type: 'tenant_1to1' }));
+    api.getContact.mockResolvedValue(
+      makeContact({ type: 'tenant', status: 'active', firstName: 'Keisha', lastName: 'Jones' }),
     );
 
     const saveButtons = screen.getAllByRole('button', { name: /save contact/i });
     fireEvent.click(saveButtons[0]!);
 
-    await waitFor(() =>
-      expect(api.updateContact).toHaveBeenCalledWith(
-        'contact-1',
-        expect.objectContaining({ type: 'tenant' }),
-      ),
-    );
+    // Dirty-tracking: only the changed type is sent (no stale status/name/notes).
+    await waitFor(() => expect(api.updateContact).toHaveBeenCalledTimes(1));
+    expect(api.updateContact).toHaveBeenCalledWith('contact-1', { type: 'tenant' });
     // Conversation refetched after the type flip.
     await waitFor(() => expect(api.getConversation.mock.calls.length).toBeGreaterThan(1));
+    // The header needs-review Badge clears once the identity resolves.
+    await waitFor(() =>
+      expect(document.querySelector('[title="Identity not yet confirmed"]')).toBeNull(),
+    );
   });
 });
 

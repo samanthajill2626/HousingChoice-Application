@@ -2,7 +2,7 @@
 // relative timestamp, and the status cues — unread count, assignment, opt-out,
 // and the honest-identity "needs review" triage chip. The whole row is a Link to
 // the thread. Rendered inside a <ul> (list semantics) by the Inbox screen.
-import { Link } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import { Avatar, Badge } from '../../ui/index.js';
 import type { ConversationSummary } from '../../api/index.js';
 import { displayName, formatRelativeTime, needsReview } from './formatters.js';
@@ -22,9 +22,9 @@ export function ConversationRow({ conversation, now }: ConversationRowProps): Re
 
   return (
     <li className={styles.row}>
-      <Link
+      <NavLink
         to={`/conversations/${encodeURIComponent(conversation.conversationId)}`}
-        className={styles.link}
+        className={({ isActive }) => `${styles.link} ${isActive ? styles.linkActive : ''}`}
         aria-label={`Conversation with ${name}${unread ? `, ${conversation.unread_count} unread` : ''}${review ? ', needs review' : ''}`}
       >
         <Avatar name={review ? undefined : name} review={review} />
@@ -72,7 +72,7 @@ export function ConversationRow({ conversation, now }: ConversationRowProps): Re
             </div>
           )}
         </div>
-      </Link>
+      </NavLink>
     </li>
   );
 }

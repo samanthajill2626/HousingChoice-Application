@@ -27,6 +27,17 @@
   box-shadow: var(--hc-focus-ring);
 }
 
+/* Form-level error region (above Save) — not pinned to any single field. */
+.formError {
+  margin: 0;
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-danger);
+  background-color: var(--hc-color-danger-bg);
+  border: 1px solid var(--hc-color-danger);
+  border-radius: var(--hc-radius-md);
+  padding: var(--hc-space-2) var(--hc-space-3);
+}
+
 @media (max-width: 599px) {
   .row {
     grid-template-columns: 1fr;

@@ -1,0 +1,107 @@
+/* The conversation hub. Mobile-first: a single column where ONE pane shows at a
+ * time (driven by [data-thread-selected]). From the hub breakpoint up, it
+ * becomes a two-pane workspace that fills the content area's height; each pane
+ * scrolls internally so the page itself never double-scrolls. */
+.hub {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  /* Fill the content area between the sticky topbar and (mobile) tabbar. */
+  height: 100%;
+}
+
+/* --- Mobile (< 900px = --hc-hub-breakpoint): stacked, one pane at a time. --- */
+.listPane,
+.threadPane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  width: 100%;
+  /* Leave room for the fixed bottom tab bar on mobile. */
+  padding-bottom: calc(var(--hc-nav-height) + var(--hc-space-4));
+}
+
+/* The list is its own scroll region with comfortable padding. */
+.listPane {
+  overflow-y: auto;
+  padding: var(--hc-space-4);
+}
+
+/* At '/' (no thread) show the list; hide the empty thread pane. */
+.hub[data-thread-selected='false'] .threadPane {
+  display: none;
+}
+/* At /conversations/:id show the thread full-screen; hide the list. */
+.hub[data-thread-selected='true'] .listPane {
+  display: none;
+}
+
+/* The thread pane fills the height and lets the thread own its inner scroll. */
+.threadPane {
+  overflow: hidden;
+  padding-bottom: var(--hc-nav-height);
+}
+
+/* Empty state (desktop right pane at '/'). */
+.empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--hc-space-2);
+  color: var(--hc-color-text-muted);
+  text-align: center;
+  padding: var(--hc-space-6);
+}
+
+.emptyTitle {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text);
+}
+
+.emptyHint {
+  font-size: var(--hc-font-size-sm);
+}
+
+/* --- Desktop (≥ 900px = --hc-hub-breakpoint): two panes side-by-side. --- */
+@media (min-width: 900px) {
+  .hub {
+    flex-direction: row;
+    gap: var(--hc-space-4);
+    padding: var(--hc-space-4);
+  }
+
+  /* Both panes always visible on desktop, regardless of selection. */
+  .hub[data-thread-selected='false'] .threadPane,
+  .hub[data-thread-selected='true'] .listPane {
+    display: flex;
+  }
+
+  /* Left list: fixed width, its own card + scroll. */
+  .listPane {
+    flex: 0 0 var(--hc-hub-list-width);
+    width: var(--hc-hub-list-width);
+    padding: var(--hc-space-3);
+    padding-bottom: var(--hc-space-3);
+    background-color: var(--hc-color-surface);
+    border: 1px solid var(--hc-color-border);
+    border-radius: var(--hc-radius-lg);
+    box-shadow: var(--hc-shadow-sm);
+  }
+
+  /* Right thread: fills remaining width, its own card + internal scroll. */
+  .threadPane {
+    flex: 1 1 auto;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--hc-color-surface);
+    border: 1px solid var(--hc-color-border);
+    border-radius: var(--hc-radius-lg);
+    box-shadow: var(--hc-shadow-sm);
+  }
+}

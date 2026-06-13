@@ -23,6 +23,17 @@
   box-shadow: var(--hc-focus-ring);
 }
 
+/* Selected row in the desktop two-pane hub (the thread on the right is this
+ * conversation). Harmless on mobile, where the list isn't shown beside a
+ * thread. */
+.linkActive {
+  background-color: var(--hc-color-brand-weak);
+}
+
+.linkActive:hover {
+  background-color: var(--hc-color-brand-weak);
+}
+
 .body {
   flex: 1;
   min-width: 0;

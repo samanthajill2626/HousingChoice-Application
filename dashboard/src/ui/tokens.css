@@ -74,6 +74,10 @@
   /* Layout. */
   --hc-nav-height: 3.5rem;
   --hc-content-max: 42rem;
+  /* Two-pane conversation hub: the breakpoint at/above which the inbox list and
+   * the selected thread sit side-by-side, and the fixed width of the list pane. */
+  --hc-hub-breakpoint: 900px;
+  --hc-hub-list-width: 22rem;
   --hc-z-sheet: 1000;
   --hc-z-toast: 1100;
 }

@@ -64,6 +64,7 @@ root — templates: `.env.dev.example` / `.env.prod.example` (copy, rename, fill
 by script only. Nobody hand-runs `aws ssm put-parameter`:
 
 ```powershell
+npm run secrets:sync -- dev       # mirror .env.dev to .env.dev.example (comments/structure), values kept
 npm run secrets:push -- dev       # .env.dev -> SecureString /hc/dev/app/<KEY> (account-guarded)
 npm run secrets:check -- prod     # read-only diff: exit 0 in sync, 2 drift, 1 error
 ```
@@ -81,10 +82,24 @@ Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `JOBS_QUEUE_URL`, `LOG_LEVEL`
 script, and this tool can never overwrite them. `.env.dev` / `.env.prod` are gitignored; never
 commit them.
 
-**Template-first rule:** the real files must mirror the key set of their committed templates. A new
-key lands in `.env.<env>.example` FIRST (placeholder + comment), then gets merged into the real
-`.env.<env>` — append only, never overwrite existing lines. `secrets:push`/`secrets:check` print a
-warning whenever the key sets drift.
+**Template-first rule:** the committed `.env.<env>.example` is the source of truth for
+comments + structure + key-set; the gitignored `.env.<env>` holds the real values. The workflow is:
+
+1. Edit `.env.<env>.example` — add a key with its comment, OR change an existing key's comment.
+2. `npm run secrets:sync -- <env>` — the real file now mirrors the template's comments/structure,
+   your existing values preserved byte-for-byte, any new key present but empty, and any key not in
+   the template parked under a generated `# --- Keys not in the template (review/remove) ---`
+   section (never silently dropped). Values are never printed — the summary is key names + counts.
+   If `.env.<env>` does not exist yet it is created from the template with all values empty.
+3. Fill in any new values in `.env.<env>`.
+4. `npm run secrets:push -- <env>` (then a deploy — see above) to land them in Parameter Store.
+
+`npm run secrets:sync` replaces the old fragile hand-appending, which kept missing new-key comments
+and comment edits to existing keys. `npm run secrets:sync -- <env> --check` is the read-only drift
+check (exit 0 in sync, 2 drift, 1 error): unlike `secrets:check` (which compares the real file's
+VALUES against Parameter Store) it catches comment/structure drift between the real file and its
+template, including a comment edited only in the template. `secrets:push`/`secrets:check` also print
+a key-set drift warning, but they do not see comment drift — `secrets:sync` is what fixes it.
 
 **Rotating `SESSION_SECRET`** (the sealed-session-cookie key; Terraform-generated, NOT an `.env`
 key): taint the generator, re-apply, deploy —

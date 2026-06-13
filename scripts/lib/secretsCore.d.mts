@@ -9,3 +9,15 @@ export declare function diffKeySets(
   realKeys: string[],
   exampleKeys: string[],
 ): { missing: string[]; extra: string[] };
+export declare function syncEnvFromExample(
+  exampleText: string,
+  realText: string,
+): {
+  output: string;
+  summary: {
+    newKeys: string[];
+    preservedKeys: string[];
+    extraKeys: string[];
+    changed: boolean;
+  };
+};

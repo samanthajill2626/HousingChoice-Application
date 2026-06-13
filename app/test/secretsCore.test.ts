@@ -9,6 +9,7 @@ import {
   findDenylistedKeys,
   maskValue,
   parseDotenv,
+  syncEnvFromExample,
 } from '../../scripts/lib/secretsCore.mjs';
 
 describe('parseDotenv', () => {
@@ -141,5 +142,144 @@ describe('diffKeySets (.env.<env> vs .env.<env>.example sync rule)', () => {
 
   it('is empty-empty when the key sets match (values are irrelevant)', () => {
     expect(diffKeySets(['A', 'B'], ['B', 'A'])).toEqual({ missing: [], extra: [] });
+  });
+});
+
+describe('syncEnvFromExample (template-first: comments/structure from example, values from real)', () => {
+  it('preserves the real value VERBATIM for values containing =, quotes, and spaces', () => {
+    const example = [
+      '# api creds',
+      'WITH_EQUALS=placeholder',
+      'DQUOTED=placeholder',
+      'SQUOTED=placeholder',
+      'PADDED=placeholder',
+    ].join('\n');
+    const real = [
+      '# api creds',
+      'WITH_EQUALS=a=b=c', // inner = signs
+      'DQUOTED="quoted value"', // double quotes kept
+      "SQUOTED='single'", // single quotes kept
+      'PADDED=  spaced  ', // leading/trailing spaces kept
+    ].join('\n');
+    const { output } = syncEnvFromExample(example, real);
+    expect(output).toBe(real); // byte-for-byte: no parse/unquote round-trip
+  });
+
+  it('emits an empty value (KEY=) for a brand-new key in the example', () => {
+    const example = ['EXISTING=x', '# a new secret', 'NEW_KEY=replace-me'].join('\n');
+    const real = 'EXISTING=realvalue';
+    const { output, summary } = syncEnvFromExample(example, real);
+    expect(output).toBe(['EXISTING=realvalue', '# a new secret', 'NEW_KEY='].join('\n'));
+    expect(summary.newKeys).toEqual(['NEW_KEY']);
+    expect(summary.preservedKeys).toEqual(['EXISTING']);
+    expect(summary.changed).toBe(true);
+  });
+
+  it('preserves an empty real value as KEY= (empty stays empty)', () => {
+    const { output, summary } = syncEnvFromExample('A=placeholder', 'A=');
+    expect(output).toBe('A=');
+    // An empty real value still counts as "present" — it is preserved, not new.
+    expect(summary.preservedKeys).toEqual(['A']);
+    expect(summary.newKeys).toEqual([]);
+  });
+
+  it('propagates a comment EDIT from the example while preserving the value', () => {
+    const example = ['# NEW comment text', 'TOKEN=placeholder'].join('\n');
+    const real = ['# OLD comment text', 'TOKEN=s3cr3t-token-value'].join('\n');
+    const { output, summary } = syncEnvFromExample(example, real);
+    expect(output).toBe(['# NEW comment text', 'TOKEN=s3cr3t-token-value'].join('\n'));
+    expect(summary.changed).toBe(true); // comment changed even though value did not
+  });
+
+  it('emits blank lines and comments from the example VERBATIM', () => {
+    const example = ['# header', '', '# section', 'A=ph', '', 'B=ph'].join('\n');
+    const real = ['A=1', 'B=2'].join('\n');
+    const { output } = syncEnvFromExample(example, real);
+    expect(output).toBe(['# header', '', '# section', 'A=1', '', 'B=2'].join('\n'));
+  });
+
+  it('follows the EXAMPLE key order, not the real file order', () => {
+    const example = ['C=ph', 'A=ph', 'B=ph'].join('\n');
+    const real = ['A=1', 'B=2', 'C=3'].join('\n'); // different order
+    const { output } = syncEnvFromExample(example, real);
+    expect(output).toBe(['C=3', 'A=1', 'B=2'].join('\n'));
+  });
+
+  it('preserves an extra real key under a generated section and lists it in extraKeys', () => {
+    const example = ['A=ph'].join('\n');
+    const real = ['A=1', 'LEGACY_KEY=keepme', 'ANOTHER_EXTRA=also'].join('\n');
+    const { output, summary } = syncEnvFromExample(example, real);
+    expect(output).toBe(
+      [
+        'A=1',
+        '',
+        '# --- Keys not in the template (review/remove) ---',
+        'LEGACY_KEY=keepme',
+        'ANOTHER_EXTRA=also',
+      ].join('\n'),
+    );
+    expect(summary.extraKeys).toEqual(['LEGACY_KEY', 'ANOTHER_EXTRA']);
+    expect(summary.changed).toBe(true);
+  });
+
+  it('never silently drops an extra key even when its value contains tricky bytes', () => {
+    const example = 'A=ph';
+    const real = ['A=1', 'EXTRA="weird = value"'].join('\n');
+    const { output, summary } = syncEnvFromExample(example, real);
+    expect(output).toContain('EXTRA="weird = value"');
+    expect(summary.extraKeys).toEqual(['EXTRA']);
+  });
+
+  it('reports changed=false when the real file already mirrors the example', () => {
+    const example = ['# c', 'A=ph', 'B=ph'].join('\n');
+    const real = ['# c', 'A=1', 'B=2'].join('\n');
+    const { summary } = syncEnvFromExample(example, real);
+    expect(summary.changed).toBe(false);
+  });
+
+  it('is idempotent: syncing the output again yields byte-identical output', () => {
+    const example = [
+      '# header comment',
+      '',
+      'A=ph',
+      '# mid comment',
+      'B=ph',
+      'NEW=ph',
+    ].join('\n');
+    const real = ['A=val-a', 'B=val=b', 'EXTRA=drifted'].join('\n');
+    const once = syncEnvFromExample(example, real).output;
+    const twice = syncEnvFromExample(example, once).output;
+    expect(twice).toBe(once);
+  });
+
+  it('matches the EOL style of the example (CRLF in -> CRLF out)', () => {
+    const example = 'A=ph\r\n# comment\r\nB=ph\r\n';
+    const real = 'A=1\nB=2\n'; // real is LF; output must follow the example (CRLF)
+    const { output } = syncEnvFromExample(example, real);
+    expect(output).toBe('A=1\r\n# comment\r\nB=2\r\n');
+    expect(output).not.toMatch(/[^\r]\n/); // every \n is preceded by \r
+  });
+
+  it('throws if the example contains a denylisted (Terraform/deploy-managed) key', () => {
+    expect(() => syncEnvFromExample('A=ph\nPORT=8080', 'A=1')).toThrowError(/PORT/);
+  });
+
+  it('the summary never contains a value — key names only', () => {
+    const example = ['A=ph', 'NEW=ph'].join('\n');
+    const real = ['A=super-secret-value', 'EXTRA=another-secret'].join('\n');
+    const { summary } = syncEnvFromExample(example, real);
+    const blob = JSON.stringify(summary);
+    expect(blob).not.toContain('super-secret-value');
+    expect(blob).not.toContain('another-secret');
+    expect(summary.newKeys).toEqual(['NEW']);
+    expect(summary.preservedKeys).toEqual(['A']);
+    expect(summary.extraKeys).toEqual(['EXTRA']);
+  });
+
+  it('propagates malformed-dotenv errors with line numbers but not content', () => {
+    expect(() => syncEnvFromExample('A=ph', 'GOOD=1\nthis is not dotenv')).toThrowError(/line 2/);
+    expect(() => syncEnvFromExample('A=ph', 'secret-content no equals')).not.toThrowError(
+      /secret-content/,
+    );
   });
 });

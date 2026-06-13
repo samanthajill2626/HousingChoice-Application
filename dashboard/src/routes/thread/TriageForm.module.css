@@ -1,0 +1,34 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-3);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--hc-space-3);
+}
+
+.select {
+  width: 100%;
+  font: inherit;
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text);
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  padding: var(--hc-space-2) var(--hc-space-3);
+}
+
+.select:focus-visible {
+  outline: none;
+  border-color: var(--hc-color-brand);
+  box-shadow: var(--hc-focus-ring);
+}
+
+@media (max-width: 599px) {
+  .row {
+    grid-template-columns: 1fr;
+  }
+}

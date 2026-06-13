@@ -1,0 +1,46 @@
+.thread {
+  display: flex;
+  flex-direction: column;
+  /* Fill the AppLayout content area; the timeline scrolls internally. */
+  height: 100%;
+  min-height: 0;
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.timelineFill {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background-color: var(--hc-color-bg);
+}
+
+.side {
+  flex: none;
+  width: 20rem;
+  border-left: 1px solid var(--hc-color-border);
+  background-color: var(--hc-color-surface);
+  overflow-y: auto;
+}
+
+/* Mobile: the side column is hidden — the contact panel opens as a Sheet from
+ * the header's contact button. */
+@media (max-width: 899px) {
+  .side {
+    display: none;
+  }
+}

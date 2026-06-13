@@ -1,0 +1,79 @@
+/* Design tokens — the single source of color/spacing/typography/radius for the
+ * dashboard. Mobile-first. Imported once (src/main.tsx via index.css) so every
+ * CSS Module can reference these custom properties. No external fonts/CDNs
+ * (CSP: default-src 'self'); the system font stack is used throughout. */
+:root {
+  /* Brand + surface (also drives the PWA manifest theme/background colors). */
+  --hc-color-brand: #1f6feb;
+  --hc-color-brand-strong: #1a5fd0;
+  --hc-color-brand-weak: #e8f1ff;
+
+  --hc-color-bg: #f7f8fa;
+  --hc-color-surface: #ffffff;
+  --hc-color-surface-alt: #f0f2f5;
+  --hc-color-overlay: rgba(17, 24, 39, 0.45);
+
+  /* Text. */
+  --hc-color-text: #111827;
+  --hc-color-text-muted: #6b7280;
+  --hc-color-text-inverse: #ffffff;
+
+  /* Lines. */
+  --hc-color-border: #d8dce3;
+  --hc-color-border-strong: #b6bcc7;
+
+  /* Status / delivery palette (DeliveryBadge + Badge variants). */
+  --hc-color-neutral: #6b7280;
+  --hc-color-neutral-bg: #eceef1;
+  --hc-color-info: #1f6feb;
+  --hc-color-info-bg: #e8f1ff;
+  --hc-color-success: #15803d;
+  --hc-color-success-bg: #e4f5ea;
+  --hc-color-warning: #b45309;
+  --hc-color-warning-bg: #fdf0dc;
+  --hc-color-danger: #b91c1c;
+  --hc-color-danger-bg: #fde5e5;
+  --hc-color-review: #7c3aed;
+  --hc-color-review-bg: #f1e8fe;
+
+  /* Focus ring (accessibility — visible keyboard focus on every interactive). */
+  --hc-focus-ring: 0 0 0 3px rgba(31, 111, 235, 0.4);
+
+  /* Spacing scale (4px base). */
+  --hc-space-1: 0.25rem;
+  --hc-space-2: 0.5rem;
+  --hc-space-3: 0.75rem;
+  --hc-space-4: 1rem;
+  --hc-space-5: 1.5rem;
+  --hc-space-6: 2rem;
+  --hc-space-8: 3rem;
+
+  /* Radius. */
+  --hc-radius-sm: 0.375rem;
+  --hc-radius-md: 0.5rem;
+  --hc-radius-lg: 0.75rem;
+  --hc-radius-pill: 999px;
+
+  /* Typography. */
+  --hc-font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --hc-font-size-xs: 0.75rem;
+  --hc-font-size-sm: 0.875rem;
+  --hc-font-size-md: 1rem;
+  --hc-font-size-lg: 1.25rem;
+  --hc-font-size-xl: 1.75rem;
+  --hc-font-weight-medium: 500;
+  --hc-font-weight-semibold: 600;
+  --hc-font-weight-bold: 700;
+
+  /* Elevation. */
+  --hc-shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.08);
+  --hc-shadow-md: 0 4px 12px rgba(17, 24, 39, 0.12);
+  --hc-shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.2);
+
+  /* Layout. */
+  --hc-nav-height: 3.5rem;
+  --hc-content-max: 42rem;
+  --hc-z-sheet: 1000;
+  --hc-z-toast: 1100;
+}

@@ -1,0 +1,58 @@
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hc-space-3);
+  padding: var(--hc-space-2) var(--hc-space-3);
+  border-bottom: 1px solid var(--hc-color-border);
+  background-color: var(--hc-color-surface);
+  flex: none;
+}
+
+.lead {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  min-width: 0;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.name {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  min-width: 0;
+}
+
+.nameText {
+  font-weight: var(--hc-font-weight-semibold);
+  font-size: var(--hc-font-size-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phone {
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  flex: none;
+}
+
+/* On narrow screens, keep the header compact: drop the assignment label-heavy
+ * controls to the essentials. The contact button + back stay reachable. */
+@media (max-width: 599px) {
+  .phone {
+    display: none;
+  }
+}

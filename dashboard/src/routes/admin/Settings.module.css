@@ -1,0 +1,161 @@
+/* Settings screen — two sections: missed-call templates (founder-editable, CO2)
+ * and push notifications on this device. Mobile-first; shares design tokens. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-5);
+}
+
+.header h1 {
+  font-size: var(--hc-font-size-xl);
+  font-weight: var(--hc-font-weight-bold);
+  margin: 0 0 var(--hc-space-1);
+}
+
+.lead {
+  color: var(--hc-color-text-muted);
+  font-size: var(--hc-font-size-sm);
+  margin: 0;
+}
+
+.section {
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-lg);
+  padding: var(--hc-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-4);
+}
+
+.sectionHead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-1);
+}
+
+.sectionTitle {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-semibold);
+  margin: 0;
+}
+
+.sectionHint {
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text-muted);
+  margin: 0;
+}
+
+.note {
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+  background-color: var(--hc-color-surface-alt);
+  border-radius: var(--hc-radius-md);
+  padding: var(--hc-space-2) var(--hc-space-3);
+  margin: 0;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-4);
+}
+
+/* Toggle row (auto-text enabled). */
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hc-space-3);
+}
+
+.toggleLabel {
+  font-size: var(--hc-font-size-sm);
+  font-weight: var(--hc-font-weight-semibold);
+}
+
+.toggleLabel small {
+  display: block;
+  font-weight: var(--hc-font-weight-medium);
+  color: var(--hc-color-text-muted);
+}
+
+/* The native checkbox styled as a switch — keep it simple + accessible. */
+.switch {
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--hc-color-brand);
+}
+
+.charCount {
+  align-self: flex-end;
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+}
+
+.charCountOver {
+  color: var(--hc-color-danger);
+  font-weight: var(--hc-font-weight-semibold);
+}
+
+/* Quick replies list. */
+.replyList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.replyItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--hc-space-2);
+}
+
+.replyItem .control {
+  flex: 1;
+}
+
+.replyAdd {
+  display: flex;
+  gap: var(--hc-space-2);
+  align-items: flex-start;
+}
+
+.replyAdd .control {
+  flex: 1;
+}
+
+.saveRow {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-3);
+}
+
+.saveError {
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-danger);
+}
+
+/* Push / notifications section. */
+.pushState {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  font-size: var(--hc-font-size-sm);
+}
+
+.pushActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-2);
+}
+
+.iosNote {
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+  margin: 0;
+}

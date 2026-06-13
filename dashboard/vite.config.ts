@@ -18,6 +18,11 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // Launch the OS default browser (real Chrome/Edge) when the dev server is
+    // ready — NOT the IDE's embedded browser. Vite uses the `open` package
+    // (Windows `start`), which the IDE never intercepts. Opens once on start,
+    // not on HMR reloads.
+    open: true,
     proxy: {
       '/api': appProxy,
       '/auth': appProxy,

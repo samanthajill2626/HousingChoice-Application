@@ -62,12 +62,25 @@ try {
 }
 const { mode, overlay } = resolved;
 
+// Whether to also run the dashboard Vite server (default yes; --no-web skips).
+const webEnabled = !process.argv.includes('--no-web');
+
 // Children also need tsx on PATH even when this script runs outside npm.
 const childEnv = {
   ...process.env,
   ...overlay,
   PATH: `${path.join(repoRoot, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
 };
+
+// Local Google login must ride the Vite proxy: a direct hit on the app's
+// :8080 carries no x-origin-verify header (the origin-secret validator 403s
+// it), but Vite (:5173) stamps it on proxied /auth + /api. So the OAuth
+// redirect_uri has to target :5173 — point the app there unless the operator
+// set PUBLIC_BASE_URL explicitly. (Register http://localhost:5173/auth/callback
+// on the dev Google OAuth client.) Skipped with --no-web — no UI to log in via.
+if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BASE_URL === '')) {
+  childEnv.PUBLIC_BASE_URL = 'http://localhost:5173';
+}
 
 /** Run a one-shot tsx script (db:create / db:seed) and await success. */
 function runTsx(scriptRelPath) {
@@ -107,8 +120,6 @@ if (mode === 'local') {
   }
 }
 
-const webEnabled = !process.argv.includes('--no-web');
-
 const runStep = mode === 'local' ? 'step 4/4' : 'step 2/2';
 console.log(
   `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +
@@ -119,6 +130,8 @@ if (webEnabled) {
   console.log('');
   console.log('  ▶ Open the dashboard:  http://localhost:5173');
   console.log('    (UI with hot-reload; proxies /api + /auth to the app on http://localhost:8080)');
+  console.log('    Google sign-in works here once http://localhost:5173/auth/callback is');
+  console.log('    registered on the dev OAuth client (PUBLIC_BASE_URL set to :5173 for you).');
   console.log('');
 }
 

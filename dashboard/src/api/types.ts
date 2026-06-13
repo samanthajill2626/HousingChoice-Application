@@ -10,8 +10,17 @@
 // --- Enums / unions ---------------------------------------------------------
 
 /** Conversation thread type. `unknown_1to1` is the honest-identity value: a
- *  thread whose participant has not been triaged to tenant/landlord yet. */
-export type ConversationType = 'tenant_1to1' | 'landlord_1to1' | 'unknown_1to1';
+ *  thread whose participant has not been triaged to tenant/landlord yet.
+ *  `relay_group` (M1.7) is a multi-party masked thread fronted by a pool number:
+ *  inbound on the pool number fans out to the other members. */
+export type ConversationType =
+  | 'tenant_1to1'
+  | 'landlord_1to1'
+  | 'unknown_1to1'
+  | 'relay_group';
+
+/** A relay group's lifecycle status (M1.7). `closed` released its pool number. */
+export type RelayStatus = 'open' | 'closed';
 
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'pm' | 'team_member' | 'unknown';
@@ -45,10 +54,15 @@ export interface Me {
 
 // --- Conversations ----------------------------------------------------------
 
-/** A linked external participant: contact + phone pair. */
+/** A linked external participant: contact + phone pair. For relay groups (M1.7)
+ *  this array is the mutable member roster and each member may carry an optional
+ *  `name` (the sender-prefix display name resolved from the contact at add time;
+ *  absent when no name is known — honest identity falls back to the phone). */
 export interface ConversationParticipant {
   contactId: string;
   phone: string;
+  /** Sender-prefix display name (relay groups); resolved from the contact, may be absent. */
+  name?: string;
 }
 
 /** One inbox row (GET /api/conversations). Field names are the server's
@@ -70,6 +84,9 @@ export interface ConversationSummary {
   /** Resolved contact name denormalized onto the conversation, or null when the
    *  participant is un-triaged (we never fabricate a name — fall back to phone). */
   participant_display_name: string | null;
+  /** Relay group (M1.7): the masked pool number fronting the thread, when the
+   *  server projects it onto the summary. Absent on 1:1 rows. */
+  pool_number?: string | null;
 }
 
 /** Inbox page (GET /api/conversations). */
@@ -85,6 +102,8 @@ export interface ConversationsPage {
 export interface Conversation {
   conversationId: string;
   participant_phone: string;
+  /** 1:1 threads only ever write `open`; relay_group threads use `open` |
+   *  `closed` (see RelayStatus). Typed as string to match the flexible wire. */
   status: string;
   last_activity_at: string;
   type: ConversationType;
@@ -94,11 +113,29 @@ export interface Conversation {
   participants?: ConversationParticipant[];
   unread_count?: number;
   assignment?: string;
+  /** Relay group (M1.7): the masked pool number fronting the thread (E.164),
+   *  present only while a relay_group is open; cleared on close. Absent on 1:1. */
+  pool_number?: string;
   created_at: string;
   [key: string]: unknown;
 }
 
 // --- Messages ---------------------------------------------------------------
+
+/**
+ * Per-recipient delivery state for a relay-group fan-out (M1.7). A relayed
+ * message is stored ONCE; this records the outbound delivery to each OTHER
+ * member, keyed by member key (contactId else `phone#<E164>`). Each entry runs
+ * the same forward-only status machine as 1:1 `delivery_status`, independently.
+ */
+export interface RelayRecipientDelivery {
+  status: DeliveryStatus;
+  /** Provider SID of the per-recipient outbound send (Twilio SMxxx). */
+  sid?: string;
+  errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
 
 /** One timeline message (GET /api/conversations/:id/messages → { messages }).
  *  Newest-first. Field names are the server's persisted shape. */
@@ -122,6 +159,24 @@ export interface Message {
   /** Set on a retry send: the tsMsgId of the message being retried. */
   retry_of?: string;
   retry_attempt?: number;
+  /**
+   * Relay group (M1.7): on an INBOUND relay message, the member key
+   * (contactId else `phone#<E164>`) of the sender — which member texted the
+   * pool number. Attribution resolves this against the roster (never the body).
+   * Absent on 1:1 messages.
+   */
+  relay_sender_key?: string;
+  /**
+   * Relay group (M1.7): true when this inbound arrived on a CLOSED relay thread
+   * (a late reply, persisted but not fanned out). Absent otherwise.
+   */
+  received_on_closed_thread?: boolean;
+  /**
+   * Relay group (M1.7): per-recipient fan-out delivery state of THIS message to
+   * the other members, keyed by member key. Present on relayed inbound + team
+   * messages; absent on 1:1 (whose single `delivery_status` is unchanged).
+   */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
   created_at: string;
   [key: string]: unknown;
 }
@@ -132,6 +187,39 @@ export interface SendMessageResult {
   providerSid: string;
   tsMsgId: string;
   status: DeliveryStatus;
+}
+
+// --- Relay groups (M1.7) ----------------------------------------------------
+
+/** One member in a create-relay-group / add-member request. `phone` is required;
+ *  `contactId` links an existing contact; `name` is the optional display name. */
+export interface RelayMemberInput {
+  phone: string;
+  contactId?: string;
+  name?: string;
+}
+
+/** POST /api/relay-groups body. At least one member is required. `tag` is an
+ *  optional placement label stored for operators. */
+export interface CreateRelayGroupBody {
+  members: RelayMemberInput[];
+  tag?: string;
+}
+
+/** POST /api/relay-groups result → { conversation }. */
+export interface CreateRelayGroupResult {
+  conversation: Conversation;
+}
+
+/** GET /api/conversations/:id/members and the add/remove mutations →
+ *  { members }. The current roster after the operation. */
+export interface RelayMembersResult {
+  members: ConversationParticipant[];
+}
+
+/** PATCH /api/conversations/:id/close body. */
+export interface SetRelayClosedBody {
+  closed: boolean;
 }
 
 // --- Contacts ---------------------------------------------------------------
@@ -371,6 +459,22 @@ export interface ConversationUpdatedEvent {
   /** Resolved contact name (or null) — so the inbox shows the name and clears
    *  the review chip the instant a contact is triaged, without a reload. */
   participant_display_name: string | null;
+  /**
+   * Relay group (M1.7): `open` | `closed` for relay_group threads; null/absent
+   * for 1:1 (implicitly open). Lets the relay UI grey out a closed thread live.
+   */
+  status?: string | null;
+  /**
+   * Relay group (M1.7): the masked pool number (E.164), or null/absent on 1:1
+   * threads. Cleared on close, re-set (fresh) on reopen.
+   */
+  pool_number?: string | null;
+  /**
+   * Relay group (M1.7): the live member roster, or null/absent on 1:1 threads.
+   * Carried on the event so the relay UI updates rosters in place on add/remove
+   * WITHOUT a refetch. Each entry carries contactId/phone/name (name optional).
+   */
+  members?: ConversationParticipant[] | null;
 }
 
 /** GET /api/events 'message.persisted' payload. */

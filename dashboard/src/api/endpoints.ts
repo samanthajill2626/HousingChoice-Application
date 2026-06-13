@@ -11,8 +11,10 @@ import type {
   ContactsPage,
   ContactType,
   Conversation,
+  ConversationParticipant,
   ConversationsPage,
   CreateContactBody,
+  CreateRelayGroupBody,
   CreateUnitBody,
   HousingFairSignup,
   InviteUserResult,
@@ -21,6 +23,7 @@ import type {
   OrgSettings,
   OrgSettingsPatch,
   PushTestResult,
+  RelayMemberInput,
   SendMessageResult,
   UnitFlyer,
   UnitItem,
@@ -138,6 +141,74 @@ export async function setAssignment(
   const res = await request<{ conversation: Conversation }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/assignment`,
     { method: 'PATCH', body: { assigneeUserId } },
+  );
+  return res.conversation;
+}
+
+// --- Relay groups (M1.7) ----------------------------------------------------
+// VAs run relay threads day-to-day (no admin gate). The team-send into a relay
+// reuses sendMessage() above — the server routes by conversation type, fanning
+// the one message out to every member from the pool number.
+
+/** POST /api/relay-groups — create a relay group (provisions a pool number +
+ *  sends the intro), returning the new conversation. → 201 { conversation }.
+ *  Throws ApiError(503,'pool_number_unavailable') when no voice number is free. */
+export async function createRelayGroup(body: CreateRelayGroupBody): Promise<Conversation> {
+  const res = await request<{ conversation: Conversation }>('/api/relay-groups', {
+    method: 'POST',
+    body,
+  });
+  return res.conversation;
+}
+
+/** GET /api/conversations/:id/members — the current relay roster. Throws
+ *  ApiError(404,'relay_group_not_found') for a 1:1 / unknown conversation. */
+export async function getRelayMembers(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.members;
+}
+
+/** POST /api/conversations/:id/members — idempotent add; returns the new roster.
+ *  Throws ApiError(409,'roster_conflict') on a concurrency conflict. */
+export async function addRelayMember(
+  conversationId: string,
+  member: RelayMemberInput,
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    { method: 'POST', body: member },
+  );
+  return res.members;
+}
+
+/** DELETE /api/conversations/:id/members/:phone — idempotent remove; returns the
+ *  new roster. The phone is the member's E.164 (path-segment encoded). */
+export async function removeRelayMember(
+  conversationId: string,
+  phone: string,
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(phone)}`,
+    { method: 'DELETE' },
+  );
+  return res.members;
+}
+
+/** PATCH /api/conversations/:id/close — close (release the pool number) or
+ *  reopen (provision a fresh one). Returns the updated conversation. */
+export async function setRelayClosed(
+  conversationId: string,
+  closed: boolean,
+): Promise<Conversation> {
+  const res = await request<{ conversation: Conversation }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/close`,
+    { method: 'PATCH', body: { closed } },
   );
   return res.conversation;
 }

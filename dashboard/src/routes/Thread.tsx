@@ -14,6 +14,7 @@ import {
   getConversation,
   markRead,
   setAssignment,
+  setRelayClosed,
   useApi,
   useEventStream,
   type Contact,
@@ -23,10 +24,14 @@ import {
 } from '../api';
 import { Button, EmptyState, Sheet, Spinner, useToast } from '../ui';
 import { ThreadHeader } from './thread/ThreadHeader';
+import { RelayThreadHeader } from './thread/RelayThreadHeader';
 import { MessageList } from './thread/MessageList';
 import { SendBox } from './thread/SendBox';
 import { ContactPanel } from './thread/ContactPanel';
+import { RelayMembersList } from './thread/RelayMembersList';
+import { ClosedThreadBanner } from './thread/ClosedThreadBanner';
 import { useThreadMessages } from './thread/useThreadMessages';
+import { useRelayMembers } from './thread/useRelayMembers';
 import { resolveIdentity } from './thread/identity';
 import { useAuth } from '../app/AuthContext';
 import styles from './Thread.module.css';
@@ -46,6 +51,14 @@ export default function Thread(): React.JSX.Element {
     refetch: refetchConversation,
   } = useApi((signal) => getConversation(conversationId, signal), [conversationId]);
 
+  // --- Relay group (M1.7) ----------------------------------------------------
+  // Detect a relay_group thread and switch to the relay surface (group header +
+  // members panel + per-recipient delivery + closed banner). 1:1 behavior is
+  // untouched (isRelay false → every relay branch below is skipped).
+  const isRelay = conversation?.type === 'relay_group';
+  const relayClosed = isRelay && conversation?.status === 'closed';
+  const relay = useRelayMembers(conversationId, isRelay);
+
   // --- Message timeline ------------------------------------------------------
   const timeline = useThreadMessages(conversationId);
 
@@ -53,7 +66,9 @@ export default function Thread(): React.JSX.Element {
   // H1: the contact is fetched HERE (lifted up) so the header identity can show
   // the real name post-triage — not just in the side panel. ContactPanel
   // receives the fetched contact + refetch as props (it no longer fetches).
-  const contactId = conversation?.participants?.[0]?.contactId;
+  // A relay_group has a multi-member roster, not a single 1:1 contact — so we do
+  // NOT fetch a contact for it (the roster panel replaces the contact panel).
+  const contactId = isRelay ? undefined : conversation?.participants?.[0]?.contactId;
   const {
     data: contact,
     loading: contactLoading,
@@ -138,6 +153,12 @@ export default function Thread(): React.JSX.Element {
   const onConversationUpdated = useCallback(
     (event: ConversationUpdatedEvent) => {
       if (event.conversationId !== conversationId) return;
+      // Relay (M1.7): the event carries the live roster — apply it in place so a
+      // member add/remove reflects WITHOUT a /members refetch. (Status + pool
+      // number live on the conversation header, refetched just below.)
+      if (event.members != null) {
+        relay.ingestRoster(event.members);
+      }
       // Skip exactly the self-echo from THIS client's markRead (unread → 0): it
       // carries no header/assignment/type change we don't already have, so the
       // refetch would be redundant. Consume the latch once; any later unread→0
@@ -146,10 +167,11 @@ export default function Thread(): React.JSX.Element {
         selfReadEchoRef.current = false;
         return;
       }
-      // Header/assignment/type may have changed — refetch the header.
+      // Header/assignment/type — and, for a relay, status + pool number — may
+      // have changed; refetch the header so the closed/reopen state is live.
       refetchConversation();
     },
-    [conversationId, refetchConversation],
+    [conversationId, refetchConversation, relay],
   );
 
   // M2: only stream while authenticated, so a mid-session session expiry stops
@@ -176,6 +198,33 @@ export default function Thread(): React.JSX.Element {
           toast.error(msg);
         })
         .finally(() => setAssigning(false));
+    },
+    [conversationId, toast, refetchConversation],
+  );
+
+  // --- Relay close / reopen (M1.7) -------------------------------------------
+  const [togglingClosed, setTogglingClosed] = useState(false);
+  const handleToggleClosed = useCallback(
+    (closed: boolean) => {
+      if (conversationId.length === 0) return;
+      setTogglingClosed(true);
+      setRelayClosed(conversationId, closed)
+        .then(() => {
+          toast.success(closed ? 'Relay group closed' : 'Relay group reopened');
+          // The server emits conversation.updated, but refetch directly too so
+          // the header reflects the new status/pool immediately for this client.
+          refetchConversation();
+        })
+        .catch((err: unknown) => {
+          const msg =
+            err instanceof ApiError
+              ? err.code === 'pool_number_unavailable'
+                ? 'No phone number is available to reopen — try again shortly.'
+                : err.message
+              : 'Could not update the relay group';
+          toast.error(msg);
+        })
+        .finally(() => setTogglingClosed(false));
     },
     [conversationId, toast, refetchConversation],
   );
@@ -248,17 +297,56 @@ export default function Thread(): React.JSX.Element {
   // The timeline is "empty" only once it has loaded with no messages.
   const showEmptyTimeline = !timeline.loading && timeline.messages.length === 0 && !timeline.error;
 
+  // Relay (M1.7): the roster forwarded to the timeline drives bubble attribution
+  // + per-recipient delivery chips. Undefined for 1:1 → 1:1 bubbles unchanged.
+  const timelineRoster = isRelay ? relay.members : undefined;
+
+  // Relay members panel — shared between the desktop side column and the sheet.
+  const relayPanel = (
+    <RelayMembersList
+      members={relay.members}
+      loading={relay.loading}
+      error={relay.error}
+      closed={Boolean(relayClosed)}
+      onAdd={relay.add}
+      onRemove={relay.remove}
+    />
+  );
+  // 1:1 contact panel — shared between the desktop side column and the sheet.
+  const contactPanel = (
+    <ContactPanel
+      contactId={contactId}
+      contact={contact}
+      loading={contactLoading}
+      error={contactError}
+      onResolved={handleContactResolved}
+    />
+  );
+
   return (
     <section className={styles.thread}>
-      <ThreadHeader
-        conversation={conversation}
-        identity={identity}
-        meUserId={meUserId}
-        onSetAssignment={handleSetAssignment}
-        assigning={assigning}
-        onOpenContact={() => setSheetOpen(true)}
-        onBack={() => navigate('/')}
-      />
+      {isRelay ? (
+        <RelayThreadHeader
+          conversation={conversation}
+          memberCount={relay.members.length}
+          toggling={togglingClosed}
+          onToggleClosed={handleToggleClosed}
+          onOpenMembers={() => setSheetOpen(true)}
+          onBack={() => navigate('/')}
+        />
+      ) : (
+        <ThreadHeader
+          conversation={conversation}
+          identity={identity}
+          meUserId={meUserId}
+          onSetAssignment={handleSetAssignment}
+          assigning={assigning}
+          onOpenContact={() => setSheetOpen(true)}
+          onBack={() => navigate('/')}
+        />
+      )}
+
+      {relayClosed && <ClosedThreadBanner />}
 
       <div className={styles.body}>
         <div className={styles.main}>
@@ -277,7 +365,11 @@ export default function Thread(): React.JSX.Element {
             <div className={styles.timelineFill}>
               <EmptyState
                 title="No messages yet"
-                description="Send the first message to start this conversation."
+                description={
+                  isRelay
+                    ? 'Send the first message to relay it to every member.'
+                    : 'Send the first message to start this conversation.'
+                }
               />
             </div>
           ) : (
@@ -288,33 +380,30 @@ export default function Thread(): React.JSX.Element {
               onLoadOlder={timeline.loadOlder}
               onRetry={handleRetry}
               {...(retryingId !== undefined && { retryingId })}
+              {...(timelineRoster !== undefined && { roster: timelineRoster })}
             />
           )}
 
-          <SendBox onSend={timeline.send} optedOut={optedOut} />
+          <SendBox
+            onSend={timeline.send}
+            optedOut={optedOut}
+            {...(relayClosed && {
+              disabledNote: 'This relay group is closed — reopen it to send.',
+            })}
+          />
         </div>
 
         {/* Side column on wide screens. */}
-        <aside className={styles.side}>
-          <ContactPanel
-            contactId={contactId}
-            contact={contact}
-            loading={contactLoading}
-            error={contactError}
-            onResolved={handleContactResolved}
-          />
-        </aside>
+        <aside className={styles.side}>{isRelay ? relayPanel : contactPanel}</aside>
       </div>
 
       {/* Bottom sheet on mobile. */}
-      <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)} title="Contact">
-        <ContactPanel
-          contactId={contactId}
-          contact={contact}
-          loading={contactLoading}
-          error={contactError}
-          onResolved={handleContactResolved}
-        />
+      <Sheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        title={isRelay ? 'Members' : 'Contact'}
+      >
+        {isRelay ? relayPanel : contactPanel}
       </Sheet>
     </section>
   );

@@ -6,7 +6,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { Spinner } from '../../ui';
 import { MessageBubble } from './MessageBubble';
 import { isPending, type TimelineMessage } from './useThreadMessages';
-import type { Message } from '../../api';
+import type { ConversationParticipant, Message } from '../../api';
 import styles from './MessageList.module.css';
 
 export interface MessageListProps {
@@ -17,6 +17,9 @@ export interface MessageListProps {
   onRetry: (message: Message) => void;
   /** tsMsgId/localId currently being (re)sent — disables that bubble's Retry. */
   retryingId?: string;
+  /** Relay group (M1.7): the live roster, forwarded to each bubble for relay
+   *  attribution + per-recipient delivery chips. Absent on 1:1 threads. */
+  roster?: ConversationParticipant[];
 }
 
 /** Scroll threshold (px) from the top that triggers a "load older" page. */
@@ -29,6 +32,7 @@ export function MessageList({
   onLoadOlder,
   onRetry,
   retryingId,
+  roster,
 }: MessageListProps): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -96,7 +100,15 @@ export function MessageList({
         {messages.map((m) => {
           const key = isPending(m) ? m.localId : m.tsMsgId;
           const isRetrying = retryingId !== undefined && retryingId === key;
-          return <MessageBubble key={key} message={m} onRetry={onRetry} retrying={isRetrying} />;
+          return (
+            <MessageBubble
+              key={key}
+              message={m}
+              onRetry={onRetry}
+              retrying={isRetrying}
+              {...(roster !== undefined && { roster })}
+            />
+          );
         })}
       </ul>
       <div ref={bottomRef} />

@@ -4,6 +4,14 @@
   gap: var(--hc-space-3);
 }
 
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hc-space-3);
+  flex-wrap: wrap;
+}
+
 .heading {
   font-size: var(--hc-font-size-xl);
   font-weight: var(--hc-font-weight-bold);

@@ -31,6 +31,7 @@ import ContactNew from '../routes/ContactNew.js';
 import Units from '../routes/Units.js';
 import UnitDetail from '../routes/UnitDetail.js';
 import UnitForm from '../routes/UnitForm.js';
+import NewRelayGroup from '../routes/NewRelayGroup.js';
 
 export function AppRouter(): React.JSX.Element {
   return (
@@ -63,6 +64,9 @@ export function AppRouter(): React.JSX.Element {
             }
           />
           <Route path="quick-reply/:callId" element={<QuickReply />} />
+
+          {/* Relay groups (M1.7) — create a new masked group thread. */}
+          <Route path="relay-groups/new" element={<NewRelayGroup />} />
 
           {/* Records — Contacts (M1.5). new BEFORE :contactId so "new" is not
            *  swallowed as an id. */}

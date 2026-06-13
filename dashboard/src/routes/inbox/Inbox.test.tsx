@@ -308,6 +308,32 @@ describe('<Inbox>', () => {
     expect(listConversationsMock).toHaveBeenCalledTimes(2);
   });
 
+  it('shows a "Relay · N" badge for a relay_group row (and never a fabricated name)', async () => {
+    listConversationsMock.mockResolvedValue(
+      page([
+        summary({
+          conversationId: 'cr',
+          type: 'relay_group',
+          participant_phone: '+13135559000',
+          participant_display_name: null,
+          participants: [
+            { contactId: 'c-a', phone: '+13135550001', name: 'Alice' },
+            { contactId: '', phone: '+14155550100' },
+          ],
+          preview: 'team broadcast',
+        }),
+      ]),
+    );
+
+    renderInbox();
+
+    expect(await screen.findByText('Relay · 2')).toBeInTheDocument();
+    // The row's name is the honest group label, not a fabricated person.
+    expect(screen.getByText('Relay group')).toBeInTheDocument();
+    // No needs-review chip for a relay row.
+    expect(screen.queryByText('Needs review')).not.toBeInTheDocument();
+  });
+
   it('paginates via Load more using nextCursor', async () => {
     listConversationsMock.mockResolvedValueOnce(
       page([summary({ conversationId: 'c1', preview: 'page one' })], 'cursor-2'),

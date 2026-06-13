@@ -15,6 +15,11 @@ export interface SendBoxProps {
   onSend: (body: string) => Promise<void>;
   /** Hard-disable + opt-out note when the contact has opted out (STOP). */
   optedOut: boolean;
+  /**
+   * Generic hard-disable with a custom note (M1.7 relay: a CLOSED relay group
+   * accepts no sends). Independent of optedOut so the message is accurate.
+   */
+  disabledNote?: string;
 }
 
 /** Map a send-refusal ApiError to the human inline message. */
@@ -26,6 +31,8 @@ function refusalMessage(err: ApiError): string {
       return 'This conversation is in manual mode — automated sending is paused.';
     case 'breaker_open':
       return 'Sending is temporarily paused (rate limit). Try again shortly.';
+    case 'relay_closed':
+      return 'This relay group is closed — reopen it to send.';
     case 'network_error':
       return 'Network problem — your message was not sent.';
     default:
@@ -33,14 +40,14 @@ function refusalMessage(err: ApiError): string {
   }
 }
 
-export function SendBox({ onSend, optedOut }: SendBoxProps): React.JSX.Element {
+export function SendBox({ onSend, optedOut, disabledNote }: SendBoxProps): React.JSX.Element {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   // Latch opt-out either from the conversation flag or a live 403/409 refusal.
   const [refusedOptOut, setRefusedOptOut] = useState(false);
 
-  const disabled = optedOut || refusedOptOut;
+  const disabled = optedOut || refusedOptOut || disabledNote !== undefined;
 
   async function doSend(): Promise<void> {
     const body = draft.trim();
@@ -72,7 +79,9 @@ export function SendBox({ onSend, optedOut }: SendBoxProps): React.JSX.Element {
   if (disabled) {
     return (
       <div className={styles.optedOut} role="status">
-        This contact has opted out (STOP). Texting is disabled.
+        {optedOut || refusedOptOut
+          ? 'This contact has opted out (STOP). Texting is disabled.'
+          : disabledNote}
       </div>
     );
   }

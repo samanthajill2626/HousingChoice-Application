@@ -22,6 +22,20 @@
   min-width: 0;
 }
 
+/* Relay group header: a neutral group glyph in place of the 1:1 Avatar (no
+ * name → no fabricated identity). Sized to match Avatar size="sm". */
+.groupAvatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--hc-radius-pill);
+  background-color: var(--hc-color-info-bg);
+  color: var(--hc-color-info);
+  flex: none;
+}
+
 .name {
   display: flex;
   align-items: center;

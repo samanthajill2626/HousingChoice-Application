@@ -76,3 +76,13 @@ export function displayName(c: ConversationSummary): string {
 export function needsReview(c: ConversationSummary): boolean {
   return c.type === 'unknown_1to1' && !c.participant_display_name;
 }
+
+/** True for a relay-group inbox row (M1.7). */
+export function isRelayGroup(c: ConversationSummary): boolean {
+  return c.type === 'relay_group';
+}
+
+/** Member count for a relay-group row (the roster length; 0 when none). */
+export function relayMemberCount(c: ConversationSummary): number {
+  return c.participants?.length ?? 0;
+}

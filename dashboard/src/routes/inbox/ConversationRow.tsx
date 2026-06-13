@@ -5,7 +5,13 @@
 import { NavLink } from 'react-router-dom';
 import { Avatar, Badge } from '../../ui/index.js';
 import type { ConversationSummary } from '../../api/index.js';
-import { displayName, formatRelativeTime, needsReview } from './formatters.js';
+import {
+  displayName,
+  formatRelativeTime,
+  isRelayGroup,
+  needsReview,
+  relayMemberCount,
+} from './formatters.js';
 import styles from './ConversationRow.module.css';
 
 export interface ConversationRowProps {
@@ -15,8 +21,12 @@ export interface ConversationRowProps {
 }
 
 export function ConversationRow({ conversation, now }: ConversationRowProps): React.JSX.Element {
-  const review = needsReview(conversation);
-  const name = displayName(conversation);
+  const relay = isRelayGroup(conversation);
+  // Honest identity: a relay group is a GROUP, not a person — never a fabricated
+  // contact name. 1:1 rows keep the exact needs-review + name behavior.
+  const review = !relay && needsReview(conversation);
+  const name = relay ? 'Relay group' : displayName(conversation);
+  const memberCount = relayMemberCount(conversation);
   const unread = conversation.unread_count > 0;
   const relative = formatRelativeTime(conversation.last_activity_at, now);
 
@@ -25,9 +35,9 @@ export function ConversationRow({ conversation, now }: ConversationRowProps): Re
       <NavLink
         to={`/conversations/${encodeURIComponent(conversation.conversationId)}`}
         className={({ isActive }) => `${styles.link} ${isActive ? styles.linkActive : ''}`}
-        aria-label={`Conversation with ${name}${unread ? `, ${conversation.unread_count} unread` : ''}${review ? ', needs review' : ''}`}
+        aria-label={`${relay ? 'Relay group' : `Conversation with ${name}`}${unread ? `, ${conversation.unread_count} unread` : ''}${review ? ', needs review' : ''}`}
       >
-        <Avatar name={review ? undefined : name} review={review} />
+        <Avatar name={review || relay ? undefined : name} review={review} />
 
         <div className={styles.body}>
           <div className={styles.topline}>
@@ -52,8 +62,13 @@ export function ConversationRow({ conversation, now }: ConversationRowProps): Re
             )}
           </div>
 
-          {(review || conversation.assignment !== null || conversation.sms_opt_out) && (
+          {(review || relay || conversation.assignment !== null || conversation.sms_opt_out) && (
             <div className={styles.cues}>
+              {relay && (
+                <Badge tone="info" title={`Relay group · ${memberCount} members`}>
+                  Relay · {memberCount}
+                </Badge>
+              )}
               {review && (
                 <Badge tone="review" dot title="Identity not yet triaged">
                   Needs review

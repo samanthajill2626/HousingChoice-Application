@@ -1,16 +1,25 @@
 // users repo — the team (doc §5: PK userId, byEmail GSI, Google identity
-// sub + email, role). M1.3: auto-provisioning on first allowlisted login,
-// session lookups, and the user:role ops script's runtime counterpart.
+// sub + email, role). M1.3: INVITE-FIRST access (an admin pre-creates a user;
+// the login path can never mint a user), session lookups, and the user:invite
+// / user:role ops scripts' runtime counterpart.
 //
 // Roles are 'admin' | 'va' (README deviations table 2026-06-12: the doc's
 // founder_admin | va renamed by operator preference, semantics identical).
 //
-// RACE SAFETY: userId is DETERMINISTIC from the lowercased email
-// (userIdForEmail), so two concurrent first logins for one email mint the
-// SAME key and the attribute_not_exists(userId) conditional write lets
-// exactly one create win — the same conditional-create discipline as
-// contactsRepo, but with the identity baked into the key so no duplicate
-// users can exist per email (the byEmail GSI is a lookup, not a guard).
+// LIFECYCLE (status): an invited record carries email + role + status
+// 'invited' + created_at + session_epoch 1, but NO google_sub yet. The user's
+// FIRST successful login activates the record (writes google_sub, flips status
+// → 'active', stamps last_login_at). A login for an email with no record is
+// REFUSED — there is no auto-provision (README deviations 2026-06-12: access
+// is invite-gated, the domain allowlist is retained only as defense-in-depth).
+//
+// RACE SAFETY: userId is DETERMINISTIC from the normalized email
+// (userIdForEmail), so a re-invite of the same email targets the SAME key and
+// the attribute_not_exists(userId) conditional write makes invite idempotent
+// (the second caller never overwrites the first). Two concurrent first logins
+// for one invited user issue conditional google_sub writes — exactly one wins
+// the activation; the loser is a harmless no-op (its google_sub equals the
+// winner's). The byEmail GSI is a lookup, not a guard.
 import { createHash } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -28,19 +37,31 @@ export function isUserRole(value: unknown): value is UserRole {
   return value === 'admin' || value === 'va';
 }
 
+/**
+ * User lifecycle status. 'invited' = pre-created by an admin, never signed in
+ * (no google_sub). 'active' = has completed a first login (google_sub written).
+ * Items created before this field existed have no status; activateOnLogin
+ * still flips them to 'active' on their next login.
+ */
+export type UserStatus = 'invited' | 'active';
+
 export interface UserItem {
   userId: string;
-  /** Lowercased login email — the byEmail GSI key. */
+  /** Normalized login email — the byEmail GSI key (normalizeEmail). */
   email: string;
-  /** Google OIDC subject (stable account id) recorded at provisioning. */
-  google_sub: string;
+  /**
+   * Google OIDC subject (stable account id). Recorded on first login when an
+   * invited record is activated — ABSENT on an 'invited' record.
+   */
+  google_sub?: string;
   role: UserRole;
+  /** Lifecycle status (see UserStatus). */
+  status?: UserStatus;
   /**
    * Server-side session kill switch: sealed into every session cookie at
    * login and re-checked by sessionMiddleware. Bumping it (logout, role
-   * change) revokes ALL of the user's sessions everywhere. Provisioning
-   * writes 1; items provisioned before the field existed read as 1 via
-   * sessionEpochOf().
+   * change) revokes ALL of the user's sessions everywhere. Invite writes 1;
+   * items provisioned before the field existed read as 1 via sessionEpochOf().
    */
   session_epoch?: number;
   created_at: string;
@@ -54,25 +75,50 @@ export function sessionEpochOf(item: UserItem): number {
 }
 
 /**
- * Deterministic userId for an email: `usr_<sha256(lowercased email) hex/24>`.
- * This is what makes auto-provisioning race-safe (see module header) — and
- * it lets a losing racer re-read the winner's item by id without a GSI read
- * (GSIs are eventually consistent; the base-table Get is not).
+ * The ONE email normalization used everywhere an email is hashed to an id or
+ * queried (invite, login lookup, the ops scripts mirror this exactly in
+ * scripts/lib/userInviteCore.mjs / userRoleCore.mjs): lowercase + trim. Keep
+ * this and the ops-script normalizeEmail() byte-for-byte identical — they
+ * compute the same byEmail GSI key and the same deterministic userId.
+ */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/**
+ * Deterministic userId for an email: `usr_<sha256(normalized email) hex/24>`.
+ * This is what makes invite idempotent and activation race-safe (see module
+ * header) — and it lets a caller re-read a winner's item by id without a GSI
+ * read (GSIs are eventually consistent; the base-table Get is not).
  */
 export function userIdForEmail(email: string): string {
-  return `usr_${createHash('sha256').update(email.trim().toLowerCase(), 'utf8').digest('hex').slice(0, 24)}`;
+  return `usr_${createHash('sha256').update(normalizeEmail(email), 'utf8').digest('hex').slice(0, 24)}`;
+}
+
+/** invite() result: created=true when THIS call minted the invited record. */
+export interface InviteResult {
+  created: boolean;
+  user: UserItem;
 }
 
 export interface UsersRepo {
-  /** Lowercases the input; byEmail GSI Query; undefined when unknown. */
+  /** Normalizes the input; byEmail GSI Query; undefined when unknown. */
   findByEmail(email: string): Promise<UserItem | undefined>;
   findById(userId: string): Promise<UserItem | undefined>;
   /**
-   * Conditional create (attribute_not_exists(userId)): true when THIS call
-   * created the item, false when the user already existed. Existing items
-   * are never overwritten.
+   * Pre-create ("invite") a user: conditional put at the deterministic id
+   * (attribute_not_exists(userId)). IDEMPOTENT — re-inviting an existing user
+   * is a no-op that returns the existing record UNCHANGED (role/status/epoch
+   * are never reset). Returns { created, user }.
    */
-  createIfAbsent(item: UserItem): Promise<boolean>;
+  invite(input: { email: string; role: UserRole }): Promise<InviteResult>;
+  /**
+   * Activate an invited user on their first login: write google_sub, flip
+   * status → 'active', stamp last_login_at — in ONE update. The google_sub
+   * write is conditional-safe so two concurrent first logins don't clobber.
+   * Throws if the user does not exist (the caller must have found it first).
+   */
+  activateOnLogin(userId: string, googleSub: string, at?: string): Promise<void>;
   /** Stamp last_login_at (ISO 8601); throws if the user does not exist. */
   touchLastLogin(userId: string, at?: string): Promise<void>;
   /** Flip the role; throws if the user does not exist (ops script path). */
@@ -90,14 +136,14 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
   const table = tableName('users', deps.env);
   const log = deps.logger ?? defaultLogger;
 
-  return {
+  const repo: UsersRepo = {
     async findByEmail(email) {
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,
           IndexName: 'byEmail',
           KeyConditionExpression: 'email = :e',
-          ExpressionAttributeValues: { ':e': email.trim().toLowerCase() },
+          ExpressionAttributeValues: { ':e': normalizeEmail(email) },
         }),
       );
       // Deterministic userIds make duplicate emails impossible; [0] is THE user.
@@ -109,7 +155,16 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       return Item as UserItem | undefined;
     },
 
-    async createIfAbsent(item) {
+    async invite({ email, role }) {
+      const normalized = normalizeEmail(email);
+      const item: UserItem = {
+        userId: userIdForEmail(normalized),
+        email: normalized,
+        role,
+        status: 'invited', // no google_sub yet — written on first login
+        session_epoch: 1, // the kill switch starts at 1 (bumpSessionEpoch)
+        created_at: new Date().toISOString(),
+      };
       try {
         await doc.send(
           new PutCommand({
@@ -120,13 +175,40 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
         );
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          return false; // lost the race / already provisioned — never overwrite
+          // Already invited (or active) — idempotent: return the existing
+          // record UNCHANGED. Never reset role/status/epoch.
+          const existing = await repo.findById(item.userId);
+          if (!existing) {
+            throw new Error(
+              `invite(${item.userId}): conditional create failed but the user is not readable`,
+            );
+          }
+          return { created: false, user: existing };
         }
         throw err;
       }
-      // IDs + role only — emails stay out of logs (PII posture, doc §9).
-      log.info({ userId: item.userId, role: item.role }, 'user created');
-      return true;
+      // IDs + role only — emails stay out of steady-state logs (PII posture,
+      // doc §9). The admin-facing invite AUDIT event (services layer) records
+      // the email; that is an audit-relevant operator action.
+      log.info({ userId: item.userId, role: item.role }, 'user invited');
+      return { created: true, user: item };
+    },
+
+    async activateOnLogin(userId, googleSub, at = new Date().toISOString()) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          // One write: set google_sub (conditional-safe — only if absent, so
+          // a racing second first-login is a harmless no-op rather than a
+          // clobber), flip status → active, stamp last_login_at.
+          UpdateExpression:
+            'SET google_sub = if_not_exists(google_sub, :sub), #status = :active, last_login_at = :at',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':sub': googleSub, ':active': 'active', ':at': at },
+        }),
+      );
     },
 
     async touchLastLogin(userId, at = new Date().toISOString()) {
@@ -177,4 +259,6 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       return epoch;
     },
   };
+
+  return repo;
 }

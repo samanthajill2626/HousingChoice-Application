@@ -1,9 +1,10 @@
 // User role changes (M1.3). Powers:
 //   npm run user:role -- <dev|prod> <email> <admin|va>
 //
-// First login auto-provisions every allowlisted user as 'va' (the login path
-// can never mint an admin) — THIS script is the only promotion/demotion
-// path. The operator promotes the first admin with it.
+// Auth is INVITE-FIRST (README deviations 2026-06-12): users are pre-created
+// by `npm run user:invite` and never auto-provisioned. THIS script changes an
+// EXISTING user's role (promote/demote). It NEVER creates a user — if the
+// target does not exist, invite them first.
 //
 // Rules (the secrets.mjs conventions):
 //   - account guard FIRST (assertHousingChoiceAccount) and AWS_PROFILE forced
@@ -11,8 +12,7 @@
 //   - direct DynamoDB against the hc-<env>- tables: users via the byEmail
 //     GSI, then a conditional update, then a role_changed audit event
 //     (entityKey users#<userId> — the auditRepo convention).
-//   - the user must already exist: they log in once (auto-provisioned 'va'),
-//     then get promoted. This script never creates users.
+//   - the user must already exist (invite first). This script never creates users.
 //   - the role flip ALSO bumps session_epoch (one atomic update): the user's
 //     active sessions are revoked within the app's ~60s epoch-cache TTL
 //     (middleware/auth), so the new role applies at their next sign-in —
@@ -33,8 +33,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 const USAGE = `usage: node scripts/userRole.mjs <dev|prod> <email> <admin|va>
   (via npm: npm run user:role -- dev someone@housingchoice.org admin)
-  Sets an EXISTING user's role. Users are auto-provisioned as 'va' on their
-  first allowlisted Google login — have them log in once, then run this.`;
+  Changes an EXISTING user's role. Users are created by \`npm run user:invite\`
+  (auth is invite-first) — invite the user first, then run this to promote/demote.`;
 
 function fail(message) {
   console.error(message);
@@ -91,8 +91,9 @@ const items = JSON.parse(queryJson).Items ?? [];
 if (items.length === 0) {
   fail(
     `[user:role] no user with email ${email} in ${usersTable}.\n` +
-      `Users are created on their FIRST allowlisted Google login (auto-provisioned as 'va').\n` +
-      `Have them sign in once at the ${env} dashboard, then re-run this.`,
+      `Auth is invite-first — users must be invited before they can log in or be promoted.\n` +
+      `Invite them first: npm run user:invite -- ${env} ${email} ${role}\n` +
+      `(that already sets the role you want — re-run this only to change it later).`,
   );
 }
 const userId = items[0]?.userId?.S;

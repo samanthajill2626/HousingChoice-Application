@@ -10,7 +10,13 @@
 import { DEV_SESSION_SECRET_DEFAULT } from '../../src/lib/config.js';
 import { seal, SESSION_COOKIE_NAME } from '../../src/lib/sessionCookie.js';
 import { SESSION_TTL_MS, type SessionUser } from '../../src/middleware/auth.js';
-import { sessionEpochOf, type UserItem, type UsersRepo } from '../../src/repos/usersRepo.js';
+import {
+  normalizeEmail,
+  sessionEpochOf,
+  userIdForEmail,
+  type UserItem,
+  type UsersRepo,
+} from '../../src/repos/usersRepo.js';
 
 export const TEST_SESSION_USER: SessionUser = {
   userId: 'usr_testva00000000000000000',
@@ -18,13 +24,31 @@ export const TEST_SESSION_USER: SessionUser = {
   role: 'va',
 };
 
-/** A users-table item for TEST_SESSION_USER (epoch 1) — the standard seed. */
+/**
+ * A users-table item for TEST_SESSION_USER (epoch 1) — the standard seed. The
+ * user is 'active' (invite-first: seeded users must have completed a login so
+ * the api/webhook auth gates still authenticate them).
+ */
 export function testUserItem(overrides: Partial<UserItem> = {}): UserItem {
   return {
     userId: TEST_SESSION_USER.userId,
     email: TEST_SESSION_USER.email,
     google_sub: 'test-google-sub',
     role: TEST_SESSION_USER.role,
+    status: 'active',
+    session_epoch: 1,
+    created_at: '2026-06-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** An 'invited' record (no google_sub yet) — the pre-login state. */
+export function invitedUserItem(overrides: Partial<UserItem> = {}): UserItem {
+  return {
+    userId: TEST_SESSION_USER.userId,
+    email: TEST_SESSION_USER.email,
+    role: TEST_SESSION_USER.role,
+    status: 'invited',
     session_epoch: 1,
     created_at: '2026-06-01T00:00:00.000Z',
     ...overrides,
@@ -63,8 +87,10 @@ export const TEST_SESSION_COOKIE = sessionCookieFor();
 
 export interface FakeUsersRepo {
   users: Map<string, UserItem>;
-  /** userIds actually CREATED by createIfAbsent, in order. */
+  /** userIds actually CREATED by invite (the winning conditional put), in order. */
   creates: string[];
+  /** userIds activated by activateOnLogin (first-login flip), in order. */
+  activations: string[];
   /** Every findById call, in order — asserts the epoch cache's read economy. */
   findByIdCalls: string[];
   repo: UsersRepo;
@@ -74,21 +100,42 @@ export interface FakeUsersRepo {
 export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
   const users = new Map<string, UserItem>(seed.map((u) => [u.userId, { ...u }]));
   const creates: string[] = [];
+  const activations: string[] = [];
   const findByIdCalls: string[] = [];
   const repo: UsersRepo = {
     async findByEmail(email) {
-      const e = email.trim().toLowerCase();
+      const e = normalizeEmail(email);
       return [...users.values()].find((u) => u.email === e);
     },
     async findById(userId) {
       findByIdCalls.push(userId);
       return users.get(userId);
     },
-    async createIfAbsent(item) {
-      if (users.has(item.userId)) return false;
-      users.set(item.userId, { ...item });
-      creates.push(item.userId);
-      return true;
+    async invite({ email, role }) {
+      const normalized = normalizeEmail(email);
+      const userId = userIdForEmail(normalized);
+      const existing = users.get(userId);
+      if (existing) return { created: false, user: existing }; // idempotent no-op
+      const item: UserItem = {
+        userId,
+        email: normalized,
+        role,
+        status: 'invited',
+        session_epoch: 1,
+        created_at: new Date().toISOString(),
+      };
+      users.set(userId, { ...item });
+      creates.push(userId);
+      return { created: true, user: item };
+    },
+    async activateOnLogin(userId, googleSub, at = new Date().toISOString()) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`activateOnLogin: no user ${userId}`);
+      // if_not_exists(google_sub): a racing second activation never clobbers.
+      if (user.google_sub === undefined) user.google_sub = googleSub;
+      user.status = 'active';
+      user.last_login_at = at;
+      activations.push(userId);
     },
     async touchLastLogin(userId, at = new Date().toISOString()) {
       const user = users.get(userId);
@@ -107,5 +154,5 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       return user.session_epoch;
     },
   };
-  return { users, creates, findByIdCalls, repo };
+  return { users, creates, activations, findByIdCalls, repo };
 }

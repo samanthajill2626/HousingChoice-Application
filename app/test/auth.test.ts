@@ -1,8 +1,9 @@
 // M1.3 unit tests: the auth surface —
 //   evaluateIdentity        the domain allowlist gate (pure)
 //   GET  /auth/login        302 to the provider + sealed state cookie
-//   GET  /auth/callback     exchange, allowlist 403s, auto-provisioning,
-//                           session cookie, race behavior
+//   GET  /auth/callback     exchange, allowlist 403s, INVITE-gated access
+//                           (not-invited 403, first-login activation),
+//                           session cookie, activation race behavior
 //   POST /auth/logout       session cleared
 //   GET  /auth/me           shapes (200 / 401)
 //   /api requireAuth        401 without/with-tampered session, SSE included
@@ -38,8 +39,9 @@ import {
 import { evaluateIdentity } from '../src/routes/auth.js';
 import type { UserItem } from '../src/repos/usersRepo.js';
 import { userIdForEmail } from '../src/repos/usersRepo.js';
-import { findOrCreateUser } from '../src/services/userProvisioning.js';
+import { AccessDeniedError, resolveInvitedUser } from '../src/services/resolveInvitedUser.js';
 import {
+  invitedUserItem,
   makeFakeUsersRepo,
   sessionCookieFor,
   testUserItem,
@@ -246,9 +248,15 @@ describe('GET /auth/login', () => {
 
 // --- GET /auth/callback -----------------------------------------------------------
 
-describe('GET /auth/callback — happy path + provisioning', () => {
-  it('auto-creates the user as VA on first login, audits it, sets the session cookie, redirects /', async () => {
-    const { app, fakeUsers, audits, completeCalls } = makeAuthApp();
+describe('GET /auth/callback — happy path + invite activation', () => {
+  it('activates an INVITED user on first login, audits user_activated, sets the session cookie, redirects /', async () => {
+    const expectedUserId = userIdForEmail('va@housingchoice.org');
+    // Invite-first: the user must already exist (status 'invited', no google_sub).
+    const { app, fakeUsers, audits, completeCalls } = makeAuthApp({
+      seedUsers: [
+        invitedUserItem({ userId: expectedUserId, email: 'va@housingchoice.org', role: 'va' }),
+      ],
+    });
     const res = await callback(app);
 
     expect(res.status).toBe(302);
@@ -264,21 +272,22 @@ describe('GET /auth/callback — happy path + provisioning', () => {
       },
     ]);
 
-    const expectedUserId = userIdForEmail('va@housingchoice.org');
-    expect(fakeUsers.creates).toEqual([expectedUserId]);
+    // No CREATE on the login path — only an activation of the existing invite.
+    expect(fakeUsers.creates).toEqual([]);
+    expect(fakeUsers.activations).toEqual([expectedUserId]);
     const user = fakeUsers.users.get(expectedUserId)!;
     expect(user).toMatchObject({
       email: 'va@housingchoice.org',
-      google_sub: 'google-sub-1',
-      role: 'va', // first login NEVER mints an admin
+      google_sub: 'google-sub-1', // written on first login
+      role: 'va', // login NEVER changes the invited role
+      status: 'active', // invited → active
     });
-    expect(typeof user.created_at).toBe('string');
     expect(typeof user.last_login_at).toBe('string');
 
     expect(audits).toEqual([
       {
         entityKey: `users#${expectedUserId}`,
-        eventType: 'user_provisioned',
+        eventType: 'user_activated',
         payload: { email: 'va@housingchoice.org', role: 'va', google_sub: 'google-sub-1' },
       },
     ]);
@@ -306,22 +315,27 @@ describe('GET /auth/callback — happy path + provisioning', () => {
     expect(line).toContain('Path=/');
   });
 
-  it('second login finds the user by email — no second create, last_login touched, role preserved', async () => {
-    const { app, fakeUsers, audits } = makeAuthApp();
+  it('second login of an ACTIVE user — no re-activation, last_login touched, role preserved', async () => {
     const userId = userIdForEmail('va@housingchoice.org');
-    // Pre-promoted admin: login must keep the role, not reset it.
-    fakeUsers.users.set(userId, {
-      userId,
-      email: 'va@housingchoice.org',
-      google_sub: 'google-sub-1',
-      role: 'admin',
-      created_at: '2026-06-01T00:00:00.000Z',
+    // Pre-promoted, already-active admin: login must keep the role, not reset it.
+    const { app, fakeUsers, audits } = makeAuthApp({
+      seedUsers: [
+        {
+          userId,
+          email: 'va@housingchoice.org',
+          google_sub: 'google-sub-1',
+          role: 'admin',
+          status: 'active',
+          created_at: '2026-06-01T00:00:00.000Z',
+        },
+      ],
     });
 
     const res = await callback(app);
     expect(res.status).toBe(302);
     expect(fakeUsers.creates).toEqual([]); // found, not created
-    expect(audits).toEqual([]); // no user_provisioned for an existing user
+    expect(fakeUsers.activations).toEqual([]); // already active — no re-activation
+    expect(audits).toEqual([]); // no user_activated for an active user
     expect(typeof fakeUsers.users.get(userId)!.last_login_at).toBe('string');
 
     const me = await request(app)
@@ -331,9 +345,11 @@ describe('GET /auth/callback — happy path + provisioning', () => {
     expect(me.body.role).toBe('admin');
   });
 
-  it('provisioning race: the conditional-create loser still logs in as the winner (one user, one audit)', async () => {
-    const { fakeUsers, audits } = makeAuthApp();
-    // Drive the service directly with the same fake (conditional semantics):
+  it('activation race: two concurrent first logins activate once, both see the same user (one audit)', async () => {
+    const userId = userIdForEmail(VA_IDENTITY.email);
+    const { fakeUsers, audits } = makeAuthApp({
+      seedUsers: [invitedUserItem({ userId, email: VA_IDENTITY.email, role: 'va' })],
+    });
     const deps = {
       usersRepo: fakeUsers.repo,
       auditRepo: {
@@ -343,13 +359,24 @@ describe('GET /auth/callback — happy path + provisioning', () => {
       },
     };
     const [a, b] = await Promise.all([
-      findOrCreateUser(deps, VA_IDENTITY),
-      findOrCreateUser(deps, VA_IDENTITY),
+      resolveInvitedUser(deps, VA_IDENTITY),
+      resolveInvitedUser(deps, VA_IDENTITY),
     ]);
     expect(a.user.userId).toBe(b.user.userId);
-    expect([a.created, b.created].filter(Boolean)).toHaveLength(1); // exactly one winner
-    expect(fakeUsers.creates).toHaveLength(1);
-    expect(audits.filter((e) => e.eventType === 'user_provisioned')).toHaveLength(1);
+    expect(fakeUsers.users.get(userId)!.status).toBe('active');
+    // The same google_sub either way (if_not_exists: no clobber).
+    expect(fakeUsers.users.get(userId)!.google_sub).toBe(VA_IDENTITY.sub);
+  });
+
+  it('refuses a verified, allowlisted, but UN-invited identity with AccessDeniedError (no create)', async () => {
+    const { fakeUsers } = makeAuthApp(); // empty users table — nobody invited
+    const deps = {
+      usersRepo: fakeUsers.repo,
+      auditRepo: { async append() {} },
+    };
+    await expect(resolveInvitedUser(deps, VA_IDENTITY)).rejects.toBeInstanceOf(AccessDeniedError);
+    expect(fakeUsers.creates).toEqual([]);
+    expect(fakeUsers.activations).toEqual([]);
   });
 });
 
@@ -388,9 +415,12 @@ describe('GET /auth/callback — refusals', () => {
     expect(res.status).toBe(403);
   });
 
-  it('allows when hd is absent but the email domain is allowlisted (documented decision)', async () => {
+  it('allows when hd is absent but the email domain is allowlisted AND the user is invited', async () => {
     const noHd: AuthIdentity = { sub: 's', email: 'va@housingchoice.org', emailVerified: true };
-    const { app } = makeAuthApp({ identity: noHd });
+    const { app } = makeAuthApp({
+      identity: noHd,
+      seedUsers: [invitedUserItem({ userId: userIdForEmail(noHd.email), email: noHd.email })],
+    });
     const res = await callback(app);
     expect(res.status).toBe(302);
   });
@@ -432,6 +462,61 @@ describe('GET /auth/callback — refusals', () => {
     expect(res.body.error).toBe('login_failed');
     const warn = capture.atLevel(40).find((l) => l['msg'] === 'oauth code exchange failed');
     expect(warn).toBeDefined();
+  });
+});
+
+// --- GET /auth/callback — invite gate (the access decision) -------------------------
+
+describe('GET /auth/callback — invite gate', () => {
+  it('403 not_invited for a verified, allowlisted, but UN-invited account — no session, no audit', async () => {
+    // VA_IDENTITY passes the domain allowlist; the users table is empty.
+    const { app, fakeUsers, audits } = makeAuthApp();
+    const res = await callback(app);
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'not_invited', detail: 'ask an admin for access' });
+    expect(fakeUsers.creates).toEqual([]);
+    expect(fakeUsers.activations).toEqual([]);
+    expect(audits).toEqual([]);
+    expect(setCookieValue(res, SESSION_COOKIE_NAME)).toBeUndefined();
+  });
+
+  it('serves the not-invited 403 as its own HTML page (distinct from "Domain not allowed")', async () => {
+    const { app } = makeAuthApp();
+    const res = await request(app)
+      .get('/auth/callback?code=fake-code&state=state-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', stateCookie())
+      .set('accept', 'text/html');
+    expect(res.status).toBe(403);
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.text).toContain('No access yet');
+    expect(res.text).not.toContain('Domain not allowed');
+  });
+
+  it('the two 403s log DISTINCT reasons (domain_not_allowed vs not_invited), neither logging the email', async () => {
+    // not-invited: allowlisted domain, no invite.
+    const notInvited = makeAuthApp();
+    await callback(notInvited.app);
+    const notInvitedWarn = notInvited.capture
+      .atLevel(40)
+      .find((l) => l['msg'] === 'login refused — not invited');
+    expect(notInvitedWarn).toBeDefined();
+    expect(notInvitedWarn!['reason']).toBe('not_invited');
+    expect(notInvitedWarn!['emailDomain']).toBe('housingchoice.org');
+    // No email anywhere in the line.
+    expect(JSON.stringify(notInvitedWarn)).not.toContain('va@housingchoice.org');
+
+    // domain refusal: a different message + reason.
+    const wrongDomain = makeAuthApp({
+      identity: { sub: 's', email: 'outsider@gmail.com', emailVerified: true },
+    });
+    await callback(wrongDomain.app);
+    const domainWarn = wrongDomain.capture
+      .atLevel(40)
+      .find((l) => l['msg'] === 'login refused by domain allowlist');
+    expect(domainWarn).toBeDefined();
+    expect(domainWarn!['reason']).toBe('domain_not_allowed');
+    expect(JSON.stringify(domainWarn)).not.toContain('outsider@gmail.com');
   });
 });
 

@@ -7,9 +7,10 @@
 //   GET  /auth/login     → 302 to Google; state+PKCE sealed into a short-
 //                          lived cookie (the browser is the only state store)
 //   GET  /auth/callback  → verify state/PKCE, exchange code, enforce the
-//                          domain allowlist, find-or-create the user, set the
-//                          session cookie (sealing the user's session_epoch),
-//                          redirect /
+//                          domain allowlist, resolve the INVITED user (no
+//                          auto-provision — login is invite-gated, README
+//                          deviations 2026-06-12), set the session cookie
+//                          (sealing the user's session_epoch), redirect /
 //   POST /auth/logout    → bump the user's session_epoch (revokes ALL of
 //                          their sessions, everywhere) + clear the cookie (204)
 //   GET  /auth/me        → { userId, email, role } | 401
@@ -40,8 +41,13 @@ import {
   type SessionEpochCache,
 } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createUsersRepo, sessionEpochOf, type UsersRepo } from '../repos/usersRepo.js';
-import { findOrCreateUser } from '../services/userProvisioning.js';
+import {
+  createUsersRepo,
+  sessionEpochOf,
+  type UserItem,
+  type UsersRepo,
+} from '../repos/usersRepo.js';
+import { AccessDeniedError, resolveInvitedUser } from '../services/resolveInvitedUser.js';
 
 /** The login attempt's lifetime: state cookie sealed for 10 minutes. */
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -79,6 +85,16 @@ const DOMAIN_NOT_ALLOWED_HTML = `<!doctype html>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 4rem 2rem;">
 <h1 style="font-size:1.5rem">Domain not allowed</h1>
 <p>Your Google account's domain is not authorized for HousingChoice.</p>
+<p><a href="/auth/login">Try a different account</a></p>
+</body></html>`;
+
+// Distinct from DOMAIN_NOT_ALLOWED_HTML: the domain passed but no admin has
+// invited this account (invite-first, README deviations 2026-06-12).
+const NOT_INVITED_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>HousingChoice — no access</title></head>
+<body style="font-family: system-ui, sans-serif; text-align: center; padding: 4rem 2rem;">
+<h1 style="font-size:1.5rem">No access yet</h1>
+<p>Your account hasn't been invited to HousingChoice. Ask an admin for access.</p>
 <p><a href="/auth/login">Try a different account</a></p>
 </body></html>`;
 
@@ -196,7 +212,40 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
       return;
     }
 
-    const { user } = await findOrCreateUser({ usersRepo, auditRepo, logger: log }, identity);
+    // Invite-gated (README deviations 2026-06-12): the domain check above is
+    // defense-in-depth; ACCESS requires an existing invite. resolveInvitedUser
+    // activates an invited record on first login (writes google_sub, flips
+    // status → active) or throws AccessDeniedError when there is no invite.
+    //
+    // TODO(M1.4): the admin-only user-management UI (list / invite / role-
+    // change) will wrap usersRepo.invite + usersRepo.setRole behind
+    // requireRole('admin') — the FIRST admin-only /api surface. Build nothing
+    // here; M1.4 picks it up. Until then invites come from `npm run user:invite`.
+    let user: UserItem;
+    try {
+      ({ user } = await resolveInvitedUser({ usersRepo, auditRepo, logger: log }, identity));
+    } catch (err) {
+      if (err instanceof AccessDeniedError) {
+        // Distinct from the allowlist 403: domain passed but no invite exists.
+        // No email in the log (PII, §9) and no userId exists for a non-invited
+        // identity — log the email DOMAIN + the reason code only.
+        log.warn(
+          {
+            reason: err.reason,
+            emailDomain: identity.email.slice(identity.email.lastIndexOf('@') + 1),
+          },
+          'login refused — not invited',
+        );
+        if (req.accepts(['json', 'html']) === 'html') {
+          res.status(403).type('html').send(NOT_INVITED_HTML);
+        } else {
+          res.status(403).json({ error: 'not_invited', detail: 'ask an admin for access' });
+        }
+        return;
+      }
+      throw err;
+    }
+
     res.cookie(
       SESSION_COOKIE_NAME,
       sealSession({ userId: user.userId, email: user.email, role: user.role }, config, {

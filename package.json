@@ -28,6 +28,7 @@
     "deploy:prod": "node scripts/deploy.mjs prod",
     "secrets:push": "node scripts/secrets.mjs push",
     "secrets:check": "node scripts/secrets.mjs check",
+    "user:invite": "node scripts/userInvite.mjs",
     "user:role": "node scripts/userRole.mjs",
     "plan": "node scripts/tf.mjs plan",
     "apply": "node scripts/tf.mjs apply",

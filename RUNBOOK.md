@@ -100,6 +100,45 @@ Effect: every outstanding session cookie stops opening = **forced global logout*
 back in via Google). No data loss — sessions live only inside the cookies themselves. Rotate on any
 suspicion the secret leaked.
 
+### Users & access (invite-first)
+
+Access is **invite-first** (operator decision 2026-06-12, README deviations). A Google login
+succeeds ONLY if an admin has already created a user record for that email — the login path never
+auto-provisions. A verified, allowlisted Google account with **no invite is refused with a 403
+"not invited"** (distinct from the domain-allowlist 403). The OAuth domain allowlist
+(`OAUTH_ALLOWED_DOMAINS`) is retained as a second fence (defense-in-depth), not as the access grant.
+
+Invite a user (account-guarded; idempotent — re-inviting is a no-op that leaves the role unchanged):
+
+```powershell
+npm run user:invite -- <dev|prod> someone@housingchoice.org va     # or admin
+```
+
+The invite writes an `invited` record (email + role + `session_epoch` 1, no `google_sub`) plus a
+`user_invited` audit event. The user's **first** Google login activates it (writes `google_sub`,
+flips `status` → `active`, audits `user_activated`); later logins just stamp `last_login_at`.
+
+**Bootstrap the first admin** (do this once per env, before anyone can sign in — the order vs.
+deploy does not matter, the record just has to exist before the user logs in):
+
+```powershell
+npm run user:invite -- <env> <your-workspace-email> admin
+```
+
+**Promote / demote** an existing user (never creates — invite first):
+
+```powershell
+npm run user:role -- <dev|prod> someone@housingchoice.org admin
+```
+
+`user:role` bumps `session_epoch`, so a role change revokes the user's active sessions within ~60s
+and the new role applies at their next sign-in. `user:role` against a non-existent email refuses and
+points you at `user:invite`.
+
+In-app user management (list / invite / role-change behind `requireRole('admin')`) is coming in
+**M1.4** — it will wrap the same `usersRepo.invite` + `usersRepo.setRole` these scripts use, and is
+the first admin-only `/api` surface. Until then these npm scripts are the only invite/role path.
+
 ### Twilio
 
 The messaging stack (M1.1) has a Twilio-console side that Terraform does NOT manage — this wiring

@@ -80,7 +80,12 @@ describe('<UnitForm> create', () => {
     );
 
     fireEvent.change(landlordSelect, { target: { value: 'k-land' } });
-    fireEvent.change(screen.getByLabelText('Address'), { target: { value: '5 Oak Ave' } });
+    // Structured address: the 5 labelled inputs replace the old free-text field.
+    fireEvent.change(screen.getByLabelText('Address line 1'), { target: { value: '5 Oak Ave' } });
+    fireEvent.change(screen.getByLabelText('Unit / Apt #'), { target: { value: 'Apt 2' } });
+    fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Atlanta' } });
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'GA' } });
+    fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '30303' } });
     fireEvent.change(screen.getByLabelText('Beds'), { target: { value: '3' } });
     fireEvent.change(screen.getByLabelText('Min rent'), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText('Max rent'), { target: { value: '1400' } });
@@ -92,7 +97,7 @@ describe('<UnitForm> create', () => {
     expect(body).toMatchObject({
       landlordId: 'k-land',
       status: 'available',
-      address: '5 Oak Ave',
+      address: { line1: '5 Oak Ave', line2: 'Apt 2', city: 'Atlanta', state: 'GA', zip: '30303' },
       beds: 3,
       rent_min: 1000,
       rent_max: 1400,
@@ -124,15 +129,18 @@ describe('<UnitForm> edit', () => {
       unitId: 'u1',
       landlordId: 'k-land',
       status: 'available',
-      address: '1 Old Rd',
+      address: { line1: '1 Old Rd', city: 'Decatur', state: 'GA', zip: '30030' },
       beds: 2,
     } as UnitItem);
     updateUnitMock.mockResolvedValue({ unitId: 'u1', landlordId: 'k-land', status: 'placed' } as UnitItem);
 
     renderAt('/units/u1/edit');
-    // Form seeds the existing address.
-    const address = (await screen.findByLabelText('Address')) as HTMLInputElement;
-    expect(address.value).toBe('1 Old Rd');
+    // Form seeds the existing structured address into the labelled inputs.
+    const line1 = (await screen.findByLabelText('Address line 1')) as HTMLInputElement;
+    expect(line1.value).toBe('1 Old Rd');
+    expect((screen.getByLabelText('City') as HTMLInputElement).value).toBe('Decatur');
+    expect((screen.getByLabelText('State') as HTMLInputElement).value).toBe('GA');
+    expect((screen.getByLabelText('ZIP') as HTMLInputElement).value).toBe('30030');
 
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'placed' } });
     fireEvent.click(screen.getByRole('button', { name: /save property/i }));
@@ -140,7 +148,38 @@ describe('<UnitForm> edit', () => {
     await waitFor(() => expect(updateUnitMock).toHaveBeenCalledTimes(1));
     const [unitId, patch] = updateUnitMock.mock.calls[0]!;
     expect(unitId).toBe('u1');
-    expect(patch).toMatchObject({ status: 'placed', landlordId: 'k-land', address: '1 Old Rd' });
+    expect(patch).toMatchObject({
+      status: 'placed',
+      landlordId: 'k-land',
+      address: { line1: '1 Old Rd', city: 'Decatur', state: 'GA', zip: '30030' },
+    });
     expect(await screen.findByText('Unit detail page')).toBeInTheDocument();
+  });
+
+  it('tolerates a legacy plain-string address (starts the fields empty)', async () => {
+    // Back-compat: a pre-contract dev record may carry address as a string.
+    // The form must not crash; the structured fields start empty.
+    getUnitMock.mockResolvedValue({
+      unitId: 'u2',
+      landlordId: 'k-land',
+      status: 'available',
+      address: '1 Old Rd',
+    } as unknown as UnitItem);
+    updateUnitMock.mockResolvedValue({ unitId: 'u2', landlordId: 'k-land', status: 'available' } as UnitItem);
+
+    renderAt('/units/u2/edit');
+    const line1 = (await screen.findByLabelText('Address line 1')) as HTMLInputElement;
+    expect(line1.value).toBe('');
+  });
+
+  it('shows a clean primary-contact label without the internal note', async () => {
+    getUnitMock.mockResolvedValue({
+      unitId: 'u3',
+      landlordId: 'k-land',
+      status: 'available',
+    } as UnitItem);
+    renderAt('/units/u3/edit');
+    expect(await screen.findByLabelText('Primary contact for calls')).toBeInTheDocument();
+    expect(screen.queryByText(/pending confirmation/i)).not.toBeInTheDocument();
   });
 });

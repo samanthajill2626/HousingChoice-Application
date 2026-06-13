@@ -6,6 +6,7 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { getUnit, useApi, type UnitItem } from '../api/index.js';
 import { Badge, Button, ChevronLeftIcon, EmptyState, Spinner } from '../ui/index.js';
+import { AddressDisplay, formatAddress } from './records/Address.js';
 import { UNIT_STATUS_LABEL, formatRentRange } from './records/records.js';
 import styles from './records/records.module.css';
 
@@ -61,7 +62,7 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }): Reac
 
 function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
   const rent = formatRentRange(unit.rent_min, unit.rent_max);
-  const title = unit.address ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
+  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
   const flyerHref = `/flyer/${encodeURIComponent(unit.unitId)}`;
 
   return (
@@ -93,7 +94,9 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
       <div className={styles.surface}>
         <h2 className={styles.sectionTitle}>Details</h2>
         <dl className={styles.facts}>
-          <Fact label="Address" value={unit.address} />
+          {formatAddress(unit.address) !== undefined && (
+            <Fact label="Address" value={<AddressDisplay address={unit.address} />} />
+          )}
           <Fact label="Jurisdiction" value={unit.jurisdiction} />
           <Fact label="Area" value={unit.area} />
           <Fact label="Subzone" value={unit.subzone} />
@@ -131,12 +134,14 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
               ) : undefined
             }
           />
+          {/* CO1 per-property primary voice contact, pending founder
+              confirmation — that internal note stays in code, off the screen. */}
           <Fact
             label="Primary contact for calls"
             value={
-              unit.primary_voice_contact ? (
+              typeof unit.primary_voice_contact === 'string' && unit.primary_voice_contact.length > 0 ? (
                 <Link to={`/contacts/${encodeURIComponent(unit.primary_voice_contact)}`}>
-                  View contact (pending confirmation)
+                  View contact
                 </Link>
               ) : undefined
             }

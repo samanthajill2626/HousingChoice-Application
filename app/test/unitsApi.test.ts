@@ -41,7 +41,13 @@ describe('POST /api/units — create', () => {
       .post('/api/units')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ landlordId: 'contact-ll-9', jurisdiction: 'Fulton', beds: 3, rent_min: 1700 });
+      .send({
+        landlordId: 'contact-ll-9',
+        jurisdiction: 'Fulton',
+        beds: 3,
+        rent_min: 1700,
+        address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
+      });
 
     expect(res.status).toBe(201);
     expect(res.body.unit).toMatchObject({
@@ -50,6 +56,7 @@ describe('POST /api/units — create', () => {
       jurisdiction: 'Fulton',
       beds: 3,
       rent_min: 1700,
+      address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
     });
     expect(res.body.unit.unitId).toBeDefined();
     expect(world.units.get(res.body.unit.unitId)).toBeDefined();
@@ -71,6 +78,9 @@ describe('POST /api/units — create', () => {
       { landlordId: 'c', rent_min: -5 }, // negative
       { landlordId: 'c', status: 'sold' }, // not an allowed status
       { landlordId: 'c', accepted_programs: [1, 2] }, // not string[]
+      { landlordId: 'c', address: 'just a string' }, // address must be an object now
+      { landlordId: 'c', address: { line1: '1 Main', country: 'US' } }, // unknown address key
+      { landlordId: 'c', address: { zip: 30303 } }, // address sub-field not a string
     ];
     for (const body of bodies) {
       const res = await request(app)
@@ -100,6 +110,57 @@ describe('POST /api/units — create', () => {
     expect(res.status).toBe(201);
     expect(res.body.unit.primary_voice_contact).toBe('contact-ll-agent-7');
     expect(res.body.unit.pets).toBe(true);
+  });
+});
+
+describe('structured address (lib/address.ts)', () => {
+  it('accepts a PARTIAL address and stores only the supplied fields', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-1', address: { city: 'Decatur', state: 'GA' } });
+    expect(res.status).toBe(201);
+    expect(res.body.unit.address).toEqual({ city: 'Decatur', state: 'GA' });
+  });
+
+  it('trims values and drops empty/whitespace-only sub-fields', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        landlordId: 'contact-ll-1',
+        address: { line1: '  88 Sycamore St  ', line2: '   ', city: '', zip: '30030' },
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.unit.address).toEqual({ line1: '88 Sycamore St', zip: '30030' });
+  });
+
+  it('PATCH replaces the address object with the supplied structured value', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-addr', { address: { line1: '1 Old Rd', city: 'Atlanta' } });
+    const res = await request(app)
+      .patch('/api/units/unit-addr')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ address: { line1: '2 New Ave', city: 'Marietta', state: 'GA' } });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.address).toEqual({ line1: '2 New Ave', city: 'Marietta', state: 'GA' });
+  });
+
+  it('rejects a non-object, unknown keys, and non-string sub-fields with 400', async () => {
+    const { app } = makeWebhookHarness();
+    for (const address of ['123 Main St', ['123 Main St'], { line1: '1 Main', foo: 'x' }, { zip: 30303 }]) {
+      const res = await request(app)
+        .post('/api/units')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ landlordId: 'contact-ll-1', address });
+      expect(res.status, JSON.stringify(address)).toBe(400);
+    }
   });
 });
 
@@ -173,6 +234,19 @@ describe('GET /api/units/:unitId', () => {
       .set('cookie', TEST_SESSION_COOKIE);
     expect(missing.status).toBe(404);
     expect(missing.body).toEqual({ error: 'unit_not_found' });
+  });
+
+  it('back-compat: reads a legacy plain-string address through untouched', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A dev unit created before the structured-address change still has a string
+    // here. The validator only runs on WRITE; reads must not crash or migrate.
+    seedUnit(world, 'unit-legacy', { address: '123 Legacy St' as unknown as UnitItem['address'] });
+    const res = await request(app)
+      .get('/api/units/unit-legacy')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.unit.address).toBe('123 Legacy St');
   });
 });
 

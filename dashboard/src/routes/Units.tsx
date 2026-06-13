@@ -12,6 +12,7 @@ import {
   type UnitStatus,
 } from '../api/index.js';
 import { Badge, Button, EmptyState, Field, HomeIcon, PlusIcon, Spinner } from '../ui/index.js';
+import { formatAddress } from './records/Address.js';
 import {
   UNIT_STATUSES,
   UNIT_STATUS_LABEL,
@@ -140,7 +141,7 @@ export default function Units(): React.JSX.Element {
 
 function UnitRow({ unit }: { unit: UnitItem }): React.JSX.Element {
   const rent = formatRentRange(unit.rent_min, unit.rent_max);
-  const title = unit.address ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
+  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
 
   return (
     <li>

@@ -177,7 +177,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       landlordId: 'contact-ll-secret',
       status: 'available',
       jurisdiction: 'DCA',
-      address: '123 Private St',
+      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
       beds: 2,
       baths: 1,
       area: 'Westside',

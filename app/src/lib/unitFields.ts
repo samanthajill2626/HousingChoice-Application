@@ -7,6 +7,7 @@
 // the WRITE surface only accepts known fields with the right types, so a
 // caller can never inject `tour_process` through an unexpected key or set a GSI
 // key (status/jurisdiction) to a non-string that would poison the index.
+import { validateAddress } from './address.js';
 import { UNIT_STATUSES, type UnitItem } from '../repos/unitsRepo.js';
 
 /** Result of validating a units request body. */
@@ -14,7 +15,7 @@ export type UnitValidation =
   | { ok: true; fields: Record<string, unknown> }
   | { ok: false; error: string };
 
-type FieldKind = 'string' | 'number' | 'string[]' | 'pets';
+type FieldKind = 'string' | 'number' | 'string[]' | 'pets' | 'address';
 
 /**
  * The writable unit fields and their kinds. `status` and `jurisdiction` are the
@@ -26,7 +27,7 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   landlordId: 'string',
   status: 'string',
   jurisdiction: 'string',
-  address: 'string',
+  address: 'address',
   accepted_programs: 'string[]',
   beds: 'number',
   baths: 'number',
@@ -91,6 +92,15 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
           return { ok: false, error: 'pets must be a string or boolean' };
         }
         break;
+      case 'address': {
+        // Structured Address object: only line1/line2/city/state/zip, each an
+        // optional string within caps. Unknown keys / non-strings → 400. The
+        // NORMALIZED (trimmed, empties dropped) address is what we store.
+        const result = validateAddress(value, key);
+        if (!result.ok) return { ok: false, error: result.error };
+        fields[key] = result.address;
+        continue;
+      }
     }
     fields[key] = value;
   }

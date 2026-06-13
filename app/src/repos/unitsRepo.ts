@@ -8,9 +8,11 @@
 // is a free-form attribute, so schema churn during the build needs no
 // migration — exactly the §5 posture.
 //
-// NO GEOCODING (kickoff "no geocoding — out of scope"): `address` is free text
-// and `jurisdiction` is a plain string the operator sets; §5's "geocoded
-// address" is intentionally NOT implemented here (README deviation row).
+// NO GEOCODING (kickoff "no geocoding — out of scope"): `address` is a
+// STRUCTURED postal address (lib/address.ts Address: line1/line2/city/state/zip,
+// all optional) and `jurisdiction` is a plain string the operator sets; §5's
+// "geocoded address" is intentionally NOT implemented here (README deviation
+// row). The Address type is reused for tenant/contact addresses later.
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
@@ -22,6 +24,7 @@ import {
   type ScanCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import type { Address } from '../lib/address.js';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -55,8 +58,12 @@ export interface UnitItem {
   status: string;
   /** byJurisdiction GSI: the primary HCV jurisdiction string (free text, no geocoding). */
   jurisdiction?: string;
-  /** Free-text street address — NO geocoding (out of scope, kickoff). */
-  address?: string;
+  /**
+   * Structured postal address (lib/address.ts) — NO geocoding (out of scope,
+   * kickoff). All sub-fields optional. Legacy dev units may still hold a plain
+   * string here; reads tolerate both (see units route / frontend display).
+   */
+  address?: Address;
   /** HCV programs this unit accepts (e.g. GHV, Step Up); §13 question pending. */
   accepted_programs?: string[];
   beds?: number;

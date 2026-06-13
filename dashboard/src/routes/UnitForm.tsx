@@ -5,9 +5,10 @@
 // The property intake form covers every contract field. Numbers are validated
 // client-side (non-negative, integer beds; rent_min ≤ rent_max). landlordId is
 // REQUIRED by the backend — we satisfy it with a "Landlord" picker over
-// landlord contacts. primary_voice_contact ("Primary contact for calls
-// (pending confirmation)") is a separate optional picker over landlord + pm
-// contacts. Media + accepted programs are simple newline / comma lists.
+// landlord contacts. The primary voice contact (CO1 per-property primary voice
+// contact, pending founder confirmation — note kept off-screen) is a separate
+// optional picker over landlord + pm contacts. Media + accepted programs are
+// simple newline / comma lists. The address is the shared structured Address.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
@@ -17,6 +18,7 @@ import {
   listContacts,
   updateUnit,
   useApi,
+  type Address,
   type Contact,
   type CreateUnitBody,
   type UnitItem,
@@ -24,6 +26,7 @@ import {
   type UnitStatus,
 } from '../api/index.js';
 import { Button, ChevronLeftIcon, EmptyState, Field, Input, Spinner, Textarea, useToast } from '../ui/index.js';
+import { AddressFields } from './records/Address.js';
 import { contactName } from './records/records.js';
 import { formatPhone } from './thread/identity.js';
 import styles from './records/records.module.css';
@@ -37,7 +40,7 @@ const STATUS_OPTIONS: { value: UnitStatus; label: string }[] = [
 interface FormState {
   landlordId: string;
   status: UnitStatus;
-  address: string;
+  address: Address;
   jurisdiction: string;
   acceptedPrograms: string; // comma-separated
   beds: string;
@@ -64,7 +67,7 @@ function emptyForm(): FormState {
   return {
     landlordId: '',
     status: 'available',
-    address: '',
+    address: {},
     jurisdiction: '',
     acceptedPrograms: '',
     beds: '',
@@ -90,10 +93,14 @@ function emptyForm(): FormState {
 
 function fromUnit(unit: UnitItem): FormState {
   const numStr = (n: number | undefined): string => (typeof n === 'number' ? String(n) : '');
+  // Back-compat: a pre-contract dev record may carry a plain-string address.
+  // We can't reliably parse that into parts, so AddressFields starts empty for
+  // such records (no data migration); structured addresses seed as-is.
+  const address: Address = typeof unit.address === 'object' && unit.address !== null ? unit.address : {};
   return {
     landlordId: unit.landlordId ?? '',
     status: unit.status,
-    address: unit.address ?? '',
+    address,
     jurisdiction: unit.jurisdiction ?? '',
     acceptedPrograms: (unit.accepted_programs ?? []).join(', '),
     beds: numStr(unit.beds),
@@ -197,7 +204,10 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
     if (form.landlordId.trim().length === 0) {
       errors.landlordId = 'Pick the landlord this property belongs to.';
     }
-    const numericFields: [keyof FormState, string][] = [
+    // Only the string-valued numeric fields (address is structured, not a
+    // string) — keeps form[key] a string for parseNum.
+    type NumericFieldKey = 'beds' | 'baths' | 'rentMin' | 'rentMax' | 'paymentStandard' | 'deposit';
+    const numericFields: [NumericFieldKey, string][] = [
       ['beds', 'Beds'],
       ['baths', 'Baths'],
       ['rentMin', 'Min rent'],
@@ -235,7 +245,14 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
       const t = v.trim();
       if (t.length > 0) (body[k] as string) = t;
     };
-    str('address', form.address);
+    // Structured address: trim each part, keep only non-empty ones; omit the
+    // whole field when nothing was entered.
+    const address: Address = {};
+    for (const key of ['line1', 'line2', 'city', 'state', 'zip'] as const) {
+      const t = (form.address[key] ?? '').trim();
+      if (t.length > 0) address[key] = t;
+    }
+    if (Object.keys(address).length > 0) body.address = address;
     str('jurisdiction', form.jurisdiction);
     str('area', form.area);
     str('subzone', form.subzone);
@@ -354,11 +371,11 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
             )}
           </Field>
 
-          <Field label="Address">
-            {({ id }) => (
-              <Input id={id} value={form.address} disabled={submitting} onChange={(e) => set('address', e.target.value)} />
-            )}
-          </Field>
+          <AddressFields
+            value={form.address}
+            disabled={submitting}
+            onChange={(next) => set('address', next)}
+          />
 
           <div className={styles.fieldRow}>
             <Field label="Jurisdiction">
@@ -464,7 +481,9 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
             </Field>
           </div>
 
-          <Field label="Primary contact for calls (pending confirmation)" hint="A landlord or property manager to call about this unit.">
+          {/* CO1 per-property primary voice contact, pending founder
+              confirmation — that internal note stays in code, off the screen. */}
+          <Field label="Primary contact for calls" hint="A landlord or property manager to call about this unit.">
             {({ id }) => (
               <select
                 id={id}

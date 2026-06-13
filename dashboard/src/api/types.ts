@@ -189,6 +189,20 @@ export interface CreateContactBody {
 
 // --- Units (properties) -----------------------------------------------------
 
+/** A structured US postal address. Every part is optional — intake is
+ *  partial-by-design. Shared shape: tenant/contact addresses can adopt it.
+ *  Matches the backend contract exactly. */
+export interface Address {
+  /** Street address line 1. */
+  line1?: string;
+  /** Unit / apt #. */
+  line2?: string;
+  city?: string;
+  /** 2-letter US state. */
+  state?: string;
+  zip?: string;
+}
+
 /** A unit's lifecycle status. */
 export type UnitStatus = 'available' | 'placed' | 'inactive';
 
@@ -201,8 +215,9 @@ export interface UnitItem {
   landlordId: string;
   status: UnitStatus;
   jurisdiction?: string;
-  /** Free-text address. */
-  address?: string;
+  /** Structured street address. A pre-contract dev record may still carry a
+   *  plain string here — read views tolerate that (see AddressDisplay). */
+  address?: Address | string;
   accepted_programs?: string[];
   beds?: number;
   baths?: number;
@@ -242,7 +257,7 @@ export interface CreateUnitBody {
   landlordId: string;
   status?: UnitStatus;
   jurisdiction?: string;
-  address?: string;
+  address?: Address;
   accepted_programs?: string[];
   beds?: number;
   baths?: number;

@@ -22,11 +22,12 @@ import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../../repos/contactsRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
 import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
+  type ConversationType,
 } from '../../repos/conversationsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
@@ -48,6 +49,27 @@ type WebhookParams = Record<string, string | undefined>;
 
 function asParams(body: unknown): WebhookParams {
   return (typeof body === 'object' && body !== null ? body : {}) as WebhookParams;
+}
+
+/**
+ * Conversation typing is as honest as contact typing (operator mandate,
+ * 2026-06-12): only a RESOLVED contact type yields a typed thread. No contact
+ * yet, or a contact whose type is 'unknown'/'pm'/'team_member', is
+ * `unknown_1to1` — never a guess.
+ *
+ * TODO(M1.5): when the team sets a contact's real type, the records CRUD must
+ * propagate the conversation type (unknown_1to1 → tenant_1to1/landlord_1to1).
+ * Seam only — nothing is built here yet.
+ */
+function conversationTypeFor(contact: ContactItem | undefined): ConversationType {
+  switch (contact?.type) {
+    case 'landlord':
+      return 'landlord_1to1';
+    case 'tenant':
+      return 'tenant_1to1';
+    default:
+      return 'unknown_1to1';
+  }
 }
 
 export interface TwilioWebhookDeps {
@@ -128,7 +150,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const contact = await contacts.findByPhone(From);
     const conversation = await conversations.createOrGetByParticipantPhone(
       From,
-      contact?.type === 'landlord' ? 'landlord_1to1' : 'tenant_1to1',
+      conversationTypeFor(contact),
     );
     mergeContext({ conversationId: conversation.conversationId });
 
@@ -152,7 +174,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       providerTs,
       type: mediaUrls.length > 0 ? 'mms' : 'sms',
       direction: 'inbound',
-      author: contact?.type === 'landlord' ? 'landlord' : 'tenant',
+      // Same honesty rule as conversation typing: only a reviewed contact
+      // type may claim tenant/landlord authorship; everything else is
+      // `unknown` until a human types the contact (M1.4/M1.5).
+      author:
+        contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown',
       // Inbound messages are received by definition; the outbound delivery
       // machine never transitions them.
       deliveryStatus: 'delivered',

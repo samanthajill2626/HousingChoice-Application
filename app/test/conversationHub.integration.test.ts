@@ -366,9 +366,10 @@ describe.skipIf(!reachable)('conversation hub repos against DynamoDB Local (thro
       expect(linked?.participants).toEqual([{ contactId: a.contactId, phone: '+15550206666' }]);
 
       const persisted = await contacts.getById(a.contactId);
+      // Auto-captured stubs never carry guessed identity (2026-06-12).
       expect(persisted).toMatchObject({
-        type: 'tenant',
-        status: 'new',
+        type: 'unknown',
+        status: 'needs_review',
         phone: '+15550206666',
         capture_source: 'inbound_sms',
       });

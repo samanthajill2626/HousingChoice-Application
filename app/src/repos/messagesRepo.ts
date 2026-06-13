@@ -30,8 +30,13 @@ import type { RepoDeps } from './conversationsRepo.js';
 
 export type MessageType = 'sms' | 'mms';
 export type MessageDirection = 'inbound' | 'outbound';
-/** Who authored the message (doc §5; `ai` is Phase 2). */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai';
+/**
+ * Who authored the message (doc §5; `ai` is Phase 2). `unknown` is the
+ * operator-mandated honesty value (deviations table 2026-06-12): inbound from
+ * an unreviewed contact must not be recorded as a guessed `tenant` — it
+ * resolves when the contact is typed in the M1.4/M1.5 review flows.
+ */
+export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown';
 
 /**
  * Outbound delivery status machine (doc §7.1):

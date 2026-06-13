@@ -1,9 +1,10 @@
 // M1.2 contact auto-capture (doc §5 / §11.3 "contacts auto-captured"): every
 // inbound conversation ends up linked to a contact record. Unknown phones get
-// a stub contact (type 'tenant' — the default for unknown inbound; landlords
-// get typed at intake/import, M1.5/M1.6); known phones get the conversation's
-// participants link backfilled. The "First Last - N Bed" naming of stubs is
-// later work (lib/contactName.ts is the one true parser for it).
+// a stub contact (type 'unknown', status 'needs_review' — auto-capture never
+// records guessed identity as fact; humans resolve the real type in the
+// M1.4/M1.5 review flows); known phones get the conversation's participants
+// link backfilled. The "First Last - N Bed" naming of stubs is later work
+// (lib/contactName.ts is the one true parser for it).
 //
 // RACE HANDLING — the disclosed byPhone-GSI eventual-consistency race: two
 // concurrent first-messages can BOTH miss findByPhone (the GSI lags writes)
@@ -60,11 +61,13 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     const now = new Date().toISOString();
     return {
       contactId,
-      // Default for unknown inbound: tenants text first; landlords get typed
-      // at intake/import (M1.5/M1.6).
-      type: 'tenant',
-      // 'new' marks an unreviewed auto-captured stub (byTypeStatus GSI).
-      status: 'new',
+      // NEVER guess identity (operator mandate, 2026-06-12): an inbound from
+      // an unknown phone could be a tenant, landlord, PM, … — recording a
+      // guess as fact poisons the records. On the byTypeStatus GSI,
+      // (type=unknown, status=needs_review) IS the human triage queue;
+      // the M1.4/M1.5 review flows resolve the real type.
+      type: 'unknown',
+      status: 'needs_review',
       phone,
       capture_source: 'inbound_sms',
       captured_at: now,

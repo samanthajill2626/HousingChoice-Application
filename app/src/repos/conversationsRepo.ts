@@ -29,8 +29,13 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 
-/** Conversation thread types (doc §5; relay groups land with a later milestone). */
-export type ConversationType = 'tenant_1to1' | 'landlord_1to1';
+/**
+ * Conversation thread types (doc §5; relay groups land with a later
+ * milestone). `unknown_1to1` (2026-06-12 deviation) mirrors the contact-side
+ * honesty rule: a thread with no resolved tenant/landlord identity is typed
+ * `unknown_1to1`, never guessed.
+ */
+export type ConversationType = 'tenant_1to1' | 'landlord_1to1' | 'unknown_1to1';
 
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';

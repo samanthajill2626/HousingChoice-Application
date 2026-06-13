@@ -16,9 +16,18 @@ import type { RepoDeps } from './conversationsRepo.js';
  */
 export type ContactFlag = 'sms_opt_out' | 'sms_unreachable';
 
+/**
+ * Contact types (doc §5, plus `unknown` — 2026-06-12 deviation): auto-capture
+ * NEVER records guessed identity as fact, so stubs are created as `unknown`
+ * with status `needs_review`. On the byTypeStatus GSI, (type=unknown,
+ * status=needs_review) IS the human triage queue, resolved by the M1.4/M1.5
+ * review flows.
+ */
+export type ContactType = 'tenant' | 'landlord' | 'pm' | 'team_member' | 'unknown';
+
 export interface ContactItem {
   contactId: string;
-  type: string;
+  type: ContactType;
   status?: string;
   /** E.164 (byPhone GSI). */
   phone?: string;

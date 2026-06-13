@@ -34,7 +34,9 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
     expect(world.messages[0]).toMatchObject({
       provider_sid: 'SMinbound0001',
       direction: 'inbound',
-      author: 'tenant',
+      // No reviewed contact for this phone — authorship is honest 'unknown'
+      // (operator mandate; see MessageAuthor in messagesRepo).
+      author: 'unknown',
       type: 'sms',
       body: 'hello, looking for a 2 bed',
     });
@@ -243,12 +245,22 @@ describe('POST /webhooks/twilio/sms — conversation resolution', () => {
     expect(world.messages[0]).toMatchObject({ author: 'landlord' });
   });
 
-  it('unknown phones get a tenant_1to1 conversation and a touch with the body preview + 200', async () => {
+  it('routes a KNOWN tenant phone into a tenant_1to1 conversation', async () => {
     const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
 
     const conv = [...world.conversations.values()][0]!;
     expect(conv.type).toBe('tenant_1to1');
+  });
+
+  it('unknown phones get an unknown_1to1 conversation (type is never guessed) and a touch with the body preview + 200', async () => {
+    const { app, world } = makeWebhookHarness();
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('unknown_1to1');
     expect(conv.participant_phone).toBe(TENANT_PHONE);
     expect(world.touches).toEqual([
       {
@@ -257,6 +269,16 @@ describe('POST /webhooks/twilio/sms — conversation resolution', () => {
         ts: world.messages[0]!.provider_ts,
       },
     ]);
+  });
+
+  it('a contact with an UNRESOLVED type (unknown) also yields unknown_1to1 — only resolved types are trusted', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-U', type: 'unknown', status: 'needs_review', phone: TENANT_PHONE });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('unknown_1to1');
   });
 });
 
@@ -415,15 +437,15 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
 });
 
 describe('POST /webhooks/twilio/sms — M1.2 contact auto-capture', () => {
-  it('UNKNOWN phone → stub contact (tenant/new/capture metadata) + participants link + audit', async () => {
+  it('UNKNOWN phone → stub contact (unknown/needs_review/capture metadata) + participants link + audit', async () => {
     const { app, world } = makeWebhookHarness();
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMcapture01' }));
 
     expect(world.contacts).toHaveLength(1);
     const stub = world.contacts[0]!;
     expect(stub).toMatchObject({
-      type: 'tenant', // default for unknown inbound; landlords get typed at intake/import
-      status: 'new',
+      type: 'unknown', // identity is never guessed; humans triage via byTypeStatus
+      status: 'needs_review',
       phone: TENANT_PHONE,
       capture_source: 'inbound_sms',
     });

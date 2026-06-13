@@ -117,14 +117,16 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
 }
 
 describe('contactCapture — unknown phone', () => {
-  it('creates a tenant/new stub with capture metadata, links it, and audits once', async () => {
+  it('creates an unknown/needs_review stub (never a guessed type) with capture metadata, links it, and audits once', async () => {
     const f = makeCaptureFakes();
     const contact = await f.capture(f.conversation);
 
     expect(f.contacts).toHaveLength(1);
+    // Operator mandate (2026-06-12): auto-capture never records guessed
+    // identity — (type=unknown, status=needs_review) is the triage queue.
     expect(contact).toMatchObject({
-      type: 'tenant',
-      status: 'new',
+      type: 'unknown',
+      status: 'needs_review',
       phone: PHONE,
       capture_source: 'inbound_sms',
     });
@@ -234,8 +236,8 @@ describe('contactCapture — race handling (the byPhone GSI eventual-consistency
     expect(f.contacts).toHaveLength(1);
     expect(f.contacts[0]).toMatchObject({
       contactId: 'contact-orphan-link',
-      type: 'tenant',
-      status: 'new',
+      type: 'unknown',
+      status: 'needs_review',
       phone: PHONE,
     });
     expect(f.auditEvents).toEqual([

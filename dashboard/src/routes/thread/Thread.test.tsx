@@ -300,6 +300,28 @@ describe('<Thread> identity + triage', () => {
     expect(screen.getAllByText('Tenant').length).toBeGreaterThan(0);
     expect(screen.getAllByText('(313) 555-1234').length).toBeGreaterThan(0);
   });
+
+  it('a team_member triage clears the needs-review cue and shows the name even though the thread stays unknown_1to1 (regression)', async () => {
+    // The bug the operator hit: triaging a contact to a NON-tenant/landlord type
+    // (team_member) leaves the conversation type at unknown_1to1 (there is no
+    // *_1to1 value for a team_member). Identity must follow the CONTACT, so the
+    // header should resolve — real name, no "?"/review badge — once the contact
+    // is active + named.
+    api.getConversation.mockResolvedValue(makeConversation({ type: 'unknown_1to1' }));
+    api.getContact.mockResolvedValue(
+      makeContact({ type: 'team_member', status: 'active', firstName: 'Jamie', lastName: 'Rivera' }),
+    );
+
+    renderThread();
+
+    // The resolved name surfaces (header + side panel summary).
+    expect((await screen.findAllByText('Jamie Rivera')).length).toBeGreaterThan(0);
+    // The needs-review cue is cleared even though the thread is still unknown_1to1
+    // (scoped via its title so the triage <option> labels don't false-match).
+    expect(document.querySelector('[title="Identity not yet confirmed"]')).toBeNull();
+    // The phone remains as the honest subtitle (it is NOT used as the header
+    // label here — the resolved name is), so we don't assert its absence.
+  });
 });
 
 describe('<Thread> mark read (M3)', () => {

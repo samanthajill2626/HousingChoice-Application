@@ -63,7 +63,12 @@ export function resolveIdentity(
 ): IdentityDisplay {
   const phone = formatPhone(conversation?.participant_phone ?? contact?.phone);
   const name = contactFullName(contact);
-  const needsReview = isUnknownConversation(conversation?.type) || isContactNeedsReview(contact);
+  // Resolution follows the CONTACT when we have one: a triaged contact (real
+  // type + status not needs_review) is resolved even when its thread stays
+  // `unknown_1to1` (pm/team_member have no *_1to1 type). Only when no contact is
+  // loaded do we fall back to the conversation type as the signal.
+  const needsReview =
+    contact !== undefined ? isContactNeedsReview(contact) : isUnknownConversation(conversation?.type);
   // Only show a real name when we have one AND the identity is resolved.
   const label = name !== undefined && !needsReview ? name : phone;
   return { label, needsReview, name: needsReview ? undefined : name, phone };

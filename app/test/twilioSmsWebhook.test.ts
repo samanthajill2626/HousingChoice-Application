@@ -551,9 +551,11 @@ describe('POST /webhooks/twilio/sms — M1.2 unread tracking + SSE emits', () =>
           unread_count: 1,
           preview: 'hello, looking for a 2 bed',
           // M1.4 wire fields (shared builder): an unknown-phone inbound is an
-          // unresolved unknown_1to1 thread with no assignee yet.
+          // unresolved unknown_1to1 thread with no assignee yet — and no
+          // resolved name (the participant is un-triaged).
           type: 'unknown_1to1',
           assignment: null,
+          participant_display_name: null,
         },
       },
     ]);

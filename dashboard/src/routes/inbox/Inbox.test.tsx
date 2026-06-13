@@ -190,6 +190,7 @@ describe('<Inbox>', () => {
       preview: 'fresh preview',
       type: 'tenant_1to1',
       assignment: null,
+      participant_display_name: null,
     });
 
     // Row patched in place and re-sorted to the top; no refetch.
@@ -225,10 +226,48 @@ describe('<Inbox>', () => {
       unread_count: 0,
       type: 'tenant_1to1',
       assignment: 'u_va1',
+      participant_display_name: null,
     });
 
     await waitFor(() => expect(screen.queryByText('Needs review')).not.toBeInTheDocument());
     expect(screen.getByText('Assigned')).toBeInTheDocument();
+    // Patched in place — no refetch.
+    expect(listConversationsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the needs-review chip live when a name is denormalized even though the thread stays unknown_1to1 (pm/team_member triage)', async () => {
+    // Regression: an un-triaged conversation shows "Needs review". A live update
+    // triages the participant to a pm/team_member (the thread type never leaves
+    // unknown_1to1) but now carries a resolved participant_display_name — the
+    // chip must clear and the name must surface, with no refetch.
+    listConversationsMock.mockResolvedValue(
+      page([
+        summary({
+          conversationId: 'c1',
+          type: 'unknown_1to1',
+          participant_phone: '+14155550101',
+          participant_display_name: null,
+        }),
+      ]),
+    );
+
+    renderInbox();
+
+    expect(await screen.findByText('Needs review')).toBeInTheDocument();
+
+    fireUpdate({
+      conversationId: 'c1',
+      last_activity_at: '2026-06-13T11:00:00.000Z',
+      unread_count: 0,
+      // Thread type stays unknown_1to1 (no *_1to1 value for a team_member)…
+      type: 'unknown_1to1',
+      assignment: null,
+      // …but the resolved name rides the event.
+      participant_display_name: 'Jamie Rivera',
+    });
+
+    await waitFor(() => expect(screen.queryByText('Needs review')).not.toBeInTheDocument());
+    expect(screen.getByText('Jamie Rivera')).toBeInTheDocument();
     // Patched in place — no refetch.
     expect(listConversationsMock).toHaveBeenCalledTimes(1);
   });
@@ -261,6 +300,7 @@ describe('<Inbox>', () => {
       unread_count: 1,
       type: 'unknown_1to1',
       assignment: null,
+      participant_display_name: null,
     });
 
     // The debounced refetch (real timers) surfaces the new row at the top.

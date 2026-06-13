@@ -78,6 +78,20 @@ describe('resolveIdentity', () => {
     expect(id.label).toBe('Keisha Jones');
     expect(id.name).toBe('Keisha Jones');
   });
+
+  it('resolves a triaged team_member contact (name + no review) even when the thread stays unknown_1to1', () => {
+    // Regression (the operator hit this): a contact triaged to a NON-tenant/
+    // landlord type (pm/team_member) has no *_1to1 thread value, so the
+    // conversation stays unknown_1to1. Resolution must follow the CONTACT —
+    // an active team_member with a name is resolved: no "?"/review cue, real name.
+    const id = resolveIdentity(
+      conv({ type: 'unknown_1to1' }),
+      contact({ firstName: 'Jamie', lastName: 'Rivera', type: 'team_member', status: 'active' }),
+    );
+    expect(id.needsReview).toBe(false);
+    expect(id.label).toBe('Jamie Rivera');
+    expect(id.name).toBe('Jamie Rivera');
+  });
 });
 
 describe('conversationTypeLabel', () => {

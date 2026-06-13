@@ -115,6 +115,7 @@ describe('GET /api/events — stream mechanics', () => {
       preview: 'hi there',
       type: 'tenant_1to1',
       assignment: null,
+      participant_display_name: null,
     });
     world.events.emit('message.persisted', {
       conversationId: 'conv-sse-1',
@@ -133,6 +134,7 @@ describe('GET /api/events — stream mechanics', () => {
         preview: 'hi there',
         type: 'tenant_1to1',
         assignment: null,
+        participant_display_name: null,
       })}`,
     );
   });
@@ -190,6 +192,7 @@ describe('event bus — listener isolation (M1.2)', () => {
         unread_count: 0,
         type: 'unknown_1to1',
         assignment: null,
+        participant_display_name: null,
       }),
     ).not.toThrow();
 

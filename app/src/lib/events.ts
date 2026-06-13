@@ -34,6 +34,13 @@ export interface ConversationUpdatedEvent {
   type: ConversationType;
   /** Assigned team member's userId, or null when unassigned. */
   assignment: string | null;
+  /**
+   * Denormalized resolved contact name, or null when none is known. Carried on
+   * the event so the inbox shows the name (and clears the review chip) the
+   * instant a contact is triaged — including pm/team_member contacts whose
+   * thread type never leaves unknown_1to1. Null → the inbox falls back to phone.
+   */
+  participant_display_name: string | null;
 }
 
 /**
@@ -52,6 +59,7 @@ export function toConversationUpdatedEvent(item: ConversationItem): Conversation
     ...(item.last_message_preview !== undefined && { preview: item.last_message_preview }),
     type: item.type,
     assignment: item.assignment ?? null,
+    participant_display_name: item.participant_display_name ?? null,
   };
 }
 

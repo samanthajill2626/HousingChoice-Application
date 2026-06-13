@@ -259,9 +259,10 @@ describe('sendMessage service', () => {
           unread_count: 2,
           preview: 'live update',
           // M1.4 wire fields (shared builder): the thread's current type +
-          // assignment ride along on every conversation.updated.
+          // assignment + resolved name ride along on every conversation.updated.
           type: 'tenant_1to1',
           assignment: null,
+          participant_display_name: null,
         },
       },
     ]);

@@ -64,20 +64,15 @@ export function displayName(c: ConversationSummary): string {
 }
 
 /**
- * Whether to show the honest-identity "needs review" triage chip. The only
- * triage signal present in the inbox summary is the conversation type
- * `unknown_1to1` (an un-triaged participant). The per-contact `needs_review`
- * status is NOT in the summary wire shape, so we cannot surface it from the
- * list alone — see the flagged shared-type gap.
- *
- * BOUNDARY (review H3 — intentional, do NOT add a per-row contact fetch): the
- * inbox is served by a SINGLE DynamoDB query and keys its review cue purely on
- * the conversation's `unknown_1to1` type — fetching each row's contact to read
- * its `needs_review` status would turn one query into N+1 lookups. The richer
- * per-CONTACT `needs_review` cue (a typed contact still awaiting human review)
- * is surfaced where the contact is already loaded: the Thread side panel /
- * header. The two cues are complementary, not duplicative.
+ * Whether to show the honest-identity "needs review" triage chip. A row needs
+ * review when the thread is still `unknown_1to1` AND no resolved name has been
+ * denormalized onto it. The name guard matters because a pm/team_member contact
+ * never flips the thread type (there is no `*_1to1` value for them) — yet once
+ * triaged+named the backend writes `participant_display_name`, so the row is
+ * resolved and should drop the chip. Both signals ride the inbox's single
+ * DynamoDB query + the live conversation.updated event (no per-row contact
+ * fetch — review boundary H3).
  */
 export function needsReview(c: ConversationSummary): boolean {
-  return c.type === 'unknown_1to1';
+  return c.type === 'unknown_1to1' && !c.participant_display_name;
 }

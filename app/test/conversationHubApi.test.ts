@@ -315,6 +315,7 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
           preview: 'seen now',
           type: 'tenant_1to1',
           assignment: null,
+          participant_display_name: null,
         },
       },
     ]);
@@ -377,6 +378,7 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
       unread_count: 0,
       type: 'tenant_1to1',
       assignment: 'user-va-1',
+      participant_display_name: null,
     });
   });
 

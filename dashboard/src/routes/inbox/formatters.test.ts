@@ -80,8 +80,17 @@ describe('displayName / needsReview', () => {
     expect(displayName(summary({ participant_display_name: '' }))).toBe('(415) 555-0142');
   });
 
-  it('flags unknown_1to1 conversations as needing review', () => {
-    expect(needsReview(summary({ type: 'unknown_1to1' }))).toBe(true);
+  it('flags unknown_1to1 conversations with no resolved name as needing review', () => {
+    expect(needsReview(summary({ type: 'unknown_1to1', participant_display_name: null }))).toBe(true);
     expect(needsReview(summary({ type: 'tenant_1to1' }))).toBe(false);
+  });
+
+  it('does NOT flag an unknown_1to1 row once a name is denormalized (pm/team_member triage)', () => {
+    // Regression: a pm/team_member contact never flips the thread type away from
+    // unknown_1to1, but once triaged+named the backend writes
+    // participant_display_name — the review chip must drop.
+    expect(
+      needsReview(summary({ type: 'unknown_1to1', participant_display_name: 'Jamie Rivera' })),
+    ).toBe(false);
   });
 });

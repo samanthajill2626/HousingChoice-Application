@@ -11,14 +11,17 @@
 //   (4) routes
 //   (last) expressErrorHandler
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import path from 'node:path';
 import express, { type Express, type Request } from 'express';
 import { loadConfig, type AppConfig } from './lib/config.js';
 import { createExpressErrorHandler } from './lib/errors.js';
 import { logger as defaultLogger, type Logger } from './lib/logger.js';
+import { requireAuth, sessionMiddleware } from './middleware/auth.js';
 import { correlationMiddleware } from './middleware/correlation.js';
 import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
+import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
 
@@ -34,6 +37,8 @@ export interface BuildAppDeps {
   api?: Omit<ApiRouterDeps, 'config' | 'logger'>;
   /** Test seam: injected /webhooks dependencies (fake repos/adapter/media store). */
   webhooks?: Omit<WebhooksRouterDeps, 'config' | 'logger'>;
+  /** Test seam: injected /auth dependencies (fake provider/repos — no Google, no DynamoDB). */
+  auth?: Omit<AuthRouterDeps, 'config' | 'logger'>;
   /** Test seam: register extra routes after the built-ins, before the error handler. */
   configureRoutes?: (app: Express) => void;
 }
@@ -63,8 +68,43 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // (4) routes
   app.use(healthRouter);
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));
-  app.use('/api', createApiRouter({ config, logger: log, ...deps.api }));
+  // M1.3 auth — mounted HERE in the route stage, never ahead of the
+  // origin-secret validator (locked chain). /auth itself is public by
+  // design (login/callback/logout/me); EVERY /api route including the SSE
+  // stream sits behind requireAuth (closing the accepted H4 exposure —
+  // EventSource carries the session cookie fine). Webhooks keep their own
+  // HMAC validation; GET /health stays public for the deploy gate.
+  app.use('/auth', createAuthRouter({ config, logger: log, ...deps.auth }));
+  app.use(
+    '/api',
+    sessionMiddleware({ config, logger: log, usersRepo: deps.auth?.usersRepo }),
+    requireAuth(),
+    createApiRouter({ config, logger: log, ...deps.api }),
+  );
   deps.configureRoutes?.(app);
+
+  // Dashboard static serving (M1.3): active only when DASHBOARD_DIST_DIR is
+  // set — the Docker image points it at the built dashboard (/srv/app/public);
+  // locally it stays unset (the Vite dev server owns the UI, proxying
+  // /api + /auth here). SPA fallback: unmatched GETs outside the
+  // api/webhooks/auth namespaces stream index.html (express.static/sendFile
+  // stream from disk — guideline 1 holds).
+  if (config.dashboardDistDir) {
+    const distDir = path.resolve(config.dashboardDistDir);
+    app.use(express.static(distDir));
+    app.use((req, res, next) => {
+      const reserved = ['/api', '/webhooks', '/auth'].some(
+        (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
+      );
+      if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {
+        next();
+        return;
+      }
+      res.sendFile(path.join(distDir, 'index.html'), (err) => {
+        if (err) next(err);
+      });
+    });
+  }
 
   // (last) error handler
   app.use(createExpressErrorHandler(log));

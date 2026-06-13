@@ -33,6 +33,22 @@ resource "aws_ssm_parameter" "cf_origin_secret" {
   value       = random_password.cf_origin_secret.result
 }
 
+# Session-cookie secret (M1.3 auth) — the exact CF_ORIGIN_SECRET pattern:
+# Terraform-generated random value, SecureString, hydrated into the instance
+# .env by the deploy. The app derives the AES-256-GCM session-cookie key from
+# it (app/src/lib/sessionCookie.ts); production refuses to boot without it.
+resource "random_password" "session_secret" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "session_secret" {
+  name        = "/hc/${var.env}/app/SESSION_SECRET"
+  description = "Secret the app derives the sealed session-cookie key from (M1.3 auth). Never logged."
+  type        = "SecureString"
+  value       = random_password.session_secret.result
+}
+
 resource "aws_ssm_parameter" "log_level" {
   name        = "/hc/${var.env}/app/LOG_LEVEL"
   description = "pino log level for app + worker."

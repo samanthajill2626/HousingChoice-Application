@@ -15,7 +15,7 @@ import type {
   SendMessageParams,
   SendMessageResult,
 } from '../../src/adapters/messaging.js';
-import { loadConfig, type AppConfig } from '../../src/lib/config.js';
+import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
 import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
@@ -355,6 +355,14 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     TWILIO_AUTH_TOKEN: AUTH_TOKEN,
     PUBLIC_BASE_URL: PUBLIC_BASE_URL,
     OUR_PHONE_NUMBERS: OUR_NUMBER,
+    // M1.3 auth wiring — production fail-fast keys, so tests overriding
+    // NODE_ENV to 'production' still boot. SESSION_SECRET deliberately
+    // matches the dev placeholder: the sealed cookies minted by
+    // helpers/authSession.ts stay valid against harness-built apps.
+    SESSION_SECRET: DEV_SESSION_SECRET_DEFAULT,
+    GOOGLE_CLIENT_ID: 'test-client-id.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
+    OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
     ...opts.env,
   };
   for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];

@@ -14,9 +14,12 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
+// Every /api request sits behind requireAuth since M1.3 — the suites ride a
+// real sealed session cookie next to the origin secret.
 const SECRET = ORIGIN_SECRET;
 
 function seedConversation(
@@ -52,7 +55,7 @@ describe('GET /api/conversations — the inbox', () => {
     });
     seedConversation(world, 'conv-closed', { status: 'closed' });
 
-    const res = await request(app).get('/api/conversations').set('x-origin-verify', SECRET);
+    const res = await request(app).get('/api/conversations').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
 
     expect(res.status).toBe(200);
     expect(res.body.conversations.map((c: { conversationId: string }) => c.conversationId)).toEqual([
@@ -84,7 +87,7 @@ describe('GET /api/conversations — the inbox', () => {
   it('rejects bad limits and garbage cursors with 400', async () => {
     const { app } = makeWebhookHarness();
     for (const qs of ['limit=0', 'limit=101', 'limit=abc', 'limit=1.5']) {
-      const res = await request(app).get(`/api/conversations?${qs}`).set('x-origin-verify', SECRET);
+      const res = await request(app).get(`/api/conversations?${qs}`).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
       expect(res.status, qs).toBe(400);
     }
     const wrongShape = (key: Record<string, unknown>): string =>
@@ -102,7 +105,7 @@ describe('GET /api/conversations — the inbox', () => {
     for (const cursor of garbageCursors) {
       const res = await request(app)
         .get(`/api/conversations?cursor=${cursor}`)
-        .set('x-origin-verify', SECRET);
+        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
       expect(res.status, cursor).toBe(400);
       expect(res.body).toEqual({ error: 'invalid cursor' });
     }
@@ -115,12 +118,12 @@ describe('GET /api/conversations — the inbox', () => {
     for (const status of ['closed', 'bogus', 'OPEN', 'open%20OR%201']) {
       const res = await request(app)
         .get(`/api/conversations?status=${status}`)
-        .set('x-origin-verify', SECRET);
+        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
       expect(res.status, status).toBe(400);
     }
     const ok = await request(app)
       .get('/api/conversations?status=open')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(ok.status).toBe(200);
   });
 
@@ -168,7 +171,7 @@ describe('GET /api/conversations — ONE Query on byLastActivity, never a Scan (
 
     const res = await request(app)
       .get('/api/conversations?status=open&limit=25')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
 
     expect(res.status).toBe(200);
     expect(commands).toHaveLength(1); // ONE DynamoDB round trip for the whole inbox page
@@ -193,7 +196,7 @@ describe('GET /api/conversations — ONE Query on byLastActivity, never a Scan (
     ]);
     const app = makeAppWithDoc(fakeDoc);
 
-    const first = await request(app).get('/api/conversations').set('x-origin-verify', SECRET);
+    const first = await request(app).get('/api/conversations').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(first.status).toBe(200);
     const cursor: string = first.body.nextCursor;
     expect(typeof cursor).toBe('string');
@@ -202,7 +205,7 @@ describe('GET /api/conversations — ONE Query on byLastActivity, never a Scan (
 
     const second = await request(app)
       .get(`/api/conversations?cursor=${encodeURIComponent(cursor)}`)
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(second.status).toBe(200);
     expect(second.body.nextCursor).toBeNull();
 
@@ -218,11 +221,11 @@ describe('GET /api/conversations/:conversationId', () => {
     const { app, world } = makeWebhookHarness();
     seedConversation(world, 'conv-1', { unread_count: 2 });
 
-    const ok = await request(app).get('/api/conversations/conv-1').set('x-origin-verify', SECRET);
+    const ok = await request(app).get('/api/conversations/conv-1').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(ok.status).toBe(200);
     expect(ok.body.conversation).toMatchObject({ conversationId: 'conv-1', unread_count: 2 });
 
-    const missing = await request(app).get('/api/conversations/conv-nope').set('x-origin-verify', SECRET);
+    const missing = await request(app).get('/api/conversations/conv-nope').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(missing.status).toBe(404);
     expect(missing.body).toEqual({ error: 'conversation_not_found' });
   });
@@ -247,7 +250,7 @@ describe('GET /api/conversations/:conversationId/messages', () => {
 
     const res = await request(app)
       .get('/api/conversations/conv-1/messages')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(200);
     expect(res.body.messages.map((m: { provider_sid: string }) => m.provider_sid)).toEqual([
       'SMpage2',
@@ -258,13 +261,13 @@ describe('GET /api/conversations/:conversationId/messages', () => {
     const before: string = res.body.messages[2].tsMsgId; // oldest seen
     const older = await request(app)
       .get(`/api/conversations/conv-1/messages?before=${encodeURIComponent(res.body.messages[1].tsMsgId)}`)
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(older.status).toBe(200);
     expect(older.body.messages.map((m: { tsMsgId: string }) => m.tsMsgId)).toEqual([before]);
 
     const bad = await request(app)
       .get('/api/conversations/conv-1/messages?limit=0')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(bad.status).toBe(400);
   });
 });
@@ -276,7 +279,7 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
 
     const res = await request(app)
       .post('/api/conversations/conv-1/read')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
 
     expect(res.status).toBe(200);
     expect(res.body.conversation).toMatchObject({ conversationId: 'conv-1', unread_count: 0 });
@@ -300,7 +303,7 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/conversations/conv-nope/read')
-      .set('x-origin-verify', SECRET);
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'conversation_not_found' });
     expect(world.emitted).toHaveLength(0);
@@ -314,21 +317,21 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
 
     const assign = await request(app)
       .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ assigneeUserId: 'user-va-1' });
     expect(assign.status).toBe(200);
     expect(assign.body.conversation.assignment).toBe('user-va-1');
 
     const reassign = await request(app)
       .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ assigneeUserId: 'user-va-2' });
     expect(reassign.status).toBe(200);
     expect(reassign.body.conversation.assignment).toBe('user-va-2');
 
     const unassign = await request(app)
       .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ assigneeUserId: null });
     expect(unassign.status).toBe(200);
     expect(unassign.body.conversation.assignment).toBeUndefined();
@@ -361,7 +364,7 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
     for (const payload of [{}, { assigneeUserId: '' }, { assigneeUserId: 42 }, { assigneeUserId: ['x'] }]) {
       const res = await request(app)
         .patch('/api/conversations/conv-1/assignment')
-        .set('x-origin-verify', SECRET)
+        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
         .send(payload);
       expect(res.status, JSON.stringify(payload)).toBe(400);
     }
@@ -373,7 +376,7 @@ describe('PATCH /api/conversations/:conversationId/assignment', () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .patch('/api/conversations/conv-nope/assignment')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ assigneeUserId: 'user-va-1' });
     expect(res.status).toBe(404);
     expect(world.auditEvents).toHaveLength(0);

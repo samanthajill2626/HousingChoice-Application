@@ -46,10 +46,12 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
-  # API + webhooks: fully dynamic, all methods, nothing cached, full viewer
-  # request forwarded (minus Host, which must be the origin's own hostname).
+  # API + webhooks + auth: fully dynamic, all methods, nothing cached, full
+  # viewer request forwarded (minus Host, which must be the origin's own
+  # hostname). /auth/* is here for POST /auth/logout — the default behavior
+  # below only allows GET/HEAD/OPTIONS (M1.3).
   dynamic "ordered_cache_behavior" {
-    for_each = ["/api/*", "/webhooks/*"]
+    for_each = ["/api/*", "/webhooks/*", "/auth/*"]
     content {
       path_pattern             = ordered_cache_behavior.value
       target_origin_id         = local.origin_id
@@ -62,9 +64,10 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
-  # Default behavior: same origin, also CachingDisabled FOR NOW — where the
-  # dashboard is hosted (S3+CF vs served by the app) is decided later; once
-  # static assets exist this likely becomes CachingOptimized.
+  # Default behavior: same origin, also CachingDisabled FOR NOW — since M1.3
+  # the app serves the built dashboard from here (DASHBOARD_DIST_DIR static +
+  # SPA fallback). Tiny asset set, so CachingDisabled stays correct-first;
+  # revisit CachingOptimized once the M1.4 UI ships real asset weight.
   default_cache_behavior {
     target_origin_id         = local.origin_id
     viewer_protocol_policy   = "redirect-to-https"

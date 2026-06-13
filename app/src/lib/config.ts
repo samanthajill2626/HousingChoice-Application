@@ -1,11 +1,13 @@
 // Typed runtime configuration, read from process.env.
 //
-// Fail-fast policy: in production NODE_ENV, CF_ORIGIN_SECRET and the job-
+// Fail-fast policy: in production NODE_ENV, CF_ORIGIN_SECRET, the job-
 // delivery wiring (JOBS_QUEUE_URL + SCHEDULER_TARGET_ARN/SCHEDULER_ROLE_ARN)
-// are mandatory and startup throws without them; when MESSAGING_DRIVER
-// resolves to `twilio`, all TWILIO_* credentials are mandatory too. Locally a
-// dev placeholder / console driver / in-memory job path is allowed so the dev
-// loop boots with no .env present.
+// and the M1.3 auth wiring (SESSION_SECRET + GOOGLE_CLIENT_ID/SECRET +
+// OAUTH_ALLOWED_DOMAINS) are mandatory and startup throws without them; when
+// MESSAGING_DRIVER resolves to `twilio`, all TWILIO_* credentials are
+// mandatory too. Locally a dev placeholder / console driver / in-memory job
+// path / unconfigured OAuth is allowed so the dev loop boots with no .env
+// present.
 
 /** Outbound messaging driver: real Twilio REST vs the local console fake. */
 export type MessagingDriverName = 'twilio' | 'console';
@@ -89,10 +91,43 @@ export interface AppConfig {
    * beyond the cap new streams get 503.
    */
   sseMaxConnections: number;
+  /**
+   * Secret the session-cookie AES-256-GCM key is derived from (M1.3 auth).
+   * Terraform-managed random SecureString /hc/<env>/app/SESSION_SECRET —
+   * exactly the CF_ORIGIN_SECRET pattern. Never log.
+   */
+  sessionSecret: string;
+  /**
+   * Google OAuth client credentials (M1.3) — operator secrets
+   * (.env.<env> → secrets:push). Unset locally: /auth/login responds 503.
+   */
+  googleClientId?: string;
+  googleClientSecret?: string;
+  /**
+   * Workspace domains allowed to sign in (OAUTH_ALLOWED_DOMAINS,
+   * comma-separated, lowercased). EMPTY = nobody can log in (safe default;
+   * production fails fast on empty). The callback checks the email domain
+   * (authoritative) AND the `hd` claim when present (corroboration) — see
+   * routes/auth.ts.
+   */
+  oauthAllowedDomains: string[];
+  /**
+   * Directory of built dashboard assets the app serves statically with SPA
+   * index.html fallback (DASHBOARD_DIST_DIR, M1.3). Set by the Docker image
+   * (/srv/app/public); unset locally — the Vite dev server serves the UI.
+   */
+  dashboardDistDir?: string;
 }
 
 /** Dev-only fallback; matches .env.example. Never used when NODE_ENV=production. */
 const DEV_ORIGIN_SECRET_DEFAULT = 'dev-placeholder-not-a-secret';
+
+/**
+ * Dev-only session-secret fallback; matches .env.example and the test
+ * session-cookie factory (app/test/helpers/authSession.ts). Never used when
+ * NODE_ENV=production (fail-fast below).
+ */
+export const DEV_SESSION_SECRET_DEFAULT = 'dev-placeholder-session-secret';
 
 /** Default table prefix for local dev; M0.4 Terraform sets hc-dev-/hc-prod-. */
 export const DEFAULT_TABLE_PREFIX = 'hc-local-';
@@ -177,6 +212,44 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // M1.3 auth wiring is mandatory in production — same fail-fast pattern as
+  // the job-delivery block above. SESSION_SECRET is Terraform-managed (params
+  // module, exactly the CF_ORIGIN_SECRET pattern); GOOGLE_* and
+  // OAUTH_ALLOWED_DOMAINS are operator secrets (npm run secrets:push). Local
+  // NODE_ENVs boot with the placeholder session secret and OAuth
+  // unconfigured (/auth/login responds 503 oauth_not_configured).
+  if (nodeEnv === 'production') {
+    const missingAuth = [
+      'SESSION_SECRET',
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
+      'OAUTH_ALLOWED_DOMAINS',
+    ].filter((key) => !env[key]);
+    if (missingAuth.length > 0) {
+      throw new Error(
+        `NODE_ENV=production requires ${missingAuth.join(', ')} (M1.3 auth: SESSION_SECRET comes ` +
+          'from the Terraform params module; the others are operator secrets — npm run ' +
+          'secrets:push). Refusing to start without them.',
+      );
+    }
+  }
+
+  // Comma-separated Workspace domains, lowercased; empty/unset = NOBODY can
+  // log in (safe default — production fails fast above instead). Malformed
+  // entries fail fast (same posture as OUR_PHONE_NUMBERS below: a silently
+  // dropped domain locks the team out; a typo'd one could let outsiders in).
+  const oauthAllowedDomains = (env.OAUTH_ALLOWED_DOMAINS ?? '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase())
+    .filter((d) => d.length > 0);
+  for (const domain of oauthAllowedDomains) {
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
+      throw new Error(
+        `OAUTH_ALLOWED_DOMAINS entries must be bare lowercase domains (example.org), got: ${domain}`,
+      );
+    }
+  }
+
   // Comma-separated E.164 list; whitespace tolerated; empty/unset = none
   // (the echo defense then relies on SID dedupe alone — layer 2).
   const ourPhoneNumbers = (env.OUR_PHONE_NUMBERS ?? '')
@@ -225,5 +298,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ourPhoneNumbers,
     mediaBucket: env.MEDIA_BUCKET,
     sseMaxConnections,
+    sessionSecret: env.SESSION_SECRET ?? DEV_SESSION_SECRET_DEFAULT,
+    googleClientId: env.GOOGLE_CLIENT_ID,
+    googleClientSecret: env.GOOGLE_CLIENT_SECRET,
+    oauthAllowedDomains,
+    dashboardDistDir: env.DASHBOARD_DIST_DIR,
   };
 }

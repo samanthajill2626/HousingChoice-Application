@@ -19,6 +19,7 @@ export const MANAGED_BY_OTHERS = Object.freeze([
   'PUBLIC_BASE_URL',
   'SCHEDULER_ROLE_ARN',
   'SCHEDULER_TARGET_ARN',
+  'SESSION_SECRET',
   'TABLE_PREFIX',
 ]);
 

@@ -25,12 +25,16 @@ const TWILIO_ENV = {
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
 };
 
-// NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring —
-// production-shaped configs in this suite must carry it.
+// NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring and
+// the M1.3 auth wiring — production-shaped configs in this suite carry both.
 const JOB_DELIVERY_ENV = {
   JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
   SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
   SCHEDULER_ROLE_ARN: 'arn:aws:iam::000000000000:role/hc-test-scheduler',
+  SESSION_SECRET: 'test-session-secret',
+  GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com',
+  GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
+  OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
 };
 
 function makeFakeTwilioClient() {

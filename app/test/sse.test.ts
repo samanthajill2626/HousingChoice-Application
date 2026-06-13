@@ -9,6 +9,7 @@ import type { Express } from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
   inboundSmsParams,
@@ -59,7 +60,9 @@ async function connectSse(port: number): Promise<SseClient> {
   const controller = new AbortController();
   aborters.push(controller);
   const response = await fetch(`http://127.0.0.1:${port}/api/events`, {
-    headers: { 'x-origin-verify': ORIGIN_SECRET },
+    // M1.3: the SSE stream sits behind requireAuth like every /api route —
+    // the session rides the cookie header, exactly as EventSource sends it.
+    headers: { 'x-origin-verify': ORIGIN_SECRET, cookie: TEST_SESSION_COOKIE },
     signal: controller.signal,
   });
   let buffer = '';

@@ -1,7 +1,7 @@
 // M1.1 unit tests: POST /api/conversations/:id/messages — payload validation
 // and typed-refusal → HTTP status mapping, with a fake send service injected
 // through buildApp (no DynamoDB, no provider). The route sits BEHIND the
-// origin-secret middleware like everything else.
+// origin-secret middleware AND (M1.3) the session requireAuth gate.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
@@ -13,6 +13,7 @@ import {
   ConversationNotFoundError,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const SECRET = 'test-origin-secret';
@@ -43,7 +44,7 @@ describe('POST /api/conversations/:conversationId/messages', () => {
     const { app, calls } = makeApp();
     const res = await request(app)
       .post('/api/conversations/conv-1/messages')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ body: 'hello' });
 
     expect(res.status).toBe(201);
@@ -61,7 +62,7 @@ describe('POST /api/conversations/:conversationId/messages', () => {
     for (const payload of [{}, { body: '' }, { mediaUrls: [] }, { mediaUrls: [42] }]) {
       const res = await request(app)
         .post('/api/conversations/conv-1/messages')
-        .set('x-origin-verify', SECRET)
+        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
         .send(payload);
       expect(res.status).toBe(400);
     }
@@ -80,7 +81,7 @@ describe('POST /api/conversations/:conversationId/messages', () => {
       });
       const res = await request(app)
         .post('/api/conversations/conv-1/messages')
-        .set('x-origin-verify', SECRET)
+        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
         .send({ body: 'x' });
       expect(res.status).toBe(status);
       expect(res.body).toEqual({ error: code });

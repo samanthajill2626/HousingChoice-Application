@@ -1,10 +1,11 @@
 // /api router — dashboard-facing REST (M1.1 outbound send; M1.2 conversation
 // hub: inbox, thread, unread, assignment, SSE live updates).
 //
-// TODO(M1.3): AUTH — this router currently trusts anything that clears the
-// CloudFront origin-secret middleware. Google OAuth + RBAC land in M1.3 and
-// must gate every /api route (including the SSE stream); until then the
-// dashboard API is origin-secret protected only.
+// AUTH (M1.3): every route in this router — the SSE stream included — sits
+// behind sessionMiddleware + requireAuth, mounted ahead of it in app.ts.
+// Role gates are deliberately MINIMAL: VAs run the day-to-day (assignment
+// included), so nothing here uses requireRole('admin') until a genuinely
+// admin-only surface exists (see middleware/auth.ts).
 //
 // PII (doc §9): responses carry bodies/previews to the authenticated client;
 // LOG LINES never do — logs are IDs/counts only, correlated via the pino mixin.
@@ -302,8 +303,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     mergeContext({ conversationId });
     const payload = (req.body ?? {}) as { assigneeUserId?: unknown };
     const assigneeUserId = payload.assigneeUserId;
-    // TODO(M1.3): validate assigneeUserId against the users table once
-    // auth/users land — until then any non-empty string is accepted.
+    // TODO(M1.4): validate assigneeUserId against the users table (users
+    // exist since M1.3) — until then any non-empty string is accepted.
     if (
       !(assigneeUserId === null || (typeof assigneeUserId === 'string' && assigneeUserId.length > 0))
     ) {

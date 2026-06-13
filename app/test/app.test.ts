@@ -166,8 +166,16 @@ describe('config fail-fast', () => {
       }
     });
 
+    // M1.3 auth wiring — required in production alongside the job delivery.
+    const authWiring = {
+      SESSION_SECRET: 'test-session-secret',
+      GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com',
+      GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
+      OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
+    };
+
     it('production boots with the full wiring; local NODE_ENVs keep the in-memory path (no throw)', () => {
-      const config = loadConfig({ ...prodBase, ...jobDelivery });
+      const config = loadConfig({ ...prodBase, ...jobDelivery, ...authWiring });
       expect(config.jobsQueueUrl).toBe(jobDelivery.JOBS_QUEUE_URL);
       expect(config.schedulerTargetArn).toBe(jobDelivery.SCHEDULER_TARGET_ARN);
       expect(config.schedulerRoleArn).toBe(jobDelivery.SCHEDULER_ROLE_ARN);

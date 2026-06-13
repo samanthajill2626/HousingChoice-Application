@@ -27,6 +27,8 @@ export interface CorrelationContext {
   conversationId?: string;
   tenantId?: string;
   caseId?: string;
+  /** Authenticated session user (M1.3) — stamped by the session middleware. */
+  userId?: string;
   /** Job-chain depth; incremented per enqueue hop (runaway-loop guard). */
   hopCount?: number;
   /** W3C traceparent propagated across HTTP and job hops. */

@@ -110,6 +110,9 @@ function makeFakeAdapter(opts: { voice?: boolean } = {}): MessagingAdapter & { p
       };
     },
     async setVoiceWebhook() {},
+    async initiateCall() {
+      return { callSid: 'CAtest-pool' };
+    },
   };
   return adapter;
 }

@@ -526,6 +526,32 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     res.json({ messages: page });
   });
 
+  // GET /api/calls/:callId — resolve a call (M1.9a). `callId` is the Twilio
+  // CallSid (== the call message's provider_sid); getByProviderSid resolves it
+  // via the SID pointer, exactly like the status-callback path. Returns
+  // { call, conversation } so the dashboard /quick-reply/:callId seam can map a
+  // callId → its conversation (and render the masked call entry). PII (doc §9):
+  // the call carries call_party_label (a role/name) — never a raw counterpart
+  // phone beyond what the conversation already exposes; logs stay IDs-only.
+  router.get('/calls/:callId', async (req, res) => {
+    const { callId } = req.params;
+    const call = await messages.getByProviderSid(callId);
+    if (!call || call.type !== 'call') {
+      res.status(404).json({ error: 'call_not_found' });
+      return;
+    }
+    mergeContext({ conversationId: call.conversationId });
+    const conversation = await conversations.getById(call.conversationId);
+    if (!conversation) {
+      // The call entry points at a conversation that no longer exists — surface
+      // the call alone rather than a hard 404 (the timeline item is still real).
+      log.warn({ callSid: callId }, 'GET /api/calls: call found but its conversation is missing');
+      res.json({ call, conversation: null });
+      return;
+    }
+    res.json({ call, conversation });
+  });
+
   // POST /api/conversations/:conversationId/read — zero the unread counter
   // (the operator opened the thread). Returns the updated conversation.
   router.post('/conversations/:conversationId/read', async (req, res) => {

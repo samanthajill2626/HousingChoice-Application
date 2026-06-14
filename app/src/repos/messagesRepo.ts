@@ -28,8 +28,49 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-export type MessageType = 'sms' | 'mms';
+export type MessageType = 'sms' | 'mms' | 'call';
 export type MessageDirection = 'inbound' | 'outbound';
+
+/**
+ * Voice call lifecycle (M1.9a, doc §7.1 masked calling). Mirrors Twilio's
+ * CallStatus values verbatim so the status-callback mapping is identity. A
+ * call entry is a metadata-only timeline item — masked calls are NEVER
+ * recorded/transcribed (recording_s3_key/transcript stay UNPOPULATED here).
+ */
+export type CallStatus =
+  | 'ringing'
+  | 'in-progress'
+  | 'completed'
+  | 'no-answer'
+  | 'busy'
+  | 'failed'
+  | 'canceled';
+
+/**
+ * Coarse human-facing outcome derived from CallStatus + whether a leg
+ * connected (M1.9a): `answered` (a leg picked up), `missed` (nobody answered /
+ * busy / failed), `voicemail` (reserved — masked calls press-1-gate to block
+ * carrier voicemail, so this is the founder-bridge seam, unused here).
+ */
+export type CallOutcome = 'answered' | 'missed' | 'voicemail';
+
+/** Forward-only CallStatus progression: which prior statuses each may overwrite. */
+const ALLOWED_PRIOR_CALL_STATUS: Record<CallStatus, CallStatus[]> = {
+  // Non-terminal: ringing may only be the first write (nothing transitions INTO it).
+  ringing: [],
+  // in-progress (answered) can follow ringing.
+  'in-progress': ['ringing'],
+  // Terminal states may follow either non-terminal state; terminals never regress.
+  completed: ['ringing', 'in-progress'],
+  'no-answer': ['ringing', 'in-progress'],
+  busy: ['ringing', 'in-progress'],
+  failed: ['ringing', 'in-progress'],
+  canceled: ['ringing', 'in-progress'],
+};
+
+export function allowedPriorCallStatuses(next: CallStatus): CallStatus[] {
+  return ALLOWED_PRIOR_CALL_STATUS[next];
+}
 /**
  * Who authored the message (doc §5; `ai` is Phase 2). `unknown` is the
  * operator-mandated honesty value (deviations table 2026-06-12): inbound from
@@ -115,6 +156,39 @@ export interface NewMessage {
    * broadcast's recipient slot to update by the provider SID alone.
    */
   broadcastId?: string;
+
+  // --- Voice calls (M1.9a) -------------------------------------------------
+  // A `type:'call'` message is a metadata-only timeline entry for a masked
+  // (pool-number) call. `providerSid` carries the Twilio CallSid (the dedupe
+  // key — same append conditional + a parallel callsid pointer for the status
+  // callback). PII (doc §9): NEVER the raw counterpart phone — the label below
+  // is a role/name only.
+  /** Voice call lifecycle status (absent on sms/mms). */
+  callStatus?: CallStatus;
+  /** Coarse outcome (set/refined by the status callback). */
+  callOutcome?: CallOutcome;
+  /** When the call leg was first seen (ISO 8601). */
+  startedAt?: string;
+  /** When a leg connected (ISO 8601); absent until answered. */
+  answeredAt?: string;
+  /** When the call ended (ISO 8601); absent until completion. */
+  endedAt?: string;
+  /** Billable/connected duration in whole seconds (from Twilio CallDuration). */
+  callDuration?: number;
+  /** True for masked relay-pool calls — they are NEVER recorded/transcribed. */
+  masked?: boolean;
+  /**
+   * A MASKED party label for the timeline: the COUNTERPART's role ("Tenant"/
+   * "Landlord"/"Team") or contact name — NEVER the raw counterpart phone (PII).
+   */
+  callPartyLabel?: string;
+  /**
+   * Recording/transcript seams (later decision; UNUSED for masked calls —
+   * masked calls never record). Included so M1.9b/founder-bridge can populate
+   * them without a schema change.
+   */
+  recordingS3Key?: string;
+  transcript?: string;
 }
 
 export interface MessageItem {
@@ -161,6 +235,28 @@ export interface MessageItem {
    * stats by SID lookup. Absent on 1:1 / relay messages.
    */
   broadcast_id?: string;
+
+  // --- Voice calls (M1.9a) — present only on type:'call' items -------------
+  /** Twilio CallStatus (lifecycle); the status callback advances it forward-only. */
+  call_status?: CallStatus;
+  /** Coarse outcome (answered/missed/voicemail) — refined by the status callback. */
+  call_outcome?: CallOutcome;
+  /** First-seen time of the call leg (ISO 8601). */
+  started_at?: string;
+  /** When a leg connected (ISO 8601); absent until answered. */
+  answered_at?: string;
+  /** When the call ended (ISO 8601); absent until completion. */
+  ended_at?: string;
+  /** Connected duration in whole seconds (Twilio CallDuration). */
+  call_duration?: number;
+  /** True for masked relay-pool calls (NEVER recorded/transcribed). */
+  masked?: boolean;
+  /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
+  call_party_label?: string;
+  /** Recording S3 key seam (UNUSED for masked calls). */
+  recording_s3_key?: string;
+  /** Transcript seam (UNUSED for masked calls). */
+  transcript?: string;
   [key: string]: unknown;
 }
 
@@ -199,6 +295,25 @@ export interface MessagesRepo {
    * callbacks arrive out of order and redelivered (doc §7.1).
    */
   updateDeliveryStatus(sid: string, status: DeliveryStatus, errorCode?: string): Promise<boolean>;
+  /**
+   * Voice call (M1.9a): apply a call status-callback transition to a
+   * `type:'call'` item, found by CallSid (== provider_sid). Forward-only on
+   * call_status (a redelivered/out-of-order callback can never regress a
+   * terminal call), and idempotently stamps the supplied lifecycle fields
+   * (answered_at/ended_at/call_duration/call_outcome). Returns false (no-op)
+   * when the call is unknown or the transition would regress — so a redelivered
+   * webhook never double-writes or double-counts. PII (doc §9): IDs/labels only.
+   */
+  updateCallStatus(
+    callSid: string,
+    fields: {
+      callStatus: CallStatus;
+      callOutcome?: CallOutcome;
+      answeredAt?: string;
+      endedAt?: string;
+      callDuration?: number;
+    },
+  ): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
@@ -326,6 +441,20 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
+        // Voice call (M1.9a): metadata-only fields on a type:'call' item. The
+        // same sid#<CallSid> pointer the append already writes lets the status
+        // callback recover context via getByProviderSid(CallSid). Masked calls
+        // never populate recording_s3_key/transcript (asserted in tests).
+        ...(message.callStatus !== undefined && { call_status: message.callStatus }),
+        ...(message.callOutcome !== undefined && { call_outcome: message.callOutcome }),
+        ...(message.startedAt !== undefined && { started_at: message.startedAt }),
+        ...(message.answeredAt !== undefined && { answered_at: message.answeredAt }),
+        ...(message.endedAt !== undefined && { ended_at: message.endedAt }),
+        ...(message.callDuration !== undefined && { call_duration: message.callDuration }),
+        ...(message.masked === true && { masked: true }),
+        ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
+        ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
+        ...(message.transcript !== undefined && { transcript: message.transcript }),
       };
       try {
         await doc.send(
@@ -428,6 +557,63 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       log.info({ providerSid: sid, status, errorCode }, 'delivery status updated');
+      return true;
+    },
+
+    async updateCallStatus(callSid, fields) {
+      // CallSid == provider_sid, so the same sid# pointer the call append wrote
+      // resolves the item — no separate callsid partition needed.
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid, callStatus: fields.callStatus }, 'call status for unknown CallSid ignored');
+        return false;
+      }
+      const allowed = allowedPriorCallStatuses(fields.callStatus);
+      if (allowed.length === 0) return false; // nothing transitions INTO ringing
+      const sets = ['call_status = :s'];
+      const values: Record<string, unknown> = { ':s': fields.callStatus };
+      if (fields.callOutcome !== undefined) {
+        sets.push('call_outcome = :o');
+        values[':o'] = fields.callOutcome;
+      }
+      if (fields.answeredAt !== undefined) {
+        sets.push('answered_at = :a');
+        values[':a'] = fields.answeredAt;
+      }
+      if (fields.endedAt !== undefined) {
+        sets.push('ended_at = :e');
+        values[':e'] = fields.endedAt;
+      }
+      if (fields.callDuration !== undefined) {
+        sets.push('call_duration = :d');
+        values[':d'] = fields.callDuration;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            // Forward-only: commit only from an allowed prior call_status, so an
+            // out-of-order/redelivered callback can never regress a terminal call.
+            ConditionExpression: `call_status IN (${allowed.map((_, i) => `:p${i}`).join(', ')})`,
+            ExpressionAttributeValues: {
+              ...values,
+              ...Object.fromEntries(allowed.map((p, i) => [`:p${i}`, p])),
+            },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info(
+            { callSid, callStatus: fields.callStatus, currentStatus: existing.call_status },
+            'call status transition skipped (would regress)',
+          );
+          return false;
+        }
+        throw err;
+      }
+      log.info({ callSid, callStatus: fields.callStatus }, 'call status updated');
       return true;
     },
 

@@ -73,6 +73,28 @@ export interface SendMessageResult {
   providerTs: string;
 }
 
+/**
+ * Outbound call origination params (M1.9a). The INBOUND masked bridge needs no
+ * REST call — it answers Twilio's inbound webhook with <Dial> TwiML. This is
+ * the seam for the OUTBOUND legs: press-0 → team and the later founder-bridge.
+ * `twimlUrl` is the voice webhook URL Twilio fetches to drive the new call;
+ * `from` MUST be a number we own (a pool number for masked calls — NEVER the
+ * real caller's number).
+ */
+export interface InitiateCallParams {
+  to: string;
+  from: string;
+  /** Absolute https URL Twilio fetches for the new call's TwiML. */
+  twimlUrl: string;
+  /** Deterministic-fake CallSid hint for the console driver (no network). */
+  idempotencyKey?: string;
+}
+
+export interface InitiateCallResult {
+  /** Provider call SID (Twilio CAxxx). */
+  callSid: string;
+}
+
 export interface MessagingAdapter {
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Streams-only media fetch (Builder B: MMS → S3 mirroring). */
@@ -94,6 +116,14 @@ export interface MessagingAdapter {
    * the console driver logs a no-op.
    */
   setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void>;
+  /**
+   * Originate an OUTBOUND call (M1.9a). NOT used by the inbound masked bridge
+   * (that answers with <Dial> TwiML) — this is the seam for press-0 → team and
+   * the later founder-bridge. The Twilio driver calls client.calls.create; the
+   * console driver returns a deterministic `CAconsole-*` CallSid, no network.
+   * PII (doc §9): the driver logs the CallSid only, never the to/from numbers.
+   */
+  initiateCall(params: InitiateCallParams): Promise<InitiateCallResult>;
 }
 
 /** Twilio media host allowlist — MediaUrl{i} values always live here. */
@@ -160,6 +190,14 @@ export interface TwilioClientLike {
       mediaUrl?: string[];
       messagingServiceSid: string;
     }): Promise<{ sid: string; status: string; dateCreated: Date | null }>;
+  };
+  /**
+   * Outbound call origination (M1.9a). Optional on the interface so the
+   * existing message-only fakes keep compiling; the real twilio SDK provides
+   * it, and the driver guards with a clear error when a fake omits it.
+   */
+  calls?: {
+    create(params: { to: string; from: string; url: string }): Promise<{ sid: string }>;
   };
   /**
    * Number provisioning (M1.7). Optional on the interface so the existing
@@ -378,6 +416,19 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     this.log.info({ sid: match.sid }, 'twilio voice webhook set');
   }
 
+  async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
+    const calls = this.client.calls;
+    if (!calls) {
+      throw new Error('TwilioMessagingDriver: client lacks the calls API');
+    }
+    // from MUST be a number we own (a pool number for masked calls) — the
+    // caller guarantees this; the masked-call invariant is never the real
+    // caller's number. PII: log the CallSid only, never to/from.
+    const call = await calls.create({ to: params.to, from: params.from, url: params.twimlUrl });
+    this.log.info({ callSid: call.sid }, 'twilio call initiated');
+    return { callSid: call.sid };
+  }
+
   async getMediaStream(mediaUrl: string): Promise<Readable> {
     // SSRF guard FIRST — before any credentials are attached: MediaUrl{i}
     // comes off a webhook form, so an exact-host https-only allowlist keeps
@@ -482,6 +533,13 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     void phoneNumber;
     void voiceUrl;
     this.log.info({ wired: true }, 'console messaging driver: voice webhook "set" (no-op)');
+  }
+
+  async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
+    // NEVER hits Twilio: a deterministic fake CallSid (CAconsole-*), mirroring
+    // the sendMessage SMconsole-* convention. PII: never log to/from.
+    this.log.info({ callSid: `CAconsole-${params.idempotencyKey ?? 'x'}` }, 'console messaging driver: call "initiated"');
+    return { callSid: `CAconsole-${params.idempotencyKey ?? randomUUID()}` };
   }
 }
 

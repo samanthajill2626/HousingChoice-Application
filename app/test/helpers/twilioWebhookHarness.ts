@@ -11,6 +11,7 @@ import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
 import type {
+  InitiateCallParams,
   MessagingAdapter,
   SendMessageParams,
   SendMessageResult,
@@ -32,6 +33,7 @@ import {
   type ConversationType,
 } from '../../src/repos/conversationsRepo.js';
 import {
+  allowedPriorCallStatuses,
   allowedPriorStatuses,
   buildTsMsgId,
   type MessageItem,
@@ -98,6 +100,8 @@ export interface FakeWorld {
   /** conversationIds whose unread counter was bumped, in order (M1.2). */
   unreadIncrements: string[];
   sent: SendMessageParams[];
+  /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
+  initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
@@ -138,11 +142,13 @@ export function createFakeWorld(): FakeWorld {
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const sent: SendMessageParams[] = [];
+  const initiatedCalls: InitiateCallParams[] = [];
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const failMediaUrls = new Set<string>();
   let convCounter = 0;
   let sidCounter = 0;
   let provisionCounter = 0;
+  let callCounter = 0;
 
   const events = createEventBus();
   const emitted: FakeWorld['emitted'] = [];
@@ -345,6 +351,18 @@ export function createFakeWorld(): FakeWorld {
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         // Share-broadcast (M1.8a): preserve the broadcast id stamp.
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
+        // Voice call (M1.9a): preserve the metadata-only call fields so tests
+        // can assert masked/CallSid-idempotent/forward-only behavior.
+        ...(message.callStatus !== undefined && { call_status: message.callStatus }),
+        ...(message.callOutcome !== undefined && { call_outcome: message.callOutcome }),
+        ...(message.startedAt !== undefined && { started_at: message.startedAt }),
+        ...(message.answeredAt !== undefined && { answered_at: message.answeredAt }),
+        ...(message.endedAt !== undefined && { ended_at: message.endedAt }),
+        ...(message.callDuration !== undefined && { call_duration: message.callDuration }),
+        ...(message.masked === true && { masked: true }),
+        ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
+        ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
+        ...(message.transcript !== undefined && { transcript: message.transcript }),
       });
       return { deduped: false, tsMsgId };
     },
@@ -357,6 +375,22 @@ export function createFakeWorld(): FakeWorld {
       if (!allowedPriorStatuses(status).includes(existing.delivery_status)) return false;
       existing.delivery_status = status;
       if (errorCode !== undefined) existing.error_code = errorCode;
+      return true;
+    },
+    async updateCallStatus(callSid, fields) {
+      // Mirror the real repo: forward-only on call_status, idempotent stamp of
+      // the supplied lifecycle fields. Unknown CallSid or a regressing
+      // transition is a no-op (false) — so a redelivery never double-writes.
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      const allowed = allowedPriorCallStatuses(fields.callStatus);
+      const current = existing.call_status;
+      if (current === undefined || !allowed.includes(current)) return false;
+      existing.call_status = fields.callStatus;
+      if (fields.callOutcome !== undefined) existing.call_outcome = fields.callOutcome;
+      if (fields.answeredAt !== undefined) existing.answered_at = fields.answeredAt;
+      if (fields.endedAt !== undefined) existing.ended_at = fields.endedAt;
+      if (fields.callDuration !== undefined) existing.call_duration = fields.callDuration;
       return true;
     },
     async listByConversation(conversationId, opts = {}) {
@@ -714,6 +748,13 @@ export function createFakeWorld(): FakeWorld {
     async setVoiceWebhook() {
       // no-op fake
     },
+    async initiateCall(params) {
+      // Voice (M1.9a): record the origination + return a deterministic fake
+      // CallSid. The inbound masked bridge answers with TwiML (no initiateCall),
+      // so this only fires for press-0/founder-bridge seams.
+      initiatedCalls.push(params);
+      return { callSid: `CAfake-${++callCounter}` };
+    },
   };
 
   const mediaStore: MediaStore = {
@@ -737,6 +778,7 @@ export function createFakeWorld(): FakeWorld {
     contactCreates,
     unreadIncrements,
     sent,
+    initiatedCalls,
     mediaPuts,
     failMediaUrls,
     events,

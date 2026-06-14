@@ -313,6 +313,67 @@ describe('ConsoleMessagingDriver', () => {
     expect(a.providerSid).toMatch(/^SMconsole-/);
     expect(a.providerSid).not.toBe(b.providerSid);
   });
+
+  it('initiateCall returns a deterministic CAconsole-* CallSid, no network, never logs to/from (M1.9a)', async () => {
+    const capture = createLogCapture();
+    const driver = new ConsoleMessagingDriver({
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const result = await driver.initiateCall({
+      to: '+15550100002',
+      from: '+15550109000',
+      twimlUrl: 'https://x.example/webhooks/twilio/voice/whisper',
+      idempotencyKey: 'fixed-call-key',
+    });
+
+    // Deterministic when an idempotencyKey is supplied; never hits the network.
+    expect(result.callSid).toBe('CAconsole-fixed-call-key');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // PII (doc §9): the log carries the CallSid only — never to/from numbers.
+    expect(JSON.stringify(capture.lines)).not.toContain('+15550100002');
+    expect(JSON.stringify(capture.lines)).not.toContain('+15550109000');
+
+    // Unique without an idempotencyKey.
+    const a = await driver.initiateCall({ to: '+1', from: '+2', twimlUrl: 'https://x/y' });
+    const b = await driver.initiateCall({ to: '+1', from: '+2', twimlUrl: 'https://x/y' });
+    expect(a.callSid).toMatch(/^CAconsole-/);
+    expect(a.callSid).not.toBe(b.callSid);
+  });
+});
+
+describe('TwilioMessagingDriver.initiateCall (M1.9a)', () => {
+  it('calls client.calls.create with to/from/url and returns the CallSid', async () => {
+    const calls: { to: string; from: string; url: string }[] = [];
+    const client: TwilioClientLike = {
+      messages: { create: async () => ({ sid: 'SM', status: 'queued', dateCreated: new Date() }) },
+      calls: {
+        create: async (params) => {
+          calls.push(params);
+          return { sid: 'CA-real-123' };
+        },
+      },
+    };
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const result = await driver.initiateCall({
+      to: '+15550100002',
+      from: '+15550109000',
+      twimlUrl: 'https://x.example/webhooks/twilio/voice/whisper',
+    });
+    expect(result).toEqual({ callSid: 'CA-real-123' });
+    expect(calls).toEqual([
+      { to: '+15550100002', from: '+15550109000', url: 'https://x.example/webhooks/twilio/voice/whisper' },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -127,6 +127,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     },
     getByProviderSid: async () => undefined,
     updateDeliveryStatus: async () => true,
+    updateCallStatus: async () => true,
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
@@ -155,6 +156,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
       sid: 'PNfake-sm',
     }),
     setVoiceWebhook: async () => {},
+    initiateCall: async () => ({ callSid: 'CAfake-sm' }),
   };
 
   const events = createEventBus();

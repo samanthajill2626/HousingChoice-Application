@@ -19,3 +19,15 @@ variable "origin_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "aliases" {
+  description = "Alternate domain name(s) (CNAME aliases) the distribution answers for. Empty = default *.cloudfront.net only (Change Order 3 custom domain)."
+  type        = list(string)
+  default     = []
+}
+
+variable "acm_certificate_arn" {
+  description = "Validated ACM cert ARN (us-east-1) covering the aliases. null keeps the default *.cloudfront.net certificate. When set, the distribution serves SNI-only at min TLS 1.2."
+  type        = string
+  default     = null
+}

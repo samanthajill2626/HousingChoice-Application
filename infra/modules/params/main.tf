@@ -79,7 +79,7 @@ resource "aws_ssm_parameter" "node_env" {
 
 resource "aws_ssm_parameter" "public_base_url" {
   name        = "/hc/${var.env}/app/PUBLIC_BASE_URL"
-  description = "Public https entry point (the CloudFront domain) — Twilio webhook signature reconstruction needs the exact public URL (M1.1)."
+  description = "Canonical public https base URL — the custom domain once cut over (Change Order 3 custom_domain_phase 2), else the CloudFront domain. Every absolute URL derives from it (OAuth callback, Twilio signature reconstruction + webhook self-registration, CSRF origin). Changing the value requires a redeploy to re-hydrate the instance .env."
   type        = "String"
   value       = var.public_base_url
 }

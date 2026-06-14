@@ -47,4 +47,19 @@ locals {
   log_retention_days = 90
   monthly_budget_usd = 40
   alert_email        = "cameron@abt-industries.com"
+
+  # Custom domain + TLS (Change Order 3). DNS lives in Namecheap (manual); the
+  # ACM cert + CloudFront alias are Terraform. custom_domain_phase staircases the
+  # cutover so no apply deadlocks and there is no TLS/outage window:
+  #   0  request the ACM cert only -> apply emits the acm_validation_records
+  #      output; enter that CNAME in Namecheap and wait for ISSUED.
+  #   1  attach the validated cert + alias to the distribution (SNI, TLS 1.2),
+  #      then cut the app CNAME in Namecheap and verify the new host serves.
+  #   2  flip PUBLIC_BASE_URL to the custom domain (canonical-origin cutover) and
+  #      redeploy so the app re-hydrates it; re-point OAuth + Twilio in the same step.
+  #
+  # NOTE: production OAuth/Twilio/PWA cutover rides with M1.11 (ported number) —
+  # hold custom_domain_phase at 1 until the M1.11 cutover, then bump to 2.
+  custom_domain       = "app.housingchoice.org"
+  custom_domain_phase = 1
 }

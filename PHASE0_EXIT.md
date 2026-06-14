@@ -31,7 +31,7 @@ Legend: ✅ met · ⚠️ partially met (gap stated) · ❌ not met
 |---|---|---|
 | VPC (public subnet) | ✅ | `infra/modules/network` — 10.0.0.0/16, public subnet us-east-1a, CloudFront-prefix-list-only SG, no SSH |
 | EC2 t4g + bootstrap | ✅ | t4g.small × 2 (`i-0ad45daa858632001` dev, `i-087fd4eda3e2804c1` prod), user-data installs docker/compose, SSM-only access |
-| CloudFront/ACM | ⚠️ | CloudFront live both envs (`d2w86qra2rq9iz` dev, `d3v3fqgxdcoxv9` prod, `/health` 200). **ACM/custom domain NOT done** — default `*.cloudfront.net` cert; deferred pending the doc's own §13 open question (where DNS for housingchoice.com lives). Tracked in RUNBOOK backlog. |
+| CloudFront/ACM | ⚠️ | CloudFront live both envs (`d2w86qra2rq9iz` dev, `d3v3fqgxdcoxv9` prod, `/health` 200). **ACM/custom domain NOT done at Phase 0 exit** — default `*.cloudfront.net` cert. **Scheduled in Phase 1 via Change Order 3**: per-stack ACM cert (us-east-1, DNS-validated) + CloudFront alias for `app` / `dev.app` on `housingchoice.org`, with DNS hand-maintained at Namecheap (doc §13 resolved). |
 | DynamoDB (PITR on) | ✅ | 9 on-demand tables per env, PITR + deletion protection (`infra/modules/dynamodb`, mirrors `app/src/lib/tables.ts`) |
 | S3 | ✅ | `hc-<env>-media-938565869261`, versioned, SSE, public-blocked |
 | ECR | ✅ | `hc-dev-app` / `hc-prod-app`; same-digest image promoted (sha256:9ae40ac5…3279 in both) |

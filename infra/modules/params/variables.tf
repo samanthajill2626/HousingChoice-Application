@@ -21,7 +21,7 @@ variable "app_port" {
 }
 
 variable "public_base_url" {
-  description = "Public https base URL of the stack (https://<cloudfront domain>)."
+  description = "Canonical public https base URL — the custom domain post-cutover (Change Order 3) or the CloudFront domain. No trailing slash."
   type        = string
 }
 

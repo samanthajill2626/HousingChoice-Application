@@ -16,7 +16,9 @@
 //      Parameter Store (+ computed HC_IMAGE / HC_LOG_GROUP_*), write the
 //      repo's docker-compose.yml, compose pull+up, localhost health-check
 //      gate, image prune ONLY on success
-//   5. operator-side verification: CloudFront /health must return 200
+//   5. operator-side verification: CloudFront /health 200 (the reliable gate),
+//      then the CANONICAL custom-domain /health (PUBLIC_BASE_URL) once cut over —
+//      proves the real front door (DNS + ACM cert + alias + app) is reachable
 //   6. record the released tag in SSM /hc/<env>/app/DEPLOYED_TAG
 //
 // Rollback = `npm run deploy:<env> -- --tag <previous tag>` (skips build/push).
@@ -122,6 +124,23 @@ function aws(cliArgs, what) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Poll <url> up to `attempts` times (5s apart). Returns "200 <body>" or "FAILED".
+ *  An HTTPS fetch also validates the TLS chain, so a 200 here proves the cert too. */
+async function verifyHealth(url, attempts = 8) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      const body = await res.text();
+      if (res.status === 200) return `200 ${body}`;
+      console.error(`  attempt ${attempt}/${attempts}: HTTP ${res.status}`);
+    } catch (err) {
+      console.error(`  attempt ${attempt}/${attempts}: ${err.message}`);
+    }
+    if (attempt < attempts) await sleep(5000);
+  }
+  return 'FAILED';
+}
 
 // --- 1. account guard + stack outputs -----------------------------------------
 const identity = await assertHousingChoiceAccount();
@@ -583,24 +602,12 @@ if (invocation.Status !== 'Success') {
   );
 }
 
-// --- 5. operator-side verification through CloudFront ---------------------------
-const healthUrl = `https://${cfDomain}/health`;
-console.error(`[deploy] verifying ${healthUrl} ...`);
-let cfStatus = 'FAILED';
-for (let attempt = 1; attempt <= 8; attempt++) {
-  try {
-    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
-    const body = await res.text();
-    if (res.status === 200) {
-      cfStatus = `200 ${body}`;
-      break;
-    }
-    console.error(`  attempt ${attempt}/8: HTTP ${res.status}`);
-  } catch (err) {
-    console.error(`  attempt ${attempt}/8: ${err.message}`);
-  }
-  await sleep(5000);
-}
+// --- 5. operator-side verification through CloudFront (the reliable GATE) -------
+// The distribution's own *.cloudfront.net name always resolves — no dependency
+// on the custom DNS/cert — so it stays the deploy's health gate. The canonical
+// custom-domain check (step 6b) additionally proves the real front door works.
+console.error(`[deploy] verifying https://${cfDomain}/health ...`);
+const cfStatus = await verifyHealth(`https://${cfDomain}/health`, 8);
 if (cfStatus === 'FAILED') {
   fail(
     `[deploy] CloudFront /health did not return 200 (instance-side health check DID pass — ` +
@@ -613,6 +620,31 @@ if (cfStatus === 'FAILED') {
 aws(['ssm', 'put-parameter', '--name', deployedTagParam, '--type', 'String',
   '--value', tag, '--overwrite'], 'ssm put-parameter DEPLOYED_TAG');
 
+// --- 6b. verify the CANONICAL public URL (the custom domain, once cut over) -----
+// PUBLIC_BASE_URL is the app's canonical entry point; after the Change Order 3
+// cutover it's the custom domain. Hitting it proves DNS + ACM cert + CloudFront
+// alias + app all work end-to-end — i.e. the app is reachable through the REAL
+// front door, not just the default name. Before cutover PUBLIC_BASE_URL == the
+// CloudFront host, so there's nothing new to check and it's skipped (this is also
+// why a not-yet-cut-over stack like prod never false-fails here).
+let canonicalStatus = 'skipped';
+let canonicalBase = '';
+let canonicalHost = '';
+const pbu = capture('aws', ['ssm', 'get-parameter', '--name', `/hc/${env}/app/PUBLIC_BASE_URL`,
+  '--region', HC_REGION, '--query', 'Parameter.Value', '--output', 'text']);
+if (pbu.status === 0) {
+  canonicalBase = pbu.stdout.trim();
+  try { canonicalHost = new URL(canonicalBase).host; } catch { canonicalHost = ''; }
+}
+if (canonicalHost && canonicalHost !== cfDomain) {
+  console.error(`[deploy] verifying canonical https://${canonicalHost}/health ...`);
+  canonicalStatus = await verifyHealth(`${canonicalBase.replace(/\/+$/, '')}/health`, 6);
+} else if (!canonicalHost) {
+  canonicalStatus = 'skipped (could not read PUBLIC_BASE_URL)';
+} else {
+  canonicalStatus = 'skipped (PUBLIC_BASE_URL = CloudFront host — not cut over)';
+}
+
 // --- 7. summary -----------------------------------------------------------------
 const totalS = Math.round((Date.now() - startedAt) / 1000);
 console.log(`
@@ -621,7 +653,19 @@ console.log(`
   deployed tag:  ${tag}${promoteTag ? '  (promoted from hc-dev-app — same digest)' : requestedTag ? '  (existing image — rollback/redeploy)' : ''}
   previous tag:  ${previousTag || '(none — first deploy)'}
   cloudfront:    ${cfStatus}
+  canonical:     ${canonicalHost && canonicalHost !== cfDomain ? `https://${canonicalHost}/health -> ${canonicalStatus}` : canonicalStatus}
   DEPLOYED_TAG:  ${deployedTagParam} = ${tag}
   duration:      ${totalS}s
   rollback:      npm run deploy:${env} -- --tag ${previousTag || '<tag>'}
 ==================================================================`);
+
+// The app IS deployed & healthy (CloudFront gate passed, DEPLOYED_TAG written),
+// but if the canonical custom domain is unreachable, exit non-zero so a broken
+// DNS / ACM cert / CloudFront alias can't pass silently — the deployment stands.
+if (canonicalStatus === 'FAILED') {
+  fail(
+    `[deploy] DEPLOYED OK via CloudFront, but the CANONICAL domain ${canonicalBase} did NOT ` +
+      `return 200 — users on the custom domain are affected. Check the Namecheap CNAME, the ` +
+      `ACM cert, and the CloudFront alias for ${canonicalHost} (see RUNBOOK "Custom domain & TLS").`,
+  );
+}

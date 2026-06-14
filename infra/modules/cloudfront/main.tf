@@ -1,11 +1,16 @@
 # cloudfront — the public entry point for the stack.
 #
-# Viewers hit https://<dist>.cloudfront.net (default *.cloudfront.net cert);
+# Viewers hit the custom domain (Change Order 3: app / dev.app on
+# housingchoice.org) — or, before/without the alias, https://<dist>.cloudfront.net.
 # CloudFront forwards to the EC2 EIP public DNS over plain HTTP on the app
 # port and stamps the secret x-origin-verify header (value lives in Parameter
 # Store via the params module). App middleware rejects any request missing the
 # header (GET /health exempt), so the instance only ever serves CloudFront.
 # Custom error pages: deliberately NONE (spec: custom error responses OFF).
+#
+# The Host header does NOT reach the origin (Managed-AllViewerExceptHostHeader),
+# so the alias is transparent to the app — the origin secret, /api/* + /webhooks/*
+# behaviors, and middleware chain are unchanged by the custom domain.
 
 # AWS-managed policies — never create our own for these.
 data "aws_cloudfront_cache_policy" "caching_disabled" {
@@ -26,6 +31,12 @@ resource "aws_cloudfront_distribution" "this" {
   price_class     = "PriceClass_100"
   http_version    = "http2and3"
   is_ipv6_enabled = true
+
+  # Alternate domain name(s). Empty until the custom-domain phase attaches the
+  # alias alongside the validated ACM cert (must move together — an alias with
+  # no matching cert is rejected). CloudFront only serves a Host that is either
+  # the distribution's own *.cloudfront.net or a listed alias.
+  aliases = var.aliases
 
   origin {
     origin_id   = local.origin_id
@@ -84,7 +95,13 @@ resource "aws_cloudfront_distribution" "this" {
     }
   }
 
+  # Default *.cloudfront.net cert when no ACM cert is wired; otherwise the custom
+  # cert, SNI-only at min TLS 1.2 (TLSv1.2_2021). Exactly one branch is active:
+  # setting acm_certificate_arn omits cloudfront_default_certificate (null).
   viewer_certificate {
-    cloudfront_default_certificate = true # *.cloudfront.net; custom domain is post-Phase-0
+    cloudfront_default_certificate = var.acm_certificate_arn == null ? true : null
+    acm_certificate_arn            = var.acm_certificate_arn
+    ssl_support_method             = var.acm_certificate_arn == null ? null : "sni-only"
+    minimum_protocol_version       = var.acm_certificate_arn == null ? null : "TLSv1.2_2021"
   }
 }

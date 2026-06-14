@@ -56,7 +56,11 @@ module "params" {
   # NOT a cycle: only the PUBLIC_BASE_URL param resource depends on the
   # distribution; cloudfront's origin_secret input depends on random_password.
   # Terraform graphs at resource granularity, so this resolves cleanly.
-  public_base_url = "https://${module.cloudfront.domain_name}"
+  # Custom-domain phase 2 flips PUBLIC_BASE_URL to the custom hostname (the
+  # canonical-origin cutover — pair with the app CNAME + a redeploy). Phases 0-1
+  # keep it on the CloudFront host so the old origin stays fully working while
+  # the alias/cert are wired and verified (Change Order 3).
+  public_base_url = local.custom_domain_phase >= 2 ? "https://${local.custom_domain}" : "https://${module.cloudfront.domain_name}"
   media_bucket    = module.s3_media.bucket_name
   # M1.2 job delivery: the queue the worker long-polls + the Scheduler
   # target/role jobs.enqueue() creates one-off schedules with.
@@ -79,12 +83,28 @@ module "ec2" {
   scheduler_role_arn = module.jobs.scheduler_role_arn
 }
 
+# ACM cert for the custom domain (Change Order 3). DNS-validated in Namecheap
+# (manual, outside Terraform), so the apply is staged via custom_domain_phase —
+# see the acm module header for the no-deadlock flow.
+module "acm" {
+  source = "../../modules/acm"
+
+  domain_name       = local.custom_domain
+  enable_validation = local.custom_domain_phase >= 1
+}
+
 module "cloudfront" {
   source = "../../modules/cloudfront"
 
   name_prefix        = local.name_prefix
   origin_domain_name = module.ec2.eip_public_dns
   origin_secret      = module.params.origin_secret
+
+  # Custom domain attaches at phase >= 1: the alias and the validated cert move
+  # together (acm.certificate_arn reads through the validation resource, so this
+  # implicitly waits for ISSUED). Phase 0 leaves the default *.cloudfront.net cert.
+  aliases             = local.custom_domain_phase >= 1 ? [local.custom_domain] : []
+  acm_certificate_arn = local.custom_domain_phase >= 1 ? module.acm.certificate_arn : null
 }
 
 module "observability" {

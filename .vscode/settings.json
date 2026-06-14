@@ -1,0 +1,11 @@
+{
+  // Don't let VS Code's "Integrated Browser" hijack localhost links. When this
+  // is on (the default), clicking a http://localhost:* link in the terminal
+  // opens it in an editor tab instead of your real browser. Turning it off
+  // routes those clicks through the normal external opener = your OS default
+  // browser — which is what the clickable links `npm run dev` prints should do.
+  "workbench.browser.openLocalhostLinks": false,
+  // Also keep the command-palette "Simple Browser" off the integrated browser,
+  // so nothing else re-captures localhost links.
+  "simpleBrowser.useIntegratedBrowser": false
+}

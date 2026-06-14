@@ -121,7 +121,16 @@ export function createWebPushAdapter(config: AppConfig): WebPushAdapter | undefi
         return { result: 'gone' };
       }
       try {
-        const res = await webpush.sendNotification(subscription, payload, { vapidDetails });
+        // urgency:'high' tells the push service to deliver immediately and wake
+        // the device, rather than batching/deferring for battery (the default
+        // is 'normal'). Every push this app sends is a real-time founder alert
+        // (pre-ring, missed call, message), so high urgency is always correct —
+        // it is also a prerequisite for the OS treating the notification as
+        // important enough to surface as a heads-up banner on Android.
+        const res = await webpush.sendNotification(subscription, payload, {
+          vapidDetails,
+          urgency: 'high',
+        });
         return { result: 'sent', statusCode: res.statusCode };
       } catch (err) {
         if (err instanceof WebPushError && GONE_STATUSES.has(err.statusCode)) {

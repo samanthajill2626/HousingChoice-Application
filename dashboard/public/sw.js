@@ -51,6 +51,11 @@ self.addEventListener('push', (event) => {
   }
 
   const title = data.title || 'HousingChoice';
+  // Pre-ring and missed-call alerts are time-sensitive (the founder must see
+  // them BEFORE/around a live call), so they get the strongest on-screen
+  // treatment we can ask for.
+  const timeSensitive = data.kind === 'missed_call' || data.kind === 'pre_ring';
+  const tag = data.callId || data.conversationId || undefined;
   const options = {
     body: data.body || '',
     // The icons ship in the manifest set; reuse the maskable icon.
@@ -65,9 +70,19 @@ self.addEventListener('push', (event) => {
     },
     // Android shows action buttons; iOS ignores them (tap deep-links instead).
     actions: Array.isArray(data.actions) ? data.actions.slice(0, 2) : undefined,
-    // A missed call is time-sensitive — keep it on screen until acted on.
-    requireInteraction: data.kind === 'missed_call',
-    tag: data.callId || data.conversationId || undefined,
+    // HEADS-UP / "bubble" treatment: a vibration pattern is the key nudge that
+    // makes Android surface the notification as an on-screen banner (a "peek")
+    // instead of filing it silently into the shade. (iOS ignores `vibrate` but
+    // honors the banner per the user's per-PWA notification settings — there is
+    // no code lever for heads-up on iOS; see PHASE1_CHANGE_ORDER_3 notes.)
+    vibrate: [200, 100, 200],
+    // `renotify` re-alerts (peeks again) when a later push reuses the same tag,
+    // instead of swapping the existing one in place silently. It REQUIRES a tag
+    // — setting it without one throws — so gate it on tag presence.
+    renotify: timeSensitive && Boolean(tag),
+    // Time-sensitive alerts stay on screen until acted on.
+    requireInteraction: timeSensitive,
+    tag,
   };
 
   event.waitUntil(self.registration.showNotification(title, options));

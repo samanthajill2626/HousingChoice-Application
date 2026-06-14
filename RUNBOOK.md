@@ -8,7 +8,7 @@ Quick reference (authoritative source: `terraform -chdir=infra/envs/<env> output
 
 | | dev | prod |
 |---|---|---|
-| CloudFront | `d2w86qra2rq9iz.cloudfront.net` | `d3v3fqgxdcoxv9.cloudfront.net` |
+| CloudFront | `dev.app.housingchoice.org` (alias of `d2w86qra2rq9iz.cloudfront.net`) | `app.housingchoice.org` (alias of `d3v3fqgxdcoxv9.cloudfront.net`) |
 | EC2 instance | `i-0ad45daa858632001` | `i-087fd4eda3e2804c1` |
 | ECR repo | `hc-dev-app` | `hc-prod-app` |
 | Log groups | `/hc/dev/app`, `/hc/dev/worker` | `/hc/prod/app`, `/hc/prod/worker` |
@@ -265,6 +265,64 @@ Exit and re-run the deploy. A successful deploy's own prune also sweeps ALL accu
 (every image not in use by the now-running containers), so the disk resets to ~one image on
 every green deploy — this section is only needed when the failure streak wins the race.
 
+## Push notifications (PWA install + heads-up setup)
+
+The founder's pre-ring/missed-call alert is only useful if it **pops up on screen** (a "heads-up"
+banner, like a text), not just lands silently in the notification shade. Whether it pops is an
+**OS-level** decision driven by notification *importance* — the app sends the strongest signals it
+can (every push goes out `urgency: 'high'`, and the service worker attaches a `vibrate` pattern +
+`requireInteraction` for `missed_call`/`pre_ring` — see [app/src/adapters/webPush.ts](app/src/adapters/webPush.ts)
+and [dashboard/public/sw.js](dashboard/public/sw.js)), but the final gate is a per-device setting the
+founder must enable. Run this once per device during onboarding.
+
+**Prerequisites (both platforms):**
+
+1. **Install the PWA to the home screen** — web push does NOT work from a browser tab. On Android
+   (Chrome) "Install app" creates a *WebAPK* (its own entry in Settings → Apps); on iOS use
+   Share → "Add to Home Screen".
+2. **Open the installed app** (not the browser) and **grant the notification permission** when
+   prompted (or via the in-app settings toggle).
+3. Send a **test push** (admin → push test, the `kind:'test'` send) to confirm delivery. On Android
+   this also *creates the notification category* you configure in the next step — the category does
+   not exist in settings until the app has posted at least one notification.
+
+### Android (installed PWA = WebAPK)
+
+The installed PWA is **its own app**, so its notification settings live under **Settings → Apps →
+[the PWA's name] → Notifications** — *not* under Chrome, and Chrome's per-site notification controls
+do **not** apply to it.
+
+- **Samsung (One UI 6.1+) — this is the most common gotcha:** Samsung **disables per-app
+  notification categories by default**, so the installed PWA shows only a single master on/off
+  toggle with **no importance / sound / vibration controls** (exactly the "there's nothing to set"
+  symptom). Re-enable them first: **Settings → Notifications → Advanced settings → turn on "Manage
+  notification categories for each app."** Then go to **Settings → Apps → [PWA] → Notifications**,
+  tap the notification **category**, and set it to **Alert** (not Silent) with **pop-up** and
+  sound/vibration on.
+- **Stock Android / Pixel:** **Settings → Apps → [PWA] → Notifications** → tap the notification
+  **category** → choose **Alerting** → turn on **"Pop on screen."** (Equivalently, set the
+  category's **Importance** to **Urgent**.)
+- Make sure **Do Not Disturb / a Focus/Bedtime mode is not active** — it suppresses heads-up
+  banners regardless of these settings.
+- **If it's stuck silent and won't change:** Android locks a category's importance once created and
+  the app can't raise it afterward. If toggling the category doesn't take, **uninstall and
+  reinstall the PWA** to recreate the channel fresh, then re-grant permission.
+
+### iPhone (installed PWA, iOS 16.4+)
+
+There is **no code lever for heads-up on iOS** — banners are governed entirely by the per-PWA
+notification settings, so this checklist *is* the fix:
+
+- The PWA must be **added to the Home Screen** (push does not work from a Safari tab).
+- **Settings → Notifications → [the PWA's name]:** **Allow Notifications ON**, **Banners ON**,
+  **Banner Style → Persistent** (the default *Temporary* auto-dismisses after a moment — Persistent
+  stays until dismissed), and **Sounds ON**.
+- Confirm **no Focus mode** is active (Focus silences banners and may route them to the summary).
+
+> Push subscriptions are **origin-scoped** — see [PWA re-install + push re-grant](#pwa-re-install--push-re-grant-origin-change):
+> after a domain cutover every device must re-install the PWA and re-grant permission, then redo
+> this setup.
+
 ## Rollback
 
 One-liner per env (re-deploys an EXISTING ECR tag — no build, ~20–25 s end to end):
@@ -399,6 +457,71 @@ two public IPv4 charges dominate. Options if/when it matters (NOT actioned — d
 The Terraform `budget` module already emails at 80% actual / 100% forecast of a **$40/mo** budget,
 so an honest ~$33 idle baseline leaves little headroom — expect 80% (= $32) budget emails as normal.
 
+## Custom domain & TLS
+
+Change Order 3 puts the platform on custom hostnames in front of the existing CloudFront distributions:
+
+| | dev | prod |
+|---|---|---|
+| Custom host | `dev.app.housingchoice.org` | `app.housingchoice.org` |
+| Distribution | `d2w86qra2rq9iz.cloudfront.net` (`E1GRFFQ3LDD8HU`) | `d3v3fqgxdcoxv9.cloudfront.net` (`E17AV6DZTTJUS6`) |
+
+**What's in Terraform vs. by hand.** The per-stack ACM certificate (us-east-1, DNS-validated) and the CloudFront alias + cert attach are Terraform (`infra/modules/acm`, wired in `stack.tf`; SNI-only, min TLS 1.2). **DNS is NOT** — the `housingchoice.org` zone lives at **Namecheap**, so the records below are entered by hand in Namecheap → Advanced DNS. This is the one deliberate deviation from zero-drift IaC (README deviations table); migrating the zone to Route 53 is parked (doc §14).
+
+### Namecheap record inventory
+
+⚠️ **Namecheap auto-appends the base domain.** Strip the trailing `.housingchoice.org` (and any trailing dot) from the Host before pasting. ACM gives a name like `_abc123.dev.app.housingchoice.org.` → Namecheap **Host = `_abc123.dev.app`**.
+
+| Env | Type | Host (Namecheap) | Value | Notes |
+|---|---|---|---|---|
+| dev | CNAME | `_<hash>.dev.app` | `_<hash>.acm-validations.aws.` | ACM validation (`terraform output acm_validation_records`). **Leave forever** — ACM reuses it for auto-renewal. |
+| dev | CNAME | `dev.app` | `d2w86qra2rq9iz.cloudfront.net` | App CNAME. Cut ONLY after the cert is issued + attached (phase 1). Low TTL while testing. |
+| prod | CNAME | `_<hash>.app` | `_<hash>.acm-validations.aws.` | ACM validation. Leave forever. |
+| prod | CNAME | `app` | `d3v3fqgxdcoxv9.cloudfront.net` | App CNAME. |
+
+Exact values print at the end of `npm run apply`, or read them ad-hoc (the S3 backend pins the `housingchoice` profile, but set it anyway — the repo never uses the default chain): `$env:AWS_PROFILE='housingchoice'; terraform -chdir=infra/envs/<env> output acm_validation_records` and `... output app_cname_target`.
+
+### Staged cutover (per stack)
+
+The `custom_domain_phase` local in `infra/envs/<env>/main.tf` staircases the rollout so the first apply never deadlocks on DNS Terraform can't create:
+
+1. **Phase 0 → request the cert.** `custom_domain_phase = 0` (default). `npm run plan -- <env>` → `npm run apply -- <env>` creates the ACM cert (PENDING_VALIDATION). Read `acm_validation_records` from the apply output (or `$env:AWS_PROFILE='housingchoice'; terraform -chdir=infra/envs/<env> output acm_validation_records`), enter that CNAME in Namecheap, wait for ISSUED (`aws acm describe-certificate --certificate-arn <arn> --region us-east-1 --profile housingchoice --query Certificate.Status`).
+2. **Phase 1 → attach alias + cert.** Set `custom_domain_phase = 1`, plan + apply (validates, then attaches alias + cert to the distribution; SNI, TLS 1.2). **Now** add the app CNAME in Namecheap (`output app_cname_target`) and verify the new host (checklist below). The old `*.cloudfront.net` host still works and `PUBLIC_BASE_URL` is unchanged.
+3. **Phase 2 → flip canonical URL.** Set `custom_domain_phase = 2`, plan + apply (repoints `PUBLIC_BASE_URL` to the custom host), then **`npm run deploy:<env>`** so the app re-hydrates `.env` with the new `PUBLIC_BASE_URL`. In the same window, re-point Google OAuth redirect URIs and Twilio webhooks to the new host. (Prod holds phase 2 until the M1.11 ported-number cutover.)
+
+> **The CSRF origin gate is single-origin.** Once `PUBLIC_BASE_URL` flips (phase 2 + redeploy), state-changing requests through the OLD `*.cloudfront.net` host are rejected (GET/`/health` unaffected). Coordinate phase 2 with the user-facing switch.
+
+### Cert auto-renewal
+
+ACM auto-renews DNS-validated certs with no action **as long as the validation CNAME stays in Namecheap**. Never delete it; no alias/app-CNAME change is needed at renewal.
+
+### PWA re-install + push re-grant (origin change)
+
+Web-push subscriptions and the installed PWA are **origin-scoped**. Moving an origin from `*.cloudfront.net` to the custom host **invalidates existing push subscriptions**, and the installed PWA is a different app. After cutover each user must **re-install the PWA on the new host and re-grant notification permission**. Stale old-origin subscriptions are handled gracefully (the push adapter drops 404/410 endpoints — no crash).
+
+### Live verification checklist (run against the new host after phase 1 / phase 2)
+
+```powershell
+# 1. TLS + cert: 200 over HTTPS on the custom host; cert is the ACM cert (not *.cloudfront.net)
+curl.exe -sI https://dev.app.housingchoice.org/health           # expect HTTP/2 200
+echo | openssl s_client -connect dev.app.housingchoice.org:443 -servername dev.app.housingchoice.org 2>$null | openssl x509 -noout -subject -ext subjectAltName   # CN/SAN = dev.app.housingchoice.org
+# 2. HTTP -> HTTPS redirect
+curl.exe -sI http://dev.app.housingchoice.org/health            # expect 301/302 to https
+# 3. min TLS 1.2 enforced (a TLS 1.1 handshake must FAIL)
+curl.exe -sI --tlsv1.1 --tls-max 1.1 https://dev.app.housingchoice.org/health   # expect handshake failure
+# 4. Origin reachable ONLY via CloudFront (direct-to-EC2 must fail) -- eip from: terraform output eip_public_dns
+curl.exe -sS --max-time 6 http://<eip_public_dns>:8080/health   # expect timeout/refused (SG = CloudFront prefix only)
+```
+
+Then exercise the app paths: OAuth login completes on the new host; an inbound text's Twilio signature verifies (no `invalid X-Twilio-Signature` in logs); push subscribe on the new origin receives a test push; a unit flyer / housing-fair link renders on the new host. The host-agnostic behaviors are also pinned by `app/test/customDomainCutover.test.ts`.
+
+### Rollback
+
+- **Before the app CNAME is cut:** nothing user-facing changed — drop `custom_domain_phase` back and apply.
+- **After phase 2:** set `custom_domain_phase = 1` (or `0`), apply, redeploy — `PUBLIC_BASE_URL` returns to the `*.cloudfront.net` host, which never stopped serving. The custom-host CNAME can stay or be removed in Namecheap; with no alias attached, CloudFront stops serving that host.
+- The default `*.cloudfront.net` hostname + cert stay valid throughout — always the safety net.
+- The phase-2 OAuth/Twilio re-point doesn't need undoing: the original `*.cloudfront.net` OAuth callback URIs and Twilio webhooks were never removed (Change Order 3 adds the custom-host ones alongside), so login and webhooks keep working after a rollback. Leave the custom-host registrations in place.
+
 ## Security / hardening backlog
 
 Tracked here so nothing silently becomes permanent:
@@ -411,7 +534,7 @@ Tracked here so nothing silently becomes permanent:
 | CloudWatch agent (disk metric) | **Not installed** — disk alarms can't fire (no data → `notBreaching` → OK) | Install via user-data or SSM Distributor; config must emit `CWAgent disk_used_percent` with dimensions `InstanceId, path="/", fstype="xfs"` to match the alarm. Until then disk is only protected by deploy-time pruning. |
 | OTLP exporter wiring | **OTel SDK currently runs with no exporter in BOTH envs** | Reality check 2026-06-11: neither `/hc/dev/app` nor `/hc/prod/app` sets `OTEL_SDK_DISABLED`, so the SDK starts and instruments http/express in both envs — but `app/src/lib/otel.ts` configures no `traceExporter`/`metricReader`, so traces/metrics are exported **nowhere** (locally `OTEL_SDK_DISABLED=true` makes it a true no-op). Wire OTLP → CloudWatch Application Signals via the existing `OTEL_EXPORTER_OTLP_ENDPOINT` seam. |
 | Orphan boot-log lines | **Fixed 2026-06-12** | Lifecycle lines (boot/shutdown/process-level errors) now run inside a per-process `bootId` correlation context, so container starts no longer trip `hc-<env>-orphan-logs`. Any orphan hit is now a real bug. (Images tagged before 2026-06-12 still carry the old behavior.) |
-| Custom domain + ACM | Deferred until the DNS question is settled | CloudFront serves on the default `*.cloudfront.net` cert. No Route 53 zone exists. |
+| Custom domain + ACM | **Addressed in Phase 1 (Change Order 3)** | Per-stack ACM cert (us-east-1, DNS-validated) + CloudFront alias for `app` / `dev.app` on `housingchoice.org`, staged via the `custom_domain_phase` local. DNS hand-maintained at Namecheap (zone not in Route 53 — migration parked, doc §14). See [Custom domain & TLS](#custom-domain--tls). |
 | SNS prod confirmation | **Action needed once:** click the confirmation email for `hc-prod-alerts` | See the Alarms section note. |
 | Messaging delivery alarms | M1.1 gap | Metric filter + alarm for webhook signature rejections and for undelivered-rate / 429-30022 throttling errors (the doc-§9 alarm table) — today only 30007 carrier filtering and breaker trips reach ERROR/the error-logs alarm. |
 | /api rate limiting | Before M1.3 auth lands | Express rate limit on the /api manual-send route — it is origin-secret-protected only until OAuth/RBAC (M1.3), so a leaked origin secret currently means unthrottled sends. |

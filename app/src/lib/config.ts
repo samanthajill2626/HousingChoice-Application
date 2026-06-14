@@ -51,6 +51,17 @@ export interface AppConfig {
    * `console` for local NODE_ENVs (development/test).
    */
   messagingDriver: MessagingDriverName;
+  /**
+   * Relay number-provisioning kill-switch (M1.7 safety). When false,
+   * provisionForPlacement refuses to OBTAIN a new pool number (no
+   * adapter.provisionPhoneNumber → no real Twilio number PURCHASE) and throws
+   * RelayProvisioningDisabledError. Read from RELAY_LIVE_PROVISIONING; when
+   * unset it DEFAULTS to (messagingDriver === 'console') — true locally/test
+   * (console fakes, $0), false when deployed (twilio driver buys real
+   * numbers). Flip it to true (RELAY_LIVE_PROVISIONING=true) only after A2P
+   * approval to enable buying a pool number.
+   */
+  relayLiveProvisioning: boolean;
   /** Twilio account SID (ACxxx). REST auth pairs it with the API key below. */
   twilioAccountSid?: string;
   /** Twilio API key SID/secret (SKxxx) — the ONLY credentials used for REST. */
@@ -225,6 +236,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Relay number-provisioning kill-switch (M1.7 safety). DEFAULT: on when the
+  // console driver is selected (local/test — fake $0 numbers), OFF when the
+  // twilio driver is selected (deployed — a fresh provision is a real number
+  // PURCHASE). So a DEPLOYED stack cannot accidentally buy a number before A2P
+  // approval; flip RELAY_LIVE_PROVISIONING=true once approved. NOT fail-fast:
+  // an unparseable value WARNs (the value is a boolean flag, no PII) and falls
+  // back to the default. true: 'true'|'1'|'yes'; false: 'false'|'0'|'no'.
+  const relayLiveProvisioningDefault = messagingDriver === 'console';
+  let relayLiveProvisioning = relayLiveProvisioningDefault;
+  const relayLiveProvisioningRaw = env.RELAY_LIVE_PROVISIONING;
+  if (relayLiveProvisioningRaw !== undefined && relayLiveProvisioningRaw.trim().length > 0) {
+    const normalized = relayLiveProvisioningRaw.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      relayLiveProvisioning = true;
+    } else if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      relayLiveProvisioning = false;
+    } else {
+      logger.warn(
+        { default: relayLiveProvisioningDefault },
+        "RELAY_LIVE_PROVISIONING is not one of true/1/yes/false/0/no — using the default",
+      );
+    }
+  }
+
   const sendBreakerMaxPerMinute = Number(env.SEND_BREAKER_MAX_PER_MINUTE ?? 10);
   if (!Number.isInteger(sendBreakerMaxPerMinute) || sendBreakerMaxPerMinute <= 0) {
     throw new Error(
@@ -390,6 +425,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     schedulerRoleArn: env.SCHEDULER_ROLE_ARN,
     jobsQueueUrl: env.JOBS_QUEUE_URL,
     messagingDriver,
+    relayLiveProvisioning,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,
     twilioApiKeySecret: env.TWILIO_API_KEY_SECRET,

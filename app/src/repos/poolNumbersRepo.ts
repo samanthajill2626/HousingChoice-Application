@@ -32,6 +32,15 @@ import type { RepoDeps } from './conversationsRepo.js';
 /** Pool-number lifecycle states (doc §5 M1.7 deviation). */
 export type PoolNumberLifecycleState = 'available' | 'assigned' | 'quarantined';
 
+/**
+ * Which messaging driver obtained the number (M1.7 kill-switch). A flexible doc
+ * field (NOT a key/GSI attr): 'console' numbers are local/test fakes written
+ * into the shared dev table; 'twilio' numbers are real purchases. The live
+ * twilio path must NEVER reuse a 'console' fake (and vice-versa) — the service
+ * filters reuse by the CURRENT driver.
+ */
+export type PoolNumberProvisionedVia = 'console' | 'twilio';
+
 /** Quarantine window before a released number may be reclaimed (30 days). */
 export const QUARANTINE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -56,6 +65,12 @@ export interface PoolNumberItem {
   quarantine_until: string;
   voice_capable: boolean;
   sms_capable: boolean;
+  /**
+   * Driver that obtained this number (M1.7 kill-switch source tag). Flexible
+   * doc field; absent on legacy items (treated as unknown — never reused by the
+   * source-isolation filter).
+   */
+  provisioned_via?: PoolNumberProvisionedVia;
   /** The relay_group conversation currently fronted by this number (assigned). */
   assigned_conversation_id?: string;
   /** Operator placement label carried through provisioning. */
@@ -72,6 +87,8 @@ export interface CreatePoolNumberInput {
   smsCapable: boolean;
   /** Defaults to 'available'. */
   lifecycleState?: PoolNumberLifecycleState;
+  /** Source driver tag (M1.7 kill-switch) — 'console' fakes vs 'twilio' real. */
+  provisionedVia?: PoolNumberProvisionedVia;
 }
 
 export interface PoolNumbersRepo {
@@ -142,6 +159,7 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
         quarantine_until: NOT_QUARANTINED_SENTINEL,
         voice_capable: input.voiceCapable,
         sms_capable: input.smsCapable,
+        ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
         provisioned_at: now,
       };
       await doc.send(

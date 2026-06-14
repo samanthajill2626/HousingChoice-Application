@@ -8,13 +8,17 @@ import {
   type MessagingAdapter,
   type ProvisionPhoneNumberResult,
 } from '../src/adapters/messaging.js';
+import type { AppConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import {
   QUARANTINE_WINDOW_MS,
   type PoolNumberItem,
   type PoolNumbersRepo,
 } from '../src/repos/poolNumbersRepo.js';
-import { createPoolNumbersService } from '../src/services/poolNumbers.js';
+import {
+  createPoolNumbersService,
+  RelayProvisioningDisabledError,
+} from '../src/services/poolNumbers.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const logger = createLogger({ destination: createLogCapture().stream });
@@ -36,6 +40,7 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
         quarantine_until: SENTINEL,
         voice_capable: input.voiceCapable,
         sms_capable: input.smsCapable,
+        ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
         provisioned_at: now,
       };
       store.set(item.poolNumber, item);
@@ -109,6 +114,24 @@ function makeFakeAdapter(opts: { voice?: boolean } = {}): MessagingAdapter & { p
   return adapter;
 }
 
+/**
+ * Minimal AppConfig for the kill-switch tests — only the two fields
+ * provisionForPlacement reads (messagingDriver = source tag, relayLiveProvisioning
+ * = kill-switch). Cast through `as AppConfig`: the rest is irrelevant here.
+ */
+function makeConfig(over: Partial<AppConfig>): AppConfig {
+  return { messagingDriver: 'console', relayLiveProvisioning: true, ...over } as AppConfig;
+}
+/** Console driver, live provisioning on (the local/test default). */
+const consoleConfig = (): AppConfig =>
+  makeConfig({ messagingDriver: 'console', relayLiveProvisioning: true });
+/** Twilio driver with the kill-switch OFF (the deployed pre-A2P default). */
+const twilioConfigOff = (): AppConfig =>
+  makeConfig({ messagingDriver: 'twilio', relayLiveProvisioning: false });
+/** Twilio driver with the kill-switch ON (post-A2P, RELAY_LIVE_PROVISIONING=true). */
+const twilioConfigOn = (): AppConfig =>
+  makeConfig({ messagingDriver: 'twilio', relayLiveProvisioning: true });
+
 describe('poolNumbers service (M1.7)', () => {
   it('provisions a fresh voice-capable number when the pool is empty', async () => {
     const repo = makeFakeRepo();
@@ -127,8 +150,19 @@ describe('poolNumbers service (M1.7)', () => {
   it('reuses an AVAILABLE number instead of provisioning a fresh one', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
-    await repo.create({ poolNumber: '+15550200001', voiceCapable: true, smsCapable: true });
-    const svc = createPoolNumbersService({ adapter, poolNumbersRepo: repo, logger });
+    // Source-tag it for the CURRENT (console) driver so the reuse filter matches.
+    await repo.create({
+      poolNumber: '+15550200001',
+      voiceCapable: true,
+      smsCapable: true,
+      provisionedVia: 'console',
+    });
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: consoleConfig(),
+    });
 
     const result = await svc.provisionForPlacement('conv-1');
     expect(result.provisioned).toBe(false);
@@ -187,12 +221,130 @@ describe('poolNumbers service (M1.7)', () => {
       adapter,
       poolNumbersRepo: repo,
       logger,
-      config: { publicBaseUrl: 'https://dxxxx.cloudfront.example' } as never,
+      config: makeConfig({ publicBaseUrl: 'https://dxxxx.cloudfront.example' }),
     });
     await svc.provisionForPlacement('conv-1');
     expect(setVoice).toHaveBeenCalledWith(
       expect.stringMatching(/^\+1555/),
       'https://dxxxx.cloudfront.example/webhooks/twilio/voice',
     );
+  });
+
+  // --- M1.7 relay provisioning kill-switch -------------------------------
+
+  it('console driver (default, no env) → provisioning works (existing behavior preserved)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // No config passed → loadConfig() with the test env (console driver, flag
+    // defaults true). The console fake provision must keep working with no env.
+    const svc = createPoolNumbersService({ adapter, poolNumbersRepo: repo, logger });
+    const result = await svc.provisionForPlacement('conv-1');
+    expect(result.provisioned).toBe(true);
+    expect(adapter.provisions).toBe(1);
+    // Source-tagged 'console' so the live twilio path can never reuse it later.
+    expect(repo.store.get(result.poolNumber)!.provisioned_via).toBe('console');
+  });
+
+  it('twilio driver + flag OFF (deployed default) → throws RelayProvisioningDisabledError; adapter NEVER purchases', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: twilioConfigOff(),
+    });
+
+    await expect(svc.provisionForPlacement('conv-1')).rejects.toBeInstanceOf(
+      RelayProvisioningDisabledError,
+    );
+    // The purchase is PROVABLY skipped — the adapter was never asked for a number.
+    expect(provisionSpy).not.toHaveBeenCalled();
+    expect(adapter.provisions).toBe(0);
+  });
+
+  it('twilio driver + RELAY_LIVE_PROVISIONING=true → provisioning proceeds (adapter called)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: twilioConfigOn(),
+    });
+
+    const result = await svc.provisionForPlacement('conv-1');
+    expect(result.provisioned).toBe(true);
+    expect(provisionSpy).toHaveBeenCalledTimes(1);
+    // Tagged 'twilio' (real purchase) — never reusable by a console process.
+    expect(repo.store.get(result.poolNumber)!.provisioned_via).toBe('twilio');
+  });
+
+  it('source isolation: the twilio path does NOT reuse a console-sourced available number (it provisions)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // A fake console number sitting available in the shared table.
+    await repo.create({
+      poolNumber: '+15550100001',
+      voiceCapable: true,
+      smsCapable: true,
+      provisionedVia: 'console',
+    });
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: twilioConfigOn(), // twilio driver, flag ON so it may provision
+    });
+
+    const result = await svc.provisionForPlacement('conv-1');
+    // It did NOT reuse the console fake — a fresh twilio number was provisioned.
+    expect(result.poolNumber).not.toBe('+15550100001');
+    expect(result.provisioned).toBe(true);
+    expect(adapter.provisions).toBe(1);
+    expect(repo.store.get(result.poolNumber)!.provisioned_via).toBe('twilio');
+    // The console fake is still available — never claimed by the live path.
+    expect(repo.store.get('+15550100001')!.lifecycle_state).toBe('available');
+  });
+
+  it('source isolation (reverse): the console path does NOT reuse a twilio-sourced available number', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await repo.create({
+      poolNumber: '+15550100002',
+      voiceCapable: true,
+      smsCapable: true,
+      provisionedVia: 'twilio',
+    });
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: consoleConfig(),
+    });
+
+    const result = await svc.provisionForPlacement('conv-1');
+    expect(result.poolNumber).not.toBe('+15550100002');
+    expect(result.provisioned).toBe(true);
+    expect(repo.store.get('+15550100002')!.lifecycle_state).toBe('available');
+  });
+
+  it('explicit flag OFF on the console driver → refuses (the override beats the default)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter,
+      poolNumbersRepo: repo,
+      logger,
+      config: makeConfig({ messagingDriver: 'console', relayLiveProvisioning: false }),
+    });
+
+    await expect(svc.provisionForPlacement('conv-1')).rejects.toBeInstanceOf(
+      RelayProvisioningDisabledError,
+    );
+    expect(provisionSpy).not.toHaveBeenCalled();
   });
 });

@@ -33,6 +33,21 @@ import {
 /** Voice webhook the relay pool number is pre-wired to (M1.9 bridge seam). */
 const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 
+/**
+ * Thrown by provisionForPlacement when obtaining a NEW pool number would be
+ * required but the relay number-provisioning kill-switch is off
+ * (config.relayLiveProvisioning === false). Raised BEFORE any
+ * adapter.provisionPhoneNumber call, so the deployed twilio driver can never
+ * accidentally PURCHASE a real number before A2P approval / an explicit
+ * RELAY_LIVE_PROVISIONING=true decision. The message is actionable and PII-free.
+ */
+export class RelayProvisioningDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 export interface PoolNumbersServiceDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -77,6 +92,13 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
   const repo = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
   const now = deps.now ?? (() => new Date());
 
+  // The driver that owns THIS process — the source tag stamped on numbers we
+  // provision and the filter the reuse path matches against (kill-switch source
+  // isolation). Local/test = console (fake $0 numbers), deployed = twilio (real
+  // purchases); the two must never reuse each other's numbers (the shared dev
+  // table holds both).
+  const currentVia = config.messagingDriver; // 'console' | 'twilio'
+
   return {
     async provisionForPlacement(conversationId, tag) {
       // (a) Lazy reclaim — never let quarantine starve the pool silently.
@@ -85,14 +107,30 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // (b) Reuse an available number when one exists (race-safe claim). The
       // GSI read is just a candidate; claim() is the arbiter — if we lose the
       // race we fall through to provisioning a fresh number (never reuse a
-      // quarantined one; findAvailable only returns 'available').
+      // quarantined one; findAvailable only returns 'available'). SOURCE
+      // ISOLATION (M1.7 kill-switch): only reuse a number our CURRENT driver
+      // obtained — the live twilio path must never reuse a fake console number
+      // (and vice-versa), even though both live in the shared dev table.
       const candidate = await repo.findAvailable();
-      if (candidate) {
+      if (candidate && candidate.provisioned_via === currentVia) {
         const claimed = await repo.claim(candidate.poolNumber, conversationId, tag);
         if (claimed) {
           log.info({ conversationId, provisioned: false }, 'relay pool number acquired (reused)');
           return { poolNumber: claimed.poolNumber, record: claimed, provisioned: false };
         }
+      }
+
+      // Obtaining a NEW number is required. KILL-SWITCH (M1.7): when relay live
+      // provisioning is off (default when deployed/twilio), refuse BEFORE the
+      // adapter call so no real number is ever PURCHASED pre-A2P. Strict: we do
+      // not fall back to reusing anything here (the matching-source reuse above
+      // already failed) — deployed pre-A2P relay creation fails cleanly with an
+      // actionable error.
+      if (!config.relayLiveProvisioning) {
+        throw new RelayProvisioningDisabledError(
+          'relay number provisioning is disabled in this environment — set ' +
+            'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number',
+        );
       }
 
       // (c) Provision fresh. REQUIRE voice — a misconfigured account/exhausted
@@ -105,11 +143,13 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       }
 
       // Persist as assigned (skip the available→claim hop — we own it already).
+      // Source-tag it with the current driver (kill-switch source isolation).
       await repo.create({
         poolNumber: provisioned.phoneNumber,
         voiceCapable: provisioned.capabilities.voice,
         smsCapable: provisioned.capabilities.sms,
         lifecycleState: 'available',
+        provisionedVia: currentVia,
       });
       const claimed = await repo.claim(provisioned.phoneNumber, conversationId, tag);
       if (!claimed) {

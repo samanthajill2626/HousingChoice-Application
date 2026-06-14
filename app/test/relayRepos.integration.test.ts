@@ -162,6 +162,18 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 
+  it('pool_numbers: provisioned_via source tag round-trips on the item', async () => {
+    const pn = `+1555047${Math.floor(Math.random() * 9000 + 1000)}`;
+    await poolNumbers.create({
+      poolNumber: pn,
+      voiceCapable: true,
+      smsCapable: true,
+      provisionedVia: 'twilio',
+    });
+    const stored = await poolNumbers.get(pn);
+    expect(stored?.provisioned_via).toBe('twilio'); // flexible doc field, not a key/GSI attr
+  });
+
   it('pool_numbers: findAvailable + claim (race-safe) + quarantine reclaim', async () => {
     const pn = `+1555043${Math.floor(Math.random() * 9000 + 1000)}`;
     await poolNumbers.create({ poolNumber: pn, voiceCapable: true, smsCapable: true });

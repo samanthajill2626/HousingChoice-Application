@@ -34,7 +34,11 @@ import {
   type ConversationsRepo,
   RosterConflictError,
 } from '../repos/conversationsRepo.js';
-import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
+import {
+  createPoolNumbersService,
+  RelayProvisioningDisabledError,
+  type PoolNumbersService,
+} from '../services/poolNumbers.js';
 
 export interface RelayGroupsRouterDeps {
   config?: AppConfig;
@@ -131,6 +135,20 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       const provisioned = await poolNumbers.provisionForPlacement('relay-pending', tag);
       poolNumber = provisioned.poolNumber;
     } catch (err) {
+      // Kill-switch refusal (M1.7): live provisioning is off in this
+      // environment — no number was (or could be) purchased. Surface a stable
+      // 503 code + actionable message; audit the refusal (actor + reason, no PII).
+      if (err instanceof RelayProvisioningDisabledError) {
+        log.warn({ err: { name: err.name }, actor }, 'relay group create: number provisioning disabled');
+        await audit.append('relay#provisioning', 'relay_provisioning_disabled', {
+          actor,
+          reason: 'create',
+        });
+        res
+          .status(503)
+          .json({ error: 'relay_provisioning_disabled', message: err.message });
+        return;
+      }
       if (err instanceof VoiceCapabilityError) {
         log.error({ err: { name: err.name } }, 'relay group create: no voice-capable pool number available');
         res.status(503).json({ error: 'pool_number_unavailable' });
@@ -332,6 +350,20 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         const provisioned = await poolNumbers.provisionForPlacement(conversationId);
         poolNumber = provisioned.poolNumber;
       } catch (err) {
+        // Kill-switch refusal (M1.7): reopen needs a fresh number but live
+        // provisioning is off — refuse cleanly (no purchase). Stable 503 code +
+        // actionable message; audit the refusal (actor + reason, no PII).
+        if (err instanceof RelayProvisioningDisabledError) {
+          log.warn({ err: { name: err.name }, conversationId, actor }, 'relay reopen: number provisioning disabled');
+          await audit.append(`conversations#${conversationId}`, 'relay_provisioning_disabled', {
+            actor,
+            reason: 'reopen',
+          });
+          res
+            .status(503)
+            .json({ error: 'relay_provisioning_disabled', message: err.message });
+          return;
+        }
         if (err instanceof VoiceCapabilityError) {
           res.status(503).json({ error: 'pool_number_unavailable' });
           return;

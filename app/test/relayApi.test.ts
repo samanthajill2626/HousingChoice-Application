@@ -19,7 +19,10 @@ import {
 import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
-import type { PoolNumbersService } from '../src/services/poolNumbers.js';
+import {
+  RelayProvisioningDisabledError,
+  type PoolNumbersService,
+} from '../src/services/poolNumbers.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -54,6 +57,39 @@ function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provi
     async release(poolNumber) {
       released.push(poolNumber);
       return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    },
+  };
+}
+
+/**
+ * A pool service emulating the M1.7 kill-switch OFF: provisionForPlacement
+ * always refuses (as the real service does on the deployed twilio driver
+ * pre-A2P). NO number is ever handed out — the route must surface 503
+ * relay_provisioning_disabled.
+ */
+function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: number } {
+  const DISABLED_MESSAGE =
+    'relay number provisioning is disabled in this environment — set ' +
+    'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number';
+  let provisionAttempts = 0;
+  return {
+    get provisionAttempts() {
+      return provisionAttempts;
+    },
+    async provisionForPlacement() {
+      provisionAttempts += 1;
+      throw new RelayProvisioningDisabledError(DISABLED_MESSAGE);
+    },
+    async assignConversation() {},
+    async release(poolNumber) {
+      return {
+        poolNumber,
+        lifecycle_state: 'quarantined',
+        quarantine_until: '0000-00-00T00:00:00.000Z',
+        voice_capable: true,
+        sms_capable: true,
+        provisioned_at: new Date().toISOString(),
+      };
     },
   };
 }
@@ -115,6 +151,59 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ members: [] });
     expect(res.status).toBe(400);
+  });
+
+  // --- M1.7 kill-switch: provisioning disabled (deployed pre-A2P) ---------
+  it('POST /api/relay-groups → 503 relay_provisioning_disabled when the kill-switch is off (no number purchased)', async () => {
+    const pool = makeDisabledPoolNumbers();
+    const { app } = authedHarness(world, pool);
+
+    const res = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('relay_provisioning_disabled');
+    expect(res.body.message).toMatch(/RELAY_LIVE_PROVISIONING=true/);
+    // The refusal happened — and no conversation was created (no number to front it).
+    expect(pool.provisionAttempts).toBe(1);
+    expect([...world.conversations.values()]).toHaveLength(0);
+    // The refusal is audited (actor + reason, no PII).
+    const refusal = world.auditEvents.find((a) => a.event_type === 'relay_provisioning_disabled');
+    expect(refusal).toBeDefined();
+    expect(refusal?.actorId).toBe(SESSION_USER_ID);
+  });
+
+  it('PATCH reopen → 503 relay_provisioning_disabled when the kill-switch is off', async () => {
+    // Create + close with a WORKING pool, then swap to a disabled pool for the
+    // reopen so only the reopen hits the kill-switch.
+    const working = makeFakePoolNumbers();
+    const created = await request(authedHarness(world, working).app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    await request(authedHarness(world, working).app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+
+    const disabled = makeDisabledPoolNumbers();
+    const reopened = await request(authedHarness(world, disabled).app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: false });
+
+    expect(reopened.status).toBe(503);
+    expect(reopened.body.error).toBe('relay_provisioning_disabled');
+    expect(disabled.provisionAttempts).toBe(1);
+    // The thread stayed closed — the refused reopen never flipped it open.
+    expect((await world.conversationsRepo.getById(id))?.status).toBe('closed');
   });
 
   it('member CRUD: GET roster, POST idempotent add, DELETE idempotent remove', async () => {

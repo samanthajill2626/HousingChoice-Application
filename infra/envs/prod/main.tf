@@ -58,8 +58,11 @@ locals {
   #   2  flip PUBLIC_BASE_URL to the custom domain (canonical-origin cutover) and
   #      redeploy so the app re-hydrates it; re-point OAuth + Twilio in the same step.
   #
-  # NOTE: production OAuth/Twilio/PWA cutover rides with M1.11 (ported number) —
-  # hold custom_domain_phase at 1 until the M1.11 cutover, then bump to 2.
+  # Cut over to phase 2 on 2026-06-14, ahead of M1.11: prod OAuth callback is
+  # registered, and there are NO prod Twilio numbers yet — so nothing to re-point
+  # (the M1.11 ported number gets its webhooks wired fresh on app.housingchoice.org,
+  # not re-pointed, which was the only reason to defer). PUBLIC_BASE_URL re-hydrates
+  # on the next prod deploy (the instance is currently powered off).
   custom_domain       = "app.housingchoice.org"
-  custom_domain_phase = 1
+  custom_domain_phase = 2
 }

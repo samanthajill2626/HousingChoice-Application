@@ -38,7 +38,17 @@ import {
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
 import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
+import {
+  type BroadcastItem,
+  type BroadcastsRepo,
+  type BroadcastStats,
+  zeroStats,
+} from '../../src/repos/broadcastsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
+import {
+  createAudienceResolutionService,
+  type AudienceResolutionService,
+} from '../../src/services/audienceResolution.js';
 import { createSendMessageService } from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
@@ -102,6 +112,9 @@ export interface FakeWorld {
   /** In-memory units (M1.5), keyed by unitId. */
   units: Map<string, UnitItem>;
   unitsRepo: UnitsRepo;
+  /** In-memory broadcasts (M1.8a), keyed by broadcastId. */
+  broadcasts: Map<string, BroadcastItem>;
+  broadcastsRepo: BroadcastsRepo;
   /** In-memory org-settings (M1.4); starts at DEFAULT_ORG_SETTINGS. */
   settings: OrgSettings;
   settingsRepo: SettingsRepo;
@@ -135,6 +148,7 @@ export function createFakeWorld(): FakeWorld {
   const emitted: FakeWorld['emitted'] = [];
   events.on('conversation.updated', (payload) => emitted.push({ event: 'conversation.updated', payload }));
   events.on('message.persisted', (payload) => emitted.push({ event: 'message.persisted', payload }));
+  events.on('broadcast.updated', (payload) => emitted.push({ event: 'broadcast.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
@@ -329,6 +343,8 @@ export function createFakeWorld(): FakeWorld {
         // Relay group (M1.7): preserve the inbound relay annotations.
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        // Share-broadcast (M1.8a): preserve the broadcast id stamp.
+        ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
       });
       return { deduped: false, tsMsgId };
     },
@@ -403,6 +419,14 @@ export function createFakeWorld(): FakeWorld {
       const items = contacts
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async listByHousingAuthority(housingAuthority, opts = {}) {
+      // Mirror the byHousingAuthority GSI: tenant-sparse (only tenants carry the
+      // attribute). The service defends the type invariant either way.
+      const items = contacts
+        .filter((c) => c['housing_authority'] === housingAuthority)
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -536,6 +560,136 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory broadcasts (M1.8a): mirror the repo's contractual semantics —
+  // generate-id create, markSending draft-gate + recipients seed, setRecipient
+  // map slot, atomic bumpStats, terminal markSent/markFailed.
+  const broadcasts = new Map<string, BroadcastItem>();
+  let broadcastCounter = 0;
+  /**
+   * Mirror the repo's GSI pagination over an already-ordered list: resume after
+   * the cursor's broadcastId (keyset), take `limit`, and emit a lastEvaluatedKey
+   * (the GSI ExclusiveStartKey shape) only when more items remain.
+   */
+  const pageBroadcasts = (
+    ordered: BroadcastItem[],
+    opts: { limit?: number; exclusiveStartKey?: Record<string, unknown> },
+  ): { items: BroadcastItem[]; lastEvaluatedKey?: Record<string, unknown> } => {
+    let start = 0;
+    const cursorId = opts.exclusiveStartKey?.['broadcastId'];
+    if (typeof cursorId === 'string') {
+      const idx = ordered.findIndex((b) => b.broadcastId === cursorId);
+      if (idx >= 0) start = idx + 1;
+    }
+    const limit = opts.limit ?? 50;
+    const window = ordered.slice(start, start + limit);
+    const items = window.map((b) => ({ ...b }));
+    const hasMore = start + limit < ordered.length;
+    const last = window[window.length - 1];
+    return {
+      items,
+      // The GSI ExclusiveStartKey (byCreatedAt): base key + GSI keys — a small
+      // flat scalar object the route's decodeCursor accepts (1..3 string attrs).
+      ...(hasMore && last !== undefined && {
+        lastEvaluatedKey: {
+          broadcastId: last.broadcastId,
+          created_by: last.created_by,
+          created_at: last.created_at,
+        } as Record<string, unknown>,
+      }),
+    };
+  };
+  const broadcastsRepo: BroadcastsRepo = {
+    async create(input) {
+      const now = new Date().toISOString();
+      const stats: BroadcastStats = zeroStats();
+      if (typeof input.estimatedAudience === 'number') stats.audience = input.estimatedAudience;
+      const item: BroadcastItem = {
+        broadcastId: input.broadcastId ?? `bcast-${++broadcastCounter}`,
+        created_by: input.created_by,
+        created_at: now,
+        status: 'draft',
+        audience_filter: input.audience_filter,
+        body_template: input.body_template,
+        stats,
+        recipients: {},
+        updated_at: now,
+        ...(input.unitId !== undefined && { unitId: input.unitId }),
+        ...(input.flyer_url !== undefined && { flyer_url: input.flyer_url }),
+      };
+      broadcasts.set(item.broadcastId, item);
+      return { ...item };
+    },
+    async getById(broadcastId) {
+      const b = broadcasts.get(broadcastId);
+      return b ? { ...b } : undefined;
+    },
+    async listByStatus(status, opts = {}) {
+      const all = [...broadcasts.values()].filter((b) => b.status === status);
+      return pageBroadcasts(all, opts);
+    },
+    async listByCreatedBy(createdBy, opts = {}) {
+      const all = [...broadcasts.values()]
+        .filter((b) => b.created_by === createdBy)
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+      return pageBroadcasts(all, opts);
+    },
+    async markSending(broadcastId, recipients) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`markSending: no broadcast ${broadcastId}`);
+      if (b.status !== 'draft') {
+        throw conditionalCheckFailed(`markSending: broadcast ${broadcastId} is not a draft`);
+      }
+      b.status = 'sending';
+      b.recipients = recipients;
+      b.stats.audience = Object.keys(recipients).length;
+      b.stats.queued = Object.keys(recipients).length;
+      b.updated_at = new Date().toISOString();
+      return { ...b };
+    },
+    async setRecipient(broadcastId, contactKey, recipient, allowedPriorStatuses) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`setRecipient: no broadcast ${broadcastId}`);
+      if (allowedPriorStatuses !== undefined) {
+        // Mirror the real conditional write: only apply when the slot's current
+        // nested status is an allowed predecessor. The loser of a concurrent
+        // transition returns false (no stat double-bump) — never throws.
+        const current = b.recipients[contactKey]?.status;
+        if (current === undefined || !allowedPriorStatuses.includes(current)) {
+          return false;
+        }
+      }
+      b.recipients = { ...b.recipients, [contactKey]: recipient };
+      return true;
+    },
+    async bumpStats(broadcastId, delta) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`bumpStats: no broadcast ${broadcastId}`);
+      for (const [key, value] of Object.entries(delta)) {
+        if (typeof value === 'number') {
+          (b.stats as unknown as Record<string, number>)[key] =
+            ((b.stats as unknown as Record<string, number>)[key] ?? 0) + value;
+        }
+      }
+      b.updated_at = new Date().toISOString();
+      return { ...b };
+    },
+    async markSent(broadcastId) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`markSent: no broadcast ${broadcastId}`);
+      b.status = 'sent';
+      b.updated_at = new Date().toISOString();
+      return { ...b };
+    },
+    async markFailed(broadcastId, lastError) {
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`markFailed: no broadcast ${broadcastId}`);
+      b.status = 'failed';
+      if (lastError !== undefined) b.last_error = lastError;
+      b.updated_at = new Date().toISOString();
+      return { ...b };
+    },
+  };
+
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
@@ -593,6 +747,8 @@ export function createFakeWorld(): FakeWorld {
     auditRepo,
     units,
     unitsRepo,
+    broadcasts,
+    broadcastsRepo,
     settings,
     settingsRepo,
     adapter,
@@ -616,6 +772,12 @@ export interface HarnessOptions {
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
   poolNumbersService?: PoolNumbersService;
+  /**
+   * Override the share-broadcast audience resolver (M1.8a). Default resolves
+   * against the world contacts; tests inject a stub to drive the over-cap /
+   * truncated refusal paths without seeding thousands of contacts.
+   */
+  audienceResolutionService?: AudienceResolutionService;
 }
 
 export interface Harness {
@@ -674,6 +836,16 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
       unitsRepo: world.unitsRepo,
+      broadcastsRepo: world.broadcastsRepo,
+      // M1.8a: resolve the share-broadcast audience against the SAME world
+      // contacts the authed API + the broadcast.send job read (no DynamoDB).
+      // A test may override the resolver to drive the over-cap/truncated paths.
+      audienceResolutionService:
+        opts.audienceResolutionService ??
+        createAudienceResolutionService({
+          contactsRepo: world.contactsRepo,
+          logger: createLogger({ level: 'info', destination: capture.stream }),
+        }),
       usersRepo: fakeUsers.repo,
       events: world.events,
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
@@ -708,6 +880,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
+      broadcastsRepo: world.broadcastsRepo,
       events: world.events,
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,

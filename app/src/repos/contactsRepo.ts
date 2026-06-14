@@ -72,6 +72,17 @@ export interface ContactsRepo {
    */
   listByType(type: ContactType, opts?: ListContactsOpts): Promise<ContactsPage>;
   /**
+   * List tenants administered by a housing authority via the byHousingAuthority
+   * GSI (M1.8a share-broadcast audience resolution). A voucher is administered
+   * by exactly one authority at a time (doc §5), so this GSI is single-attribute
+   * and tenant-sparse — ONE Query per page, never a Scan. The caller applies any
+   * further in-memory filtering (bedroom size, opt-out/unreachable).
+   */
+  listByHousingAuthority(
+    housingAuthority: string,
+    opts?: ListContactsOpts,
+  ): Promise<ContactsPage>;
+  /**
    * Manual create (M1.5): generate a contactId and conditionally put it. Phone
    * dedupe is the CALLER's job (findByPhone first) — this is the raw create
    * once the route has decided a new contact is warranted. Returns the stored
@@ -145,6 +156,28 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         KeyConditionExpression: keyExpr,
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
+        ...(opts.limit !== undefined && { Limit: opts.limit }),
+        ...(opts.exclusiveStartKey !== undefined && {
+          ExclusiveStartKey: opts.exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],
+        }),
+      };
+      const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
+      return {
+        items: (Items ?? []) as ContactItem[],
+        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
+      };
+    },
+
+    async listByHousingAuthority(housingAuthority, opts = {}) {
+      // ONE Query on byHousingAuthority (hash = housing_authority). Sparse +
+      // tenant-only by data convention — only tenant contacts carry the
+      // attribute. Pagination via the raw LastEvaluatedKey (route opaque-cursors
+      // it). `status`/`type` are not key attrs here, so no expression aliasing.
+      const input: QueryCommandInput = {
+        TableName: table,
+        IndexName: 'byHousingAuthority',
+        KeyConditionExpression: 'housing_authority = :ha',
+        ExpressionAttributeValues: { ':ha': housingAuthority },
         ...(opts.limit !== undefined && { Limit: opts.limit }),
         ...(opts.exclusiveStartKey !== undefined && {
           ExclusiveStartKey: opts.exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],

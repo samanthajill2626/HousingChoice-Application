@@ -9,9 +9,10 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'audit_events',
+      'broadcasts',
       'cases',
       'contacts',
       'conversations',
@@ -23,6 +24,25 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'units',
       'users',
     ]);
+  });
+
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus + byCreatedAt; no stream/TTL', () => {
+    expect(tables['broadcasts']).toEqual({
+      hash_key: { name: 'broadcastId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byStatus',
+          hash_key: { name: 'status', type: 'S' },
+        },
+        {
+          index_name: 'byCreatedAt',
+          hash_key: { name: 'created_by', type: 'S' },
+          range_key: { name: 'created_at', type: 'S' },
+        },
+      ],
+      stream: false,
+      pitr: true,
+    });
   });
 
   it('pool_numbers (M1.7): PK poolNumber; GSI byLifecycleState (lifecycle_state + quarantine_until); no stream/TTL', () => {

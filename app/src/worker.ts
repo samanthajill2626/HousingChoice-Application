@@ -19,6 +19,7 @@ const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { registerRetrySendJobHandler } = await import('./jobs/retrySend.js');
 const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
+const { registerBroadcastSendJobHandler } = await import('./jobs/broadcastFanOut.js');
 const { TokenBucket } = await import('./lib/tokenBucket.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
@@ -52,6 +53,11 @@ const a2pBucket = new TokenBucket({
 // recipient (SQS path) AND the in-process immediate adapter applies it before
 // dispatch (local path) — both paths are throttled.
 registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
+
+// M1.8a: filtered share-broadcast ("Share Properties") fan-out. SHARES THE
+// SAME a2pBucket instance as relay fan-out, so the COMBINED outbound rate stays
+// under the registered A2P tier no matter how many broadcasts/relays run.
+registerBroadcastSendJobHandler({ tokenBucket: a2pBucket });
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker

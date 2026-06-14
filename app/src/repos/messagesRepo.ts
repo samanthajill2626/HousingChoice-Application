@@ -109,6 +109,12 @@ export interface NewMessage {
   relaySenderKey?: string;
   /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out). */
   receivedOnClosedThread?: boolean;
+  /**
+   * Share-broadcast id (M1.8a): when set, the persisted message is tagged with
+   * `broadcast_id` so the delivery-status callback rollup can resolve which
+   * broadcast's recipient slot to update by the provider SID alone.
+   */
+  broadcastId?: string;
 }
 
 export interface MessageItem {
@@ -149,6 +155,12 @@ export interface MessageItem {
    * 1:1 messages (the single `delivery_status` is unchanged for those).
    */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /**
+   * Share-broadcast id (M1.8a): set on an outbound broadcast send so the
+   * delivery-status callback can roll delivered/failed into the broadcast's
+   * stats by SID lookup. Absent on 1:1 / relay messages.
+   */
+  broadcast_id?: string;
   [key: string]: unknown;
 }
 
@@ -313,6 +325,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         created_at: now,
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
       };
       try {
         await doc.send(

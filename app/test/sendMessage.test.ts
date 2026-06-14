@@ -113,6 +113,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     findByPhone: async () => contact,
     getById: async (id) => (contact?.contactId === id ? contact : undefined),
     listByType: async () => ({ items: [] }),
+    listByHousingAuthority: async () => ({ items: [] }),
     create: async (input) => ({ ...input, contactId: input.contactId ?? 'contact-sm-1' }),
     createIfAbsent: async () => true,
     setFlag: async () => {},

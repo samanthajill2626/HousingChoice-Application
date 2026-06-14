@@ -24,6 +24,11 @@ import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
+import {
+  createBroadcastsRepo,
+  type BroadcastRecipient,
+  type BroadcastsRepo,
+} from '../../repos/broadcastsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
 import {
   createConversationsRepo,
@@ -34,6 +39,7 @@ import {
 import {
   createMessagesRepo,
   relayMemberKey,
+  type DeliveryStatus,
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
@@ -89,6 +95,8 @@ export interface TwilioWebhookDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  /** Share-broadcast results rollup (M1.8a); the real repo by default. */
+  broadcastsRepo?: BroadcastsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /**
@@ -110,6 +118,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const captureContact = createContactCapture({
     contactsRepo: contacts,
@@ -592,6 +601,31 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: message.direction,
         deliveryStatus: mappedStatus,
       });
+
+      // (M1.8a) Share-broadcast rollup: when THIS message belongs to a
+      // broadcast, fold its delivered/failed terminal status into the
+      // broadcast's recipient slot (forward-only) + stats, and emit the
+      // broadcast.updated SSE event. O(1): the message carries broadcast_id +
+      // its own conversationId/tsMsgId, so we load the broadcast by id and
+      // find the matching recipient slot by those keys (no new GSI). Only
+      // terminal transitions move the rollup — a sent→delivered (no failed)
+      // bumps `delivered`; *→failed bumps `failed`. Never 5xx the callback.
+      if (typeof message.broadcast_id === 'string' && message.broadcast_id.length > 0) {
+        try {
+          await rollIntoBroadcast(
+            broadcasts,
+            events,
+            log,
+            message.broadcast_id,
+            message.conversationId,
+            message.tsMsgId,
+            mappedStatus,
+            ErrorCode,
+          );
+        } catch (err) {
+          log.error({ err, providerSid: MessageSid, broadcastId: message.broadcast_id }, 'broadcast delivery rollup failed — message status recorded, broadcast stats stale');
+        }
+      }
     }
 
     if (transitioned && ErrorCode) {
@@ -676,4 +710,103 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   });
 
   return router;
+}
+
+/**
+ * Forward-only terminal transitions for a broadcast recipient slot — mirrors
+ * the messages delivery-status machine but over the broadcast slot's smaller
+ * state set ('queued'|'sent'|'delivered'|'failed'|'skipped'). Only `delivered`
+ * and `failed` are reachable here (delivery callbacks), and a terminal slot
+ * (delivered/failed/skipped) never regresses.
+ */
+function broadcastSlotMayTransition(current: BroadcastRecipient['status'] | undefined): boolean {
+  // A terminal slot (delivered/failed/skipped) never regresses; queued or sent
+  // → delivered/failed are both forward moves.
+  return current !== 'delivered' && current !== 'failed' && current !== 'skipped';
+}
+
+/**
+ * (M1.8a) Roll a 1:1 delivery-status transition into the owning broadcast: find
+ * the recipient slot whose persisted conversationId+tsMsgId match this message,
+ * apply the forward-only terminal status, bump the broadcast's delivered/failed
+ * counter, and emit broadcast.updated. O(1) load-by-id; the slot is found by
+ * scanning the broadcast's (bounded) recipients map for the matching keys.
+ */
+async function rollIntoBroadcast(
+  broadcasts: BroadcastsRepo,
+  events: EventBus,
+  log: Logger,
+  broadcastId: string,
+  conversationId: string,
+  tsMsgId: string,
+  deliveryStatus: DeliveryStatus,
+  errorCode: string | undefined,
+): Promise<void> {
+  // Only terminal delivery outcomes roll up; intermediate (sent/queued)
+  // callbacks for a broadcast message are already reflected by the send job.
+  const next: 'delivered' | 'failed' | undefined =
+    deliveryStatus === 'delivered'
+      ? 'delivered'
+      : deliveryStatus === 'failed' || deliveryStatus === 'undelivered'
+        ? 'failed'
+        : undefined;
+  if (next === undefined) return;
+
+  const broadcast = await broadcasts.getById(broadcastId);
+  if (!broadcast) {
+    log.warn({ broadcastId }, 'broadcast delivery rollup: broadcast not found — ignored');
+    return;
+  }
+  // Find the recipient slot for THIS message (matched by the persisted
+  // conversationId + tsMsgId stamped at send time).
+  const entry = Object.entries(broadcast.recipients ?? {}).find(
+    ([, r]) => r.conversationId === conversationId && r.tsMsgId === tsMsgId,
+  );
+  if (!entry) {
+    log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot — ignored');
+    return;
+  }
+  const [contactKey, slot] = entry;
+  if (!broadcastSlotMayTransition(slot.status)) {
+    // Forward-only: a terminal slot never regresses (out-of-order/duplicate
+    // callbacks). No stat change, no emit.
+    return;
+  }
+
+  // Atomic forward-only transition: condition the slot write on the slot still
+  // being in a non-terminal predecessor state (queued|sent). Two concurrent
+  // callbacks for the same SID both read the same `slot` above and both pass the
+  // in-memory check — but only ONE wins this conditional write; the other
+  // returns false and is skipped, so `delivered`/`failed` is bumped exactly
+  // once per recipient transition (no double-increment race).
+  const applied = await broadcasts.setRecipient(
+    broadcastId,
+    contactKey,
+    {
+      ...slot,
+      status: next,
+      ...(errorCode !== undefined && { errorCode }),
+    },
+    ['queued', 'sent'],
+  );
+  if (!applied) {
+    // Another callback already transitioned this slot — do NOT bump stats.
+    return;
+  }
+  // Stats: a sent→delivered move bumps `delivered` (the recipient was counted
+  // in `sent` at send time — delivered is a refinement, not a re-count). A
+  // *→failed move bumps `failed`; if the slot was 'sent', decrement `sent` so
+  // the totals reconcile (a sent that ultimately failed is a failure).
+  const fromSent = slot.status === 'sent';
+  const delta =
+    next === 'delivered'
+      ? { delivered: 1 }
+      : { failed: 1, ...(fromSent && { sent: -1 }) };
+  const updated = await broadcasts.bumpStats(broadcastId, delta);
+  events.emit('broadcast.updated', {
+    broadcastId,
+    status: updated.status,
+    stats: updated.stats,
+  });
+  log.info({ broadcastId, deliveryStatus: next }, 'broadcast delivery rolled into stats');
 }

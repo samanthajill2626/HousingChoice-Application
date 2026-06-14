@@ -251,6 +251,33 @@ export const TABLES: readonly TableSpec[] = [
       },
     ],
   },
+  {
+    // NEW in M1.8a (NOT in the doc §5 9-table model — README deviation
+    // 2026-06-13): the filtered share-broadcast ("Share Properties") record.
+    // The operator picks a unit + bedroom-size/housing-authority filter and
+    // texts the matching tenants the unit's flyer; this row is the draft →
+    // sending → sent/failed lifecycle + the audience snapshot, per-recipient
+    // delivery map, and rolled-up stats the results view reads.
+    //
+    // PK is broadcastId. Item is a flexible document; only the key + the two
+    // GSI key attrs are contractual (lib/tables.ts). The recipients map is
+    // bounded (a Phase-1 filtered tenant set, low hundreds) and lives on the
+    // item — the broadcastsRepo notes the 400KB item ceiling.
+    baseName: 'broadcasts',
+    hashKey: { name: 'broadcastId', type: 'S' },
+    gsis: [
+      // List by lifecycle state (draft/sending/sent/failed) — the results
+      // dashboard's "in-flight / recent broadcasts" view.
+      { indexName: 'byStatus', hashKey: { name: 'status', type: 'S' } },
+      // List a creator's broadcasts newest-first: partition by created_by,
+      // sort on created_at (ISO 8601).
+      {
+        indexName: 'byCreatedAt',
+        hashKey: { name: 'created_by', type: 'S' },
+        rangeKey: { name: 'created_at', type: 'S' },
+      },
+    ],
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

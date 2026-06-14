@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4) and pool_numbers (M1.7)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -30,7 +30,23 @@ describe('tables.ts — the table contract', () => {
       'audit_events',
       'settings',
       'pool_numbers',
+      'broadcasts',
     ]);
+  });
+
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus (status), byCreatedAt (created_by + created_at); no stream/TTL', () => {
+    const t = spec('broadcasts');
+    expect(t.hashKey.name).toBe('broadcastId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byStatus', 'byCreatedAt']);
+    const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
+    expect(byStatus?.hashKey.name).toBe('status');
+    expect(byStatus?.rangeKey).toBeUndefined();
+    const byCreatedAt = t.gsis.find((g) => g.indexName === 'byCreatedAt');
+    expect(byCreatedAt?.hashKey.name).toBe('created_by');
+    expect(byCreatedAt?.rangeKey?.name).toBe('created_at');
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('pool_numbers (M1.7): PK poolNumber; GSI byLifecycleState (lifecycle_state + quarantine_until); no stream/TTL', () => {

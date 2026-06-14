@@ -17,6 +17,7 @@ import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
   toConversationUpdatedEvent,
+  type BroadcastUpdatedEvent,
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
@@ -52,7 +53,10 @@ import {
   TEAM_SENDER_KEY,
   TEAM_SENDER_LABEL,
 } from '../jobs/relayFanOut.js';
+import { type BroadcastsRepo } from '../repos/broadcastsRepo.js';
+import { type AudienceResolutionService } from '../services/audienceResolution.js';
 import { createAdminUsersRouter } from './adminUsers.js';
+import { createBroadcastsRouter } from './broadcasts.js';
 import { createContactsRouter } from './contacts.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
@@ -105,6 +109,9 @@ export interface ApiRouterDeps {
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
   contactsRepoForRelay?: ContactsRepo;
+  /** M1.8a share-broadcast — injected in tests; default to the real repo/service. */
+  broadcastsRepo?: BroadcastsRepo;
+  audienceResolutionService?: AudienceResolutionService;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -260,6 +267,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         deps.contactsRepoForRelay === undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      events,
+    }),
+  );
+  // Share-broadcasts (M1.8a; requireAuth — VAs run share broadcasts, no admin
+  // gate). Mounted at '/' so it owns /broadcasts + the /broadcasts/:id sub-paths.
+  router.use(
+    '/',
+    createBroadcastsRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.broadcastsRepo !== undefined && { broadcastsRepo: deps.broadcastsRepo }),
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      ...(deps.audienceResolutionService !== undefined && {
+        audienceResolutionService: deps.audienceResolutionService,
+      }),
+      auditRepo: audit,
       events,
     }),
   );
@@ -610,8 +633,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onMessagePersisted = (payload: MessagePersistedEvent): void => {
       writeEvent('message.persisted', payload);
     };
+    const onBroadcastUpdated = (payload: BroadcastUpdatedEvent): void => {
+      writeEvent('broadcast.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
+    events.on('broadcast.updated', onBroadcastUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -631,6 +658,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       clearInterval(heartbeat);
       events.off('conversation.updated', onConversationUpdated);
       events.off('message.persisted', onMessagePersisted);
+      events.off('broadcast.updated', onBroadcastUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

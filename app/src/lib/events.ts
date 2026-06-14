@@ -23,6 +23,7 @@ import type {
   ConversationType,
 } from '../repos/conversationsRepo.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
+import type { BroadcastStats, BroadcastStatus } from '../repos/broadcastsRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
 export interface ConversationUpdatedEvent {
@@ -119,9 +120,22 @@ export interface MessagePersistedEvent {
   deliveryStatus: DeliveryStatus;
 }
 
+/**
+ * A share-broadcast (M1.8a "Share Properties") progressed — emitted from the
+ * broadcast.send job (on completion) and the delivery-callback rollup so the
+ * results view updates live. Carries the lifecycle status + the rolled-up
+ * counters; NO PII (counts only).
+ */
+export interface BroadcastUpdatedEvent {
+  broadcastId: string;
+  status: BroadcastStatus;
+  stats: BroadcastStats;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
+  'broadcast.updated': BroadcastUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

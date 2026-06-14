@@ -119,6 +119,15 @@ export interface SendMessageInput {
    * Unset for the 1:1 path (the messaging service picks the sender).
    */
   from?: string;
+  /**
+   * Broadcast id (M1.8a "Share Properties"): when set, the persisted message is
+   * STAMPED with `broadcast_id = broadcastId` so the delivery-status callback
+   * rollup (webhooks/twilio.ts) can find this broadcast's recipient slot by the
+   * SID alone and roll delivered/failed into the broadcast stats. ADDITIVE: the
+   * 1:1 send path (opt-out gate → breaker → persist-at-send → audit) is
+   * otherwise UNCHANGED — absent on every non-broadcast send (relay + 1:1).
+   */
+  broadcastId?: string;
 }
 
 export interface SendMessageOutcome {
@@ -153,7 +162,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from } = input;
+    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from, broadcastId } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
@@ -223,6 +232,10 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
       deliveryStatus: result.status,
+      // M1.8a: stamp the broadcast id so the delivery-callback rollup can find
+      // this recipient's broadcast slot by the SID alone (additive — absent on
+      // 1:1 / relay sends).
+      ...(broadcastId !== undefined && { broadcastId }),
     });
 
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and

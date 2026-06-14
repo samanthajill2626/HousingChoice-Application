@@ -77,6 +77,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status));
       return { items };
     },
+    async listByHousingAuthority(housingAuthority) {
+      return { items: contacts.filter((c) => c['housing_authority'] === housingAuthority) };
+    },
     async create(input) {
       const item = { ...input, contactId: input.contactId ?? `contact-${contacts.length + 1}` };
       contacts.push({ ...item });

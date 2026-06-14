@@ -267,6 +267,41 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30007' }));
       expect((await world.messagesRepo.getByProviderSid('SMout0001'))?.error_code).toBe('30007');
     });
+
+    it('an undelivered/failed callback logs the delivery_failed marker with the error_code + SID (IDs only, doc §9)', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+
+      await signedTwilioPost(
+        app,
+        STATUS_PATH,
+        statusParams({ MessageStatus: 'undelivered', ErrorCode: '30005' }),
+      );
+
+      // Stable marker the DeliveryFailures metric filter keys on — WARN, with
+      // the Twilio error_code + provider SID, never a body/phone (PII).
+      const marker = capture
+        .atLevel(WARN)
+        .find((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0001')!;
+      expect(marker).toBeDefined();
+      expect(marker['errorCode']).toBe('30005');
+      expect(marker['providerStatus']).toBe('undelivered');
+      expect(typeof marker['correlationId']).toBe('string');
+      // A 'failed' status maps the same way → also marked (no error code needed).
+      const { app: app2, world: world2, capture: capture2 } = makeWebhookHarness();
+      await seedOutbound(world2, 'SMout0002');
+      await signedTwilioPost(app2, STATUS_PATH, statusParams({ MessageSid: 'SMout0002', MessageStatus: 'failed' }));
+      expect(
+        capture2.atLevel(WARN).some((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0002'),
+      ).toBe(true);
+    });
+
+    it('a delivered callback does NOT emit the delivery_failed marker', async () => {
+      const { app, world, capture } = makeWebhookHarness();
+      await seedOutbound(world, 'SMout0001');
+      await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'delivered' }));
+      expect(capture.lines.some((l) => l['event'] === 'delivery_failed')).toBe(false);
+    });
   });
 });
 

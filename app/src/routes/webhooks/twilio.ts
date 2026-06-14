@@ -543,6 +543,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned, relay: true },
           'twilio relay-recipient delivery status callback processed',
         );
+        // Delivery-failure marker (doc §9): a relay fan-out leg that resolved
+        // undelivered/failed is also a countable failed delivery. Same `event`
+        // field the DeliveryFailures metric filter keys on; IDs/codes only.
+        if (mapped === 'undelivered' || mapped === 'failed') {
+          log.warn(
+            { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus, relay: true },
+            'twilio relay-recipient delivery failed (undelivered/failed)',
+          );
+        }
         if (transitioned) {
           // Refresh the UI: a per-recipient delivery move re-renders the relay
           // thread (the source message's delivery_recipients changed).
@@ -590,6 +599,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned },
       'twilio delivery status callback processed',
     );
+
+    // Delivery-failure marker (doc §9 "Send failures / delivery errors"): a
+    // callback that resolves to undelivered/failed is a countable failed
+    // delivery. The `event` field is what the observability DeliveryFailures
+    // metric filter keys on; IDs/codes only, never the body (PII). 30007
+    // additionally ERROR-logs below — this WARN marker is the countable signal,
+    // so both fire (the alarm counts deliveries, not error severity).
+    if (mappedStatus === 'undelivered' || mappedStatus === 'failed') {
+      log.warn(
+        { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus },
+        'twilio delivery failed (undelivered/failed)',
+      );
+    }
 
     if (transitioned) {
       // SSE (M1.2): a REAL transition updates delivery badges live.

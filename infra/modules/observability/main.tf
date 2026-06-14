@@ -54,6 +54,61 @@ resource "aws_cloudwatch_log_metric_filter" "error_logs" {
   }
 }
 
+# Messaging delivery markers (doc §9 "Webhook failures" / "Send failures"). The
+# app emits stable `event` fields (twilioSignature.ts, routes/webhooks/twilio.ts,
+# adapters/messaging.ts) so these filters key on a field, not fragile free text.
+# Filters on BOTH groups emit into the SAME hc/<env> metric, so one alarm each
+# covers app + worker (the worker runs the fan-out sends; the app runs the
+# webhooks — the throttle marker can come from either).
+
+resource "aws_cloudwatch_log_metric_filter" "webhook_signature_rejections" {
+  for_each = aws_cloudwatch_log_group.proc
+
+  name           = "${var.name_prefix}${each.key}-webhook-signature-rejections"
+  log_group_name = each.value.name
+  # Inbound webhook whose X-Twilio-Signature failed validation (403 + WARN).
+  pattern = "{ $.event = \"webhook_signature_rejected\" }"
+
+  metric_transformation {
+    name          = "WebhookSignatureRejections"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "delivery_failures" {
+  for_each = aws_cloudwatch_log_group.proc
+
+  name           = "${var.name_prefix}${each.key}-delivery-failures"
+  log_group_name = each.value.name
+  # A delivery-status callback that resolved to undelivered/failed.
+  pattern = "{ $.event = \"delivery_failed\" }"
+
+  metric_transformation {
+    name          = "DeliveryFailures"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "send_throttled" {
+  for_each = aws_cloudwatch_log_group.proc
+
+  name           = "${var.name_prefix}${each.key}-send-throttled"
+  log_group_name = each.value.name
+  # A send hit a Twilio 429 / 30022 transient throttle at the adapter boundary.
+  pattern = "{ $.event = \"send_throttled\" }"
+
+  metric_transformation {
+    name          = "SendThrottled"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+  }
+}
+
 # --- Alerting -------------------------------------------------------------
 
 # NOTE (apply-time side effect): the email subscription sends a confirmation
@@ -92,6 +147,60 @@ resource "aws_cloudwatch_metric_alarm" "error_logs" {
   period              = 300
   evaluation_periods  = 1
   threshold           = var.error_logs_alarm_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+# Messaging delivery alarms (doc §9). Each → the same alerts SNS topic, with
+# both ok + alarm actions, period 300, treat_missing_data notBreaching (these
+# metrics stop emitting when nothing is wrong — missing = OK, not breaching).
+
+resource "aws_cloudwatch_metric_alarm" "webhook_signature_rejections" {
+  alarm_name          = "${var.name_prefix}webhook-signature-rejections"
+  alarm_description   = "doc §9 'Webhook failures': inbound Twilio webhooks failing signature validation (event=webhook_signature_rejected). Inbound texts are the product's heartbeat — behind CloudFront+origin-secret a sustained rejection means an auth-token misconfig (e.g. after rotation) and every inbound conversation is silently lost. Low threshold on purpose."
+  namespace           = local.metric_namespace
+  metric_name         = "WebhookSignatureRejections"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = var.webhook_signature_rejections_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "send_throttled" {
+  alarm_name          = "${var.name_prefix}send-throttled"
+  alarm_description   = "doc §9 'Send failures': outbound sends hitting Twilio throttling (429/30022, event=send_throttled). With the conservative ~1/s token bucket these should be ~0 — any sustained throttling means a token-bucket/A2P-tier problem (TPS budget breach) throttling the core loop. Low threshold on purpose."
+  namespace           = local.metric_namespace
+  metric_name         = "SendThrottled"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = var.send_throttled_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "delivery_failures" {
+  alarm_name        = "${var.name_prefix}delivery-failures"
+  alarm_description = "doc §9 'Send failures / delivery errors': undelivered/failed delivery-status callbacks (event=delivery_failed). Carrier filtering, A2P issues, or bad numbers. Higher threshold than the others because some undelivered to bad numbers is normal at low volume."
+  # NOTE: this is a COUNT-based alarm (raw undelivered/failed count per 5 min).
+  # The better high-volume design is a RATE alarm (undelivered / attempts) via a
+  # CloudWatch metric-math expression so a busy period doesn't false-page — that
+  # needs an attempts/sent metric to divide against and is DEFERRED until send
+  # volume warrants it. Until then this count bar is the honest, simple signal.
+  namespace           = local.metric_namespace
+  metric_name         = "DeliveryFailures"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = var.delivery_failures_threshold
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
@@ -218,6 +327,20 @@ resource "aws_cloudwatch_dashboard" "stack" {
           period = 300
           metrics = [
             ["CWAgent", "disk_used_percent", "InstanceId", var.instance_id, "path", "/", "fstype", "xfs"],
+          ]
+        }
+      },
+      {
+        type = "metric", x = 0, y = 12, width = 12, height = 6
+        properties = {
+          title  = "Messaging delivery (doc §9: webhook + send failures)"
+          region = data.aws_region.current.region
+          stat   = "Sum"
+          period = 300
+          metrics = [
+            [local.metric_namespace, "WebhookSignatureRejections"],
+            [local.metric_namespace, "SendThrottled"],
+            [local.metric_namespace, "DeliveryFailures"],
           ]
         }
       },

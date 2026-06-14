@@ -25,6 +25,27 @@ variable "disk_used_alarm_threshold" {
   default     = 80
 }
 
+# --- Messaging delivery alarms (doc §9 "Webhook failures" / "Send failures") ---
+# Defaults carry the operating thresholds so the env stack does NOT pass them.
+
+variable "webhook_signature_rejections_threshold" {
+  description = "WebhookSignatureRejections (event=webhook_signature_rejected) Sum per 5 min that trips the alarm. Low bar: behind CloudFront+origin-secret a sustained signature failure means an auth-token misconfig after rotation = every inbound silently lost (doc §9 'Webhook failures')."
+  type        = number
+  default     = 3
+}
+
+variable "send_throttled_threshold" {
+  description = "SendThrottled (event=send_throttled; Twilio 429/30022) Sum per 5 min that trips the alarm. With the conservative ~1/s token bucket these should be ~0, so any sustained throttling = bucket/tier problem (doc §9 'Send failures')."
+  type        = number
+  default     = 3
+}
+
+variable "delivery_failures_threshold" {
+  description = "DeliveryFailures (event=delivery_failed; undelivered/failed deliveries) Sum per 5 min that trips the alarm. Count-based with a higher bar — undelivered to bad numbers is normal at low volume (doc §9 'Send failures / delivery errors')."
+  type        = number
+  default     = 15
+}
+
 variable "alert_email" {
   description = "Email address subscribed to the alerts SNS topic (confirmation email sent on apply)."
   type        = string

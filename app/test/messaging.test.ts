@@ -143,6 +143,62 @@ describe('TwilioMessagingDriver', () => {
     });
   });
 
+  it('emits ONE send_throttled marker on a 429/30022 send and re-throws unchanged (doc §9)', async () => {
+    // The single shared send boundary: a Twilio 429/30022 thrown by
+    // messages.create is the throttle signal every path (relay/broadcast/retry)
+    // funnels through. The driver logs the countable marker ONCE, then re-throws
+    // so the caller's existing back-off classification is untouched.
+    for (const code of [429, 30022]) {
+      const capture = createLogCapture();
+      const driver = new TwilioMessagingDriver({
+        accountSid: 'ACtest',
+        apiKeySid: 'SKtest',
+        apiKeySecret: 'secret',
+        messagingServiceSid: 'MGtest',
+        client: {
+          messages: {
+            create: async () => {
+              throw Object.assign(new Error('rate limited'), { code });
+            },
+          },
+        },
+        logger: createLogger({ level: 'info', destination: capture.stream }),
+      });
+
+      await expect(
+        driver.sendMessage({ to: '+15550100001', body: 'super secret PII body' }),
+      ).rejects.toThrow('rate limited');
+
+      // Exactly one marker, WARN (40), carrying only the code — never the body.
+      const markers = capture.lines.filter((l) => l['event'] === 'send_throttled');
+      expect(markers).toHaveLength(1);
+      expect(markers[0]!['level']).toBe(40);
+      expect(markers[0]!['errorCode']).toBe(String(code));
+      expect(JSON.stringify(capture.lines)).not.toContain('super secret');
+    }
+  });
+
+  it('does NOT emit send_throttled for a non-throttle send error (re-throws only)', async () => {
+    const capture = createLogCapture();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client: {
+        messages: {
+          create: async () => {
+            throw Object.assign(new Error('carrier filtered'), { code: 30007 });
+          },
+        },
+      },
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    await expect(driver.sendMessage({ to: '+15550100001', body: 'x' })).rejects.toThrow('carrier filtered');
+    expect(capture.lines.some((l) => l['event'] === 'send_throttled')).toBe(false);
+  });
+
   it('maps every Twilio status onto the delivery-status machine', () => {
     expect(mapTwilioStatus('accepted')).toBe('queued');
     expect(mapTwilioStatus('queued')).toBe('queued');

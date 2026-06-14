@@ -63,9 +63,14 @@ export function twilioSignatureMiddleware(opts: TwilioSignatureOptions): Request
     const valid =
       typeof signature === 'string' && twilio.validateRequest(authToken as string, signature, url, params);
     if (!valid) {
-      // Correlation rides the pino mixin; the body is NEVER logged.
+      // Correlation rides the pino mixin; the body is NEVER logged. The
+      // `event` marker is the stable field the observability module's
+      // WebhookSignatureRejections metric filter keys on (doc §9 "Webhook
+      // failures") — behind CloudFront+origin-secret a sustained rejection
+      // means an auth-token misconfig after rotation = every inbound lost.
       logger.warn(
         {
+          event: 'webhook_signature_rejected',
           path: req.path,
           remoteIp: req.socket.remoteAddress ?? null,
           reason: typeof signature === 'string' ? 'signature mismatch' : 'signature header missing',

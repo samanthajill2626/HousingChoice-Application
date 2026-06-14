@@ -52,8 +52,11 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('invalid X-Twilio-Signature'))!;
     expect(warn).toBeDefined();
     expect(typeof warn['correlationId']).toBe('string');
-    // The body must never be logged.
+    // Stable marker the WebhookSignatureRejections metric filter keys on (doc §9).
+    expect(warn['event']).toBe('webhook_signature_rejected');
+    // The body must never be logged (and the marker line carries no PII).
     expect(JSON.stringify(capture.lines)).not.toContain('looking for a 2 bed');
+    expect(JSON.stringify(warn)).not.toContain('looking for a 2 bed');
   });
 
   it('rejects a MISSING signature header with 403 and persists nothing', async () => {

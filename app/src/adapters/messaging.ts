@@ -188,6 +188,28 @@ export interface TwilioClientLike {
   };
 }
 
+/**
+ * Twilio transient-throttle error codes (doc §9 "Send failures"): 429 (HTTP
+ * Too Many Requests) and 30022 (Twilio "Rate exceeded"). These are the codes
+ * the relay + broadcast fan-out classifiers back off on; the driver emits ONE
+ * `send_throttled` marker per throttled send at this single provider-send
+ * boundary so the metric counts each occurrence exactly once (no per-path
+ * double-logging).
+ */
+const SEND_THROTTLE_CODES = new Set(['429', '30022']);
+
+/** Best-effort provider error-code extraction (Twilio attaches `code`/`status`). */
+function providerErrorCode(err: unknown): string | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'number') return String(code);
+    if (typeof code === 'string' && code.length > 0) return code;
+    const status = (err as { status?: unknown }).status;
+    if (typeof status === 'number') return String(status);
+  }
+  return undefined;
+}
+
 /** Twilio MessageStatus → our delivery-status machine (unknowns stay queued). */
 export function mapTwilioStatus(status: string): DeliveryStatus {
   switch (status) {
@@ -239,18 +261,37 @@ export class TwilioMessagingDriver implements MessagingAdapter {
   }
 
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
-    const message = await this.client.messages.create({
-      to: params.to,
-      ...(params.body !== undefined && { body: params.body }),
-      ...(params.mediaUrls !== undefined && { mediaUrl: params.mediaUrls }),
-      // The Messaging Service is the sender (A2P sender pool) AND carries the
-      // service-level status callback — no per-message statusCallback needed.
-      messagingServiceSid: this.deps.messagingServiceSid,
-      // Relay fan-out (M1.7): pin the send to a specific pool number while
-      // staying inside the A2P service (the number is in the service's sender
-      // pool). Omitted for the 1:1 path — the service picks the sender.
-      ...(params.from !== undefined && { from: params.from }),
-    });
+    let message;
+    try {
+      message = await this.client.messages.create({
+        to: params.to,
+        ...(params.body !== undefined && { body: params.body }),
+        ...(params.mediaUrls !== undefined && { mediaUrl: params.mediaUrls }),
+        // The Messaging Service is the sender (A2P sender pool) AND carries the
+        // service-level status callback — no per-message statusCallback needed.
+        messagingServiceSid: this.deps.messagingServiceSid,
+        // Relay fan-out (M1.7): pin the send to a specific pool number while
+        // staying inside the A2P service (the number is in the service's sender
+        // pool). Omitted for the 1:1 path — the service picks the sender.
+        ...(params.from !== undefined && { from: params.from }),
+      });
+    } catch (err) {
+      // Send-throttle marker (doc §9 "Send failures"): a 429/30022 at the
+      // provider is a transient throttle. Emit ONE `send_throttled` marker
+      // here — the single shared send boundary every path (relay/broadcast/
+      // retry) funnels through — so the SendThrottled metric counts each
+      // throttled send exactly once. IDs/codes only, never the body (PII).
+      // The error is re-thrown unchanged so each caller's existing classify/
+      // back-off logic is untouched (this only ADDS the countable signal).
+      const code = providerErrorCode(err);
+      if (code !== undefined && SEND_THROTTLE_CODES.has(code)) {
+        this.log.warn(
+          { event: 'send_throttled', errorCode: code },
+          'twilio send throttled (429/30022) — transient rate limit',
+        );
+      }
+      throw err;
+    }
     // Redacted by design: SID + lengths only — never the body (PII).
     this.log.info(
       {

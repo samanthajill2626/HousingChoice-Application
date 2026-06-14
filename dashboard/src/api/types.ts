@@ -484,3 +484,154 @@ export interface MessagePersistedEvent {
   direction: MessageDirection;
   deliveryStatus: DeliveryStatus;
 }
+
+/** GET /api/events 'broadcast.updated' payload (M1.8). Emitted from the
+ *  broadcast.send job (on completion) and the delivery-callback rollup so the
+ *  results view updates the lifecycle status + rolled-up stats live. NO PII
+ *  (counts only) — never logged. */
+export interface BroadcastUpdatedEvent {
+  broadcastId: string;
+  status: BroadcastStatus;
+  stats: BroadcastStats;
+}
+
+// --- Broadcasts (M1.8 "Share Properties") -----------------------------------
+// The filtered share-broadcast: text a property's flyer to a filtered set of
+// tenant 1:1 contacts. Mirrors app/src/repos/broadcastsRepo.ts +
+// app/src/routes/broadcasts.ts + app/src/services/audienceResolution.ts.
+
+/** Broadcast lifecycle status (byStatus GSI hash on the server). */
+export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
+
+/** Per-recipient delivery status on a broadcast (its own forward-only machine;
+ *  `skipped` = dropped at send for opt-out/unreachable, no token spent). */
+export type BroadcastRecipientStatus = 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
+
+/**
+ * The audience filter snapshot (M1.8). contact_type is fixed 'tenant' (never
+ * relay rosters); housing_authority + bedroomSize are optional narrowers;
+ * excludeOptedOut + excludeUnreachable are ALWAYS true (the server enforces it
+ * — the booleans record the intent for the audit trail).
+ */
+export interface AudienceFilter {
+  contact_type: 'tenant';
+  housing_authority?: string;
+  bedroomSize?: number;
+  excludeOptedOut: boolean;
+  excludeUnreachable: boolean;
+}
+
+/** Rolled-up send/delivery counters the results view renders. */
+export interface BroadcastStats {
+  /** Resolved audience size at send time. */
+  audience: number;
+  /** Provider-accepted sends (queued/sent at the adapter). */
+  sent: number;
+  /** Delivery callbacks that reached `delivered`. */
+  delivered: number;
+  /** Sends that failed (carrier filter / invalid number / cap). */
+  failed: number;
+  /** Recipients skipped at send time for opt-out/unreachable (no token spent). */
+  skipped_opted_out: number;
+  /** Recipients still queued (pre-send seed / transient deferral). */
+  queued: number;
+}
+
+/** Per-recipient delivery slot on a broadcast (keyed by contactKey = contactId
+ *  else `phone#<E164>`). */
+export interface BroadcastRecipient {
+  status: BroadcastRecipientStatus;
+  /** The tenant's 1:1 conversation the message landed in (set at send). */
+  conversationId?: string;
+  /** The persisted message's SK (delivery-callback rollup target). */
+  tsMsgId?: string;
+  errorCode?: string;
+}
+
+/** A broadcast list-row summary (GET /api/broadcasts → broadcasts[]). No
+ *  recipients map — that lives on the results view. */
+export interface BroadcastSummary {
+  broadcastId: string;
+  status: BroadcastStatus;
+  /** The shared unit, or null for a unit-less broadcast. */
+  unitId: string | null;
+  audience_filter: AudienceFilter;
+  stats: BroadcastStats;
+  /** ISO 8601. */
+  created_at: string;
+  /** The acting user's userId. */
+  created_by: string;
+}
+
+/** The results-view projection of a broadcast (GET /api/broadcasts/:id/results). */
+export interface BroadcastResults {
+  broadcastId: string;
+  status: BroadcastStatus;
+  /** The shared unit, or null. */
+  unitId: string | null;
+  audience_filter: AudienceFilter;
+  stats: BroadcastStats;
+  /** contactKey → per-recipient delivery slot. */
+  recipients: Record<string, BroadcastRecipient>;
+  last_error?: string;
+  created_at: string;
+}
+
+/** GET /api/broadcasts page. */
+export interface BroadcastsPage {
+  broadcasts: BroadcastSummary[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** POST /api/broadcasts body — body_template is required; unitId +
+ *  audience_filter narrowers are optional. */
+export interface CreateBroadcastBody {
+  body_template: string;
+  unitId?: string;
+  audience_filter?: {
+    housing_authority?: string;
+    bedroomSize?: number;
+  };
+}
+
+/** POST /api/broadcasts result → 201 (a fresh draft + audience estimate). */
+export interface CreateBroadcastResult {
+  broadcastId: string;
+  status: 'draft';
+  /** The estimated audience reach at draft time. */
+  estimatedCount: number;
+  /** True when resolution hit the page cap — the estimate is INCOMPLETE. */
+  truncated: boolean;
+}
+
+/** One sampled contact in a preview response. Honest identity: firstName may be
+ *  absent — fall back to the formatted phone. */
+export interface BroadcastPreviewSample {
+  contactId: string;
+  firstName?: string;
+  phone: string;
+}
+
+/** POST /api/broadcasts/:id/preview result — the live audience count + a sample. */
+export interface BroadcastPreviewResult {
+  count: number;
+  /** True when resolution hit the page cap — the set is INCOMPLETE / over-cap. */
+  truncated: boolean;
+  sample: BroadcastPreviewSample[];
+}
+
+/** POST /api/broadcasts/:id/send result (200). */
+export interface SendBroadcastResult {
+  broadcastId: string;
+  status: 'sending';
+  count: number;
+}
+
+/** The 400 `audience_too_large` error body (over the recipient cap OR truncated). */
+export interface AudienceTooLargeError {
+  error: 'audience_too_large';
+  message: string;
+  count: number;
+  truncated: boolean;
+}

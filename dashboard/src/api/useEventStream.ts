@@ -5,11 +5,17 @@
 // backoff for the cases EventSource gives up on (and a manual close on
 // unmount). Feature agents pass handlers; they never touch EventSource.
 import { useEffect, useRef } from 'react';
-import type { ConversationUpdatedEvent, MessagePersistedEvent } from './types.js';
+import type {
+  BroadcastUpdatedEvent,
+  ConversationUpdatedEvent,
+  MessagePersistedEvent,
+} from './types.js';
 
 export interface EventStreamHandlers {
   onConversationUpdated?: (event: ConversationUpdatedEvent) => void;
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
+  /** A share-broadcast (M1.8) progressed — live status + rolled-up stats. */
+  onBroadcastUpdated?: (event: BroadcastUpdatedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -63,6 +69,11 @@ export function useEventStream(handlers: EventStreamHandlers): void {
       source.addEventListener('message.persisted', (ev) => {
         const data = parse<MessagePersistedEvent>((ev as MessageEvent).data);
         if (data) handlersRef.current.onMessagePersisted?.(data);
+      });
+
+      source.addEventListener('broadcast.updated', (ev) => {
+        const data = parse<BroadcastUpdatedEvent>((ev as MessageEvent).data);
+        if (data) handlersRef.current.onBroadcastUpdated?.(data);
       });
 
       source.addEventListener('error', () => {

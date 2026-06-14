@@ -3,11 +3,13 @@
 // Shows every intake field (including tour_process / application_process), the
 // primary call contact (resolved to its contact detail when linkable), the
 // media list, and the shareable public flyer link. Edit links to the form.
+import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { getUnit, useApi, type UnitItem } from '../api/index.js';
 import { Badge, Button, ChevronLeftIcon, EmptyState, Spinner } from '../ui/index.js';
 import { AddressDisplay, formatAddress } from './records/Address.js';
 import { UNIT_STATUS_LABEL, formatRentRange } from './records/records.js';
+import { BroadcastComposer } from './broadcast/BroadcastComposer.js';
 import styles from './records/records.module.css';
 
 export default function UnitDetail(): React.JSX.Element {
@@ -61,9 +63,11 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }): Reac
 }
 
 function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
+  const navigate = useNavigate();
   const rent = formatRentRange(unit.rent_min, unit.rent_max);
   const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
   const flyerHref = `/flyer/${encodeURIComponent(unit.unitId)}`;
+  const [shareOpen, setShareOpen] = useState(false);
 
   return (
     <section className={styles.page} aria-labelledby="unit-detail-heading">
@@ -83,13 +87,26 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
       </header>
 
       <div className={styles.formActions}>
-        <Button as="a" href={`/units/${encodeURIComponent(unit.unitId)}/edit`} size="sm">
+        <Button size="sm" onClick={() => setShareOpen(true)}>
+          Share this property
+        </Button>
+        <Button as="a" href={`/units/${encodeURIComponent(unit.unitId)}/edit`} variant="secondary" size="sm">
           Edit property
         </Button>
         <Button as="a" href={flyerHref} target="_blank" rel="noopener noreferrer" variant="secondary" size="sm">
           View public flyer
         </Button>
       </div>
+
+      <BroadcastComposer
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        unit={unit}
+        onSent={(broadcastId) => {
+          setShareOpen(false);
+          navigate(`/broadcasts/${encodeURIComponent(broadcastId)}`);
+        }}
+      />
 
       <div className={styles.surface}>
         <h2 className={styles.sectionTitle}>Details</h2>

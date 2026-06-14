@@ -5,6 +5,10 @@
 import { request } from './client.js';
 import type {
   AdminUser,
+  BroadcastPreviewResult,
+  BroadcastResults,
+  BroadcastsPage,
+  BroadcastStatus,
   ChangeRoleResult,
   Contact,
   ContactPatch,
@@ -13,6 +17,8 @@ import type {
   Conversation,
   ConversationParticipant,
   ConversationsPage,
+  CreateBroadcastBody,
+  CreateBroadcastResult,
   CreateContactBody,
   CreateRelayGroupBody,
   CreateUnitBody,
@@ -24,6 +30,7 @@ import type {
   OrgSettingsPatch,
   PushTestResult,
   RelayMemberInput,
+  SendBroadcastResult,
   SendMessageResult,
   UnitFlyer,
   UnitItem,
@@ -392,6 +399,68 @@ export async function updateUnit(unitId: string, patch: UnitPatch): Promise<Unit
     { method: 'PATCH', body: patch },
   );
   return res.unit;
+}
+
+// --- Broadcasts (/api/broadcasts, M1.8 "Share Properties", requireAuth) ------
+// VAs run share broadcasts day-to-day (no admin gate). The lifecycle is
+// create-draft → preview → send; results carry the per-recipient delivery map,
+// and the `broadcast.updated` SSE event drives live stat updates.
+
+/** POST /api/broadcasts — create a DRAFT + estimate the audience. → 201. */
+export function createBroadcast(body: CreateBroadcastBody): Promise<CreateBroadcastResult> {
+  return request<CreateBroadcastResult>('/api/broadcasts', { method: 'POST', body });
+}
+
+/** POST /api/broadcasts/:id/preview — re-resolve the audience count + a sample.
+ *  Throws ApiError(404,'broadcast_not_found'). */
+export function previewBroadcast(broadcastId: string): Promise<BroadcastPreviewResult> {
+  return request<BroadcastPreviewResult>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/preview`,
+    { method: 'POST' },
+  );
+}
+
+/** POST /api/broadcasts/:id/send — snapshot the audience + start the fan-out.
+ *  Throws ApiError(400,'audience_too_large') (err.body is AudienceTooLargeError),
+ *  ApiError(400,'empty_audience'), or ApiError(409,'broadcast_not_draft'). */
+export function sendBroadcast(broadcastId: string): Promise<SendBroadcastResult> {
+  return request<SendBroadcastResult>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/send`,
+    { method: 'POST' },
+  );
+}
+
+/** GET /api/broadcasts/:id/results — stats + per-recipient delivery map.
+ *  Throws ApiError(404,'broadcast_not_found'). */
+export function getBroadcastResults(
+  broadcastId: string,
+  signal?: AbortSignal,
+): Promise<BroadcastResults> {
+  return request<BroadcastResults>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/results`,
+    { ...(signal !== undefined && { signal }) },
+  );
+}
+
+export interface ListBroadcastsParams {
+  status?: BroadcastStatus;
+  limit?: number;
+  cursor?: string | null;
+}
+
+/** GET /api/broadcasts — list (by status, else the caller's), newest-first. */
+export function listBroadcasts(
+  params: ListBroadcastsParams = {},
+  signal?: AbortSignal,
+): Promise<BroadcastsPage> {
+  return request<BroadcastsPage>('/api/broadcasts', {
+    query: {
+      status: params.status,
+      limit: params.limit,
+      cursor: params.cursor ?? undefined,
+    },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 // --- Public (/public, NO auth — rate-limited) -------------------------------

@@ -32,6 +32,7 @@ import Units from '../routes/Units.js';
 import UnitDetail from '../routes/UnitDetail.js';
 import UnitForm from '../routes/UnitForm.js';
 import NewRelayGroup from '../routes/NewRelayGroup.js';
+import BroadcastResults from '../routes/broadcast/BroadcastResults.js';
 
 export function AppRouter(): React.JSX.Element {
   return (
@@ -79,6 +80,9 @@ export function AppRouter(): React.JSX.Element {
           <Route path="units/new" element={<UnitForm />} />
           <Route path="units/:unitId" element={<UnitDetail />} />
           <Route path="units/:unitId/edit" element={<UnitForm />} />
+
+          {/* Share Properties broadcast (M1.8) — the live results view. */}
+          <Route path="broadcasts/:id" element={<BroadcastResults />} />
 
           <Route path="*" element={<NotFound />} />
         </Route>

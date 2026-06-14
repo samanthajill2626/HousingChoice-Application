@@ -1,10 +1,12 @@
 // SQS jobs consumer — the worker-side intake for job envelopes (M1.2).
 //
-// EventBridge Scheduler one-off schedules (created by jobs.enqueue() through
-// the EventBridgeSchedulerAdapter) deliver each JSON JobEnvelope as an SQS
-// message BODY; this long-polls the jobs queue and hands every body to
-// dispatchJob() — the consumer gate, which validates the envelope, mints a
-// fresh jobRunId, and rehydrates AsyncLocalStorage before any handler runs.
+// Producers (jobs.enqueue()) put each JSON JobEnvelope onto the jobs queue as
+// an SQS message BODY — directly via SendMessage with DelaySeconds for <=12min
+// jobs (the Phase-1 path), or via an EventBridge Scheduler one-off schedule for
+// >12min long-horizon jobs (dormant in Phase 1). Either way this long-polls the
+// jobs queue and hands every body to dispatchJob() — the consumer gate, which
+// validates the envelope, mints a fresh jobRunId, and rehydrates
+// AsyncLocalStorage before any handler runs.
 //
 // Delete semantics (SQS is at-least-once — handlers must tolerate the rare
 // duplicate delivery, e.g. a job overrunning the 120s visibility timeout):

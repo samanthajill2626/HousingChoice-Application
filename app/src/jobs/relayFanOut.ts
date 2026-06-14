@@ -341,10 +341,9 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     );
 
     // Transient continuation: re-enqueue the remaining recipients with backoff,
-    // capped. (enqueue() with runAt — the future-scheduled path; the backoff is
-    // well above EventBridge's 60s floor only at higher attempts, but a relay
-    // continuation tolerating a short delay is correct — the alternative is
-    // dropping the recipient.)
+    // capped. enqueue() with runAt routes through SQS DelaySeconds (5/10/20s is
+    // well within the 12min cap), so the backoff is EXACT — no EventBridge 60s
+    // floor inflating a 5s wait to 60s.
     if (transientRemaining.length > 0) {
       const nextAttempt = (payload.attempt ?? 1) + 1;
       if (nextAttempt > MAX_FANOUT_ATTEMPTS) {

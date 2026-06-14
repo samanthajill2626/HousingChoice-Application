@@ -1,7 +1,21 @@
 // The TWO gates for all job traffic (binding guideline 2):
 //   - enqueue(jobName, payload, opts?)  — producer side
 //   - defineJobHandler(jobName, handler) + dispatchJob(rawEvent) — consumer side
-// Nothing else may ever talk to EventBridge or hand events to handlers.
+// Nothing else may ever talk to EventBridge/SQS or hand events to handlers.
+//
+// DELAY ROUTING (delay refactor): enqueue() computes the requested delay and
+// picks the transport:
+//   - delaySeconds <= JOBS_SQS_MAX_DELAY_SECONDS (720, conservative; SQS caps
+//     at 900) → the SQS path (OutboundQueueAdapter) with that DelaySeconds.
+//     0 = immediate. EXACT backoff — no EventBridge 60s floor.
+//   - delaySeconds  > JOBS_SQS_MAX_DELAY_SECONDS → EventBridge Scheduler
+//     (SchedulerAdapter.scheduleOnce), the long-horizon branch. In Phase 1
+//     EVERY delayed job is <= 240s (retry 60/120/240, relay/broadcast
+//     continuations 5/10/20), so they ALL take the SQS path; the EventBridge
+//     branch is DORMANT in Phase 1 and kept only for future >12min scheduling
+//     (e.g. reminders).
+// The worker long-polls the same SQS jobs queue regardless of which producer
+// path an envelope took (EventBridge delivers to that same queue).
 import { randomUUID } from 'node:crypto';
 import type {
   OutboundQueueAdapter,
@@ -22,6 +36,17 @@ import { JOB_ENVELOPE_VERSION, type JobEnvelope } from './types.js';
 /** Runaway-loop guard: a job chain may not exceed this many hops. */
 export const MAX_HOP_COUNT = 10;
 
+/**
+ * Conservative DelaySeconds ceiling for the SQS path (12min). A requested
+ * delay at or below this routes through SQS DelaySeconds; above it routes to
+ * EventBridge Scheduler. Deliberately below the SQS hard cap (900s) for
+ * headroom. In Phase 1 every delayed job is <= 240s, so all take the SQS path.
+ */
+export const JOBS_SQS_MAX_DELAY_SECONDS = 720;
+
+/** SQS's hard DelaySeconds limit — for reference; the cap above stays under it. */
+export const SQS_MAX_DELAY_SECONDS = 900;
+
 export type JobHandler = (payload: unknown) => void | Promise<void>;
 
 // Module-scoped registry + wiring (reset via _resetForTests()).
@@ -29,16 +54,25 @@ const registry = new Map<string, JobHandler>();
 let scheduler: SchedulerAdapter | undefined;
 let outboundQueue: OutboundQueueAdapter | undefined;
 let log: Logger = defaultLogger;
+// Injected clock for delaySeconds computation (test seam). The codebase injects
+// time rather than calling Date.now() directly in scheduled paths (see
+// tokenBucket.ts); the enqueue gate follows suit so tests can pin "now".
+let now: () => number = Date.now;
 
-/** Wire the scheduler adapter (in-memory locally; EventBridge in AWS). */
+/**
+ * Wire the EventBridge Scheduler adapter — used ONLY for delays beyond
+ * JOBS_SQS_MAX_DELAY_SECONDS (long-horizon jobs; dormant in Phase 1). In-memory
+ * locally/in tests, EventBridgeSchedulerAdapter in AWS.
+ */
 export function configureScheduler(adapter: SchedulerAdapter): void {
   scheduler = adapter;
 }
 
 /**
- * Wire the immediate-job adapter (M1.7): SQS-direct in AWS, in-process
- * locally/in tests. Powers enqueueImmediate(), which skips the EventBridge
- * 60s floor for latency-sensitive jobs (relay fan-out).
+ * Wire the SQS outbound adapter — the path for ALL jobs whose delay is within
+ * JOBS_SQS_MAX_DELAY_SECONDS (immediate + short backoff). SQS-direct in AWS,
+ * in-process locally/in tests. Skips the EventBridge 60s floor; backoff delays
+ * are exact via SQS DelaySeconds.
  */
 export function configureOutboundQueue(adapter: OutboundQueueAdapter): void {
   outboundQueue = adapter;
@@ -49,49 +83,81 @@ export function configureJobsLogger(logger: Logger): void {
   log = logger;
 }
 
+/** Test seam: pin the clock used to compute delaySeconds from runAt. */
+export function configureJobsClock(clock: () => number): void {
+  now = clock;
+}
+
 export interface EnqueueOptions {
   runAt?: Date;
 }
 
 /**
  * Producer gate. Stamps the current correlation context, a W3C traceparent,
- * and an incremented hopCount into a JobEnvelope, then delegates to the
- * SchedulerAdapter (which sets ActionAfterCompletion: DELETE on one-off
- * EventBridge schedules — they don't clean up after themselves).
+ * and an incremented hopCount into a JobEnvelope, then routes by delay:
+ *   - delaySeconds <= JOBS_SQS_MAX_DELAY_SECONDS → SQS path (OutboundQueueAdapter)
+ *     with that DelaySeconds (0 = immediate). Exact backoff, no 60s floor.
+ *   - delaySeconds  > JOBS_SQS_MAX_DELAY_SECONDS → EventBridge Scheduler
+ *     (scheduleOnce sets ActionAfterCompletion: DELETE on its one-off schedule —
+ *     they don't clean up after themselves). The MIN_SCHEDULE_LEAD_MS clamp
+ *     applies on this branch only; it cannot be hit in Phase 1 (no >12min
+ *     callers). delaySeconds is computed from runAt against the injected clock,
+ *     ceil'd to whole seconds, floored at 0 (a past runAt = immediate).
  */
 export async function enqueue(
   jobName: string,
   payload: unknown,
   opts?: EnqueueOptions,
 ): Promise<JobEnvelope> {
+  const delaySeconds = opts?.runAt
+    ? Math.max(0, Math.ceil((opts.runAt.getTime() - now()) / 1000))
+    : 0;
+
+  const envelope = buildEnvelope(jobName, payload);
+
+  if (delaySeconds <= JOBS_SQS_MAX_DELAY_SECONDS) {
+    if (!outboundQueue) {
+      throw new Error(
+        'jobs.enqueue: no OutboundQueueAdapter configured (call configureOutboundQueue first)',
+      );
+    }
+    await outboundQueue.enqueue(envelope, { delaySeconds });
+    log.info(
+      { jobName, jobId: envelope.jobId, hopCount: envelope.hopCount, delaySeconds },
+      'job enqueued (SQS)',
+    );
+    return envelope;
+  }
+
+  // Long-horizon branch (delay > 12min): EventBridge Scheduler. Dormant in
+  // Phase 1 — kept for future >12min scheduling (e.g. reminders).
   if (!scheduler) {
     throw new Error('jobs.enqueue: no SchedulerAdapter configured (call configureScheduler first)');
   }
-  const envelope = buildEnvelope(jobName, payload);
   const scheduleOpts: ScheduleOnceOptions = {};
   if (opts?.runAt) scheduleOpts.runAt = opts.runAt;
   await scheduler.scheduleOnce(envelope, scheduleOpts);
-  log.info({ jobName, jobId: envelope.jobId, hopCount: envelope.hopCount, runAt: opts?.runAt?.toISOString() }, 'job enqueued');
+  log.info(
+    {
+      jobName,
+      jobId: envelope.jobId,
+      hopCount: envelope.hopCount,
+      delaySeconds,
+      runAt: opts?.runAt?.toISOString(),
+    },
+    'job enqueued (EventBridge, long-horizon)',
+  );
   return envelope;
 }
 
 /**
- * IMMEDIATE producer gate (M1.7): same envelope machinery as enqueue(), but
- * routed through the OutboundQueueAdapter (SQS-direct in AWS, in-process
- * locally) — bypassing EventBridge Scheduler's ~60s delivery floor. Use for
- * latency-sensitive jobs only (relay fan-out). Future-scheduled jobs MUST
- * still use enqueue().
+ * IMMEDIATE producer gate — thin alias for enqueue() with no runAt
+ * (delaySeconds 0 → SQS path, no delay). Kept for the latency-sensitive
+ * callers (relay/broadcast primary fan-out, relay intro) that read clearly as
+ * "send this now". Identical behavior to enqueue(jobName, payload).
  */
 export async function enqueueImmediate(jobName: string, payload: unknown): Promise<JobEnvelope> {
-  if (!outboundQueue) {
-    throw new Error(
-      'jobs.enqueueImmediate: no OutboundQueueAdapter configured (call configureOutboundQueue first)',
-    );
-  }
-  const envelope = buildEnvelope(jobName, payload);
-  await outboundQueue.enqueueImmediate(envelope);
-  log.info({ jobName, jobId: envelope.jobId, hopCount: envelope.hopCount }, 'job enqueued (immediate)');
-  return envelope;
+  return enqueue(jobName, payload);
 }
 
 /** Build a correlation-stamped JobEnvelope from the current context. */
@@ -270,10 +336,11 @@ export async function dispatchJob(rawEvent: unknown): Promise<void> {
   });
 }
 
-/** Test seam: clear the registry, scheduler wiring, and logger override. */
+/** Test seam: clear the registry, scheduler wiring, logger, and clock override. */
 export function _resetForTests(): void {
   registry.clear();
   scheduler = undefined;
   outboundQueue = undefined;
   log = defaultLogger;
+  now = Date.now;
 }

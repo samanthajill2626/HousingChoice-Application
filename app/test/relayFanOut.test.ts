@@ -84,6 +84,7 @@ function seedSource(world: FakeWorld, body: string, senderKey: string): MessageI
 
 describe('relay.fanOut (M1.7)', () => {
   let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -97,7 +98,12 @@ describe('relay.fanOut (M1.7)', () => {
       messagesRepo: world.messagesRepo,
       logger,
     });
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    // The delay refactor routes the <=12min transient continuation (5/10/20s)
+    // through the SQS path (outbound adapter), NOT EventBridge. In tests the
+    // InProcess adapter dispatches immediate jobs in-process and RECORDS delayed
+    // ones in `delayed[]` for assertions (no real sleep).
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
   });
 
   afterEach(() => {
@@ -254,8 +260,6 @@ describe('relay.fanOut (M1.7)', () => {
   });
 
   it('429/30022 transient: defers the recipient and enqueues a continuation with backoff (capped)', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
     seedRelay(world, { participants: [{ contactId: 'c-alice', phone: ALICE, name: 'Alice' }, { contactId: 'c-bob', phone: BOB, name: 'Bob' }] });
     const source = seedSource(world, 'hi', 'c-alice');
     world.adapter.sendMessage = async (params: SendMessageParams) => {
@@ -267,14 +271,18 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
-    // A continuation relay.fanOut was scheduled for the remaining recipient.
-    expect(scheduler.scheduled).toHaveLength(1);
-    const cont = scheduler.scheduled[0]!.envelope;
+    // A continuation relay.fanOut was enqueued for the remaining recipient via
+    // the SQS path with an EXACT DelaySeconds backoff (5s for attempt 1, NOT
+    // clamped to 60s) — recorded as a delayed outbound job, not an EventBridge
+    // schedule.
+    expect(outbound.delayed).toHaveLength(1);
+    const cont = outbound.delayed[0]!.envelope;
     expect(cont.jobName).toBe(RELAY_FANOUT_JOB);
     const payload = cont.payload as { recipientKeys?: string[]; attempt?: number };
     expect(payload.recipientKeys).toEqual(['c-bob']);
     expect(payload.attempt).toBe(2);
-    expect(scheduler.scheduled[0]!.runAt).toBeInstanceOf(Date);
+    // fanOutBackoffMs(attempt 1) = 5s → DelaySeconds 5 (exact, no 60s floor).
+    expect(outbound.delayed[0]!.delaySeconds).toBe(5);
   });
 
   it('SendRefusedError (opt-out/breaker): marks that recipient failed and continues with others', async () => {

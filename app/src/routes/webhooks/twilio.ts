@@ -199,9 +199,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
     } else if (!appended.deduped) {
       // Current member, open thread, fresh message → fan out immediately
-      // (skips EventBridge's 60s floor). A redelivery (deduped) does NOT
-      // re-enqueue: the original fan-out is guarded by its own job marker +
-      // per-recipient terminal skips.
+      // (enqueueImmediate → SQS DelaySeconds 0, no EventBridge 60s floor). A
+      // redelivery (deduped) does NOT re-enqueue: the original fan-out is
+      // guarded by its own job marker + per-recipient terminal skips.
       try {
         await enqueueImmediate(RELAY_FANOUT_JOB, {
           relayConversationId: relay.conversationId,

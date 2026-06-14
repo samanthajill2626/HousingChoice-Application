@@ -134,6 +134,7 @@ function wireHandler(world: FakeWorld, logger = createLogger({ destination: crea
 describe('broadcast.send (M1.8a)', () => {
   let world: FakeWorld;
   let logger: ReturnType<typeof createLogger>;
+  let outbound: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -141,7 +142,11 @@ describe('broadcast.send (M1.8a)', () => {
     configureJobsLogger(logger);
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    // Delay refactor: the <=12min transient continuation (5/10/20s) routes
+    // through the SQS path (outbound adapter), recorded in `delayed[]` for
+    // assertions; NOT EventBridge.
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
   });
 
   afterEach(() => {
@@ -249,8 +254,6 @@ describe('broadcast.send (M1.8a)', () => {
   });
 
   it('429/30022 mid-batch → continuation enqueued with ONLY the remaining recipients', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
     const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
     const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
     seedUnit(world);
@@ -265,9 +268,11 @@ describe('broadcast.send (M1.8a)', () => {
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
 
-    // A continuation broadcast.send was scheduled for ONLY the deferred key.
-    expect(scheduler.scheduled).toHaveLength(1);
-    const cont = scheduler.scheduled[0]!.envelope;
+    // A continuation broadcast.send was enqueued (SQS path) for ONLY the
+    // deferred key, with an exact DelaySeconds backoff — not an EventBridge
+    // schedule.
+    expect(outbound.delayed).toHaveLength(1);
+    const cont = outbound.delayed[0]!.envelope;
     expect(cont.jobName).toBe(BROADCAST_SEND_JOB);
     const payload = cont.payload as { recipientKeys?: string[]; attempt?: number };
     expect(payload.recipientKeys).toEqual(['c-b']);
@@ -296,8 +301,6 @@ describe('broadcast.send (M1.8a)', () => {
   });
 
   it('30007 carrier filtering → recipient failed, NEVER retried', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
     const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
     seedUnit(world);
     seedBroadcast(world, [b]);
@@ -312,8 +315,8 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.recipients['c-b']?.status).toBe('failed');
     expect(bcast.recipients['c-b']?.errorCode).toBe('30007');
     expect(bcast.status).toBe('failed');
-    // No continuation scheduled — 30007 is never retried.
-    expect(scheduler.scheduled).toHaveLength(0);
+    // No continuation enqueued — 30007 is never retried.
+    expect(outbound.delayed).toHaveLength(0);
   });
 
   it('30005 invalid number → recipient failed + contact flagged sms_unreachable', async () => {
@@ -400,8 +403,6 @@ describe('broadcast.send (M1.8a)', () => {
 
   // --- FIX 6: the continuation waits ITS OWN attempt's backoff -------------
   it('continuation backoff uses the NEXT attempt delay (FIX 6)', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
     const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
     seedUnit(world);
     seedBroadcast(world, [b]);
@@ -410,19 +411,17 @@ describe('broadcast.send (M1.8a)', () => {
       throw Object.assign(new Error('rate limited'), { code: 429 });
     };
 
-    const before = Date.now();
     // First run is attempt 1 → the continuation runs AS attempt 2, so it must
-    // wait broadcastBackoffMs(2) = 10s (NOT broadcastBackoffMs(1) = 5s).
+    // wait broadcastBackoffMs(2) = 10s (NOT broadcastBackoffMs(1) = 5s). Via
+    // the SQS path this is an EXACT DelaySeconds of 10 (no EventBridge floor).
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 1 });
 
-    expect(scheduler.scheduled).toHaveLength(1);
-    const item = scheduler.scheduled[0]!;
+    expect(outbound.delayed).toHaveLength(1);
+    const item = outbound.delayed[0]!;
     expect((item.envelope.payload as { attempt?: number }).attempt).toBe(2);
     const expected = broadcastBackoffMs(2); // 10_000
     expect(expected).toBe(10_000);
-    const waited = item.runAt!.getTime() - before;
-    // The scheduled delay matches the 2nd-step backoff (allow scheduling slack).
-    expect(waited).toBeGreaterThanOrEqual(expected - 1_000);
-    expect(waited).toBeLessThan(expected + 5_000);
+    // The recorded DelaySeconds matches the 2nd-step backoff exactly.
+    expect(item.delaySeconds).toBe(10);
   });
 });

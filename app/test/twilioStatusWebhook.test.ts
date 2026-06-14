@@ -4,10 +4,14 @@
 // InMemorySchedulerAdapter (envelope machinery, never raw scheduler calls).
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { InMemorySchedulerAdapter } from '../src/adapters/scheduler.js';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
 import {
   _resetForTests,
   configureJobsLogger,
+  configureOutboundQueue,
   configureScheduler,
   dispatchJob,
   enqueue,
@@ -66,11 +70,17 @@ async function seedOutbound(
 }
 
 describe('POST /webhooks/twilio/status — transitions', () => {
-  let scheduler: InMemorySchedulerAdapter;
+  // The 30003 retry backoff (60/120/240s) is <=12min, so enqueue() routes it
+  // through the SQS path (outbound adapter), NOT EventBridge. In tests a
+  // delayed job is RECORDED in outbound.delayed[] (no real sleep, no dispatch),
+  // exactly as the in-memory scheduler used to record it.
+  let outbound: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
-    scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    // Scheduler is still wired for the long-horizon branch (unused here).
+    configureScheduler(new InMemorySchedulerAdapter());
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     configureJobsLogger(createLogger({ destination: createLogCapture().stream }));
   });
   afterEach(() => {
@@ -148,7 +158,6 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     it('30003 (transient) enqueues EXACTLY ONE backed-off retry job through jobs.enqueue()', async () => {
       const { app, world } = makeWebhookHarness();
       const seeded = await seedOutbound(world, 'SMout0001');
-      const before = Date.now();
 
       const res = await signedTwilioPost(
         app,
@@ -157,8 +166,11 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       );
       expect(res.status).toBe(200);
 
-      expect(scheduler.scheduled).toHaveLength(1);
-      const { envelope, runAt } = scheduler.scheduled[0]!;
+      // Routed through the SQS path with an exact DelaySeconds backoff (60s for
+      // attempt 1) — recorded as a delayed outbound job, NOT an EventBridge
+      // schedule, and NOT clamped to a 60s floor.
+      expect(outbound.delayed).toHaveLength(1);
+      const { envelope, delaySeconds } = outbound.delayed[0]!;
       expect(envelope.jobName).toBe(RETRY_SEND_JOB);
       expect(envelope.payload).toEqual({
         providerSid: 'SMout0001',
@@ -167,9 +179,8 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       });
       // context envelope: the recovered conversationId rides the job
       expect(envelope.correlationContext.conversationId).toBe(seeded.conversationId);
-      // backed off ~60s for attempt 1
-      expect(runAt!.getTime()).toBeGreaterThanOrEqual(before + retryBackoffMs(1) - 1000);
-      expect(runAt!.getTime()).toBeLessThanOrEqual(Date.now() + retryBackoffMs(1) + 1000);
+      // backed off exactly 60s for attempt 1 (retryBackoffMs(1) = 60_000)
+      expect(delaySeconds).toBe(retryBackoffMs(1) / 1000);
       // the payload never carries the message body (PII rides the DB, not the wire)
       expect(JSON.stringify(envelope.payload)).not.toContain('outbound body');
     });
@@ -182,7 +193,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       await signedTwilioPost(app, STATUS_PATH, params);
       await signedTwilioPost(app, STATUS_PATH, params); // Twilio redelivery
 
-      expect(scheduler.scheduled).toHaveLength(1);
+      expect(outbound.delayed).toHaveLength(1);
     });
 
     it('30003 past the attempt cap WARNs and does NOT enqueue', async () => {
@@ -195,7 +206,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
         statusParams({ MessageSid: 'SMretry3', MessageStatus: 'undelivered', ErrorCode: '30003' }),
       );
 
-      expect(scheduler.scheduled).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
       const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('retry cap reached'));
       expect(warn).toBeDefined();
     });
@@ -208,7 +219,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'failed', ErrorCode: '30005' }));
 
       expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_unreachable', value: true }]);
-      expect(scheduler.scheduled).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
     });
 
     it('30006 (landline) does the same', async () => {
@@ -219,7 +230,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30006' }));
 
       expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_unreachable', value: true }]);
-      expect(scheduler.scheduled).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
     });
 
     it('30007 (carrier filtering) ERROR-logs with correlation and never retries', async () => {
@@ -232,7 +243,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(err).toBeDefined();
       expect(err['conversationId']).toBe(seeded.conversationId);
       expect(typeof err['correlationId']).toBe('string');
-      expect(scheduler.scheduled).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
       expect(world.flagWrites).toHaveLength(0);
     });
 
@@ -247,7 +258,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(world.auditEvents).toEqual([
         expect.objectContaining({ entityKey: 'contacts#contact-T', event_type: 'sms_opt_out_recorded' }),
       ]);
-      expect(scheduler.scheduled).toHaveLength(0);
+      expect(outbound.delayed).toHaveLength(0);
     });
 
     it('the error code is recorded on the message item either way', async () => {
@@ -281,8 +292,12 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('END TO END: a 30003 callback schedules a job whose handler re-sends via the service (automated) and records retry lineage', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    // The retry backoff (60s) is <=12min → SQS path. The InProcess outbound
+    // adapter RECORDS the delayed retry; deliverDelayed() drains it through the
+    // handler deterministically (no real sleep) — the analog of the old
+    // scheduler.deliverAll.
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const capture = createLogCapture();
     const logger = createLogger({ destination: capture.stream });
     configureJobsLogger(logger);
@@ -293,7 +308,7 @@ describe('messaging.retrySend job (worker side)', () => {
 
     // 1) the failure callback enqueues the retry
     await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
-    expect(scheduler.scheduled).toHaveLength(1);
+    expect(outbound.delayed).toHaveLength(1);
 
     // 2) the worker-side handler, wired to the SAME fakes through the real
     // send service (breaker-metered automated send)
@@ -307,7 +322,7 @@ describe('messaging.retrySend job (worker side)', () => {
       auditRepo: world.auditRepo,
     });
     registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
-    await scheduler.deliverAll(dispatchJob);
+    await outbound.deliverDelayed(dispatchJob);
 
     // the retry went to the provider with the SAME body, automated:true path
     expect(world.sent).toEqual([{ to: TENANT_PHONE, body: 'outbound body' }]);
@@ -320,8 +335,8 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('a retry carries the ORIGINAL message author through (ai stays ai)', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
 
@@ -340,7 +355,7 @@ describe('messaging.retrySend job (worker side)', () => {
       auditRepo: world.auditRepo,
     });
     registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
-    await scheduler.deliverAll(dispatchJob);
+    await outbound.deliverDelayed(dispatchJob);
 
     const retried = world.messages.find((m) => m.retry_of !== undefined)!;
     expect(retried).toBeDefined();
@@ -348,8 +363,8 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('a refused retry (contact opted out meanwhile) WARNs and stops the chain — no throw, no send', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const capture = createLogCapture();
     const logger = createLogger({ destination: capture.stream });
     configureJobsLogger(logger);
@@ -372,7 +387,7 @@ describe('messaging.retrySend job (worker side)', () => {
       auditRepo: world.auditRepo,
     });
     registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
-    await scheduler.deliverAll(dispatchJob);
+    await outbound.deliverDelayed(dispatchJob);
 
     expect(world.sent).toHaveLength(0);
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('send refused'));
@@ -380,8 +395,8 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('EXECUTION GUARD: a redelivered job (same jobId) sends NOTHING and resolves (consumer can delete)', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const capture = createLogCapture();
     const logger = createLogger({ destination: capture.stream });
     configureJobsLogger(logger);
@@ -390,7 +405,7 @@ describe('messaging.retrySend job (worker side)', () => {
     const { app } = makeWebhookHarness({ world });
     await seedOutbound(world, 'SMout0001');
     await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
-    const envelope = scheduler.scheduled[0]!.envelope;
+    const envelope = outbound.delayed[0]!.envelope;
 
     const send = createSendMessageService({
       config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
@@ -421,8 +436,8 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('EXECUTION GUARD: a non-conditional marker write failure propagates as a handler failure (redelivery)', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
 
@@ -430,7 +445,7 @@ describe('messaging.retrySend job (worker side)', () => {
     const { app } = makeWebhookHarness({ world });
     await seedOutbound(world, 'SMout0001');
     await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
-    const envelope = scheduler.scheduled[0]!.envelope;
+    const envelope = outbound.delayed[0]!.envelope;
 
     world.messagesRepo.putJobExecutionMarker = async () => {
       throw new Error('marker write exploded');
@@ -450,8 +465,10 @@ describe('messaging.retrySend job (worker side)', () => {
   });
 
   it('a missing original message WARNs and does nothing', async () => {
-    const scheduler = new InMemorySchedulerAdapter();
-    configureScheduler(scheduler);
+    // No runAt → delaySeconds 0 → the InProcess outbound adapter dispatches the
+    // job immediately in-process (no deliverDelayed needed).
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
     const capture = createLogCapture();
     const logger = createLogger({ destination: capture.stream });
     configureJobsLogger(logger);
@@ -466,7 +483,6 @@ describe('messaging.retrySend job (worker side)', () => {
     });
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMnope', conversationId: 'conv-x', attempt: 1 });
-    await scheduler.deliverAll(dispatchJob);
 
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('original message not found'));
     expect(warn).toBeDefined();

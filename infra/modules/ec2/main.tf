@@ -77,27 +77,35 @@ data "aws_iam_policy_document" "app" {
     resources = [var.media_bucket_arn]
   }
 
-  # Jobs queue (M1.2): the worker consumes ONLY (Receive/Delete/
-  # GetQueueAttributes). No sqs:SendMessage — nothing app-side sends
-  # direct-to-queue (guideline: ALL job traffic goes through jobs.enqueue()
-  # -> EventBridge Scheduler, which writes to the queue via ITS role below).
-  # Queue ARN only.
+  # Jobs queue (M1.2 + delay refactor): the worker consumes (Receive/Delete/
+  # GetQueueAttributes) AND the app SendMessages job envelopes directly to the
+  # queue. After the delay refactor every job whose delay is <=12min — the
+  # immediate path (relay/broadcast fan-out, M1.7) and ALL short backoff
+  # (retry 60/120/240s, relay/broadcast continuations 5/10/20s) — is an SQS
+  # SendMessage with DelaySeconds straight to this queue (no EventBridge hop).
+  # sqs:SendMessage is therefore required here; it also fixes the latent M1.7
+  # gap where the immediate path already SendMessaged but the role didn't allow
+  # it (AccessDenied in AWS). EventBridge Scheduler + its role (below) are used
+  # ONLY for >12min long-horizon delays (future jobs; no Phase-1 callers).
+  # Least-privilege: SendMessage on this one queue ARN only.
   statement {
     sid = "JobsQueue"
     actions = [
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes",
+      "sqs:SendMessage",
     ]
     resources = [var.jobs_queue_arn]
   }
 
-  # jobs.enqueue() creates one-off EventBridge schedules (ActionAfterCompletion
-  # DELETE — the service deletes fired schedules itself, the instance never
-  # needs scheduler:DeleteSchedule). Adapter names are `hc-<job>-<uuid>` in the
-  # default group; both stacks share the account, so the real isolation is
-  # PassRole below — this instance can only hand Scheduler ITS stack's role,
-  # which can only SendMessage to ITS stack's queue.
+  # jobs.enqueue() creates one-off EventBridge schedules ONLY for >12min
+  # long-horizon delays (dormant in Phase 1; <=12min jobs go direct-to-queue
+  # above). ActionAfterCompletion DELETE — the service deletes fired schedules
+  # itself, the instance never needs scheduler:DeleteSchedule. Adapter names are
+  # `hc-<job>-<uuid>` in the default group; both stacks share the account, so the
+  # real isolation is PassRole below — this instance can only hand Scheduler ITS
+  # stack's role, which can only SendMessage to ITS stack's queue.
   statement {
     sid     = "SchedulerCreate"
     actions = ["scheduler:CreateSchedule"]

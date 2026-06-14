@@ -3,10 +3,15 @@
 // OTel must be loaded/started FIRST, so everything below the startOtel()
 // call uses dynamic imports.
 //
-// Delivery path in AWS: app jobs.enqueue() -> EventBridge Scheduler one-off
-// schedule (ActionAfterCompletion DELETE) -> SQS jobs queue -> the long-poll
-// loop below -> dispatchJob() (envelope gate: validates, mints jobRunId,
-// rehydrates correlation context) -> registered handler.
+// Delivery path in AWS (delay refactor): app jobs.enqueue() ->
+//   - <=12min delay: SQS SendMessage with DelaySeconds straight to the jobs
+//     queue (immediate + short backoff — the Phase-1 path); or
+//   - >12min delay: EventBridge Scheduler one-off schedule
+//     (ActionAfterCompletion DELETE) that delivers to the SAME jobs queue
+//     (long-horizon; dormant in Phase 1)
+// -> SQS jobs queue -> the long-poll loop below -> dispatchJob() (envelope
+// gate: validates, mints jobRunId, rehydrates correlation context) ->
+// registered handler. The worker polls the same queue regardless of producer.
 import type { SqsJobConsumer } from './adapters/sqsJobConsumer.js';
 import { startOtel } from './lib/otel.js';
 

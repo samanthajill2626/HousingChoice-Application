@@ -1,6 +1,9 @@
 // SchedulerAdapter — the ONLY place EventBridge Scheduler is touched.
-// jobs.enqueue() delegates here; nothing else may ever call EventBridge
-// directly (binding guideline 2).
+// jobs.enqueue() delegates here ONLY for long-horizon delays (> the SQS
+// DelaySeconds cap, JOBS_SQS_MAX_DELAY_SECONDS in jobs.ts); nothing else may
+// ever call EventBridge directly (binding guideline 2). All ≤12min jobs
+// (immediate + short backoff) flow through the OutboundQueueAdapter below as
+// an SQS SendMessage with DelaySeconds — no EventBridge hop.
 import {
   CreateScheduleCommand,
   type CreateScheduleCommandOutput,
@@ -23,28 +26,47 @@ export interface SchedulerAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// OutboundQueueAdapter — the IMMEDIATE job path (M1.7).
+// OutboundQueueAdapter — the SQS-native job path (M1.7 + delay refactor).
 //
-// jobs.enqueue() routes future-scheduled jobs through EventBridge Scheduler,
-// which floors delivery at ~60s (MIN_SCHEDULE_LEAD_MS) — far too slow for
-// relay fan-out, where a member texts the pool number and the other members
-// expect the relay within seconds. enqueueImmediate() routes here instead:
-//   - production  → SQS SendMessage straight to the jobs queue (the worker
-//                   already long-polls it; no EventBridge hop, no 60s floor).
-//   - local/tests → dispatch the job IN-PROCESS so relay fan-out actually
-//                   runs on a laptop and in the suite (the in-memory scheduler
-//                   only RECORDS envelopes — see worker.ts).
+// jobs.enqueue() routes EVERY job whose delay is within the SQS DelaySeconds
+// cap (JOBS_SQS_MAX_DELAY_SECONDS, 12min) through here — immediate (delay 0)
+// AND short-backoff (retry 60/120/240s, relay/broadcast continuations
+// 5/10/20s) alike. Only delays beyond that cap fall through to EventBridge
+// Scheduler (future long-horizon jobs; no Phase-1 callers). This bypasses
+// EventBridge's ~60s delivery floor entirely, so relay fan-out reaches the
+// other members within seconds and backoff delays are exact (no 60s floor):
+//   - production  → SQS SendMessage straight to the jobs queue with
+//                   DelaySeconds (the worker already long-polls it; no
+//                   EventBridge hop). DelaySeconds 0 = immediate.
+//   - local/tests → an immediate (delaySeconds 0) job dispatches IN-PROCESS so
+//                   relay fan-out actually runs on a laptop and in the suite; a
+//                   delayed job is RECORDED for deterministic test draining
+//                   (deliverDelayed) and, in local dev, fired after a real
+//                   setTimeout so backoff continuations still run on a laptop.
 // A2P PACING (FIX 6): the shared TokenBucket is metered PER OUTBOUND MESSAGE
 // inside the relay.fanOut HANDLER (one acquire(1) per recipient — the correct
-// A2P meter, one token per real SMS). The in-process immediate adapter ALSO
-// acquires one token before dispatch as a coarse admission gate on the laptop
+// A2P meter, one token per real SMS). The in-process adapter ALSO acquires one
+// token before an immediate dispatch as a coarse admission gate on the laptop
 // path; the SQS producer does NOT throttle (the handler does). Net: the
 // combined outbound rate stays under the registered tier.
 // ---------------------------------------------------------------------------
 
+export interface EnqueueQueueOptions {
+  /**
+   * Seconds SQS holds the message before the worker can receive it (0..900;
+   * jobs.enqueue() never sends > JOBS_SQS_MAX_DELAY_SECONDS = 720). Defaults
+   * to 0 (immediate).
+   */
+  delaySeconds?: number;
+}
+
 export interface OutboundQueueAdapter {
-  /** Hand an envelope to the worker for IMMEDIATE execution (no schedule delay). */
-  enqueueImmediate(envelope: JobEnvelope): Promise<void>;
+  /**
+   * Hand an envelope to the worker queue. delaySeconds 0 = immediate;
+   * delaySeconds > 0 = SQS holds it that long before delivery (exact backoff,
+   * no EventBridge 60s floor).
+   */
+  enqueue(envelope: JobEnvelope, opts?: EnqueueQueueOptions): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,25 +98,76 @@ export class InMemorySchedulerAdapter implements SchedulerAdapter {
   }
 }
 
+/** A delayed in-process job recorded for deterministic draining (tests). */
+export interface DelayedItem {
+  envelope: JobEnvelope;
+  delaySeconds: number;
+}
+
 /**
- * In-process immediate adapter — local dev + tests (M1.7). Dispatches the
- * envelope through `dispatch` (dispatchJob) RIGHT NOW, after the shared token
- * bucket admits it, so relay fan-out actually runs without SQS/EventBridge.
+ * In-process outbound adapter — local dev + tests (M1.7 + delay refactor).
+ *
+ * IMMEDIATE (delaySeconds 0): dispatches the envelope through `dispatch`
+ * (dispatchJob) RIGHT NOW, after the shared token bucket admits it, so relay
+ * fan-out actually runs without SQS/EventBridge.
+ *
+ * DELAYED (delaySeconds > 0): RECORDED in `delayed[]` so tests stay
+ * deterministic (drain synchronously via deliverDelayed — never a real sleep,
+ * matching InMemorySchedulerAdapter.deliverAll). In LOCAL DEV an injected
+ * `scheduleTimer` (real setTimeout, wired in index.ts) ALSO fires the dispatch
+ * after the delay so backoff continuations run on a laptop; tests omit it, so
+ * delayed jobs only accumulate in `delayed[]`.
+ *
  * The envelope is JSON round-tripped to match the wire format the SQS path
  * delivers. A dispatch failure propagates to the caller (the webhook logs it
  * but still acks Twilio).
  */
 export class InProcessOutboundQueueAdapter implements OutboundQueueAdapter {
+  /** Delayed jobs recorded for deterministic test draining (deliverDelayed). */
+  readonly delayed: DelayedItem[] = [];
+
   constructor(
     private readonly deps: {
       dispatch: (rawEvent: unknown) => Promise<void>;
       tokenBucket?: TokenBucket;
+      /**
+       * LOCAL DEV ONLY: schedule `run` after `delaySeconds` (real setTimeout in
+       * index.ts). Omitted in tests so delayed jobs stay deterministic — they
+       * just accumulate in `delayed[]` for deliverDelayed to drain.
+       */
+      scheduleTimer?: (run: () => void, delaySeconds: number) => void;
     },
   ) {}
 
-  async enqueueImmediate(envelope: JobEnvelope): Promise<void> {
-    await this.deps.tokenBucket?.acquire(1);
-    await this.deps.dispatch(JSON.parse(JSON.stringify(envelope)) as unknown);
+  async enqueue(envelope: JobEnvelope, opts?: EnqueueQueueOptions): Promise<void> {
+    const delaySeconds = opts?.delaySeconds ?? 0;
+    const wire = JSON.parse(JSON.stringify(envelope)) as unknown;
+    if (delaySeconds <= 0) {
+      await this.deps.tokenBucket?.acquire(1);
+      await this.deps.dispatch(wire);
+      return;
+    }
+    // Delayed: record for deterministic test draining; optionally fire later
+    // (local dev) via the injected real-timer seam.
+    this.delayed.push({ envelope, delaySeconds });
+    if (this.deps.scheduleTimer) {
+      this.deps.scheduleTimer(() => {
+        void this.deps.dispatch(wire);
+      }, delaySeconds);
+    }
+  }
+
+  /**
+   * Test/dev helper: drain recorded DELAYED jobs through a dispatch fn,
+   * synchronously and with no real sleep (the delaySeconds is recorded for
+   * assertions, not awaited). Mirrors InMemorySchedulerAdapter.deliverAll.
+   */
+  async deliverDelayed(dispatch: (rawEvent: unknown) => Promise<void>): Promise<void> {
+    while (this.delayed.length > 0) {
+      const item = this.delayed.shift();
+      if (!item) break;
+      await dispatch(JSON.parse(JSON.stringify(item.envelope)) as unknown);
+    }
   }
 }
 
@@ -180,14 +253,21 @@ export class EventBridgeSchedulerAdapter implements SchedulerAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// SQS immediate adapter — production immediate path (M1.7).
+// SQS outbound adapter — production path for ALL ≤12min jobs (M1.7 + delay
+// refactor).
 //
 // SendMessage the JSON envelope straight to the jobs queue the worker already
-// long-polls (SqsJobConsumer), bypassing EventBridge entirely (no 60s floor).
-// A2P pacing for the SQS path is metered INSIDE the relay.fanOut handler
-// (acquire(1) per recipient — see worker.ts / relayFanOut.ts), NOT here, so
-// this producer does not throttle: it just enqueues.
+// long-polls (SqsJobConsumer), bypassing EventBridge entirely (no 60s floor),
+// with DelaySeconds for short-backoff jobs (0 = immediate). SQS hard-caps
+// DelaySeconds at 900; jobs.enqueue() routes anything above
+// JOBS_SQS_MAX_DELAY_SECONDS (720) to EventBridge instead, so a value > 900
+// never reaches here. A2P pacing is metered INSIDE the relay.fanOut /
+// broadcast.send handler (acquire(1) per recipient — see worker.ts), NOT here,
+// so this producer does not throttle: it just enqueues.
 // ---------------------------------------------------------------------------
+
+/** SQS rejects DelaySeconds above this hard cap. */
+export const SQS_HARD_MAX_DELAY_SECONDS = 900;
 
 /** Minimal SQS client surface so tests inject a fake (no AWS calls). */
 export interface OutboundSqsClientLike {
@@ -208,16 +288,23 @@ export class SqsOutboundQueueAdapter implements OutboundQueueAdapter {
     this.log = deps.logger ?? defaultLogger;
   }
 
-  async enqueueImmediate(envelope: JobEnvelope): Promise<void> {
+  async enqueue(envelope: JobEnvelope, opts?: EnqueueQueueOptions): Promise<void> {
+    // Defensive clamp: jobs.enqueue() already keeps this within
+    // JOBS_SQS_MAX_DELAY_SECONDS, but never let a bad value 400 the Send.
+    const delaySeconds = Math.max(
+      0,
+      Math.min(Math.floor(opts?.delaySeconds ?? 0), SQS_HARD_MAX_DELAY_SECONDS),
+    );
     await this.deps.client.send(
       new SendMessageCommand({
         QueueUrl: this.deps.queueUrl,
         MessageBody: JSON.stringify(envelope),
+        DelaySeconds: delaySeconds,
       }),
     );
     this.log.info(
-      { jobName: envelope.jobName, jobId: envelope.jobId },
-      'job enqueued (immediate, SQS)',
+      { jobName: envelope.jobName, jobId: envelope.jobId, delaySeconds },
+      'job enqueued (SQS)',
     );
   }
 }

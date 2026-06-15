@@ -8,7 +8,8 @@
 // never the cell value.
 import { describe, expect, it } from 'vitest';
 import { createTwilioVoiceRouter } from '../src/routes/webhooks/voice.js';
-import { createLogger } from '../src/lib/logger.js';
+import { newBootId, runWithContext } from '../src/lib/context.js';
+import { createLogger, isOrphanLogLine } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness } from './helpers/twilioWebhookHarness.js';
 
@@ -49,5 +50,24 @@ describe('voice: founder call-triage boot readiness log', () => {
     const capture = createLogCapture();
     createTwilioVoiceRouter({ config, logger: createLogger({ level: 'info', destination: capture.stream }) });
     expect(JSON.stringify(capture.lines)).not.toContain(FOUNDER_CELL);
+  });
+
+  it('is correlation-safe inside a boot context — carries a correlationId, not an orphan log', () => {
+    // index.ts builds the app inside runWithContext(bootContext); this is the
+    // router-level proof that the readiness line then carries the bootId as its
+    // correlationId, so it never trips hc-<env>-orphan-logs (binding guideline
+    // #4). Regression guard for the 2026-06-15 orphan-log alarm.
+    const { config } = makeWebhookHarness({ world: createFakeWorld(), env: { FOUNDER_CELL } });
+    const capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
+    runWithContext({ bootId: newBootId() }, () => {
+      createTwilioVoiceRouter({ config, logger });
+    });
+    const line = capture.lines.find((l) =>
+      String(l['msg']).startsWith('voice: founder call-triage'),
+    );
+    expect(line).toBeDefined();
+    expect(typeof line!['correlationId']).toBe('string');
+    expect(isOrphanLogLine(line!)).toBe(false);
   });
 });

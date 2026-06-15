@@ -109,7 +109,11 @@ if (config.jobsQueueUrl) {
 }
 
 const devRouter = await maybeLoadDevRouter(config, logger);
-const app = buildApp({ config, devRouter });
+// Construct the app INSIDE the boot context so any router-creation log line
+// (e.g. the voice founder-triage readiness line) carries the bootId as its
+// correlationId. Without this, a construction-time log is an orphan and trips
+// the hc-<env>-orphan-logs alarm (binding guideline #4).
+const app = runWithContext(bootContext, () => buildApp({ config, devRouter }));
 
 const server = runWithContext(bootContext, () =>
   app.listen(config.port, () => {

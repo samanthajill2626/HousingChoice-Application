@@ -630,6 +630,61 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     object.body.pipe(res);
   });
 
+  // GET /api/messages/:providerSid/media/:idx — stream a mirrored inbound MMS
+  // attachment back to the dashboard for inline <img> display. AUTH-ONLY (this
+  // router is behind requireAuth) — MMS media is PII (IDs, personal photos/docs),
+  // so it is NEVER public/presigned; the bytes stay behind the session gate, the
+  // same posture as the call-recording endpoint above. The S3 key is read from
+  // the message's STORED media_s3_keys[idx] (never client input → no path
+  // traversal); :idx only selects which attachment. 404 for a missing message /
+  // out-of-range idx / unmirrored media (MEDIA_BUCKET unset) / absent object.
+  router.get('/messages/:providerSid/media/:idx', async (req, res) => {
+    const { providerSid } = req.params;
+    const idx = Number(req.params['idx']);
+    if (!Number.isInteger(idx) || idx < 0) {
+      res.status(400).json({ error: 'invalid_media_index' });
+      return;
+    }
+    const message = await messages.getByProviderSid(providerSid);
+    if (!message) {
+      res.status(404).json({ error: 'message_not_found' });
+      return;
+    }
+    mergeContext({ conversationId: message.conversationId });
+    const keys = Array.isArray(message.media_s3_keys) ? message.media_s3_keys : [];
+    const key = keys[idx];
+    if (typeof key !== 'string' || key.length === 0) {
+      res.status(404).json({ error: 'media_not_found' });
+      return;
+    }
+    if (!mediaStore) {
+      log.warn({ providerSid }, 'media requested but no media store configured');
+      res.status(404).json({ error: 'media_not_found' });
+      return;
+    }
+    const object = await mediaStore.getStream(key);
+    if (!object) {
+      log.warn({ providerSid, mediaIndex: idx }, 'media key present but object not found in the store');
+      res.status(404).json({ error: 'media_not_found' });
+      return;
+    }
+    // Content-Type is the stored MMS type (image/jpeg, …) — load-bearing under
+    // the app-wide nosniff header so an <img> renders. Default to a non-inline
+    // octet-stream if it's somehow absent (never sniff PII media as something else).
+    res.setHeader('Content-Type', object.contentType ?? 'application/octet-stream');
+    if (object.contentLength !== undefined) {
+      res.setHeader('Content-Length', String(object.contentLength));
+    }
+    // Immutable per (MessageSid, idx); private so only this session's browser caches it.
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    log.info({ providerSid, mediaIndex: idx }, 'streaming inbound MMS media to the dashboard');
+    object.body.on('error', (err) => {
+      log.error({ err, providerSid, mediaIndex: idx }, 'media stream errored mid-flight');
+      res.destroy(err);
+    });
+    object.body.pipe(res);
+  });
+
   // POST /api/conversations/:conversationId/read — zero the unread counter
   // (the operator opened the thread). Returns the updated conversation.
   router.post('/conversations/:conversationId/read', async (req, res) => {

@@ -180,6 +180,64 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   // Side-effect failures NEVER 5xx (a redelivery dedupes at the append and
   // re-runs the idempotent steps); failures are ERROR-logged + alarmed.
   // ---------------------------------------------------------------------
+  /** Parse Twilio's NumMedia / MediaUrl{i} form fields into a list of URLs. */
+  function parseInboundMediaUrls(params: WebhookParams): string[] {
+    const numMedia = Number(params['NumMedia'] ?? 0) || 0;
+    const urls: string[] = [];
+    for (let i = 0; i < numMedia; i++) {
+      const url = params[`MediaUrl${i}`];
+      if (typeof url === 'string' && url.length > 0) urls.push(url);
+    }
+    return urls;
+  }
+
+  /**
+   * Mirror inbound MMS media into S3 under media/<conversationId>/<MessageSid>/<i>
+   * (streams only) and record the resulting keys on the message (media_s3_keys),
+   * which the authed GET /api/messages/:sid/media/:idx endpoint serves. SHARED by
+   * the 1:1 and relay inbound paths. Best-effort: MEDIA_BUCKET unset → log + skip;
+   * a per-attachment failure leaves a usable message (provider URLs stay on the
+   * item) + a correlated ERROR — never a crash. PII (doc §9): SIDs/indexes/counts
+   * only, never the URL or the bytes.
+   */
+  async function mirrorInboundMedia(input: {
+    mediaUrls: string[];
+    messageSid: string;
+    conversationId: string;
+    tsMsgId: string;
+    params: WebhookParams;
+  }): Promise<void> {
+    const { mediaUrls, messageSid, conversationId, tsMsgId, params } = input;
+    if (mediaUrls.length === 0) return;
+    if (!mediaStore) {
+      const line = 'inbound MMS media NOT mirrored — MEDIA_BUCKET is not configured';
+      if (config.nodeEnv === 'production') log.error({ providerSid: messageSid, mediaCount: mediaUrls.length }, line);
+      else log.warn({ providerSid: messageSid, mediaCount: mediaUrls.length }, line);
+      return;
+    }
+    const keys: string[] = [];
+    for (const [i, url] of mediaUrls.entries()) {
+      const key = `media/${conversationId}/${messageSid}/${i}`;
+      try {
+        const stream = await adapter.getMediaStream(url);
+        await mediaStore.put(key, stream, params[`MediaContentType${i}`]);
+        keys.push(key);
+      } catch (err) {
+        log.error(
+          { err, providerSid: messageSid, mediaIndex: i },
+          'media mirror failed — message record keeps the provider URL',
+        );
+      }
+    }
+    if (keys.length > 0) {
+      try {
+        await messages.annotateMessage(conversationId, tsMsgId, { mediaS3Keys: keys });
+      } catch (err) {
+        log.error({ err, providerSid: messageSid }, 'failed to record mirrored media keys on the message');
+      }
+    }
+  }
+
   async function handleRelayInbound(
     relay: ConversationItem,
     msg: {
@@ -192,6 +250,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   ): Promise<void> {
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
+
+    // Inbound MMS into a relay thread (tenant↔landlord photos/docs). Capture the
+    // provider media URLs so the message records the attachment, and mirror them
+    // to S3 below (the 1:1 path does the same). NOTE/FOLLOW-UP: this only SAVES +
+    // displays the media in the hub — it does NOT yet relay the media ON to the
+    // other thread members (the relay fan-out still forwards text only); that's a
+    // separate change to the fan-out.
+    const mediaUrls = parseInboundMediaUrls(msg.params);
 
     // Identify the sender = the member whose phone == From. A former member
     // (removed mid-thread) is NOT found here — we still persist for the audit
@@ -221,7 +287,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       conversationId: relay.conversationId,
       providerSid: MessageSid,
       providerTs,
-      type: 'sms',
+      type: mediaUrls.length > 0 ? 'mms' : 'sms',
       direction: 'inbound',
       author,
       deliveryStatus: 'delivered',
@@ -229,7 +295,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       deliveryRecipients: {},
       ...(isClosed && { receivedOnClosedThread: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
+      ...(mediaUrls.length > 0 && { mediaUrls }),
     });
+
+    // Mirror MMS media to S3 on the FIRST delivery only (a redelivery is deduped
+    // → already mirrored). Best-effort (mirrorInboundMedia never throws).
+    if (!appended.deduped) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: relay.conversationId,
+        tsMsgId: appended.tsMsgId,
+        params: msg.params,
+      });
+    }
 
     // Closed-thread reply: flagged (receivedOnClosedThread above), NEVER fanned
     // out — the conversation is over; the reply is kept for the record only.
@@ -333,12 +412,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     );
     mergeContext({ conversationId: conversation.conversationId });
 
-    const numMedia = Number(params['NumMedia'] ?? 0) || 0;
-    const mediaUrls: string[] = [];
-    for (let i = 0; i < numMedia; i++) {
-      const url = params[`MediaUrl${i}`];
-      if (typeof url === 'string' && url.length > 0) mediaUrls.push(url);
-    }
+    const mediaUrls = parseInboundMediaUrls(params);
 
     // (3) Idempotency by MessageSid (doc §7.1 defense 2): the conditional
     // append dedupes Twilio redeliveries AND the webhook copy of our own
@@ -465,40 +539,18 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed — message persisted, flag NOT updated');
     }
 
-    // (5) MMS media — mirror each MediaUrl{i} into S3 under
-    // media/<conversationId>/<MessageSid>/<i>, streams only. Mirroring runs
-    // before the ack on purpose (decision): counts are tiny (<=10) and well
-    // inside Twilio's 15s webhook window, and a failure here must leave a
-    // usable message record (the provider mediaUrls stay on the item) plus a
-    // correlated ERROR — never a crash, never a dropped message.
-    if (mediaUrls.length > 0 && !mediaAlreadyMirrored) {
-      if (!mediaStore) {
-        const line = 'inbound MMS media NOT mirrored — MEDIA_BUCKET is not configured';
-        if (config.nodeEnv === 'production') log.error({ providerSid: MessageSid, mediaCount: mediaUrls.length }, line);
-        else log.warn({ providerSid: MessageSid, mediaCount: mediaUrls.length }, line);
-      } else {
-        const keys: string[] = [];
-        for (const [i, url] of mediaUrls.entries()) {
-          const key = `media/${persistedConversationId}/${MessageSid}/${i}`;
-          try {
-            const stream = await adapter.getMediaStream(url);
-            await mediaStore.put(key, stream, params[`MediaContentType${i}`]);
-            keys.push(key);
-          } catch (err) {
-            log.error(
-              { err, providerSid: MessageSid, mediaIndex: i },
-              'media mirror failed — message record keeps the provider URL',
-            );
-          }
-        }
-        if (keys.length > 0) {
-          try {
-            await messages.annotateMessage(persistedConversationId, persistedTsMsgId, { mediaS3Keys: keys });
-          } catch (err) {
-            log.error({ err, providerSid: MessageSid }, 'failed to record mirrored media keys on the message');
-          }
-        }
-      }
+    // (5) MMS media — mirror each MediaUrl{i} into S3 (streams only). Runs before
+    // the ack on purpose (decision): counts are tiny (<=10) and well inside
+    // Twilio's 15s webhook window. Skipped when an earlier delivery already
+    // mirrored (idempotent). The shared helper logs + degrades on failure.
+    if (!mediaAlreadyMirrored) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: persistedConversationId,
+        tsMsgId: persistedTsMsgId,
+        params,
+      });
     }
 
     // (6) Inbox touch + unread + SSE live updates, then acknowledge with

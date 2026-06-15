@@ -457,6 +457,23 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
+    // SELF-CALL GUARD: the caller IS the founder cell (the founder dialing the
+    // business line, or a test placed from the founder's own phone). Bridging
+    // the founder to their own number is nonsensical, and with answerOnBridge it
+    // leaves the caller leg unanswered → a VoIP client can loop on it. Refuse to
+    // bridge — a brief greeting + hangup, no self-dial, no bogus call entry/push.
+    // (The masked relay path already has the equivalent dialPhone !== From guard.)
+    if (From === founderCell) {
+      log.info({ callSid: CallSid }, 'founder triage: caller is the founder cell — not bridging to self');
+      sendTwiml(
+        res,
+        maskedSayHangup(
+          'Thanks for calling Housing Choice. Please reach us from a different line, or send a text message. Goodbye.',
+        ),
+      );
+      return;
+    }
+
     // Resolve the caller's 1:1 conversation for masked context (role/name +
     // the conversationId the pushes + auto-text key on). conversationTypeFor
     // mirrors the SMS path's honesty rule (unknown until a human reviews).

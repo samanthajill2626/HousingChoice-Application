@@ -206,6 +206,21 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
   });
 
+  it('SELF-CALL guard: caller IS the founder cell → greeting + hangup, no self-bridge, no call entry/push', async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+    // The inbound From is the founder's own cell (founder dialing the business
+    // line, or a test from the founder phone).
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams({ From: FOUNDER_CELL }));
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial'); // never bridges the founder to themselves
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).toContain('different line');
+    // No bogus call entry persisted, no pre-ring push fired.
+    expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(0);
+    expect(world.pushSends).toHaveLength(0);
+  });
+
   it('no FOUNDER_CELL configured → minimal greeting + hangup, NO bridge, NO number leak', async () => {
     const world = createFakeWorld();
     // No FOUNDER_CELL in env → cannot bridge.

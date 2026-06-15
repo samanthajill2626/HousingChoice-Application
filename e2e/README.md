@@ -4,6 +4,42 @@ Playwright end-to-end tests that drive the real dashboard + API against a
 hermetic local stack (DynamoDB Local, console messaging, no AWS/Twilio/Google).
 Design & rationale: [`docs/superpowers/specs/2026-06-14-ui-e2e-testing-harness-design.md`](../docs/superpowers/specs/2026-06-14-ui-e2e-testing-harness-design.md).
 
+## Setup (first time)
+
+Run these once from the repo root:
+
+1. **Docker** must be running (DynamoDB Local is a container).
+2. **Install deps:** `npm ci` (or `npm install`) — pulls in `@playwright/test`.
+3. **Install the bundled browser** the suite uses (no admin needed):
+   ```
+   npx playwright install chromium
+   ```
+4. **Verify:** `npm run e2e` — should boot the stack and pass. You're set for the
+   suite and for headed/UI runs (`npm run e2e -- --headed`, `npx playwright test --ui`).
+
+### Interactive driving via the Playwright MCP (optional)
+
+Driving the live UI through an MCP server has a browser-channel wrinkle on Windows:
+
+- **This project's MCP** ([`.mcp.json`](../.mcp.json)) is configured with
+  `--browser chromium`, so it reuses the bundled build from step 3 — **no admin
+  needed**. Prefer this if your client surfaces it.
+- **A Claude-client *plugin* Playwright MCP** (the `mcp__plugin_playwright_*`
+  tools) defaults to the **`chrome` channel** (real Google Chrome), NOT bundled
+  chromium. If you see:
+  ```
+  Error: Chromium distribution 'chrome' is not found ... Run "npx playwright install chrome"
+  ```
+  install the chrome channel **once, in an Administrator terminal** (it writes to a
+  machine location, which is why it needs elevation on Windows):
+  ```
+  # Administrator PowerShell, from the repo root:
+  npx playwright install chrome
+  ```
+- **No admin / don't want the MCP?** You don't need it. The written suite and
+  `--headed`/`--ui` runs use bundled chromium and need no elevation; the MCP is
+  only for free-form interactive exploration.
+
 ## Two modes
 
 | Mode | Command | What it does |
@@ -23,11 +59,10 @@ Helpers (session mode):
   `MESSAGING_RECORD_OUTBOX=1` so dev-login and the message outbox are available.
 - **Env vars:** the session launcher reads only `process.env` (hermetic/reproducible) and does NOT merge a local `.env` the way `npm run dev -- --local` does — so `TABLE_PREFIX`/`DYNAMODB_ENDPOINT` overrides in `.env` won't affect `e2e:session`.
 - **Windows note:** killing the background task alone can leave the reparented node tree running on `:8080`/`:5173`. The launcher now auto-exits when its parent dies (parent-death watch), and `npm run e2e:stop` or the next `npm run e2e:session` (self-heal) also clean up any stale processes.
-- The written suite uses Playwright's **bundled Chromium** (`npx playwright install
-  chromium`). The Playwright **MCP** (for interactive driving) is registered in
-  [`.mcp.json`](../.mcp.json) with `--browser chromium` so it reuses that bundled
-  build — do NOT use the `chrome` channel (`npx playwright install chrome` needs
-  Administrator on Windows). The suite never depends on the MCP.
+- **Browsers:** see [Setup](#setup-first-time) — the suite uses bundled Chromium
+  (no admin); interactive MCP driving may need a one-time admin `npx playwright
+  install chrome` if your client's plugin MCP uses the chrome channel. The suite
+  never depends on the MCP.
 
 ## Agent workflow (driving the UI yourself)
 1. Start the stack in the background: `npm run e2e:session` (wait for `ready`).

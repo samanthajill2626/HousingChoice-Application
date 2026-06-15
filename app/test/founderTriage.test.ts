@@ -31,6 +31,7 @@ import {
 import { registerMissedCallAutoTextJobHandler } from '../src/jobs/missedCallAutoText.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
+import type { PushService, SendToUserResult } from '../src/services/pushService.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -186,6 +187,40 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     // No pre-ring push when we cannot bridge.
     expect(world.pushSends).toHaveLength(0);
   });
+
+  it('FIX 2: a SLOW (never-resolving) pre-ring push does NOT gate the bridge TwiML', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    // Replace the push service with one whose sendToUser NEVER resolves — a slow
+    // push backend. If the handler awaited the push, the request would hang;
+    // FIX 2 fires it without awaiting, so the bridge TwiML returns immediately.
+    let pushStarted = false;
+    const neverResolving: PushService = {
+      // Params omitted (interface allows fewer): this stub only records that the
+      // push was STARTED, then returns a promise that never settles.
+      sendToUser(): Promise<SendToUserResult> {
+        pushStarted = true;
+        return new Promise<SendToUserResult>(() => {
+          /* deliberately never resolves */
+        });
+      },
+    };
+    world.pushService = neverResolving;
+    const { app } = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+
+    // The request resolves (does NOT hang on the push). A failure here would
+    // surface as a test timeout rather than an assertion.
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    // The full bridge TwiML is present even though the push never completed.
+    expect(xml).toContain('<Pause');
+    expect(xml).toContain('<Dial');
+    expect(xml).toContain(FOUNDER_CELL);
+    expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
+    // The push WAS started (fire-and-forget), just not awaited.
+    expect(pushStarted).toBe(true);
+  });
 });
 
 describe('founder whisper leg (M1.9b)', () => {
@@ -322,6 +357,81 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
 
     expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
     expect(world.sent).toHaveLength(1);
+  });
+
+  it('FIX 1: a child-leg completed with NON-ZERO duration arriving BEFORE the Dial summary does NOT mark answered (real Twilio ordering)', async () => {
+    const app = await seedRingingBridge();
+
+    // REAL Twilio ordering for a no-press-1 miss: the founder's whisper leg
+    // ANSWERS (the carrier picks up), so the per-<Number statusCallback> CHILD
+    // leg fires `completed` with a NON-ZERO CallDuration (the whisper seconds) —
+    // and it arrives BEFORE the <Dial action> summary. The buggy handler read
+    // that child CallDuration as a bridged-call duration and stamped
+    // answered/outcome, suppressing the missed push + auto-text. FIX 1: a child
+    // leg (ParentCallSid, NO DialCallStatus) must NOT classify the call.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAfounder-child-leg',
+      ParentCallSid: 'CAbiz0001',
+      CallStatus: 'completed',
+      CallDuration: '6', // whisper seconds — NOT a connected bridge
+      ApiVersion: '2010-04-01',
+    });
+
+    // After ONLY the child-leg callback: NOT answered, no duration, no miss
+    // side-effects yet (the bridge outcome is undecided until the Dial summary).
+    let call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_outcome).not.toBe('answered');
+    expect(call.answered_at).toBeUndefined();
+    expect(call.call_duration).toBeUndefined();
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(false);
+    expect(world.sent).toHaveLength(0);
+
+    // NOW the authoritative <Dial action> summary arrives: completed with ZERO
+    // bridged duration → a real MISS. The missed push + auto-text fire exactly
+    // once, and the call is NOT recorded as answered.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '0',
+      ApiVersion: '2010-04-01',
+    });
+
+    call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_status).toBe('completed');
+    expect(call.call_outcome).toBe('missed');
+    expect(call.answered_at).toBeUndefined();
+    expect(world.pushSends.filter((p) => p.notification.kind === 'missed_call')).toHaveLength(1);
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]!.to).toBe(CALLER);
+  });
+
+  it('FIX 1: the inverse — Dial summary completed WITH duration → answered, NO auto-text, answered_at set', async () => {
+    const app = await seedRingingBridge();
+
+    // A child leg may also report (harmless transitional), then the authoritative
+    // <Dial action> summary reports a CONNECTED bridge (non-zero duration).
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAfounder-child-leg',
+      ParentCallSid: 'CAbiz0001',
+      CallStatus: 'completed',
+      CallDuration: '4',
+      ApiVersion: '2010-04-01',
+    });
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '42',
+      ApiVersion: '2010-04-01',
+    });
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_status).toBe('completed');
+    expect(call.call_outcome).toBe('answered');
+    expect(call.call_duration).toBe(42); // the BRIDGE duration, not the leg's
+    expect(call.answered_at).toBeDefined();
+    // GUARDRAIL: an answered call never fires the missed push / auto-text.
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(false);
+    expect(world.sent).toHaveLength(0);
   });
 
   it('ANSWERED (completed with duration) → NO missed push, NO auto-text', async () => {

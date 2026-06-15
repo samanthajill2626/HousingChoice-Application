@@ -278,6 +278,62 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
     const [, init] = fetchSpy.mock.calls[0] as unknown as [URL, RequestInit];
     expect((init.headers as Record<string, string>)['authorization']).toMatch(/^Basic /);
   });
+
+  it('FIX 3: enforces the cap on the STREAM when there is NO Content-Length (chunked/redirect)', async () => {
+    // A response that omits Content-Length entirely (as the S3 redirect does)
+    // but whose BODY exceeds the cap. The header early-out can't catch this —
+    // the byte-counting cap must abort the fetch + refuse mid-stream.
+    let aborted = false;
+    let pulls = 0;
+    const chunk = new Uint8Array(1024 * 1024); // 1 MB per pull
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        // Would stream unbounded (far past 25 MB) if the cap didn't stop it.
+        if (pulls > 1000) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        aborted = true; // the cap's controller.abort() cancels the web stream
+      },
+    });
+    const fetchSpy = vi.fn(async (_url: URL, init: RequestInit) => {
+      // The cap wires the AbortController's signal into fetch; when it aborts,
+      // the web ReadableStream is cancelled (cancel() above flips `aborted`).
+      init.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(), // NO content-length
+        body,
+      };
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const stream = await makeDriver().getMediaStream('https://api.twilio.com/media/chunked');
+    // Draining the stream must reject with the typed too_large refusal, NOT run
+    // unbounded. (Consume it the way mediaStore.put would.)
+    const drain = (async () => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      for await (const _ of stream) {
+        /* discard */
+      }
+    })();
+    await expect(drain).rejects.toMatchObject({
+      name: 'MediaFetchRefusedError',
+      reason: 'too_large',
+    });
+    // The fetch was aborted (no unbounded read), and we stopped FAR short of the
+    // 1000-pull runaway (cap is 25 MB ⇒ ~26 one-MB pulls before the refusal).
+    expect(aborted).toBe(true);
+    expect(pulls).toBeLessThan(64);
+  });
 });
 
 describe('ConsoleMessagingDriver', () => {

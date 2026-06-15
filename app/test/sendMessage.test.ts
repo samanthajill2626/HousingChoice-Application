@@ -129,6 +129,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
     setCallRecording: async () => true,
+    releaseCallRecording: async () => {},
     setCallTranscript: async () => true,
     listByConversation: async () => [],
     annotateMessage: async () => {},

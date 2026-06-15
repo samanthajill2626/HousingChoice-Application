@@ -381,6 +381,10 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
     async listByRole(role) {
       // Reuse the bounded scan + filter in memory (the team is tiny). Keeps the
       // founder-resolution lookup inside the existing read economy — no GSI.
+      // SCALE NOTE (accepted): this SCANs the users table and is hit on the
+      // call path (founder triage resolves admins per inbound call). Acceptable
+      // at the current bounded team size; revisit with a byRole GSI if the users
+      // table grows past a single Scan page / the call volume makes the scan hot.
       const all = await repo.listAll();
       return all.filter((u) => u.role === role);
     },

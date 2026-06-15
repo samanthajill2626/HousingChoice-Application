@@ -57,7 +57,6 @@ import {
 } from '../../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
-  type CallOutcome,
   type CallStatus,
   type MessageAuthor,
   type MessagesRepo,
@@ -228,33 +227,24 @@ function mapCallStatus(raw: string | undefined): CallStatus | undefined {
   }
 }
 
-/** Coarse outcome from a (terminal or in-progress) call status. */
-function outcomeForStatus(status: CallStatus): CallOutcome | undefined {
-  switch (status) {
-    case 'in-progress':
-    case 'completed':
-      return 'answered';
-    case 'no-answer':
-    case 'busy':
-    case 'failed':
-    case 'canceled':
-      return 'missed';
-    default:
-      return undefined;
-  }
-}
-
 /**
- * Whether a TERMINAL founder-bridge status means the founder MISSED the call
- * (M1.9b) — the trigger for the missed-call push + auto-text. True for the
- * obvious misses (no-answer/busy/failed/canceled) AND for the NO-PRESS-1 case:
- * with answerOnBridge, the founder hanging up at the whisper gate leaves the
- * <Dial> `completed` but with ZERO connected duration (the bridge to the caller
- * never formed). A `completed` WITH duration is a real answered+ended call — not
- * a miss. `callDuration` undefined on a `completed` is treated conservatively as
- * NOT a miss (we only auto-text on a clear no-connect signal).
+ * Whether a TERMINAL founder-bridge <Dial action> summary means the founder
+ * MISSED the call (M1.9b) — the trigger for the missed-call push + auto-text.
+ * True for the obvious misses (no-answer/busy/failed/canceled) AND for the
+ * NO-PRESS-1 case: with answerOnBridge, the founder hanging up at the whisper
+ * gate leaves the <Dial> `completed` but with ZERO connected duration (the
+ * bridge to the caller never formed). A `completed` WITH duration is a real
+ * answered+ended call — not a miss.
+ *
+ * IMPORTANT (FIX 1): this is derived ONLY from the `<Dial action>` summary
+ * (DialCallStatus/DialCallDuration — the authoritative BRIDGE outcome), NEVER
+ * the per-<Number statusCallback> child leg (which reports the founder LEG /
+ * whisper answer, not whether the bridge to the caller connected). A
+ * `completed` here therefore ALWAYS carries a Dial-bridge duration (0 = no
+ * connect → miss; >0 = real call), so an undefined duration on a Dial
+ * `completed` is treated conservatively as NOT a miss.
  */
-function isMissOutcome(status: CallStatus, callDuration: number | undefined): boolean {
+function isMissOutcome(status: CallStatus, dialDuration: number | undefined): boolean {
   switch (status) {
     case 'no-answer':
     case 'busy':
@@ -262,8 +252,8 @@ function isMissOutcome(status: CallStatus, callDuration: number | undefined): bo
     case 'canceled':
       return true;
     case 'completed':
-      // No-press-1 gate-hangup: bridge never connected → duration 0.
-      return callDuration === 0;
+      // No-press-1 gate-hangup: bridge never connected → Dial duration 0.
+      return dialDuration === 0;
     default:
       return false;
   }
@@ -487,12 +477,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, callSid: CallSid }, 'founder triage: persisting the call entry failed — bridging anyway');
     }
 
-    // PRE-RING push to the founder (admin user(s)), SYNCHRONOUSLY and BEFORE the
-    // <Dial> — the <Pause length=preRingPause> below buys the ~2s head start so
-    // the push lands AHEAD of the cell ringing (load-bearing timing). PII (doc
-    // §9): masked label only, never the raw From; push send is best-effort and
-    // never blocks/fails the bridge.
-    await sendPreRingPush(conversation.conversationId, CallSid, callerLabel);
+    // PRE-RING push to the founder (admin user(s)) — FIRED, but NOT awaited
+    // (FIX 2). The push backend (a DynamoDB founder scan + sequential per-device
+    // web-push POSTs) can be slow; awaiting it here would add dead air before the
+    // TwiML and risk the ~15s Twilio webhook timeout. We START it now (so it
+    // still goes out ahead of the ring) but return the bridge TwiML immediately;
+    // the <Pause length=preRingPause> below remains the intended head start so
+    // the push lands AHEAD of the cell ringing. sendPreRingPush is already fully
+    // error-trapped internally, so the extra .catch is belt-and-braces (an
+    // unexpected throw can never become an unhandled rejection). PII (doc §9):
+    // masked label only, never the raw From; the send never blocks/fails the
+    // bridge.
+    void sendPreRingPush(conversation.conversationId, CallSid, callerLabel).catch((err: unknown) => {
+      log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
+    });
 
     // Build the founder-bridge TwiML. callerId is ALWAYS the business number,
     // NEVER From (the guardrail). The <Pause> is what makes the push land first.
@@ -533,7 +531,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       {
         url: whisperUrl,
         statusCallback: `${baseUrl}/webhooks/twilio/voice/status`,
-        statusCallbackEvent: ['answered', 'completed'],
+        // (FIX 1) Only 'ringing' — a harmless transitional hint. The TERMINAL
+        // bridge outcome (answered/missed) is reported AUTHORITATIVELY by the
+        // <Dial action> summary above (DialCallStatus/DialCallDuration). We do
+        // NOT subscribe the per-leg 'answered'/'completed' here: those describe
+        // the founder LEG / whisper answer, not whether the bridge connected, so
+        // letting them through would misclassify a missed call as answered.
+        statusCallbackEvent: ['ringing'],
         statusCallbackMethod: 'POST',
       },
       founderCell,
@@ -545,7 +549,12 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     sendTwiml(res, vr);
   }
 
-  /** The set of founder (admin) users to notify — resolved fresh per call. */
+  /**
+   * The set of founder (admin) users to notify — resolved fresh per call.
+   * SCALE NOTE (accepted): usersRepo.listByRole('admin') SCANs the (tiny,
+   * bounded) users table on the call path. Acceptable at the current team size;
+   * revisit with a byRole GSI if the users table grows (see usersRepo.listByRole).
+   */
   async function resolveFounders(): Promise<UserItem[]> {
     try {
       return await users.listByRole('admin');
@@ -751,7 +760,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         {
           url: whisperUrl,
           statusCallback: `${baseUrl}/webhooks/twilio/voice/status`,
-          statusCallbackEvent: ['answered', 'completed'],
+          // (FIX 1) Only 'ringing' — the TERMINAL bridge outcome + duration come
+          // AUTHORITATIVELY from the <Dial action> summary (DialCallStatus/
+          // DialCallDuration), never the per-leg child callback (whose
+          // CallDuration is the callee LEG / whisper, not the bridged call).
+          statusCallbackEvent: ['ringing'],
           statusCallbackMethod: 'POST',
         },
         callee.phone,
@@ -879,16 +892,31 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   });
 
   // ---------------------------------------------------------------------
-  // Call status callback — POST /voice/status. Twilio POSTs the call's lifecycle
-  // (top-level CallStatus/CallDuration) AND the <Dial> action summary
-  // (DialCallStatus/DialCallDuration) here. Update the `call` entry by CallSid,
-  // forward-only + idempotent: a redelivered/out-of-order callback never
-  // regresses a terminal call or double-counts. Emit message.persisted so the
-  // hub timeline updates live. NEVER log raw numbers.
+  // Call status callback — POST /voice/status. TWO distinct callback shapes hit
+  // this URL (both bridges wire both):
+  //   (a) the <Dial action> summary — carries DialCallStatus/DialCallDuration on
+  //       the PARENT CallSid. This is AUTHORITATIVE for whether the BRIDGE
+  //       connected (and for how long), so it — and ONLY it — derives the
+  //       terminal outcome, the bridge call_duration, answered_at, and the
+  //       founder-bridge MISSED trigger (FIX 1).
+  //   (b) the per-<Number statusCallback> child leg — carries ParentCallSid and
+  //       NO DialCallStatus. It describes the founder/callee LEG (the whisper
+  //       answer), NOT the bridge, so it MUST NOT classify answered/missed,
+  //       stamp answered_at, or fire the missed trigger. (We also drop
+  //       'completed'/'answered' from the per-leg statusCallbackEvent lists so
+  //       Twilio reports the terminal outcome ONLY via the <Dial action> — this
+  //       handler logic is the belt-and-braces guarantee.)
+  // Update the `call` entry by CallSid, forward-only + idempotent: a
+  // redelivered/out-of-order callback never regresses a terminal call or
+  // double-counts. Emit message.persisted so the hub timeline updates live.
+  // NEVER log raw numbers.
   // ---------------------------------------------------------------------
   router.post('/status', verifySignature, async (req, res) => {
     const params = asParams(req.body);
-    const { CallSid, CallStatus, DialCallStatus, CallDuration, DialCallDuration } = params;
+    // NOTE (FIX 1): CallDuration (the per-leg/top-level duration) is deliberately
+    // NOT read — only the <Dial action> summary's DialCallDuration is the bridge
+    // duration. A child leg's CallDuration is whisper/leg seconds, not the call.
+    const { CallSid, CallStatus, DialCallStatus, DialCallDuration } = params;
     // The <Number statusCallback> fires on a CHILD leg (its own CallSid) and
     // carries ParentCallSid pointing at the call entry's CallSid; the <Dial
     // action> + the call's own callback carry the call entry's CallSid directly.
@@ -901,8 +929,12 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    // Prefer the Dial child status (the bridge outcome) when present, else the
-    // top-level call status. Both fold onto our CallStatus machine.
+    // (FIX 1) The presence of DialCallStatus is what distinguishes the two
+    // shapes: a <Dial action> summary carries it; a per-leg child callback does
+    // not. The <Dial action> is the BRIDGE outcome (authoritative); a per-leg
+    // callback describes only the dialed LEG (whisper answer), so it can never
+    // decide answered/missed for the bridge.
+    const isDialSummary = DialCallStatus !== undefined;
     const rawStatus = DialCallStatus ?? CallStatus;
     const mapped = mapCallStatus(rawStatus);
     if (mapped === undefined) {
@@ -913,22 +945,68 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    const durationRaw = DialCallDuration ?? CallDuration;
-    const duration = durationRaw !== undefined && durationRaw.length > 0 ? Number(durationRaw) : undefined;
-    const callDuration = duration !== undefined && Number.isFinite(duration) ? duration : undefined;
-    const outcome = outcomeForStatus(mapped);
-    const now = new Date().toISOString();
     const terminal = mapped !== 'ringing' && mapped !== 'in-progress';
+
+    // (FIX 1) A per-leg child callback (no DialCallStatus) describes the dialed
+    // LEG, not the bridge — it must NEVER drive the call to a TERMINAL status.
+    // Doing so would not only mis-describe the bridge, it would LOCK OUT the
+    // authoritative <Dial action> summary (the call-status machine is forward-
+    // only and terminal-absorbing, so a premature child `completed` makes the
+    // real Dial `completed` a no-op, suppressing the missed push + auto-text).
+    // So we ignore a terminal per-leg callback entirely; the Dial summary owns
+    // the terminal outcome. (We also drop these events at the <Number> so this
+    // is belt-and-braces.)
+    if (!isDialSummary && terminal) {
+      log.info(
+        { callSid: entryCallSid, providerStatus: rawStatus },
+        'voice status callback: terminal per-leg (non-Dial) status — ignored (bridge outcome comes from the Dial summary)',
+      );
+      res.status(200).end();
+      return;
+    }
+
+    // The BRIDGE duration comes ONLY from the <Dial action> summary
+    // (DialCallDuration). A per-leg child callback's CallDuration is the founder
+    // LEG / whisper seconds, NOT the bridged-call duration — using it would
+    // misread a non-zero whisper as a connected call (the root-cause bug). So a
+    // per-leg callback contributes NO duration.
+    const dialDurationRaw = isDialSummary ? DialCallDuration : undefined;
+    const dialDuration =
+      dialDurationRaw !== undefined && dialDurationRaw.length > 0 ? Number(dialDurationRaw) : undefined;
+    const callDuration = dialDuration !== undefined && Number.isFinite(dialDuration) ? dialDuration : undefined;
+    const now = new Date().toISOString();
+
+    // (FIX 1) Outcome, answered_at, and ended_at are derived ONLY from the
+    // <Dial action> summary. A per-leg callback that reaches here is necessarily
+    // NON-terminal (terminal ones were ignored above), and is used purely for
+    // harmless transitional state (e.g. a 'ringing' UI hint) — it NEVER stamps
+    // an outcome/answered_at/ended_at or fires the missed trigger.
+    //
+    // For a TERMINAL Dial summary the outcome is derived via isMissOutcome (so a
+    // `completed` with ZERO bridged duration — the no-press-1 hangup — records
+    // call_outcome 'missed', NOT a misleading 'answered'); a non-terminal Dial
+    // summary (in-progress) is 'answered'. This keeps call_outcome and the
+    // missed trigger in lock-step (they read the same signal).
+    const isMissed = isDialSummary && terminal && isMissOutcome(mapped, callDuration);
+    // A Dial summary that ANSWERED (in-progress, or a terminal non-miss like a
+    // `completed` WITH bridged duration) → outcome 'answered'; a terminal miss →
+    // 'missed'. answered_at is stamped whenever the bridge connected — including
+    // the common case where the action summary jumps straight ringing→completed
+    // with a duration (no separate in-progress callback for the bridge).
+    const isAnswered = isDialSummary && (mapped === 'in-progress' || (terminal && !isMissed));
+    const outcome = isMissed ? 'missed' : isAnswered ? 'answered' : undefined;
+    const stampAnsweredAt = isAnswered;
+    const stampEndedAt = isDialSummary && terminal;
 
     const transitioned = await messages.updateCallStatus(entryCallSid, {
       callStatus: mapped,
       ...(outcome !== undefined && { callOutcome: outcome }),
-      ...(mapped === 'in-progress' && { answeredAt: now }),
-      ...(terminal && { endedAt: now }),
+      ...(stampAnsweredAt && { answeredAt: now }),
+      ...(stampEndedAt && { endedAt: now }),
       ...(callDuration !== undefined && { callDuration }),
     });
     log.info(
-      { callSid: entryCallSid, providerStatus: rawStatus, callStatus: mapped, transitioned },
+      { callSid: entryCallSid, providerStatus: rawStatus, callStatus: mapped, isDialSummary, transitioned },
       'twilio voice status callback processed',
     );
 
@@ -947,13 +1025,16 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         });
 
         // MISSED FOUNDER-BRIDGE (M1.9b): a founder-bridge call (masked:false)
-        // that just transitioned into a terminal MISS → fire the missed-call
-        // push + the zero-tap auto-text. Gating on `transitioned` (the
-        // forward-only call-status write) is the trigger-once guard: only the
-        // FIRST callback that moves the call into a terminal miss state returns
-        // true, so a redelivered/stale callback never re-triggers (and the
-        // auto-text job is ALSO CallSid-idempotent as a second layer).
-        if (terminal && entry.type === 'call' && entry.masked !== true && isMissOutcome(mapped, callDuration)) {
+        // whose <Dial action> summary just transitioned it into a terminal MISS
+        // → fire the missed-call push + the zero-tap auto-text. `isMissed` is
+        // derived (above) ONLY from the <Dial action> summary (FIX 1: gated on
+        // isDialSummary + terminal), so a per-leg child callback can NEVER fire
+        // it. The block is also gated on `transitioned` (the forward-only call-
+        // status write) so only the FIRST callback that moves the call into a
+        // terminal miss returns true — a redelivered/stale callback never
+        // re-triggers (and the auto-text job is ALSO CallSid-idempotent as a
+        // second layer).
+        if (isMissed && entry.type === 'call' && entry.masked !== true) {
           await onFounderBridgeMissed(entryCallSid, entry.conversationId);
         }
       }
@@ -1041,40 +1122,63 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       RecordingDuration !== undefined && RecordingDuration.length > 0 ? Number(RecordingDuration) : undefined;
     const duration =
       recordingDuration !== undefined && Number.isFinite(recordingDuration) ? recordingDuration : undefined;
+    // The S3 key is fully derivable up front (recordings/<callSid>/<recordingSid>),
+    // so we can CLAIM the RecordingSid with its intended key BEFORE the fetch.
     const key = `recordings/${entryCallSid}/${RecordingSid}`;
+
+    // (FIX 4) CLAIM-BEFORE-FETCH: win the RecordingSid with the conditional
+    // setCallRecording (attribute_not_exists(recording_sid)) FIRST, then fetch +
+    // put ONLY if the claim succeeded. This closes the double-fetch / orphaned-
+    // S3-object race: two concurrent first-time deliveries (same or DIFFERENT
+    // RecordingSids) can no longer both fetch+put — only the claim WINNER does;
+    // the loser short-circuits here without touching the media or S3. (Layer-1
+    // early-return above handles the common already-stored redelivery cheaply;
+    // this conditional write is the authority under a true race.)
+    const claimed = await messages.setCallRecording(entryCallSid, {
+      recordingSid: RecordingSid,
+      recordingS3Key: key,
+      ...(duration !== undefined && { recordingDuration: duration }),
+    });
+    if (!claimed) {
+      // Another callback already claimed/stored a recording for this call — do
+      // NOT fetch or put (no double-fetch, no orphan).
+      log.info(
+        { callSid: entryCallSid, recordingSid: RecordingSid },
+        'recording callback: lost the claim (already recorded) — no fetch',
+      );
+      res.status(200).end();
+      return;
+    }
+
     try {
       // Authenticated, SSRF-guarded (api.twilio.com), size-capped fetch — then
       // STREAM to S3 (no whole-body buffering). Same posture as the MMS mirror.
       const stream = await adapter.getRecordingStream(RecordingUrl);
       await mediaStore.put(key, stream, 'audio/mpeg');
     } catch (err) {
-      // A refused (SSRF/oversize) or failed fetch must never 5xx the webhook —
-      // Twilio's redelivery re-enters (idempotent: still no recording stored).
-      // PII: the error carries no body; log the reason class + IDs only.
+      // The fetch/put failed AFTER we claimed — RELEASE the claim so the call
+      // entry does not keep a recording key pointing at an object that was never
+      // written (and so Twilio's redelivery can re-claim + re-fetch). The
+      // release is conditioned on the RecordingSid we claimed, so it never
+      // clobbers a different concurrent writer. A refused (SSRF/oversize) or
+      // failed fetch must never 5xx the webhook. PII: log reason class + IDs.
       const reason = err instanceof MediaFetchRefusedError ? err.reason : 'fetch_or_store_failed';
-      log.error({ callSid: entryCallSid, recordingSid: RecordingSid, reason }, 'recording mirror failed — call entry keeps no recording key');
+      await messages.releaseCallRecording(entryCallSid, RecordingSid);
+      log.error({ callSid: entryCallSid, recordingSid: RecordingSid, reason }, 'recording mirror failed — claim released, call entry keeps no recording key');
       res.status(200).end();
       return;
     }
 
-    // Stamp recording_s3_key (+ recording_sid + duration) idempotently per
-    // RecordingSid. A redelivery that raced past the early-return above loses
-    // the conditional write here (false) — no duplicate, no second mirror.
-    const stored = await messages.setCallRecording(entryCallSid, {
-      recordingSid: RecordingSid,
-      recordingS3Key: key,
-      ...(duration !== undefined && { recordingDuration: duration }),
+    // The claim succeeded AND the media is in S3 → announce the now-recorded
+    // call so the timeline updates live.
+    events.emit('message.persisted', {
+      conversationId: entry.conversationId,
+      tsMsgId: entry.tsMsgId,
+      direction: entry.direction,
+      deliveryStatus: entry.delivery_status,
     });
-    if (stored) {
-      events.emit('message.persisted', {
-        conversationId: entry.conversationId,
-        tsMsgId: entry.tsMsgId,
-        direction: entry.direction,
-        deliveryStatus: entry.delivery_status,
-      });
-    }
     log.info(
-      { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored },
+      { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored: true },
       'founder-bridge recording mirrored to S3',
     );
     res.status(200).end();

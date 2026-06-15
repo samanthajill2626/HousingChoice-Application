@@ -423,6 +423,16 @@ export function createFakeWorld(): FakeWorld {
       }
       return true;
     },
+    async releaseCallRecording(callSid, recordingSid) {
+      // Mirror the real repo (FIX 4): clear the claim ONLY when recording_sid
+      // still equals the one we claimed (never clobber another writer).
+      const existing = findBySid(callSid);
+      if (!existing) return;
+      if (existing.recording_sid !== recordingSid) return;
+      delete existing.recording_sid;
+      delete existing.recording_s3_key;
+      delete existing.recording_duration;
+    },
     async setCallTranscript(callSid, transcript) {
       // Mirror the real repo: idempotent — a non-empty transcript already
       // present is never overwritten (false).

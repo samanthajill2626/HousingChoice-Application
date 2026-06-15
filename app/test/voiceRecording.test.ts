@@ -190,6 +190,56 @@ describe('recording callback — POST /voice/recording (M1.9c)', () => {
     expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111');
   });
 
+  it('FIX 4: claim-before-fetch — two CONCURRENT first-time callbacks fetch the media ONCE (no double-fetch/orphan)', async () => {
+    const world = createFakeWorld();
+    // Count + delay the recording fetch so two concurrent callbacks genuinely
+    // interleave AROUND the fetch await — without claim-before-fetch, BOTH would
+    // pass the layer-1 (no-key-yet) check and fetch twice.
+    let fetches = 0;
+    const realGet = world.adapter.getRecordingStream.bind(world.adapter);
+    world.adapter.getRecordingStream = async (url: string) => {
+      fetches += 1;
+      await new Promise((r) => setTimeout(r, 10)); // hold the await open
+      return realGet(url);
+    };
+    const { app } = await seedFounderBridge(world);
+
+    // Fire the SAME completed callback twice concurrently.
+    await Promise.all([
+      signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams()),
+      signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams()),
+    ]);
+
+    // The claim (conditional setCallRecording) is won once, so the media is
+    // fetched + put EXACTLY once — no double-fetch, no orphaned S3 object.
+    expect(fetches).toBe(1);
+    expect(world.mediaPuts).toHaveLength(1);
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111');
+    expect(call.recording_sid).toBe('RE1111');
+  });
+
+  it('FIX 4: a failed fetch RELEASES the claim so a later redelivery re-fetches + stores', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridge(world);
+    // First delivery: the fetch fails → the claim must be released (no key left).
+    world.failRecordingUrls.add(`${RECORDING_URL}.mp3`);
+    world.failRecordingUrls.add(RECORDING_URL);
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    let call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(world.mediaPuts).toHaveLength(0);
+    expect(call.recording_s3_key).toBeUndefined();
+    expect(call.recording_sid).toBeUndefined(); // claim was rolled back
+
+    // Twilio redelivers later; this time the fetch succeeds → stored normally.
+    world.failRecordingUrls.clear();
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(world.mediaPuts).toHaveLength(1);
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111');
+    expect(call.recording_sid).toBe('RE1111');
+  });
+
   it('GUARDRAIL: a MASKED relay call → recording callback REFUSED, no media fetch (masked never records)', async () => {
     const world = createFakeWorld();
     seedRelay(world);

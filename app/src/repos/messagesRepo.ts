@@ -346,6 +346,17 @@ export interface MessagesRepo {
     recording: { recordingSid: string; recordingS3Key: string; recordingDuration?: number },
   ): Promise<boolean>;
   /**
+   * Voice call recording (M1.9c, FIX 4 — claim rollback): RELEASE a recording
+   * claim made by setCallRecording when the subsequent media fetch/put fails, so
+   * the call entry does not keep a recording_s3_key/recording_sid pointing at an
+   * S3 object that was never written (and Twilio's redelivery can re-claim +
+   * re-fetch). Clears recording_sid/recording_s3_key/recording_duration CONDI-
+   * TIONALLY on recording_sid still equalling the one we claimed, so it never
+   * clobbers a different concurrent writer. Best-effort + idempotent: a no-op
+   * (unknown CallSid, or the claim already superseded) never throws.
+   */
+  releaseCallRecording(callSid: string, recordingSid: string): Promise<void>;
+  /**
    * Voice call transcript (M1.9c): save the VERBATIM transcript onto a
    * `type:'call'` item found by CallSid. IDEMPOTENT — the write is conditioned
    * on the call NOT already carrying a (non-empty) transcript, so a redelivered
@@ -706,9 +717,44 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       return true;
     },
 
+    async releaseCallRecording(callSid, recordingSid) {
+      // FIX 4: roll back a claim whose media fetch/put failed. CallSid ==
+      // provider_sid (same pointer lookup as setCallRecording).
+      const existing = await getByProviderSid(callSid);
+      if (!existing) return;
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: 'REMOVE recording_sid, recording_s3_key, recording_duration',
+            // Only release OUR claim — never clobber a different concurrent
+            // writer that has since stored a (different) RecordingSid.
+            ConditionExpression: 'recording_sid = :rsid',
+            ExpressionAttributeValues: { ':rsid': recordingSid },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // The claim was already superseded/cleared — nothing to release.
+          log.info({ callSid, recordingSid }, 'recording claim release skipped (claim superseded)');
+          return;
+        }
+        throw err;
+      }
+      log.info({ callSid, recordingSid }, 'call recording claim released (mirror failed)');
+    },
+
     async setCallTranscript(callSid, transcript) {
       // CallSid == provider_sid (same pointer lookup). PII (doc §9): NEVER log
       // the transcript text — length only.
+      //
+      // PHASE 1 DECISION — "first verbatim wins": the write is conditioned on no
+      // (non-empty) transcript existing, so the FIRST transcript to land is
+      // permanent. There is NO transcription-SID idempotency, so a CORRECTED
+      // re-POST from Voice Intelligence (same call, revised text) is DROPPED, not
+      // applied. Accepted for Phase 1 (verbatim capture only; no transcript
+      // versioning / structured extraction — that is Phase 2).
       const existing = await getByProviderSid(callSid);
       if (!existing) {
         log.warn({ callSid }, 'transcript for unknown CallSid ignored');

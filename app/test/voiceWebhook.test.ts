@@ -361,15 +361,17 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     return { app, capture };
   }
 
-  it('answered → completed updates duration/outcome and emits message.persisted', async () => {
+  it('answered → completed updates duration/outcome and emits message.persisted (Dial summary)', async () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
     const before = world.emitted.filter((e) => e.event === 'message.persisted').length;
 
-    // Dial child answered.
+    // The <Dial action> summary reports the bridge ANSWERED (in-progress). FIX 1:
+    // the terminal outcome/answered_at come ONLY from the Dial summary
+    // (DialCallStatus present), never a bare CallStatus.
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      CallStatus: 'in-progress',
+      DialCallStatus: 'in-progress',
       ApiVersion: '2010-04-01',
     });
     let call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
@@ -377,11 +379,11 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     expect(call.call_outcome).toBe('answered');
     expect(call.answered_at).toBeDefined();
 
-    // Completed with a duration.
+    // <Dial action> completed WITH a connected bridge duration.
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      CallStatus: 'completed',
-      CallDuration: '42',
+      DialCallStatus: 'completed',
+      DialCallDuration: '42',
       ApiVersion: '2010-04-01',
     });
     expect(res.status).toBe(200);
@@ -394,13 +396,13 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     expect(after).toBeGreaterThan(before); // live updates on real transitions
   });
 
-  it('reads the Dial child status/duration (DialCallStatus/DialCallDuration) too', async () => {
+  it('reads the Dial child status/duration (DialCallStatus/DialCallDuration)', async () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
 
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      // top-level call still in-progress, but the <Dial> child reported the bridge result
+      // The <Dial> action summary reports the bridge result (status + duration).
       DialCallStatus: 'completed',
       DialCallDuration: '17',
       ApiVersion: '2010-04-01',
@@ -408,6 +410,30 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
     expect(call.call_status).toBe('completed');
     expect(call.call_duration).toBe(17);
+  });
+
+  it('FIX 1: a per-leg child callback (no DialCallStatus) NEVER stamps the bridge outcome/duration', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedRingingCall(world);
+
+    // A per-<Number statusCallback> child leg carries ParentCallSid and a
+    // top-level CallStatus/CallDuration that describe the LEG (whisper answer),
+    // NOT the bridge. It must NOT classify answered/missed or stamp a duration —
+    // only the <Dial action> summary may. (We model what Twilio could still
+    // deliver defensively even though we now drop those per-leg events.)
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAchild-leg-xyz',
+      ParentCallSid: 'CAinbound0001',
+      CallStatus: 'completed',
+      CallDuration: '8', // whisper seconds — must NOT be read as a bridge duration
+      ApiVersion: '2010-04-01',
+    });
+    const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
+    // A TERMINAL per-leg callback is ignored entirely (it must not lock out the
+    // authoritative Dial summary): no outcome, no duration, status stays ringing.
+    expect(call.call_status).toBe('ringing');
+    expect(call.call_outcome).not.toBe('answered');
+    expect(call.call_duration).toBeUndefined();
   });
 
   it('no-answer → outcome missed', async () => {
@@ -424,14 +450,14 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     expect(call.call_outcome).toBe('missed');
   });
 
-  it('forward-only + idempotent: a redelivered/stale callback after completed is a no-op', async () => {
+  it('forward-only + idempotent: a redelivered/stale Dial summary after completed is a no-op', async () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
 
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      CallStatus: 'completed',
-      CallDuration: '30',
+      DialCallStatus: 'completed',
+      DialCallDuration: '30',
       ApiVersion: '2010-04-01',
     });
     const persistedAfterComplete = world.emitted.filter((e) => e.event === 'message.persisted').length;
@@ -439,13 +465,13 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     // A stale 'in-progress' AND a redelivered 'completed' must both no-op.
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      CallStatus: 'in-progress',
+      DialCallStatus: 'in-progress',
       ApiVersion: '2010-04-01',
     });
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
-      CallStatus: 'completed',
-      CallDuration: '999',
+      DialCallStatus: 'completed',
+      DialCallDuration: '999',
       ApiVersion: '2010-04-01',
     });
     const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
@@ -457,22 +483,25 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     );
   });
 
-  it('uses ParentCallSid to update the call entry when a child-leg callback fires', async () => {
+  it('uses ParentCallSid to update the call entry when a child-leg callback fires (status only)', async () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
 
     // A <Number statusCallback> fires on the CHILD leg (its own CallSid) and
-    // carries ParentCallSid → the call entry's CallSid.
+    // carries ParentCallSid → the call entry's CallSid. FIX 1: it may advance a
+    // transitional status keyed off the parent, but it does NOT derive the
+    // bridge outcome/duration (only the <Dial action> summary does).
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAchild-leg-xyz',
       ParentCallSid: 'CAinbound0001',
-      CallStatus: 'completed',
-      CallDuration: '12',
+      CallStatus: 'ringing',
       ApiVersion: '2010-04-01',
     });
     const call = world.messages.find((m) => m.provider_sid === 'CAinbound0001')!;
-    expect(call.call_status).toBe('completed');
-    expect(call.call_duration).toBe(12);
+    // The callback resolved to the PARENT entry by ParentCallSid (status stays a
+    // valid lifecycle value; the bridge outcome is not set from a leg).
+    expect(call.provider_sid).toBe('CAinbound0001');
+    expect(call.call_outcome).not.toBe('answered');
   });
 
   it('unknown CallSid → 200, no crash, no write', async () => {

@@ -22,7 +22,7 @@
 // pair works); undici drops the Authorization header on the cross-origin
 // redirect to S3, which is exactly right.
 import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
@@ -157,6 +157,46 @@ export class MediaFetchRefusedError extends Error {
     super(message);
     this.name = new.target.name;
   }
+}
+
+/**
+ * Wrap a media Readable in a byte-COUNTING cap (FIX 3). The Content-Length
+ * header is a cheap early-out but is unreliable: a chunked / Content-Length-less
+ * response (common once Twilio 302-redirects the media to S3) would otherwise
+ * stream UNBOUNDED into our bucket. This Transform tracks the running byte total
+ * and, the moment it exceeds `maxBytes`, aborts the in-flight fetch (so the
+ * socket closes — no more bytes pulled) and fails the stream with the same
+ * `too_large` refusal the header check raises. Bytes already seen are bounded by
+ * `maxBytes + one chunk`; nothing past the cap is ever written downstream.
+ */
+function capStreamBySize(source: Readable, maxBytes: number, controller: AbortController, op: string): Readable {
+  let total = 0;
+  const counter = new Transform({
+    transform(chunk: Buffer, _enc, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        // Stop pulling more bytes from the network, then fail the pipeline with
+        // the typed refusal (destroys `counter`; the pipe tears down `source`).
+        controller.abort();
+        callback(
+          new MediaFetchRefusedError(
+            `${op}: streamed bytes exceeded the ${maxBytes}-byte cap`,
+            'too_large',
+          ),
+        );
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  // If the SOURCE errors (e.g. the abort above surfaces as an AbortError on the
+  // underlying body), propagate it so the consumer's pipe rejects rather than
+  // hanging. An AbortError AFTER we've already failed `counter` with the typed
+  // refusal is redundant — swallow it so it can't become an unhandled 'error'.
+  source.on('error', (err) => {
+    if (!counter.destroyed) counter.destroy(err);
+  });
+  return source.pipe(counter);
 }
 
 /**
@@ -475,6 +515,15 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     }
     const auth = Buffer.from(`${this.deps.apiKeySid}:${this.deps.apiKeySecret}`).toString('base64');
     const controller = new AbortController();
+    // REDIRECT NOTE (accepted): api.twilio.com 302-redirects media/recordings to
+    // a signed S3 URL, and fetch follows that redirect WITHOUT us re-validating
+    // the redirect's host against the allowlist (the allowlist only gates the
+    // FIRST hop above). This is accepted because (a) undici strips the
+    // Authorization header on the cross-origin redirect, so our basic-auth
+    // credentials never leave api.twilio.com, and (b) FIX 3's byte-counting cap
+    // below bounds how much a redirected response can stream regardless of where
+    // it lands. So a hijacked redirect can neither exfiltrate our creds nor write
+    // an unbounded object into S3.
     const res = await fetch(url, {
       headers: { authorization: `Basic ${auth}` },
       signal: controller.signal,
@@ -482,9 +531,8 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     if (!res.ok || !res.body) {
       throw new Error(`${op}: ${res.status} ${res.statusText} fetching Twilio media`);
     }
-    // Size cap: refuse oversize media up front instead of streaming 25MB+
-    // into S3 (MMS media is carrier-capped far below this; a recording is
-    // bounded by call length but the cap is the same defensive ceiling).
+    // Size cap, layer 1 (cheap early-out): refuse up front when the response
+    // ADVERTISES an oversize Content-Length, before streaming a byte.
     const contentLength = Number(res.headers.get('content-length') ?? 0);
     if (contentLength > MAX_MEDIA_CONTENT_LENGTH) {
       controller.abort();
@@ -493,7 +541,13 @@ export class TwilioMessagingDriver implements MessagingAdapter {
         'too_large',
       );
     }
-    return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+    // Size cap, layer 2 (the authority — FIX 3): a chunked / Content-Length-less
+    // response (common via the S3 redirect) would bypass the header check, so
+    // enforce the cap on the ACTUAL byte stream. The counter aborts the fetch +
+    // fails the stream with the same `too_large` refusal once the running total
+    // exceeds the cap — nothing past the cap is ever written into S3.
+    const source = Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+    return capStreamBySize(source, MAX_MEDIA_CONTENT_LENGTH, controller, op);
   }
 }
 

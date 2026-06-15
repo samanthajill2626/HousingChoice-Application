@@ -38,7 +38,10 @@ harness before claiming the work is done** — and add/extend a spec for new beh
   been sent), `POST /__dev/reseed`, `GET /__dev/ping`.
 - Write specs with accessibility-first selectors (`getByRole`/`getByLabel`) — see
   [e2e/support/selectors.md](../e2e/support/selectors.md). Requires Docker (DynamoDB Local).
-- The Playwright MCP is registered in [.mcp.json](../.mcp.json) (`--browser
-  chromium`; the chrome channel needs admin on Windows).
+- Interactive MCP browser: this repo's [.mcp.json](../.mcp.json) uses bundled
+  chromium (no admin). If your client's *plugin* Playwright MCP errors with
+  `Chromium distribution 'chrome' is not found`, a one-time **Administrator**
+  `npx playwright install chrome` fixes it (see [e2e/README.md](../e2e/README.md)
+  → Setup). The suite and `--headed`/`--ui` runs need no admin.
 
 Full workflow, modes, and how to add tests: **[e2e/README.md](../e2e/README.md)**.

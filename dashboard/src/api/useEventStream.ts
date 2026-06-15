@@ -7,6 +7,7 @@
 import { useEffect, useRef } from 'react';
 import type {
   BroadcastUpdatedEvent,
+  CaseUpdatedEvent,
   ConversationUpdatedEvent,
   MessagePersistedEvent,
 } from './types.js';
@@ -16,6 +17,8 @@ export interface EventStreamHandlers {
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
   /** A share-broadcast (M1.8) progressed — live status + rolled-up stats. */
   onBroadcastUpdated?: (event: BroadcastUpdatedEvent) => void;
+  /** A case (M1.10) changed — live board move / attention / tour / deadline. */
+  onCaseUpdated?: (event: CaseUpdatedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -74,6 +77,11 @@ export function useEventStream(handlers: EventStreamHandlers): void {
       source.addEventListener('broadcast.updated', (ev) => {
         const data = parse<BroadcastUpdatedEvent>((ev as MessageEvent).data);
         if (data) handlersRef.current.onBroadcastUpdated?.(data);
+      });
+
+      source.addEventListener('case.updated', (ev) => {
+        const data = parse<CaseUpdatedEvent>((ev as MessageEvent).data);
+        if (data) handlersRef.current.onCaseUpdated?.(data);
       });
 
       source.addEventListener('error', () => {

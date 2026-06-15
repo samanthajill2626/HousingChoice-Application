@@ -124,3 +124,14 @@ export function PlusIcon(props: IconProps): React.JSX.Element {
     </svg>
   );
 }
+
+/** A kanban-columns glyph for the Boards (cases) section. */
+export function BoardIcon(props: IconProps): React.JSX.Element {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+      <path d="M15 3v18" />
+    </svg>
+  );
+}

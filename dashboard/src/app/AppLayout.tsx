@@ -9,6 +9,7 @@ import { logout } from '../api/index.js';
 import { unsubscribeFromPush } from '../push/index.js';
 import {
   Avatar,
+  BoardIcon,
   Button,
   ContactsIcon,
   HomeIcon,
@@ -29,6 +30,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Inbox', icon: <InboxIcon /> },
+  { to: '/boards', label: 'Boards', icon: <BoardIcon /> },
   { to: '/contacts', label: 'Contacts', icon: <ContactsIcon /> },
   { to: '/units', label: 'Listings', icon: <HomeIcon /> },
   { to: '/admin/users', label: 'Users', icon: <UsersIcon />, adminOnly: true },

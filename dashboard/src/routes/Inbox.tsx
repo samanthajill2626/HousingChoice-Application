@@ -7,7 +7,7 @@
 // Tapping a row navigates to /conversations/:id.
 //
 // Private components/hooks/styles live in src/routes/inbox/.
-import { Button, EmptyState, InboxIcon, PlusIcon, Spinner } from '../ui/index.js';
+import { Button, EmptyState, InboxIcon, Spinner } from '../ui/index.js';
 import { useEventStream } from '../api/index.js';
 import { useAuth } from '../app/AuthContext.js';
 import { ConversationRow } from './inbox/ConversationRow.js';
@@ -32,10 +32,6 @@ export default function Inbox(): React.JSX.Element {
         <h1 id="inbox-heading" className={styles.heading}>
           Inbox
         </h1>
-        <Button as="a" href="/relay-groups/new" size="sm">
-          <PlusIcon size={16} />
-          New relay group
-        </Button>
       </div>
 
       {loading ? (

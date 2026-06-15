@@ -31,7 +31,9 @@ import ContactNew from '../routes/ContactNew.js';
 import Units from '../routes/Units.js';
 import UnitDetail from '../routes/UnitDetail.js';
 import UnitForm from '../routes/UnitForm.js';
-import NewRelayGroup from '../routes/NewRelayGroup.js';
+import Boards from '../routes/Boards.js';
+import BoardNew from '../routes/BoardNew.js';
+import BoardDetail from '../routes/BoardDetail.js';
 import BroadcastResults from '../routes/broadcast/BroadcastResults.js';
 
 export function AppRouter(): React.JSX.Element {
@@ -66,9 +68,6 @@ export function AppRouter(): React.JSX.Element {
           />
           <Route path="quick-reply/:callId" element={<QuickReply />} />
 
-          {/* Relay groups (M1.7) — create a new masked group thread. */}
-          <Route path="relay-groups/new" element={<NewRelayGroup />} />
-
           {/* Records — Contacts (M1.5). new BEFORE :contactId so "new" is not
            *  swallowed as an id. */}
           <Route path="contacts" element={<Contacts />} />
@@ -83,6 +82,12 @@ export function AppRouter(): React.JSX.Element {
 
           {/* Share Listings broadcast (M1.8) — the live results view. */}
           <Route path="broadcasts/:id" element={<BroadcastResults />} />
+
+          {/* Boards — cases (M1.10). new BEFORE :caseId so "new" is not
+           *  swallowed as an id. */}
+          <Route path="boards" element={<Boards />} />
+          <Route path="boards/new" element={<BoardNew />} />
+          <Route path="boards/:caseId" element={<BoardDetail />} />
 
           <Route path="*" element={<NotFound />} />
         </Route>

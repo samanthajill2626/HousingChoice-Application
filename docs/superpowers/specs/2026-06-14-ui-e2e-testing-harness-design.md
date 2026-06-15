@@ -378,3 +378,38 @@ read-only **Explore** sub-agents that return conclusions only.
   separate `MESSAGING_RECORD=1`) — resolved in writing-plans.
 - Whether the optional 5th safety layer (local-endpoint check) is included.
 - Precise seed identities/units pinned for tests.
+
+---
+
+## 15. Phase review log (deferred adversarial-review findings)
+
+Findings from each phase's §12 adversarial review that were consciously
+deferred (not dropped). Each names the phase that should resolve it.
+
+### Phase 0 (commit `1eb19fc`) — reviewed, 0 critical. Fixed inline: a missing
+`typecheck` script in the e2e workspace (commit `a20c6ac`). Deferred:
+
+- **[→ Phase 4] DynamoDB Local container is a leaked singleton.** `scripts/db.mjs`
+  starts `hc-dynamodb-local` detached on fixed port 8000 and `dev.mjs` never
+  stops it. After `npm run e2e` the container survives; two concurrent runs (or a
+  run alongside `npm run dev`) collide on the same container/port/shared data.
+  The Phase 4 dedicated non-watch test-mode launcher should own DB lifecycle
+  (globalTeardown, or a dedicated e2e container name/port), and/or Phase 6 CI
+  must `npm run db:stop` between runs.
+- **[→ Phase 4] Windows process-tree teardown is unproven.** The webServer tree
+  (`npm → dev.mjs → concurrently → tsx watch ×2 + npm → vite`) has no signal
+  handling; on Windows, orphaned `node`/`vite`/watcher processes may survive
+  teardown and hold :5173. The Phase 4 launcher should be validated for clean
+  teardown (no surviving node/vite after a run) or add explicit tree-kill.
+- **[→ Phase 4] `reuseExistingServer` + content-blind readiness can mask a wrong
+  stack.** The :5173 gate only checks "does HTTP answer," so a stale orphan or a
+  live-mode dev server could be silently reused and yield false greens. Add a
+  stack-identity guard (e.g. a hermetic-mode assertion) before tests that touch
+  real data.
+- **[→ Phase 6] `webServer.timeout: 180_000` may be tight on a cold CI runner**
+  (image pull + container + create + seed + cold tsx/vite). Document an image
+  prewarm or bump the timeout in the CI job.
+- **[→ Phase 4] No `globalSetup`/`globalTeardown` or port preflight** (overlaps
+  the above) — fold into the Phase 4 launcher.
+- *Ignored (trivial):* `stdout/stderr: 'pipe'` hiding live boot progress on a
+  hang — acceptable; surfaces on failure.

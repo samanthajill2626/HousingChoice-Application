@@ -1,4 +1,8 @@
 // MessagingAdapter — the ONLY place the Twilio SDK is imported (adapter rule).
+// NOTE: RecordingMessagingDriver is imported at the bottom (after exports it
+// needs) to avoid a circular-dependency issue at the module graph level.
+// recordingMessaging.ts imports only TYPES from this file, so there is no
+// runtime cycle.
 //
 // Twilio **Programmable Messaging** only — NOT the Conversations product
 // (intentional deviation, README "Deviations" table 2026-06-12): every
@@ -28,6 +32,7 @@ import twilio from 'twilio';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
+import { RecordingMessagingDriver } from './recordingMessaging.js';
 
 export interface SendMessageParams {
   /** Recipient phone, E.164. */
@@ -656,26 +661,32 @@ export interface CreateMessagingAdapterDeps {
 
 export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): MessagingAdapter {
   const config = deps.config ?? loadConfig();
-  if (config.messagingDriver === 'console') {
-    return new ConsoleMessagingDriver({ logger: deps.logger });
+  const base: MessagingAdapter = (() => {
+    if (config.messagingDriver === 'console') {
+      return new ConsoleMessagingDriver({ logger: deps.logger });
+    }
+    // loadConfig() fail-fasts these for MESSAGING_DRIVER=twilio; this guard
+    // covers hand-built AppConfig objects.
+    if (
+      !config.twilioAccountSid ||
+      !config.twilioApiKeySid ||
+      !config.twilioApiKeySecret ||
+      !config.twilioMessagingServiceSid
+    ) {
+      throw new Error('createMessagingAdapter: messagingDriver=twilio but twilio* config is incomplete');
+    }
+    return new TwilioMessagingDriver({
+      accountSid: config.twilioAccountSid,
+      apiKeySid: config.twilioApiKeySid,
+      apiKeySecret: config.twilioApiKeySecret,
+      messagingServiceSid: config.twilioMessagingServiceSid,
+      ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
+      client: deps.twilioClient,
+      logger: deps.logger,
+    });
+  })();
+  if (config.recordOutbox) {
+    return new RecordingMessagingDriver({ inner: base, config, logger: deps.logger });
   }
-  // loadConfig() fail-fasts these for MESSAGING_DRIVER=twilio; this guard
-  // covers hand-built AppConfig objects.
-  if (
-    !config.twilioAccountSid ||
-    !config.twilioApiKeySid ||
-    !config.twilioApiKeySecret ||
-    !config.twilioMessagingServiceSid
-  ) {
-    throw new Error('createMessagingAdapter: messagingDriver=twilio but twilio* config is incomplete');
-  }
-  return new TwilioMessagingDriver({
-    accountSid: config.twilioAccountSid,
-    apiKeySid: config.twilioApiKeySid,
-    apiKeySecret: config.twilioApiKeySecret,
-    messagingServiceSid: config.twilioMessagingServiceSid,
-    ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
-    client: deps.twilioClient,
-    logger: deps.logger,
-  });
+  return base;
 }

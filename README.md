@@ -58,6 +58,7 @@ app/                  @housingchoice/app — the monolith (both processes)
     lib/              shared utilities (correlation context, logging, etc.)
   test/               vitest tests
 dashboard/            React + Vite dashboard (shell only in Phase 0; owned separately)
+e2e/                  Playwright UI end-to-end harness — drives the real dashboard+API; see e2e/README.md (P1)
 infra/
   modules/            shared Terraform modules (M0.4)
   envs/dev/           hc-dev- stack (own S3 backend state, use_lockfile = true)
@@ -77,7 +78,9 @@ Dockerfile            single multi-stage ARM64 image for app + worker
 | `npm run db:stop` | Stop the container (in-memory data is discarded) | M0.3 |
 | `npm run db:create` | Create all 9 tables from `app/src/lib/tables.ts` against `DYNAMODB_ENDPOINT` (default `http://localhost:8000`); existing tables skipped | M0.3 |
 | `npm run db:seed` | Write fixed-ID fake seed data exercising every GSI — idempotent, safe to re-run | M0.3 |
-| `npm test` | Vitest across all workspaces (DynamoDB integration suite auto-skips when DynamoDB Local isn't running) | M0.1 |
+| `npm test` | Vitest across all workspaces (DynamoDB integration suite auto-skips when DynamoDB Local isn't running). Does NOT include the Playwright e2e suite (that's `npm run e2e`) | M0.1 |
+| `npm run e2e` | **UI end-to-end tests** (Playwright). Boots a hermetic stack via `scripts/e2e-session.mjs` (DynamoDB Local + app + worker + Vite, with `DEV_AUTH_ENABLED` + `MESSAGING_RECORD_OUTBOX` on), drives a real browser through every spec, tears down. `reuseExistingServer` reuses a running session locally; CI boots fresh. Needs Docker. Full guide: [`e2e/README.md`](e2e/README.md) | P1 e2e |
+| `npm run e2e:session` | Long-lived, non-watch stack for the agent inner loop (drive it live via the Playwright MCP). Helpers: `e2e:restart` (restart app+worker only — Vite/DB/browser keep their place), `e2e:reseed` (`POST /__dev/reseed`), `e2e:stop` (reliable teardown), `e2e:report` (open last HTML report) | P1 e2e |
 | `npm run lint` | ESLint (flat config), incl. the streams-only `readFileSync` ban in app/src | M0.1 |
 | `npm run typecheck` | `tsc --noEmit` across workspaces | M0.1 |
 | `npm run bootstrap` | One-time account bootstrap: creates/enforces the two versioned, encrypted, public-blocked TF state buckets — idempotent and account-guarded; `bootstrap:check` is the read-only dry run. The ONLY infra not managed by Terraform (backend chicken-and-egg). | M0.4 |

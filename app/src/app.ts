@@ -171,7 +171,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth', '/public'].some(
+      const reserved = ['/api', '/webhooks', '/auth', '/public', '/__dev'].some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

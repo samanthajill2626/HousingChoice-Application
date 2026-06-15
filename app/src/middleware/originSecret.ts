@@ -34,7 +34,11 @@ export function originSecretMiddleware(opts: OriginSecretOptions): RequestHandle
     // Dev-only endpoints are exempt — they sit before this validator in the
     // middleware chain when the devRouter is present, and must be reachable
     // (returning 404) even when it is absent so tests can assert the gate.
-    if (req.path === '/__dev/ping' || req.path.startsWith('/__dev/')) {
+    // NOTE: Exempting the whole /__dev/ prefix means every current AND future
+    // /__dev/* endpoint relies solely on the structural absent-in-prod gate (no
+    // origin-secret fence). The blast radius grows as later phases add dev
+    // routes — keep this in mind before adding anything sensitive under /__dev.
+    if (req.path.startsWith('/__dev/')) {
       next();
       return;
     }

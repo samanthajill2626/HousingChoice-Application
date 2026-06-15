@@ -1122,6 +1122,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
       casesRepo: world.casesRepo,
+      // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
+      unitsRepo: world.unitsRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin
       // user(s)) via the SAME fake users repo the auth gate uses, reads the

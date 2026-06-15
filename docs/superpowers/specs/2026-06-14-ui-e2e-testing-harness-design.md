@@ -548,3 +548,23 @@ channel), `CI=1` semantics (`reuseExistingServer:!CI`, `forbidOnly:!!CI`),
 artifact upload, cold-runner timeout note, and the carried-forward limitations
 (Linux standalone `e2e:session`/`e2e:stop` teardown validation; pin
 `@playwright/mcp`). No code/review findings (docs-only).
+
+### Final holistic review (whole branch vs main) — prod-safety story HOLDS.
+The dev surface is provably inert in production: deploy hard-sets
+`NODE_ENV=production` and never sets the dev flags; `loadConfig` (the only config
+constructor in prod code) fail-fasts on either flag in prod; the dev router is
+dynamically imported and mounts only when `devAuthEnabled && !prod &&
+dynamodbEndpoint`; the recording driver engages only on `recordOutbox`;
+`resetLocalData` is double-guarded; the `/__dev` Vite proxy is dev-server-only.
+All prod-traffic-affecting tweaks (nosniff move, SPA `/__dev` reservation,
+origin-secret `/__dev/` exemption, messaging factory refactor, seed extraction)
+are behavior-preserving/hardening. Covered by `app/test/devGating.test.ts`.
+
+> **⚠️ INTEGRATION BLOCKER (for Cameron — needs a git decision):** this branch's
+> merge-base predates **M1.10** (cases/boards API+UI, relay-on-placement,
+> masked-call landlord-leg, pool-number collision fix `6f44980`). The harness
+> commits do NOT touch those files (no overlap), so `git merge main` into the
+> branch should integrate cleanly — but the branch must be brought up to date and
+> the suite re-run against the live M1.10 code BEFORE merging. Do NOT integrate
+> via any reset/replace that would drop M1.10. (I did not perform the merge —
+> shared checkout + concurrent agents + the no-branch-switching rule.)

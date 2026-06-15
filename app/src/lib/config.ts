@@ -19,6 +19,9 @@ export interface AppConfig {
   /** Dev-only test/QA endpoints (dev-login, outbox, reseed) are gated on this.
    *  MUST be false in production — loadConfig fails fast otherwise. */
   devAuthEnabled: boolean;
+  /** Dev-only: when true, outbound messages are also persisted to the
+   *  hc-local-dev-outbox table for inspection. MUST be false in production. */
+  recordOutbox: boolean;
   /** HTTP listen port for the app process (CloudFront -> EC2 origin targets 8080). */
   port: number;
   logLevel: string;
@@ -222,6 +225,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(
       'DEV_AUTH_ENABLED is set while NODE_ENV=production — refusing to start. The ' +
         'dev-only auth/test endpoints must never be enabled in production.',
+    );
+  }
+
+  const recordOutbox = ['true', '1', 'yes'].includes((env.MESSAGING_RECORD_OUTBOX ?? '').toLowerCase());
+  if (recordOutbox && nodeEnv === 'production') {
+    throw new Error(
+      'MESSAGING_RECORD_OUTBOX is set while NODE_ENV=production — refusing to start. The dev ' +
+        'message outbox persists message bodies (PII) and must never run in production.',
     );
   }
 
@@ -451,6 +462,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     nodeEnv,
     devAuthEnabled,
+    recordOutbox,
     port,
     logLevel: env.LOG_LEVEL ?? 'info',
     cfOriginSecret: cfOriginSecret ?? DEV_ORIGIN_SECRET_DEFAULT,

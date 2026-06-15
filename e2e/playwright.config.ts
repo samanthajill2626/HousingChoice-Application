@@ -23,11 +23,19 @@ export default defineConfig({
     video: 'retain-on-failure',
     navigationTimeout: 15_000,
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'setup', testDir: '.', testMatch: /auth\.setup\.ts/ },
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+      dependencies: ['setup'],
+    },
+  ],
   webServer: {
     // Boots DynamoDB Local + app(:8080) + worker + Vite(:5173) in hermetic
     // mode. No AWS creds or secrets needed; messaging defaults to console.
     command: 'npm run dev -- --local',
+    env: { DEV_AUTH_ENABLED: '1' },
     cwd: repoRoot,
     // Readiness gate: the Vite server is the surface the spec hits, and dev.mjs
     // only starts it after db:start/create/seed, so this also covers DB boot.

@@ -16,6 +16,9 @@ export type MessagingDriverName = 'twilio' | 'console';
 
 export interface AppConfig {
   nodeEnv: string;
+  /** Dev-only test/QA endpoints (dev-login, outbox, reseed) are gated on this.
+   *  MUST be false in production — loadConfig fails fast otherwise. */
+  devAuthEnabled: boolean;
   /** HTTP listen port for the app process (CloudFront -> EC2 origin targets 8080). */
   port: number;
   logLevel: string;
@@ -209,6 +212,18 @@ export function tableName(base: string, env: NodeJS.ProcessEnv = process.env): s
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV ?? 'development';
+
+  // Dev-only endpoints (dev-login, outbox, reseed in later phases) are gated
+  // behind this flag. It must NEVER be set in production; if it is, refuse to
+  // start rather than expose a backdoor. Checked first, before other validation,
+  // so the dangerous combination fails fast regardless of what else is missing.
+  const devAuthEnabled = ['true', '1', 'yes'].includes((env.DEV_AUTH_ENABLED ?? '').toLowerCase());
+  if (devAuthEnabled && nodeEnv === 'production') {
+    throw new Error(
+      'DEV_AUTH_ENABLED is set while NODE_ENV=production — refusing to start. The ' +
+        'dev-only auth/test endpoints must never be enabled in production.',
+    );
+  }
 
   const cfOriginSecret = env.CF_ORIGIN_SECRET;
   if (nodeEnv === 'production' && !cfOriginSecret) {
@@ -435,6 +450,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   return {
     nodeEnv,
+    devAuthEnabled,
     port,
     logLevel: env.LOG_LEVEL ?? 'info',
     cfOriginSecret: cfOriginSecret ?? DEV_ORIGIN_SECRET_DEFAULT,

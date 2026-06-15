@@ -9,6 +9,7 @@ import type {
   BroadcastResults,
   BroadcastsPage,
   BroadcastStatus,
+  CallResponse,
   ChangeRoleResult,
   Contact,
   ContactPatch,
@@ -150,6 +151,31 @@ export async function setAssignment(
     { method: 'PATCH', body: { assigneeUserId } },
   );
   return res.conversation;
+}
+
+// --- Calls (M1.9) -----------------------------------------------------------
+
+/** GET /api/calls/:callId — resolve a call (by Twilio CallSid == provider_sid)
+ *  to its metadata-only call entry + the conversation it belongs to. The
+ *  conversation is null when the call's thread no longer exists (the server
+ *  surfaces the call alone). Throws ApiError(404,'call_not_found') when the
+ *  CallSid is unknown / not a call. The quick-reply seam uses this to map a
+ *  missed-call deep link (callId) to its conversation. */
+export function getCall(callId: string, signal?: AbortSignal): Promise<CallResponse> {
+  return request<CallResponse>(`/api/calls/${encodeURIComponent(callId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/**
+ * The auth-gated, SAME-ORIGIN URL that streams a founder-bridge call's recording
+ * (audio/mpeg) for playback. NOT a fetch helper: feed it straight to an
+ * <audio controls src=…> — the browser request carries the session cookie
+ * (same-origin), so the PII audio never transits a public/presigned URL. Only
+ * use it when the call entry actually carries a recording_s3_key.
+ */
+export function callRecordingUrl(callId: string): string {
+  return `/api/calls/${encodeURIComponent(callId)}/recording`;
 }
 
 // --- Relay groups (M1.7) ----------------------------------------------------

@@ -12,6 +12,7 @@
 import { Badge, Button, DeliveryBadge, presentDeliveryStatus } from '../../ui';
 import { isPending, type TimelineMessage } from './useThreadMessages';
 import { PerRecipientDeliveryBadges } from './PerRecipientDeliveryBadges';
+import { CallEntry } from './CallEntry';
 import { memberLabelForKey } from './relay';
 import type { ConversationParticipant, Message, MessageAuthor } from '../../api';
 import styles from './MessageBubble.module.css';
@@ -51,6 +52,14 @@ export function MessageBubble({
   retrying = false,
   roster,
 }: MessageBubbleProps): React.JSX.Element {
+  // Voice call (M1.9): a call is a metadata-only timeline event, not a chat
+  // bubble — render the dedicated CallEntry and skip all the 1:1/relay text +
+  // delivery rendering below. (An optimistic pending bubble is always an
+  // outbound SMS, never a call, so this never collides with PendingMessage.)
+  if (message.type === 'call' && !isPending(message)) {
+    return <CallEntry message={message} />;
+  }
+
   const outbound = message.direction === 'outbound';
   const pending = isPending(message);
   const { isFailure } = presentDeliveryStatus(message.delivery_status);

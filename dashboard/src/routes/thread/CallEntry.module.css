@@ -1,0 +1,94 @@
+/* CallEntry — a centered, full-width timeline event (not a left/right bubble).
+ * The card is a quiet surface that reads as a system event in the conversation. */
+.row {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--hc-space-3);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+  width: 100%;
+  max-width: min(90%, 34rem);
+  padding: var(--hc-space-2) var(--hc-space-3);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface-alt);
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hc-space-2);
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--hc-color-text-muted);
+  flex: none;
+}
+
+.party {
+  font-weight: var(--hc-font-weight-semibold);
+}
+
+.direction {
+  color: var(--hc-color-text-muted);
+  font-size: var(--hc-font-size-xs);
+}
+
+.duration {
+  margin-left: auto;
+  color: var(--hc-color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.audio {
+  width: 100%;
+  /* Keep the native control compact and on-surface. */
+  height: 2.25rem;
+}
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-1);
+}
+
+.transcriptToggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--hc-color-brand);
+  font: inherit;
+  font-weight: var(--hc-font-weight-medium);
+  cursor: pointer;
+}
+
+.transcriptToggle:hover {
+  text-decoration: underline;
+}
+
+.transcriptToggle:focus-visible {
+  outline: none;
+  border-radius: var(--hc-radius-sm);
+  box-shadow: var(--hc-focus-ring);
+}
+
+.transcriptText {
+  margin: 0;
+  padding: var(--hc-space-2);
+  border-radius: var(--hc-radius-sm);
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}

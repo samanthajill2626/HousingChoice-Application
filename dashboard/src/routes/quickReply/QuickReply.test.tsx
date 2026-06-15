@@ -5,19 +5,26 @@
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Conversation, OrgSettings, SendMessageResult } from '../../api/index.js';
+import type {
+  CallResponse,
+  Conversation,
+  Message,
+  OrgSettings,
+  SendMessageResult,
+} from '../../api/index.js';
 import { ToastProvider } from '../../ui/index.js';
 
 // --- Mock only the endpoint functions; keep useApi/ApiError/types real. ------
-const { getSettings, getConversation, sendMessage } = vi.hoisted(() => ({
+const { getSettings, getConversation, getCall, sendMessage } = vi.hoisted(() => ({
   getSettings: vi.fn(),
   getConversation: vi.fn(),
+  getCall: vi.fn(),
   sendMessage: vi.fn(),
 }));
 
 vi.mock('../../api/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/index.js')>();
-  return { ...actual, getSettings, getConversation, sendMessage };
+  return { ...actual, getSettings, getConversation, getCall, sendMessage };
 });
 
 // Imported AFTER the mock is registered.
@@ -49,6 +56,25 @@ const SEND_RESULT: SendMessageResult = {
   status: 'queued',
 };
 
+// A masked missed-call entry the deep-link callId resolves to (M1.9).
+const CALL_MESSAGE: Message = {
+  conversationId: FAKE_CONVERSATION_ID,
+  tsMsgId: '1718000000000#CA123',
+  type: 'call',
+  direction: 'inbound',
+  author: 'unknown',
+  provider_sid: FAKE_CALL_ID,
+  provider_ts: '2026-06-13T00:00:00.000Z',
+  delivery_status: 'queued',
+  call_status: 'no-answer',
+  call_outcome: 'missed',
+  masked: true,
+  call_party_label: 'Tenant',
+  created_at: '2026-06-13T00:00:00.000Z',
+};
+
+const CALL_RESPONSE: CallResponse = { call: CALL_MESSAGE, conversation: CONVERSATION };
+
 /** Render QuickReply at a given URL, inside a router + toast provider. */
 function renderAt(initialEntry: string): void {
   render(
@@ -66,6 +92,7 @@ function renderAt(initialEntry: string): void {
 beforeEach(() => {
   getSettings.mockReset().mockResolvedValue(SETTINGS);
   getConversation.mockReset().mockResolvedValue(CONVERSATION);
+  getCall.mockReset().mockResolvedValue(CALL_RESPONSE);
   sendMessage.mockReset().mockResolvedValue(SEND_RESULT);
   // Default: opened without an #action hash.
   window.location.hash = '';
@@ -104,13 +131,42 @@ describe('<QuickReply> — canned replies', () => {
   });
 });
 
-describe('<QuickReply> — interim (callId only, no conversation)', () => {
-  it('renders the honest no-call-API state and does NOT send', async () => {
+describe('<QuickReply> — callId-only deep link (M1.9 resolution)', () => {
+  it('resolves the callId to its conversation and offers the canned replies', async () => {
     renderAt(`/quick-reply/${FAKE_CALL_ID}`);
 
-    expect(await screen.findByText(/Call details aren't available yet/)).toBeInTheDocument();
-    // No conversation was fetched and nothing was sent — no fake send.
+    // The callId is resolved via getCall (not getConversation) → the canned
+    // replies for the resolved conversation render.
+    expect(await screen.findByText('Please text me')).toBeInTheDocument();
+    expect(getCall).toHaveBeenCalledWith(FAKE_CALL_ID, expect.anything());
     expect(getConversation).not.toHaveBeenCalled();
+    // The resolved conversation's phone is shown.
+    expect(screen.getByText('+15555550123')).toBeInTheDocument();
+  });
+
+  it('sends a canned reply into the conversation the callId resolved to', async () => {
+    renderAt(`/quick-reply/${FAKE_CALL_ID}`);
+
+    fireEvent.click(await screen.findByText('Please text me'));
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+    expect(sendMessage).toHaveBeenCalledWith(FAKE_CONVERSATION_ID, { body: 'Please text me' });
+  });
+
+  it('shows the honest dead-end when the call has no conversation', async () => {
+    getCall.mockResolvedValue({ call: CALL_MESSAGE, conversation: null });
+    renderAt(`/quick-reply/${FAKE_CALL_ID}`);
+
+    expect(await screen.findByText(/No conversation for this call/)).toBeInTheDocument();
+    // Nothing to send into — no send happened.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows an error state when the call cannot be resolved', async () => {
+    const { ApiError } = await import('../../api/index.js');
+    getCall.mockRejectedValue(new ApiError(404, 'call_not_found', 'call_not_found'));
+    renderAt(`/quick-reply/${FAKE_CALL_ID}`);
+
+    expect(await screen.findByText(/Couldn't load the conversation/)).toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 });

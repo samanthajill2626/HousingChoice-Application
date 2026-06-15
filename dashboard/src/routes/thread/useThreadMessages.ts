@@ -97,18 +97,29 @@ export function useThreadMessages(conversationId: string): UseThreadMessages {
   // The set of real tsMsgIds we already hold — read inside callbacks without
   // re-subscribing them to `messages`.
   const seenRef = useRef<Set<string>>(new Set());
+  // The subset of seen tsMsgIds that are `call` entries (M1.9). A call entry's
+  // metadata (call_status/outcome/duration, and a late recording/transcript)
+  // mutates IN PLACE under the SAME tsMsgId — those updates ride message.persisted
+  // for an already-seen id. The seen-id fast path only patches delivery_status
+  // (meaningless for a call), so for a call we must re-fetch instead. This set
+  // lets ingestEvent tell "seen call" from "seen sms/mms" without subscribing to
+  // `messages`.
+  const seenCallsRef = useRef<Set<string>>(new Set());
   const oldestRef = useRef<string | undefined>(undefined);
 
   const recordIds = useCallback((list: TimelineMessage[]) => {
     const seen = new Set<string>();
+    const seenCalls = new Set<string>();
     let oldest: string | undefined;
     for (const m of list) {
       if (!isPending(m)) {
         seen.add(m.tsMsgId);
+        if (m.type === 'call') seenCalls.add(m.tsMsgId);
         if (oldest === undefined || m.tsMsgId < oldest) oldest = m.tsMsgId;
       }
     }
     seenRef.current = seen;
+    seenCallsRef.current = seenCalls;
     oldestRef.current = oldest;
   }, []);
 
@@ -131,6 +142,7 @@ export function useThreadMessages(conversationId: string): UseThreadMessages {
     setError(undefined);
     setMessages([]);
     seenRef.current = new Set();
+    seenCallsRef.current = new Set();
     oldestRef.current = undefined;
 
     listMessages(conversationId, { limit: PAGE_LIMIT }, controller.signal)
@@ -290,6 +302,19 @@ export function useThreadMessages(conversationId: string): UseThreadMessages {
   const ingestEvent = useCallback(
     (event: MessagePersistedEvent) => {
       if (event.conversationId !== conversationId) return;
+      // Voice call (M1.9): a call entry's metadata (ringing→answered/missed,
+      // duration, and a late recording/transcript) mutates IN PLACE under the
+      // same tsMsgId and rides message.persisted. The seen-id fast path below
+      // only patches delivery_status (meaningless for a call), so re-fetch the
+      // latest page to pick up the updated call fields — without a full reload.
+      if (seenCallsRef.current.has(event.tsMsgId)) {
+        listMessages(conversationId, { limit: PAGE_LIMIT })
+          .then((page) => apply((prev) => mergeById(prev, page)))
+          .catch(() => {
+            // Non-fatal: the next event or a manual refresh will reconcile.
+          });
+        return;
+      }
       // Dedupe: if we already hold this tsMsgId (e.g. our own optimistic send
       // just reconciled to it), only patch its delivery_status; otherwise fetch
       // a fresh page bounded so the new message lands without a full reload.

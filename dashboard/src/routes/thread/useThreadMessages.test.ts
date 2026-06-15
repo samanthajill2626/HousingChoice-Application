@@ -102,6 +102,62 @@ describe('useThreadMessages', () => {
     expect(m?.delivery_status).toBe('delivered');
   });
 
+  it('re-fetches a seen CALL entry on message.persisted so late status/recording/transcript update live (M1.9)', async () => {
+    // Seed a missed call (no recording/transcript yet).
+    api.listMessages.mockResolvedValue([
+      msg({
+        tsMsgId: 'tc#CA1',
+        type: 'call',
+        direction: 'inbound',
+        call_status: 'no-answer',
+        call_outcome: 'missed',
+        masked: false,
+        call_party_label: 'Tenant',
+        body: undefined,
+      }),
+    ]);
+    const { result } = renderHook(() => useThreadMessages(CONV));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // The call later gets a recording + transcript (same tsMsgId) — the re-fetch
+    // returns the enriched entry.
+    api.listMessages.mockClear();
+    api.listMessages.mockResolvedValue([
+      msg({
+        tsMsgId: 'tc#CA1',
+        type: 'call',
+        direction: 'inbound',
+        call_status: 'completed',
+        call_outcome: 'answered',
+        call_duration: 42,
+        masked: false,
+        call_party_label: 'Tenant',
+        recording_s3_key: 'recordings/CA1.mp3',
+        transcript: 'Hello there',
+        body: undefined,
+      }),
+    ]);
+
+    await act(async () => {
+      result.current.ingestEvent({
+        conversationId: CONV,
+        tsMsgId: 'tc#CA1',
+        direction: 'inbound',
+        deliveryStatus: 'queued',
+      });
+      await Promise.resolve();
+    });
+
+    // A seen CALL id re-fetches (unlike a seen SMS, which patches only).
+    expect(api.listMessages).toHaveBeenCalled();
+    await waitFor(() => {
+      const m = result.current.messages.find((x) => x.tsMsgId === 'tc#CA1');
+      expect(m?.call_outcome).toBe('answered');
+      expect(m?.recording_s3_key).toBe('recordings/CA1.mp3');
+      expect(m?.transcript).toBe('Hello there');
+    });
+  });
+
   it('fetches + merges (deduped) for an SSE event with an unseen tsMsgId', async () => {
     const { result } = renderHook(() => useThreadMessages(CONV));
     await waitFor(() => expect(result.current.loading).toBe(false));

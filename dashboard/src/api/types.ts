@@ -25,11 +25,33 @@ export type RelayStatus = 'open' | 'closed';
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'pm' | 'team_member' | 'unknown';
 
-/** Message transport. */
-export type MessageType = 'sms' | 'mms';
+/** Message transport. `call` (M1.9) is a metadata-only voice-call timeline entry
+ *  (not an SMS/MMS body) — see the call-specific fields on Message. */
+export type MessageType = 'sms' | 'mms' | 'call';
 
 /** Message direction relative to the platform. */
 export type MessageDirection = 'inbound' | 'outbound';
+
+/**
+ * Voice call lifecycle (M1.9). Mirrors Twilio's CallStatus values verbatim, so
+ * the server's status-callback mapping is identity. Present only on a
+ * `type:'call'` Message.
+ */
+export type CallStatus =
+  | 'ringing'
+  | 'in-progress'
+  | 'completed'
+  | 'no-answer'
+  | 'busy'
+  | 'failed'
+  | 'canceled';
+
+/**
+ * Coarse human-facing call outcome (M1.9): `answered` (a leg connected),
+ * `missed` (nobody answered / busy / failed), `voicemail` (founder-bridge seam).
+ * This is what the timeline badge renders.
+ */
+export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
 /** Who authored a message. `unknown` = from an un-triaged contact (never guessed). */
 export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown';
@@ -177,6 +199,43 @@ export interface Message {
    * messages; absent on 1:1 (whose single `delivery_status` is unchanged).
    */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+
+  // --- Voice call (M1.9) — present only on a type:'call' entry --------------
+  // A call entry is a metadata-only timeline item. `provider_sid` carries the
+  // Twilio CallSid. PII (doc §9): NEVER a raw counterpart phone — the masked
+  // call_party_label below is a role/name only, and the recording is served
+  // through the auth-gated /api/calls/:callId/recording endpoint (never a URL
+  // here). The recording/transcript fields appear ONLY on masked:false
+  // founder-bridge calls — masked relay calls are never recorded/transcribed.
+  /** Twilio call lifecycle status (the status callback advances it forward-only). */
+  call_status?: CallStatus;
+  /** Coarse outcome (answered/missed/voicemail) — drives the timeline badge. */
+  call_outcome?: CallOutcome;
+  /** When the call leg was first seen (ISO 8601). */
+  started_at?: string;
+  /** When a leg connected (ISO 8601); absent until answered. */
+  answered_at?: string;
+  /** When the call ended (ISO 8601); absent until completion. */
+  ended_at?: string;
+  /** Connected duration in whole seconds (Twilio CallDuration). */
+  call_duration?: number;
+  /** True for masked relay-pool calls (NEVER recorded/transcribed). */
+  masked?: boolean;
+  /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
+  call_party_label?: string;
+  /**
+   * S3 key of the mirrored recording (founder-bridge calls only). Its PRESENCE
+   * is the signal that a playable recording exists — render the player only when
+   * set; the bytes are fetched via callRecordingUrl()/the auth-gated endpoint.
+   */
+  recording_s3_key?: string;
+  /** Recording duration in whole seconds (founder-bridge calls only). */
+  recording_duration?: number;
+  /**
+   * VERBATIM call transcript (founder-bridge calls only; never on masked calls).
+   * Render the collapsible transcript section only when present.
+   */
+  transcript?: string;
   created_at: string;
   [key: string]: unknown;
 }
@@ -187,6 +246,21 @@ export interface SendMessageResult {
   providerSid: string;
   tsMsgId: string;
   status: DeliveryStatus;
+}
+
+// --- Calls (M1.9) -----------------------------------------------------------
+
+/**
+ * GET /api/calls/:callId → { call, conversation }. `callId` is the Twilio
+ * CallSid (== the call entry's provider_sid). `call` is the metadata-only
+ * `type:'call'` Message; `conversation` is the thread it belongs to, or null
+ * when the call entry points at a conversation that no longer exists (the
+ * server surfaces the call alone rather than a hard 404). The quick-reply seam
+ * reads conversation.conversationId to resolve a missed-call deep link.
+ */
+export interface CallResponse {
+  call: Message;
+  conversation: Conversation | null;
 }
 
 // --- Relay groups (M1.7) ----------------------------------------------------

@@ -150,17 +150,17 @@ export default function QuickReply(): React.JSX.Element {
       );
     }
 
-    // Honest interim state: only a callId, no call API yet (M1.9).
+    // Can't resolve a target at all (no callId and no conversationId). The route
+    // always carries a :callId, so this is the defensive "nothing to go on" case.
     if (target.kind === 'no_call_api') {
       return (
         <EmptyState
           icon={<PhoneIcon size={28} />}
-          title="Call details aren't available yet"
+          title="Call details aren't available"
           description={
             <>
-              This missed-call reply view connects to the call once call tracking
-              ships. For now, open the conversation from the inbox to reply.
-              (Reference: call {callId ?? 'unknown'}.)
+              We couldn't tell which call this is. Open the conversation from the
+              inbox to reply.
             </>
           }
           action={
@@ -172,7 +172,29 @@ export default function QuickReply(): React.JSX.Element {
       );
     }
 
-    // Conversation fetch error.
+    // The call resolved, but its conversation is gone (M1.9 honest dead-end) —
+    // there is nothing to reply into, and we never fabricate one.
+    if (target.kind === 'missing_conversation') {
+      return (
+        <EmptyState
+          icon={<PhoneIcon size={28} />}
+          title="No conversation for this call"
+          description={
+            <>
+              This call isn't linked to a conversation, so there's nothing to
+              reply to here. (Reference: call {callId ?? 'unknown'}.)
+            </>
+          }
+          action={
+            <Button variant="secondary" onClick={close}>
+              Back to inbox
+            </Button>
+          }
+        />
+      );
+    }
+
+    // Conversation/call fetch error.
     if (target.kind === 'error') {
       return (
         <EmptyState

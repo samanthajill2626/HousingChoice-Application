@@ -1,11 +1,9 @@
 // useQuickReplyTarget — resolve which conversation a quick reply should be sent
 // to, from the route's `:callId` param and/or a `?conversationId=` query param.
 //
-// THE M1.9 SEAM (read this before touching the resolution logic):
-// ----------------------------------------------------------------
-// Calls do NOT exist as entities yet. There is no call API, no
-// callId→conversation mapping, and no missed-call push trigger — all of that is
-// milestone M1.9. So this hook resolves a target in exactly two ways today:
+// THE M1.9 SEAM (now wired):
+// --------------------------
+// Two ways to resolve a target:
 //
 //   • conversationId present (?conversationId=<id>) → that's the target. This is
 //     the WORKING M1.4 path: send a canned reply to a KNOWN conversation. We
@@ -13,23 +11,32 @@
 //     to the full thread.
 //
 //   • only a callId (the deep-link the SW produces from a missed-call push) →
-//     there is no way to resolve it to a conversation yet, so we return an
-//     HONEST interim state ('no_call_api'). We do NOT fabricate a conversation.
+//     resolve it with getCall(callId): the response carries the call entry's
+//     conversation directly. We read that conversation and fall through to the
+//     same 'conversation' state below — so everything downstream (the sheet, the
+//     send, the auto-send) works off a resolved conversationId unchanged.
 //
-// >>> TODO(M1.9): when the call entity + API land, resolve callId→conversation
-// >>> HERE: fetch the call (GET /api/calls/<callId> or equivalent), read its
-// >>> conversationId, and fall through to the same getConversation path below.
-// >>> The 'no_call_api' branch is the ONLY thing that changes — everything
-// >>> downstream (the sheet, the send, the auto-send) already works off a
-// >>> resolved conversationId, so M1.9 is a drop-in at this seam.
-import { useApi, getConversation, ApiError, type Conversation } from '../../api/index.js';
+// HONEST fallbacks (never fabricate a conversation):
+//   - getCall 404 (unknown CallSid) → 'error'.
+//   - call found but its conversation is gone (server returns conversation:null)
+//     → 'missing_conversation' (a distinct honest state — the call is real but
+//     there is nothing to reply into).
+//   - neither callId nor conversationId → 'no_call_api' (can't resolve at all).
+import {
+  useApi,
+  getCall,
+  getConversation,
+  ApiError,
+  type Conversation,
+} from '../../api/index.js';
 
 /** What kind of target we resolved to. */
 export type TargetKind =
-  | 'loading' // still fetching the conversation
+  | 'loading' // still fetching the call/conversation
   | 'conversation' // resolved → we have a Conversation to reply into
-  | 'no_call_api' // only a callId, no call API yet (M1.9 interim state)
-  | 'error'; // the conversation fetch failed
+  | 'missing_conversation' // the call resolved but its conversation is gone (M1.9)
+  | 'no_call_api' // neither a callId nor a conversationId to resolve from
+  | 'error'; // the call/conversation fetch failed
 
 export interface QuickReplyTarget {
   kind: TargetKind;
@@ -43,6 +50,14 @@ export interface QuickReplyTarget {
   refetch: () => void;
 }
 
+/** The fetcher's resolution: the conversation to reply into (or null when the
+ *  call resolved but its conversation no longer exists). `null` distinguishes
+ *  "nothing to fetch" (no inputs) from "resolved to no conversation". */
+type Resolution =
+  | { kind: 'none' } // no inputs to resolve from
+  | { kind: 'conversation'; conversation: Conversation }
+  | { kind: 'missing_conversation' }; // call resolved, conversation gone
+
 /**
  * @param callId          the `:callId` route param (may be undefined).
  * @param conversationId  the `?conversationId=` query param (the M1.4 path).
@@ -51,25 +66,47 @@ export function useQuickReplyTarget(
   callId: string | undefined,
   conversationId: string | null,
 ): QuickReplyTarget {
-  // We only fetch when we actually have a conversationId. When we have only a
-  // callId, there is no call API yet (M1.9) — so the fetcher short-circuits to a
-  // sentinel and the hook reports the honest 'no_call_api' interim state.
-  const { data, error, loading, refetch } = useApi<Conversation | null>(
+  // Resolve in priority order: an explicit conversationId wins (M1.4 path); else
+  // resolve the callId via getCall (M1.9). Re-runs when either input changes.
+  const { data, error, loading, refetch } = useApi<Resolution>(
     async (signal) => {
       if (conversationId !== null && conversationId !== '') {
-        return getConversation(conversationId, signal);
+        const conversation = await getConversation(conversationId, signal);
+        return { kind: 'conversation', conversation };
       }
-      // No conversationId → nothing to fetch. (TODO(M1.9): resolve callId here.)
-      return null;
+      if (callId !== undefined && callId !== '') {
+        // The call response carries the conversation directly — no second fetch.
+        const { conversation } = await getCall(callId, signal);
+        if (conversation === null) return { kind: 'missing_conversation' };
+        return { kind: 'conversation', conversation };
+      }
+      // Nothing to resolve from.
+      return { kind: 'none' };
     },
-    [conversationId],
+    [conversationId, callId],
   );
 
-  if (conversationId === null || conversationId === '') {
-    // No conversation to work off. If there's a callId we're in the honest
-    // interim state; if there's neither, it's still the same "can't resolve"
-    // surface (the route always has a :callId, so this is the missed-call case).
-    void callId;
+  if (loading) {
+    return {
+      kind: 'loading',
+      conversationId: conversationId ?? undefined,
+      conversation: undefined,
+      error: undefined,
+      refetch,
+    };
+  }
+  if (error !== undefined) {
+    return {
+      kind: 'error',
+      conversationId: conversationId ?? undefined,
+      conversation: undefined,
+      error,
+      refetch,
+    };
+  }
+
+  if (data === undefined || data.kind === 'none') {
+    // No callId and no conversationId — can't resolve a target at all.
     return {
       kind: 'no_call_api',
       conversationId: undefined,
@@ -79,16 +116,21 @@ export function useQuickReplyTarget(
     };
   }
 
-  if (loading) {
-    return { kind: 'loading', conversationId, conversation: undefined, error: undefined, refetch };
+  if (data.kind === 'missing_conversation') {
+    // The call is real but its conversation is gone — honest dead-end.
+    return {
+      kind: 'missing_conversation',
+      conversationId: undefined,
+      conversation: undefined,
+      error: undefined,
+      refetch,
+    };
   }
-  if (error !== undefined) {
-    return { kind: 'error', conversationId, conversation: undefined, error, refetch };
-  }
+
   return {
     kind: 'conversation',
-    conversationId,
-    conversation: data ?? undefined,
+    conversationId: data.conversation.conversationId,
+    conversation: data.conversation,
     error: undefined,
     refetch,
   };

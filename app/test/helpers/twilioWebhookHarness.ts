@@ -586,6 +586,7 @@ export function createFakeWorld(): FakeWorld {
       if (patch.missedCallAutoTextEnabled !== undefined)
         settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
       if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
+      if (patch.preRingPauseSeconds !== undefined) settings.preRingPauseSeconds = patch.preRingPauseSeconds;
       return { ...settings };
     },
   };

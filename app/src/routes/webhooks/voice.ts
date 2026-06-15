@@ -259,6 +259,30 @@ function isMissOutcome(status: CallStatus, dialDuration: number | undefined): bo
   }
 }
 
+/**
+ * LOAD-BEARING founder call-triage timing fallback (M1.9b / CO2 §7.1): the
+ * pre-ring <Pause> seconds when the OrgSettings value is somehow missing/invalid.
+ * The pause is now founder-editable on OrgSettings (CO2: founder-editable values
+ * live in the settings record, NOT Parameter Store); this is the last-ditch
+ * default so triage timing never breaks on a malformed/absent setting.
+ */
+const PRE_RING_PAUSE_FALLBACK_SECONDS = 2;
+/** Same sane bound the Settings PUT validates (routes/settings.ts). */
+const MAX_PRE_RING_PAUSE_SECONDS = 10;
+
+/**
+ * Clamp the founder-editable pre-ring pause to a sane whole-second range,
+ * falling back to the default for anything non-integer / out of range. Defensive
+ * twin of the route-level validation (a hand-written DynamoDB item could still
+ * carry a bad value) so the TwiML <Pause length> is always valid.
+ */
+function clampPreRingPauseSeconds(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_PRE_RING_PAUSE_SECONDS) {
+    return PRE_RING_PAUSE_FALLBACK_SECONDS;
+  }
+  return value;
+}
+
 export interface TwilioVoiceWebhookDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -506,8 +530,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // verbatim transcript later). The recordingStatusCallback fires once on
     // 'completed' → /voice/recording mirrors the media to S3. This applies to
     // the founder-bridge ONLY; the masked relay <Dial> stays do-not-record.
+    // The pre-ring pause is now founder-editable on OrgSettings (CO2: founder-
+    // editable values live in the settings record, NOT Parameter Store). One
+    // GetItem on the TwiML path — cheap, and the read is defended (a fetch
+    // failure or a malformed value falls back to the default; triage timing
+    // must never crash the bridge).
+    let preRingPauseSeconds = PRE_RING_PAUSE_FALLBACK_SECONDS;
+    try {
+      const orgSettings = await settings.getOrgSettings();
+      preRingPauseSeconds = clampPreRingPauseSeconds(orgSettings.preRingPauseSeconds);
+    } catch (err) {
+      log.warn(
+        { err, callSid: CallSid, fallback: PRE_RING_PAUSE_FALLBACK_SECONDS },
+        'founder triage: reading pre-ring pause from settings failed — using the default',
+      );
+    }
+
     const vr = new VoiceResponse();
-    vr.pause({ length: config.preRingPauseSeconds });
+    vr.pause({ length: preRingPauseSeconds });
     const dial = vr.dial({
       callerId: businessCallerId,
       record: 'record-from-answer-dual',
@@ -543,7 +583,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       founderCell,
     );
     log.info(
-      { callSid: CallSid, callerIdIsBusiness: true, masked: false, recording: true, preRingPauseSeconds: config.preRingPauseSeconds },
+      { callSid: CallSid, callerIdIsBusiness: true, masked: false, recording: true, preRingPauseSeconds },
       'founder triage: pre-ring push sent, bridging to founder cell (callerId = business number, record-from-answer-dual, whisper+gate)',
     );
     sendTwiml(res, vr);

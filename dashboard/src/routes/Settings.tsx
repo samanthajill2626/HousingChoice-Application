@@ -26,6 +26,9 @@ import styles from './admin/Settings.module.css';
 /** Server caps: auto-text + each quick reply ≤320 chars; ≤10 quick replies. */
 const MAX_TEXT_LEN = 320;
 const MAX_QUICK_REPLIES = 10;
+/** Pre-ring pause bounds — mirror the backend (routes/settings.ts): whole 0..10. */
+const MIN_PRE_RING_PAUSE = 0;
+const MAX_PRE_RING_PAUSE = 10;
 
 export default function Settings(): React.JSX.Element {
   const { data, loading, error, refetch } = useApi((signal) => getSettings(signal), []);
@@ -87,6 +90,8 @@ function MissedCallForm({ initial }: { initial: OrgSettings }): React.JSX.Elemen
   const [enabled, setEnabled] = useState(initial.missedCallAutoTextEnabled);
   const [quickReplies, setQuickReplies] = useState<string[]>(initial.quickReplies);
   const [newReply, setNewReply] = useState('');
+  // Kept as a string so the input can be cleared/typed freely; validated below.
+  const [preRingPause, setPreRingPause] = useState(String(initial.preRingPauseSeconds));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>(undefined);
 
@@ -94,7 +99,15 @@ function MissedCallForm({ initial }: { initial: OrgSettings }): React.JSX.Elemen
   const newReplyOver = newReply.length > MAX_TEXT_LEN;
   const anyReplyOver = quickReplies.some((r) => r.length > MAX_TEXT_LEN);
   const atReplyCap = quickReplies.length >= MAX_QUICK_REPLIES;
-  const invalid = autoTextOver || anyReplyOver;
+  // Pre-ring pause: a whole number in [0, 10]. A non-integer / out-of-range
+  // value blocks save (mirrors the backend 400) and shows inline help.
+  const preRingPauseNum = Number(preRingPause);
+  const preRingPauseInvalid =
+    preRingPause.trim() === '' ||
+    !Number.isInteger(preRingPauseNum) ||
+    preRingPauseNum < MIN_PRE_RING_PAUSE ||
+    preRingPauseNum > MAX_PRE_RING_PAUSE;
+  const invalid = autoTextOver || anyReplyOver || preRingPauseInvalid;
 
   function updateReply(index: number, value: string): void {
     setQuickReplies((current) => current.map((r, i) => (i === index ? value : r)));
@@ -121,12 +134,14 @@ function MissedCallForm({ initial }: { initial: OrgSettings }): React.JSX.Elemen
       missedCallAutoTextEnabled: enabled,
       // Drop empties so a blank row never persists.
       quickReplies: quickReplies.map((r) => r.trim()).filter((r) => r !== ''),
+      preRingPauseSeconds: preRingPauseNum,
     };
     try {
       const saved = await updateSettings(patch);
       setAutoText(saved.missedCallAutoText);
       setEnabled(saved.missedCallAutoTextEnabled);
       setQuickReplies(saved.quickReplies);
+      setPreRingPause(String(saved.preRingPauseSeconds));
       toast.success('Settings saved.');
     } catch (err) {
       const message = settingsErrorMessage(err);
@@ -182,6 +197,30 @@ function MissedCallForm({ initial }: { initial: OrgSettings }): React.JSX.Elemen
               {autoText.length}/{MAX_TEXT_LEN}
             </span>
           </>
+        )}
+      </Field>
+
+      <Field
+        label="Pre-ring pause (seconds)"
+        hint="We send you a heads-up notification, then wait this long before ringing your cell — so the push lands just before the call. 0–10 seconds."
+        {...(preRingPauseInvalid && {
+          error: `Enter a whole number from ${MIN_PRE_RING_PAUSE} to ${MAX_PRE_RING_PAUSE}.`,
+        })}
+      >
+        {({ id, describedBy, invalid: fieldInvalid }) => (
+          <Input
+            id={id}
+            type="number"
+            inputMode="numeric"
+            min={MIN_PRE_RING_PAUSE}
+            max={MAX_PRE_RING_PAUSE}
+            step={1}
+            value={preRingPause}
+            invalid={fieldInvalid}
+            disabled={saving}
+            {...(describedBy !== undefined && { 'aria-describedby': describedBy })}
+            onChange={(e) => setPreRingPause(e.target.value)}
+          />
         )}
       </Field>
 

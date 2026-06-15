@@ -14,6 +14,7 @@ const settings = (over: Partial<OrgSettings> = {}): OrgSettings => ({
   missedCallAutoText: 'auto text',
   missedCallAutoTextEnabled: true,
   quickReplies: ['first', 'second'],
+  preRingPauseSeconds: 2,
   ...over,
 });
 

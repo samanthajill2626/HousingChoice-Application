@@ -26,6 +26,9 @@ export interface SettingsRouterDeps {
 /** Quick replies: each non-empty string, the whole array <= this many, each <= this long. */
 const MAX_QUICK_REPLIES = 10;
 const MAX_TEMPLATE_CHARS = 320; // ~2 SMS segments — a canned reply, not an essay
+/** Pre-ring pause (founder call-triage): whole seconds, a sane bound. */
+const MIN_PRE_RING_PAUSE_SECONDS = 0;
+const MAX_PRE_RING_PAUSE_SECONDS = 10;
 
 /**
  * Validate + extract a settings patch from the request body. Returns the patch
@@ -65,6 +68,20 @@ function parsePatch(body: unknown): { patch: Partial<OrgSettings> } | { error: s
       };
     }
     patch.quickReplies = v;
+  }
+  if ('preRingPauseSeconds' in b) {
+    const v = b['preRingPauseSeconds'];
+    if (
+      typeof v !== 'number' ||
+      !Number.isInteger(v) ||
+      v < MIN_PRE_RING_PAUSE_SECONDS ||
+      v > MAX_PRE_RING_PAUSE_SECONDS
+    ) {
+      return {
+        error: `preRingPauseSeconds must be an integer between ${MIN_PRE_RING_PAUSE_SECONDS} and ${MAX_PRE_RING_PAUSE_SECONDS}`,
+      };
+    }
+    patch.preRingPauseSeconds = v;
   }
   return { patch };
 }

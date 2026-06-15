@@ -81,6 +81,39 @@ describe('PUT /api/settings — admin only', () => {
     expect(world.settings.quickReplies).toEqual(['Call me', 'Text me']);
   });
 
+  it('admin can set preRingPauseSeconds (a valid integer in range); GET returns it', async () => {
+    const { app, world } = makeWebhookHarness();
+    const put = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ preRingPauseSeconds: 4 });
+    expect(put.status).toBe(200);
+    expect(put.body.settings.preRingPauseSeconds).toBe(4);
+    expect(world.settings.preRingPauseSeconds).toBe(4);
+
+    // It rides the GET projection too (VA may view).
+    const get = await request(app)
+      .get('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(get.status).toBe(200);
+    expect(get.body.settings.preRingPauseSeconds).toBe(4);
+  });
+
+  it('the boundary values 0 and 10 are accepted', async () => {
+    const { app } = makeWebhookHarness();
+    for (const v of [0, 10]) {
+      const res = await request(app)
+        .put('/api/settings')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_ADMIN_COOKIE)
+        .send({ preRingPauseSeconds: v });
+      expect(res.status, String(v)).toBe(200);
+      expect(res.body.settings.preRingPauseSeconds).toBe(v);
+    }
+  });
+
   it('400s validation failures', async () => {
     const { app } = makeWebhookHarness();
     const bad = [
@@ -90,6 +123,10 @@ describe('PUT /api/settings — admin only', () => {
       { quickReplies: 'a string' }, // not array
       { quickReplies: ['ok', ''] }, // empty element
       { quickReplies: Array.from({ length: 11 }, (_v, i) => `r${i}`) }, // too many
+      { preRingPauseSeconds: 2.5 }, // non-integer
+      { preRingPauseSeconds: -1 }, // below range
+      { preRingPauseSeconds: 11 }, // above range
+      { preRingPauseSeconds: '3' }, // not a number
     ];
     for (const body of bad) {
       const res = await request(app)

@@ -37,6 +37,14 @@ export interface OrgSettings {
   missedCallAutoTextEnabled: boolean;
   /** The missed-call quick-reply buttons / canned-sheet options (CO2). */
   quickReplies: string[];
+  /**
+   * LOAD-BEARING founder call-triage timing (M1.9b / CO2 §7.1): the <Pause>
+   * (whole seconds) inserted BEFORE the founder-bridge <Dial> so the pre-ring
+   * push lands on the founder's phone ~this-many seconds AHEAD of the cell
+   * ringing. Founder-editable (CO2: founder-editable values live here, NOT
+   * Parameter Store). Defaults to 2; a sane range is 0..10.
+   */
+  preRingPauseSeconds: number;
 }
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
@@ -44,6 +52,7 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   missedCallAutoText: "Sorry I missed you — I'll call back soon; you can also text me here.",
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
+  preRingPauseSeconds: 2,
 };
 
 export interface SettingsRepo {
@@ -76,6 +85,14 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       quickReplies: Array.isArray(item?.['quickReplies'])
         ? (item['quickReplies'] as string[])
         : DEFAULT_ORG_SETTINGS.quickReplies,
+      // LOAD-BEARING triage timing: an existing item without it (or a malformed
+      // value) reads as the 2s default — the same defaulting posture as above.
+      preRingPauseSeconds:
+        typeof item?.['preRingPauseSeconds'] === 'number' &&
+        Number.isInteger(item['preRingPauseSeconds']) &&
+        (item['preRingPauseSeconds'] as number) >= 0
+          ? (item['preRingPauseSeconds'] as number)
+          : DEFAULT_ORG_SETTINGS.preRingPauseSeconds,
     };
   }
 

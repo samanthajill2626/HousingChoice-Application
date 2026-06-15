@@ -115,6 +115,30 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(JSON.stringify(push.notification.payload)).not.toContain(CALLER);
   });
 
+  it('the <Pause length> comes from the founder-editable OrgSettings preRingPauseSeconds', async () => {
+    const world = createFakeWorld();
+    // Founder edited the pause to 5s via the Settings panel (DB-backed setting).
+    world.settings.preRingPauseSeconds = 5;
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+    // The TwiML <Pause> reflects the setting, NOT a config/env value.
+    expect(res.text).toContain('<Pause length="5"');
+  });
+
+  it('defaults the <Pause length> to 2 when the setting is somehow invalid (defensive clamp)', async () => {
+    const world = createFakeWorld();
+    // A malformed stored value (e.g. a hand-edited DynamoDB item) must not break
+    // the bridge — the handler clamps back to the 2s default.
+    (world.settings as { preRingPauseSeconds: number }).preRingPauseSeconds = -3;
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Pause length="2"');
+  });
+
   it('persists a NON-masked founder-bridge call entry (CallSid-idempotent, masked label, no recording fields)', async () => {
     const world = createFakeWorld();
     world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });

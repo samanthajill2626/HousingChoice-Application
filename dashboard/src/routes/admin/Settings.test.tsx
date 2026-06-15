@@ -63,6 +63,7 @@ function makeSettings(over: Partial<OrgSettings> = {}): OrgSettings {
     missedCallAutoText: 'Sorry I missed you — I will call back soon.',
     missedCallAutoTextEnabled: true,
     quickReplies: ['Please text me', "I'll call you back soon"],
+    preRingPauseSeconds: 2,
     ...over,
   };
 }
@@ -125,6 +126,8 @@ describe('<Settings> — missed-call templates', () => {
     const patch = updateSettings.mock.calls[0]![0] as Partial<OrgSettings>;
     expect(patch.missedCallAutoText).toBe('New auto-text body');
     expect(patch.missedCallAutoTextEnabled).toBe(true);
+    // The pre-ring pause rides every save payload (load-bearing triage timing).
+    expect(patch.preRingPauseSeconds).toBe(2);
     expect(await screen.findByText('Settings saved.')).toBeInTheDocument();
   });
 
@@ -181,6 +184,42 @@ describe('<Settings> — missed-call templates', () => {
     expect(await screen.findByText(/320 characters or fewer/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
     // Save button is disabled while invalid → no PUT fired.
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('renders the pre-ring pause field with the current value', async () => {
+    getSettings.mockResolvedValue(makeSettings({ preRingPauseSeconds: 3 }));
+    renderScreen();
+    const input = await screen.findByLabelText(/pre-ring pause/i);
+    expect(input).toHaveValue(3);
+  });
+
+  it('edits the pre-ring pause and includes it in the save payload', async () => {
+    renderScreen();
+    const input = await screen.findByLabelText(/pre-ring pause/i);
+    fireEvent.change(input, { target: { value: '6' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+    const patch = updateSettings.mock.calls[0]![0] as Partial<OrgSettings>;
+    expect(patch.preRingPauseSeconds).toBe(6);
+  });
+
+  it('blocks save when the pre-ring pause is out of range', async () => {
+    renderScreen();
+    const input = await screen.findByLabelText(/pre-ring pause/i);
+    fireEvent.change(input, { target: { value: '11' } });
+    expect(await screen.findByText(/whole number from 0 to 10/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('blocks save when the pre-ring pause is not a whole number', async () => {
+    renderScreen();
+    const input = await screen.findByLabelText(/pre-ring pause/i);
+    fireEvent.change(input, { target: { value: '2.5' } });
+    expect(await screen.findByText(/whole number from 0 to 10/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
     expect(updateSettings).not.toHaveBeenCalled();
   });
 });

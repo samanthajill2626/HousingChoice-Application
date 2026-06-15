@@ -94,6 +94,20 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
       s = await settings.getOrgSettings();
       expect(s.missedCallAutoText).toBe('Updated text');
       expect(s.missedCallAutoTextEnabled).toBe(false); // prior patch preserved
+      // An item written WITHOUT preRingPauseSeconds (the prior patches never set
+      // it) reads back as the 2s default — existing records keep working.
+      expect(s.preRingPauseSeconds).toBe(2);
+    });
+
+    it('persists preRingPauseSeconds and merges it field-level', async () => {
+      await settings.putOrgSettings({ preRingPauseSeconds: 6 });
+      let s = await settings.getOrgSettings();
+      expect(s.preRingPauseSeconds).toBe(6);
+
+      // A later unrelated patch leaves the pause untouched (field-level merge).
+      await settings.putOrgSettings({ missedCallAutoTextEnabled: true });
+      s = await settings.getOrgSettings();
+      expect(s.preRingPauseSeconds).toBe(6);
     });
   });
 

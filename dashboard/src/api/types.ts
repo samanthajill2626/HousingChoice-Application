@@ -501,6 +501,12 @@ export interface OrgSettings {
   missedCallAutoText: string;
   missedCallAutoTextEnabled: boolean;
   quickReplies: string[];
+  /**
+   * LOAD-BEARING founder call-triage timing (M1.9b): the <Pause> (whole seconds)
+   * before the founder's cell is dialed, so the pre-ring push lands ~this-many
+   * seconds AHEAD of the ring. Editable in the Settings panel; range 0..10.
+   */
+  preRingPauseSeconds: number;
 }
 
 export type OrgSettingsPatch = Partial<OrgSettings>;

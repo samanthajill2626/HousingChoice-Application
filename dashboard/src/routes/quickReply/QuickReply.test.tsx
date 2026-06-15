@@ -37,6 +37,7 @@ const SETTINGS: OrgSettings = {
   missedCallAutoText: "Sorry I missed you — I'll call back soon; you can also text me here.",
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
+  preRingPauseSeconds: 2,
 };
 
 const CONVERSATION: Conversation = {

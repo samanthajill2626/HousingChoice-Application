@@ -335,6 +335,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   // number), NEVER the real caller's From (the M1.9b guardrail).
   const businessCallerId = config.ourPhoneNumbers[0];
 
+  // Boot readiness signal (PII-safe — booleans only, never the cell itself):
+  // founder call-triage needs BOTH a business number (caller ID) and a founder
+  // cell to dial. Missing either makes every inbound business call degrade to
+  // the "text us" fallback (see handleFounderTriage) — log it loudly at startup
+  // so a missing/unpushed FOUNDER_CELL is obvious without a live test call.
+  const founderTriageReady = businessCallerId !== undefined && config.founderCell !== undefined;
+  log.info(
+    {
+      founderTriage: founderTriageReady ? 'enabled' : 'disabled',
+      hasBusinessNumber: businessCallerId !== undefined,
+      hasFounderCell: config.founderCell !== undefined,
+    },
+    founderTriageReady
+      ? 'voice: founder call-triage ENABLED'
+      : 'voice: founder call-triage DISABLED — inbound business calls will play the text-us fallback ' +
+          '(needs OUR_PHONE_NUMBERS[0] + FOUNDER_CELL; push to SSM + redeploy)',
+  );
+
   const router = Router();
   const verifySignature = twilioSignatureMiddleware({
     authToken: config.twilioAuthToken,

@@ -48,6 +48,11 @@ import {
 } from '../../src/repos/broadcastsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import {
+  type PushNotification,
+  type PushService,
+  type SendToUserResult,
+} from '../../src/services/pushService.js';
+import {
   createAudienceResolutionService,
   type AudienceResolutionService,
 } from '../../src/services/audienceResolution.js';
@@ -122,6 +127,10 @@ export interface FakeWorld {
   /** In-memory org-settings (M1.4); starts at DEFAULT_ORG_SETTINGS. */
   settings: OrgSettings;
   settingsRepo: SettingsRepo;
+  /** Every pushService.sendToUser call (M1.9b pre-ring/missed-call pushes), in order. */
+  pushSends: { userId: string; notification: PushNotification }[];
+  /** Fake push service the voice router uses — records sends into pushSends. */
+  pushService: PushService;
   adapter: MessagingAdapter;
   mediaStore: MediaStore;
 }
@@ -541,6 +550,17 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // Fake push service (M1.9b): records every sendToUser so tests can assert the
+  // pre-ring / missed-call pushes (kind + payload — and that NO raw phone leaks
+  // into them). Returns a "configured, 1 sent" tally; never touches the network.
+  const pushSends: FakeWorld['pushSends'] = [];
+  const pushService: PushService = {
+    async sendToUser(userId: string, notification: PushNotification): Promise<SendToUserResult> {
+      pushSends.push({ userId, notification });
+      return { configured: true, attempted: 1, sent: 1, pruned: 0, failed: 0 };
+    },
+  };
+
   // In-memory units (M1.5): mirror the repo's contractual semantics —
   // generate-id create, SET-merge update (no-overwrite of unset fields),
   // conditional 404 on update, GSI-shaped list queries.
@@ -793,6 +813,8 @@ export function createFakeWorld(): FakeWorld {
     broadcastsRepo,
     settings,
     settingsRepo,
+    pushSends,
+    pushService,
     adapter,
     mediaStore,
   };
@@ -923,6 +945,13 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
       broadcastsRepo: world.broadcastsRepo,
+      // M1.9b founder call-triage: the voice router resolves the founder (admin
+      // user(s)) via the SAME fake users repo the auth gate uses, reads the
+      // founder-editable quick-replies from the world settings, and dispatches
+      // the pre-ring / missed-call pushes through the recording fake pushService.
+      settingsRepo: world.settingsRepo,
+      usersRepo: fakeUsers.repo,
+      pushService: world.pushService,
       events: world.events,
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,

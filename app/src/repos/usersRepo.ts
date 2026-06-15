@@ -176,6 +176,13 @@ export interface UsersRepo {
    */
   listAll(): Promise<UserItem[]>;
   /**
+   * List users with a given role (M1.9b call-triage: resolve "the founder" =
+   * the admin user(s) to push the pre-ring / missed-call notifications to).
+   * Built on listAll() + an in-memory filter — the users table is tiny and
+   * bounded, so this stays within the existing scan economy (no new GSI).
+   */
+  listByRole(role: UserRole): Promise<UserItem[]>;
+  /**
    * Add a Web Push subscription to a user (M1.4), deduped by endpoint and
    * capped at MAX_PUSH_SUBSCRIPTIONS (oldest dropped, LRU by created_at).
    * Read-modify-write under attribute_exists(userId); returns the new list.
@@ -369,6 +376,13 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       // no claim pattern) — every base-table item is a real user. Filter to
       // items that actually carry a role, defensively.
       return items.filter((u) => isUserRole(u.role));
+    },
+
+    async listByRole(role) {
+      // Reuse the bounded scan + filter in memory (the team is tiny). Keeps the
+      // founder-resolution lookup inside the existing read economy — no GSI.
+      const all = await repo.listAll();
+      return all.filter((u) => u.role === role);
     },
 
     async addPushSubscription(userId, sub) {

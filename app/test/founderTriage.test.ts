@@ -1,0 +1,390 @@
+// M1.9b (Change Order 2) golden suite: founder CALL-TRIAGE — an inbound call to
+// a BUSINESS number (not a pool number). The pre-ring push to the founder (admin
+// user) ~2s AHEAD of the ring, the bridge to the founder's cell with the
+// BUSINESS number as caller ID (never the real caller's From) behind the same
+// whisper + press-1 gate, and — on a MISSED call — the missed-call push + the
+// zero-tap auto-text (idempotent per CallSid). Driven through the REAL app
+// (buildApp) + the webhook harness with REAL computed X-Twilio-Signature values
+// and the jobs machinery wired so the auto-text fans out in-process end-to-end.
+//
+// GUARDRAILS asserted here (the M1.9b contract):
+//  - founder-leg callerId is ALWAYS the business number, NEVER the caller's From
+//  - the pre-ring push is sent BEFORE the <Dial>, and the TwiML has the <Pause>
+//    so it lands ~2s ahead of the ring
+//  - no raw caller phone/name in any push payload or log line (masked label only)
+//  - auto-text fires EXACTLY ONCE per missed call (CallSid marker)
+//  - auto-text respects the settings toggle + opt-out (SendRefusedError skipped)
+//  - record stays OFF on the founder-bridge (// SEAM(M1.9c))
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureJobsLogger,
+  configureOutboundQueue,
+  configureScheduler,
+  dispatchJob,
+} from '../src/jobs/jobs.js';
+import { registerMissedCallAutoTextJobHandler } from '../src/jobs/missedCallAutoText.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createSendMessageService } from '../src/services/sendMessage.js';
+import {
+  createFakeWorld,
+  makeWebhookHarness,
+  signedTwilioPost,
+  OUR_NUMBER,
+  type FakeWorld,
+} from './helpers/twilioWebhookHarness.js';
+import { TEST_ADMIN_USER } from './helpers/authSession.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+const CALLER = '+15550177777'; // a tenant calling the business number
+const FOUNDER_CELL = '+15550160000';
+
+/** A standard inbound voice webhook to the BUSINESS number (non-pool To). */
+function bizVoiceParams(over: Record<string, string> = {}): Record<string, string> {
+  return {
+    CallSid: 'CAbiz0001',
+    AccountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    From: CALLER,
+    To: OUR_NUMBER,
+    CallStatus: 'ringing',
+    Direction: 'inbound',
+    ApiVersion: '2010-04-01',
+    ...over,
+  };
+}
+
+/** Build a harness with FOUNDER_CELL set so the bridge actually forms. */
+function founderHarness(world: FakeWorld) {
+  return makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+}
+
+describe('founder call-triage — the inbound bridge (M1.9b)', () => {
+  it('To=business number → pre-ring push to the founder (admin), then <Pause>+<Dial> the founder cell from the business number', async () => {
+    const world = createFakeWorld();
+    // Type the caller as a tenant so the masked label resolves to the role+name.
+    world.contacts.push({
+      contactId: 'c-caller',
+      type: 'tenant',
+      phone: CALLER,
+      firstName: 'Jane',
+      lastName: 'Doe',
+    });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    const xml = res.text;
+
+    // GUARDRAIL: callerId is the BUSINESS number, never the caller's From.
+    expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
+    expect(xml).not.toContain(CALLER);
+    // GUARDRAIL: the <Pause> precedes the <Dial> so the push lands first.
+    const pauseIdx = xml.indexOf('<Pause');
+    const dialIdx = xml.indexOf('<Dial');
+    expect(pauseIdx).toBeGreaterThanOrEqual(0);
+    expect(dialIdx).toBeGreaterThan(pauseIdx);
+    // Bridges to the FOUNDER CELL behind the whisper + press-1 gate.
+    expect(xml).toContain(FOUNDER_CELL);
+    expect(xml).toContain('/webhooks/twilio/voice/whisper');
+    expect(xml).toContain('leg=founder');
+    // GUARDRAIL: record stays OFF on the founder bridge (M1.9c seam).
+    expect(xml).toContain('record="do-not-record"');
+    // The dial reports completion to the status route.
+    expect(xml).toContain('/webhooks/twilio/voice/status');
+
+    // Pre-ring push sent to the founder (admin) BEFORE the dial, masked body.
+    expect(world.pushSends).toHaveLength(1);
+    const push = world.pushSends[0]!;
+    expect(push.userId).toBe(TEST_ADMIN_USER.userId);
+    expect(push.notification.kind).toBe('pre_ring');
+    expect(push.notification.payload.kind).toBe('pre_ring');
+    expect(push.notification.payload.callId).toBe('CAbiz0001');
+    // Masked: the role + abbreviated name, NEVER the raw phone.
+    expect(push.notification.payload.body).toBe('Incoming call — Tenant (Jane D.)');
+    expect(JSON.stringify(push.notification.payload)).not.toContain(CALLER);
+  });
+
+  it('persists a NON-masked founder-bridge call entry (CallSid-idempotent, masked label, no recording fields)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app } = founderHarness(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    const calls = world.messages.filter((m) => m.type === 'call');
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.direction).toBe('inbound');
+    // GUARDRAIL: a founder-bridge is NOT a masked relay.
+    expect(call.masked).not.toBe(true);
+    expect(call.provider_sid).toBe('CAbiz0001');
+    expect(call.call_status).toBe('ringing');
+    expect(call.author).toBe('tenant'); // caller's reviewed role
+    // call_party_label is the MASKED caller label — never a phone.
+    expect(call.call_party_label).toBe('Tenant (Jane D.)');
+    expect(call.call_party_label).not.toContain('+');
+    // GUARDRAIL: the founder-bridge never populates recording/transcript (M1.9c).
+    expect(call.recording_s3_key).toBeUndefined();
+    expect(call.transcript).toBeUndefined();
+
+    // CallSid idempotency: a redelivered /voice must NOT double-write the entry.
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(1);
+  });
+
+  it('an UNKNOWN caller (no contact) → masked label "Unknown caller", author unknown, no phone in push', async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.author).toBe('unknown');
+    expect(call.call_party_label).toBe('Unknown caller');
+    const push = world.pushSends[0]!;
+    expect(push.notification.payload.body).toBe('Incoming call — Unknown caller');
+    expect(JSON.stringify(world.pushSends)).not.toContain(CALLER);
+  });
+
+  it('emits message.persisted once for the new founder-bridge call entry', async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(world.emitted.filter((e) => e.event === 'message.persisted')).toHaveLength(1);
+  });
+
+  it('never logs the caller phone on the triage path (PII, doc §9)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app, capture } = founderHarness(world);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
+  });
+
+  it('no FOUNDER_CELL configured → minimal greeting + hangup, NO bridge, NO number leak', async () => {
+    const world = createFakeWorld();
+    // No FOUNDER_CELL in env → cannot bridge.
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).not.toContain('<Dial');
+    expect(xml).toContain('<Hangup');
+    expect(xml).not.toContain(CALLER);
+    // No pre-ring push when we cannot bridge.
+    expect(world.pushSends).toHaveLength(0);
+  });
+});
+
+describe('founder whisper leg (M1.9b)', () => {
+  const founderWhisperQuery =
+    '?callerLabel=Tenant%20(Jane%20D.)&conversationId=conv-1&parentCallSid=CAbiz0001&leg=founder';
+  const founderGateQuery = '?conversationId=conv-1&parentCallSid=CAbiz0001&leg=founder';
+
+  it('founder whisper announces the caller + press 1 to accept (no press-0 team escape)', async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+    const res = await signedTwilioPost(
+      app,
+      `/webhooks/twilio/voice/whisper${founderWhisperQuery}`,
+      { CallSid: 'CAfounder-leg' },
+    );
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).toContain('<Gather');
+    expect(xml).toContain('Press 1 to accept');
+    expect(xml).not.toContain('reach the team'); // founder IS the team
+    expect(xml).not.toContain('+1555'); // never a phone
+  });
+
+  it("gate: Digits='1' → <Pause> (bridge proceeds)", async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+    const res = await signedTwilioPost(app, `/webhooks/twilio/voice/whisper-gate${founderGateQuery}`, {
+      Digits: '1',
+      CallSid: 'CAfounder-leg',
+    });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Pause');
+    expect(res.text).not.toContain('<Hangup');
+  });
+
+  it("gate: press-0 on the founder leg → <Hangup> (no team escape — falls through to missed)", async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+    const res = await signedTwilioPost(app, `/webhooks/twilio/voice/whisper-gate${founderGateQuery}`, {
+      Digits: '0',
+      CallSid: 'CAfounder-leg',
+    });
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).toContain('<Hangup');
+    expect(xml).not.toContain('<Dial');
+  });
+});
+
+describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    // Wire the auto-text job against the SAME world repos so the webhook's
+    // enqueueImmediate runs the job in-process, end-to-end. The send service is
+    // a REAL sendMessage wired to the world fakes (opt-out gate exercised).
+    registerMissedCallAutoTextJobHandler({
+      settingsRepo: world.settingsRepo,
+      messagesRepo: world.messagesRepo,
+      sendMessageService: createSendMessageService({
+        config: makeWebhookHarness({ world }).config,
+        logger,
+        adapter: world.adapter,
+        conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
+        contactsRepo: world.contactsRepo,
+        auditRepo: world.auditRepo,
+        events: world.events,
+      }),
+      logger,
+    });
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  /** Run the inbound bridge once so a ringing founder-bridge call exists. */
+  async function seedRingingBridge() {
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app } = founderHarness(world);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    // Clear the pre-ring push so the missed-call assertions start clean.
+    world.pushSends.length = 0;
+    return app;
+  }
+
+  it('no-answer → missed-call push (with quick-reply actions) + auto-text sent once', async () => {
+    const app = await seedRingingBridge();
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_status).toBe('no-answer');
+    expect(call.call_outcome).toBe('missed');
+
+    // Missed-call push to the founder, kind missed_call, masked body, actions
+    // from the (default) quickReplies, callId for the /quick-reply deep link.
+    const missed = world.pushSends.find((p) => p.notification.kind === 'missed_call');
+    expect(missed).toBeDefined();
+    expect(missed!.userId).toBe(TEST_ADMIN_USER.userId);
+    expect(missed!.notification.payload.callId).toBe('CAbiz0001');
+    expect(missed!.notification.payload.body).toBe('Missed call — Tenant (Jane D.)');
+    const actions = missed!.notification.payload.actions as { action: string; title: string }[];
+    expect(actions).toHaveLength(2); // default quickReplies are 2
+    expect(actions[0]!.action).toBe('qr-0');
+    expect(JSON.stringify(missed!.notification.payload)).not.toContain(CALLER);
+
+    // Zero-tap auto-text fired ONCE into the caller's conversation.
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]!.to).toBe(CALLER);
+    expect(world.sent[0]!.body).toBe(world.settings.missedCallAutoText);
+  });
+
+  it('no-press-1 (Dial completed, zero duration) → counted as missed → auto-text', async () => {
+    const app = await seedRingingBridge();
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '0',
+      ApiVersion: '2010-04-01',
+    });
+
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('ANSWERED (completed with duration) → NO missed push, NO auto-text', async () => {
+    const app = await seedRingingBridge();
+
+    // Answered first, then completed with a real duration.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'answered',
+      ApiVersion: '2010-04-01',
+    });
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '42',
+      ApiVersion: '2010-04-01',
+    });
+
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(false);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('GUARDRAIL: a redelivered missed status callback never double-texts (CallSid idempotent)', async () => {
+    const app = await seedRingingBridge();
+
+    const missedStatus = {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    };
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', missedStatus);
+    // Redeliver the same terminal callback twice more.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', missedStatus);
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', missedStatus);
+
+    // Exactly ONE auto-text, ever — the forward-only transition guards the
+    // trigger AND the job's CallSid marker guards the send.
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('auto-text DISABLED in settings → missed push still sent, but NO text', async () => {
+    const app = await seedRingingBridge();
+    world.settings.missedCallAutoTextEnabled = false;
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'busy',
+      ApiVersion: '2010-04-01',
+    });
+
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
+    expect(world.sent).toHaveLength(0); // toggle off → no auto-text
+  });
+
+  it('caller opted out → auto-text refused (SendRefusedError) → skipped, not retried', async () => {
+    const app = await seedRingingBridge();
+    // Flip the caller's conversation to opted-out (the send wrapper refuses).
+    const conv = [...world.conversations.values()].find((c) => c.participant_phone === CALLER)!;
+    conv.sms_opt_out = true;
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    // Push still went (the founder should know); the auto-text was refused.
+    expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
+    expect(world.sent).toHaveLength(0);
+  });
+});

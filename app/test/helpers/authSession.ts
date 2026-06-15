@@ -193,6 +193,9 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
     async listAll() {
       return [...users.values()].map((u) => ({ ...u }));
     },
+    async listByRole(role) {
+      return [...users.values()].filter((u) => u.role === role).map((u) => ({ ...u }));
+    },
     async addPushSubscription(userId, sub) {
       const user = users.get(userId);
       if (!user) throw new Error(`addPushSubscription: no user ${userId}`);

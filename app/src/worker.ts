@@ -25,6 +25,7 @@ const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { registerRetrySendJobHandler } = await import('./jobs/retrySend.js');
 const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
 const { registerBroadcastSendJobHandler } = await import('./jobs/broadcastFanOut.js');
+const { registerMissedCallAutoTextJobHandler } = await import('./jobs/missedCallAutoText.js');
 const { TokenBucket } = await import('./lib/tokenBucket.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
@@ -63,6 +64,12 @@ registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
 // SAME a2pBucket instance as relay fan-out, so the COMBINED outbound rate stays
 // under the registered A2P tier no matter how many broadcasts/relays run.
 registerBroadcastSendJobHandler({ tokenBucket: a2pBucket });
+
+// M1.9b: missed-call zero-tap auto-text (founder call-triage). Enqueued by the
+// /voice/status handler when a founder-bridge call is MISSED; sends the
+// founder-editable auto-text through the SAME a2pBucket + the opt-out/breaker
+// gated send wrapper. Idempotent per CallSid (one auto-text per missed call).
+registerMissedCallAutoTextJobHandler({ tokenBucket: a2pBucket });
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker

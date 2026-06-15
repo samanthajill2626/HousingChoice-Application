@@ -93,6 +93,24 @@ export interface AppConfig {
    */
   ourPhoneNumbers: string[];
   /**
+   * The founder's E.164 cell — the dial-through TARGET for founder
+   * call-triage (M1.9b / CO2 §7.1): an inbound call to a BUSINESS number is
+   * bridged to this cell with the business number as caller ID (NEVER the
+   * real caller's). NOT a secret-secret (it's a phone number, not a
+   * credential) but OPERATOR-SET; currently a 555 placeholder — live calls
+   * need the real number wired (FOUNDER_CELL). Unset = founder triage cannot
+   * bridge (the seam logs + falls back to a minimal greeting).
+   */
+  founderCell?: string;
+  /**
+   * LOAD-BEARING triage timing (M1.9b / CO2 §7.1): the <Pause> (seconds)
+   * inserted BEFORE the founder-bridge <Dial> so the pre-ring push lands on
+   * the founder's phone ~this-many seconds AHEAD of the cell ringing. Read
+   * from PRE_RING_PAUSE_SECONDS; defaults to 2. NOT fail-fast: a bad value
+   * WARNs and falls back to the default (triage timing must never crash boot).
+   */
+  preRingPauseSeconds: number;
+  /**
    * S3 bucket inbound MMS media is mirrored into (MEDIA_BUCKET) —
    * Terraform-managed in AWS (the s3_media module's bucket). Unset locally:
    * media mirroring is skipped with a log instead.
@@ -306,6 +324,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Founder cell (M1.9b call-triage): the dial-through target. E.164-validated
+  // (same posture as OUR_PHONE_NUMBERS — a malformed number would silently
+  // disable bridging) but OPTIONAL everywhere: founder triage is a feature, and
+  // the placeholder 555 number is fine until the real cell is wired. NOT
+  // fail-fast (unlike OUR_PHONE_NUMBERS) — an unset/placeholder founder cell
+  // must not take the deployed stack down; the triage branch logs + degrades.
+  const founderCellRaw = env.FOUNDER_CELL?.trim();
+  const founderCell = founderCellRaw !== undefined && founderCellRaw.length > 0 ? founderCellRaw : undefined;
+  if (founderCell !== undefined && !/^\+[1-9]\d{1,14}$/.test(founderCell)) {
+    throw new Error(`FOUNDER_CELL must be E.164 (+1...), got: ${founderCell}`);
+  }
+
+  // Pre-ring pause (M1.9b call-triage) — LOAD-BEARING timing. NOT fail-fast: a
+  // bad/missing value falls back to 2s (triage timing must never crash boot).
+  // An explicitly-set-but-invalid value WARNs so the operator notices.
+  const PRE_RING_PAUSE_DEFAULT = 2;
+  let preRingPauseSeconds = PRE_RING_PAUSE_DEFAULT;
+  if (env.PRE_RING_PAUSE_SECONDS !== undefined && env.PRE_RING_PAUSE_SECONDS.length > 0) {
+    const parsed = Number(env.PRE_RING_PAUSE_SECONDS);
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      preRingPauseSeconds = parsed;
+    } else {
+      logger.warn(
+        { value: env.PRE_RING_PAUSE_SECONDS, fallback: PRE_RING_PAUSE_DEFAULT },
+        'PRE_RING_PAUSE_SECONDS is not a non-negative integer — using the default',
+      );
+    }
+  }
+
   // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
   // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
   // would accept enqueues into the in-memory adapter (silently undelivered)
@@ -434,6 +481,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,
+    ...(founderCell !== undefined && { founderCell }),
+    preRingPauseSeconds,
     mediaBucket: env.MEDIA_BUCKET,
     sseMaxConnections,
     publicRateLimitMax,

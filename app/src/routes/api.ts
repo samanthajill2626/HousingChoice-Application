@@ -19,6 +19,7 @@ import {
   appEvents,
   toConversationUpdatedEvent,
   type BroadcastUpdatedEvent,
+  type CaseUpdatedEvent,
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
@@ -40,6 +41,7 @@ import {
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
+import { type CasesRepo } from '../repos/casesRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -58,6 +60,7 @@ import { type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { type AudienceResolutionService } from '../services/audienceResolution.js';
 import { createAdminUsersRouter } from './adminUsers.js';
 import { createBroadcastsRouter } from './broadcasts.js';
+import { createCasesRouter } from './cases.js';
 import { createContactsRouter } from './contacts.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
@@ -113,6 +116,8 @@ export interface ApiRouterDeps {
   pushService?: PushService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
   unitsRepo?: UnitsRepo;
+  /** M1.10 boards/cases — injected in tests; default to the real repo. */
+  casesRepo?: CasesRepo;
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
   contactsRepoForRelay?: ContactsRepo;
@@ -291,6 +296,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.audienceResolutionService !== undefined && {
         audienceResolutionService: deps.audienceResolutionService,
       }),
+      auditRepo: audit,
+      events,
+    }),
+  );
+  // Cases + boards (M1.10; requireAuth — VAs run the boards, no admin gate).
+  // Gets the relay-provisioning deps too (M1.10c: POST /cases/:id/relay derives
+  // the roster from the case + reuses the shared provisioning primitive).
+  router.use(
+    '/cases',
+    createCasesRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      conversationsRepo: conversations,
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       auditRepo: audit,
       events,
     }),
@@ -715,9 +737,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onBroadcastUpdated = (payload: BroadcastUpdatedEvent): void => {
       writeEvent('broadcast.updated', payload);
     };
+    const onCaseUpdated = (payload: CaseUpdatedEvent): void => {
+      writeEvent('case.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
+    events.on('case.updated', onCaseUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -738,6 +764,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('conversation.updated', onConversationUpdated);
       events.off('message.persisted', onMessagePersisted);
       events.off('broadcast.updated', onBroadcastUpdated);
+      events.off('case.updated', onCaseUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

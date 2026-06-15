@@ -23,8 +23,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { enqueueImmediate } from '../jobs/jobs.js';
-import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
+import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -125,28 +124,27 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       members.push(await resolveMemberName(parsed));
     }
 
-    // Provision the pool number (lazy reclaim → reuse → fresh). A
-    // VoiceCapabilityError means the account can't yield a voice-capable
-    // number — surface 503 so the operator retries / fixes the account.
-    // The conversation row is created AFTER the number is claimed, so we claim
-    // under a provisional id and stamp the real conversationId once it exists.
-    let poolNumber: string;
+    // Provision via the shared primitive (provision pool → create relay → assign
+    // → audit → intro → emit). A standalone (no-case) relay — the test scaffold;
+    // the product path is POST /api/cases/:caseId/relay. Typed refusals map to
+    // 503 here with the create-reason refusal audit.
+    let conversation;
     try {
-      const provisioned = await poolNumbers.provisionForPlacement('relay-pending', tag);
-      poolNumber = provisioned.poolNumber;
+      conversation = await provisionRelayGroup(
+        { conversationsRepo: conversations, poolNumbersService: poolNumbers, auditRepo: audit, events, logger: log },
+        { members, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }) },
+      );
     } catch (err) {
-      // Kill-switch refusal (M1.7): live provisioning is off in this
-      // environment — no number was (or could be) purchased. Surface a stable
-      // 503 code + actionable message; audit the refusal (actor + reason, no PII).
+      // Kill-switch refusal (M1.7): live provisioning is off — no number was (or
+      // could be) purchased. Stable 503 + actionable message; audit (actor +
+      // reason, no PII).
       if (err instanceof RelayProvisioningDisabledError) {
         log.warn({ err: { name: err.name }, actor }, 'relay group create: number provisioning disabled');
         await audit.append('relay#provisioning', 'relay_provisioning_disabled', {
           actor,
           reason: 'create',
         });
-        res
-          .status(503)
-          .json({ error: 'relay_provisioning_disabled', message: err.message });
+        res.status(503).json({ error: 'relay_provisioning_disabled', message: err.message });
         return;
       }
       if (err instanceof VoiceCapabilityError) {
@@ -156,41 +154,6 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       }
       throw err;
     }
-
-    const conversation = await conversations.createRelayGroup({
-      poolNumber,
-      members,
-      ...(tag !== undefined && { tag }),
-    });
-    mergeContext({ conversationId: conversation.conversationId });
-    // Stamp the real conversation id onto the pool number (it was claimed under
-    // the provisional id above). Best-effort: the relay routes on pool_number,
-    // not this back-reference — a failure here is operational metadata only.
-    try {
-      await poolNumbers.assignConversation(poolNumber, conversation.conversationId);
-    } catch (err) {
-      log.error({ err, conversationId: conversation.conversationId }, 'relay create: pool number reassign failed (operational only)');
-    }
-    await audit.append(`conversations#${conversation.conversationId}`, 'relay_group_created', {
-      actor,
-      memberCount: members.length,
-      ...(tag !== undefined && { tag }),
-    });
-
-    // Intro: throttle-send to each member (names everyone connected). The
-    // immediate job runs in the worker (or in-process locally). A failure to
-    // enqueue must not fail the create — the group exists; log + continue.
-    try {
-      await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: conversation.conversationId });
-    } catch (err) {
-      log.error({ err, conversationId: conversation.conversationId }, 'relay intro enqueue failed — group created without intro');
-    }
-
-    events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
-    log.info(
-      { conversationId: conversation.conversationId, memberCount: members.length, actor },
-      'relay group created via api',
-    );
     res.status(201).json({ conversation });
   });
 

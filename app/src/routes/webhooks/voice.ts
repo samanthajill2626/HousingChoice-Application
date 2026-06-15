@@ -55,6 +55,8 @@ import {
   type ConversationsRepo,
   type ConversationType,
 } from '../../repos/conversationsRepo.js';
+import { createCasesRepo, type CasesRepo } from '../../repos/casesRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../../repos/unitsRepo.js';
 import {
   createMessagesRepo,
   type CallStatus,
@@ -297,6 +299,9 @@ export interface TwilioVoiceWebhookDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
+  /** M1.10d masked-call landlord-leg routing (case -> unit.primary_voice_contact). */
+  casesRepo?: CasesRepo;
+  unitsRepo?: UnitsRepo;
   /** Founder-editable templates (M1.9b: missed-call quick-replies); real repo by default. */
   settingsRepo?: SettingsRepo;
   /** Team lookup (M1.9b: resolve the founder = admin user(s)); real repo by default. */
@@ -317,6 +322,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const pushService =
@@ -773,6 +780,49 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');
     }
 
+    // M1.10d: for a tenant->landlord masked call on a CASE-linked relay, the
+    // landlord LEG dials the unit's primary_voice_contact (the per-property
+    // voice contact, §7.1) instead of the roster SMS number — resolved at CALL
+    // TIME (so a changed per-unit voice contact takes effect without
+    // re-rostering), with the roster number as the fallback. It substitutes ONLY
+    // when the CALLER is the case's tenant (destination = the landlord side);
+    // texts are unaffected (relay fan-out always uses the roster SMS numbers).
+    // Best-effort: any lookup hiccup falls back to the roster number — the
+    // bridge must never crash on routing resolution.
+    let landlordVoiceOverride: { landlordContactId: string; dialPhone: string } | undefined;
+    try {
+      const caseId = typeof relay.caseId === 'string' && relay.caseId.length > 0 ? relay.caseId : undefined;
+      if (caseId !== undefined && caller.contactId) {
+        const linkedCase = await cases.getById(caseId);
+        if (linkedCase && caller.contactId === linkedCase.tenantId) {
+          const unit = await units.getById(linkedCase.unitId);
+          const voiceContactId =
+            typeof unit?.primary_voice_contact === 'string' && unit.primary_voice_contact.length > 0
+              ? unit.primary_voice_contact
+              : undefined;
+          const landlordContactId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
+          if (voiceContactId !== undefined && landlordContactId !== undefined) {
+            const voiceContact = await contacts.getById(voiceContactId);
+            const dialPhone =
+              typeof voiceContact?.phone === 'string' && voiceContact.phone.length > 0
+                ? voiceContact.phone
+                : undefined;
+            // Guard a misconfig where the unit's voice contact resolves to the
+            // CALLER's own number — never bridge the tenant to themselves; fall
+            // back to the roster number.
+            if (dialPhone !== undefined && dialPhone !== From) {
+              landlordVoiceOverride = { landlordContactId, dialPhone };
+            }
+          }
+        }
+      }
+    } catch (err) {
+      log.error(
+        { err, callSid: CallSid },
+        'masked call: landlord voice-contact resolution failed — using the roster number',
+      );
+    }
+
     // Build the bridge TwiML. callerId MUST be the pool number — NEVER From.
     // record="do-not-record": masked calls are NEVER recorded/transcribed. The
     // <Dial action> reports the dial outcome to /voice/status; each <Number>
@@ -796,6 +846,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       `&conversationId=${encodeURIComponent(relay.conversationId)}` +
       `&parentCallSid=${encodeURIComponent(CallSid)}`;
     for (const callee of callees) {
+      // M1.10d: the landlord-side callee dials the unit's primary_voice_contact
+      // when resolved (else the roster number). Identified by contactId so a
+      // multi-member group only substitutes the actual landlord leg.
+      const dialPhone =
+        landlordVoiceOverride !== undefined && callee.contactId === landlordVoiceOverride.landlordContactId
+          ? landlordVoiceOverride.dialPhone
+          : callee.phone;
       dial.number(
         {
           url: whisperUrl,
@@ -807,11 +864,17 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           statusCallbackEvent: ['ringing'],
           statusCallbackMethod: 'POST',
         },
-        callee.phone,
+        dialPhone,
       );
     }
     log.info(
-      { callSid: CallSid, calleeCount: callees.length, masked: true, callerIdIsPool: true },
+      {
+        callSid: CallSid,
+        calleeCount: callees.length,
+        masked: true,
+        callerIdIsPool: true,
+        landlordVoiceOverride: landlordVoiceOverride !== undefined,
+      },
       'masked inbound call bridged (callerId = pool number, do-not-record, whisper+gate)',
     );
     sendTwiml(res, vr);

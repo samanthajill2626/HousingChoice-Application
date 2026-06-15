@@ -119,6 +119,14 @@ export interface ConversationItem {
   unread_count?: number;
   /** Assigned team member's userId (M1.2; users-table validation is M1.3). */
   assignment?: string;
+  /**
+   * The case this relay_group is the placement thread for (M1.10): the
+   * conversation→case BACK-REFERENCE. It lets the voice masked-call seam resolve
+   * the landlord-leg target (case→unit.primary_voice_contact) and the
+   * failed-send escalation flag the right case. Set when a relay is provisioned
+   * FROM a case; absent on 1:1 threads and standalone (test-scaffold) relays.
+   */
+  caseId?: string;
   created_at: string;
   /** Circuit-breaker minute bucket (`YYYY-MM-DDTHH:mm`, UTC). */
   outbound_minute_bucket?: string;
@@ -295,6 +303,8 @@ export interface ConversationsRepo {
     poolNumber: string;
     members: ConversationParticipant[];
     tag?: string;
+    /** The case this relay is the placement thread for (M1.10 back-reference). */
+    caseId?: string;
   }): Promise<ConversationItem>;
   /**
    * Resolve a pool number to its active relay_group via the byPoolNumber GSI
@@ -791,7 +801,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
     // --- Relay groups (M1.7) -----------------------------------------------
 
-    async createRelayGroup({ poolNumber, members, tag }) {
+    async createRelayGroup({ poolNumber, members, tag, caseId }) {
       const now = new Date().toISOString();
       const item: ConversationItem = {
         conversationId: `conv-${randomUUID()}`,
@@ -810,6 +820,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         participants: members,
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
+        ...(caseId !== undefined && { caseId }),
       };
       await doc.send(
         new PutCommand({

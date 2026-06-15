@@ -24,6 +24,7 @@ import type {
 } from '../repos/conversationsRepo.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
 import type { BroadcastStats, BroadcastStatus } from '../repos/broadcastsRepo.js';
+import type { CaseItem } from '../repos/casesRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
 export interface ConversationUpdatedEvent {
@@ -132,10 +133,55 @@ export interface BroadcastUpdatedEvent {
   stats: BroadcastStats;
 }
 
+/**
+ * A case (M1.10) was created or changed — the boards re-render the card live
+ * (move it between stage columns, refresh its tour/deadline/attention/relay
+ * state). A compact, ID-only payload: the boards already render names from the
+ * tenant/unit they hydrate, so a card move needs only the keys + state, never
+ * PII. NO names/phones/bodies (the placement_tag — a name — is deliberately
+ * NOT carried).
+ */
+export interface CaseUpdatedEvent {
+  caseId: string;
+  tenantId: string;
+  unitId: string;
+  stage: string;
+  tour_date: string | null;
+  next_deadline_type: string | null;
+  next_deadline_at: string | null;
+  /** The linked relay-group conversationId, or null (set in M1.10c). */
+  group_thread: string | null;
+  /** True when the case carries an escalation attention flag (doc §7.1). */
+  attention: boolean;
+  lost_reason: string | null;
+  updated_at: string | null;
+}
+
+/** THE one case.updated payload builder — every emit site uses it (no drift). */
+export function toCaseUpdatedEvent(item: CaseItem): CaseUpdatedEvent {
+  return {
+    caseId: item.caseId,
+    tenantId: item.tenantId,
+    unitId: item.unitId,
+    stage: item.stage,
+    tour_date: item.tour_date ?? null,
+    next_deadline_type: item.next_deadline_type ?? null,
+    next_deadline_at: item.next_deadline_at ?? null,
+    group_thread: item.group_thread ?? null,
+    // != null covers both absent (cleared → REMOVE) and a stray null. This
+    // boolean is load-bearing: the boards flip a case's attention badge live
+    // when the M1.10c escalation seam raises it.
+    attention: item.attention != null,
+    lost_reason: item.lost_reason ?? null,
+    updated_at: item.updated_at ?? null,
+  };
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
   'broadcast.updated': BroadcastUpdatedEvent;
+  'case.updated': CaseUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

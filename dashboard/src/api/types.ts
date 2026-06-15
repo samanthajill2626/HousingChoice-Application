@@ -715,3 +715,135 @@ export interface AudienceTooLargeError {
   count: number;
   truncated: boolean;
 }
+
+// --- Cases / boards (M1.10) -------------------------------------------------
+// A "case" is one tenant↔unit deal moving through a stage ladder (the boards
+// are staff-facing). Mirrors app/src/repos/casesRepo.ts +
+// app/src/routes/cases.ts + app/src/lib/events.ts. Field names are the wire JSON
+// the server emits (snake_case where shown: tour_date, next_deadline_type,
+// next_deadline_at, group_thread, placement_tag, lost_reason, lease_date,
+// move_in_date) — NOT a normalized client model.
+
+/**
+ * The stage ladder (doc §5), one deal from tour-interest to move-in. `porting`
+ * is the portability branch; `moved_in` is the happy terminal and `lost` the
+ * negative one (reachable from any stage). An ordered list, not a strict state
+ * machine — Phase 1 is manual (the operator sets the stage).
+ */
+export type CaseStage =
+  | 'interested'
+  | 'porting'
+  | 'touring'
+  | 'applied'
+  | 'rta_submitted'
+  | 'inspection'
+  | 'rent_determined'
+  | 'lease'
+  | 'moved_in'
+  | 'lost';
+
+/** The ordered case stages, for the kanban columns + the stage <select>. */
+export const CASE_STAGES: readonly CaseStage[] = [
+  'interested',
+  'porting',
+  'touring',
+  'applied',
+  'rta_submitted',
+  'inspection',
+  'rent_determined',
+  'lease',
+  'moved_in',
+  'lost',
+];
+
+/** The business-clock deadline types (doc §5): the single most-urgent pending
+ *  clock a case carries. */
+export type CaseDeadlineType =
+  | 'tour_reminder'
+  | 'rta_window'
+  | 'voucher_expiration'
+  | 'stuck_case'
+  | 'follow_up';
+
+/** A scheduled tour on a case, current or historical. */
+export interface CaseTour {
+  /** YYYY-MM-DD. */
+  date: string;
+  outcome?: string;
+  notes?: string;
+}
+
+/** Escalation flag (doc §7.1): a failed send on an active case → a human calls. */
+export interface CaseAttention {
+  reason: string;
+  /** ISO 8601 — when the flag was raised. */
+  at: string;
+}
+
+/** A case record (GET /api/cases → { cases }, GET /api/cases/:caseId →
+ *  { case }). Flexible document on the server; the contractual fields are typed
+ *  and the index signature carries anything extra. */
+export interface CaseItem {
+  caseId: string;
+  /** The tenant contact this deal is for. */
+  tenantId: string;
+  /** The unit this deal is on. */
+  unitId: string;
+  /** The stage ladder position (the kanban column). */
+  stage: CaseStage;
+  /** The CURRENT scheduled tour date, YYYY-MM-DD (absent when none scheduled). */
+  tour_date?: string;
+  /** The next-deadline composite (set/cleared together via the deadline route). */
+  next_deadline_type?: CaseDeadlineType;
+  /** The next-deadline instant, ISO 8601. */
+  next_deadline_at?: string;
+  /** The placement's relay-group conversationId (set when the relay is set up). */
+  group_thread?: string;
+  /** Operator label, mirrored onto the relay pool number. */
+  placement_tag?: string;
+  /** Tour history (the current tour is also reflected in tour_date). */
+  tours?: CaseTour[];
+  /** The four-rung application ladder — free-form object. */
+  application?: Record<string, unknown>;
+  /** RTA/approval data — free-form object. */
+  rta?: Record<string, unknown>;
+  /** Why a `lost` case was lost. */
+  lost_reason?: string;
+  lease_date?: string;
+  move_in_date?: string;
+  /** Free-text case-level note the operator keeps on the board. */
+  notes?: string;
+  /** Escalation flag (doc §7.1) — cleared via updateCase({ attention: null }). */
+  attention?: CaseAttention;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/cases page. */
+export interface CasesPage {
+  cases: CaseItem[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** GET /api/events 'case.updated' payload (M1.10). Carries the board-relevant
+ *  projection so a kanban card can move stage / flip its attention dot / refresh
+ *  its tour + deadline live, without a refetch. `attention` is a BOOLEAN here
+ *  (the full CaseItem carries the CaseAttention object). NO PII — never logged.
+ *  `stage` is the wire string (one of CASE_STAGES). */
+export interface CaseUpdatedEvent {
+  caseId: string;
+  tenantId: string;
+  unitId: string;
+  stage: string;
+  tour_date: string | null;
+  next_deadline_type: string | null;
+  next_deadline_at: string | null;
+  /** The linked relay-group conversationId, or null. */
+  group_thread: string | null;
+  /** True when the case carries an escalation attention flag. */
+  attention: boolean;
+  lost_reason: string | null;
+  updated_at: string | null;
+}

@@ -18,7 +18,12 @@ import {
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
-import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/events.js';
+import {
+  appEvents,
+  toCaseUpdatedEvent,
+  toConversationUpdatedEvent,
+  type EventBus,
+} from '../../lib/events.js';
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
@@ -30,6 +35,7 @@ import {
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
+import { createCasesRepo, type CasesRepo, TERMINAL_STAGES } from '../../repos/casesRepo.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -95,6 +101,8 @@ export interface TwilioWebhookDeps {
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  /** M1.10c failed-send escalation: flag the linked case's attention flag. */
+  casesRepo?: CasesRepo;
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
@@ -119,7 +127,36 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
+  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+
+  // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
+  // case-linked conversation (a relay/placement thread carries
+  // conversation.caseId) raises that case's attention flag so the boards prompt
+  // a human to call — "the message failing must not mean the communication
+  // fails, especially against voucher and RTA deadlines." Only ACTIVE
+  // (non-terminal) cases escalate. Best-effort: a failure here NEVER 5xxs the
+  // webhook. (1:1 threads aren't case-linked today; escalating a 1:1 failure to
+  // the tenant's case is a later refinement — it needs picking among a tenant's
+  // cases, a product decision.)
+  async function flagCaseAttention(conversationId: string, reason: string): Promise<void> {
+    try {
+      const conv = await conversations.getById(conversationId);
+      const caseId =
+        typeof conv?.caseId === 'string' && conv.caseId.length > 0 ? conv.caseId : undefined;
+      if (caseId === undefined) return;
+      const c = await cases.getById(caseId);
+      if (!c || TERMINAL_STAGES.has(c.stage)) return; // only active cases escalate
+      const updated = await cases.update(caseId, { attention: { reason, at: new Date().toISOString() } });
+      events.emit('case.updated', toCaseUpdatedEvent(updated));
+      log.warn(
+        { event: 'case_escalation', caseId, conversationId, reason },
+        'failed send on an active case — attention flag raised',
+      );
+    } catch (err) {
+      log.error({ err, conversationId }, 'case escalation: flagging attention failed (non-fatal)');
+    }
+  }
   const captureContact = createContactCapture({
     contactsRepo: contacts,
     conversationsRepo: conversations,
@@ -566,6 +603,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             direction: 'inbound',
             deliveryStatus: mapped,
           });
+          // (M1.10c) A failed relay leg is a failed send on the placement's case
+          // (the relay thread carries conversation.caseId) → escalate.
+          if (mapped === 'undelivered' || mapped === 'failed') {
+            await flagCaseAttention(ptr.conversationId, 'send_failed');
+          }
         }
         res.status(200).end();
         return;
@@ -653,12 +695,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           log.error({ err, providerSid: MessageSid, broadcastId: message.broadcast_id }, 'broadcast delivery rollup failed — message status recorded, broadcast stats stale');
         }
       }
+
+      // (M1.10c) Escalation (doc §7.1): a failed send on a case-linked
+      // conversation raises the case's attention flag so a human calls. Gated on
+      // the failure CLASS (undelivered/failed), NOT on ErrorCode — a failed/
+      // canceled callback may carry no error code — mirroring the relay-leg
+      // branch above. Today 1:1 threads aren't case-linked → this is a no-op on
+      // the 1:1 path (the dominant relay-leg failures escalate at the relay-
+      // recipient branch); kept here so a future case-linked 1:1 escalates with
+      // no extra wiring. Best-effort (flagCaseAttention never throws/5xxs).
+      if (mappedStatus === 'undelivered' || mappedStatus === 'failed') {
+        await flagCaseAttention(message.conversationId, 'send_failed');
+      }
     }
 
     if (transitioned && ErrorCode) {
-      // TODO(M1.10) escalation-queue seam: a failed send on an ACTIVE CASE
-      // must also drop an escalation item so a human calls (doc §7.1).
-      // Cases do not exist until M1.10 — nothing is built here yet.
+      // Error-class-aware handling (doc §7.1): transient retry (30003) / contact
+      // flag (30005/30006/21610) / suppression-confirm. Case escalation is
+      // handled ABOVE on the failure-class gate (not here — a failed/canceled
+      // callback may carry no ErrorCode).
       try {
         switch (ErrorCode) {
           case '30003': {

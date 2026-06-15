@@ -10,6 +10,10 @@ import type {
   BroadcastsPage,
   BroadcastStatus,
   CallResponse,
+  CaseDeadlineType,
+  CaseItem,
+  CasesPage,
+  CaseStage,
   ChangeRoleResult,
   Contact,
   ContactPatch,
@@ -487,6 +491,125 @@ export function listBroadcasts(
     },
     ...(signal !== undefined && { signal }),
   });
+}
+
+// --- Cases / boards (/api/cases, M1.10, requireAuth) ------------------------
+// VAs run the boards day-to-day (no admin gate). A case is one tenant↔unit deal
+// moving through the stage ladder; the `case.updated` SSE event drives live
+// board updates. The relay-on-placement action (setUpCaseRelay) provisions the
+// placement's masked relay thread from the case's parties.
+
+export interface ListCasesParams {
+  stage?: CaseStage;
+  tenantId?: string;
+  unitId?: string;
+  /** YYYY-MM-DD — cases whose CURRENT tour is on this date. */
+  tourDate?: string;
+  deadlineType?: CaseDeadlineType;
+  /** ISO 8601 "due by" bound (only with deadlineType). */
+  before?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+/** GET /api/cases — the boards' read, paged. Exactly one filter is honored
+ *  server-side (most-specific first); with none, a paginated scan. */
+export function listCases(
+  params: ListCasesParams = {},
+  signal?: AbortSignal,
+): Promise<CasesPage> {
+  return request<CasesPage>('/api/cases', {
+    query: {
+      stage: params.stage,
+      tenantId: params.tenantId,
+      unitId: params.unitId,
+      tourDate: params.tourDate,
+      deadlineType: params.deadlineType,
+      before: params.before,
+      limit: params.limit,
+      cursor: params.cursor ?? undefined,
+    },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+export interface CreateCaseBody {
+  tenantId: string;
+  unitId: string;
+  stage?: CaseStage;
+  placement_tag?: string;
+}
+
+/** POST /api/cases — open a case (tenantId + unitId required; stage defaults to
+ *  'interested' server-side). → 201 { case }. */
+export async function createCase(body: CreateCaseBody): Promise<CaseItem> {
+  const res = await request<{ case: CaseItem }>('/api/cases', { method: 'POST', body });
+  return res.case;
+}
+
+/** GET /api/cases/:caseId — one case, or throws ApiError(404,'case_not_found'). */
+export async function getCase(caseId: string, signal?: AbortSignal): Promise<CaseItem> {
+  const res = await request<{ case: CaseItem }>(
+    `/api/cases/${encodeURIComponent(caseId)}`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.case;
+}
+
+/** PATCH /api/cases/:caseId body — partial update (SET-merge; an explicit `null`
+ *  clears tour_date / attention). The next_deadline pair moves via the deadline
+ *  route, never here. */
+export interface CasePatch {
+  stage?: CaseStage;
+  /** YYYY-MM-DD, or null to clear the scheduled tour. */
+  tour_date?: string | null;
+  placement_tag?: string | null;
+  lost_reason?: string | null;
+  lease_date?: string | null;
+  move_in_date?: string | null;
+  notes?: string | null;
+  /** Only `null` is accepted — clear (acknowledge) the escalation flag. */
+  attention?: null;
+}
+
+/** PATCH /api/cases/:caseId — partial update. → { case } | 404. */
+export async function updateCase(caseId: string, patch: CasePatch): Promise<CaseItem> {
+  const res = await request<{ case: CaseItem }>(
+    `/api/cases/${encodeURIComponent(caseId)}`,
+    { method: 'PATCH', body: patch },
+  );
+  return res.case;
+}
+
+/** POST /api/cases/:caseId/deadline body — set ({ type, at }) or clear
+ *  ({ clear: true }) the next business-clock deadline. `at` is ISO 8601. */
+export type SetCaseDeadlineBody = { type: CaseDeadlineType; at: string } | { clear: true };
+
+/** POST /api/cases/:caseId/deadline — set/clear the next deadline. → { case }. */
+export async function setCaseDeadline(
+  caseId: string,
+  body: SetCaseDeadlineBody,
+): Promise<CaseItem> {
+  const res = await request<{ case: CaseItem }>(
+    `/api/cases/${encodeURIComponent(caseId)}/deadline`,
+    { method: 'POST', body },
+  );
+  return res.case;
+}
+
+/** POST /api/cases/:caseId/relay — set up the placement's masked relay thread
+ *  (roster derived from the case: tenant + the unit's landlord). → 201
+ *  { conversation, case }. Throws ApiError on 409 'relay_exists' (err.body carries
+ *  the existing { conversation }), 400 'tenant_unreachable'|'landlord_unreachable'|
+ *  'unit_not_found', 503 'relay_provisioning_disabled'|'pool_number_unavailable',
+ *  or 404 'case_not_found'. */
+export function setUpCaseRelay(
+  caseId: string,
+): Promise<{ conversation: Conversation; case: CaseItem }> {
+  return request<{ conversation: Conversation; case: CaseItem }>(
+    `/api/cases/${encodeURIComponent(caseId)}/relay`,
+    { method: 'POST' },
+  );
 }
 
 // --- Public (/public, NO auth — rate-limited) -------------------------------

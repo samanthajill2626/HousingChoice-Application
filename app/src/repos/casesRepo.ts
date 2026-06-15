@@ -161,6 +161,8 @@ export interface CaseItem {
   lost_reason?: string;
   lease_date?: string;
   move_in_date?: string;
+  /** Free-text case-level note the operator keeps on the board. */
+  notes?: string;
   /** Escalation flag (doc §7.1) — surfaced on the boards; cleared via update({ attention: null }). */
   attention?: CaseAttention;
   created_at?: string;

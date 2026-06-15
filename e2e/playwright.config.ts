@@ -34,11 +34,12 @@ export default defineConfig({
   webServer: {
     // Boots DynamoDB Local + app(:8080) + worker + Vite(:5173) in hermetic
     // mode. No AWS creds or secrets needed; messaging defaults to console.
-    command: 'npm run dev -- --local',
-    env: { DEV_AUTH_ENABLED: '1', MESSAGING_RECORD_OUTBOX: '1' },
+    // Env (DEV_AUTH_ENABLED, MESSAGING_RECORD_OUTBOX, etc.) is baked into the
+    // launcher — no env block needed here.
+    command: 'node scripts/e2e-session.mjs',
     cwd: repoRoot,
-    // Readiness gate: the Vite server is the surface the spec hits, and dev.mjs
-    // only starts it after db:start/create/seed, so this also covers DB boot.
+    // Readiness gate: the Vite server is the surface the spec hits, and the
+    // launcher only logs 'ready' after db:start/create/seed + app health.
     url: 'http://localhost:5173',
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,

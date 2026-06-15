@@ -374,6 +374,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
 
+    // Seed every current member's delivery slot to 'queued' (member key =
+    // contactId else phone#<E164>, the shared convention) directly on the
+    // SOURCE message at append time. The fan-out's setRecipientDelivery is a
+    // CHILD-ONLY SET (DynamoDB forbids seeding a map and a child in one
+    // expression), so the parent delivery_recipients map must exist before the
+    // first per-recipient write — appending it whole here guarantees that.
+    const roster = conversation.participants ?? [];
+    const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
+    for (const member of roster) {
+      deliveryRecipients[relayMemberKey(member)] = { status: 'queued' };
+    }
+
     // Persist the source message ONCE (the relayed message is stored once;
     // fan-out only updates delivery_recipients). No provider send happens here —
     // the per-recipient sends are the fan-out's job — so the SID/ts are
@@ -390,26 +402,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       author: 'teammate',
       deliveryStatus: 'queued',
       relaySenderKey: TEAM_SENDER_KEY,
+      deliveryRecipients,
       ...(bodyText !== undefined && { body: bodyText }),
       ...(mediaUrlList !== undefined && { mediaUrls: mediaUrlList }),
     });
-
-    // Seed every current member's delivery slot to 'queued' (member key =
-    // contactId else phone#<E164>, the shared convention).
-    const roster = conversation.participants ?? [];
-    const queued: RelayRecipientDelivery = { status: 'queued' };
-    for (const member of roster) {
-      try {
-        await messages.setRecipientDelivery(
-          conversationId,
-          appended.tsMsgId,
-          relayMemberKey(member),
-          queued,
-        );
-      } catch (err) {
-        log.error({ err, conversationId }, 'relay team send: seeding a recipient slot failed — fan-out still re-sends');
-      }
-    }
 
     // Fan out to ALL members FROM the pool number. TEAM_SENDER_KEY matches no
     // member, so none is excluded; the neutral team label is the prefix.

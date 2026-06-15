@@ -325,11 +325,16 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
     },
 
     async setRecipient(broadcastId, contactKey, recipient, allowedPriorStatuses) {
-      // SET the whole recipient slot. The parent map is created at markSending,
-      // but lazily if_not_exists-initialise it defensively. contactKey may
-      // contain `#` (phone keys) — bind as an aliased name (dotted-path safe).
+      // CHILD-ONLY SET of the recipient slot. The parent `recipients` map is
+      // always pre-seeded by markSending (`SET ... recipients = :r ...`), and
+      // the /send route only enqueues the fan-out AFTER markSending succeeds —
+      // so `recipients` always exists when this runs. DynamoDB rejects an
+      // UpdateExpression that SETs both a map and a child of that map in one
+      // statement (overlapping document paths), so we must NOT also seed the
+      // parent here. contactKey may contain `#` (phone keys) — bind as an
+      // aliased name (dotted-path safe).
       const names: Record<string, string> = { '#ck': contactKey };
-      const values: Record<string, unknown> = { ':empty': {}, ':rec': recipient };
+      const values: Record<string, unknown> = { ':rec': recipient };
       let condition = 'attribute_exists(broadcastId)';
       if (allowedPriorStatuses !== undefined) {
         // Atomic forward-only transition: only apply when the slot's NESTED
@@ -350,8 +355,7 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
           new UpdateCommand({
             TableName: table,
             Key: { broadcastId },
-            UpdateExpression:
-              'SET recipients = if_not_exists(recipients, :empty), recipients.#ck = :rec',
+            UpdateExpression: 'SET recipients.#ck = :rec',
             ConditionExpression: condition,
             ExpressionAttributeNames: names,
             ExpressionAttributeValues: values,

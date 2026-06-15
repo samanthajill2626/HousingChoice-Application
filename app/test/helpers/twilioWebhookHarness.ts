@@ -366,6 +366,12 @@ export function createFakeWorld(): FakeWorld {
         // Relay group (M1.7): preserve the inbound relay annotations.
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        // Relay group (M1.7): preserve the seeded per-recipient delivery map so
+        // the fan-out's child-only setRecipientDelivery has a parent to write
+        // into (mirrors the real repo's append passthrough).
+        ...(message.deliveryRecipients !== undefined && {
+          delivery_recipients: message.deliveryRecipients,
+        }),
         // Share-broadcast (M1.8a): preserve the broadcast id stamp.
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
         // Voice call (M1.9a): preserve the metadata-only call fields so tests

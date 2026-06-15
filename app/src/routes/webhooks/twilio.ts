@@ -175,7 +175,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const isClosed = relay.status !== 'open';
     const providerTs = new Date().toISOString();
     // Persist the relay message ONCE on the relay thread (idempotent MessageSid
-    // append). Direction inbound; relay_sender_key records who sent it.
+    // append). Direction inbound; relay_sender_key records who sent it. Seed an
+    // EMPTY delivery_recipients map on the SOURCE message so the fan-out's
+    // child-only setRecipientDelivery has a parent map to write into (DynamoDB
+    // forbids seeding a map and a child in one expression). The fan-out resolves
+    // current membership at run time, so the per-member slots are filled there.
     const appended = await messages.append({
       conversationId: relay.conversationId,
       providerSid: MessageSid,
@@ -185,6 +189,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       author,
       deliveryStatus: 'delivered',
       relaySenderKey: senderKey,
+      deliveryRecipients: {},
       ...(isClosed && { receivedOnClosedThread: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
     });

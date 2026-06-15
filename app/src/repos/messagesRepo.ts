@@ -151,6 +151,16 @@ export interface NewMessage {
   /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out). */
   receivedOnClosedThread?: boolean;
   /**
+   * Relay group (M1.7): SEED the per-recipient delivery map on the SOURCE
+   * message at append time. The fan-out's setRecipientDelivery is a CHILD-ONLY
+   * SET (DynamoDB forbids seeding a map and a child in one expression), so the
+   * parent map MUST already exist before the first per-recipient write. Pass an
+   * EMPTY map `{}` on the relay INBOUND path (the fan-out resolves current
+   * membership at run time); team-send seeds per-member 'queued' slots via this
+   * field too. Absent on 1:1 messages.
+   */
+  deliveryRecipients?: Record<string, RelayRecipientDelivery>;
+  /**
    * Share-broadcast id (M1.8a): when set, the persisted message is tagged with
    * `broadcast_id` so the delivery-status callback rollup can resolve which
    * broadcast's recipient slot to update by the provider SID alone.
@@ -492,6 +502,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         created_at: now,
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        // Seed the per-recipient delivery map (possibly empty) so the fan-out's
+        // child-only setRecipientDelivery has a parent map to write into.
+        ...(message.deliveryRecipients !== undefined && {
+          delivery_recipients: message.deliveryRecipients,
+        }),
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
         // Voice call (M1.9a): metadata-only fields on a type:'call' item. The
         // same sid#<CallSid> pointer the append already writes lets the status
@@ -863,20 +878,24 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     // --- Relay groups (M1.7) -----------------------------------------------
 
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
-      // SET the whole recipient slot (delivery_recipients.<memberKey>). Lazily
-      // initialise the parent map with if_not_exists so the first recipient
-      // write creates it. memberKey is attacker-free (derived from our own
-      // roster) but may contain `#` (phone keys) — bind it as a value, address
-      // the map slot via an aliased name to avoid dotted-path parsing issues.
+      // CHILD-ONLY SET of the recipient slot (delivery_recipients.<memberKey>).
+      // The parent `delivery_recipients` map is always pre-seeded on the source
+      // message at append time (team-send seeds per-member 'queued'; the relay
+      // inbound path seeds an empty map) — so it always exists when the fan-out
+      // calls this. DynamoDB rejects an UpdateExpression that SETs both a map
+      // and a child of that map in one statement (overlapping document paths),
+      // so we must NOT also seed the parent here. memberKey is attacker-free
+      // (derived from our own roster) but may contain `#` (phone keys) — bind it
+      // as a value, address the map slot via an aliased name to avoid
+      // dotted-path parsing issues.
       await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId, tsMsgId },
-          UpdateExpression:
-            'SET delivery_recipients = if_not_exists(delivery_recipients, :empty), delivery_recipients.#mk = :d',
+          UpdateExpression: 'SET delivery_recipients.#mk = :d',
           ConditionExpression: 'attribute_exists(tsMsgId)',
           ExpressionAttributeNames: { '#mk': memberKey },
-          ExpressionAttributeValues: { ':empty': {}, ':d': delivery },
+          ExpressionAttributeValues: { ':d': delivery },
         }),
       );
     },

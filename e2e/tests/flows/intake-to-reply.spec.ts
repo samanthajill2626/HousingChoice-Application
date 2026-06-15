@@ -32,11 +32,15 @@ test('public intake → staff inbox → staff reply → outbox', async ({ page, 
   await vaPage.getByRole('textbox', { name: 'Message' }).fill(reply);
   await vaPage.getByRole('button', { name: 'Send' }).click();
 
-  // 4) The reply renders in the thread timeline.
+  // 4) The reply renders in the thread timeline. NOTE: this is presentational
+  //    only — the bubble is appended optimistically before the POST resolves, so
+  //    it proves the UI accepted the input, NOT that the message was sent. The
+  //    real proof-of-send is step 5 (the outbox row only exists if the messaging
+  //    adapter actually ran). Do not remove step 5 thinking step 4 covers it.
   await expect(vaPage.getByRole('log', { name: 'Message timeline' }).getByText(reply)).toBeVisible();
 
-  // 5) The outbox recorded BOTH the welcome (contains the first name) and the
-  //    staff reply, to this tenant's phone.
+  // 5) PROOF OF SEND: the outbox recorded BOTH the welcome (contains the first
+  //    name) and the staff reply, to this tenant's phone.
   await expect
     .poll(async () => (await getOutbox(request, { to: phone })).map((m) => m.body ?? ''), {
       timeout: 10_000,

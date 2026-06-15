@@ -518,3 +518,22 @@ teardown leaves **zero** orphaned processes on :8080/:5173 (parent-death watch +
   needs finishing when CI lands. Also: same-user PID-reuse could (rarely) leak a
   session (recoverable via `e2e:stop`/self-heal); consider pinning the
   `@playwright/mcp` version. Address in Phase 6.
+
+### Phase 5 (commits `5b5e346`, `219077b`; review fix `<this commit>`) — reviewed,
+0 critical / 0 important. **R1 RESOLVED:** local in-process job dispatch runs
+(immediate jobs dispatch synchronously via `InProcessOutboundQueueAdapter`), and
+the chosen slice (staff 1:1 reply) is synchronous regardless — no worker, no relay
+provisioning needed. The cross-UI spec drives BOTH real UIs (public form + staff
+dashboard, no API shortcuts) and the outbox assertion is grounded in the real
+`adapter.sendMessage` call (an outbox row cannot be faked by optimistic UI), so a
+green run genuinely exercises the whole stack. Selector adjustments (both
+accessibility-first, no test-ids): `getByRole('textbox',{name:'Message'})` to
+disambiguate from the `role=log` "Message timeline", and scoping the reply
+assertion to that log. Fixed inline:
+
+- **[fixed/minor]** added a comment marking step 4 (thread render) as presentational
+  and step 5 (outbox) as the real proof-of-send, so the test can't silently
+  degrade into a tautology if step 5 is ever removed.
+- *Observations (no action):* implicit cross-spec ordering vs `outbox.spec.ts`'s
+  reseed is safe (per-run unique phone isolates state); `.first()` on the inbox
+  match is cosmetic given dedupe-by-phone + unique name.

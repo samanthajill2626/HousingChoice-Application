@@ -3,7 +3,7 @@
 // the flag is ever set in production). Exposes a liveness probe and a dev-login
 // that mints a REAL session for a seeded user, mirroring the OAuth callback.
 // Later phases add the recorded-message outbox and reseed.
-import express, { Router } from 'express';
+import { Router, json } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { sealSession, sessionCookieOptions } from '../middleware/auth.js';
@@ -22,10 +22,6 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const router = Router();
 
-  // Body parser for the dev router (mounted before the global body parsers in
-  // app.ts, so we need our own). Only parses JSON for dev endpoints.
-  router.use(express.json());
-
   // GET /__dev/ping — confirms the dev endpoints are active (stack-identity probe).
   router.get('/__dev/ping', (_req, res) => {
     res.status(200).json({ dev: true });
@@ -34,7 +30,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // POST /auth/dev-login — mint a session for a seeded user without Google.
   // Mirrors the OAuth callback's session minting exactly (same seal + cookie
   // options), so the resulting session is indistinguishable from a real login.
-  router.post('/auth/dev-login', async (req, res) => {
+  // json() is scoped to this route only — no global body-parsing side-effects.
+  router.post('/auth/dev-login', json(), async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown };
     const email = typeof body.email === 'string' && body.email.trim() ? body.email : 'va@example.com';
     const user = await users.findByEmail(email);

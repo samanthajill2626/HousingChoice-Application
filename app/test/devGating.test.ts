@@ -130,6 +130,12 @@ describe('dev gating — /auth/dev-login', () => {
     const token = setCookieValue(res, SESSION_COOKIE_NAME);
     expect(token).toBeTruthy();
 
+    const rawCookie = (res.headers['set-cookie'] as unknown as string[]).find((c) =>
+      c.startsWith(`${SESSION_COOKIE_NAME}=`),
+    )!;
+    expect(rawCookie).toContain('HttpOnly');
+    expect(rawCookie).toContain('SameSite=Lax');
+
     const me = await request(app)
       .get('/auth/me')
       .set('x-origin-verify', SECRET)
@@ -141,6 +147,16 @@ describe('dev gating — /auth/dev-login', () => {
   it('returns 404 for an unknown email', async () => {
     const app = buildDevApp();
     const res = await request(app).post('/auth/dev-login').send({ email: 'nobody@example.com' });
+    expect(res.status).toBe(404);
+  });
+
+  it('does not expose /auth/dev-login when the dev router is absent', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const app = buildApp({ config }); // no devRouter
+    const res = await request(app)
+      .post('/auth/dev-login')
+      .set('x-origin-verify', SECRET)
+      .send({ email: VA });
     expect(res.status).toBe(404);
   });
 });

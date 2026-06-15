@@ -253,9 +253,26 @@ export interface MessageItem {
   masked?: boolean;
   /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
   call_party_label?: string;
-  /** Recording S3 key seam (UNUSED for masked calls). */
+  /**
+   * S3 key of the mirrored recording (M1.9c founder-bridge calls only; UNUSED
+   * for masked calls, which are never recorded). Set by the recording callback.
+   */
   recording_s3_key?: string;
-  /** Transcript seam (UNUSED for masked calls). */
+  /**
+   * RecordingSid of the stored recording (M1.9c) — the idempotency key for the
+   * recordingStatusCallback: a redelivered callback carrying the SAME
+   * RecordingSid is a no-op (no re-fetch, no re-store). Set alongside
+   * recording_s3_key.
+   */
+  recording_sid?: string;
+  /** Recording duration in whole seconds (M1.9c; from Twilio RecordingDuration). */
+  recording_duration?: number;
+  /**
+   * VERBATIM call transcript (M1.9c founder-bridge calls only; UNUSED for
+   * masked calls). Populated when the transcription ENGINE (Twilio Voice
+   * Intelligence, operator-configured) POSTs to the transcription callback. NO
+   * AI / structured extraction — that is Phase 2.
+   */
   transcript?: string;
   [key: string]: unknown;
 }
@@ -314,6 +331,30 @@ export interface MessagesRepo {
       callDuration?: number;
     },
   ): Promise<boolean>;
+  /**
+   * Voice call recording (M1.9c): stamp recording_s3_key (+ recording_sid +
+   * recording_duration) onto a `type:'call'` item found by CallSid. IDEMPOTENT
+   * per RecordingSid — the write is conditioned on the call NOT already carrying
+   * a recording_sid (a redelivered recordingStatusCallback with the same
+   * RecordingSid is a no-op). Returns true on the first store, false when a
+   * recording is already present (so the callback skips re-fetch/re-store) or
+   * the CallSid is unknown. PII (doc §9): IDs/keys/durations only — never the
+   * RecordingUrl content.
+   */
+  setCallRecording(
+    callSid: string,
+    recording: { recordingSid: string; recordingS3Key: string; recordingDuration?: number },
+  ): Promise<boolean>;
+  /**
+   * Voice call transcript (M1.9c): save the VERBATIM transcript onto a
+   * `type:'call'` item found by CallSid. IDEMPOTENT — the write is conditioned
+   * on the call NOT already carrying a (non-empty) transcript, so a redelivered
+   * transcription callback never overwrites a completed transcript (and an empty
+   * redelivery is refused upstream too). Returns true on the first save, false
+   * when a transcript already exists or the CallSid is unknown. PII (doc §9):
+   * NEVER log the transcript text.
+   */
+  setCallTranscript(callSid: string, transcript: string): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
@@ -614,6 +655,86 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       log.info({ callSid, callStatus: fields.callStatus }, 'call status updated');
+      return true;
+    },
+
+    async setCallRecording(callSid, recording) {
+      // CallSid == provider_sid, so the sid# pointer the call append wrote
+      // resolves the item (same as updateCallStatus). PII (doc §9): IDs/keys/
+      // durations only — never the RecordingUrl/content.
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid, recordingSid: recording.recordingSid }, 'recording for unknown CallSid ignored');
+        return false;
+      }
+      const sets = ['recording_s3_key = :k', 'recording_sid = :rsid'];
+      const values: Record<string, unknown> = {
+        ':k': recording.recordingS3Key,
+        ':rsid': recording.recordingSid,
+      };
+      if (recording.recordingDuration !== undefined) {
+        sets.push('recording_duration = :d');
+        values[':d'] = recording.recordingDuration;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            // Idempotent per RecordingSid: commit ONLY when no recording is yet
+            // stored, so a redelivered recordingStatusCallback (same or a later
+            // RecordingSid) never re-stores or overwrites the first one.
+            ConditionExpression: 'attribute_not_exists(recording_sid)',
+            ExpressionAttributeValues: values,
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info(
+            { callSid, recordingSid: recording.recordingSid },
+            'recording store skipped (already recorded)',
+          );
+          return false;
+        }
+        throw err;
+      }
+      log.info(
+        { callSid, recordingSid: recording.recordingSid, recordingDuration: recording.recordingDuration },
+        'call recording stored',
+      );
+      return true;
+    },
+
+    async setCallTranscript(callSid, transcript) {
+      // CallSid == provider_sid (same pointer lookup). PII (doc §9): NEVER log
+      // the transcript text — length only.
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid }, 'transcript for unknown CallSid ignored');
+        return false;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: 'SET transcript = :t',
+            // Idempotent: commit ONLY when no (non-empty) transcript exists yet,
+            // so a redelivered transcription callback never overwrites a saved
+            // transcript. (An empty redelivery is refused at the callback too.)
+            ConditionExpression: 'attribute_not_exists(transcript) OR transcript = :empty',
+            ExpressionAttributeValues: { ':t': transcript, ':empty': '' },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ callSid }, 'transcript save skipped (already transcribed)');
+          return false;
+        }
+        throw err;
+      }
+      log.info({ callSid, transcriptLength: transcript.length }, 'call transcript saved');
       return true;
     },
 

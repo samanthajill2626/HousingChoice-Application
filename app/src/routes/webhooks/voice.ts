@@ -3,8 +3,10 @@
 //   POST /webhooks/twilio/voice/whisper      — callee-leg whisper + press-1 gate
 //   POST /webhooks/twilio/voice/whisper-gate — the press-1/press-0/timeout gate
 //   POST /webhooks/twilio/voice/status       — call status callback (forward-only)
+//   POST /webhooks/twilio/voice/recording    — recordingStatusCallback (M1.9c)
+//   POST /webhooks/twilio/voice/transcription— transcription callback (M1.9c)
 //
-// All four are signature-gated identically to the SMS handlers (the same
+// All are signature-gated identically to the SMS handlers (the same
 // twilioSignatureMiddleware over the parsed form params; query params are part
 // of the URL Twilio signs, so they are covered by the same HMAC).
 //
@@ -16,10 +18,26 @@
 // transcribed (record="do-not-record") — they produce a metadata-only `call`
 // timeline entry (who→whom by ROLE, when, duration, answered/missed).
 //
+// FOUNDER-BRIDGE RECORDING + TRANSCRIPTION — the M1.9c path (CO1, v2.17): the
+// founder-bridge call (M1.9b, masked:false) RECORDS. The recordingStatusCallback
+// fetches the recording media (authenticated, SSRF-guarded) + streams it to S3,
+// then stamps recording_s3_key/duration on the `call` entity. A separate
+// transcription callback persists a VERBATIM transcript (NO AI / structured
+// extraction — Phase 2). ONLY the founder-bridge (non-masked) records; the
+// masked relay <Dial> STAYS do-not-record.
+//
 // PII (doc §9): NEVER log a real caller's phone/name, and NEVER speak/announce
 // or persist a raw counterpart phone — IDs/SIDs/CallSid/role-labels/counts only.
+// A recording/transcript IS sensitive: store in S3 / the call entity, NEVER in
+// logs (RecordingUrl content + transcript text never appear in any log line).
 import { Router } from 'express';
 import twilio from 'twilio';
+import { createMediaStore, type MediaStore } from '../../adapters/mediaStore.js';
+import {
+  createMessagingAdapter,
+  MediaFetchRefusedError,
+  type MessagingAdapter,
+} from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import { appEvents, type EventBus } from '../../lib/events.js';
@@ -57,6 +75,18 @@ type WebhookParams = Record<string, string | undefined>;
 
 function asParams(body: unknown): WebhookParams {
   return (typeof body === 'object' && body !== null ? body : {}) as WebhookParams;
+}
+
+/**
+ * First trimmed non-empty string from a list of candidates, else undefined
+ * (M1.9c: the transcription callback is lenient about WHICH field carries the
+ * transcript across legacy / Voice Intelligence payload shapes).
+ */
+function firstNonEmptyString(candidates: (string | undefined)[]): string | undefined {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim().length > 0) return c;
+  }
+  return undefined;
 }
 
 /**
@@ -242,6 +272,14 @@ function isMissOutcome(status: CallStatus, callDuration: number | undefined): bo
 export interface TwilioVoiceWebhookDeps {
   config?: AppConfig;
   logger?: Logger;
+  /** Twilio adapter (M1.9c: authed recording-media fetch); real adapter by default. */
+  adapter?: MessagingAdapter;
+  /**
+   * S3 media store (M1.9c: mirror the founder-bridge recording). Undefined when
+   * MEDIA_BUCKET is unset (local loop) — the recording callback then logs +
+   * skips the mirror (the call entity stays recording-less, never a crash).
+   */
+  mediaStore?: MediaStore;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
@@ -258,6 +296,10 @@ export interface TwilioVoiceWebhookDeps {
 export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
+  const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
+  // MEDIA_BUCKET unset (local loop) → createMediaStore returns undefined; the
+  // recording callback logs + skips the mirror rather than crashing.
+  const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
@@ -352,7 +394,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * entry CallSid-idempotently, send the pre-ring push to the founder (admin
    * user(s)) BEFORE returning TwiML, then return a <Pause> + <Dial> that bridges
    * to the founder's cell (callerId = the business number) behind the whisper +
-   * press-1 gate. Recording stays OFF (// SEAM(M1.9c)).
+   * press-1 gate. The founder-bridge RECORDS (M1.9c) — recording media is mirrored
+   * to S3 by the /voice/recording callback (the masked relay <Dial> stays
+   * do-not-record).
    */
   async function handleFounderTriage(
     res: import('express').Response,
@@ -410,9 +454,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // Persist the founder-bridge `call` entry ONCE (CallSid-idempotent). This is
     // NOT a masked relay — masked:false (a founder-bridge). author = caller's
     // reviewed role/unknown; call_party_label = the masked caller label.
-    // recording_s3_key/transcript stay UNPOPULATED (// SEAM(M1.9c)). A
-    // redelivered /voice webhook dedupes here → no double-write, and the
-    // pre-ring push still fires (it is idempotent at the founder's device).
+    // recording_s3_key/transcript are populated LATER by the recording +
+    // transcription callbacks (M1.9c) — unset at ring time. A redelivered /voice
+    // webhook dedupes here → no double-write, and the pre-ring push still fires
+    // (it is idempotent at the founder's device).
     const startedAt = new Date().toISOString();
     try {
       const appended = await messages.append({
@@ -454,13 +499,23 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // The founder-leg whisper announces the caller (masked) + press-1 to accept
     // (blocks the founder's carrier voicemail from silently "answering"). The
     // <Dial action> + per-leg statusCallback report MISSED/answered to
-    // /voice/status. Recording stays OFF (// SEAM(M1.9c): enable record +
-    // transcribe here for the founder-bridge call).
+    // /voice/status.
+    //
+    // M1.9c RECORDING: the founder-bridge (non-masked) call RECORDS. We use
+    // 'record-from-answer-dual' — recording starts only when the bridge is
+    // ANSWERED (no dead-air/whisper-gate audio before the press-1 accept), and
+    // DUAL channel keeps caller + founder on separate tracks (cleaner for the
+    // verbatim transcript later). The recordingStatusCallback fires once on
+    // 'completed' → /voice/recording mirrors the media to S3. This applies to
+    // the founder-bridge ONLY; the masked relay <Dial> stays do-not-record.
     const vr = new VoiceResponse();
     vr.pause({ length: config.preRingPauseSeconds });
     const dial = vr.dial({
       callerId: businessCallerId,
-      record: 'do-not-record', // SEAM(M1.9c): enable record + transcribe here
+      record: 'record-from-answer-dual',
+      recordingStatusCallback: `${baseUrl}/webhooks/twilio/voice/recording`,
+      recordingStatusCallbackEvent: ['completed'],
+      recordingStatusCallbackMethod: 'POST',
       answerOnBridge: true,
       action: `${baseUrl}/webhooks/twilio/voice/status`,
       method: 'POST',
@@ -484,8 +539,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       founderCell,
     );
     log.info(
-      { callSid: CallSid, callerIdIsBusiness: true, masked: false, preRingPauseSeconds: config.preRingPauseSeconds },
-      'founder triage: pre-ring push sent, bridging to founder cell (callerId = business number, do-not-record, whisper+gate)',
+      { callSid: CallSid, callerIdIsBusiness: true, masked: false, recording: true, preRingPauseSeconds: config.preRingPauseSeconds },
+      'founder triage: pre-ring push sent, bridging to founder cell (callerId = business number, record-from-answer-dual, whisper+gate)',
     );
     sendTwiml(res, vr);
   }
@@ -903,6 +958,201 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         }
       }
     }
+    res.status(200).end();
+  });
+
+  // ---------------------------------------------------------------------
+  // Recording status callback — POST /voice/recording (M1.9c). Twilio POSTs the
+  // RecordingStatusCallback here once the founder-bridge recording is
+  // 'completed'. Resolve the `call` entity by CallSid; it MUST be a
+  // founder-bridge (masked:false) call — a masked:true relay call (or a missing
+  // entry) is logged + IGNORED, and we NEVER fetch the media for it (the masked
+  // guardrail). Fetch the recording media authenticated (SSRF-guarded,
+  // size-capped — the MMS path's Twilio-auth fetch) and stream it to S3 under
+  // recordings/<callSid>/<recordingSid>, then stamp recording_s3_key + duration
+  // (idempotent per RecordingSid: a redelivered callback never re-fetches or
+  // re-stores). Emit message.persisted so the timeline shows the recording.
+  // PII (doc §9): IDs/SIDs/durations only — NEVER the RecordingUrl content.
+  // ---------------------------------------------------------------------
+  router.post('/recording', verifySignature, async (req, res) => {
+    const params = asParams(req.body);
+    const { CallSid, RecordingSid, RecordingStatus, RecordingUrl, RecordingDuration } = params;
+    const entryCallSid = params['ParentCallSid'] ?? CallSid;
+    if (!entryCallSid || !RecordingSid) {
+      log.warn(
+        { hasCallSid: Boolean(entryCallSid), hasRecordingSid: Boolean(RecordingSid) },
+        'twilio recording callback missing CallSid/RecordingSid — rejected',
+      );
+      res.status(400).json({ error: 'bad request' });
+      return;
+    }
+    // Only act on the terminal 'completed' status (we register only that event,
+    // but be defensive against a redelivered in-progress/absent).
+    if (RecordingStatus !== undefined && RecordingStatus !== 'completed') {
+      log.info({ callSid: entryCallSid, recordingStatus: RecordingStatus }, 'recording callback: non-completed status — ignored');
+      res.status(200).end();
+      return;
+    }
+
+    // Resolve the call entity by CallSid. It MUST be a founder-bridge call —
+    // masked relay calls are NEVER recorded, so a masked:true entry (or a stray
+    // callback for an unknown CallSid) is ignored WITHOUT fetching the media.
+    const entry = await messages.getByProviderSid(entryCallSid);
+    if (!entry || entry.type !== 'call') {
+      log.warn({ callSid: entryCallSid, recordingSid: RecordingSid }, 'recording callback: no founder-bridge call for CallSid — ignored, no fetch');
+      res.status(200).end();
+      return;
+    }
+    if (entry.masked === true) {
+      // GUARDRAIL: a masked relay call must never record — refuse even a stray
+      // recording callback (never fetch the media).
+      log.warn({ callSid: entryCallSid, recordingSid: RecordingSid, masked: true }, 'recording callback for a MASKED call — refused (masked calls are never recorded)');
+      res.status(200).end();
+      return;
+    }
+    mergeContext({ conversationId: entry.conversationId });
+
+    // Idempotency layer 1: if this call already carries a recording, a
+    // redelivered callback is a no-op — do NOT re-fetch the media. (Layer 2 is
+    // the conditional write in setCallRecording, the authority under a race.)
+    if (typeof entry.recording_s3_key === 'string' && entry.recording_s3_key.length > 0) {
+      log.info({ callSid: entryCallSid, recordingSid: RecordingSid }, 'recording callback: recording already stored — no re-fetch');
+      res.status(200).end();
+      return;
+    }
+
+    // No media URL to fetch, or no media store configured (MEDIA_BUCKET unset,
+    // local loop) → record what we can without the mirror, never a crash. PII:
+    // never log the URL itself.
+    if (RecordingUrl === undefined || RecordingUrl.length === 0) {
+      log.warn({ callSid: entryCallSid, recordingSid: RecordingSid }, 'recording callback: no RecordingUrl — nothing to mirror');
+      res.status(200).end();
+      return;
+    }
+    if (!mediaStore) {
+      const line = 'recording NOT mirrored — MEDIA_BUCKET is not configured';
+      if (config.nodeEnv === 'production') log.error({ callSid: entryCallSid, recordingSid: RecordingSid }, line);
+      else log.warn({ callSid: entryCallSid, recordingSid: RecordingSid }, line);
+      res.status(200).end();
+      return;
+    }
+
+    const recordingDuration =
+      RecordingDuration !== undefined && RecordingDuration.length > 0 ? Number(RecordingDuration) : undefined;
+    const duration =
+      recordingDuration !== undefined && Number.isFinite(recordingDuration) ? recordingDuration : undefined;
+    const key = `recordings/${entryCallSid}/${RecordingSid}`;
+    try {
+      // Authenticated, SSRF-guarded (api.twilio.com), size-capped fetch — then
+      // STREAM to S3 (no whole-body buffering). Same posture as the MMS mirror.
+      const stream = await adapter.getRecordingStream(RecordingUrl);
+      await mediaStore.put(key, stream, 'audio/mpeg');
+    } catch (err) {
+      // A refused (SSRF/oversize) or failed fetch must never 5xx the webhook —
+      // Twilio's redelivery re-enters (idempotent: still no recording stored).
+      // PII: the error carries no body; log the reason class + IDs only.
+      const reason = err instanceof MediaFetchRefusedError ? err.reason : 'fetch_or_store_failed';
+      log.error({ callSid: entryCallSid, recordingSid: RecordingSid, reason }, 'recording mirror failed — call entry keeps no recording key');
+      res.status(200).end();
+      return;
+    }
+
+    // Stamp recording_s3_key (+ recording_sid + duration) idempotently per
+    // RecordingSid. A redelivery that raced past the early-return above loses
+    // the conditional write here (false) — no duplicate, no second mirror.
+    const stored = await messages.setCallRecording(entryCallSid, {
+      recordingSid: RecordingSid,
+      recordingS3Key: key,
+      ...(duration !== undefined && { recordingDuration: duration }),
+    });
+    if (stored) {
+      events.emit('message.persisted', {
+        conversationId: entry.conversationId,
+        tsMsgId: entry.tsMsgId,
+        direction: entry.direction,
+        deliveryStatus: entry.delivery_status,
+      });
+    }
+    log.info(
+      { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored },
+      'founder-bridge recording mirrored to S3',
+    );
+    res.status(200).end();
+  });
+
+  // ---------------------------------------------------------------------
+  // Transcription callback — POST /voice/transcription (M1.9c). Persists a
+  // VERBATIM transcript onto the founder-bridge `call` entity. The transcription
+  // ENGINE itself is Twilio VOICE INTELLIGENCE — a paid, account-configured
+  // Service (OPERATOR step; the legacy <Record transcribe> attribute is
+  // deprecated and does NOT apply to <Dial> recordings). This endpoint does NOT
+  // call any transcription API inline — it only PERSISTS what the engine POSTs
+  // here (the transcript field populates when Voice Intelligence POSTs to this
+  // callback). Lenient on the payload shape: accept TranscriptionText (legacy)
+  // or a Voice Intelligence transcript body. Idempotent: an empty redelivery, or
+  // one after a transcript is already saved, never overwrites. ONLY founder-
+  // bridge (masked:false) calls — a masked call is refused. PII (doc §9): NEVER
+  // log the transcript text — length only.
+  // ---------------------------------------------------------------------
+  router.post('/transcription', verifySignature, async (req, res) => {
+    const params = asParams(req.body);
+    const { CallSid, TranscriptionStatus } = params;
+    const entryCallSid = params['ParentCallSid'] ?? CallSid;
+    if (!entryCallSid) {
+      log.warn({ hasCallSid: false }, 'twilio transcription callback missing CallSid — rejected');
+      res.status(400).json({ error: 'bad request' });
+      return;
+    }
+    // A failed-transcription callback carries no usable text — ack + ignore.
+    if (TranscriptionStatus !== undefined && TranscriptionStatus !== 'completed') {
+      log.info({ callSid: entryCallSid, transcriptionStatus: TranscriptionStatus }, 'transcription callback: non-completed status — ignored');
+      res.status(200).end();
+      return;
+    }
+
+    // Lenient extraction: the legacy/simple shape is TranscriptionText; a Voice
+    // Intelligence callback may instead carry the transcript under a `Transcript`
+    // / `transcript` field. Take the first non-empty string. NEVER log the value.
+    const transcriptText = firstNonEmptyString([
+      params['TranscriptionText'],
+      params['Transcript'],
+      params['transcript'],
+      params['transcript_text'],
+    ]);
+    if (transcriptText === undefined) {
+      log.info({ callSid: entryCallSid }, 'transcription callback: empty transcript — nothing to save');
+      res.status(200).end();
+      return;
+    }
+
+    // Resolve the call entity. Founder-bridge only — a masked relay call is
+    // never recorded/transcribed, so refuse it.
+    const entry = await messages.getByProviderSid(entryCallSid);
+    if (!entry || entry.type !== 'call') {
+      log.warn({ callSid: entryCallSid }, 'transcription callback: no founder-bridge call for CallSid — ignored');
+      res.status(200).end();
+      return;
+    }
+    if (entry.masked === true) {
+      log.warn({ callSid: entryCallSid, masked: true }, 'transcription callback for a MASKED call — refused (masked calls are never transcribed)');
+      res.status(200).end();
+      return;
+    }
+    mergeContext({ conversationId: entry.conversationId });
+
+    // Save VERBATIM, idempotently — a redelivery after a saved transcript loses
+    // the conditional write (false), so the transcript is never overwritten/dup.
+    const saved = await messages.setCallTranscript(entryCallSid, transcriptText);
+    if (saved) {
+      events.emit('message.persisted', {
+        conversationId: entry.conversationId,
+        tsMsgId: entry.tsMsgId,
+        direction: entry.direction,
+        deliveryStatus: entry.delivery_status,
+      });
+    }
+    // PII: transcriptLength only — NEVER the transcript text.
+    log.info({ callSid: entryCallSid, transcriptLength: transcriptText.length, saved }, 'founder-bridge transcript saved');
     res.status(200).end();
   });
 

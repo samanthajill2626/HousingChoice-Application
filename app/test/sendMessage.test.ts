@@ -128,6 +128,8 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
     getByProviderSid: async () => undefined,
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
+    setCallRecording: async () => true,
+    setCallTranscript: async () => true,
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
@@ -148,6 +150,9 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
       return { providerSid: `SMfake-${fakes.sent.length}`, status: 'queued', providerTs: '2026-06-12T10:00:00.000Z' };
     },
     getMediaStream: async () => {
+      throw new Error('not used');
+    },
+    getRecordingStream: async () => {
       throw new Error('not used');
     },
     provisionPhoneNumber: async () => ({

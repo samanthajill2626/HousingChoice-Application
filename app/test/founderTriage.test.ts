@@ -14,7 +14,8 @@
 //  - no raw caller phone/name in any push payload or log line (masked label only)
 //  - auto-text fires EXACTLY ONCE per missed call (CallSid marker)
 //  - auto-text respects the settings toggle + opt-out (SendRefusedError skipped)
-//  - record stays OFF on the founder-bridge (// SEAM(M1.9c))
+//  - the founder-bridge RECORDS (M1.9c / CO1) — record-from-answer-dual +
+//    recordingStatusCallback (the masked relay stays do-not-record)
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   InMemorySchedulerAdapter,
@@ -92,8 +93,12 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(xml).toContain(FOUNDER_CELL);
     expect(xml).toContain('/webhooks/twilio/voice/whisper');
     expect(xml).toContain('leg=founder');
-    // GUARDRAIL: record stays OFF on the founder bridge (M1.9c seam).
-    expect(xml).toContain('record="do-not-record"');
+    // M1.9c (CO1): the founder bridge RECORDS (the masked relay stays
+    // do-not-record — asserted in voiceWebhook.test.ts). recording-from-answer
+    // + the recordingStatusCallback drive the S3 mirror.
+    expect(xml).not.toContain('record="do-not-record"');
+    expect(xml).toContain('record="record-from-answer-dual"');
+    expect(xml).toContain('/webhooks/twilio/voice/recording');
     // The dial reports completion to the status route.
     expect(xml).toContain('/webhooks/twilio/voice/status');
 

@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
+import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
@@ -99,6 +100,12 @@ export interface ApiRouterDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   auditRepo?: AuditRepo;
+  /**
+   * S3 media store (M1.9c: serve the founder-bridge recording back to the authed
+   * dashboard). Undefined when MEDIA_BUCKET is unset — the recording endpoint
+   * then answers 404 (nothing is stored locally).
+   */
+  mediaStore?: MediaStore;
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
   settingsRepo?: SettingsRepo;
@@ -185,6 +192,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
+  const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const events = deps.events ?? appEvents;
   const sseHeartbeatMs = deps.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
   const sendMessage =
@@ -550,6 +559,54 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
     res.json({ call, conversation });
+  });
+
+  // GET /api/calls/:callId/recording — stream the founder-bridge recording back
+  // to the dashboard for playback (M1.9c). AUTH-ONLY (this router sits behind
+  // requireAuth + session) — recordings are PII (doc §9) and NEVER public.
+  // Resolve the call by CallSid (== provider_sid); if it carries a
+  // recording_s3_key, STREAM the S3 object through (streams-only, no whole-body
+  // buffering) so the audio never transits a public/presigned URL — the bytes
+  // stay behind the session gate. 404 when the call/recording does not exist (or
+  // MEDIA_BUCKET is unconfigured). PII: no recording content in any log line.
+  router.get('/calls/:callId/recording', async (req, res) => {
+    const { callId } = req.params;
+    const call = await messages.getByProviderSid(callId);
+    if (!call || call.type !== 'call') {
+      res.status(404).json({ error: 'call_not_found' });
+      return;
+    }
+    mergeContext({ conversationId: call.conversationId });
+    const key = call.recording_s3_key;
+    if (typeof key !== 'string' || key.length === 0) {
+      res.status(404).json({ error: 'recording_not_found' });
+      return;
+    }
+    if (!mediaStore) {
+      // No store configured (MEDIA_BUCKET unset) — the key cannot be served.
+      log.warn({ callSid: callId }, 'recording requested but no media store configured');
+      res.status(404).json({ error: 'recording_not_found' });
+      return;
+    }
+    const object = await mediaStore.getStream(key);
+    if (!object) {
+      // The key is recorded on the call but the object is gone (lifecycle/
+      // deletion) — 404 rather than a hanging stream.
+      log.warn({ callSid: callId }, 'recording key present but object not found in the media store');
+      res.status(404).json({ error: 'recording_not_found' });
+      return;
+    }
+    res.setHeader('Content-Type', object.contentType ?? 'audio/mpeg');
+    if (object.contentLength !== undefined) {
+      res.setHeader('Content-Length', String(object.contentLength));
+    }
+    // nosniff is already set app-wide; the recording is audio, never executable.
+    log.info({ callSid: callId }, 'streaming founder-bridge recording to the dashboard');
+    object.body.on('error', (err) => {
+      log.error({ err, callSid: callId }, 'recording stream errored mid-flight');
+      res.destroy(err);
+    });
+    object.body.pipe(res);
   });
 
   // POST /api/conversations/:conversationId/read — zero the unread counter

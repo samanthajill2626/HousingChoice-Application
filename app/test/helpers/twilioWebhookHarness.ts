@@ -110,6 +110,10 @@ export interface FakeWorld {
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
+  /** Recording URLs that getRecordingStream should fail for (M1.9c). */
+  failRecordingUrls: Set<string>;
+  /** What mediaStore.put stored, by S3 key — read back by getStream (M1.9c). */
+  mediaObjects: Map<string, { body: Buffer; contentType?: string }>;
   /** The bus injected into the app — emit/subscribe like production code. */
   events: EventBus;
   /** Every bus emission, in order (the harness subscribes to both events). */
@@ -154,6 +158,10 @@ export function createFakeWorld(): FakeWorld {
   const initiatedCalls: InitiateCallParams[] = [];
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const failMediaUrls = new Set<string>();
+  const failRecordingUrls = new Set<string>();
+  // What put() stored, keyed by S3 key — so getStream() can read it back (the
+  // M1.9c recording round-trip).
+  const mediaObjects = new Map<string, { body: Buffer; contentType?: string }>();
   let convCounter = 0;
   let sidCounter = 0;
   let provisionCounter = 0;
@@ -400,6 +408,28 @@ export function createFakeWorld(): FakeWorld {
       if (fields.answeredAt !== undefined) existing.answered_at = fields.answeredAt;
       if (fields.endedAt !== undefined) existing.ended_at = fields.endedAt;
       if (fields.callDuration !== undefined) existing.call_duration = fields.callDuration;
+      return true;
+    },
+    async setCallRecording(callSid, recording) {
+      // Mirror the real repo: idempotent per RecordingSid — once a recording is
+      // stored (recording_sid present) a redelivery is a no-op (false).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.recording_sid !== undefined) return false;
+      existing.recording_s3_key = recording.recordingS3Key;
+      existing.recording_sid = recording.recordingSid;
+      if (recording.recordingDuration !== undefined) {
+        existing.recording_duration = recording.recordingDuration;
+      }
+      return true;
+    },
+    async setCallTranscript(callSid, transcript) {
+      // Mirror the real repo: idempotent — a non-empty transcript already
+      // present is never overwritten (false).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (typeof existing.transcript === 'string' && existing.transcript.length > 0) return false;
+      existing.transcript = transcript;
       return true;
     },
     async listByConversation(conversationId, opts = {}) {
@@ -757,6 +787,13 @@ export function createFakeWorld(): FakeWorld {
       if (failMediaUrls.has(mediaUrl)) throw new Error(`fake media fetch failed: 404`);
       return Readable.from([Buffer.from(`media-bytes-for:${mediaUrl}`)]);
     },
+    async getRecordingStream(recordingUrl) {
+      // M1.9c: simulate the authed recording-media fetch. A URL in
+      // failRecordingUrls throws (the fetch-failure path); otherwise stream
+      // deterministic fake audio bytes for the recording round-trip assertions.
+      if (failRecordingUrls.has(recordingUrl)) throw new Error(`fake recording fetch failed: 404`);
+      return Readable.from([Buffer.from(`recording-bytes-for:${recordingUrl}`)]);
+    },
     async provisionPhoneNumber() {
       const seq = String(++provisionCounter).padStart(4, '0');
       return {
@@ -780,8 +817,28 @@ export function createFakeWorld(): FakeWorld {
   const mediaStore: MediaStore = {
     async put(key, body, contentType) {
       let bytes = 0;
-      for await (const chunk of body) bytes += (chunk as Buffer).length;
+      const chunks: Buffer[] = [];
+      for await (const chunk of body) {
+        const buf = chunk as Buffer;
+        bytes += buf.length;
+        chunks.push(buf);
+      }
       mediaPuts.push({ key, ...(contentType !== undefined && { contentType }), bytes });
+      // Keep the bytes so getStream can read back what put stored (the M1.9c
+      // recording round-trip: callback stores → serving endpoint streams).
+      mediaObjects.set(key, {
+        body: Buffer.concat(chunks),
+        ...(contentType !== undefined && { contentType }),
+      });
+    },
+    async getStream(key) {
+      const obj = mediaObjects.get(key);
+      if (!obj) return undefined;
+      return {
+        body: Readable.from([obj.body]),
+        ...(obj.contentType !== undefined && { contentType: obj.contentType }),
+        contentLength: obj.body.length,
+      };
     },
   };
 
@@ -801,6 +858,8 @@ export function createFakeWorld(): FakeWorld {
     initiatedCalls,
     mediaPuts,
     failMediaUrls,
+    failRecordingUrls,
+    mediaObjects,
     events,
     emitted,
     conversationsRepo,
@@ -912,6 +971,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
         }),
       usersRepo: fakeUsers.repo,
       events: world.events,
+      // M1.9c: the recording-serving endpoint (GET /api/calls/:callId/recording)
+      // streams the stored recording back out of the SAME media store the voice
+      // recording callback wrote it into.
+      ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

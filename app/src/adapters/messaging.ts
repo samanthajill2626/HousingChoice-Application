@@ -100,6 +100,16 @@ export interface MessagingAdapter {
   /** Streams-only media fetch (Builder B: MMS → S3 mirroring). */
   getMediaStream(mediaUrl: string): Promise<Readable>;
   /**
+   * Streams-only RECORDING-media fetch (M1.9c founder-bridge call recording):
+   * the recordingStatusCallback hands us a RecordingUrl on api.twilio.com that
+   * needs the same basic-auth first hop + the same SSRF allowlist + size cap as
+   * MMS media (RecordingUrl is webhook-shaped input). Identical guarantees to
+   * getMediaStream; a distinct method only so call-recording media can be wired
+   * independently (and so the `.mp3` suffix convention below is documented). PII
+   * (doc §9): the bytes are the call audio — never log the URL/content.
+   */
+  getRecordingStream(recordingUrl: string): Promise<Readable>;
+  /**
    * Provision a NEW phone number for a relay group (M1.7). MUST return a
    * voice+sms-capable number — M1.7 pre-wires the voice webhook so the M1.9
    * masked-calling bridge is a config flip, not a re-provision. Throws
@@ -430,13 +440,36 @@ export class TwilioMessagingDriver implements MessagingAdapter {
   }
 
   async getMediaStream(mediaUrl: string): Promise<Readable> {
-    // SSRF guard FIRST — before any credentials are attached: MediaUrl{i}
-    // comes off a webhook form, so an exact-host https-only allowlist keeps
-    // a forged URL from pointing our authenticated fetch anywhere else.
+    return this.fetchTwilioMediaStream(mediaUrl, 'getMediaStream');
+  }
+
+  async getRecordingStream(recordingUrl: string): Promise<Readable> {
+    // M1.9c: the founder-bridge recording media. RecordingUrl comes off the
+    // recordingStatusCallback (api.twilio.com/.../Recordings/RExxxx) — same
+    // basic-auth first hop + SSRF allowlist + size cap as MMS media. We request
+    // a concrete media representation by suffixing `.mp3` (Twilio serves the
+    // dual-channel recording as MP3); without a suffix Twilio returns an XML
+    // metadata doc, not the audio. The suffix is added only when one is absent
+    // so a callback that already carries an extension is honored.
+    const withExt = /\.(mp3|wav)$/i.test(recordingUrl) ? recordingUrl : `${recordingUrl}.mp3`;
+    return this.fetchTwilioMediaStream(withExt, 'getRecordingStream');
+  }
+
+  /**
+   * Shared authenticated, SSRF-guarded, size-capped streaming fetch for any
+   * Twilio media URL (MMS attachments AND call recordings). STREAMS ONLY — the
+   * Readable is piped straight from the HTTP response; nothing buffers whole
+   * bodies (binding guideline 1). PII (doc §9): never log the URL or the bytes.
+   */
+  private async fetchTwilioMediaStream(mediaUrl: string, op: string): Promise<Readable> {
+    // SSRF guard FIRST — before any credentials are attached: the URL comes off
+    // a webhook form (MediaUrl{i} / RecordingUrl), so an exact-host https-only
+    // allowlist keeps a forged URL from pointing our authenticated fetch
+    // anywhere else.
     const url = new URL(mediaUrl);
     if (url.protocol !== 'https:' || url.hostname !== TWILIO_MEDIA_HOST) {
       throw new MediaFetchRefusedError(
-        `getMediaStream: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
+        `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
         'host_not_allowed',
       );
     }
@@ -447,15 +480,16 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       signal: controller.signal,
     });
     if (!res.ok || !res.body) {
-      throw new Error(`getMediaStream: ${res.status} ${res.statusText} fetching Twilio media`);
+      throw new Error(`${op}: ${res.status} ${res.statusText} fetching Twilio media`);
     }
     // Size cap: refuse oversize media up front instead of streaming 25MB+
-    // into S3 (MMS media is carrier-capped far below this anyway).
+    // into S3 (MMS media is carrier-capped far below this; a recording is
+    // bounded by call length but the cap is the same defensive ceiling).
     const contentLength = Number(res.headers.get('content-length') ?? 0);
     if (contentLength > MAX_MEDIA_CONTENT_LENGTH) {
       controller.abort();
       throw new MediaFetchRefusedError(
-        `getMediaStream: Content-Length ${contentLength} exceeds the ${MAX_MEDIA_CONTENT_LENGTH}-byte cap`,
+        `${op}: Content-Length ${contentLength} exceeds the ${MAX_MEDIA_CONTENT_LENGTH}-byte cap`,
         'too_large',
       );
     }
@@ -504,6 +538,18 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     const res = await fetch(mediaUrl);
     if (!res.ok || !res.body) {
       throw new Error(`getMediaStream: ${res.status} ${res.statusText} fetching media`);
+    }
+    return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
+  }
+
+  async getRecordingStream(recordingUrl: string): Promise<Readable> {
+    // Local loop: no real Twilio voice / no real recording media. Plain
+    // streamed fetch (parity with getMediaStream) so a simulated callback that
+    // points at a local fixture still streams; the console driver is never used
+    // against api.twilio.com.
+    const res = await fetch(recordingUrl);
+    if (!res.ok || !res.body) {
+      throw new Error(`getRecordingStream: ${res.status} ${res.statusText} fetching recording`);
     }
     return Readable.fromWeb(res.body as WebReadableStream<Uint8Array>);
   }

@@ -100,6 +100,9 @@ function makeFakeAdapter(opts: { voice?: boolean } = {}): MessagingAdapter & { p
     async getMediaStream() {
       throw new Error('not used');
     },
+    async getRecordingStream() {
+      throw new Error('not used');
+    },
     async provisionPhoneNumber(): Promise<ProvisionPhoneNumberResult> {
       provisions += 1;
       const seq = String(provisions).padStart(4, '0');

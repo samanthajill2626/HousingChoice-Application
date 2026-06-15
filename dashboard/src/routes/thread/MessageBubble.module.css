@@ -68,6 +68,30 @@
   background-color: var(--hc-color-surface-alt);
 }
 
+/* Inline MMS attachments (mirrored S3 media served via the authed endpoint). */
+.mediaGallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-1);
+  align-self: flex-start;
+}
+
+.mediaLink {
+  display: inline-flex;
+  border-radius: var(--hc-radius-md);
+  overflow: hidden;
+}
+
+.mediaImg {
+  display: block;
+  max-width: 12rem;
+  max-height: 12rem;
+  object-fit: cover;
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface-alt);
+}
+
 .meta {
   display: flex;
   align-items: center;

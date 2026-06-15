@@ -177,9 +177,23 @@ describe('<Thread> timeline + bubbles', () => {
     expect(screen.queryByText(/Failed/)).not.toBeInTheDocument();
   });
 
-  it('renders a media-attachment placeholder chip for an MMS (no broken img)', async () => {
+  it('renders inline <img> for mirrored (S3-backed) MMS media via the authed media endpoint', async () => {
     api.listMessages.mockResolvedValue([
-      makeMessage({ tsMsgId: 't1#SM1', type: 'mms', body: '', media_s3_keys: ['k1', 'k2'] }),
+      makeMessage({ tsMsgId: 't1#SM1', provider_sid: 'SM1', type: 'mms', body: '', media_s3_keys: ['k1', 'k2'] }),
+    ]);
+    renderThread();
+
+    const imgs = await screen.findAllByAltText(/attachment/i);
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]).toHaveAttribute('src', '/api/messages/SM1/media/0');
+    expect(imgs[1]).toHaveAttribute('src', '/api/messages/SM1/media/1');
+    // No placeholder chip when the media is actually viewable.
+    expect(screen.queryByText(/media attachment/i)).not.toBeInTheDocument();
+  });
+
+  it('falls back to the placeholder chip for MMS media with no S3 keys (unmirrored)', async () => {
+    api.listMessages.mockResolvedValue([
+      makeMessage({ tsMsgId: 't1#SM1', type: 'mms', body: '', mediaUrls: ['https://provider/1'] }),
     ]);
     renderThread();
 

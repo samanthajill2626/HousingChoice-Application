@@ -64,6 +64,10 @@ export function MessageBubble({
   const pending = isPending(message);
   const { isFailure } = presentDeliveryStatus(message.delivery_status);
   const media = mediaCount(message);
+  // Mirrored (S3-backed) inbound MMS attachments are viewable inline via the
+  // authed same-origin media endpoint (the session cookie rides along). Media
+  // with no s3 keys (e.g. local/unmirrored) falls back to the placeholder chip.
+  const s3Keys = message.media_s3_keys ?? [];
   const hasBody = typeof message.body === 'string' && message.body.length > 0;
 
   // Relay mode (M1.7): only when a roster is supplied. Attribution comes from
@@ -89,10 +93,23 @@ export function MessageBubble({
 
         {hasBody && <p className={styles.body}>{message.body}</p>}
 
-        {media > 0 && (
-          <span className={styles.media} title="Media attachment (not yet viewable)">
-            📎 {media === 1 ? 'Media attachment' : `${media} media attachments`}
-          </span>
+        {s3Keys.length > 0 ? (
+          <div className={styles.mediaGallery}>
+            {s3Keys.map((_, i) => {
+              const src = `/api/messages/${encodeURIComponent(message.provider_sid)}/media/${i}`;
+              return (
+                <a key={i} className={styles.mediaLink} href={src} target="_blank" rel="noopener noreferrer">
+                  <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />
+                </a>
+              );
+            })}
+          </div>
+        ) : (
+          media > 0 && (
+            <span className={styles.media} title="Media attachment (not yet viewable)">
+              📎 {media === 1 ? 'Media attachment' : `${media} media attachments`}
+            </span>
+          )
         )}
 
         {!hasBody && media === 0 && <p className={styles.empty}>(no content)</p>}

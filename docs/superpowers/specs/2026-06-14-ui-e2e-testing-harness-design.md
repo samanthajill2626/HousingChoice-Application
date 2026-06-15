@@ -457,3 +457,26 @@ gitignored; the gate chain holds for the new route. Fixed inline:
 > immediately logged out." The e2e harness sidesteps it by using `va@example.com`.
 > Fix candidate: seed the founder as `role: 'admin'` (or add `founder_admin` to
 > `UserRole`). Flagging because it likely affects real founder logins too.
+
+### Phase 3 (commits `ad7344b`, `25ef701`, `4e05f9f`, `036dce5`; review fixes
+`74f4372`) — reviewed, 0 critical. Recording driver cannot run in prod (flag
+fail-fast + structural gate + Terraform-pinned NODE_ENV); `resetLocalData`
+cannot escape a hermetic local stack (guard runs before any destructive call,
+double-gated on endpoint + exact prefix); seed extraction is byte-identical.
+Fixed inline:
+
+- **[fixed — was Important]** `/__dev/*` is unauthenticated + origin-secret-exempt
+  and the outbox read exposes message bodies (PII). Added the spec's optional 5th
+  safety layer: the dev router now ALSO requires `config.dynamodbEndpoint` to be
+  set, so `/__dev/*` only mounts on a hermetic local stack (cloud stacks have no
+  local endpoint). `requireAuth` is unsuitable here (dev-login mints the session;
+  the outbox fixture has none).
+- **[fixed]** `RecordingMessagingDriver.ensureTable` no longer caches a *failed*
+  promise (was a silent permanently-empty-outbox / false-green risk).
+- **[fixed]** `clearTable` retries `BatchWrite` `UnprocessedItems`; reset guard
+  uses exact `prefix === 'hc-local-'`; removed an unused test import.
+- **[→ Phase 6 / deferred]** `reuseExistingServer:!CI` can flake the outbox spec
+  locally if a dev server is already running WITHOUT `MESSAGING_RECORD_OUTBOX=1`
+  (CI forces a fresh boot). And the new `*.integration.test.ts` self-skip when
+  DynamoDB Local is down (consistent with the existing pattern) — Phase 6 CI MUST
+  start the container or those suites add zero coverage. Document both in Phase 6.

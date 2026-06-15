@@ -86,14 +86,23 @@ export function useEventStream(handlers: EventStreamHandlers): void {
 
       source.addEventListener('error', () => {
         handlersRef.current.onError?.();
-        // EventSource auto-reconnects while readyState is CONNECTING; only step
-        // in when it has CLOSED (gave up) — reopen with capped backoff.
-        if (source && source.readyState === EventSource.CLOSED && !closed) {
-          source.close();
-          source = null;
-          reconnectTimer = setTimeout(connect, reconnectDelay);
-          reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-        }
+        if (closed) return;
+        // OWN the reconnect with capped exponential backoff — do NOT defer to
+        // EventSource's native retry. On a refused/down origin the browser keeps
+        // readyState at CONNECTING and retries at a FIXED ~3s forever (it never
+        // reaches CLOSED), so a CLOSED-only guard never engaged the backoff and
+        // a prolonged outage hammered every ~3s with no ramp. Closing +
+        // rescheduling ourselves gives a real 1s→2s→…→30s back-off. The
+        // reconnectTimer guard coalesces the repeated 'error' events one drop
+        // fires into a single scheduled reconnect.
+        if (reconnectTimer !== undefined) return;
+        source?.close();
+        source = null;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
+          connect();
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
       });
     };
 

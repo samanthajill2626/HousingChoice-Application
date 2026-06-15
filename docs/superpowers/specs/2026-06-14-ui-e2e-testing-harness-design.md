@@ -413,3 +413,23 @@ deferred (not dropped). Each names the phase that should resolve it.
   the above) — fold into the Phase 4 launcher.
 - *Ignored (trivial):* `stdout/stderr: 'pipe'` hiding live boot progress on a
   hang — acceptable; surfaces on failure.
+
+### Phase 1 (commits `5f1e456`, `9b56611`; review fixes `aee4009`) — reviewed,
+0 critical, no live backdoor. Deploy invariant confirmed: `NODE_ENV` is the
+literal `"production"` across terraform/Dockerfile/compose, so both env gates +
+the fail-fast bite, and `loadConfig` is the only AppConfig construction path in
+prod code. All findings fixed inline (nothing deferred):
+
+- **[fixed] `/__dev/*` fell through to the SPA `index.html` (200) in prod** when a
+  dashboard dist dir is configured, because `/__dev` was not a reserved prefix —
+  breaking the "absent → 404" invariant and setting a trap for later dangerous
+  `/__dev/*` handlers. Added `/__dev` to the SPA-fallback reserved list + a test
+  that builds the app with a real temp dist dir and asserts `/__dev/ping` → 404
+  while a control SPA route → 200.
+- **[fixed] Fail-fast test only covered `'1'`** — now loops all truthy tokens
+  (`true/1/yes/TRUE/Yes`) asserting each throws in production.
+- **[fixed/minor]** simplified the redundant `originSecret` `/__dev/` condition
+  and documented the prefix-exemption blast radius.
+- *Note for later phases:* every `/__dev/*` endpoint is exempt from the
+  origin-secret validator, so dev-login/outbox/reseed will rely SOLELY on the
+  structural absent-in-prod gate. Keep nothing prod-sensitive reachable there.

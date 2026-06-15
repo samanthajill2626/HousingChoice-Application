@@ -262,9 +262,12 @@ Three independent guards; any one failing still leaves two:
 - **Engine unit tests** (in-process, no HTTP) — registry mapping; **signer
   correctness** (signature matches what real Twilio produces for a given
   payload+URL+token); payload shape; async status progression on a **seeded clock**.
-- **Scripted integration** — the harness imports the engine directly (or hits the
-  control API) to inject inbound texts and assert app behavior (inbound creates a
-  conversation; auto-reply fires; failed delivery surfaces correctly). No browser.
+- **Scripted integration** — drives the mock through the **control API (HTTP)** —
+  the single authoring convention for scripted scenarios — to inject inbound texts
+  and assert app behavior (inbound creates a conversation; auto-reply fires; failed
+  delivery surfaces correctly). No browser. In-process engine calls are reserved for
+  pure engine unit tests only (above), so scenarios read identically across
+  integration and e2e and there is no second engine-wiring path to drift.
 - **e2e (Playwright)** — boot the stack **with** the fake-twilio service; drive the
   real dashboard + the fake-phones UI; assert cross-party flows end to end. Extends
   the existing [`e2e/`](../../../e2e/) harness.
@@ -293,7 +296,5 @@ table. No new domain noun is introduced by this work.
 
 - Exact `twilio-node` redirection mechanism — settle in the §4.4 spike before the
   rest of the build.
-- Whether scripted scenarios prefer in-process engine calls vs the control API as
-  the default authoring style (both supported; pick a convention during planning).
 - Voice / RCS / number-provisioning — explicitly deferred; scaffolded `501` routes
   mark the seams.

@@ -40,6 +40,7 @@ import {
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
 import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
+import { type CaseDeadline, type CaseItem, type CasesRepo } from '../../src/repos/casesRepo.js';
 import {
   type BroadcastItem,
   type BroadcastsRepo,
@@ -125,6 +126,9 @@ export interface FakeWorld {
   /** In-memory units (M1.5), keyed by unitId. */
   units: Map<string, UnitItem>;
   unitsRepo: UnitsRepo;
+  /** In-memory cases (M1.10), keyed by caseId. */
+  cases: Map<string, CaseItem>;
+  casesRepo: CasesRepo;
   /** In-memory broadcasts (M1.8a), keyed by broadcastId. */
   broadcasts: Map<string, BroadcastItem>;
   broadcastsRepo: BroadcastsRepo;
@@ -172,6 +176,7 @@ export function createFakeWorld(): FakeWorld {
   events.on('conversation.updated', (payload) => emitted.push({ event: 'conversation.updated', payload }));
   events.on('message.persisted', (payload) => emitted.push({ event: 'message.persisted', payload }));
   events.on('broadcast.updated', (payload) => emitted.push({ event: 'broadcast.updated', payload }));
+  events.on('case.updated', (payload) => emitted.push({ event: 'case.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
@@ -661,6 +666,94 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory cases (M1.10): mirror the repo's contractual semantics —
+  // generate-id create, SET-merge update with null→REMOVE + the next_deadline
+  // composite-key REFUSAL, both-or-neither setNextDeadline, conditional 404, and
+  // the GSI-shaped list queries. (Cursor pagination is integration-tested in
+  // casesRepo.integration.test.ts; this fake slices by limit only.)
+  const cases = new Map<string, CaseItem>();
+  let caseCounter = 0;
+  const casesRepo: CasesRepo = {
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: CaseItem = {
+        ...input,
+        caseId: input.caseId ?? `case-${++caseCounter}`,
+        created_at: typeof input.created_at === 'string' ? input.created_at : now,
+        updated_at: now,
+      };
+      cases.set(item.caseId, item);
+      return { ...item };
+    },
+    async getById(caseId) {
+      const c = cases.get(caseId);
+      return c ? { ...c } : undefined;
+    },
+    async update(caseId, patch) {
+      const c = cases.get(caseId);
+      if (!c) throw conditionalCheckFailed(`update: no case ${caseId}`);
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) continue;
+        if (key === 'next_deadline_type' || key === 'next_deadline_at') {
+          throw new Error('casesRepo.update: set next_deadline via setNextDeadline');
+        }
+        if (value === null) delete c[key];
+        else c[key] = value;
+      }
+      c.updated_at = new Date().toISOString();
+      return { ...c };
+    },
+    async setNextDeadline(caseId, deadline: CaseDeadline | null) {
+      const c = cases.get(caseId);
+      if (!c) throw conditionalCheckFailed(`setNextDeadline: no case ${caseId}`);
+      if (deadline === null) {
+        delete c.next_deadline_type;
+        delete c.next_deadline_at;
+      } else {
+        c.next_deadline_type = deadline.type;
+        c.next_deadline_at = deadline.at;
+      }
+      c.updated_at = new Date().toISOString();
+      return { ...c };
+    },
+    async listByTenant(tenantId, opts = {}) {
+      const items = [...cases.values()].filter((c) => c.tenantId === tenantId).slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+    async listByUnit(unitId, opts = {}) {
+      const items = [...cases.values()].filter((c) => c.unitId === unitId).slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+    async listByStage(stage, opts = {}) {
+      const items = [...cases.values()].filter((c) => c.stage === stage).slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+    async listByTourDate(tourDate, opts = {}) {
+      const items = [...cases.values()].filter((c) => c.tour_date === tourDate).slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+    async listByNextDeadline(type, opts = {}) {
+      const items = [...cases.values()]
+        // Composite SPARSE key: a row exists in byNextDeadline only when BOTH
+        // attrs are present — mirror the real GSI (never a half-set), so the fake
+        // can't admit a state production can't represent.
+        .filter((c) => c.next_deadline_type === type && typeof c.next_deadline_at === 'string')
+        .filter((c) =>
+          opts.beforeAt === undefined ? true : (c.next_deadline_at as string) <= opts.beforeAt,
+        )
+        .sort((a, b) => {
+          const cmp = (a.next_deadline_at as string) < (b.next_deadline_at as string) ? -1 : 1;
+          return (opts.scanIndexForward ?? true) ? cmp : -cmp;
+        })
+        .slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+    async list(opts = {}) {
+      const items = [...cases.values()].slice(0, opts.limit ?? 50);
+      return { items: items.map((c) => ({ ...c })) };
+    },
+  };
+
   // In-memory broadcasts (M1.8a): mirror the repo's contractual semantics —
   // generate-id create, markSending draft-gate + recipients seed, setRecipient
   // map slot, atomic bumpStats, terminal markSent/markFailed.
@@ -885,6 +978,8 @@ export function createFakeWorld(): FakeWorld {
     auditRepo,
     units,
     unitsRepo,
+    cases,
+    casesRepo,
     broadcasts,
     broadcastsRepo,
     settings,
@@ -976,6 +1071,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
       unitsRepo: world.unitsRepo,
+      casesRepo: world.casesRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).

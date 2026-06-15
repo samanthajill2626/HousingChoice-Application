@@ -1062,7 +1062,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // A status we don't model (e.g. 'queued'/'initiated') — ack so Twilio
       // stops, but make no change.
       log.info({ callSid: entryCallSid, providerStatus: rawStatus ?? null }, 'voice status callback: unmodeled status — ignored');
-      res.status(200).end();
+      sendTwiml(res, new VoiceResponse()); // valid (empty) TwiML — this URL is also the <Dial action>
       return;
     }
 
@@ -1082,7 +1082,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         { callSid: entryCallSid, providerStatus: rawStatus },
         'voice status callback: terminal per-leg (non-Dial) status — ignored (bridge outcome comes from the Dial summary)',
       );
-      res.status(200).end();
+      sendTwiml(res, new VoiceResponse()); // valid (empty) TwiML — this URL is also the <Dial action>
       return;
     }
 
@@ -1160,7 +1160,25 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         }
       }
     }
-    res.status(200).end();
+
+    // /status is ALSO the <Dial action> URL (the founder/relay bridges above):
+    // when the bridge ends, Twilio fetches it and drives the CALLER's onward
+    // call from the TwiML we return. An empty/non-TwiML 200 here made Twilio
+    // play its generic "an application error has occurred" to the caller on a
+    // no-answer (the action fired with no TwiML to continue). Answer with valid
+    // TwiML: on a MISS, a brief masked goodbye — we have NO voicemail; a missed
+    // bridge is handled by the missed push + auto-text — then hang up; on an
+    // answered/completed bridge (or a per-leg statusCallback, whose response
+    // Twilio ignores) an empty <Response/> ends the call cleanly. Never leaks
+    // the caller's number (no <Number>/callerId echoed here).
+    const reply = new VoiceResponse();
+    if (isMissed) {
+      reply.say(
+        'Sorry we missed your call. Please send us a text message and we will get right back to you. Goodbye.',
+      );
+      reply.hangup();
+    }
+    sendTwiml(res, reply);
   });
 
   // ---------------------------------------------------------------------

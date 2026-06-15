@@ -369,6 +369,40 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.sent[0]!.body).toBe(world.settings.missedCallAutoText);
   });
 
+  it('no-answer <Dial action> returns a masked goodbye TwiML — never Twilio\'s generic error', async () => {
+    // The <Dial action> URL (= /status) MUST get valid TwiML back, or Twilio
+    // plays "an application error has occurred" to the caller on a no-answer
+    // (the 2026-06-15 bug — /status used to return an empty 200). We have no
+    // voicemail; the caller hears a brief masked goodbye, then hangs up.
+    const app = await seedRingingBridge();
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(res.text).toContain('<Say');
+    expect(res.text).toContain('Sorry we missed your call');
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain(CALLER); // never the caller's number
+  });
+
+  it('answered/completed <Dial action> returns clean (empty) TwiML — no goodbye, no error', async () => {
+    const app = await seedRingingBridge();
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '42', // a real bridged call (not a miss)
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(res.text).toContain('<Response'); // valid TwiML envelope
+    expect(res.text).not.toContain('<Say'); // the call happened — nothing to say
+    expect(res.text).not.toContain('Sorry we missed');
+  });
+
   it('no-press-1 (Dial completed, zero duration) → counted as missed → auto-text', async () => {
     const app = await seedRingingBridge();
 

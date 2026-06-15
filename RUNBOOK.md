@@ -29,6 +29,16 @@ npm run deploy:dev
 Builds the ARM64 image from the working tree, tags it `dev-<git sha>-<UTC timestamp>`, pushes to
 `hc-dev-app`, then rolls the dev instance via SSM Run Command (no SSH exists anywhere).
 
+**Secrets gate (all deploy paths — `dev`, `--promote`, `--tag`):** before building, the deploy runs
+a **read-only** `secrets:check <env>` and **aborts on drift** — i.e. a key present in `.env.<env>`
+but not yet pushed to `/hc/<env>/app/`, the Parameter Store path the instance hydrates `/opt/hc/.env`
+from on every roll. On drift it prints the per-key table + the reconcile command and builds/rolls
+nothing; the gate never writes SSM. This is the guard against the "edited `.env`, forgot
+`secrets:push`, shipped a missing key" footgun (it caught a missing `FOUNDER_CELL` that had silently
+disabled founder call-triage on dev). Bypass with `--skip-secrets` only when you know SSM is already
+correct — e.g. `.env.<env>` isn't on this machine. To clear a real drift, just
+`npm run secrets:push -- <env>` then re-run the deploy.
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell
@@ -74,7 +84,10 @@ The flow: edit `.env.<env>` → `secrets:push` writes each key as SecureString u
 `AC…1234`) → the **next deploy** hydrates them into `/opt/hc/.env` on the instance. Pushing alone
 restarts nothing — follow with a deploy (re-deploying the current `DEPLOYED_TAG` works) to make new
 values live. `secrets:check` is the drift report: per-key missing/differs/matches against Parameter
-Store, plus any unexpected extra params under the path (report-only).
+Store, plus any unexpected extra params under the path (report-only). The **deploy runs this same
+check as a gate** and aborts on drift (see [Deploy to dev](#deploy-to-dev)), so a forgotten push
+can't ship — but pushing then deploying is still the normal flow; the gate is the backstop, not the
+mechanism.
 
 Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `JOBS_QUEUE_URL`, `LOG_LEVEL`, `MEDIA_BUCKET`,
 `NODE_ENV`, `PORT`, `PUBLIC_BASE_URL`, `SCHEDULER_ROLE_ARN`, `SCHEDULER_TARGET_ARN`,

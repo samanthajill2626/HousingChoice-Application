@@ -61,11 +61,13 @@ export class RecordingMessagingDriver implements MessagingAdapter {
   }
 
   private ensureTable(): Promise<unknown> {
-    return (this.ensured ??= ensureTable(
-      this.client,
-      { baseName: OUTBOX_TABLE_BASE, hashKey: { name: 'id', type: 'S' }, gsis: [] },
-      this.table,
-    ));
+    if (!this.ensured) {
+      this.ensured = ensureTable(this.client, { baseName: OUTBOX_TABLE_BASE, hashKey: { name: 'id', type: 'S' }, gsis: [] }, this.table).catch((err) => {
+        this.ensured = undefined; // allow retry on the next send
+        throw err;
+      });
+    }
+    return this.ensured;
   }
 
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {

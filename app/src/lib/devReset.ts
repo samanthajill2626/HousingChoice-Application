@@ -35,7 +35,12 @@ async function clearTable(
       const batch = items.slice(i, i + 25).map((it) => ({
         DeleteRequest: { Key: Object.fromEntries(keyNames.map((k) => [k, it[k]])) },
       }));
-      if (batch.length > 0) await doc.send(new BatchWriteCommand({ RequestItems: { [physical]: batch } }));
+      if (batch.length === 0) continue;
+      let requestItems: typeof batch = batch;
+      for (let attempt = 0; attempt < 5 && requestItems.length > 0; attempt++) {
+        const res = await doc.send(new BatchWriteCommand({ RequestItems: { [physical]: requestItems } }));
+        requestItems = (res.UnprocessedItems?.[physical] ?? []) as typeof batch;
+      }
     }
     startKey = scan.LastEvaluatedKey as Record<string, unknown> | undefined;
   } while (startKey);
@@ -45,7 +50,7 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
   const { config } = deps;
   const log = deps.logger ?? defaultLogger;
   const prefix = tableName(''); // the TABLE_PREFIX
-  if (!config.dynamodbEndpoint || !prefix.startsWith('hc-local-')) {
+  if (!config.dynamodbEndpoint || prefix !== 'hc-local-') {
     throw new Error(
       `resetLocalData refused: not a hermetic local stack (endpoint=${config.dynamodbEndpoint ?? 'unset'}, prefix=${prefix}).`,
     );

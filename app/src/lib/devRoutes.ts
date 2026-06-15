@@ -11,7 +11,10 @@ export async function maybeLoadDevRouter(
   config: AppConfig,
   logger: Logger = defaultLogger,
 ): Promise<Router | undefined> {
-  if (!config.devAuthEnabled || config.nodeEnv === 'production') return undefined;
+  // Dev endpoints are unauthenticated, so they only mount on a hermetic local
+  // stack. A DYNAMODB_ENDPOINT is only set for DynamoDB Local; cloud stacks use
+  // the default AWS endpoint and have it unset.
+  if (!config.devAuthEnabled || config.nodeEnv === 'production' || !config.dynamodbEndpoint) return undefined;
   const { createDevRouter } = await import('../routes/dev.js');
   return createDevRouter({ config, logger });
 }

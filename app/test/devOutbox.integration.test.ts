@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { buildApp } from '../src/app.js';
 import { createDevRouter } from '../src/routes/dev.js';
-import { RecordingMessagingDriver, OUTBOX_TABLE_BASE } from '../src/adapters/recordingMessaging.js';
+import { RecordingMessagingDriver } from '../src/adapters/recordingMessaging.js';
 import type { MessagingAdapter } from '../src/adapters/messaging.js';
 import { loadConfig } from '../src/lib/config.js';
 

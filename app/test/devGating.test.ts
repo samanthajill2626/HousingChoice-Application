@@ -58,12 +58,17 @@ describe('dev gating — config', () => {
 });
 
 describe('dev gating — router', () => {
-  const enabled = () => loadConfig({ NODE_ENV: 'test', DEV_AUTH_ENABLED: '1', CF_ORIGIN_SECRET: SECRET });
+  const enabled = () => loadConfig({ NODE_ENV: 'test', DEV_AUTH_ENABLED: '1', CF_ORIGIN_SECRET: SECRET, DYNAMODB_ENDPOINT: 'http://localhost:8000' });
   const disabled = () => loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
 
   it('maybeLoadDevRouter returns a router only when the flag is set', async () => {
     expect(await maybeLoadDevRouter(enabled())).toBeDefined();
     expect(await maybeLoadDevRouter(disabled())).toBeUndefined();
+  });
+
+  it('does not mount the dev router without a local DynamoDB endpoint', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', DEV_AUTH_ENABLED: '1', CF_ORIGIN_SECRET: SECRET });
+    expect(await maybeLoadDevRouter(config)).toBeUndefined();
   });
 
   it('mounts /__dev/ping when the dev router is present', async () => {

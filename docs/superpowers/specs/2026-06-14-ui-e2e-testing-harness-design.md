@@ -433,3 +433,27 @@ prod code. All findings fixed inline (nothing deferred):
 - *Note for later phases:* every `/__dev/*` endpoint is exempt from the
   origin-secret validator, so dev-login/outbox/reseed will rely SOLELY on the
   structural absent-in-prod gate. Keep nothing prod-sensitive reachable there.
+
+### Phase 2 (commits `f898fde`, `0776203`; review fixes `138be0f`) — reviewed,
+0 critical / 0 important. dev-login reuses the production session primitives
+verbatim (byte-compatible, revocable via epoch); the storageState credential is
+gitignored; the gate chain holds for the new route. Fixed inline:
+
+- **[fixed]** `express.json()` was applied to ALL dev-router traffic (mounted at
+  root before the global parsers) — route-scoped it to `/auth/dev-login` to
+  remove the dev/prod body-handling divergence and future-proof against a
+  `rawBody` consumer.
+- **[fixed]** added the missing security assertions: `HttpOnly`/`SameSite=Lax`
+  on the minted cookie, and that `/auth/dev-login` 404s when the router is absent.
+- *Deviations accepted (legit):* Playwright `webServer.env: { DEV_AUTH_ENABLED:
+  '1' }` (— `--local` doesn't set it; env MERGES over process.env so boot is
+  unaffected); setup project `testDir: '.'`; e2e tsconfig include widened.
+
+> **⚠️ PRE-EXISTING BUG surfaced (NOT fixed here — for Cameron / the seed owner):**
+> `app/scripts/db-seed.ts` seeds `founder@example.com` with `role: 'founder_admin'`,
+> but `UserRole` is only `'admin' | 'va'` and `isUserRole` rejects `founder_admin`.
+> Result: any login as the founder (dev-login OR real OAuth) mints a session that
+> `toSessionClaims` rejects on the next request — a silent "logged in then
+> immediately logged out." The e2e harness sidesteps it by using `va@example.com`.
+> Fix candidate: seed the founder as `role: 'admin'` (or add `founder_admin` to
+> `UserRole`). Flagging because it likely affects real founder logins too.

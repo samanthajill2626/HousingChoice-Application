@@ -49,5 +49,72 @@ is set. They never exist in a deployed environment.
 - `playwright.config.ts` — projects (`setup` → `chromium`), reporters, `webServer`.
 - `auth.setup.ts` — dev-login → saved `storageState` (the `vaPage` fixture uses it).
 - `fixtures/` — `auth` (`vaPage`), `outbox` (`getOutbox`), `reseed`.
+- `support/` — `selectors.md` (the selector conventions).
 - `tests/` — `public/`, `dashboard/`, `flows/`.
 - `.artifacts/` — reports, traces, screenshots, the `.restart` sentinel (gitignored).
+
+## CI readiness (documented, not yet wired)
+
+CI is intentionally **not built** (project decision D4) — but the harness is
+CI-ready and `npm run e2e` already honors CI semantics via `playwright.config.ts`:
+- `reuseExistingServer: !process.env.CI` — CI always boots a fresh stack (never
+  reuses a stale/leaked one); locally a running `e2e:session` is reused.
+- `forbidOnly: !!process.env.CI` — a stray `test.only` fails the CI run.
+
+To wire it later, a GitHub Actions job needs all of the following:
+
+1. **Node 24 + `npm ci`.**
+2. **Docker / DynamoDB Local.** The e2e launcher starts the container via
+   `scripts/db.mjs` (GitHub `ubuntu-latest` runners have Docker preinstalled).
+   The app `*.integration.test.ts` and the e2e launcher BOTH need DynamoDB Local —
+   without it the integration suites silently **self-skip** (zero coverage) and the
+   launcher's DB step fails. Start + create + seed it before the unit/integration
+   run: `npm run db:start && npm run db:create && npm run db:seed`.
+3. **Bundled Chromium with caching** — `npx playwright install --with-deps
+   chromium` (cache `~/.cache/ms-playwright`). Do NOT use the `chrome` channel.
+4. **Run with `CI=1`** so the semantics above engage.
+5. **Upload `e2e/.artifacts/`** (HTML report, traces, screenshots, videos) on
+   failure for debugging.
+6. **Cold-runner timing:** first `--local` boot pulls `amazon/dynamodb-local` +
+   cold-starts tsx/vite; if `webServer.timeout` (180s) proves tight on a cold
+   runner, prewarm the image (`docker pull amazon/dynamodb-local`) or raise it.
+
+Sample workflow (copy to `.github/workflows/e2e.yml` when CI is adopted):
+
+```yaml
+name: e2e
+on: [push, pull_request]
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
+      - name: Start DynamoDB Local (+ tables + seed)
+        run: npm run db:start && npm run db:create && npm run db:seed
+      - name: Unit + integration tests
+        run: npm test
+      - name: E2E
+        run: npm run e2e
+        env: { CI: '1' }
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: e2e-artifacts, path: e2e/.artifacts/ }
+```
+
+**Known limitations to resolve when CI lands:**
+- CI uses the Playwright-managed `webServer` (it starts/stops
+  `scripts/e2e-session.mjs`); on Linux, Playwright tears the webServer down via its
+  own process-group kill, so suite teardown is clean. The **standalone**
+  `e2e:session`/`e2e:stop` teardown is verified on Windows but **not yet validated
+  on Linux** (children aren't reaped via process groups since they aren't spawned
+  detached) — only relevant for interactive Linux use, not the CI suite.
+- Consider pinning `@playwright/mcp` to the installed Playwright version in
+  `.mcp.json` (the MCP is interactive-only; CI never uses it).

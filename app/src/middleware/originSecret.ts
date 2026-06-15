@@ -31,6 +31,13 @@ export function originSecretMiddleware(opts: OriginSecretOptions): RequestHandle
       next();
       return;
     }
+    // Dev-only endpoints are exempt — they sit before this validator in the
+    // middleware chain when the devRouter is present, and must be reachable
+    // (returning 404) even when it is absent so tests can assert the gate.
+    if (req.path === '/__dev/ping' || req.path.startsWith('/__dev/')) {
+      next();
+      return;
+    }
 
     const provided = req.headers['x-origin-verify'];
     if (typeof provided !== 'string' || !secretsMatch(provided, secret)) {

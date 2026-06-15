@@ -11,6 +11,7 @@ const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { buildApp } = await import('./app.js');
+const { maybeLoadDevRouter } = await import('./lib/devRoutes.js');
 const { configureOutboundQueue, configureScheduler, dispatchJob } = await import('./jobs/jobs.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
@@ -107,7 +108,8 @@ if (config.jobsQueueUrl) {
   });
 }
 
-const app = buildApp({ config });
+const devRouter = await maybeLoadDevRouter(config, logger);
+const app = buildApp({ config, devRouter });
 
 const server = runWithContext(bootContext, () =>
   app.listen(config.port, () => {

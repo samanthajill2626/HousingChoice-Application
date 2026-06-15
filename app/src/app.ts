@@ -12,7 +12,7 @@
 //   (last) expressErrorHandler
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
-import express, { type Express, type Request } from 'express';
+import express, { type Express, type Request, type Router } from 'express';
 import { loadConfig, type AppConfig } from './lib/config.js';
 import { createExpressErrorHandler } from './lib/errors.js';
 import { logger as defaultLogger, type Logger } from './lib/logger.js';
@@ -46,6 +46,10 @@ export interface BuildAppDeps {
   public?: Omit<PublicRouterDeps, 'logger'>;
   /** Test seam: register extra routes after the built-ins, before the error handler. */
   configureRoutes?: (app: Express) => void;
+  /** Pre-built dev-only router, supplied by the composition root when gated on.
+   *  Mounted at the same trust level as /health (exempt from the origin-secret
+   *  validator). Undefined in normal runs. */
+  devRouter?: Router;
 }
 
 export function buildApp(deps: BuildAppDeps = {}): Express {
@@ -59,6 +63,21 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   app.use(correlationMiddleware());
   // (1) light request logger
   app.use(requestLoggerMiddleware(log));
+  // Every response carries nosniff — applied globally here so /health and the
+  // dev router (both exempt from the origin-secret validator below) inherit it
+  // too. The dashboard static/SPA block below adds the full browser-hardening
+  // set on top of this.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
+  // Health — exempt from the origin-secret validator (deploy health-checks
+  // arrive via localhost without the header).
+  app.use(healthRouter);
+  // Dev-only endpoints, gated at the composition root. Mounted here (before the
+  // origin-secret validator, like /health) so the e2e harness and tests can
+  // reach them without the CloudFront header. Absent in normal runs.
+  if (deps.devRouter) app.use(deps.devRouter);
   // (2) CloudFront origin-secret validator — BEFORE body parsers
   app.use(originSecretMiddleware({ secret: config.cfOriginSecret, logger: log }));
   // (3) body parsers, capturing the raw body for webhook HMAC validation.
@@ -70,14 +89,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   app.use(express.json({ verify: captureRawBody }));
   app.use(express.urlencoded({ extended: false, verify: captureRawBody }));
 
-  // (4) routes — every response carries nosniff (API/auth/webhook JSON and
-  // media must never be MIME-sniffed into something executable); the
-  // dashboard static/SPA block below adds the full browser-hardening set.
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    next();
-  });
-  app.use(healthRouter);
+  // (4) routes
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));
   // M1.5 PUBLIC, UNAUTHENTICATED intake surface — the ONE place requireAuth is
   // intentionally absent (housing-fair form + flyer have no session). Mounted

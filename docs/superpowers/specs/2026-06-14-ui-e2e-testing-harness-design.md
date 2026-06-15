@@ -1,7 +1,10 @@
 # UI End-to-End Testing Harness — Design & Scope
 
 - **Date:** 2026-06-14
-- **Status:** Approved design; pending detailed implementation plan (writing-plans)
+- **Status:** Implemented — Phases 0–6 complete on branch `e2e-testing-harness`
+  (app 767 / dashboard 272 / e2e 6 tests green; typecheck clean). Per-phase
+  adversarial-review log in §15; deferred items tagged `[→ Phase 6]` are CI-time
+  follow-ups (documented in `e2e/README.md`).
 - **Owner:** Cameron Abt
 - **Authored with:** Claude Code (brainstorming skill)
 
@@ -537,3 +540,11 @@ assertion to that log. Fixed inline:
 - *Observations (no action):* implicit cross-spec ordering vs `outbox.spec.ts`'s
   reseed is safe (per-run unique phone isolates state); `.first()` on the inbox
   match is cosmetic given dedupe-by-phone + unique name.
+
+### Phase 6 — CI-readiness documentation only (no CI built, per D4). Added the
+"CI readiness" section to `e2e/README.md`: sample GitHub Actions workflow,
+DynamoDB-Local/Docker requirement, Chromium install caching (NOT the chrome
+channel), `CI=1` semantics (`reuseExistingServer:!CI`, `forbidOnly:!!CI`),
+artifact upload, cold-runner timeout note, and the carried-forward limitations
+(Linux standalone `e2e:session`/`e2e:stop` teardown validation; pin
+`@playwright/mcp`). No code/review findings (docs-only).

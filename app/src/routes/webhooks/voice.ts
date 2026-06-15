@@ -40,6 +40,7 @@ import {
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
+import { formatPhoneForDisplay } from '../../lib/phone.js';
 import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
@@ -148,13 +149,17 @@ function roleWordForContact(contact: ContactItem | undefined): string | undefine
   return undefined;
 }
 
+/** The sentinel label for a caller we couldn't resolve to a contact. */
+const UNKNOWN_CALLER_LABEL = 'Unknown caller';
+
 /**
- * The MASKED caller label for the founder-bridge timeline entry + the pushes:
- * the contact's role + abbreviated name when known ("Tenant (Jane D.)"), the
- * role alone, the name alone, else "Unknown caller". NEVER the raw From (PII,
- * doc §9). Distinct from the relay maskedPartyLabel() (which labels a roster
- * MEMBER by its cached display name); the founder-bridge labels the CALLER by
- * the freshly-resolved contact.
+ * The MASKED caller label for the founder-bridge timeline entry (STORED) + the
+ * pushes' base: the contact's role + abbreviated name when known ("Tenant
+ * (Jane D.)"), the role alone, the name alone, else "Unknown caller". NEVER the
+ * raw From (PII, doc §9) — this value is persisted on the call entity. Distinct
+ * from the relay maskedPartyLabel() (which labels a roster MEMBER by its cached
+ * display name); the founder-bridge labels the CALLER by the freshly-resolved
+ * contact.
  */
 function maskedCallerLabel(contact: ContactItem | undefined): string {
   const role = roleWordForContact(contact);
@@ -162,7 +167,24 @@ function maskedCallerLabel(contact: ContactItem | undefined): string {
   if (role !== undefined && name !== undefined) return `${role} (${name})`;
   if (role !== undefined) return role;
   if (name !== undefined) return name;
-  return 'Unknown caller';
+  return UNKNOWN_CALLER_LABEL;
+}
+
+/**
+ * The PUSH-ONLY caller label. For a KNOWN caller it's the masked role/name (as
+ * stored). For an UNKNOWN caller we surface the caller's formatted phone number
+ * instead of a useless "Unknown caller" — the founder asked to see who's
+ * calling, and a push lands on the founder's OWN authenticated device. This is
+ * NOT a guardrail break: PHASE1_CHANGE_ORDER_2 item 5 forbids the real caller's
+ * number on the founder-bridge DIAL LEG (caller ID stays the business number)
+ * and §9 keeps it out of logs/stored records — both unchanged. The number lives
+ * ONLY in this ephemeral push payload; the call entity's call_party_label, the
+ * logs, and the dial caller ID all stay masked. Falls back to the masked label
+ * when no number is available.
+ */
+function pushCallerLabel(maskedLabel: string, callerPhone: string | undefined): string {
+  if (maskedLabel !== UNKNOWN_CALLER_LABEL) return maskedLabel;
+  return formatPhoneForDisplay(callerPhone) ?? maskedLabel;
 }
 
 /**
@@ -537,9 +559,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // unexpected throw can never become an unhandled rejection). PII (doc §9):
     // masked label only, never the raw From; the send never blocks/fails the
     // bridge.
-    void sendPreRingPush(conversation.conversationId, CallSid, callerLabel).catch((err: unknown) => {
-      log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
-    });
+    // The push (founder's own device) surfaces the caller's number when the
+    // caller is UNKNOWN; the stored entry above keeps the masked callerLabel.
+    void sendPreRingPush(conversation.conversationId, CallSid, pushCallerLabel(callerLabel, From)).catch(
+      (err: unknown) => {
+        log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
+      },
+    );
 
     // Build the founder-bridge TwiML. callerId is ALWAYS the business number,
     // NEVER From (the guardrail). The <Pause> is what makes the push land first.
@@ -1437,12 +1463,18 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
     // The masked caller label is on the persisted call entry (set at bridge
-    // time); fall back to a generic label rather than ever reaching for a phone.
+    // time). For a KNOWN caller it's role+name and we use it as-is; for an
+    // UNKNOWN caller, surface the caller's number in this push (the founder's
+    // own device) via pushCallerLabel — the caller's number is the founder-
+    // bridge conversation's participant_phone (= the inbound From). The stored
+    // entry stays masked; the number never enters logs/storage/the dial leg.
     const entry = await messages.getByProviderSid(callSid);
-    const callerLabel =
+    const storedLabel =
       typeof entry?.call_party_label === 'string' && entry.call_party_label.length > 0
         ? entry.call_party_label
-        : 'a caller';
+        : UNKNOWN_CALLER_LABEL;
+    const conversation = await conversations.getById(conversationId);
+    const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
 
     // Quick-replies → up to 2 notification actions (sw.js slices to 2 anyway).
     // The action ids (qr-0 / qr-1) are what the SW forwards so /quick-reply can

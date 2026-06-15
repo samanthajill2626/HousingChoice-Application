@@ -2,7 +2,7 @@
 // for manual + public contact entry, so its NANP assumption and its rejections
 // are both load-bearing.
 import { describe, expect, it } from 'vitest';
-import { isE164, normalizeToE164 } from '../src/lib/phone.js';
+import { formatPhoneForDisplay, isE164, normalizeToE164 } from '../src/lib/phone.js';
 
 describe('normalizeToE164', () => {
   it('passes through an already-canonical E.164 number', () => {
@@ -48,5 +48,21 @@ describe('isE164', () => {
     expect(isE164('+15550101234')).toBe(true);
     expect(isE164('15550101234')).toBe(false);
     expect(isE164('(555) 010-1234')).toBe(false);
+  });
+});
+
+describe('formatPhoneForDisplay', () => {
+  it('formats a US/Canada (+1) number as (AAA) BBB-CCCC', () => {
+    expect(formatPhoneForDisplay('+14049824978')).toBe('(404) 982-4978');
+    expect(formatPhoneForDisplay('+15550101234')).toBe('(555) 010-1234');
+  });
+
+  it('returns a non-NANP number unchanged (no reformatting of unknown shapes)', () => {
+    expect(formatPhoneForDisplay('+442079460958')).toBe('+442079460958');
+  });
+
+  it('returns undefined for undefined/empty', () => {
+    expect(formatPhoneForDisplay(undefined)).toBeUndefined();
+    expect(formatPhoneForDisplay('')).toBeUndefined();
   });
 });

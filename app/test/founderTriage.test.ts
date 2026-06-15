@@ -167,19 +167,28 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(1);
   });
 
-  it('an UNKNOWN caller (no contact) → masked label "Unknown caller", author unknown, no phone in push', async () => {
+  it('an UNKNOWN caller → masked STORED label, but the pre-ring PUSH surfaces the caller number', async () => {
     const world = createFakeWorld();
-    const { app } = founderHarness(world);
+    const { app, capture } = founderHarness(world);
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
     expect(res.status).toBe(200);
 
     const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
     expect(call.author).toBe('unknown');
+    // STORED on the call entity: still masked — the number never persists.
     expect(call.call_party_label).toBe('Unknown caller');
+
+    // PUSH (founder's own device): surfaces the caller's FORMATTED number so an
+    // unknown caller is triageable (CO2 item 5 only masks the DIAL leg, not the
+    // push). CALLER = +15550177777 → "(555) 017-7777".
     const push = world.pushSends[0]!;
-    expect(push.notification.payload.body).toBe('Incoming call — Unknown caller');
-    expect(JSON.stringify(world.pushSends)).not.toContain(CALLER);
+    expect(push.notification.payload.body).toBe('Incoming call — (555) 017-7777');
+
+    // ...but the number stays OUT of the logs (PII, doc §9) — neither the raw
+    // E.164 nor the formatted form appears in any log line.
+    expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
+    expect(JSON.stringify(capture.lines)).not.toContain('017-7777');
   });
 
   it('emits message.persisted once for the new founder-bridge call entry', async () => {
@@ -415,6 +424,29 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
 
     expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
     expect(world.sent).toHaveLength(1);
+  });
+
+  it('UNKNOWN caller missed → missed PUSH surfaces the caller number (stored label + logs stay masked)', async () => {
+    // No contact seeded → unknown caller (so we don't use seedRingingBridge,
+    // which seeds Jane). Ring the bridge, clear the pre-ring push, then miss.
+    const { app, capture } = founderHarness(world);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    world.pushSends.length = 0;
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+
+    const missed = world.pushSends.find((p) => p.notification.kind === 'missed_call')!;
+    expect(missed).toBeDefined();
+    expect(missed.notification.payload.body).toBe('Missed call — (555) 017-7777');
+    // Stored call entity stays masked; the number never reaches the logs.
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_party_label).toBe('Unknown caller');
+    expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
+    expect(JSON.stringify(capture.lines)).not.toContain('017-7777');
   });
 
   it('FIX 1: a child-leg completed with NON-ZERO duration arriving BEFORE the Dial summary does NOT mark answered (real Twilio ordering)', async () => {

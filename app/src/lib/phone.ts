@@ -57,3 +57,19 @@ export function normalizeToE164(raw: string): string | undefined {
 export function isE164(value: string): boolean {
   return E164_RE.test(value);
 }
+
+/**
+ * Human-friendly display form of an E.164 number — for OUTBOUND-to-staff UI
+ * only (e.g. a founder-triage push for an untriaged caller), NEVER for storage,
+ * logs, or a Twilio caller ID. US/Canada (+1, 11 digits) → "(AAA) BBB-CCCC";
+ * anything else is returned unchanged (we don't reformat unknown country
+ * shapes). undefined/empty → undefined.
+ *
+ * - "+14049824978"  → "(404) 982-4978"
+ * - "+442079460958" → "+442079460958" (non-NANP — left as-is)
+ */
+export function formatPhoneForDisplay(e164: string | undefined): string | undefined {
+  if (e164 === undefined || e164.length === 0) return undefined;
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : e164;
+}

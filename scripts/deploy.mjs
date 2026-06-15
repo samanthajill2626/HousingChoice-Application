@@ -9,6 +9,11 @@
 //
 // Flow (no --tag):
 //   1. account guard (assertHousingChoiceAccount) + terraform outputs for the env
+//   1b. SECRETS GATE: abort unless .env.<env> matches /hc/<env>/app/* (read-only
+//      `secrets:check` — never mutates SSM). The instance hydrates SSM into
+//      /opt/hc/.env on every roll (step 4), so a key left in .env but never
+//      pushed would silently ship missing (the FOUNDER_CELL-not-ringing bug).
+//      The gate refuses the deploy on drift; --skip-secrets bypasses it.
 //   2. tag = <env>-<git short sha>-<UTC yyyyMMddHHmmss>; dirty tree = warn only
 //   3. docker buildx build --platform linux/arm64 --provenance=false --push
 //   4. SSM Run Command on the instance (payload base64-encoded to dodge
@@ -37,11 +42,13 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const USAGE = `usage: node scripts/deploy.mjs <dev|prod> [--tag <existing-ecr-tag>] [--promote <dev-ecr-tag>] [--list]
+const USAGE = `usage: node scripts/deploy.mjs <dev|prod> [--tag <existing-ecr-tag>] [--promote <dev-ecr-tag>] [--list] [--skip-secrets]
   (via npm: npm run deploy:dev, npm run deploy:dev -- --tag dev-abc1234-20260611120000,
    npm run deploy:prod -- --promote dev-abc1234-20260611120000, npm run deploy:prod -- --list)
   --promote is prod-only: it copies the tag's manifest from hc-dev-app into hc-prod-app
-  (same digest, no rebuild) and then deploys it — the M0.6 promote-don't-rebuild path.`;
+  (same digest, no rebuild) and then deploys it — the M0.6 promote-don't-rebuild path.
+  --skip-secrets bypasses the pre-roll .env<->SSM drift gate (emergencies / when
+  .env.<env> isn't on this machine; SSM must already be correct).`;
 
 function fail(message) {
   console.error(message);
@@ -56,9 +63,11 @@ if (!STACK_ENVS.includes(env ?? '')) fail(USAGE);
 let requestedTag;
 let promoteTag;
 let listOnly = false;
+let skipSecrets = false;
 while (args.length > 0) {
   const arg = args.shift();
   if (arg === '--list') listOnly = true;
+  else if (arg === '--skip-secrets') skipSecrets = true;
   else if (arg === '--tag') {
     requestedTag = args.shift();
     if (!requestedTag) fail(`--tag requires a value.\n${USAGE}`);
@@ -198,6 +207,39 @@ if (listOnly) {
   }
   console.log(`\nRollback: npm run deploy:${env} -- --tag <tag>`);
   process.exit(0);
+}
+
+// --- 1b. secrets gate: SSM must match .env.<env> before we roll the instance ----
+// Step 4 hydrates /hc/<env>/app/* into /opt/hc/.env on the box, so a key that's
+// in .env.<env> but never `secrets:push`-ed to SSM ships SILENTLY MISSING (the
+// FOUNDER_CELL-not-ringing class of bug). `secrets:check` is READ-ONLY — it
+// never writes SSM — but it exits 2 on drift, so we gate the whole deploy on it
+// here, before spending a build. This runs for fresh builds AND --tag/--promote
+// rolls (every roll re-hydrates SSM). --skip-secrets bypasses (emergencies, or
+// when .env.<env> isn't on this machine and SSM is already known-correct).
+if (skipSecrets) {
+  console.error('[deploy] --skip-secrets: skipping the .env<->SSM drift gate (SSM assumed correct)');
+} else {
+  console.error(`[deploy] secrets gate: checking .env.${env} matches /hc/${env}/app/* (read-only)...`);
+  const check = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'secrets.mjs'), 'check', env], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    shell: false,
+    env: childEnv,
+  });
+  if (check.error) fail(`[deploy] could not run the secrets check: ${check.error.message}`);
+  if (check.status === 2) {
+    fail(
+      `[deploy] ABORTED: .env.${env} and /hc/${env}/app/* are out of sync (drift table above).\n` +
+        `  Reconcile SSM first:  npm run secrets:push -- ${env}\n` +
+        `  Then re-deploy:       npm run deploy:${env}\n` +
+        `  (Or bypass with --skip-secrets if you know SSM is already correct.)`,
+    );
+  }
+  if (check.status !== 0) {
+    fail(`[deploy] secrets check failed (exit ${check.status}) — see output above. Deploy aborted.`);
+  }
+  console.error(`[deploy] secrets gate OK: .env.${env} matches /hc/${env}/app/*`);
 }
 
 // --- 2a. --promote: ECR manifest copy hc-dev-app -> hc-prod-app (same tag) ------

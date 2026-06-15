@@ -63,8 +63,8 @@ if (config.schedulerTargetArn && config.schedulerRoleArn) {
 // EventBridge 60s floor, exact backoff. In AWS the app SendMessages to the
 // queue the worker long-polls (the worker throttles + dispatches). Locally
 // there is no queue, so the app runs jobs IN-PROCESS — immediate jobs dispatch
-// now, delayed jobs fire after a real setTimeout — which means the relay
-// handler + the shared A2P token bucket must live here too (the worker process
+// now, delayed jobs fire after a real setTimeout — which means ALL job
+// handlers + the shared A2P token bucket must live here too (the worker process
 // is separate locally). Production never registers handlers in the app.
 if (config.jobsQueueUrl) {
   const { SQSClient } = await import('@aws-sdk/client-sqs');
@@ -79,7 +79,7 @@ if (config.jobsQueueUrl) {
 } else {
   const { InProcessOutboundQueueAdapter } = await import('./adapters/scheduler.js');
   const { TokenBucket } = await import('./lib/tokenBucket.js');
-  const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
+  const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
   // FIX 6: capacity == the EXACT per-second rate (not ceil — at a fractional
   // rate ceil would let a burst exceed the A2P tier), floored at 1. The bucket
   // starts full → first burst up to `capacity`, then paced at `refillPerSec`/s.
@@ -87,7 +87,7 @@ if (config.jobsQueueUrl) {
     capacity: Math.max(1, config.a2pRateLimitPerSec),
     refillPerSec: config.a2pRateLimitPerSec,
   });
-  registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
+  registerAllJobHandlers({ tokenBucket: a2pBucket });
   configureOutboundQueue(
     new InProcessOutboundQueueAdapter({
       dispatch: dispatchJob,

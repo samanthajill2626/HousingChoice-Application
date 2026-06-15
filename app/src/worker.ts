@@ -22,10 +22,7 @@ const { logger } = await import('./lib/logger.js');
 const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
-const { registerRetrySendJobHandler } = await import('./jobs/retrySend.js');
-const { registerRelayFanOutJobHandler } = await import('./jobs/relayFanOut.js');
-const { registerBroadcastSendJobHandler } = await import('./jobs/broadcastFanOut.js');
-const { registerMissedCallAutoTextJobHandler } = await import('./jobs/missedCallAutoText.js');
+const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
 const { TokenBucket } = await import('./lib/tokenBucket.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
@@ -36,40 +33,25 @@ installProcessErrorHandlers(logger, bootContext);
 
 const config = loadConfig();
 
-// M1.1: transient-delivery-failure (30003) retry sends, enqueued by the
-// Twilio status webhook. Dispatch-time logs use the JOB context (fresh
-// jobRunId rehydrated from the envelope), not the boot context.
-registerRetrySendJobHandler();
-
-// M1.7: the shared A2P token bucket — ONE instance, sized from config
-// (a2pRateLimitPerSec, default ~1 msg/sec), shared by relay fan-out and the
-// future M1.8 broadcast so the COMBINED outbound rate stays under the
-// registered tier. BURST vs SUSTAINED (FIX 6): capacity == the per-second rate
-// (the EXACT value, not ceil — at a fractional rate like 0.5/s, ceil would let
-// a 1-token burst exceed the tier), floored at 1 so a sub-1/s rate can still
+// The shared A2P token bucket — ONE instance, sized from config
+// (a2pRateLimitPerSec, default ~1 msg/sec), shared across relay fan-out +
+// broadcast + missed-call auto-text so the COMBINED outbound rate stays under
+// the registered tier. BURST vs SUSTAINED (FIX 6): capacity == the per-second
+// rate (the EXACT value, not ceil — at a fractional rate like 0.5/s, ceil would
+// let a 1-token burst exceed the tier), floored at 1 so a sub-1/s rate can still
 // admit a single message. The bucket starts full, so the first burst is up to
-// `capacity` messages immediately; thereafter sends are paced at
-// `refillPerSec` tokens/sec (the sustained A2P rate).
+// `capacity` messages immediately; thereafter sends are paced at `refillPerSec`
+// tokens/sec (the sustained A2P rate).
 const a2pBucket = new TokenBucket({
   capacity: Math.max(1, config.a2pRateLimitPerSec),
   refillPerSec: config.a2pRateLimitPerSec,
 });
 
-// M1.7: relay group fan-out. The handler awaits the shared bucket per
-// recipient (SQS path) AND the in-process immediate adapter applies it before
-// dispatch (local path) — both paths are throttled.
-registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
-
-// M1.8a: filtered share-broadcast ("Share Listings") fan-out. SHARES THE
-// SAME a2pBucket instance as relay fan-out, so the COMBINED outbound rate stays
-// under the registered A2P tier no matter how many broadcasts/relays run.
-registerBroadcastSendJobHandler({ tokenBucket: a2pBucket });
-
-// M1.9b: missed-call zero-tap auto-text (founder call-triage). Enqueued by the
-// /voice/status handler when a founder-bridge call is MISSED; sends the
-// founder-editable auto-text through the SAME a2pBucket + the opt-out/breaker
-// gated send wrapper. Idempotent per CallSid (one auto-text per missed call).
-registerMissedCallAutoTextJobHandler({ tokenBucket: a2pBucket });
+// Register EVERY job handler (retrySend, relay fan-out + intro, broadcast,
+// missed-call auto-text) through the single shared registry — the worker
+// dispatches them off the SQS consumer below; the app's local in-process path
+// (index.ts) calls the SAME function, so the two processes can never drift.
+registerAllJobHandlers({ tokenBucket: a2pBucket });
 
 // M1.2: the delivery loop. In AWS, JOBS_QUEUE_URL is set (Terraform jobs
 // module -> Parameter Store -> deploy-hydrated .env) and the worker

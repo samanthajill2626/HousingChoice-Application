@@ -396,10 +396,18 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     expect(after).toBeGreaterThan(before); // live updates on real transitions
   });
 
-  it('reads the Dial child status/duration (DialCallStatus/DialCallDuration)', async () => {
+  it('reads the Dial summary status/duration (DialCallStatus/DialCallDuration) on an answered bridge', async () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
 
+    // Bridge connects (in-progress) so the call is ANSWERED — only then does a
+    // completed summary record the bridge duration (a never-accepted bridge is a
+    // miss with no duration).
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAinbound0001',
+      DialCallStatus: 'in-progress',
+      ApiVersion: '2010-04-01',
+    });
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
       // The <Dial> action summary reports the bridge result (status + duration).
@@ -454,6 +462,13 @@ describe('voice status callback — forward-only, idempotent (M1.9a)', () => {
     const world = createFakeWorld();
     const { app } = await seedRingingCall(world);
 
+    // Answered bridge (in-progress → completed WITH duration) so a duration is
+    // recorded; the redelivery assertions below prove it isn't re-counted.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAinbound0001',
+      DialCallStatus: 'in-progress',
+      ApiVersion: '2010-04-01',
+    });
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAinbound0001',
       DialCallStatus: 'completed',

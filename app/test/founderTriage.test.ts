@@ -399,6 +399,14 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
 
   it('answered/completed <Dial action> returns clean (empty) TwiML — no goodbye, no error', async () => {
     const app = await seedRingingBridge();
+    // ANSWERED is the press-1 gate — accept the bridge first, THEN the Dial
+    // summary completes. (A completed-with-duration WITHOUT press-1 is now a
+    // MISS — that's the carrier-voicemail fix.)
+    await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/whisper-gate?conversationId=x&parentCallSid=CAbiz0001&leg=founder',
+      { Digits: '1', CallSid: 'CAfounder-leg' },
+    );
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAbiz0001',
       DialCallStatus: 'completed',
@@ -424,6 +432,33 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
 
     expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
     expect(world.sent).toHaveLength(1);
+  });
+
+  it('carrier VOICEMAIL answers (completed WITH duration, NO press-1) → MISSED + goodbye (the 2026-06-15 loop bug)', async () => {
+    const app = await seedRingingBridge();
+
+    // The founder doesn't pick up → her carrier voicemail answers the leg, the
+    // whisper plays into it for ~13s, the gate (no press-1) hangs up. Twilio's
+    // <Dial action> reports completed WITH a non-zero duration — which the old
+    // duration heuristic misread as "answered" (suppressing the missed handling
+    // + the caller goodbye, which left a VoIP caller's leg looping). Press-1 is
+    // the answered signal now, so a never-accepted bridge is a MISS.
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '13', // voicemail/whisper seconds — NOT a real bridge
+      ApiVersion: '2010-04-01',
+    });
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_outcome).toBe('missed');
+    expect(call.answered_at).toBeUndefined();
+    expect(call.call_duration).toBeUndefined(); // a miss records no talk time
+    expect(world.pushSends.filter((p) => p.notification.kind === 'missed_call')).toHaveLength(1);
+    expect(world.sent).toHaveLength(1); // the auto-text fired
+    // The caller hears the goodbye (answers + cleanly ends the leg → no loop).
+    expect(res.text).toContain('Sorry we missed your call');
+    expect(res.text).toContain('<Hangup');
   });
 
   it('UNKNOWN caller missed → missed PUSH surfaces the caller number (stored label + logs stay masked)', async () => {
@@ -495,11 +530,17 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.sent[0]!.to).toBe(CALLER);
   });
 
-  it('FIX 1: the inverse — Dial summary completed WITH duration → answered, NO auto-text, answered_at set', async () => {
+  it('PRESS-1 accept → completed WITH duration → answered, NO auto-text, answered_at set', async () => {
     const app = await seedRingingBridge();
 
-    // A child leg may also report (harmless transitional), then the authoritative
-    // <Dial action> summary reports a CONNECTED bridge (non-zero duration).
+    // The founder ANSWERS and presses 1 — the gate stamps the bridge accepted
+    // (answered_at). A child leg may also report (harmless transitional). Then
+    // the <Dial action> summary completes with the bridge duration.
+    await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/whisper-gate?conversationId=x&parentCallSid=CAbiz0001&leg=founder',
+      { Digits: '1', CallSid: 'CAfounder-leg' },
+    );
     await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAfounder-child-leg',
       ParentCallSid: 'CAbiz0001',
@@ -518,7 +559,7 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(call.call_status).toBe('completed');
     expect(call.call_outcome).toBe('answered');
     expect(call.call_duration).toBe(42); // the BRIDGE duration, not the leg's
-    expect(call.answered_at).toBeDefined();
+    expect(call.answered_at).toBeDefined(); // stamped by the press-1 gate
     // GUARDRAIL: an answered call never fires the missed push / auto-text.
     expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(false);
     expect(world.sent).toHaveLength(0);

@@ -75,13 +75,13 @@ export function AppRouter(): React.JSX.Element {
           <Route path="contacts/new" element={<ContactNew />} />
           <Route path="contacts/:contactId" element={<ContactDetail />} />
 
-          {/* Records — Properties / units (M1.5). */}
+          {/* Records — Listings / units (M1.5). */}
           <Route path="units" element={<Units />} />
           <Route path="units/new" element={<UnitForm />} />
           <Route path="units/:unitId" element={<UnitDetail />} />
           <Route path="units/:unitId/edit" element={<UnitForm />} />
 
-          {/* Share Properties broadcast (M1.8) — the live results view. */}
+          {/* Share Listings broadcast (M1.8) — the live results view. */}
           <Route path="broadcasts/:id" element={<BroadcastResults />} />
 
           <Route path="*" element={<NotFound />} />

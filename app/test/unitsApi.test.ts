@@ -94,7 +94,7 @@ describe('POST /api/units — create', () => {
     expect(world.auditEvents).toHaveLength(0);
   });
 
-  it('accepts the per-property internal fields incl. primary_voice_contact (CO1)', async () => {
+  it('accepts the per-unit internal fields incl. primary_voice_contact (CO1)', async () => {
     const { app } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/units')

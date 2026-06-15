@@ -120,7 +120,7 @@ export interface SendMessageInput {
    */
   from?: string;
   /**
-   * Broadcast id (M1.8a "Share Properties"): when set, the persisted message is
+   * Broadcast id (M1.8a "Share Listings"): when set, the persisted message is
    * STAMPED with `broadcast_id = broadcastId` so the delivery-status callback
    * rollup (webhooks/twilio.ts) can find this broadcast's recipient slot by the
    * SID alone and roll delivered/failed into the broadcast stats. ADDITIVE: the

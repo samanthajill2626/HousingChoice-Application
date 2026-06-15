@@ -1,4 +1,4 @@
-// Shared presentation helpers for the Records screens (Contacts + Properties).
+// Shared presentation helpers for the Records screens (Contacts + Listings).
 // PURE + unit-testable: human labels for the wire enums, an honest contact name
 // (never fabricated), and a rent-range formatter. Kept apart from the views so
 // the formatting rules can be tested without rendering.

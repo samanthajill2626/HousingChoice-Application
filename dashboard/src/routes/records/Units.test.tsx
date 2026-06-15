@@ -1,4 +1,4 @@
-// Units (Properties) list tests — render rows, status filter, empty/error.
+// Units (Listings) list tests — render rows, status filter, empty/error.
 // Mock the api barrel (stub listUnits); no network.
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -78,14 +78,14 @@ describe('<Units>', () => {
   it('shows the empty state when there are no units', async () => {
     listUnitsMock.mockResolvedValue(page([]));
     renderScreen();
-    expect(await screen.findByText('No properties yet')).toBeInTheDocument();
+    expect(await screen.findByText('No listings yet')).toBeInTheDocument();
   });
 
   it('renders an error state with retry', async () => {
     const { ApiError } = await import('../../api/index.js');
     listUnitsMock.mockRejectedValueOnce(new ApiError(500, 'boom', 'boom'));
     renderScreen();
-    expect(await screen.findByText("Couldn't load properties")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load listings")).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 });

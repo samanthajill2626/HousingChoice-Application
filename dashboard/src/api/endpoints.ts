@@ -376,7 +376,7 @@ export function sendPushTest(): Promise<PushTestResult> {
   return request<PushTestResult>('/api/push/test', { method: 'POST' });
 }
 
-// --- Units / properties (/api/units, requireAuth) ---------------------------
+// --- Units (/api/units, requireAuth) ----------------------------------------
 
 export interface ListUnitsParams {
   status?: UnitStatus;
@@ -386,7 +386,7 @@ export interface ListUnitsParams {
   cursor?: string | null;
 }
 
-/** GET /api/units — the properties list, paged. */
+/** GET /api/units — the units list, paged. */
 export function listUnits(
   params: ListUnitsParams = {},
   signal?: AbortSignal,
@@ -427,7 +427,7 @@ export async function updateUnit(unitId: string, patch: UnitPatch): Promise<Unit
   return res.unit;
 }
 
-// --- Broadcasts (/api/broadcasts, M1.8 "Share Properties", requireAuth) ------
+// --- Broadcasts (/api/broadcasts, M1.8 "Share Listings", requireAuth) -------
 // VAs run share broadcasts day-to-day (no admin gate). The lifecycle is
 // create-draft → preview → send; results carry the per-recipient delivery map,
 // and the `broadcast.updated` SSE event drives live stat updates.

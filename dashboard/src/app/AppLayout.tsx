@@ -30,7 +30,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Inbox', icon: <InboxIcon /> },
   { to: '/contacts', label: 'Contacts', icon: <ContactsIcon /> },
-  { to: '/units', label: 'Properties', icon: <HomeIcon /> },
+  { to: '/units', label: 'Listings', icon: <HomeIcon /> },
   { to: '/admin/users', label: 'Users', icon: <UsersIcon />, adminOnly: true },
   { to: '/settings', label: 'Settings', icon: <SettingsIcon />, adminOnly: true },
 ];

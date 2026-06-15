@@ -253,7 +253,7 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // NEW in M1.8a (NOT in the doc §5 9-table model — README deviation
-    // 2026-06-13): the filtered share-broadcast ("Share Properties") record.
+    // 2026-06-13): the filtered share-broadcast ("Share Listings") record.
     // The operator picks a unit + bedroom-size/housing-authority filter and
     // texts the matching tenants the unit's flyer; this row is the draft →
     // sending → sent/failed lifecycle + the audience snapshot, per-recipient

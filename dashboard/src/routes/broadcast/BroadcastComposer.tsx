@@ -1,4 +1,4 @@
-// BroadcastComposer (M1.8 "Share Properties") — a Sheet that drives the
+// BroadcastComposer (M1.8 "Share Listings") — a Sheet that drives the
 // create-draft → preview → send flow against the M1.8a backend.
 //
 // Flow: the operator picks audience narrowers (bedroom size + housing
@@ -35,7 +35,7 @@ import styles from './BroadcastComposer.module.css';
 export interface BroadcastComposerProps {
   open: boolean;
   onClose: () => void;
-  /** The unit being shared (Share-Properties variant); omit for a general
+  /** The unit being shared (Share-Listings variant); omit for a general
    *  unit-less broadcast. Pre-fills bedroom size, housing-authority suggestion,
    *  and the default flyer-link template. */
   unit?: UnitItem;
@@ -174,13 +174,13 @@ export function BroadcastComposer({
   const canSend =
     draftId !== undefined && preview !== undefined && count > 0 && !overCap && !sending;
 
-  const title = unit !== undefined ? 'Share this property' : 'New broadcast';
+  const title = unit !== undefined ? 'Share this listing' : 'New broadcast';
 
   return (
     <Sheet open={open} onClose={onClose} title={title}>
       <div className={styles.body}>
         <p className={styles.lead}>
-          Text this {unit !== undefined ? 'property’s flyer' : 'message'} to a filtered set of
+          Text this {unit !== undefined ? 'listing’s flyer' : 'message'} to a filtered set of
           tenants. Opted-out and unreachable contacts are always excluded.
         </p>
 

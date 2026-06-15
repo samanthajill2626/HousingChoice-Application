@@ -1,10 +1,10 @@
-// units repo (M1.5) — landlord properties: the listings the share-broadcast
-// (M1.6) fans out and the flyer endpoint exposes a safe subset of (doc §5).
+// units repo (M1.5) — the landlord units the share-broadcast (M1.6) fans out
+// and the flyer endpoint exposes a safe subset of (doc §5).
 //
 // Items stay FLEXIBLE documents — only keys + GSI key attributes are
 // contractual (lib/tables.ts): PK unitId, plus the byLandlord (landlordId),
 // byStatus (status) and byJurisdiction (jurisdiction) GSIs. Everything else
-// (rents, beds, the never-standardized per-property tour/application processes)
+// (rents, beds, the never-standardized per-unit tour/application processes)
 // is a free-form attribute, so schema churn during the build needs no
 // migration — exactly the §5 posture.
 //
@@ -89,15 +89,15 @@ export interface UnitItem {
   media?: string[];
   /** Public flyer link. */
   listing_link?: string;
-  /** The never-standardized per-property tour process (free text). INTERNAL. */
+  /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
-  /** The never-standardized per-property application process (free text). INTERNAL. */
+  /** The never-standardized per-unit application process (free text). INTERNAL. */
   application_process?: string;
   /**
-   * Per-property primary voice contact for masked calling (CO1): the
+   * Per-unit primary voice contact for masked calling (CO1): the
    * landlord-side person a masked tenant→landlord call routes to. Stored as a
    * contactId. PENDING FOUNDER CONFIRMATION — may move to per-placement (CO1
-   * notes routing comes "from the per-property process" today; a later change
+   * notes routing comes "from the per-unit process" today; a later change
    * order may relocate this onto the case/placement). INTERNAL — never exposed
    * by the public flyer.
    */

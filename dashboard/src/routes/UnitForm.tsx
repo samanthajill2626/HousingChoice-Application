@@ -1,11 +1,11 @@
-// UnitForm — create or edit a property (routes '/units/new' and
+// UnitForm — create or edit a unit (routes '/units/new' and
 // '/units/:unitId/edit'). One component drives both: in edit mode it loads the
 // unit first and seeds the form; in create mode it starts blank.
 //
-// The property intake form covers every contract field. Numbers are validated
+// The unit intake form covers every contract field. Numbers are validated
 // client-side (non-negative, integer beds; rent_min ≤ rent_max). landlordId is
 // REQUIRED by the backend — we satisfy it with a "Landlord" picker over
-// landlord contacts. The primary voice contact (CO1 per-property primary voice
+// landlord contacts. The primary voice contact (CO1 per-unit primary voice
 // contact, pending founder confirmation — note kept off-screen) is a separate
 // optional picker over landlord + pm contacts. Media + accepted programs are
 // simple newline / comma lists. The address is the shared structured Address.
@@ -148,7 +148,7 @@ export default function UnitForm(): React.JSX.Element {
   if (editing && loading && unit === undefined) {
     return (
       <section className={styles.page}>
-        <Spinner center label="Loading property" />
+        <Spinner center label="Loading listing" />
       </section>
     );
   }
@@ -158,11 +158,11 @@ export default function UnitForm(): React.JSX.Element {
     return (
       <section className={styles.page}>
         <EmptyState
-          title={notFound ? 'Property not found' : "Couldn't load this property"}
-          description="The property couldn't be loaded for editing."
+          title={notFound ? 'Listing not found' : "Couldn't load this listing"}
+          description="The listing couldn't be loaded for editing."
           action={
             <Button variant="secondary" onClick={() => navigate('/units')}>
-              Back to properties
+              Back to listings
             </Button>
           }
         />
@@ -202,7 +202,7 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
   function validate(): { ok: boolean; errors: Partial<Record<keyof FormState, string>> } {
     const errors: Partial<Record<keyof FormState, string>> = {};
     if (form.landlordId.trim().length === 0) {
-      errors.landlordId = 'Pick the landlord this property belongs to.';
+      errors.landlordId = 'Pick the landlord this listing belongs to.';
     }
     // Only the string-valued numeric fields (address is structured, not a
     // string) — keeps form[key] a string for parseNum.
@@ -296,28 +296,28 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
       if (editing && unit) {
         const patch: UnitPatch = body;
         const updated = await updateUnit(unit.unitId, patch);
-        toast.success('Property saved');
+        toast.success('Listing saved');
         navigate(`/units/${encodeURIComponent(updated.unitId)}`);
       } else {
         const created = await createUnit(body);
-        toast.success('Property created');
+        toast.success('Listing created');
         navigate(`/units/${encodeURIComponent(created.unitId)}`);
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save the property.');
-      toast.error('Could not save the property');
+      setError(err instanceof ApiError ? err.message : 'Could not save the listing.');
+      toast.error('Could not save the listing');
     } finally {
       setSubmitting(false);
     }
   }
 
-  const heading = editing ? 'Edit property' : 'New property';
+  const heading = editing ? 'Edit listing' : 'New listing';
 
   return (
     <section className={styles.page} aria-labelledby="unit-form-heading">
       <Link to={editing && unit ? `/units/${encodeURIComponent(unit.unitId)}` : '/units'} className={styles.back}>
         <ChevronLeftIcon size={16} />
-        {editing ? 'Back to property' : 'Back to properties'}
+        {editing ? 'Back to listing' : 'Back to listings'}
       </Link>
 
       <header className={styles.header}>
@@ -332,7 +332,7 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
           <Field
             label="Landlord"
             required
-            hint="The landlord this property belongs to."
+            hint="The landlord this listing belongs to."
             {...(fieldErrors.landlordId !== undefined && { error: fieldErrors.landlordId })}
           >
             {({ id }) => (
@@ -481,9 +481,9 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
             </Field>
           </div>
 
-          {/* CO1 per-property primary voice contact, pending founder
+          {/* CO1 per-unit primary voice contact, pending founder
               confirmation — that internal note stays in code, off the screen. */}
-          <Field label="Primary contact for calls" hint="A landlord or property manager to call about this unit.">
+          <Field label="Primary contact for calls" hint="A landlord or property manager to call about this listing.">
             {({ id }) => (
               <select
                 id={id}
@@ -528,7 +528,7 @@ function UnitEditor({ unit }: { unit?: UnitItem }): React.JSX.Element {
 
           <div className={styles.formActions}>
             <Button type="submit" loading={submitting}>
-              {editing ? 'Save property' : 'Create property'}
+              {editing ? 'Save listing' : 'Create listing'}
             </Button>
             <Button
               type="button"

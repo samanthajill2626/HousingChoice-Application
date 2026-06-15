@@ -1,4 +1,4 @@
-// BroadcastComposer tests — Share-Properties pre-fill, audience preview count,
+// BroadcastComposer tests — Share-Listings pre-fill, audience preview count,
 // over-cap refusal, send success + 400/409 error handling. Mock the broadcast
 // endpoints; keep ApiError real for instanceof. No network.
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';

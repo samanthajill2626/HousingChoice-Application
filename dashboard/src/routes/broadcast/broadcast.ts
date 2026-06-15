@@ -1,4 +1,4 @@
-// Pure, unit-testable helpers for the M1.8 "Share Properties" broadcast harness.
+// Pure, unit-testable helpers for the M1.8 "Share Listings" broadcast harness.
 // Kept apart from the views so the formatting + labeling rules can be tested
 // without rendering. Honest identity throughout: a recipient with no resolved
 // name shows their formatted phone, never a fabricated name.
@@ -24,7 +24,7 @@ export const MERGE_TOKENS = [
 ] as const;
 
 /**
- * The default Share-Properties template, pre-filled when a broadcast is opened
+ * The default Share-Listings template, pre-filled when a broadcast is opened
  * from a unit. Ends with [FlyerLink] so the flyer is appended by default (the
  * server snapshots the unit's flyer URL into that token at send).
  */

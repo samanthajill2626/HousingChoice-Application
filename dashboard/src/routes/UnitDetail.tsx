@@ -1,4 +1,4 @@
-// UnitDetail — view one property (route '/units/:unitId').
+// UnitDetail — view one unit (route '/units/:unitId').
 //
 // Shows every intake field (including tour_process / application_process), the
 // primary call contact (resolved to its contact detail when linkable), the
@@ -22,7 +22,7 @@ export default function UnitDetail(): React.JSX.Element {
   if (loading && unit === undefined) {
     return (
       <section className={styles.page}>
-        <Spinner center label="Loading property" />
+        <Spinner center label="Loading listing" />
       </section>
     );
   }
@@ -32,15 +32,15 @@ export default function UnitDetail(): React.JSX.Element {
     return (
       <section className={styles.page}>
         <EmptyState
-          title={notFound ? 'Property not found' : "Couldn't load this property"}
+          title={notFound ? 'Listing not found' : "Couldn't load this listing"}
           description={
             notFound
-              ? 'This property may have been removed.'
-              : 'Something went wrong loading the property.'
+              ? 'This listing may have been removed.'
+              : 'Something went wrong loading the listing.'
           }
           action={
             <Button variant="secondary" onClick={() => navigate('/units')}>
-              Back to properties
+              Back to listings
             </Button>
           }
         />
@@ -65,7 +65,7 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }): Reac
 function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
   const navigate = useNavigate();
   const rent = formatRentRange(unit.rent_min, unit.rent_max);
-  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
+  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Listing ${unit.unitId}`;
   const flyerHref = `/flyer/${encodeURIComponent(unit.unitId)}`;
   const [shareOpen, setShareOpen] = useState(false);
 
@@ -73,13 +73,13 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
     <section className={styles.page} aria-labelledby="unit-detail-heading">
       <Link to="/units" className={styles.back}>
         <ChevronLeftIcon size={16} />
-        Back to properties
+        Back to listings
       </Link>
 
       <header className={styles.header}>
         <div>
           <h1 id="unit-detail-heading">{title}</h1>
-          <p className={styles.lead}>{unit.jurisdiction ?? 'Property record'}</p>
+          <p className={styles.lead}>{unit.jurisdiction ?? 'Listing record'}</p>
         </div>
         <Badge tone="info" dot>
           {UNIT_STATUS_LABEL[unit.status]}
@@ -88,10 +88,10 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
 
       <div className={styles.formActions}>
         <Button size="sm" onClick={() => setShareOpen(true)}>
-          Share this property
+          Share this listing
         </Button>
         <Button as="a" href={`/units/${encodeURIComponent(unit.unitId)}/edit`} variant="secondary" size="sm">
-          Edit property
+          Edit listing
         </Button>
         <Button as="a" href={flyerHref} target="_blank" rel="noopener noreferrer" variant="secondary" size="sm">
           View public flyer
@@ -151,7 +151,7 @@ function UnitView({ unit }: { unit: UnitItem }): React.JSX.Element {
               ) : undefined
             }
           />
-          {/* CO1 per-property primary voice contact, pending founder
+          {/* CO1 per-unit primary voice contact, pending founder
               confirmation — that internal note stays in code, off the screen. */}
           <Fact
             label="Primary contact for calls"

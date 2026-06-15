@@ -1,4 +1,4 @@
-// BroadcastResults (M1.8 "Share Properties") — the live results view for one
+// BroadcastResults (M1.8 "Share Listings") — the live results view for one
 // broadcast (route '/broadcasts/:id').
 //
 // Renders the lifecycle status, the summary stat chips (audience / sent /
@@ -98,7 +98,7 @@ export default function BroadcastResults(): React.JSX.Element {
           }
           action={
             <Button variant="secondary" onClick={() => navigate('/units')}>
-              Back to properties
+              Back to listings
             </Button>
           }
         />
@@ -127,7 +127,7 @@ function ResultsView({
     <section className={styles.page} aria-labelledby="broadcast-heading">
       <Link to="/units" className={styles.back}>
         <ChevronLeftIcon size={16} />
-        Back to properties
+        Back to listings
       </Link>
 
       <header className={styles.header}>
@@ -135,7 +135,7 @@ function ResultsView({
           <h1 id="broadcast-heading">Broadcast results</h1>
           <p className={styles.lead}>
             {data.unitId !== null ? (
-              <Link to={`/units/${encodeURIComponent(data.unitId)}`}>View shared property</Link>
+              <Link to={`/units/${encodeURIComponent(data.unitId)}`}>View shared listing</Link>
             ) : (
               'General broadcast'
             )}

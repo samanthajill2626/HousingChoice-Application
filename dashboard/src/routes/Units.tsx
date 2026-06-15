@@ -1,4 +1,4 @@
-// Units — the Properties list (route '/units', authenticated).
+// Units — the Listings list (route '/units', authenticated).
 //
 // A status filter (default: all) and a card list of units. Each row links to
 // the unit detail. Built on the shared GET hook; "Load more" pages via the
@@ -69,12 +69,12 @@ export default function Units(): React.JSX.Element {
     <section className={styles.page} aria-labelledby="units-heading">
       <header className={styles.header}>
         <div>
-          <h1 id="units-heading">Properties</h1>
-          <p className={styles.lead}>Available units and their placement status.</p>
+          <h1 id="units-heading">Listings</h1>
+          <p className={styles.lead}>Available listings and their placement status.</p>
         </div>
         <Button as="a" href="/units/new" size="sm">
           <PlusIcon size={16} />
-          New property
+          New listing
         </Button>
       </header>
 
@@ -101,11 +101,11 @@ export default function Units(): React.JSX.Element {
       </div>
 
       {loading && data === undefined ? (
-        <Spinner center label="Loading properties" />
+        <Spinner center label="Loading listings" />
       ) : error ? (
         <EmptyState
           icon={<HomeIcon size={28} />}
-          title="Couldn't load properties"
+          title="Couldn't load listings"
           description="Something went wrong reaching the server."
           action={
             <Button variant="secondary" onClick={refetch}>
@@ -116,12 +116,12 @@ export default function Units(): React.JSX.Element {
       ) : units.length === 0 ? (
         <EmptyState
           icon={<HomeIcon size={28} />}
-          title="No properties yet"
-          description="Add a unit with New property to start tracking it."
+          title="No listings yet"
+          description="Add a listing with New listing to start tracking it."
         />
       ) : (
         <>
-          <ul className={styles.list} aria-label="Properties">
+          <ul className={styles.list} aria-label="Listings">
             {units.map((u) => (
               <UnitRow key={u.unitId} unit={u} />
             ))}
@@ -141,7 +141,7 @@ export default function Units(): React.JSX.Element {
 
 function UnitRow({ unit }: { unit: UnitItem }): React.JSX.Element {
   const rent = formatRentRange(unit.rent_min, unit.rent_max);
-  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Unit ${unit.unitId}`;
+  const title = formatAddress(unit.address) ?? unit.jurisdiction ?? `Listing ${unit.unitId}`;
 
   return (
     <li>

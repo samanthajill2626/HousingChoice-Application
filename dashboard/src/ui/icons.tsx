@@ -106,7 +106,7 @@ export function ContactsIcon(props: IconProps): React.JSX.Element {
   );
 }
 
-/** A home / property glyph for the Properties (units) section. */
+/** A home glyph for the Listings (units) section. */
 export function HomeIcon(props: IconProps): React.JSX.Element {
   return (
     <svg {...base(props)}>

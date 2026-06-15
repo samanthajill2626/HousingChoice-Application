@@ -1,4 +1,4 @@
-// broadcast.send (M1.8a) — fan a filtered share-broadcast ("Share Properties")
+// broadcast.send (M1.8a) — fan a filtered share-broadcast ("Share Listings")
 // out to each matching TENANT's 1:1 conversation, throttled and idempotent.
 //
 // Modeled on relayFanOut.ts, but the unit differs: a broadcast sends a 1:1

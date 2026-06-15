@@ -2,7 +2,7 @@
 //
 // Rendered ABOVE the auth gate (see App.tsx) so it works for anyone with the
 // link — no session, no app nav/chrome. Fetches GET /public/units/:id/flyer.
-// A 404 shows a friendly "listing not available" rather than an error dump.
+// A 404 shows a friendly "home not available" rather than an error dump.
 import { useParams } from 'react-router-dom';
 import { getUnitFlyer, useApi, type UnitFlyer } from '../api/index.js';
 import { Spinner } from '../ui/index.js';
@@ -18,7 +18,7 @@ export default function Flyer(): React.JSX.Element {
     return (
       <main className={styles.page}>
         <div className={styles.card}>
-          <Spinner center label="Loading listing" />
+          <Spinner center label="Loading home" />
         </div>
       </main>
     );
@@ -29,9 +29,9 @@ export default function Flyer(): React.JSX.Element {
       <main className={styles.page}>
         <div className={styles.card}>
           <div className={styles.brand}>HousingChoice</div>
-          <h1 className={styles.title}>Listing not available</h1>
+          <h1 className={styles.title}>Home not available</h1>
           <p className={styles.subtitle}>
-            This listing isn&apos;t available right now. It may have been placed or removed. Please
+            This home isn&apos;t available right now. It may have been placed or removed. Please
             check back with whoever shared the link.
           </p>
         </div>
@@ -76,7 +76,7 @@ function FlyerView({ flyer }: { flyer: UnitFlyer }): React.JSX.Element {
         {photos.length > 0 && (
           <div className={styles.gallery}>
             {photos.map((src, i) => (
-              <img key={`${src}-${i}`} className={styles.photo} src={src} alt={`Listing photo ${i + 1}`} />
+              <img key={`${src}-${i}`} className={styles.photo} src={src} alt={`Home photo ${i + 1}`} />
             ))}
           </div>
         )}

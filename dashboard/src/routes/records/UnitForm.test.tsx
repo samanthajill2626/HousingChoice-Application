@@ -63,8 +63,8 @@ beforeEach(() => {
 describe('<UnitForm> create', () => {
   it('requires a landlord before POSTing', async () => {
     renderAt('/units/new');
-    await screen.findByText('New property');
-    fireEvent.click(screen.getByRole('button', { name: /create property/i }));
+    await screen.findByText('New listing');
+    fireEvent.click(screen.getByRole('button', { name: /create listing/i }));
     expect(await screen.findByText(/pick the landlord/i)).toBeInTheDocument();
     expect(createUnitMock).not.toHaveBeenCalled();
   });
@@ -90,7 +90,7 @@ describe('<UnitForm> create', () => {
     fireEvent.change(screen.getByLabelText('Min rent'), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText('Max rent'), { target: { value: '1400' } });
     fireEvent.change(screen.getByLabelText('Accepted programs'), { target: { value: 'HCV, VASH' } });
-    fireEvent.click(screen.getByRole('button', { name: /create property/i }));
+    fireEvent.click(screen.getByRole('button', { name: /create listing/i }));
 
     await waitFor(() => expect(createUnitMock).toHaveBeenCalledTimes(1));
     const body = createUnitMock.mock.calls[0]![0];
@@ -116,7 +116,7 @@ describe('<UnitForm> create', () => {
     fireEvent.change(landlordSelect, { target: { value: 'k-land' } });
     fireEvent.change(screen.getByLabelText('Min rent'), { target: { value: '2000' } });
     fireEvent.change(screen.getByLabelText('Max rent'), { target: { value: '1000' } });
-    fireEvent.click(screen.getByRole('button', { name: /create property/i }));
+    fireEvent.click(screen.getByRole('button', { name: /create listing/i }));
 
     expect(await screen.findByText(/at least the min rent/i)).toBeInTheDocument();
     expect(createUnitMock).not.toHaveBeenCalled();
@@ -143,7 +143,7 @@ describe('<UnitForm> edit', () => {
     expect((screen.getByLabelText('ZIP') as HTMLInputElement).value).toBe('30030');
 
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'placed' } });
-    fireEvent.click(screen.getByRole('button', { name: /save property/i }));
+    fireEvent.click(screen.getByRole('button', { name: /save listing/i }));
 
     await waitFor(() => expect(updateUnitMock).toHaveBeenCalledTimes(1));
     const [unitId, patch] = updateUnitMock.mock.calls[0]!;

@@ -349,7 +349,7 @@ export interface CreateContactBody {
   contactName?: string;
 }
 
-// --- Units (properties) -----------------------------------------------------
+// --- Units -------------------------------------------------------------------
 
 /** A structured US postal address. Every part is optional — intake is
  *  partial-by-design. Shared shape: tenant/contact addresses can adopt it.
@@ -368,7 +368,7 @@ export interface Address {
 /** A unit's lifecycle status. */
 export type UnitStatus = 'available' | 'placed' | 'inactive';
 
-/** A property/unit record (GET /api/units → { units }, GET /api/units/:id →
+/** A unit record (GET /api/units → { units }, GET /api/units/:id →
  *  { unit }). Flexible document on the server; the contractual fields are typed
  *  and the index signature carries anything extra. Most fields are free-form /
  *  optional because intake is partial-by-design. */
@@ -575,8 +575,8 @@ export interface BroadcastUpdatedEvent {
   stats: BroadcastStats;
 }
 
-// --- Broadcasts (M1.8 "Share Properties") -----------------------------------
-// The filtered share-broadcast: text a property's flyer to a filtered set of
+// --- Broadcasts (M1.8 "Share Listings") -------------------------------------
+// The filtered share-broadcast: text a unit's flyer to a filtered set of
 // tenant 1:1 contacts. Mirrors app/src/repos/broadcastsRepo.ts +
 // app/src/routes/broadcasts.ts + app/src/services/audienceResolution.ts.
 

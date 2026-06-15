@@ -60,7 +60,7 @@ const a2pBucket = new TokenBucket({
 // dispatch (local path) — both paths are throttled.
 registerRelayFanOutJobHandler({ tokenBucket: a2pBucket });
 
-// M1.8a: filtered share-broadcast ("Share Properties") fan-out. SHARES THE
+// M1.8a: filtered share-broadcast ("Share Listings") fan-out. SHARES THE
 // SAME a2pBucket instance as relay fan-out, so the COMBINED outbound rate stays
 // under the registered A2P tier no matter how many broadcasts/relays run.
 registerBroadcastSendJobHandler({ tokenBucket: a2pBucket });

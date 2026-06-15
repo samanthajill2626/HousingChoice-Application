@@ -1,4 +1,4 @@
-// Flyer (public) tests — renders the flyer fields; 404 → friendly "listing not
+// Flyer (public) tests — renders the flyer fields; 404 → friendly "home not
 // available". Mock the api barrel (stub getUnitFlyer); no network/session.
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -55,7 +55,7 @@ describe('<Flyer> (public)', () => {
     expect(screen.getAllByText(/\$1,200–\$1,500/).length).toBeGreaterThan(0);
     expect(screen.getByText('HCV')).toBeInTheDocument();
     // The image media renders as an <img>.
-    expect(screen.getByRole('img', { name: /Listing photo 1/ })).toHaveAttribute(
+    expect(screen.getByRole('img', { name: /Home photo 1/ })).toHaveAttribute(
       'src',
       'https://cdn.example.com/p1.jpg',
     );
@@ -70,6 +70,6 @@ describe('<Flyer> (public)', () => {
     const { ApiError } = await import('../../api/index.js');
     getUnitFlyerMock.mockRejectedValueOnce(new ApiError(404, 'not_found', 'not_found'));
     renderAt();
-    expect(await screen.findByText('Listing not available')).toBeInTheDocument();
+    expect(await screen.findByText('Home not available')).toBeInTheDocument();
   });
 });

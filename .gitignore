@@ -26,6 +26,7 @@ infra/envs/*/tfplan
 
 # Logs
 *.log
+logs/
 
 # OS cruft
 .DS_Store

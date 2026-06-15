@@ -33,7 +33,8 @@
 // dev:worker / dev -w @housingchoice/dashboard / db:* (those do NOT load
 // .env/.env.dev or apply mode defaults).
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { Writable } from 'node:stream';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import concurrently from 'concurrently';
@@ -167,7 +168,7 @@ if (mode === 'local') {
         ? ' (simulated; set MESSAGING_DRIVER=twilio in .env for real sends)'
         : ' (REAL Twilio sends)'),
   );
-  console.log('       logs:      this terminal (CloudWatch only on the deployed server)');
+  console.log('       logs:      messages here; full JSON saved to logs/dev-*.log (CloudWatch is the deployed server only)');
   console.log('       (`npm run dev -- --local` for the offline DynamoDB Local loop)');
   console.log('dev — step 1/2: account guard');
   try {
@@ -218,11 +219,81 @@ if (webEnabled) {
   });
 }
 
+// --- Local dev logging -----------------------------------------------------
+// The terminal shows just each line's MESSAGE (+ stack trace on error); the
+// FULL pino JSON for every line is tee'd to a timestamped logs/dev-<ts>.log so
+// nothing is lost (and an agent can read it back after an error). The app's
+// logger is UNCHANGED — it still emits JSON to stdout (prod ships that to
+// CloudWatch via the docker awslogs driver); this only reshapes what the LOCAL
+// runner SHOWS vs. FILES. concurrently writes its prefixed child output to
+// `outputStream` below instead of straight to the terminal, so we intercept it.
+const STRIP_ANSI = /\x1b\[[0-9;]*m/g;
+const NAME_COLOR = { app: '\x1b[36m', worker: '\x1b[35m', web: '\x1b[32m' };
+const ANSI_RESET = '\x1b[0m';
+const PREFIXED = /^\[([^\]]+)\]\s?([\s\S]*)$/;
+
+let logStream;
+let logRelPath;
+try {
+  mkdirSync(path.join(repoRoot, 'logs'), { recursive: true });
+  // new Date() is fine here (a normal script, not a Workflow); make it
+  // filesystem-safe (no ':' / '.'). Files are kept around on purpose.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  logRelPath = path.join('logs', `dev-${stamp}.log`);
+  logStream = createWriteStream(path.join(repoRoot, logRelPath), { flags: 'a' });
+} catch (err) {
+  console.warn(`dev — could not open a log file (${err.message}); terminal-only logging`);
+}
+if (logRelPath) {
+  console.log(`  ▶ Full JSON logs: ${logRelPath}`);
+  console.log('');
+}
+
+function renderDevLine(line) {
+  const clean = line.replace(STRIP_ANSI, '');
+  if (clean.length === 0) return;
+  const m = PREFIXED.exec(clean);
+  const name = m ? m[1] : '';
+  const payload = m ? m[2] : clean;
+  // FILE: the full payload (pino JSON intact), name-prefixed for correlation.
+  if (logStream) logStream.write(`${name ? `[${name}] ` : ''}${payload}\n`);
+  // TERMINAL: just the message; on a pino error (level >= 50) append the stack.
+  let shown = payload;
+  try {
+    const o = JSON.parse(payload);
+    if (o && typeof o === 'object' && typeof o.msg === 'string') {
+      shown = o.msg;
+      if (typeof o.level === 'number' && o.level >= 50) {
+        const trace = o.err?.stack ?? o.err?.message;
+        if (trace) shown += `\n${String(trace).replace(/^/gm, '    ')}`;
+      }
+    }
+  } catch {
+    // not pino JSON (tsx/vite banner, etc.) — pass the line through unchanged
+  }
+  const prefix = name ? `${NAME_COLOR[name] ?? ''}[${name}]${ANSI_RESET} ` : '';
+  process.stdout.write(`${prefix}${shown}\n`);
+}
+
+class DevLogStream extends Writable {
+  #buf = '';
+  _write(chunk, _enc, cb) {
+    this.#buf += chunk.toString();
+    let nl;
+    while ((nl = this.#buf.indexOf('\n')) >= 0) {
+      renderDevLine(this.#buf.slice(0, nl));
+      this.#buf = this.#buf.slice(nl + 1);
+    }
+    cb();
+  }
+}
+
 const { result } = concurrently(commands, {
   cwd: repoRoot,
   prefix: 'name',
   killOthersOn: ['failure', 'success'],
   handleInput: false,
+  outputStream: new DevLogStream(),
 });
 
 try {
@@ -230,8 +301,9 @@ try {
 } catch {
   // Normal teardown path (Ctrl-C / one process exiting kills the other).
 }
+logStream?.end();
 console.log(
-  mode === 'local'
+  (mode === 'local'
     ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it).'
-    : 'dev — stopped.',
+    : 'dev — stopped.') + (logRelPath ? ` Full logs: ${logRelPath}` : ''),
 );

@@ -231,6 +231,23 @@ const STRIP_ANSI = /\x1b\[[0-9;]*m/g;
 const NAME_COLOR = { app: '\x1b[36m', worker: '\x1b[35m', web: '\x1b[32m' };
 const ANSI_RESET = '\x1b[0m';
 const PREFIXED = /^\[([^\]]+)\]\s?([\s\S]*)$/;
+// After the message, show the DOMAIN fields (method, path, statusCode,
+// conversationId, providerSid, jobName, count, …) — that's what makes a line
+// useful. Skip only pino/correlation boilerplate (those stay in the file).
+const DEVLOG_BOILERPLATE = new Set([
+  'time', 'pid', 'hostname', 'level', 'msg', 'v', 'name',
+  'correlationId', 'requestId', 'jobRunId', 'bootId', 'traceparent', 'hopCount',
+  'xff', 'xffTrust', 'headers', 'err',
+]);
+function devLogValue(v) {
+  if (v === null) return 'null';
+  if (typeof v === 'object') {
+    const s = JSON.stringify(v);
+    return s.length > 80 ? `${s.slice(0, 79)}…` : s;
+  }
+  const s = String(v);
+  return s.length > 120 ? `${s.slice(0, 119)}…` : s;
+}
 
 let logStream;
 let logRelPath;
@@ -263,6 +280,11 @@ function renderDevLine(line) {
     const o = JSON.parse(payload);
     if (o && typeof o === 'object' && typeof o.msg === 'string') {
       shown = o.msg;
+      const extras = [];
+      for (const [k, val] of Object.entries(o)) {
+        if (!DEVLOG_BOILERPLATE.has(k)) extras.push(`${k}=${devLogValue(val)}`);
+      }
+      if (extras.length > 0) shown += ` ${extras.join(' ')}`;
       if (typeof o.level === 'number' && o.level >= 50) {
         const trace = o.err?.stack ?? o.err?.message;
         if (trace) shown += `\n${String(trace).replace(/^/gm, '    ')}`;

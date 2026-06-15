@@ -142,6 +142,21 @@ describe('buildApp', () => {
       expect(requestLine['xffTrust']).toBe('untrusted-until-validated');
     });
 
+    it('logs a request-completed line with status + latency, inside the request context (not orphaned)', async () => {
+      const res = await request(app).get('/health');
+      const requestId = res.headers['x-request-id'];
+      // res 'finish' (which emits the completion log) can land a tick after the
+      // client resolves — let it flush before asserting.
+      await new Promise((resolve) => setImmediate(resolve));
+      const completed = capture.lines.find((l) => l['msg'] === 'request completed')!;
+      expect(completed).toBeDefined();
+      expect(completed['statusCode']).toBe(200);
+      expect(typeof completed['durationMs']).toBe('number');
+      // Must carry the correlation context (re-run in the captured ctx on
+      // 'finish'), so it is never an orphan log.
+      expect(completed['correlationId']).toBe(requestId);
+    });
+
     it('webhooks router is a 404 seam (with origin secret)', async () => {
       const res = await request(app)
         .post('/webhooks/twilio')

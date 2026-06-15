@@ -8,7 +8,8 @@
   },
   "workspaces": [
     "app",
-    "dashboard"
+    "dashboard",
+    "e2e"
   ],
   "scripts": {
     "bootstrap": "node scripts/bootstrap.mjs",
@@ -22,6 +23,7 @@
     "db:seed": "tsx app/scripts/db-seed.ts",
     "gen:tables": "tsx app/scripts/gen-tables.ts",
     "test": "npm run test --workspaces --if-present",
+    "e2e": "npm run e2e -w @housingchoice/e2e",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "deploy:dev": "node scripts/deploy.mjs dev",

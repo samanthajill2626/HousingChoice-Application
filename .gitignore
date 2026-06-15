@@ -28,6 +28,9 @@ infra/envs/*/tfplan
 *.log
 logs/
 
+# Playwright e2e artifacts
+e2e/.artifacts/
+
 # OS cruft
 .DS_Store
 Thumbs.db

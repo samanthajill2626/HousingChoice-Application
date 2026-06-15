@@ -6,16 +6,18 @@
 // app health, and restarts ONLY app+worker when the restart sentinel changes
 // (Vite, the DB, and any attached browser keep running / keep their place).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, watchFile } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
+import { killTree, isAlive } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const dashboardDir = path.join(repoRoot, 'dashboard');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const sentinel = path.join(artifactsDir, '.restart');
+const pidFile = path.join(artifactsDir, 'session.pid');
 
 const childEnv = {
   ...process.env,
@@ -30,6 +32,7 @@ const childEnv = {
 
 const children = new Map(); // name -> ChildProcess
 let shuttingDown = false;
+let parentWatchInterval = null;
 
 function log(msg) {
   process.stdout.write(`[e2e-session] ${msg}\n`);
@@ -59,7 +62,7 @@ function startVite() {
 function killChild(name) {
   const child = children.get(name);
   if (!child) return;
-  child.kill('SIGTERM');
+  killTree(child.pid);
   children.delete(name);
 }
 
@@ -88,8 +91,13 @@ async function waitForHealth(timeoutMs = 60_000) {
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (parentWatchInterval !== null) {
+    clearInterval(parentWatchInterval);
+    parentWatchInterval = null;
+  }
   log('shutting down — stopping app, worker, web (DynamoDB container left running)');
   for (const name of [...children.keys()]) killChild(name);
+  try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
   setTimeout(() => process.exit(code), 500);
 }
 
@@ -109,7 +117,21 @@ async function restartBackend() {
 }
 
 async function main() {
+  const parentPid = process.ppid;
+
   mkdirSync(artifactsDir, { recursive: true });
+
+  // SELF-HEAL: if a stale session.pid exists, kill that launcher tree first.
+  if (existsSync(pidFile)) {
+    const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+    if (!isNaN(oldPid) && oldPid !== process.pid && isAlive(oldPid)) {
+      log(`reaping stale session launcher (pid=${oldPid})…`);
+      killTree(oldPid);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  writeFileSync(pidFile, String(process.pid));
+
   if (!existsSync(sentinel)) writeFileSync(sentinel, '0');
 
   log('ensuring DynamoDB Local…');
@@ -125,6 +147,16 @@ async function main() {
 
   await waitForHealth();
   log('ready — app :8080, web :5173 (DEV_AUTH_ENABLED + MESSAGING_RECORD_OUTBOX on)');
+
+  // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
+  // shut down automatically. This fires only when the parent is genuinely gone —
+  // during Playwright suite runs, Playwright stays alive, so the interval is dormant.
+  parentWatchInterval = setInterval(() => {
+    if (!isAlive(parentPid)) {
+      log('parent process exited — shutting down session');
+      shutdown(0);
+    }
+  }, 1000);
 
   // Restart only app+worker when the sentinel file is rewritten.
   watchFile(sentinel, { interval: 300 }, () => {

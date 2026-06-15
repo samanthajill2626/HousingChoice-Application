@@ -14,12 +14,19 @@ Design & rationale: [`docs/superpowers/specs/2026-06-14-ui-e2e-testing-harness-d
 Helpers (session mode):
 - `npm run e2e:reseed` — reset local data to a clean seeded slate (fast; no restart).
 - `npm run e2e:restart` — restart **app+worker only** to pick up backend code changes (Vite, DB, and the browser keep their place).
+- `npm run e2e:stop` — reliably stop the session stack (kills the launcher + children).
 - `npm run e2e -- --grep "<name>"` — run a subset against the live session.
 - `npm run e2e:report` — open the last HTML report.
 
 ## Requirements
 - Docker running (DynamoDB Local). The launcher sets `DEV_AUTH_ENABLED=1` and
   `MESSAGING_RECORD_OUTBOX=1` so dev-login and the message outbox are available.
+- **Windows note:** killing the background task alone can leave the reparented node tree running on `:8080`/`:5173`. The launcher now auto-exits when its parent dies (parent-death watch), and `npm run e2e:stop` or the next `npm run e2e:session` (self-heal) also clean up any stale processes.
+- The written suite uses Playwright's **bundled Chromium** (`npx playwright install
+  chromium`). The Playwright **MCP** (for interactive driving) is registered in
+  [`.mcp.json`](../.mcp.json) with `--browser chromium` so it reuses that bundled
+  build — do NOT use the `chrome` channel (`npx playwright install chrome` needs
+  Administrator on Windows). The suite never depends on the MCP.
 
 ## Agent workflow (driving the UI yourself)
 1. Start the stack in the background: `npm run e2e:session` (wait for `ready`).

@@ -27,6 +27,7 @@
     "e2e:session": "node scripts/e2e-session.mjs",
     "e2e:restart": "node scripts/e2e-restart.mjs",
     "e2e:reseed": "node scripts/e2e-reseed.mjs",
+    "e2e:stop": "node scripts/e2e-stop.mjs",
     "e2e:report": "npm run report -w @housingchoice/e2e",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",

@@ -13,5 +13,5 @@ export async function maybeLoadDevRouter(
 ): Promise<Router | undefined> {
   if (!config.devAuthEnabled || config.nodeEnv === 'production') return undefined;
   const { createDevRouter } = await import('../routes/dev.js');
-  return createDevRouter({ logger });
+  return createDevRouter({ config, logger });
 }

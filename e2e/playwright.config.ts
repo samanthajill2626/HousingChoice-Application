@@ -35,7 +35,7 @@ export default defineConfig({
     // Boots DynamoDB Local + app(:8080) + worker + Vite(:5173) in hermetic
     // mode. No AWS creds or secrets needed; messaging defaults to console.
     command: 'npm run dev -- --local',
-    env: { DEV_AUTH_ENABLED: '1' },
+    env: { DEV_AUTH_ENABLED: '1', MESSAGING_RECORD_OUTBOX: '1' },
     cwd: repoRoot,
     // Readiness gate: the Vite server is the surface the spec hits, and dev.mjs
     // only starts it after db:start/create/seed, so this also covers DB boot.

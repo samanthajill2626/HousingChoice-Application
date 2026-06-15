@@ -34,8 +34,10 @@ const IDS = {
   va: 'user-0002',
 } as const;
 
-/** table base name -> items. Document-style: only keys/GSI attrs contractual. */
-const SEED: Record<string, Record<string, unknown>[]> = {
+/** table base name -> items. Document-style: only keys/GSI attrs contractual.
+ *  Exported so a unit test can guard the field CASING (the flexible-doc repos
+ *  store any key, so a snake_case typo is silently persisted then never read). */
+export const SEED: Record<string, Record<string, unknown>[]> = {
   contacts: [
     {
       contactId: IDS.tenant,
@@ -43,9 +45,15 @@ const SEED: Record<string, Record<string, unknown>[]> = {
       status: 'active', // byTypeStatus RANGE
       phone: '+15550100001', // byPhone
       housing_authority: 'atlanta_housing', // byHousingAuthority (tenants only)
-      first_name: 'Tasha',
-      last_name: 'Nguyen',
-      voucher_size: 2,
+      // Name + voucher size are camelCase EVERYWHERE the app reads them
+      // (contactFullName / displayNameOf / audienceResolution.voucherSizeOf);
+      // the flexible-doc repo would silently store snake_case keys the UI then
+      // never finds, so seeded contacts would render as their phone + miss
+      // bedroom-size broadcast targeting. Keep these aligned with the live
+      // intake (routes/public.ts, routes/contacts.ts).
+      firstName: 'Tasha',
+      lastName: 'Nguyen',
+      voucherSize: 2,
       voucher_program: 'HCV',
       rta_in_hand: true,
       rta_expiration_date: '2026-08-15',
@@ -58,8 +66,8 @@ const SEED: Record<string, Record<string, unknown>[]> = {
       type: 'landlord',
       status: 'active',
       phone: '+15550100002',
-      first_name: 'Marcus',
-      last_name: 'Bell',
+      firstName: 'Marcus',
+      lastName: 'Bell',
       lead_status: 'registered',
       contract_status: 'signed',
       authorities_served: ['atlanta_housing', 'ga_dca'],
@@ -70,8 +78,8 @@ const SEED: Record<string, Record<string, unknown>[]> = {
       type: 'housing_authority_staff',
       status: 'active',
       phone: '+15550100003',
-      first_name: 'Renee',
-      last_name: 'Carter',
+      firstName: 'Renee',
+      lastName: 'Carter',
       housing_authority: 'atlanta_housing',
       role_title: 'HCV Program Specialist',
       created_at: T0,

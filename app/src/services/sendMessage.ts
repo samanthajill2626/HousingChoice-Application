@@ -45,10 +45,23 @@ export class SendRefusedError extends Error {
       | 'contact_opted_out'
       | 'breaker_open'
       | 'manual_mode'
-      | 'relay_not_supported',
+      | 'relay_not_supported'
+      | 'sms_sending_disabled',
   ) {
     super(message);
     this.name = new.target.name;
+  }
+}
+
+/**
+ * Outbound-SMS kill-switch is OFF (config.smsSendingEnabled false) — every SMS
+ * send is refused before the provider call so a deployed stack emits no
+ * unregistered-A2P traffic (Twilio 30034) before A2P approval. Operator flips
+ * SMS_SENDING_ENABLED=true post-A2P. Voice is unaffected. Routes map this to 503.
+ */
+export class SmsSendingDisabledError extends SendRefusedError {
+  constructor() {
+    super('SMS sending is disabled (pre-A2P) — send refused', 'sms_sending_disabled');
   }
 }
 
@@ -167,6 +180,16 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
 
     const conversation = await conversations.getById(conversationId);
     if (!conversation) throw new ConversationNotFoundError(conversationId);
+
+    // (0a) A2P kill-switch: when SMS sending is disabled (deployed pre-A2P),
+    // refuse BEFORE the opt-out/breaker work and the provider call — no real
+    // Twilio send → no 30034 → no reputation damage. Explicit === false so a
+    // hand-built test config without the field is treated as enabled. The
+    // Twilio driver enforces the same backstop for any direct-adapter caller.
+    if (config.smsSendingEnabled === false) {
+      log.warn({ conversationId }, 'send refused: SMS sending disabled (pre-A2P kill-switch)');
+      throw new SmsSendingDisabledError();
+    }
 
     // (0) Relay guard (FIX 2): this 1:1 wrapper would text participant_phone —
     // the pool number for a relay_group. Refuse so no caller can misuse it.

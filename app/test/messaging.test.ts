@@ -6,6 +6,7 @@ import {
   ConsoleMessagingDriver,
   MAX_MEDIA_CONTENT_LENGTH,
   MediaFetchRefusedError,
+  SmsSendingDisabledError,
   TwilioMessagingDriver,
   createMessagingAdapter,
   mapTwilioStatus,
@@ -141,6 +142,43 @@ describe('TwilioMessagingDriver', () => {
       status: 'queued', // accepted -> queued on our machine
       providerTs: '2026-06-12T10:00:00.000Z',
     });
+  });
+
+  it('A2P kill-switch: sendingEnabled:false REFUSES before the Twilio call (no 30034 pre-A2P)', async () => {
+    const { client, created } = makeFakeTwilioClient();
+    const capture = createLogCapture();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      sendingEnabled: false,
+      client,
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    await expect(
+      driver.sendMessage({ to: '+15550100001', body: 'super secret PII body' }),
+    ).rejects.toBeInstanceOf(SmsSendingDisabledError);
+    // The message was NEVER handed to Twilio — that is what prevents the 30034.
+    expect(created).toHaveLength(0);
+    // PII-safe refusal marker, body never logged.
+    expect(capture.lines.some((l) => l['event'] === 'sms_sending_disabled')).toBe(true);
+    expect(JSON.stringify(capture.lines)).not.toContain('super secret');
+  });
+
+  it('A2P kill-switch: omitted sendingEnabled defaults to ENABLED (back-compat for direct construction)', async () => {
+    const { client, created } = makeFakeTwilioClient();
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    await driver.sendMessage({ to: '+15550100001', body: 'hi' });
+    expect(created).toHaveLength(1); // sent — the gate only fires on explicit false
   });
 
   it('emits ONE send_throttled marker on a 429/30022 send and re-throws unchanged (doc §9)', async () => {

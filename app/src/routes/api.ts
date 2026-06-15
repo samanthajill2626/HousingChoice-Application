@@ -74,6 +74,9 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   manual_mode: 409,
   breaker_open: 429,
   relay_not_supported: 409,
+  // A2P kill-switch (pre-A2P): SMS sending disabled → 503 (matches the relay
+  // provisioning kill-switch's 503 posture).
+  sms_sending_disabled: 503,
 };
 
 /** Page-size bounds shared by the inbox and thread endpoints. */

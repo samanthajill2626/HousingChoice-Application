@@ -68,6 +68,19 @@ export interface AppConfig {
    * approval to enable buying a pool number.
    */
   relayLiveProvisioning: boolean;
+  /**
+   * Outbound-SMS kill-switch (A2P safety). When false, every real-Twilio SMS
+   * send is REFUSED before the provider call (the send wrapper throws a
+   * SendRefusedError; the Twilio driver also refuses as a backstop), so a
+   * deployed stack cannot emit unregistered-A2P traffic (Twilio 30034) and
+   * damage sender reputation before A2P registration is approved. Read from
+   * SMS_SENDING_ENABLED; when unset it DEFAULTS to (messagingDriver ===
+   * 'console') — true locally/test (console driver, no real send), false when
+   * deployed (twilio driver). Flip it to true (SMS_SENDING_ENABLED=true) only
+   * AFTER A2P approval. VOICE (calls/bridging) is unaffected — this gates SMS
+   * only.
+   */
+  smsSendingEnabled: boolean;
   /** Twilio account SID (ACxxx). REST auth pairs it with the API key below. */
   twilioAccountSid?: string;
   /** Twilio API key SID/secret (SKxxx) — the ONLY credentials used for REST. */
@@ -296,6 +309,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Outbound-SMS kill-switch (A2P) — same shape/posture as RELAY_LIVE_PROVISIONING:
+  // default OFF on the deployed (twilio) stacks so NO real SMS is sent before A2P
+  // approval (an unregistered-number send draws Twilio 30034 and hurts sender
+  // reputation). Flip SMS_SENDING_ENABLED=true once A2P is approved. NOT
+  // fail-fast: an unparseable value WARNs (a boolean flag, no PII) and uses the
+  // default. true: 'true'|'1'|'yes'; false: 'false'|'0'|'no'.
+  const smsSendingEnabledDefault = messagingDriver === 'console';
+  let smsSendingEnabled = smsSendingEnabledDefault;
+  const smsSendingEnabledRaw = env.SMS_SENDING_ENABLED;
+  if (smsSendingEnabledRaw !== undefined && smsSendingEnabledRaw.trim().length > 0) {
+    const normalized = smsSendingEnabledRaw.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      smsSendingEnabled = true;
+    } else if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      smsSendingEnabled = false;
+    } else {
+      logger.warn(
+        { default: smsSendingEnabledDefault },
+        "SMS_SENDING_ENABLED is not one of true/1/yes/false/0/no — using the default",
+      );
+    }
+  }
+
   const sendBreakerMaxPerMinute = Number(env.SEND_BREAKER_MAX_PER_MINUTE ?? 10);
   if (!Number.isInteger(sendBreakerMaxPerMinute) || sendBreakerMaxPerMinute <= 0) {
     throw new Error(
@@ -476,6 +512,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     jobsQueueUrl: env.JOBS_QUEUE_URL,
     messagingDriver,
     relayLiveProvisioning,
+    smsSendingEnabled,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,
     twilioApiKeySecret: env.TWILIO_API_KEY_SECRET,

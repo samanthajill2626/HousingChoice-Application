@@ -218,6 +218,21 @@ export class VoiceCapabilityError extends Error {
   }
 }
 
+/**
+ * The outbound-SMS kill-switch (A2P) tripped (config.smsSendingEnabled false):
+ * the Twilio driver REFUSES to hand a message to Twilio before A2P approval, so
+ * a deployed stack can't emit unregistered-A2P traffic (30034) and damage
+ * sender reputation. This is the lowest-level BACKSTOP — the send wrapper
+ * (services/sendMessage.ts) refuses earlier with a SendRefusedError so the
+ * common paths degrade gracefully; this guards any direct-adapter caller.
+ */
+export class SmsSendingDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Twilio driver — production path (Programmable Messaging REST).
 // ---------------------------------------------------------------------------
@@ -334,6 +349,13 @@ export interface TwilioMessagingDriverDeps {
    * number but skips webhook wiring with a WARN.
    */
   publicBaseUrl?: string;
+  /**
+   * Outbound-SMS kill-switch (A2P). When explicitly false, sendMessage refuses
+   * BEFORE the provider call (no 30034 pre-A2P). Optional/undefined = enabled
+   * (back-compat for direct construction in tests); the factory always passes
+   * config.smsSendingEnabled.
+   */
+  sendingEnabled?: boolean;
   /** Injected fake in unit tests; defaults to the real twilio client. */
   client?: TwilioClientLike;
   logger?: Logger;
@@ -354,6 +376,20 @@ export class TwilioMessagingDriver implements MessagingAdapter {
   }
 
   async sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+    // A2P kill-switch BACKSTOP: refuse to hand a message to Twilio when SMS
+    // sending is disabled (pre-A2P). Refusing BEFORE messages.create is what
+    // prevents the 30034 ("message from an unregistered number") that damages
+    // sender reputation. The send wrapper refuses earlier/gracefully; this
+    // guards any direct-adapter caller. PII (doc §9): recipient/body never logged.
+    if (this.deps.sendingEnabled === false) {
+      this.log.warn(
+        { event: 'sms_sending_disabled' },
+        'twilio send refused: SMS sending is disabled (SMS_SENDING_ENABLED) — pre-A2P kill-switch',
+      );
+      throw new SmsSendingDisabledError(
+        'SMS sending is disabled (SMS_SENDING_ENABLED) — refusing to send before A2P approval',
+      );
+    }
     let message;
     try {
       message = await this.client.messages.create({
@@ -681,6 +717,8 @@ export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): M
       apiKeySecret: config.twilioApiKeySecret,
       messagingServiceSid: config.twilioMessagingServiceSid,
       ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
+      // A2P kill-switch: OFF on deployed/twilio until A2P approved (config default).
+      sendingEnabled: config.smsSendingEnabled,
       client: deps.twilioClient,
       logger: deps.logger,
     });

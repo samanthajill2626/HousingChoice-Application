@@ -17,6 +17,8 @@ import {
   ConversationNotFoundError,
   ManualModeError,
   RelaySendNotSupportedError,
+  SendRefusedError,
+  SmsSendingDisabledError,
   createSendMessageService,
 } from '../src/services/sendMessage.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
@@ -37,7 +39,14 @@ interface Fakes {
   service: ReturnType<typeof createSendMessageService>;
 }
 
-function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contact?: ContactItem | null } = {}): Fakes {
+function makeFakes(
+  overrides: {
+    conversation?: Partial<ConversationItem>;
+    contact?: ContactItem | null;
+    /** Extra env passed to loadConfig (e.g. SMS_SENDING_ENABLED). */
+    env?: Record<string, string>;
+  } = {},
+): Fakes {
   const conversation: ConversationItem = {
     conversationId: 'conv-1',
     participant_phone: '+15550100001',
@@ -171,7 +180,7 @@ function makeFakes(overrides: { conversation?: Partial<ConversationItem>; contac
 
   const capture = createLogCapture();
   const service = createSendMessageService({
-    config: loadConfig({ NODE_ENV: 'test', SEND_BREAKER_MAX_PER_MINUTE: '3' }),
+    config: loadConfig({ NODE_ENV: 'test', SEND_BREAKER_MAX_PER_MINUTE: '3', ...overrides.env }),
     logger: createLogger({ level: 'info', destination: capture.stream }),
     adapter,
     conversationsRepo,
@@ -208,6 +217,17 @@ describe('sendMessage service', () => {
       tsMsgId: '2026-06-12T10:00:00.000Z#SMfake-1',
       status: 'queued',
     });
+  });
+
+  it('A2P kill-switch: smsSendingEnabled=false refuses BEFORE the adapter (no real send pre-A2P)', async () => {
+    const f = makeFakes({ env: { SMS_SENDING_ENABLED: 'false' } });
+    const err = await f.service({ conversationId: 'conv-1', body: 'hello' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SmsSendingDisabledError);
+    expect(err).toBeInstanceOf(SendRefusedError); // routes map it (→ 503)
+    expect((err as SmsSendingDisabledError).code).toBe('sms_sending_disabled');
+    // The adapter was NEVER called and nothing was persisted.
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
   });
 
   it('marks sends with media as mms', async () => {

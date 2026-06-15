@@ -480,3 +480,41 @@ Fixed inline:
   (CI forces a fresh boot). And the new `*.integration.test.ts` self-skip when
   DynamoDB Local is down (consistent with the existing pattern) — Phase 6 CI MUST
   start the container or those suites add zero coverage. Document both in Phase 6.
+
+### Phase 4 (commits `46bb480`, `ac72845`, `5d80ef5`, `9711429`; review fixes
+`33c130b`) — reviewed, 0 critical. One non-watch launcher (`scripts/e2e-session.mjs`)
+serves both suite (Playwright `webServer`) and session mode; restart/reseed/stop/
+report scripts; `.mcp.json` (Playwright MCP, `--browser chromium`); `e2e/README.md`.
+Operationally verified: suite green via the launcher, ping/reseed/restart work, and
+teardown leaves **zero** orphaned processes on :8080/:5173 (parent-death watch +
+`e2e:stop`). Fixed inline:
+
+- **[fixed]** mid-implementation: killing the background TASK left the reparented
+  launcher tree running (Windows). Added a parent-death watch (launcher auto-exits
+  when its parent dies), a PID-file self-heal on start, and an explicit
+  `npm run e2e:stop`. Verified: ports empty after task-kill.
+- **[fixed — Important]** `restartBackend` had no concurrency guard → rapid
+  restarts double-spawned `app` and leaked an untracked process on :8080. Added a
+  re-entrancy guard (verified: double-restart → exactly one app process).
+- **[fixed]** child-spawn `error` handler; corrected the POSIX `killTree` (direct
+  pid, not a group kill, since children aren't detached); README env-source note.
+
+> **MCP capstone — partial (environment-blocked, capability proven):** the live
+> "drive the UI via the Playwright **MCP**" step could not run in-session because
+> this session's MCP is pinned to the Chrome *channel*, and `npx playwright install
+> chrome` needs Administrator on Windows. Worked around in `.mcp.json`
+> (`--browser chromium`, reusing the bundled build) for future sessions. The
+> underlying capability — a real browser driving the live session stack,
+> dev-login, and rendering the authenticated inbox — was proven by running the
+> `authenticated inbox` spec against the **live background session** (2 passed,
+> 1.7s, via `reuseExistingServer`). **For Cameron:** to use the interactive MCP,
+> either run Claude with Administrator once for `npx playwright install chrome`, or
+> rely on the `.mcp.json` `--browser chromium` setting (no admin needed).
+
+- **[→ Phase 6 / deferred]** Linux/CI teardown of `e2e:session`/`e2e:stop` is NOT
+  yet validated (children aren't reaped via process groups since they're not
+  detached); the Windows path is verified and the Playwright-managed CI suite
+  survives via Playwright's own group-kill, but standalone Linux session teardown
+  needs finishing when CI lands. Also: same-user PID-reuse could (rarely) leak a
+  session (recoverable via `e2e:stop`/self-heal); consider pinning the
+  `@playwright/mcp` version. Address in Phase 6.

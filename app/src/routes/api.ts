@@ -301,11 +301,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }),
   );
   // Cases + boards (M1.10; requireAuth — VAs run the boards, no admin gate).
+  // Gets the relay-provisioning deps too (M1.10c: POST /cases/:id/relay derives
+  // the roster from the case + reuses the shared provisioning primitive).
   router.use(
     '/cases',
     createCasesRouter({
+      config,
       logger: deps.logger,
       ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      conversationsRepo: conversations,
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       auditRepo: audit,
       events,
     }),

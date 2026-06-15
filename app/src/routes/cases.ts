@@ -22,10 +22,13 @@
 // PII (doc §9): responses carry full case docs to the authenticated client;
 // LOG LINES are caseId/stage/counts only — never the placement_tag (a name).
 import { Router } from 'express';
+import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { appEvents, toCaseUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { VoiceCapabilityError } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
+import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   type CaseDeadline,
@@ -37,12 +40,39 @@ import {
   isCaseStage,
   type ListCasesOpts,
 } from '../repos/casesRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationParticipant,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  createPoolNumbersService,
+  RelayProvisioningDisabledError,
+  type PoolNumbersService,
+} from '../services/poolNumbers.js';
 
 export interface CasesRouterDeps {
+  config?: AppConfig;
   logger?: Logger;
   casesRepo?: CasesRepo;
   auditRepo?: AuditRepo;
   events?: EventBus;
+  /** M1.10c relay-on-placement — the case-scoped "Set up relay thread" action. */
+  conversationsRepo?: ConversationsRepo;
+  unitsRepo?: UnitsRepo;
+  contactsRepo?: ContactsRepo;
+  poolNumbersService?: PoolNumbersService;
+}
+
+/** Resolved "First Last" from a contact, or undefined (never a guess). */
+function nameFromContact(contact: ContactItem | undefined): string | undefined {
+  if (!contact) return undefined;
+  const first = typeof contact['firstName'] === 'string' ? contact['firstName'] : '';
+  const last = typeof contact['lastName'] === 'string' ? contact['lastName'] : '';
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : undefined;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -227,9 +257,15 @@ function validateDeadline(body: unknown): Validation<CaseDeadline | null> {
 
 export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
+  const config = deps.config ?? loadConfig();
   const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+  const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const poolNumbers =
+    deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
 
   const router = Router();
 
@@ -417,6 +453,117 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       validation.fields === null ? 'case deadline cleared via api' : 'case deadline set via api',
     );
     res.json({ case: item });
+  });
+
+  // POST /api/cases/:caseId/relay — set up the placement's masked relay thread.
+  // The explicit operator "Set up relay thread" action (Phase 1 is hand-touched
+  // parity — no auto-trigger). The roster is derived FROM the case: the tenant +
+  // the unit's landlord, by their SMS numbers (the masked-CALL landlord leg
+  // resolves unit.primary_voice_contact at call time, M1.10d). Reuses the shared
+  // provisioning primitive and links case.group_thread ↔ conversation.caseId.
+  // Idempotent: refuses (409) if the case already has an OPEN relay so a
+  // double-click never buys a second pool number.
+  router.post('/:caseId/relay', async (req: AuthedRequest, res) => {
+    const caseId = String(req.params['caseId'] ?? '');
+    mergeContext({ caseId });
+    const actor = req.user?.userId;
+
+    const item = await cases.getById(caseId);
+    if (!item) {
+      res.status(404).json({ error: 'case_not_found' });
+      return;
+    }
+    // Idempotency: an OPEN relay already fronts this case → never double-provision.
+    if (typeof item.group_thread === 'string' && item.group_thread.length > 0) {
+      const existing = await conversations.getById(item.group_thread);
+      if (existing && existing.type === 'relay_group' && existing.status === 'open') {
+        res.status(409).json({ error: 'relay_exists', conversation: existing });
+        return;
+      }
+    }
+
+    // Resolve the roster from the case: tenant + the unit's landlord side. Both
+    // need an SMS number to be in the relay (texts fan out to these). A missing
+    // party/phone is a 400 — never provision a half-roster relay.
+    const tenant = await contacts.getById(item.tenantId);
+    if (!tenant || typeof tenant.phone !== 'string' || tenant.phone.length === 0) {
+      res.status(400).json({ error: 'tenant_unreachable', message: 'the case tenant has no phone on file' });
+      return;
+    }
+    const unit = await units.getById(item.unitId);
+    if (!unit) {
+      res.status(400).json({ error: 'unit_not_found' });
+      return;
+    }
+    const landlord = await contacts.getById(unit.landlordId);
+    if (!landlord || typeof landlord.phone !== 'string' || landlord.phone.length === 0) {
+      res.status(400).json({ error: 'landlord_unreachable', message: 'the unit landlord has no phone on file' });
+      return;
+    }
+
+    const tenantName = nameFromContact(tenant);
+    const landlordName = nameFromContact(landlord);
+    const members: ConversationParticipant[] = [
+      { phone: tenant.phone, contactId: item.tenantId, ...(tenantName !== undefined && { name: tenantName }) },
+    ];
+    // De-dupe if the landlord-side number is somehow the same phone as the tenant.
+    if (landlord.phone !== tenant.phone) {
+      members.push({
+        phone: landlord.phone,
+        contactId: unit.landlordId,
+        ...(landlordName !== undefined && { name: landlordName }),
+      });
+    }
+
+    const tag =
+      typeof item.placement_tag === 'string' && item.placement_tag.length > 0
+        ? item.placement_tag
+        : undefined;
+
+    let conversation;
+    try {
+      conversation = await provisionRelayGroup(
+        { conversationsRepo: conversations, poolNumbersService: poolNumbers, auditRepo: audit, events, logger: log },
+        { members, caseId, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }) },
+      );
+    } catch (err) {
+      // Kill-switch (M1.7): live provisioning is off pre-A2P — no number bought.
+      if (err instanceof RelayProvisioningDisabledError) {
+        log.warn({ err: { name: err.name }, caseId, actor }, 'case relay: number provisioning disabled');
+        await audit.append(`cases#${caseId}`, 'relay_provisioning_disabled', { actor, reason: 'case' });
+        res.status(503).json({ error: 'relay_provisioning_disabled', message: err.message });
+        return;
+      }
+      if (err instanceof VoiceCapabilityError) {
+        log.error({ err: { name: err.name }, caseId }, 'case relay: no voice-capable pool number available');
+        res.status(503).json({ error: 'pool_number_unavailable' });
+        return;
+      }
+      throw err;
+    }
+
+    // Link the case → its placement thread. The conversation already carries
+    // caseId (the back-reference, set at createRelayGroup); a link-write failure
+    // is logged, not fatal (the conversation.caseId back-ref still resolves it).
+    let updatedCase = item;
+    try {
+      updatedCase = await cases.update(caseId, { group_thread: conversation.conversationId });
+    } catch (err) {
+      log.error(
+        { err, caseId, conversationId: conversation.conversationId },
+        'case relay: linking group_thread failed — relay created',
+      );
+    }
+    await audit.append(`cases#${caseId}`, 'case_relay_provisioned', {
+      actor,
+      conversationId: conversation.conversationId,
+    });
+    events.emit('case.updated', toCaseUpdatedEvent(updatedCase));
+    log.info(
+      { caseId, conversationId: conversation.conversationId, actor },
+      'case relay thread provisioned via api',
+    );
+    res.status(201).json({ conversation, case: updatedCase });
   });
 
   return router;

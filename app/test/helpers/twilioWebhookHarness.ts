@@ -281,7 +281,7 @@ export function createFakeWorld(): FakeWorld {
     },
 
     // --- Relay groups (M1.7) ---
-    async createRelayGroup({ poolNumber, members, tag }) {
+    async createRelayGroup({ poolNumber, members, tag, caseId }) {
       const now = new Date().toISOString();
       const item: ConversationItem = {
         conversationId: `conv-${++convCounter}`,
@@ -294,6 +294,7 @@ export function createFakeWorld(): FakeWorld {
         participants: members,
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
+        ...(caseId !== undefined && { caseId }),
       };
       conversations.set(item.conversationId, item);
       return item;
@@ -1120,6 +1121,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
+      casesRepo: world.casesRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin
       // user(s)) via the SAME fake users repo the auth gate uses, reads the

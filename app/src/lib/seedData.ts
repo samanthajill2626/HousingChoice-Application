@@ -89,26 +89,34 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     {
       unitId: IDS.unitA,
       landlordId: IDS.landlord, // byLandlord
-      status: 'active', // byStatus
+      // status MUST be a UNIT_STATUSES value (available|placed|inactive) — it's
+      // the byStatus GSI key AND gates the public flyer (only 'available' is
+      // shareable). beds / rent_min / rent_max / pets are the canonical field
+      // names the app reads (unitFields WRITABLE_FIELDS + toUnitFlyer + the
+      // dashboard UnitItem); the flexible-doc repo would silently store
+      // bedrooms / rent / pets_allowed and the UI would never find them.
+      status: 'available', // byStatus
       jurisdiction: 'atlanta_housing', // byJurisdiction
       address: '1450 Joseph E. Boone Blvd NW, Atlanta, GA 30314',
-      bedrooms: 2,
-      rent: 1650,
+      beds: 2,
+      rent_min: 1650,
+      rent_max: 1650,
       deposit: 1650,
-      pets_allowed: false,
+      pets: 'No pets',
       tour_process: 'Text landlord; lockbox tours weekdays 9-5.',
       created_at: T0,
     },
     {
       unitId: IDS.unitB,
       landlordId: IDS.landlord,
-      status: 'pending_inspection',
+      status: 'placed',
       jurisdiction: 'ga_dca',
       address: '88 Sycamore St, Decatur, GA 30030',
-      bedrooms: 3,
-      rent: 1975,
+      beds: 3,
+      rent_min: 1975,
+      rent_max: 1975,
       deposit: 1975,
-      pets_allowed: true,
+      pets: 'Cats & dogs OK',
       created_at: T0,
     },
   ],
@@ -209,20 +217,23 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       created_at: T0,
     },
   ],
+  // auditRepo.append writes event_type + payload (the actor is hoisted to the
+  // top-level actorId GSI key from payload.actor). The seed mirrors that shape:
+  // `action`/`detail` would be silently stored and never read back.
   audit_events: [
     {
       entityKey: `cases#${IDS.case}`,
       ts: T2, // table SK + byActor RANGE
       actorId: IDS.founder, // byActor HASH
-      action: 'case.stage_changed',
-      detail: { from: 'interested', to: 'touring' },
+      event_type: 'case.stage_changed',
+      payload: { actor: IDS.founder, from: 'interested', to: 'touring' },
     },
     {
       entityKey: `contacts#${IDS.tenant}`,
       ts: T1,
       actorId: IDS.va,
-      action: 'contact.profile_edited',
-      detail: { field: 'preferences_notes' },
+      event_type: 'contact.profile_edited',
+      payload: { actor: IDS.va, field: 'preferences_notes' },
     },
   ],
 };

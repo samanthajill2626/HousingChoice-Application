@@ -17,9 +17,9 @@ export function killTree(pid) {
     spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
   } else {
     try {
-      process.kill(-pid, 'SIGTERM'); // process group, if launcher is group leader
+      process.kill(pid, 'SIGTERM');
     } catch {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
+      /* already gone */
     }
   }
 }

@@ -1,10 +1,12 @@
 // Unified non-watch launcher for the e2e stack — used by BOTH `npm run e2e`
 // (Playwright webServer) and `npm run e2e:session` (the agent's persistent
 // inner-loop stack). Spawns app, worker, and Vite as individual `node`
-// processes (clean single-process kill on any OS — no process tree), bakes in
-// the hermetic test env, ensures DynamoDB Local + tables + seed once, waits for
-// app health, and restarts ONLY app+worker when the restart sentinel changes
-// (Vite, the DB, and any attached browser keep running / keep their place).
+// processes, bakes in the hermetic test env, ensures DynamoDB Local + tables +
+// seed once, waits for app health, and restarts ONLY app+worker when the
+// restart sentinel changes (Vite, the DB, and any attached browser keep running
+// / keep their place). Teardown is verified on Windows (taskkill /T); the POSIX
+// path kills each tracked child directly — full Linux/CI teardown is validated
+// separately when CI is set up.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -32,6 +34,7 @@ const childEnv = {
 
 const children = new Map(); // name -> ChildProcess
 let shuttingDown = false;
+let restarting = false;
 let parentWatchInterval = null;
 
 function log(msg) {
@@ -43,6 +46,10 @@ function spawnNode(name, args, cwd = repoRoot) {
   child.on('exit', (code, signal) => {
     children.delete(name);
     if (!shuttingDown) log(`${name} exited (code=${code} signal=${signal})`);
+  });
+  child.on('error', (err) => {
+    log(`${name} failed to spawn: ${String(err)}`);
+    if (!shuttingDown) shutdown(1);
   });
   children.set(name, child);
   return child;
@@ -102,17 +109,24 @@ function shutdown(code = 0) {
 }
 
 async function restartBackend() {
-  log('restart sentinel changed — restarting app + worker (Vite/DB untouched)');
-  killChild('app');
-  killChild('worker');
-  await new Promise((r) => setTimeout(r, 200));
-  startApp();
-  startWorker();
+  if (restarting) {
+    log('restart already in progress — ignoring this trigger');
+    return;
+  }
+  restarting = true;
   try {
+    log('restart sentinel changed — restarting app + worker (Vite/DB untouched)');
+    killChild('app');
+    killChild('worker');
+    await new Promise((r) => setTimeout(r, 200));
+    startApp();
+    startWorker();
     await waitForHealth();
     log('app + worker back up');
   } catch (err) {
     log(`restart health check failed: ${String(err)}`);
+  } finally {
+    restarting = false;
   }
 }
 

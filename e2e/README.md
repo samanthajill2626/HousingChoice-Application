@@ -21,6 +21,7 @@ Helpers (session mode):
 ## Requirements
 - Docker running (DynamoDB Local). The launcher sets `DEV_AUTH_ENABLED=1` and
   `MESSAGING_RECORD_OUTBOX=1` so dev-login and the message outbox are available.
+- **Env vars:** the session launcher reads only `process.env` (hermetic/reproducible) and does NOT merge a local `.env` the way `npm run dev -- --local` does — so `TABLE_PREFIX`/`DYNAMODB_ENDPOINT` overrides in `.env` won't affect `e2e:session`.
 - **Windows note:** killing the background task alone can leave the reparented node tree running on `:8080`/`:5173`. The launcher now auto-exits when its parent dies (parent-death watch), and `npm run e2e:stop` or the next `npm run e2e:session` (self-heal) also clean up any stale processes.
 - The written suite uses Playwright's **bundled Chromium** (`npx playwright install
   chromium`). The Playwright **MCP** (for interactive driving) is registered in

@@ -12,13 +12,14 @@
 //
 // This is a deliberately simple operator harness: the first page (limit 100) is
 // the working set; columns scroll horizontally on narrow screens.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   listCases,
   useApi,
   useEventStream,
   type CaseItem,
+  type CasesPage,
   type CaseStage,
   type CaseUpdatedEvent,
   CASE_STAGES,
@@ -76,11 +77,15 @@ export default function Boards(): React.JSX.Element {
 
   // The live in-memory case list, seeded from the fetched page and patched by
   // SSE events. Re-seeded whenever a fresh fetch lands (refetch supersedes the
-  // accumulated live patches).
+  // accumulated live patches). Seeding happens DURING render (not via an effect)
+  // so the cards appear in the SAME commit as the page — no empty-state flash,
+  // and no fetch→effect race (which made the render test timing-flaky under load).
   const [cases, setCases] = useState<CaseItem[]>([]);
-  useEffect(() => {
-    if (data) setCases(data.cases);
-  }, [data]);
+  const [seededFrom, setSeededFrom] = useState<CasesPage | undefined>(undefined);
+  if (data !== undefined && data !== seededFrom) {
+    setSeededFrom(data);
+    setCases(data.cases);
+  }
 
   const onCaseUpdated = useCallback(
     (e: CaseUpdatedEvent) => {

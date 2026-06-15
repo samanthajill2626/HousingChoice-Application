@@ -324,26 +324,41 @@ this is the increment structure.
 ## 12. Execution model (sub-agent orchestration)
 
 To keep the orchestrating agent's context clean and reliable, **work is done by
-sub-agents; the orchestrator rarely edits files itself.**
+sub-agents; the orchestrator rarely edits files itself.** **All work is serial** —
+phases run in order, and the steps within a phase run in order. **No parallel
+sub-agents** (parallelization has caused problems recently; the predictability is
+worth more than the speed).
 
-- **Per phase:** dispatch **one focused sub-agent** with a tightly scoped prompt
-  derived from the writing-plans plan for that phase. The orchestrator holds only
-  the spec, the plan, and checkpoint state — not file-level detail.
-- **Sub-agent discipline:** each implementation sub-agent is instructed to follow
-  the repo's TDD/verification skills (write/extend tests, run them, report
-  evidence). It returns a **concise summary + verification output**, not raw file
-  dumps.
-- **Investigation tasks** (e.g. R1 job-dispatch check, selector audits) go to
-  read-only **Explore** sub-agents that return conclusions only.
-- **Verification gate between phases:** the orchestrator runs (or has a sub-agent
-  run) the phase's verify command and confirms green output **before** starting
-  the next phase. No phase is "done" on assertion alone — evidence required
-  (verification-before-completion).
-- **Checkpointing:** after each phase, update this doc's status / a progress note
-  and commit, so a lost session can resume from the last green phase.
-- **Parallelism:** phases are mostly sequential (later phases depend on earlier
-  wiring). Within a phase, independent sub-tasks (e.g. two unrelated fixtures)
-  may be dispatched in parallel.
+The orchestrator holds only the spec, the plan, and checkpoint state — not
+file-level detail. Each phase moves through a fixed pipeline, every step gated
+before the next:
+
+1. **Build + test** — one focused implementation sub-agent, scoped from the
+   writing-plans plan for that phase. Follows the repo's TDD/verification skills
+   (writes/extends tests, runs them) and returns a **concise summary +
+   verification output**, not raw file dumps.
+2. **Verification gate** — the orchestrator runs (or has a sub-agent run) the
+   phase's verify command and confirms green output. Evidence required, not
+   assertion (verification-before-completion).
+3. **Adversarial review** — a **fresh, independent** review sub-agent (no
+   implementation context; given the spec + the phase diff) reviews the phase
+   with a **broad, unconstrained mandate: find anything wrong, at any severity.**
+   Architectural bugs, race conditions (esp. app/worker ↔ shared outbox), broken
+   assumptions/invariants, security vulnerabilities (especially the dev-endpoint
+   gating in §6), and integration issues are explicit areas of interest but
+   **not a limit** — the reviewer is off the leash and should report whatever it
+   finds. The orchestrator is **empowered to ignore pedantic or trivial
+   findings** at its discretion.
+4. **Triage + fix** — the orchestrator triages the findings; confirmed issues go
+   to a fix sub-agent (applying receiving-code-review discipline: verify the
+   finding before implementing), then re-run steps 2–3 until clean. Anything
+   consciously deferred is **logged in this doc, not silently dropped.**
+5. **Done = green tests + clean review.** Only then commit the phase and update
+   the progress note, so a lost session resumes from the last green, reviewed
+   phase.
+
+**Investigation tasks** (e.g. R1 job-dispatch check, selector audits) go to
+read-only **Explore** sub-agents that return conclusions only.
 
 ---
 

@@ -2,6 +2,7 @@
 // reuse-vs-provision, and voice-capability enforcement. Uses an in-memory
 // poolNumbersRepo that mirrors the real lifecycle semantics + a fake adapter
 // (deterministic provisioned numbers; never touches Twilio).
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { describe, expect, it, vi } from 'vitest';
 import {
   VoiceCapabilityError,
@@ -151,6 +152,49 @@ describe('poolNumbers service (M1.7)', () => {
     expect(rec.lifecycle_state).toBe('assigned');
     expect(rec.assigned_conversation_id).toBe('conv-1');
     expect(rec.placement_tag).toBe('fair-2026');
+  });
+
+  it('retries past a fresh-number COLLISION (create attribute_not_exists) and succeeds with the next number', async () => {
+    // A repo whose create() enforces attribute_not_exists like the real one
+    // (the default fake just overwrites — it never collides).
+    const repo = makeFakeRepo();
+    const baseCreate = repo.create.bind(repo);
+    repo.create = async (input) => {
+      if (repo.store.has(input.poolNumber)) {
+        throw new ConditionalCheckFailedException({ message: 'exists', $metadata: {} });
+      }
+      return baseCreate(input);
+    };
+    // A leftover ASSIGNED number the console-style counter will hand back first.
+    // It's NOT 'available', so the reuse path skips it → fresh provision collides.
+    await baseCreate({
+      poolNumber: '+15550100001',
+      voiceCapable: true,
+      smsCapable: true,
+      provisionedVia: 'console',
+    });
+    repo.store.get('+15550100001')!.lifecycle_state = 'assigned';
+
+    // Console-style adapter: deterministic counter → 0001 (collides), 0002 (free).
+    let n = 0;
+    const adapter: MessagingAdapter & { provisions: number } = {
+      ...makeFakeAdapter(),
+      get provisions() {
+        return n;
+      },
+      async provisionPhoneNumber(): Promise<ProvisionPhoneNumberResult> {
+        n += 1;
+        const seq = String(n).padStart(4, '0');
+        return { phoneNumber: `+1555010${seq}`, capabilities: { sms: true, voice: true }, sid: `PNconsole-${seq}` };
+      },
+    };
+    const svc = createPoolNumbersService({ adapter, poolNumbersRepo: repo, logger, config: consoleConfig() });
+
+    const result = await svc.provisionForPlacement('conv-1');
+    expect(result.provisioned).toBe(true);
+    expect(result.poolNumber).toBe('+15550100002'); // skipped the collided 0001
+    expect(n).toBe(2); // exactly one retry past the collision
+    expect(repo.store.get('+15550100002')!.lifecycle_state).toBe('assigned');
   });
 
   it('reuses an AVAILABLE number instead of provisioning a fresh one', async () => {

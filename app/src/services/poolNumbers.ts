@@ -17,12 +17,14 @@
 // collision guard).
 //
 // PII: a phone number is PII (doc §9) — log states/counts/SIDs only.
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createMessagingAdapter,
   VoiceCapabilityError,
   type MessagingAdapter,
+  type ProvisionPhoneNumberResult,
 } from '../adapters/messaging.js';
 import {
   createPoolNumbersRepo,
@@ -32,6 +34,16 @@ import {
 
 /** Voice webhook the relay pool number is pre-wired to (M1.9 bridge seam). */
 const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
+
+/**
+ * Bounded retries when a freshly-provisioned number collides with an existing
+ * pool_numbers record (create's attribute_not_exists guard fires). In production
+ * a purchased number is globally unique so this never loops; the cap only bites
+ * locally, where the console driver's per-process counter restarts each
+ * `npm run dev` and collides with leftover assigned/quarantined numbers in the
+ * shared dev table — generous enough to step past those, then a clear throw.
+ */
+const MAX_PROVISION_ATTEMPTS = 20;
 
 /**
  * Thrown by provisionForPlacement when obtaining a NEW pool number would be
@@ -133,24 +145,53 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         );
       }
 
-      // (c) Provision fresh. REQUIRE voice — a misconfigured account/exhausted
+      // (c) Provision fresh, RETRYING on a number collision. The adapter can hand
+      // back a number that ALREADY has a pool_numbers record — create()'s
+      // attribute_not_exists(poolNumber) guard then throws
+      // ConditionalCheckFailedException. That used to bubble to a 500; instead we
+      // try the NEXT number. (Local console driver: its per-process counter
+      // restarts each `npm run dev` and collides with leftover assigned/
+      // quarantined numbers in the shared dev table. Production: a purchased
+      // number is globally unique, so create never collides and this runs once.)
+      // REQUIRE voice on each candidate — a misconfigured account/exhausted
       // inventory must fail HERE (provision time), not at M1.9 call time.
-      const provisioned = await adapter.provisionPhoneNumber({ voiceCapable: true });
-      if (!provisioned.capabilities.voice) {
-        throw new VoiceCapabilityError(
-          `provisionForPlacement: provisioned ${provisioned.sid} lacks voice capability`,
+      let provisioned: ProvisionPhoneNumberResult | undefined;
+      for (let attempt = 1; attempt <= MAX_PROVISION_ATTEMPTS; attempt += 1) {
+        const candidate = await adapter.provisionPhoneNumber({ voiceCapable: true });
+        if (!candidate.capabilities.voice) {
+          throw new VoiceCapabilityError(
+            `provisionForPlacement: provisioned ${candidate.sid} lacks voice capability`,
+          );
+        }
+        try {
+          // Persist as available + source-tag with the current driver (kill-switch
+          // source isolation); the claim below flips it to assigned.
+          await repo.create({
+            poolNumber: candidate.phoneNumber,
+            voiceCapable: candidate.capabilities.voice,
+            smsCapable: candidate.capabilities.sms,
+            lifecycleState: 'available',
+            provisionedVia: currentVia,
+          });
+          provisioned = candidate;
+          break;
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) {
+            // The number already has a record (collision) — try the next one.
+            log.warn(
+              { conversationId, attempt },
+              'provisioned number already in the pool — retrying with a fresh number',
+            );
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (provisioned === undefined) {
+        throw new Error(
+          `provisionForPlacement: could not obtain a free pool number after ${MAX_PROVISION_ATTEMPTS} attempts`,
         );
       }
-
-      // Persist as assigned (skip the available→claim hop — we own it already).
-      // Source-tag it with the current driver (kill-switch source isolation).
-      await repo.create({
-        poolNumber: provisioned.phoneNumber,
-        voiceCapable: provisioned.capabilities.voice,
-        smsCapable: provisioned.capabilities.sms,
-        lifecycleState: 'available',
-        provisionedVia: currentVia,
-      });
       const claimed = await repo.claim(provisioned.phoneNumber, conversationId, tag);
       if (!claimed) {
         // The number we just created should be claimable — a failure here is

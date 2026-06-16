@@ -29,6 +29,7 @@ export interface CallState {
   recordingSid?: string;
   recordingUrl?: string;
   transcript?: string;
-  createdAt: number;
-  updatedAt: number;
+  /** ISO-8601 (matches ThreadMessage); the CallEngine sets these via clock.nowIso(). */
+  createdAt: string;
+  updatedAt: string;
 }

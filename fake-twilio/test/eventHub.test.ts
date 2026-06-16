@@ -13,8 +13,8 @@ const CALL_PLACED: EngineEvent = {
     kind: 'masked',
     status: 'ringing',
     legs: [],
-    createdAt: 0,
-    updatedAt: 0,
+    createdAt: '2026-06-15T00:00:00.000Z',
+    updatedAt: '2026-06-15T00:00:00.000Z',
   },
 };
 

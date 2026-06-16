@@ -75,8 +75,10 @@ export class FakeTwilioEngine {
   private generation = 0;
   /** Ring buffer of recent dispatch failures (FIX 2). */
   private readonly dispatchErrors: DispatchError[] = [];
-  /** The shared event bus; the SSE endpoint subscribes to it directly. */
-  private readonly hub: EventHub;
+  /** The shared event bus this engine emits through; the SSE endpoint subscribes to
+   *  it directly. Public so the server can derive the events-router hub from the
+   *  (injected-or-constructed) engine — making one hub authoritative by construction. */
+  readonly hub: EventHub;
 
   constructor(deps: FakeTwilioEngineDeps) {
     this.clock = deps.clock;

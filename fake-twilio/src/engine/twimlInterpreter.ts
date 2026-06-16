@@ -50,7 +50,14 @@ export function interpretTwiml(xml: string): TwimlPlan {
   }
   if ('Gather' in r) {
     const g = r['Gather'] as Record<string, unknown>;
-    const say = String((g['Say'] as unknown) ?? '');
+    // <Say> may be a bare string OR, when it carries attributes (voice/language), an
+    // object {'#text':..., '@_voice':...}; read the text in both cases so attributes
+    // don't silently defeat the press-0 escape detection (String(obj) → "[object Object]").
+    const sayNode = g['Say'];
+    const say =
+      typeof sayNode === 'object' && sayNode !== null
+        ? String((sayNode as Record<string, unknown>)['#text'] ?? '')
+        : String(sayNode ?? '');
     return { kind: 'gather', ...(g['@_action'] !== undefined && { actionUrl: String(g['@_action']) }), numDigits: Number(g['@_numDigits'] ?? 1), timeoutSec: Number(g['@_timeout'] ?? 5), sayContainsPress0: /press 0/i.test(say) };
   }
   if ('Pause' in r) return { kind: 'pause', lengthSec: Number((r['Pause'] as Record<string, unknown>)['@_length'] ?? 1) };

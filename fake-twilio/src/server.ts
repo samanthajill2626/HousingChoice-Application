@@ -64,9 +64,11 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   app.use(createRestRouter(engine));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
-  // SSE stream of engine events for the fake-phones UI (Plan 2). Subscribes to the
-  // shared hub directly so events from any engine on it are streamed.
-  app.use(createEventsRouter(hub));
+  // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
+  // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine
+  // emits through — no way to fabricate a mismatched hub even when `engine` is injected
+  // without `hub`. (Phase 7's CallEngine shares this same `engine.hub`.)
+  app.use(createEventsRouter(engine.hub));
 
   // Static-serve the built fake-phones UI + SPA fallback, AFTER all API routers so
   // reserved prefixes are matched by their routers first; the fallback only catches

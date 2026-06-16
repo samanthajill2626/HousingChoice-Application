@@ -34,20 +34,32 @@ export function createControlRouter(engine: FakeTwilioEngine): Router {
   });
 
   router.post('/control/delivery-outcome', (req, res) => {
-    engine.setDeliveryOutcome(req.body as SetDeliveryOutcomeInput);
-    res.status(200).json({ ok: true });
+    try {
+      engine.setDeliveryOutcome(req.body as SetDeliveryOutcomeInput);
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   router.post('/control/reset', (_req, res) => {
-    engine.reset();
-    res.status(200).json({ ok: true });
+    try {
+      engine.reset();
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   // Adversarial-review addition: surface the engine's dispatch-error ring buffer so
   // scripted tests can assert a signing/middleware regression (recorded as a failed
   // webhook dispatch) is observable, not swallowed.
   router.get('/control/dispatch-errors', (_req, res) => {
-    res.status(200).json({ errors: engine.getDispatchErrors() });
+    try {
+      res.status(200).json({ errors: engine.getDispatchErrors() });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   return router;

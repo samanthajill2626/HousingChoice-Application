@@ -26,6 +26,18 @@ describe('fake-twilio host', () => {
     expect(() => cfg({ NODE_ENV: 'production' })).toThrow(/production/i);
   });
 
+  it('buildFakeTwilioApp throws when process.env.NODE_ENV=production (defense in depth)', () => {
+    const original = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      // Build the config under test so the guard under test is the construction-point one.
+      const config = cfg();
+      expect(() => buildFakeTwilioApp({ config })).toThrow(/production/i);
+    } finally {
+      process.env.NODE_ENV = original;
+    }
+  });
+
   it('reads CF_ORIGIN_SECRET into originSecret, defaulting to the dev placeholder', () => {
     // The app gates /webhooks/* behind the origin-secret validator, so the
     // dispatcher must send the matching x-origin-verify header.

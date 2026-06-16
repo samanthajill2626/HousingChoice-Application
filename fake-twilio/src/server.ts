@@ -13,6 +13,16 @@ export interface FakeTwilioAppDeps {
 }
 
 export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
+  // Defense in depth: refuse to construct the fake locally if NODE_ENV=production,
+  // independent of the loadFakeConfig guard — it impersonates Twilio and must never
+  // run in a deployed environment.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'fake-twilio refuses to start while NODE_ENV=production — it impersonates Twilio and must ' +
+        'never run in a deployed environment.',
+    );
+  }
+
   // One engine per process — shared by the REST router (here) and, in a later
   // phase, the control router. Construct it once and pass it to every router.
   const engine =

@@ -95,6 +95,15 @@ function startWorker() {
   spawnNode('worker', ['--import', 'tsx', path.join('app', 'src', 'worker.ts')]);
 }
 function startVite() {
+  // PREFLIGHT — reap any orphan holding :5173 before spawning Vite. The dashboard
+  // pins `strictPort: true` (dashboard-legacy/vite.config.ts), so a held :5173
+  // makes Vite exit non-zero instead of drifting to another port — which here
+  // lands in `child.on('exit')` (logged, not a shutdown), so `web` silently
+  // vanishes and Playwright's webServer (:5173) polls a stale server or times
+  // out. Freeing the port first guarantees the child we spawn owns :5173 (same
+  // rationale as the :8889 reap in startFakeTwilio).
+  const reaped = killPort(5173);
+  if (reaped.length) log(`reaped orphan(s) holding :5173 before start: ${reaped.join(', ')}`);
   // Run Vite's bin directly so it's a single node process we can kill cleanly.
   spawnNode('web', [viteBin], dashboardDir);
 }

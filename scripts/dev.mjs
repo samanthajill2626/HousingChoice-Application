@@ -316,6 +316,17 @@ if (mockRedirect) {
   if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
 }
 
+// Reap any orphan still holding :5173 before concurrently spawns the dashboard
+// Vite server. The dashboard pins `strictPort: true` (dashboard-legacy/
+// vite.config.ts), so a held :5173 makes Vite exit with EADDRINUSE instead of
+// drifting to another port — and `killOthersOn: ['failure', …]` below would then
+// tear down the whole dev stack (app + worker). Freeing the port first keeps a
+// stale orphan from nuking the run (same rationale as the :8889 reap above).
+if (webEnabled) {
+  const reapedWeb = killPort(5173);
+  if (reapedWeb.length) console.log(`dev — reaped orphan(s) on :5173 before start: ${reapedWeb.join(', ')}`);
+}
+
 const runStep = mode === 'local' ? `step ${localSteps}/${localSteps}` : 'step 2/2';
 console.log(
   `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +

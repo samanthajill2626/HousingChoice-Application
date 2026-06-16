@@ -23,6 +23,7 @@ function inferMediaContentType(url: string): string {
   if (path.endsWith('.gif')) return 'image/gif';
   if (path.endsWith('.webp')) return 'image/webp';
   if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
+  if (path.endsWith('.pdf')) return 'application/pdf';
   return 'application/octet-stream';
 }
 

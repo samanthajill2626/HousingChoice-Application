@@ -5,8 +5,10 @@
 // MediaContentType{i} is attacker-controlled, so anything off this list is
 // treated as an opaque download — never rendered same-origin (stored-XSS guard).
 //
-// Raster images only. SVG is DELIBERATELY EXCLUDED: it is an image but can carry
-// script and execute it on top-level navigation. Pure, no I/O.
+// Raster images + PDF. A browser's built-in PDF viewer sandboxes any embedded
+// JS (it cannot reach the serving origin's DOM/cookies), so PDF is safe to serve
+// inline alongside nosniff. SVG / HTML / XHTML stay DELIBERATELY EXCLUDED — they
+// can run script on top-level navigation. Pure, no I/O.
 
 /** Content-Types served inline (everything else → octet-stream download). */
 export const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
@@ -14,9 +16,10 @@ export const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
   'image/png',
   'image/gif',
   'image/webp',
+  'application/pdf',
 ]);
 
-/** True when `type` is an allowlisted inline raster image (case-insensitive). */
+/** True when `type` is an allowlisted inline type (case-insensitive). */
 export function isInlineMediaType(type: string | undefined): boolean {
   return typeof type === 'string' && INLINE_MEDIA_TYPES.has(type.trim().toLowerCase());
 }

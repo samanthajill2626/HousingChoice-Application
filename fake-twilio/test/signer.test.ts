@@ -46,7 +46,15 @@ describe('signTwilioWebhook', () => {
     expect(params['MediaContentType1']).toBe('image/gif');
     expect(params['MediaContentType2']).toBe('image/webp');
     expect(params['MediaContentType3']).toBe('image/jpeg');
-    expect(params['MediaContentType4']).toBe('application/octet-stream');
+    expect(params['MediaContentType4']).toBe('application/pdf');
+  });
+
+  it('falls back to application/octet-stream for unknown extensions', () => {
+    const params = buildInboundSmsParams({
+      messageSid: 'MM3', from: '+15550100001', to: '+15550009999',
+      mediaUrls: ['http://x/f.bin'],
+    });
+    expect(params['MediaContentType0']).toBe('application/octet-stream');
   });
 
   it('builds status params with optional ErrorCode', () => {

@@ -33,6 +33,7 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { DeliveryStatus } from '../repos/messagesRepo.js';
 import { RecordingMessagingDriver } from './recordingMessaging.js';
+import { createRedirectingHttpClient } from './twilioHttpClient.js';
 
 export interface SendMessageParams {
   /** Recipient phone, E.164. */
@@ -356,6 +357,8 @@ export interface TwilioMessagingDriverDeps {
    * config.smsSendingEnabled.
    */
   sendingEnabled?: boolean;
+  /** Dev-only: redirect REST calls to this base URL (the fake-twilio host). */
+  apiBaseUrl?: string;
   /** Injected fake in unit tests; defaults to the real twilio client. */
   client?: TwilioClientLike;
   logger?: Logger;
@@ -371,7 +374,17 @@ export class TwilioMessagingDriver implements MessagingAdapter {
 
   constructor(private readonly deps: TwilioMessagingDriverDeps) {
     // API key SID/secret + account SID — never the auth token (webhook-only).
-    this.client = deps.client ?? twilio(deps.apiKeySid, deps.apiKeySecret, { accountSid: deps.accountSid });
+    // When apiBaseUrl is set (dev/test only — fake-twilio), the SDK keeps its
+    // canonical request building/parsing but every REST call is redirected to
+    // the fake host; with it unset, behavior is byte-identical to before.
+    this.client =
+      deps.client ??
+      twilio(deps.apiKeySid, deps.apiKeySecret, {
+        accountSid: deps.accountSid,
+        ...(deps.apiBaseUrl !== undefined && {
+          httpClient: createRedirectingHttpClient({ baseUrl: deps.apiBaseUrl }),
+        }),
+      });
     this.log = deps.logger ?? defaultLogger;
   }
 
@@ -717,6 +730,7 @@ export function createMessagingAdapter(deps: CreateMessagingAdapterDeps = {}): M
       apiKeySecret: config.twilioApiKeySecret,
       messagingServiceSid: config.twilioMessagingServiceSid,
       ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
+      ...(config.twilioApiBaseUrl !== undefined && { apiBaseUrl: config.twilioApiBaseUrl }),
       // A2P kill-switch: OFF on deployed/twilio until A2P approved (config default).
       sendingEnabled: config.smsSendingEnabled,
       client: deps.twilioClient,

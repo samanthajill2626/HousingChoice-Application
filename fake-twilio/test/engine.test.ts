@@ -30,7 +30,8 @@ describe('FakeTwilioEngine', () => {
     clock.flush();
     await Promise.resolve(); // let scheduled async callbacks settle
     const statuses = posted.filter((p) => p.path === '/webhooks/twilio/status').map((p) => p.params['MessageStatus']);
-    expect(statuses).toEqual(['queued', 'sent', 'undelivered']);
+    // FIX 4: the 'queued' state has no status callback (real Twilio starts at 'sent').
+    expect(statuses).toEqual(['sent', 'undelivered']);
     const last = posted.filter((p) => p.path === '/webhooks/twilio/status').at(-1);
     expect(last?.params).toMatchObject({ MessageSid: sid, ErrorCode: '30005' });
   });

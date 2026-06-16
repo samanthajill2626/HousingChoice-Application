@@ -20,5 +20,12 @@ export function plannedTransitions(profile: DeliveryProfile): DeliveryState[] {
   }
 }
 
-/** Per-step delay (ms) — seeded constants, NOT Math.random, so runs are deterministic. */
-export const STEP_DELAYS_MS: Record<number, number> = { 0: 0, 1: 150, 2: 350 };
+/**
+ * Per-step delay (ms) for the status-callback progression. Strictly increasing in
+ * the step index so ManualClock.flush() (and real timers) fire callbacks in planned
+ * order for ANY progression length — not just the historical 3-state table. Seeded
+ * (linear), NOT Math.random, so runs are deterministic.
+ */
+export function stepDelayMs(stepIndex: number): number {
+  return stepIndex * 150;
+}

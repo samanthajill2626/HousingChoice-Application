@@ -30,6 +30,26 @@ const childEnv = {
   PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? 'http://localhost:5173',
   DEV_AUTH_ENABLED: '1',
   MESSAGING_RECORD_OUTBOX: '1',
+  // --- fake-twilio (HTTP-seam messaging mock) ---
+  // The app runs the REAL Twilio driver (MESSAGING_DRIVER=twilio) but is pointed
+  // at the in-process fake host via TWILIO_API_BASE_URL, so the production
+  // messaging code path + the twilioSignature middleware run unchanged against a
+  // local impersonator instead of console-faking the send. The SID/secret values
+  // are Twilio-SHAPED dummies (the fake never authenticates them); the shared
+  // TWILIO_AUTH_TOKEN is the HMAC key BOTH sides use — the fake signs inbound
+  // webhooks with it and the app's signature middleware verifies them.
+  MESSAGING_DRIVER: 'twilio',
+  TWILIO_ACCOUNT_SID: 'ACfake000000000000000000000000000',
+  TWILIO_API_KEY_SID: 'SKfake000000000000000000000000000',
+  TWILIO_API_KEY_SECRET: 'fake-secret',
+  TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
+  TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
+  TWILIO_API_BASE_URL: 'http://localhost:8889',
+  OUR_PHONE_NUMBERS: '+15550009999',
+  // A2P kill-switch defaults OFF when MESSAGING_DRIVER=twilio (config.ts), which
+  // makes sendMessage throw before anything reaches the fake — force it ON so the
+  // hermetic stack actually exercises outbound sends against the fake host.
+  SMS_SENDING_ENABLED: 'true',
 };
 
 const children = new Map(); // name -> ChildProcess
@@ -41,8 +61,9 @@ function log(msg) {
   process.stdout.write(`[e2e-session] ${msg}\n`);
 }
 
-function spawnNode(name, args, cwd = repoRoot) {
-  const child = spawn(process.execPath, args, { cwd, env: childEnv, stdio: 'inherit' });
+function spawnNode(name, args, cwd = repoRoot, envOverride = undefined) {
+  const env = envOverride ? { ...childEnv, ...envOverride } : childEnv;
+  const child = spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
   child.on('exit', (code, signal) => {
     children.delete(name);
     if (!shuttingDown) log(`${name} exited (code=${code} signal=${signal})`);
@@ -65,6 +86,21 @@ function startVite() {
   // Run Vite's bin directly so it's a single node process we can kill cleanly.
   spawnNode('web', [viteBin], dashboardDir);
 }
+function startFakeTwilio() {
+  // The fake-twilio host impersonates Twilio's REST API (the app's redirected
+  // driver POSTs sends here) and fires correctly-signed webhooks BACK at the app.
+  // Two URLs, deliberately split: it POSTs webhooks to APP_BASE_URL (:8080, the
+  // app's real address) but SIGNS them against APP_PUBLIC_BASE_URL (the app's
+  // PUBLIC_BASE_URL, :5173) — because the app's signature middleware reconstructs
+  // the signed URL as `${PUBLIC_BASE_URL}${req.originalUrl}`. CF_ORIGIN_SECRET is
+  // inherited from childEnv so the dispatcher's x-origin-verify header satisfies
+  // the app's origin-secret validator (which gates /webhooks/* too).
+  spawnNode('fake-twilio', ['--import', 'tsx', path.join('fake-twilio', 'src', 'index.ts')], undefined, {
+    FAKE_TWILIO_PORT: '8889',
+    APP_BASE_URL: 'http://localhost:8080',
+    APP_PUBLIC_BASE_URL: childEnv.PUBLIC_BASE_URL,
+  });
+}
 
 function killChild(name) {
   const child = children.get(name);
@@ -81,16 +117,16 @@ async function runOnce(name, args) {
   });
 }
 
-async function waitForHealth(timeoutMs = 60_000) {
+async function waitForHealth(url = 'http://localhost:8080/health', timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      const res = await fetch('http://localhost:8080/health');
+      const res = await fetch(url);
       if (res.ok) return;
     } catch {
       /* not up yet */
     }
-    if (Date.now() > deadline) throw new Error('app health did not come up in time');
+    if (Date.now() > deadline) throw new Error(`health did not come up in time: ${url}`);
     await new Promise((r) => setTimeout(r, 300));
   }
 }
@@ -102,7 +138,7 @@ function shutdown(code = 0) {
     clearInterval(parentWatchInterval);
     parentWatchInterval = null;
   }
-  log('shutting down — stopping app, worker, web (DynamoDB container left running)');
+  log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB container left running)');
   for (const name of [...children.keys()]) killChild(name);
   try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
   setTimeout(() => process.exit(code), 500);
@@ -115,14 +151,18 @@ async function restartBackend() {
   }
   restarting = true;
   try {
-    log('restart sentinel changed — restarting app + worker (Vite/DB untouched)');
+    log('restart sentinel changed — restarting app + worker + fake-twilio (Vite/DB untouched)');
     killChild('app');
     killChild('worker');
+    // Also bounce fake-twilio so a code change to it is picked up on restart.
+    killChild('fake-twilio');
     await new Promise((r) => setTimeout(r, 200));
+    startFakeTwilio();
+    await waitForHealth('http://localhost:8889/health');
     startApp();
     startWorker();
     await waitForHealth();
-    log('app + worker back up');
+    log('app + worker + fake-twilio back up');
   } catch (err) {
     log(`restart health check failed: ${String(err)}`);
   } finally {
@@ -154,13 +194,20 @@ async function main() {
   await runOnce('db-create', ['--import', 'tsx', path.join('app', 'scripts', 'db-create.ts')]);
   await runOnce('db-seed', ['--import', 'tsx', path.join('app', 'scripts', 'db-seed.ts')]);
 
+  // Start fake-twilio FIRST so the app's very first outbound send has a host to
+  // reach (the app only calls it on send, but this avoids a race on boot).
+  log('starting fake-twilio (:8889)…');
+  startFakeTwilio();
+  await waitForHealth('http://localhost:8889/health');
+  log('fake-twilio ready (:8889)');
+
   log('starting app, worker, web (non-watch)…');
   startApp();
   startWorker();
   startVite();
 
   await waitForHealth();
-  log('ready — app :8080, web :5173 (DEV_AUTH_ENABLED + MESSAGING_RECORD_OUTBOX on)');
+  log('ready — app :8080, web :5173, fake-twilio :8889 (MESSAGING_DRIVER=twilio → fake)');
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

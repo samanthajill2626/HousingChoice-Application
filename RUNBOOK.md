@@ -247,7 +247,9 @@ in the Docker image / deploy bundle, and the host already refuses to boot under
 which is what you watch react.
 
 **How to open it.** `npm run e2e:session` builds the UI once and serves it from the host; open
-**`http://localhost:8889/`**. Pick a persona from the roster (grouped Landlord / Tenant / PM, each
+**`http://localhost:8889/`**. (`npm run dev -- --mock` also runs the mock + fake-phones UI locally
+— hermetic, with the app's messaging redirected to the local mock — open the same
+**`http://localhost:8889/`**.) Pick a persona from the roster (grouped Landlord / Tenant / PM, each
 with its number + unread badge; **＋ Ad-hoc number** mints a throwaway caller), type and **Send** to
 fire a signed inbound webhook at the app, flip the per-thread **delivery-profile** toggle (Normal /
 Stall at sent / Fail) to script the next outbound message's status callbacks, and attach a **canned

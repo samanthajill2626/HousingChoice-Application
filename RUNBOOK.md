@@ -235,6 +235,34 @@ through. **`403`s in the app log mean drift** in one of: the shared `TWILIO_AUTH
 > **re-run `app/test/twilioHttpClient.test.ts` on any twilio upgrade** — that test is the contract
 > that the host-rewrite still works.
 
+#### Fake-phones UI
+
+**Dev/e2e only — NEVER deployed.** A standalone React UI (workspace package
+`@housingchoice/fake-twilio-web`, `fake-twilio/web/`) that lets you act as the **simulated
+parties** (landlords / tenants / PMs) and watch the **real** dashboard react. It is served as a
+static build by the fake-twilio host itself — **only when `FAKE_TWILIO_UI_DIST` points at the build**
+(`fake-twilio/web/dist`); the host leaves it inert otherwise, so nothing about it ships (it is not
+in the Docker image / deploy bundle, and the host already refuses to boot under
+`NODE_ENV=production`). Staff is intentionally **not** a panel here — staff is the real dashboard,
+which is what you watch react.
+
+**How to open it.** `npm run e2e:session` builds the UI once and serves it from the host; open
+**`http://localhost:8889/`**. Pick a persona from the roster (grouped Landlord / Tenant / PM, each
+with its number + unread badge; **＋ Ad-hoc number** mints a throwaway caller), type and **Send** to
+fire a signed inbound webhook at the app, flip the per-thread **delivery-profile** toggle (Normal /
+Stall at sent / Fail) to script the next outbound message's status callbacks, and attach a **canned
+dev image** for MMS. Watch the real dashboard (**:5173**) react, and the thread's **status chips**
+tick `queued → sent → delivered` (or a red `failed`/`undelivered` with its `ErrorCode`).
+
+**Iterating on the UI itself.** `npm run dev -w @housingchoice/fake-twilio-web` runs Vite on
+**:5174** with HMR, proxying `/control` + `/health` to a **running** :8889 host (start the stack with
+`e2e:session` first). The served build is what `e2e:session` ships; only re-run a build (or
+`e2e:restart`/re-session) to refresh the static copy the host serves.
+
+**Live updates** ride **SSE** (`GET /control/events` on the host) — the panel reflects webhooks as
+they fire. On every (re)connect the UI re-fetches personas + threads (`useFakePhones` `onOpen →
+refresh`), so an SSE gap can't silently desync the view; the reconnect just re-syncs full state.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule

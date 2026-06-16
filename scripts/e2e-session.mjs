@@ -16,7 +16,7 @@ import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const dashboardDir = path.join(repoRoot, 'dashboard');
+const dashboardDir = path.join(repoRoot, 'dashboard-legacy');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 // The fake-phones UI is a static build served by the fake-twilio host on :8889.
 // We build it once at session start (below) and point the host at its dist.

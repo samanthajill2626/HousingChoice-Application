@@ -4,6 +4,7 @@ import { FakeTwilioEngine } from './engine/engine.js';
 import { RealClock } from './engine/clock.js';
 import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
+import { createControlRouter } from './routes/control.js';
 
 export interface FakeTwilioAppDeps {
   config: FakeTwilioConfig;
@@ -35,6 +36,7 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   });
 
   app.use(createRestRouter(engine));
-  // The control router (Phase 8) mounts here with the same `engine` instance.
+  // The control router mounts here with the same `engine` instance.
+  app.use(createControlRouter(engine));
   return app;
 }

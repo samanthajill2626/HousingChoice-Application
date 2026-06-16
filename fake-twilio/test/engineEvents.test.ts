@@ -32,6 +32,24 @@ describe('engine events', () => {
     expect(types).toContain('message.updated');
   });
 
+  it('a failed outbound carries the Twilio errorCode on its message.updated', () => {
+    const { engine, events } = makeEngine();
+    const clock = (engine as unknown as { clock: ManualClock }).clock;
+    engine.setDeliveryOutcome({
+      partyNumber: '+15550100001',
+      profile: { kind: 'fail', failState: 'failed', errorCode: '30005' },
+    });
+    engine.recordOutboundFromApp({ to: '+15550100001', from: '+15550009999', body: 'yo' });
+    clock.flush();
+    const failUpdate = events.find(
+      (e) => e.type === 'message.updated' && e.message.state === 'failed',
+    );
+    expect(failUpdate).toBeDefined();
+    if (failUpdate?.type === 'message.updated') {
+      expect(failUpdate.message.errorCode).toBe('30005');
+    }
+  });
+
   it('emits persona.added and reset', () => {
     const { engine, events } = makeEngine();
     engine.addAdHoc({ label: 'X', role: 'tenant' });

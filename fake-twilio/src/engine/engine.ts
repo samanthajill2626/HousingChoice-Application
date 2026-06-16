@@ -212,13 +212,19 @@ export class FakeTwilioEngine {
    * status-callback progression for the active delivery profile. Returns the SID.
    */
   recordOutboundFromApp(input: { to: string; from?: string; body?: string; mediaUrls?: string[] }): string {
-    const hasMedia = (input.mediaUrls?.length ?? 0) > 0;
+    // FIX 3 (defense-in-depth): the REST caller is less-trusted than the seed path;
+    // drop any non-http(s) MediaUrl before storing/rendering it as an <img src> —
+    // same isHttpUrl gate the inbound (sendAsParty) path enforces. Dropping (vs
+    // rejecting) keeps a valid-URL message flowing and a messages.create succeeding.
+    const validMediaUrls = input.mediaUrls?.filter((url) => isHttpUrl(url));
+    const mediaUrls = validMediaUrls && validMediaUrls.length > 0 ? validMediaUrls : undefined;
+    const hasMedia = (mediaUrls?.length ?? 0) > 0;
     const sid = this.mintSid(hasMedia ? 'MM' : 'SM');
     const now = this.clock.nowIso();
     const message: ThreadMessage = {
       sid, direction: 'outbound', from: input.from ?? this.appNumber, to: input.to,
       ...(input.body !== undefined && { body: input.body }),
-      ...(input.mediaUrls !== undefined && { mediaUrls: input.mediaUrls }),
+      ...(mediaUrls !== undefined && { mediaUrls }),
       state: 'queued', createdAt: now, updatedAt: now,
     };
     this.store.append(input.to, message);
@@ -243,6 +249,16 @@ export class FakeTwilioEngine {
         const updated = this.store.updateState(sid, state);
         if (updated) {
           updated.updatedAt = this.clock.nowIso();
+          // FIX 2: when this resolves to the profile's fail state, persist the
+          // Twilio ErrorCode on the message itself (not just the status webhook)
+          // so the UI can render it — set it BEFORE emitting so the event carries it.
+          if (
+            profile.kind === 'fail' &&
+            state === (profile.failState ?? 'failed') &&
+            profile.errorCode !== undefined
+          ) {
+            updated.errorCode = profile.errorCode;
+          }
           this.emit({ type: 'message.updated', partyNumber: input.to, message: updated });
         }
         // FIX 4: skip the status callback for the initial 'queued' state (index 0).

@@ -30,12 +30,22 @@ export function createEventsRouter(engine: FakeTwilioEngine): Router {
     const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), HEARTBEAT_MS);
     heartbeat.unref();
 
-    res.on('close', () => {
+    // Idempotent cleanup: an errored-but-not-closed socket still leaks a
+    // connection slot, the heartbeat timer and the engine subscription unless we
+    // tear down on 'error' too. The `done` guard makes the second event a no-op
+    // so we never double-decrement `connections` when both fire.
+    let done = false;
+    const cleanup = (): void => {
+      if (done) return;
+      done = true;
       connections -= 1;
       clearInterval(heartbeat);
       unsubscribe();
       res.end();
-    });
+    };
+
+    res.on('close', cleanup);
+    res.on('error', cleanup);
   });
 
   return router;

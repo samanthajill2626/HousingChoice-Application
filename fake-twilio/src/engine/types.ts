@@ -35,6 +35,8 @@ export interface ThreadMessage {
   body?: string;
   mediaUrls?: string[];
   state: DeliveryState;
+  /** Twilio ErrorCode, set only when the message resolved to a failure state. */
+  errorCode?: string;
   createdAt: string;
   updatedAt: string;
 }

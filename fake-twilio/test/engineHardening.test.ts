@@ -103,6 +103,30 @@ describe('FIX 5 — E.164 validation + app-number near-miss', () => {
       engine.sendAsParty({ from: p.number, body: 'x', mediaUrls: ['ftp://evil/cat.jpg'] }),
     ).rejects.toThrow();
   });
+
+  it('recordOutboundFromApp drops a non-http(s) mediaUrl but keeps a valid one', () => {
+    const { engine } = makeEngine();
+    engine.recordOutboundFromApp({
+      to: '+15550100001',
+      from: '+15550009999',
+      body: 'hi',
+      mediaUrls: ['javascript:alert(1)', 'https://assets/cat.jpg', 'ftp://x/y.png'],
+    });
+    const thread = engine.listThreads().find((t) => t.partyNumber === '+15550100001');
+    expect(thread?.messages[0]?.mediaUrls).toEqual(['https://assets/cat.jpg']);
+  });
+
+  it('recordOutboundFromApp stores no mediaUrls when all are invalid', () => {
+    const { engine } = makeEngine();
+    engine.recordOutboundFromApp({
+      to: '+15550100002',
+      from: '+15550009999',
+      body: 'hi',
+      mediaUrls: ['javascript:alert(1)'],
+    });
+    const thread = engine.listThreads().find((t) => t.partyNumber === '+15550100002');
+    expect(thread?.messages[0]?.mediaUrls).toBeUndefined();
+  });
 });
 
 describe('FIX 6 — modest input caps', () => {

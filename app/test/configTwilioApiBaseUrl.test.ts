@@ -20,4 +20,16 @@ describe('TWILIO_API_BASE_URL config', () => {
       loadConfig({ ...base, NODE_ENV: 'production', TWILIO_API_BASE_URL: 'http://evil', MESSAGING_DRIVER: 'console' }),
     ).toThrow(/TWILIO_API_BASE_URL/);
   });
+
+  it('throws a clear error in non-production when set to a malformed URL', () => {
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'development', TWILIO_API_BASE_URL: 'not a url' }),
+    ).toThrow(/TWILIO_API_BASE_URL must be a valid URL/);
+  });
+
+  it('prod-rejection fires even when the value is a malformed URL (prod check wins)', () => {
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'production', TWILIO_API_BASE_URL: 'not a url', MESSAGING_DRIVER: 'console' }),
+    ).toThrow(/refusing to start/);
+  });
 });

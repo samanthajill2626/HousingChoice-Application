@@ -267,6 +267,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         'override that redirects Twilio REST calls to a fake host; production must use the real Twilio endpoint.',
     );
   }
+  // Non-production: the value is used to redirect Twilio REST/media calls
+  // (new URL(...) in adapters/messaging.ts). Validate it parses here so a
+  // malformed override fails fast at config load instead of as a raw TypeError
+  // at request time.
+  if (twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0) {
+    try {
+      new URL(twilioApiBaseUrl);
+    } catch {
+      throw new Error(`TWILIO_API_BASE_URL must be a valid URL, got: ${twilioApiBaseUrl}`);
+    }
+  }
 
   const cfOriginSecret = env.CF_ORIGIN_SECRET;
   if (nodeEnv === 'production' && !cfOriginSecret) {

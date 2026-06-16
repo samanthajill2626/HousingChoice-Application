@@ -157,7 +157,7 @@ npm run dev -- --no-web   # backend only (skip the dashboard Vite server)
 
 **Hermetic mode** (`-- --local`, or whenever `DYNAMODB_ENDPOINT` is set) needs **Docker Desktop running** and (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-sharedDb -inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, then runs the same three processes. The integration test suite always uses DynamoDB Local.
 
-All modes load `.env` at the repo root if present (real environment variables win; template: [`.env.example`](./.env.example)). Ctrl-C stops all processes; the container (hermetic mode) stays up. Use `-- --no-web` for backend-only, or `npm run dev -w @housingchoice/dashboard` to run just the dashboard.
+All modes load `.env` at the repo root if present (real environment variables win; template: [`.env.example`](./.env.example)). Ctrl-C stops all processes; the container (hermetic mode) stays up. Use `-- --no-web` for backend-only, or `npm run dev -w @housingchoice/dashboard-legacy` to run just the dashboard.
 
 Query DynamoDB Local from PowerShell (DynamoDB Local accepts any credentials — dummy values satisfy the CLI):
 

@@ -14,7 +14,7 @@
 // URL-encoded; anything off-list or unparseable falls back to '/'.
 //
 // NOTE: public/sw.js is a CLASSIC service worker (served statically, NOT
-// bundled — see vite.config.ts / dashboard/public/). It cannot `import` this
+// bundled — see vite.config.ts / dashboard-legacy/public/). It cannot `import` this
 // ES module, so sw.js inlines a verbatim copy of resolveSafePath +
 // isPlausibleId + assertSameOriginPath with a comment pointing here. THIS
 // module is the source of truth and is unit-tested (route.test.ts); keep the

@@ -16,7 +16,7 @@ import {
   getVapidPublicKey,
 } from '../api/index.js';
 
-/** Where the service worker file lives (served statically from dashboard/dist). */
+/** Where the service worker file lives (served statically from dashboard-legacy/dist). */
 const SERVICE_WORKER_URL = '/sw.js';
 
 export type SubscribeResult =

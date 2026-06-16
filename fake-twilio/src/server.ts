@@ -23,6 +23,10 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
         appBaseUrl: deps.config.appBaseUrl,
         appPublicBaseUrl: deps.config.appPublicBaseUrl,
         authToken: deps.config.authToken,
+        // The app's origin-secret validator gates /webhooks/* (it runs BEFORE the
+        // webhook routes in the locked chain), so signed webhook POSTs also need
+        // the x-origin-verify header — pass the configured secret through.
+        originSecret: deps.config.originSecret,
       }),
     });
 

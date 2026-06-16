@@ -25,4 +25,11 @@ describe('fake-twilio host', () => {
   it('loadFakeConfig throws when NODE_ENV=production', () => {
     expect(() => cfg({ NODE_ENV: 'production' })).toThrow(/production/i);
   });
+
+  it('reads CF_ORIGIN_SECRET into originSecret, defaulting to the dev placeholder', () => {
+    // The app gates /webhooks/* behind the origin-secret validator, so the
+    // dispatcher must send the matching x-origin-verify header.
+    expect(cfg().originSecret).toBe('dev-placeholder-not-a-secret');
+    expect(cfg({ CF_ORIGIN_SECRET: 'a-different-secret' }).originSecret).toBe('a-different-secret');
+  });
 });

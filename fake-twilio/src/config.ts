@@ -10,7 +10,20 @@ export interface FakeTwilioConfig {
   appPublicBaseUrl: string;
   /** Shared Twilio auth token used to sign webhooks (must match the app's). */
   authToken: string;
+  /**
+   * Origin-secret the hermetic app expects in the `x-origin-verify` header. The
+   * app's locked middleware chain runs the CloudFront origin-secret validator
+   * BEFORE the /webhooks routes (app/src/app.ts), so the dispatcher's webhook
+   * POSTs are rejected with 403 unless they carry this exact value. Read from
+   * CF_ORIGIN_SECRET; defaults to the dev placeholder the app's config and the
+   * Vite proxy both use (dev-placeholder-not-a-secret).
+   */
+  originSecret: string;
 }
+
+/** The app's local CF_ORIGIN_SECRET default (app/src/lib/config.ts) + the value
+ *  the Vite proxy injects (dashboard/vite.config.ts). Webhook POSTs must match it. */
+const DEV_ORIGIN_SECRET_DEFAULT = 'dev-placeholder-not-a-secret';
 
 export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilioConfig {
   const nodeEnv = env.NODE_ENV ?? 'development';
@@ -23,10 +36,12 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
   const appBaseUrl = env.APP_BASE_URL ?? 'http://localhost:8080';
   const appPublicBaseUrl = env.APP_PUBLIC_BASE_URL ?? appBaseUrl;
   const authToken = env.TWILIO_AUTH_TOKEN ?? '';
+  const originSecret = env.CF_ORIGIN_SECRET ?? DEV_ORIGIN_SECRET_DEFAULT;
   return {
     port: Number(env.FAKE_TWILIO_PORT ?? 8889),
     appBaseUrl: appBaseUrl.replace(/\/$/, ''),
     appPublicBaseUrl: appPublicBaseUrl.replace(/\/$/, ''),
     authToken,
+    originSecret,
   };
 }

@@ -31,6 +31,24 @@ describe('signTwilioWebhook', () => {
     expect(params['MediaUrl0']).toBe('http://localhost:8889/media/cat.jpg');
   });
 
+  it('infers MediaContentType from the URL extension (FIX 7)', () => {
+    const params = buildInboundSmsParams({
+      messageSid: 'MM2', from: '+15550100001', to: '+15550009999',
+      mediaUrls: [
+        'http://x/a.png',
+        'http://x/b.gif',
+        'http://x/c.webp',
+        'http://x/d.jpeg',
+        'http://x/e.pdf',
+      ],
+    });
+    expect(params['MediaContentType0']).toBe('image/png');
+    expect(params['MediaContentType1']).toBe('image/gif');
+    expect(params['MediaContentType2']).toBe('image/webp');
+    expect(params['MediaContentType3']).toBe('image/jpeg');
+    expect(params['MediaContentType4']).toBe('application/octet-stream');
+  });
+
   it('builds status params with optional ErrorCode', () => {
     const p = buildStatusParams({ messageSid: 'SMout1', status: 'failed', errorCode: '30005' });
     expect(p).toMatchObject({ MessageSid: 'SMout1', MessageStatus: 'failed', ErrorCode: '30005' });

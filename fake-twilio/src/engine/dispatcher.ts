@@ -36,6 +36,8 @@ export class WebhookDispatcher {
         'x-origin-verify': this.deps.originSecret ?? 'dev-placeholder-not-a-secret',
       },
       body,
+      // A hung connection during `e2e:restart` must not block forever (FIX 7).
+      signal: AbortSignal.timeout(5000),
     });
     return res.status;
   }

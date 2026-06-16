@@ -12,6 +12,20 @@ export interface BuildInboundSmsInput {
   optOutType?: string;
 }
 
+/** Infer a Twilio-style MediaContentType from a media URL's file extension (FIX 7). */
+function inferMediaContentType(url: string): string {
+  const lower = url.toLowerCase();
+  // Compare only the path, so a `?v=1` query or `#frag` doesn't defeat the suffix match.
+  let path = lower;
+  const q = path.search(/[?#]/);
+  if (q !== -1) path = path.slice(0, q);
+  if (path.endsWith('.png')) return 'image/png';
+  if (path.endsWith('.gif')) return 'image/gif';
+  if (path.endsWith('.webp')) return 'image/webp';
+  if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'image/jpeg';
+  return 'application/octet-stream';
+}
+
 /** Build the application/x-www-form-urlencoded params Twilio sends for inbound SMS/MMS. */
 export function buildInboundSmsParams(input: BuildInboundSmsInput): WebhookParams {
   const params: WebhookParams = {
@@ -26,7 +40,7 @@ export function buildInboundSmsParams(input: BuildInboundSmsInput): WebhookParam
   params['NumMedia'] = String(media.length);
   media.forEach((url, i) => {
     params[`MediaUrl${i}`] = url;
-    params[`MediaContentType${i}`] = 'image/jpeg';
+    params[`MediaContentType${i}`] = inferMediaContentType(url);
   });
   if (input.optOutType !== undefined) params['OptOutType'] = input.optOutType;
   return params;

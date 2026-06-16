@@ -1,5 +1,5 @@
 {
-  "name": "@housingchoice/dashboard",
+  "name": "@housingchoice/dashboard-legacy",
   "private": true,
   "version": "0.1.0",
   "type": "module",

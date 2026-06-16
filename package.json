@@ -8,7 +8,7 @@
   },
   "workspaces": [
     "app",
-    "dashboard",
+    "dashboard-legacy",
     "e2e",
     "fake-twilio",
     "fake-twilio/web"

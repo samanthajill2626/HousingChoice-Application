@@ -18,6 +18,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    strictPort: true,
     // Don't auto-launch a browser on start. `npm run dev` prints a clickable
     // http://localhost:5173 link in the terminal (see scripts/dev.mjs) — click
     // it to open the UI in your OS default browser when you want it.

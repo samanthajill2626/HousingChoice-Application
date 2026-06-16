@@ -25,9 +25,30 @@ const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
   failed: { label: 'Failed', tone: 'danger', isFailure: true },
 };
 
-/** Map a delivery status to its label/tone/failure-flag. */
-export function presentDeliveryStatus(status: DeliveryStatus): DeliveryPresentation {
-  return STATUS_PRESENTATION[status];
+/**
+ * Resting presentation for a message whose delivery status is missing or
+ * unrecognized. The persisted `delivery_status` is, in practice, OPTIONAL —
+ * seed data and any message stored before/outside the status machine carry no
+ * status, so it arrives `undefined`. MessageBubble destructures this for EVERY
+ * message, so a total lookup that returned `undefined` here threw and unmounted
+ * the entire thread view. An unknown status is shown as a neutral, non-failure
+ * "Sending…"-class waypoint (never a false failure cue).
+ */
+const UNKNOWN_PRESENTATION: DeliveryPresentation = {
+  label: 'Sending…',
+  tone: 'neutral',
+  isFailure: false,
+};
+
+/**
+ * Map a delivery status to its label/tone/failure-flag. Defensive: a missing or
+ * unrecognized status yields a safe neutral presentation instead of `undefined`
+ * (the field is effectively optional in real data — see UNKNOWN_PRESENTATION).
+ */
+export function presentDeliveryStatus(
+  status: DeliveryStatus | undefined,
+): DeliveryPresentation {
+  return (status !== undefined && STATUS_PRESENTATION[status]) || UNKNOWN_PRESENTATION;
 }
 
 /**

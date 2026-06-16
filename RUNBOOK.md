@@ -192,6 +192,77 @@ defense #1 — an inbound webhook whose From matches is our own outbound project
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
 
+### fake-twilio (HTTP-seam messaging mock)
+
+**Dev/e2e only — NEVER deployed.** `fake-twilio` (workspace package `@housingchoice/fake-twilio`,
+`fake-twilio/`) is a standalone service that impersonates Twilio's REST API and POSTs
+correctly-signed webhooks back at the app, so the app's **real** `TwilioMessagingDriver` and
+`twilioSignature` middleware run unchanged against a local impersonator — no real Twilio account,
+full HTTP-seam fidelity. It is its own artifact (not in the Docker image / deploy bundle), **refuses
+to boot under `NODE_ENV=production`**, and the app's `TWILIO_API_BASE_URL` redirect is **rejected by
+the prod config validator** (three independent guards — see `fake-twilio/src/config.ts`,
+`app/src/lib/config.ts`).
+
+**How it runs in the stack.** `scripts/e2e-session.mjs` starts it first, on **port 8889**, then
+points the app at it. The app runs the real driver (`MESSAGING_DRIVER=twilio`) redirected via
+`TWILIO_API_BASE_URL=http://localhost:8889`, with a **shared** `TWILIO_AUTH_TOKEN` (the HMAC key both
+sides use), `SMS_SENDING_ENABLED=true` (the A2P kill-switch defaults OFF under the twilio driver, so
+it must be forced on), and `OUR_PHONE_NUMBERS=+15550009999`. The Twilio SID/secret values are
+Twilio-shaped dummies (the fake never authenticates them). `e2e:restart` also bounces the fake so a
+code change to it is picked up.
+
+**Control API (port 8889)** — the scripted-scenario surface (also `GET /health`):
+
+| Verb | Purpose |
+|---|---|
+| `POST /control/send-as-party` | Inject an inbound text/MMS as a party → fires a signed `/webhooks/twilio/sms` at the app |
+| `GET  /control/threads` | List every thread (both directions + delivery status) — the `/__dev/outbox` superset |
+| `POST /control/personas/ad-hoc` | Mint a throwaway caller number |
+| `POST /control/delivery-outcome` | Set the next outbound message's delivery profile (normal / stall / fail + ErrorCode) |
+| `POST /control/reset` | Clear threads + cancel in-flight status timers (wired into `e2e:reseed`) |
+| `GET  /control/dispatch-errors` | The dispatcher's error ring buffer — asserts a signing/middleware regression is observable, not swallowed |
+
+**Sign-vs-deliver split (the crux).** The dispatcher **signs** each webhook against
+`APP_PUBLIC_BASE_URL` (the app's `PUBLIC_BASE_URL`, **:5173**) — because the app's signature
+middleware reconstructs the signed URL as `${PUBLIC_BASE_URL}${req.originalUrl}` — but **POSTs** to
+`APP_BASE_URL` (the app's real address, **:8080**). It also mirrors the dev `x-origin-verify`
+header (from `CF_ORIGIN_SECRET`) so the app's origin-secret gate (which fronts `/webhooks/*`) lets it
+through. **`403`s in the app log mean drift** in one of: the shared `TWILIO_AUTH_TOKEN`,
+`PUBLIC_BASE_URL`, or `CF_ORIGIN_SECRET` between the two sides.
+
+> **Version-pin caveat (from the spike).** The redirect relies on twilio v6's internal
+> `RequestClient` (a **private** API), verified against **`twilio@6.0.2`**. Keep `twilio` pinned and
+> **re-run `app/test/twilioHttpClient.test.ts` on any twilio upgrade** — that test is the contract
+> that the host-rewrite still works.
+
+#### Fake-phones UI
+
+**Dev/e2e only — NEVER deployed.** A standalone React UI (workspace package
+`@housingchoice/fake-twilio-web`, `fake-twilio/web/`) that lets you act as the **simulated
+parties** (landlords / tenants / PMs) and watch the **real** dashboard react. It is served as a
+static build by the fake-twilio host itself — **only when `FAKE_TWILIO_UI_DIST` points at the build**
+(`fake-twilio/web/dist`); the host leaves it inert otherwise, so nothing about it ships (it is not
+in the Docker image / deploy bundle, and the host already refuses to boot under
+`NODE_ENV=production`). Staff is intentionally **not** a panel here — staff is the real dashboard,
+which is what you watch react.
+
+**How to open it.** `npm run e2e:session` builds the UI once and serves it from the host; open
+**`http://localhost:8889/`**. Pick a persona from the roster (grouped Landlord / Tenant / PM, each
+with its number + unread badge; **＋ Ad-hoc number** mints a throwaway caller), type and **Send** to
+fire a signed inbound webhook at the app, flip the per-thread **delivery-profile** toggle (Normal /
+Stall at sent / Fail) to script the next outbound message's status callbacks, and attach a **canned
+dev image** for MMS. Watch the real dashboard (**:5173**) react, and the thread's **status chips**
+tick `queued → sent → delivered` (or a red `failed`/`undelivered` with its `ErrorCode`).
+
+**Iterating on the UI itself.** `npm run dev -w @housingchoice/fake-twilio-web` runs Vite on
+**:5174** with HMR, proxying `/control` + `/health` to a **running** :8889 host (start the stack with
+`e2e:session` first). The served build is what `e2e:session` ships; only re-run a build (or
+`e2e:restart`/re-session) to refresh the static copy the host serves.
+
+**Live updates** ride **SSE** (`GET /control/events` on the host) — the panel reflects webhooks as
+they fire. On every (re)connect the UI re-fetches personas + threads (`useFakePhones` `onOpen →
+refresh`), so an SSE gap can't silently desync the view; the reconnect just re-syncs full state.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule

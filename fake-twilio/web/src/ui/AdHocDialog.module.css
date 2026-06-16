@@ -1,0 +1,105 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--hc-z-sheet);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--hc-space-4);
+  background-color: var(--hc-color-overlay);
+}
+
+.dialog {
+  width: 100%;
+  max-width: 26rem;
+  background-color: var(--hc-color-surface);
+  border-radius: var(--hc-radius-lg);
+  box-shadow: var(--hc-shadow-lg);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-4);
+  border-bottom: 1px solid var(--hc-color-border);
+}
+
+.title {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-bold);
+}
+
+.close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: none;
+  border-radius: var(--hc-radius-md);
+  background-color: transparent;
+  color: var(--hc-color-text-muted);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.close:hover {
+  background-color: var(--hc-color-surface-alt);
+  color: var(--hc-color-text);
+}
+.close:focus-visible {
+  outline: none;
+  box-shadow: var(--hc-focus-ring);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-4);
+  padding: var(--hc-space-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+}
+
+.fieldLabel {
+  font-size: var(--hc-font-size-sm);
+  font-weight: var(--hc-font-weight-semibold);
+}
+
+.input {
+  width: 100%;
+  padding: var(--hc-space-2) var(--hc-space-3);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  font-size: var(--hc-font-size-sm);
+}
+.input:focus-visible {
+  outline: none;
+  border-color: var(--hc-color-brand);
+  box-shadow: var(--hc-focus-ring);
+}
+
+.error {
+  margin: 0;
+  padding: var(--hc-space-2) var(--hc-space-3);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-danger-bg);
+  color: var(--hc-color-danger);
+  font-size: var(--hc-font-size-sm);
+  font-weight: var(--hc-font-weight-medium);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--hc-space-2);
+}

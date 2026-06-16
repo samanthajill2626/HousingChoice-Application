@@ -39,6 +39,11 @@ export interface RecordingMessagingDriverDeps {
 }
 
 /**
+ * @deprecated Outbound-only proof-of-send log. New tests should assert against the
+ * fake-twilio thread store (`GET /control/threads`), which captures BOTH directions
+ * plus delivery-status progression. Retained only so the three pre-existing green
+ * specs (outbox / intake-to-reply / boards) don't churn. Do not add new reliance.
+ *
  * Decorates a MessagingAdapter: delegates every method to `inner`, and after a
  * successful send also persists the outbound message to the dev-only outbox
  * table so e2e tests (and humans) can see what would have been sent. Dev-only;

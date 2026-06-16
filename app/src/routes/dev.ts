@@ -56,6 +56,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     res.status(200).json({ userId: user.userId, email: user.email, role: user.role });
   });
 
+  // DEPRECATED proof-of-send log — outbound-only. New tests should assert against
+  // the fake-twilio thread store (GET /control/threads on the fake-twilio service),
+  // which captures both directions + delivery status. Retained only so the three
+  // pre-existing green specs don't churn; do not extend.
   // GET /__dev/outbox?to=&since= — recorded outbound messages (newest last).
   router.get('/__dev/outbox', async (req, res) => {
     const table = tableName(OUTBOX_TABLE_BASE);

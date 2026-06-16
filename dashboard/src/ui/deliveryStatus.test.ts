@@ -27,6 +27,22 @@ describe('presentDeliveryStatus', () => {
     expect(presentDeliveryStatus('failed').isFailure).toBe(true);
     expect(presentDeliveryStatus('queued').isFailure).toBe(false);
   });
+
+  it('never returns undefined for a missing/unknown status (defensive — older or seed messages may carry no delivery_status)', () => {
+    // The persisted `delivery_status` is in practice optional: seed data and any
+    // message stored before the status machine ran omit it, so the field arrives
+    // `undefined` (or, defensively, an unrecognized string). MessageBubble
+    // destructures `{ isFailure }` from this for EVERY message, so a missing
+    // status must yield a safe, non-failure presentation — never `undefined`
+    // (which previously threw and unmounted the whole thread view).
+    for (const bad of [undefined, '', 'received', 'accepted', 'bogus']) {
+      const p = presentDeliveryStatus(bad as unknown as DeliveryStatus);
+      expect(p).toBeDefined();
+      expect(typeof p.label).toBe('string');
+      expect(p.tone.length).toBeGreaterThan(0);
+      expect(p.isFailure).toBe(false); // an unknown status is not a known failure
+    }
+  });
 });
 
 describe('deliveryReason (error_code → human reason)', () => {

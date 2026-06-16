@@ -9,7 +9,9 @@
   "workspaces": [
     "app",
     "dashboard",
-    "e2e"
+    "e2e",
+    "fake-twilio",
+    "fake-twilio/web"
   ],
   "scripts": {
     "bootstrap": "node scripts/bootstrap.mjs",
@@ -23,6 +25,7 @@
     "db:seed": "tsx app/scripts/db-seed.ts",
     "gen:tables": "tsx app/scripts/gen-tables.ts",
     "test": "npm run test --workspaces --if-present",
+    "test:fake-twilio": "npm run test -w @housingchoice/fake-twilio",
     "e2e": "npm run e2e -w @housingchoice/e2e",
     "e2e:session": "node scripts/e2e-session.mjs",
     "e2e:restart": "node scripts/e2e-restart.mjs",

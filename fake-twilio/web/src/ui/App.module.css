@@ -1,0 +1,122 @@
+/* App shell layout. A full-viewport column: the persistent DevBanner on top,
+ * then a two-pane body that fills the remaining height. Mirrors the dashboard
+ * hub proportions (the left rail is a fixed --hc-hub-list-width card; the right
+ * phone panel fills the rest), and each pane scrolls internally so the page
+ * itself never double-scrolls. Mobile-first: below the hub breakpoint the panes
+ * stack and one shows at a time isn't needed here (the rail is compact), so we
+ * keep a simple column → row transition at --hc-hub-breakpoint. */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  height: 100vh;
+  background-color: var(--hc-color-bg);
+  color: var(--hc-color-text);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: var(--hc-space-4);
+  padding: var(--hc-space-4);
+}
+
+/* The roster rail is a card; on mobile it caps its height and scrolls. */
+.body > :global(nav) {
+  flex: 0 0 auto;
+  max-height: 40vh;
+  overflow-y: auto;
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-lg);
+  box-shadow: var(--hc-shadow-sm);
+}
+
+/* --- The phone panel (right pane). --- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-lg);
+  box-shadow: var(--hc-shadow-sm);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hc-space-3);
+  padding: var(--hc-space-3) var(--hc-space-4);
+  border-bottom: 1px solid var(--hc-color-border);
+}
+
+.panelLabel {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text);
+}
+
+.panelNumber {
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The conversation log: the only internal scroll region of the panel. */
+.log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-4);
+}
+
+.threadEmpty {
+  margin: auto;
+  color: var(--hc-color-text-muted);
+  font-size: var(--hc-font-size-sm);
+  text-align: center;
+}
+
+/* Empty state when nothing is selected (fills the whole panel). */
+.empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--hc-space-2);
+  color: var(--hc-color-text-muted);
+  text-align: center;
+  padding: var(--hc-space-6);
+}
+
+.emptyTitle {
+  font-size: var(--hc-font-size-lg);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text);
+}
+
+.emptyHint {
+  font-size: var(--hc-font-size-sm);
+}
+
+/* --- Desktop (≥ 900px = --hc-hub-breakpoint): two panes side-by-side. --- */
+@media (min-width: 900px) {
+  .body {
+    flex-direction: row;
+  }
+
+  .body > :global(nav) {
+    flex: 0 0 var(--hc-hub-list-width);
+    width: var(--hc-hub-list-width);
+    max-height: none;
+  }
+}

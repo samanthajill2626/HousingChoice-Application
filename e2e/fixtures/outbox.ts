@@ -10,6 +10,11 @@ export interface OutboxMessage {
   createdAt: string;
 }
 
+/**
+ * @deprecated Outbound-only proof-of-send. Prefer e2e/fixtures/fakeTwilio.ts
+ * (`listThreads`), which captures both directions + delivery status via the
+ * fake-twilio control API. Kept for the three pre-existing specs only.
+ */
 // Queries /__dev/outbox (proxied to the app via :5173). request.baseURL is the
 // Playwright baseURL (http://localhost:5173).
 export async function getOutbox(

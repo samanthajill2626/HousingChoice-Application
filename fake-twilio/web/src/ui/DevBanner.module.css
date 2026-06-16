@@ -1,0 +1,27 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-2) var(--hc-space-4);
+  background-color: var(--hc-color-warning-bg);
+  color: var(--hc-color-warning);
+  border-bottom: 1px solid var(--hc-color-warning);
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-medium);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem var(--hc-space-2);
+  border-radius: var(--hc-radius-sm);
+  background-color: var(--hc-color-warning);
+  color: var(--hc-color-text-inverse);
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-bold);
+  letter-spacing: 0.08em;
+}
+
+.text {
+  letter-spacing: 0.01em;
+}

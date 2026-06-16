@@ -1,0 +1,116 @@
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-3);
+  padding: var(--hc-space-3) var(--hc-space-4);
+  border-top: 1px solid var(--hc-color-border);
+  background-color: var(--hc-color-surface);
+}
+
+/* Segmented delivery-profile control. */
+.profile {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 0.15rem;
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface-alt);
+}
+
+.segment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: var(--hc-space-1) var(--hc-space-3);
+  border-radius: var(--hc-radius-sm);
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.segment:hover {
+  color: var(--hc-color-text);
+}
+.segmentChecked {
+  background-color: var(--hc-color-surface);
+  color: var(--hc-color-brand);
+  box-shadow: var(--hc-shadow-sm);
+}
+.segmentInput {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+.segmentInput:focus-visible + .segment,
+.segment:has(.segmentInput:focus-visible) {
+  outline: none;
+  box-shadow: var(--hc-focus-ring);
+}
+
+/* Canned-image picker. */
+.assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-2);
+}
+.asset {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-1) var(--hc-space-2) var(--hc-space-1) var(--hc-space-1);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-medium);
+  color: var(--hc-color-text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.asset:hover {
+  border-color: var(--hc-color-border-strong);
+}
+.asset:focus-visible {
+  outline: none;
+  box-shadow: var(--hc-focus-ring);
+}
+.assetPicked {
+  border-color: var(--hc-color-brand);
+  background-color: var(--hc-color-brand-weak);
+  color: var(--hc-color-brand-strong);
+}
+.assetThumb {
+  width: 1.75rem;
+  height: 1.75rem;
+  object-fit: cover;
+  border-radius: var(--hc-radius-sm);
+  background-color: var(--hc-color-surface-alt);
+}
+
+/* Text input row. */
+.inputRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--hc-space-2);
+}
+.textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 2.75rem;
+  max-height: 12rem;
+  padding: var(--hc-space-2) var(--hc-space-3);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  font-size: var(--hc-font-size-sm);
+  line-height: 1.45;
+}
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--hc-color-brand);
+  box-shadow: var(--hc-focus-ring);
+}

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-label="Room photo">
+  <rect width="160" height="120" fill="#e8f1ff"/>
+  <rect x="0" y="78" width="160" height="42" fill="#cbd9ef"/>
+  <polygon points="80,18 24,58 136,58" fill="#1f6feb"/>
+  <rect x="34" y="58" width="92" height="36" fill="#ffffff" stroke="#b6bcc7"/>
+  <rect x="46" y="66" width="22" height="28" fill="#1a5fd0"/>
+  <rect x="92" y="66" width="28" height="18" fill="#e8f1ff" stroke="#b6bcc7"/>
+  <text x="80" y="112" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#111827" text-anchor="middle">Room</text>
+</svg>

@@ -1,3 +1,4 @@
+import React from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdHocDialog } from './AdHocDialog.js';
@@ -47,4 +48,28 @@ test('the close button calls onClose', async () => {
   render(<AdHocDialog onSubmit={() => {}} onClose={onClose} />);
   await userEvent.click(screen.getByRole('button', { name: /close/i }));
   expect(onClose).toHaveBeenCalled();
+});
+
+test('restores focus to the opener element when the dialog closes', async () => {
+  // A trigger button that opens the dialog; closing must return focus to it.
+  function Harness(): React.JSX.Element {
+    const [open, setOpen] = React.useState(false);
+    return (
+      <div>
+        <button type="button" onClick={() => setOpen(true)}>
+          Open dialog
+        </button>
+        {open && <AdHocDialog onSubmit={() => {}} onClose={() => setOpen(false)} />}
+      </div>
+    );
+  }
+  render(<Harness />);
+  const opener = screen.getByRole('button', { name: /open dialog/i });
+  opener.focus();
+  await userEvent.click(opener);
+  // Dialog open: its first field has focus, not the opener.
+  expect(screen.getByLabelText(/label/i)).toHaveFocus();
+  // Close via the close button; focus returns to the opener.
+  await userEvent.click(screen.getByRole('button', { name: /close/i }));
+  expect(opener).toHaveFocus();
 });

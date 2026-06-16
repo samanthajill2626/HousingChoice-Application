@@ -27,12 +27,24 @@ test('renders the body as escaped text (no HTML injection)', () => {
 
 test('outbound message shows a StatusChip', () => {
   render(<MessageBubble message={msg({ direction: 'outbound', state: 'sent' })} />);
-  expect(screen.getByRole('status')).toHaveTextContent(/sent/i);
+  expect(screen.getByText(/sent/i)).toBeInTheDocument();
+});
+
+test('outbound failed message surfaces its errorCode via the status chip', () => {
+  render(
+    <MessageBubble
+      message={msg({ direction: 'outbound', state: 'failed', errorCode: '30005' })}
+    />,
+  );
+  const chip = screen.getByText(/failed/i);
+  // The error code is exposed via the chip's accessible name / title.
+  expect(chip).toHaveAccessibleName(/30005/);
 });
 
 test('inbound message shows no StatusChip', () => {
-  render(<MessageBubble message={msg({ direction: 'inbound' })} />);
-  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  render(<MessageBubble message={msg({ direction: 'inbound', state: 'delivered' })} />);
+  // No outbound delivery-state chip is rendered for an inbound message.
+  expect(screen.queryByText('Delivered')).not.toBeInTheDocument();
 });
 
 test('distinguishes inbound vs outbound for layout', () => {

@@ -10,21 +10,30 @@ const cases: ReadonlyArray<[DeliveryState, string]> = [
   ['failed', 'Failed'],
 ];
 
-test.each(cases)('renders the %s state with a status accessible name', (state, label) => {
+test.each(cases)('renders the %s state with its human label and accessible name', (state, label) => {
   render(<StatusChip state={state} />);
-  // Reachable as a status region with the human label in its accessible name.
-  const chip = screen.getByRole('status');
+  // Not a live region anymore (the conversation log announces updates); reach it by
+  // its visible text, then assert its accessible name carries the label.
+  const chip = screen.getByText(label);
   expect(chip).toHaveAccessibleName(new RegExp(label, 'i'));
   expect(chip).toHaveTextContent(label);
 });
 
-test('appends an error code to the accessible name for failures', () => {
+test('exposes an error code via its accessible name + title for failures', () => {
   render(<StatusChip state="failed" errorCode="30008" />);
-  const chip = screen.getByRole('status');
+  const chip = screen.getByText('Failed');
   expect(chip).toHaveAccessibleName(/30008/);
+  expect(chip).toHaveAttribute('title', expect.stringContaining('30008'));
 });
 
 test('does not show an error code for non-failure states', () => {
   render(<StatusChip state="delivered" errorCode="30008" />);
-  expect(screen.getByRole('status')).not.toHaveTextContent('30008');
+  const chip = screen.getByText('Delivered');
+  expect(chip).not.toHaveTextContent('30008');
+  expect(chip).not.toHaveAccessibleName(/30008/);
+});
+
+test('is not a live region (no role=status)', () => {
+  render(<StatusChip state="sent" />);
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
 });

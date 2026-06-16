@@ -133,7 +133,16 @@ export function useFakePhones(): UseFakePhones {
   const onEvent = useCallback((event: EngineEvent) => {
     setState((prev) => mergeEvent(prev, event));
   }, []);
-  useFakeEvents({ onEvent });
+  // On every (re)connect, re-fetch personas+threads so events emitted during an
+  // SSE gap (no Last-Event-ID/replay) can't silently desync the UI — `refresh`
+  // does an idempotent full reconcile (replace), so the initial-mount overlap is
+  // harmless.
+  useFakeEvents({
+    onEvent,
+    onOpen: () => {
+      void refresh();
+    },
+  });
 
   const select = useCallback((partyNumber: string): void => {
     setState((prev) => {

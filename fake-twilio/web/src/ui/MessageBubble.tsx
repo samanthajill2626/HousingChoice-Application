@@ -49,7 +49,7 @@ export function MessageBubble({ message }: MessageBubbleProps): React.JSX.Elemen
           <time className={styles.time} dateTime={message.createdAt}>
             {time}
           </time>
-          {isOutbound && <StatusChip state={message.state} />}
+          {isOutbound && <StatusChip state={message.state} errorCode={message.errorCode} />}
         </div>
       </div>
     </div>

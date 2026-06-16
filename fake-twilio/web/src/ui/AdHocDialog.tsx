@@ -29,15 +29,31 @@ export function AdHocDialog({ onSubmit, onClose, error }: AdHocDialogProps): Rea
   const [number, setNumber] = useState('');
   const labelRef = useRef<HTMLInputElement>(null);
 
-  // Focus the first field on open + close on Escape (accessible dialog basics).
+  // Remember whatever was focused before the dialog opened so we can restore it on
+  // close (accessible dialog basics — don't strand keyboard focus on <body>).
+  const openerRef = useRef<HTMLElement | null>(null);
+  // Keep the latest onClose in a ref so the mount-only keydown listener always
+  // calls the current handler without re-running (and re-capturing) the effect.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Focus the first field on open + close on Escape; restore opener focus on close.
   useEffect(() => {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     labelRef.current?.focus();
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      openerRef.current?.focus();
+    };
+    // Mount-only: capture the opener on open, restore it on close. Excluding deps
+    // (onClose is proxied via onCloseRef) keeps a changing handler from clobbering
+    // the captured opener or re-stealing focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSubmit = (e: React.FormEvent): void => {
     e.preventDefault();

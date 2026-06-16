@@ -106,10 +106,12 @@ describe('mergeEvent (pure)', () => {
 // ---- Hook integration (mocked client + SSE) ---------------------------------
 
 let capturedOnEvent: ((e: EngineEvent) => void) | undefined;
+let capturedOnOpen: (() => void) | undefined;
 
 vi.mock('../api/useFakeEvents.js', () => ({
-  useFakeEvents: (handlers: { onEvent: (e: EngineEvent) => void }) => {
+  useFakeEvents: (handlers: { onEvent: (e: EngineEvent) => void; onOpen?: () => void }) => {
     capturedOnEvent = handlers.onEvent;
+    capturedOnOpen = handlers.onOpen;
   },
 }));
 
@@ -129,8 +131,11 @@ vi.mock('../api/client.js', () => ({
 
 import { useFakePhones } from './useFakePhones.js';
 
+import * as client from '../api/client.js';
+
 beforeEach(() => {
   capturedOnEvent = undefined;
+  capturedOnOpen = undefined;
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -153,6 +158,23 @@ describe('useFakePhones', () => {
       }),
     );
     expect(result.current.threads[0]?.messages.map((m) => m.sid)).toEqual(['SMseed', 'SMlive']);
+  });
+
+  it('re-fetches personas + threads on every (re)connect via onOpen (full reconcile)', async () => {
+    const getPersonasMock = vi.mocked(client.getPersonas);
+    const getThreadsMock = vi.mocked(client.getThreads);
+    renderHook(() => useFakePhones());
+    // Initial mount load.
+    await waitFor(() => expect(getPersonasMock).toHaveBeenCalledTimes(1));
+    expect(getThreadsMock).toHaveBeenCalledTimes(1);
+    expect(capturedOnOpen).toBeDefined();
+    // Simulate an SSE (re)connect: the hook must re-fetch to reconcile any gap.
+    await act(async () => {
+      capturedOnOpen?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(getPersonasMock).toHaveBeenCalledTimes(2));
+    expect(getThreadsMock).toHaveBeenCalledTimes(2);
   });
 
   it('clears unread for a party on select', async () => {

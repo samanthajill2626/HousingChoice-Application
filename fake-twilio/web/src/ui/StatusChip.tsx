@@ -1,9 +1,10 @@
 // StatusChip — a small pill showing an outbound message's DeliveryState, mapped
 // onto the shared --hc-* delivery palette (queued→neutral, sent→info,
 // delivered→success, undelivered/failed→danger). Mirrors the dashboard Badge
-// idiom (CSS Module + tone classes + status dot). Exposed as role="status" with
-// an accessible name so getByRole('status') + getByText work; failures append
-// the Twilio ErrorCode to the accessible name for debuggability.
+// idiom (CSS Module + tone classes + status dot). It is NOT a live region: the
+// conversation is a role="log" / aria-live="polite" container that already
+// announces message updates, so a per-bubble role="status" would double-announce.
+// It keeps an accessible name (label + Twilio ErrorCode on failures) and title.
 import styles from './StatusChip.module.css';
 import type { DeliveryState } from '../api/types.js';
 
@@ -34,7 +35,6 @@ export function StatusChip({ state, errorCode }: StatusChipProps): React.JSX.Ele
   const accessibleName = showCode ? `${label} (error ${errorCode})` : label;
   return (
     <span
-      role="status"
       className={classes(tone)}
       aria-label={accessibleName}
       {...(showCode && { title: `Error ${errorCode}` })}

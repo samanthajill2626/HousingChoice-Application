@@ -107,8 +107,9 @@ describe('App shell', () => {
     render(<App />);
     await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
 
-    // The seeded outbound message starts queued.
-    expect(await screen.findByRole('status', { name: /Queued/ })).toBeVisible();
+    // The seeded outbound message starts queued. The StatusChip is no longer a
+    // live region (the conversation log announces updates), so reach it by text.
+    expect(await screen.findByText('Queued')).toBeVisible();
 
     act(() =>
       capturedOnEvent?.({
@@ -118,6 +119,6 @@ describe('App shell', () => {
       }),
     );
 
-    await waitFor(() => expect(screen.getByRole('status', { name: /Delivered/ })).toBeVisible());
+    await waitFor(() => expect(screen.getByText('Delivered')).toBeVisible());
   });
 });

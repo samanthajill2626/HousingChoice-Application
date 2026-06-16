@@ -561,7 +561,19 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     // allowlist keeps a forged URL from pointing our authenticated fetch
     // anywhere else.
     const url = new URL(mediaUrl);
-    if (url.protocol !== 'https:' || url.hostname !== TWILIO_MEDIA_HOST) {
+    const isTwilioMedia = url.protocol === 'https:' && url.hostname === TWILIO_MEDIA_HOST;
+    // Dev/mock seam: when the Twilio REST base URL is overridden to a local fake
+    // (fake-twilio), inbound MediaUrls point at that SAME fake origin
+    // (http://localhost:8889/...). Allow exactly that origin so the mirror can
+    // fetch the canned media. `apiBaseUrl` is NEVER set in production
+    // (config.ts guards TWILIO_API_BASE_URL there), so prod stays https +
+    // api.twilio.com ONLY — this branch is unreachable in a deployed env.
+    let isFakeMedia = false;
+    if (this.deps.apiBaseUrl !== undefined && this.deps.apiBaseUrl !== '') {
+      const fake = new URL(this.deps.apiBaseUrl);
+      isFakeMedia = url.protocol === fake.protocol && url.host === fake.host;
+    }
+    if (!isTwilioMedia && !isFakeMedia) {
       throw new MediaFetchRefusedError(
         `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
         'host_not_allowed',

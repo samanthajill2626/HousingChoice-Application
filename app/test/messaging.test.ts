@@ -303,6 +303,51 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('allows the fake-twilio origin when apiBaseUrl is set (dev/mock seam), refusing other hosts', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      },
+    });
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-length': '3' }),
+      body,
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const driver = new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client: makeFakeTwilioClient().client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+      apiBaseUrl: 'http://localhost:8889',
+    });
+
+    // The fake origin (http, matches apiBaseUrl) passes the guard → fetch happens.
+    await driver.getMediaStream('http://localhost:8889/canned/room.png');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // A host that is NEITHER api.twilio.com NOR the fake origin is still refused.
+    await expect(driver.getMediaStream('http://localhost:9999/x')).rejects.toMatchObject({
+      reason: 'host_not_allowed',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // not called for the refused host
+  });
+
+  it('refuses the fake origin when apiBaseUrl is NOT set (production posture)', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(makeDriver().getMediaStream('http://localhost:8889/canned/room.png')).rejects.toMatchObject({
+      reason: 'host_not_allowed',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('refuses an oversize Content-Length (> 25 MB) after the fetch, before streaming', async () => {
     const fetchSpy = vi.fn(async () => fakeResponse(MAX_MEDIA_CONTENT_LENGTH + 1));
     vi.stubGlobal('fetch', fetchSpy);

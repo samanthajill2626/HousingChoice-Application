@@ -270,6 +270,54 @@ tick `queued → sent → delivered` (or a red `failed`/`undelivered` with its `
 they fire. On every (re)connect the UI re-fetches personas + threads (`useFakePhones` `onOpen →
 refresh`), so an SSE gap can't silently desync the view; the reconnect just re-syncs full state.
 
+#### Voice (fake-twilio)
+
+**Dev/e2e only — NEVER deployed.** The same fake-twilio host (**port 8889**, `FAKE_TWILIO_URL`)
+also impersonates Twilio's **voice** runtime: it places a call, fetches the app's `/voice` TwiML,
+plays the whisper Gather to the answering leg, injects the DTMF gate digit, and posts the `<Dial
+action>` summary — driving the app's **real** voice webhooks end-to-end. Everything is deterministic
+(ids from a counter, timing on an injected clock, outcome from a scripted scenario). The fake-phones
+**voice UI is a separate future plan** — not built here; today's surface is the control API below.
+
+**Voice control API (port 8889)** — drives the `CallEngine`:
+
+| Verb | Purpose |
+|---|---|
+| `POST /control/place-call` | `{from,to,scenario?}` → `{callSid}` — place a masked (`to` ∈ pool) or founder (`to` ∉ pool) call |
+| `GET  /control/calls` | `{calls: CallState[]}` — every call (sid, status, legs, recording/transcript) |
+| `POST /control/calls/:sid/press` | `{digit}` → `{call}` — inject a DTMF gate digit on a paused call |
+| `POST /control/calls/:sid/answer` | `{leg?}` → `{call}` — mark a leg answered (bare/team dial, no whisper) |
+| `POST /control/calls/:sid/hangup` | `{call}` — caller/callee hangs up before answer → no-answer |
+
+**Scenario knobs** (all optional; the engine fills sensible defaults — first leg answers, digit `'1'`,
+answered): `answerLeg` (`callee`/`founder`/`team` — advisory; the first dialed leg answers today, and
+`team` is reached via the press-0 whisper-gate escape, not leg selection), `digit` (`'0'`/`'1'`/`null`
+— `null` models "no press" → gate timeout → no-answer), `outcome` (`answered`/`no-answer`/`busy` —
+forces the terminal `<Dial action>` status), `ringMs` (auto-run delay on the injected clock),
+`record` (advisory only — see below), `transcript` (the founder-bridge transcription text). These
+drive **masked vs founder** behavior: the **masked relay never records** (the app's TwiML returns
+`record="do-not-record"` with no recordingStatusCallback → recording + transcription skipped); the
+**founder bridge records + transcribes on answer** (TwiML returns `record="record-from-answer-dual"`
+with a callback → recording fires, then transcription if `scenario.transcript` is set). Recording is
+driven **entirely by the app's returned TwiML** — `scenario.record` is advisory and does not force it.
+
+**Recording media** is fetched by the app FROM the fake: the `CallEngine` mints a `RecordingUrl` of
+`${recordingServeBase}/recordings/:callSid/:recordingSid.mp3` (the serve base is the fake's own
+`PUBLIC_BASE_URL`), and the app's `getRecordingStream` fetch resolves there via the **`TWILIO_API_BASE_URL`
+media-host SSRF dev-override** (`url.origin === twilioApiBaseUrl origin` is allowed locally only).
+**Prod stays locked to `api.twilio.com`** — the override is rejected by the prod config validator.
+The fake serves the canned MP3 at `GET /recordings/:callSid/:recordingSid.mp3` (`audio/mpeg`).
+
+**Number provisioning is now real in the fake** (was a `501` stub): `GET
+.../AvailablePhoneNumbers/US/Local.json` lists mintable pool candidates and `POST
+.../IncomingPhoneNumbers.json` commits a chosen number into the `NumberRegistry` (with `GET`/`POST
+:sid.json` for lookup + voice/sms-webhook update) — so masked-relay **pool setup works end-to-end**: a
+number purchased via REST is then recognized as a pool number by an inbound masked call.
+
+**RCS is contract-only.** The Content-API REST path + `POST /control/send-rcs` are thin `501` seams
+that point at [docs/RCS-integration-contract.md](docs/RCS-integration-contract.md); there is **no
+real RCS behavior** in the fake.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule

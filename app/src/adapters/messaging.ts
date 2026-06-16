@@ -561,9 +561,19 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     // allowlist keeps a forged URL from pointing our authenticated fetch
     // anywhere else.
     const url = new URL(mediaUrl);
-    if (url.protocol !== 'https:' || url.hostname !== TWILIO_MEDIA_HOST) {
+    // Dev-only: when the driver is redirected to a fake Twilio host
+    // (deps.apiBaseUrl, set ONLY when config.twilioApiBaseUrl is configured —
+    // which is rejected in production), also accept that exact origin for media
+    // fetch. The fake serves recordings over http on localhost, so this widens
+    // BOTH the protocol and host checks, but ONLY for the configured dev origin.
+    const devOrigin = this.deps.apiBaseUrl !== undefined ? new URL(this.deps.apiBaseUrl).origin : undefined;
+    const isRealTwilio = url.protocol === 'https:' && url.hostname === TWILIO_MEDIA_HOST;
+    const isDevFake = devOrigin !== undefined && url.origin === devOrigin;
+    if (!isRealTwilio && !isDevFake) {
       throw new MediaFetchRefusedError(
-        `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
+        `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST}` +
+          (devOrigin !== undefined ? ` or ${devOrigin}` : '') +
+          ` (got ${url.protocol}//${url.hostname})`,
         'host_not_allowed',
       );
     }

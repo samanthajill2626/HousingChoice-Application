@@ -1,12 +1,14 @@
 // fake-twilio/src/routes/events.ts
 import { Router } from 'express';
-import type { FakeTwilioEngine } from '../engine/engine.js';
+import type { EventHub } from '../engine/eventHub.js';
 
 const HEARTBEAT_MS = 25_000;
 const MAX_CONNECTIONS = 25;
 
-/** SSE stream of engine events for the fake-phones UI. Mirrors the app's /api/events. */
-export function createEventsRouter(engine: FakeTwilioEngine): Router {
+/** SSE stream of engine events for the fake-phones UI. Mirrors the app's /api/events.
+ *  Subscribes to the shared hub directly, so any engine emitting through it (messaging
+ *  or the Phase 5 CallEngine) streams to connected clients. */
+export function createEventsRouter(hub: EventHub): Router {
   const router = Router();
   let connections = 0;
 
@@ -24,7 +26,7 @@ export function createEventsRouter(engine: FakeTwilioEngine): Router {
     });
     res.write(': connected\n\n');
 
-    const unsubscribe = engine.subscribe((event) => {
+    const unsubscribe = hub.subscribe((event) => {
       res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     });
     const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), HEARTBEAT_MS);

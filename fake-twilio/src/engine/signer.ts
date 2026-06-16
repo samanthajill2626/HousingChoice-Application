@@ -82,3 +82,20 @@ export function signTwilioWebhook(input: SignInput): string {
   for (const key of sortedKeys) data += key + input.params[key];
   return createHmac('sha1', input.authToken).update(Buffer.from(data, 'utf-8')).digest('base64');
 }
+
+export interface BuildInboundVoiceInput { callSid: string; from: string; to: string; callStatus?: string; }
+export function buildInboundVoiceParams(i: BuildInboundVoiceInput): WebhookParams {
+  return { CallSid: i.callSid, From: i.from, To: i.to, CallStatus: i.callStatus ?? 'ringing', ApiVersion: '2010-04-01' };
+}
+export function buildWhisperGateParams(i: { callSid: string; digits: string }): WebhookParams {
+  return { CallSid: i.callSid, Digits: i.digits, ApiVersion: '2010-04-01' };
+}
+export function buildDialStatusParams(i: { callSid: string; dialCallStatus: string; dialCallDuration?: number }): WebhookParams {
+  return { CallSid: i.callSid, DialCallStatus: i.dialCallStatus, ...(i.dialCallDuration !== undefined && { DialCallDuration: String(i.dialCallDuration) }), ApiVersion: '2010-04-01' };
+}
+export function buildRecordingParams(i: { callSid: string; recordingSid: string; recordingUrl: string; durationSec?: number; status?: string }): WebhookParams {
+  return { CallSid: i.callSid, RecordingSid: i.recordingSid, RecordingStatus: i.status ?? 'completed', RecordingUrl: i.recordingUrl, ...(i.durationSec !== undefined && { RecordingDuration: String(i.durationSec) }), ApiVersion: '2010-04-01' };
+}
+export function buildTranscriptionParams(i: { callSid: string; transcript: string; status?: string }): WebhookParams {
+  return { CallSid: i.callSid, TranscriptionText: i.transcript, TranscriptionStatus: i.status ?? 'completed', ApiVersion: '2010-04-01' };
+}

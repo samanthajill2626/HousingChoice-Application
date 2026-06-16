@@ -27,6 +27,7 @@ import type {
   CreateContactBody,
   CreateRelayGroupBody,
   CreateUnitBody,
+  DevLoginResult,
   HousingFairSignup,
   InviteUserResult,
   Me,
@@ -61,6 +62,32 @@ export function logout(): Promise<void> {
  *  Not a fetch: use `window.location.assign(loginUrl())` / an <a href>. */
 export function loginUrl(): string {
   return '/auth/login';
+}
+
+// --- Dev-only auth (/__dev, /auth/dev-login) --------------------------------
+// These reach the hermetic-LOCAL dev router, which is mounted ONLY in the local
+// dev/e2e stack and is 404 (router absent) in every deployed env. The UI uses
+// devPing() to decide whether to surface the dev-login affordance at all; it
+// MUST fail closed (any non-200 / non-{dev:true} / error → unavailable).
+
+/** GET /__dev/ping — availability probe for the hermetic dev router. Resolves
+ *  `true` only on 200 with a `{ dev: true }` body; resolves `false` for any
+ *  non-200, network/transport error, or malformed body (never throws). */
+export async function devPing(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const res = await request<{ dev?: unknown }>('/__dev/ping', {
+      ...(signal !== undefined && { signal }),
+    });
+    return res !== null && typeof res === 'object' && res.dev === true;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /auth/dev-login — log in as a seeded dev user (sets the session cookie).
+ *  Throws ApiError(404,'unknown_dev_user') when the email isn't a seeded user. */
+export function devLogin(email = 'va@example.com'): Promise<DevLoginResult> {
+  return request<DevLoginResult>('/auth/dev-login', { method: 'POST', body: { email } });
 }
 
 // --- Conversations (/api/conversations) -------------------------------------

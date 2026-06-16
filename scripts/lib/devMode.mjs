@@ -45,6 +45,13 @@ export function resolveDevEnv({ local = false, processEnv, fileEnv, localEndpoin
   if (mode === 'local') {
     if (get('DYNAMODB_ENDPOINT') === undefined) overlay.DYNAMODB_ENDPOINT = localEndpoint;
     if (get('TABLE_PREFIX') === undefined) overlay.TABLE_PREFIX = LOCAL_TABLE_PREFIX;
+    // Mount the dev auth router (/auth/dev-login + /__dev/ping) so the dashboard
+    // dev-login button works in the hermetic loop. Safe ONLY here: local mode
+    // always points at DynamoDB Local, never prod, and the app still requires
+    // a non-production NODE_ENV + a set DYNAMODB_ENDPOINT before mounting it.
+    // Never set in live mode (pointless — no dynamodbEndpoint there — and the
+    // requirement forbids it). Respect an explicit env value (e.g. '0').
+    if (get('DEV_AUTH_ENABLED') === undefined) overlay.DEV_AUTH_ENABLED = '1';
   } else {
     if (get('TABLE_PREFIX') === undefined) overlay.TABLE_PREFIX = LIVE_TABLE_PREFIX;
     if (get('AWS_PROFILE') === undefined) overlay.AWS_PROFILE = LIVE_AWS_PROFILE;

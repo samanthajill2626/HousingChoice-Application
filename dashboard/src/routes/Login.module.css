@@ -39,3 +39,19 @@
 .signIn {
   margin-top: var(--hc-space-3);
 }
+
+/* Dev-only affordance — visually subordinate, set off from the primary flow. */
+.dev {
+  width: 100%;
+  margin-top: var(--hc-space-3);
+  padding-top: var(--hc-space-3);
+  border-top: 1px solid var(--hc-color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+}
+
+.devError {
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-danger);
+}

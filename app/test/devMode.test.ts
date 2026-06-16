@@ -92,3 +92,35 @@ describe('resolveDevEnv', () => {
     expect(mode).toBe('local');
   });
 });
+
+describe('resolveDevEnv — DEV_AUTH_ENABLED', () => {
+  it('enables the dev auth router in local mode (--local)', () => {
+    const { mode, overlay } = resolve({ local: true });
+    expect(mode).toBe('local');
+    expect(overlay.DEV_AUTH_ENABLED).toBe('1');
+  });
+
+  it('enables the dev auth router when DYNAMODB_ENDPOINT forces local mode', () => {
+    const { mode, overlay } = resolve({
+      processEnv: { DYNAMODB_ENDPOINT: 'http://localhost:9999' },
+    });
+    expect(mode).toBe('local');
+    expect(overlay.DEV_AUTH_ENABLED).toBe('1');
+  });
+
+  it('does NOT enable the dev auth router in live mode', () => {
+    const { mode, overlay } = resolve({});
+    expect(mode).toBe('live');
+    expect(overlay.DEV_AUTH_ENABLED).toBeUndefined();
+  });
+
+  it('respects an explicit DEV_AUTH_ENABLED from the environment in local mode', () => {
+    const { mode, overlay } = resolve({
+      local: true,
+      processEnv: { DEV_AUTH_ENABLED: '0' },
+    });
+    expect(mode).toBe('local');
+    // env wins over the mode default — the overlay must not clobber it.
+    expect(overlay.DEV_AUTH_ENABLED).toBeUndefined();
+  });
+});

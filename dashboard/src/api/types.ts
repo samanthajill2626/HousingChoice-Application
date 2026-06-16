@@ -74,6 +74,13 @@ export interface Me {
   role: UserRole;
 }
 
+/** POST /auth/dev-login — the seeded dev principal (hermetic-LOCAL only). */
+export interface DevLoginResult {
+  userId: string;
+  email: string;
+  role: UserRole;
+}
+
 // --- Conversations ----------------------------------------------------------
 
 /** A linked external participant: contact + phone pair. For relay groups (M1.7)

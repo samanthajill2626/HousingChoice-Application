@@ -13,6 +13,15 @@ export interface Dispatcher {
   post(path: string, params: WebhookParams): Promise<number>;
 }
 
+/** A live engine state-change, streamed to the fake-phones UI over SSE (Plan 2). */
+export type EngineEvent =
+  | { type: 'message.appended'; partyNumber: string; message: ThreadMessage }
+  | { type: 'message.updated'; partyNumber: string; message: ThreadMessage }
+  | { type: 'persona.added'; persona: Persona }
+  | { type: 'reset' };
+
+export type EngineListener = (event: EngineEvent) => void;
+
 /** A recorded dispatch failure (non-2xx or rejection), exposed via getDispatchErrors(). */
 export interface DispatchError {
   sid?: string;
@@ -66,6 +75,8 @@ export class FakeTwilioEngine {
   private generation = 0;
   /** Ring buffer of recent dispatch failures (FIX 2). */
   private readonly dispatchErrors: DispatchError[] = [];
+  /** Live subscribers for engine events (the SSE endpoint in Plan 2). */
+  private readonly listeners = new Set<EngineListener>();
 
   constructor(deps: FakeTwilioEngineDeps) {
     this.clock = deps.clock;
@@ -73,6 +84,22 @@ export class FakeTwilioEngine {
     this.appNumber = deps.appNumber ?? APP_NUMBER;
     this.registry = deps.registry ?? new PersonaRegistry();
     this.store = deps.store ?? new ConversationStore();
+  }
+
+  /** Subscribe to live engine events; returns an unsubscribe fn. */
+  subscribe(listener: EngineListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: EngineEvent): void {
+    for (const l of this.listeners) {
+      try {
+        l(event);
+      } catch {
+        // A misbehaving subscriber (e.g. a dead SSE socket) must never break the engine.
+      }
+    }
   }
 
   private mintSid(prefix: 'SM' | 'MM'): string {
@@ -97,9 +124,13 @@ export class FakeTwilioEngine {
       if (!isE164(normalized)) {
         throw new Error(`addAdHoc: ${input.number} is not a valid E.164 number`);
       }
-      return this.registry.addAdHoc({ ...input, number: normalized });
+      const persona = this.registry.addAdHoc({ ...input, number: normalized });
+      this.emit({ type: 'persona.added', persona });
+      return persona;
     }
-    return this.registry.addAdHoc(input);
+    const persona = this.registry.addAdHoc(input);
+    this.emit({ type: 'persona.added', persona });
+    return persona;
   }
   setDeliveryOutcome(input: SetDeliveryOutcomeInput): void {
     this.nextProfile.set(input.partyNumber, input.profile);
@@ -113,6 +144,7 @@ export class FakeTwilioEngine {
     this.pendingCancels.clear();
     this.store.reset();
     this.nextProfile.clear();
+    this.emit({ type: 'reset' });
   }
 
   /** Recent dispatch failures (non-2xx or rejected POSTs), newest last (FIX 2). */
@@ -158,6 +190,7 @@ export class FakeTwilioEngine {
       state: 'delivered', createdAt: now, updatedAt: now,
     };
     this.store.append(input.from, message);
+    this.emit({ type: 'message.appended', partyNumber: input.from, message });
     const params = buildInboundSmsParams({
       messageSid: sid, from: input.from, to,
       ...(input.body !== undefined && { body: input.body }),
@@ -189,6 +222,7 @@ export class FakeTwilioEngine {
       state: 'queued', createdAt: now, updatedAt: now,
     };
     this.store.append(input.to, message);
+    this.emit({ type: 'message.appended', partyNumber: input.to, message });
 
     const profile = this.nextProfile.get(input.to) ?? { kind: 'normal' as const };
     this.nextProfile.delete(input.to);
@@ -207,7 +241,10 @@ export class FakeTwilioEngine {
         // FIX 1 (belt-and-suspenders): a reset() bumped the generation; no-op.
         if (myGeneration !== this.generation) return;
         const updated = this.store.updateState(sid, state);
-        if (updated) updated.updatedAt = this.clock.nowIso();
+        if (updated) {
+          updated.updatedAt = this.clock.nowIso();
+          this.emit({ type: 'message.updated', partyNumber: input.to, message: updated });
+        }
         // FIX 4: skip the status callback for the initial 'queued' state (index 0).
         if (i === 0) return;
         const params = buildStatusParams({

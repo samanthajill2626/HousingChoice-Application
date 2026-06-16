@@ -5,6 +5,7 @@ import { RealClock } from './engine/clock.js';
 import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
 import { createControlRouter } from './routes/control.js';
+import { createEventsRouter } from './routes/events.js';
 
 export interface FakeTwilioAppDeps {
   config: FakeTwilioConfig;
@@ -52,5 +53,7 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   app.use(createRestRouter(engine));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
+  // SSE stream of engine events for the fake-phones UI (Plan 2).
+  app.use(createEventsRouter(engine));
   return app;
 }

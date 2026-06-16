@@ -10,7 +10,8 @@
     "app",
     "dashboard",
     "e2e",
-    "fake-twilio"
+    "fake-twilio",
+    "fake-twilio/web"
   ],
   "scripts": {
     "bootstrap": "node scripts/bootstrap.mjs",

@@ -2,8 +2,8 @@
 // SPA fallback for client routes, and the reserved /api,/auth,/webhooks
 // namespaces never swallowed by the fallback.
 //
-// Self-skipping when dashboard/dist isn't built (it's a gitignored build
-// artifact): `npm run build -w dashboard` to exercise this suite for real —
+// Self-skipping when dashboard-legacy/dist isn't built (it's a gitignored build
+// artifact): `npm run build -w dashboard-legacy` to exercise this suite for real —
 // the same pattern as the DynamoDB Local integration suites.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -15,13 +15,13 @@ import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const SECRET = 'test-origin-secret';
-const distDir = path.resolve(import.meta.dirname, '../../dashboard/dist');
+const distDir = path.resolve(import.meta.dirname, '../../dashboard-legacy/dist');
 const built = existsSync(path.join(distDir, 'index.html'));
 
 if (!built) {
   console.warn(
     `[staticSmoke] SKIPPED — no built dashboard at ${distDir}. ` +
-      'Run `npm run build -w dashboard` to exercise this suite.',
+      'Run `npm run build -w dashboard-legacy` to exercise this suite.',
   );
 }
 

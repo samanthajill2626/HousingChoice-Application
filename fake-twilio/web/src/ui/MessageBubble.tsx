@@ -9,7 +9,7 @@
 // dangerouslySetInnerHTML — which is the XSS guard for message content. Media is
 // restricted to same-origin canned assets.
 import { StatusChip } from './StatusChip.js';
-import { cannedLabelFor } from '../assets/canned/index.js';
+import { cannedLabelFor, isImageAsset } from '../assets/canned/index.js';
 import styles from './MessageBubble.module.css';
 import type { ThreadMessage } from '../api/types.js';
 
@@ -40,15 +40,15 @@ export function MessageBubble({ message }: MessageBubbleProps): React.JSX.Elemen
       <div className={styles.bubble}>
         {message.mediaUrls && message.mediaUrls.length > 0 && (
           <div className={styles.media}>
-            {message.mediaUrls.map((url) => (
-              <img
-                key={url}
-                className={styles.thumb}
-                src={url}
-                alt={cannedLabelFor(url)}
-                loading="lazy"
-              />
-            ))}
+            {message.mediaUrls.map((url) =>
+              isImageAsset(url) ? (
+                <img key={url} className={styles.thumb} src={url} alt={cannedLabelFor(url)} loading="lazy" />
+              ) : (
+                <a key={url} className={styles.thumb} href={url} target="_blank" rel="noopener noreferrer">
+                  📄 {cannedLabelFor(url)}
+                </a>
+              ),
+            )}
           </div>
         )}
         {message.body !== undefined && message.body !== '' && (

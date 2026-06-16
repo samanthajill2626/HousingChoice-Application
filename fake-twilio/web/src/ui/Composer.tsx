@@ -7,7 +7,7 @@
 // + chosen media; onSetDeliveryProfile fires whenever the profile changes.
 import { useId, useState } from 'react';
 import { Button } from './Button.js';
-import { cannedAssets } from '../assets/canned/index.js';
+import { cannedAssets, isImageAsset } from '../assets/canned/index.js';
 import type { DeliveryProfile } from '../api/types.js';
 import styles from './Composer.module.css';
 
@@ -113,7 +113,13 @@ export function Composer({ onSend, onSetDeliveryProfile, disabled = false }: Com
               aria-pressed={picked}
               onClick={() => toggleMedia(a.url)}
             >
-              <img className={styles.assetThumb} src={a.url} alt="" aria-hidden="true" />
+              {isImageAsset(a.url) ? (
+                <img className={styles.assetThumb} src={a.url} alt="" aria-hidden="true" />
+              ) : (
+                <span className={styles.assetThumb} aria-hidden="true">
+                  📄
+                </span>
+              )}
               {a.label}
             </button>
           );

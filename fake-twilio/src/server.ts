@@ -2,6 +2,7 @@ import path from 'node:path';
 import express, { type Express } from 'express';
 import type { FakeTwilioConfig } from './config.js';
 import { FakeTwilioEngine } from './engine/engine.js';
+import { EventHub } from './engine/eventHub.js';
 import { RealClock } from './engine/clock.js';
 import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
@@ -10,6 +11,10 @@ import { createEventsRouter } from './routes/events.js';
 
 export interface FakeTwilioAppDeps {
   config: FakeTwilioConfig;
+  /** The shared event bus the engine emits through and the SSE route subscribes to.
+   *  Injectable for tests; defaults to a fresh hub. When `engine` is also injected,
+   *  pass the SAME hub it was constructed with so the SSE stream sees its events. */
+  hub?: EventHub;
   /** Injectable for tests; defaults to a real-clock engine with a real dispatcher. */
   engine?: FakeTwilioEngine;
 }
@@ -25,12 +30,17 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
     );
   }
 
+  // One shared event bus per process: the engine(s) emit through it and the SSE
+  // events route subscribes to it. The Phase 5 CallEngine will share this same hub.
+  const hub = deps.hub ?? new EventHub();
+
   // One engine per process — shared by the REST router (here) and, in a later
   // phase, the control router. Construct it once and pass it to every router.
   const engine =
     deps.engine ??
     new FakeTwilioEngine({
       clock: new RealClock(),
+      hub,
       dispatcher: new WebhookDispatcher({
         appBaseUrl: deps.config.appBaseUrl,
         appPublicBaseUrl: deps.config.appPublicBaseUrl,
@@ -54,8 +64,9 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   app.use(createRestRouter(engine));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
-  // SSE stream of engine events for the fake-phones UI (Plan 2).
-  app.use(createEventsRouter(engine));
+  // SSE stream of engine events for the fake-phones UI (Plan 2). Subscribes to the
+  // shared hub directly so events from any engine on it are streamed.
+  app.use(createEventsRouter(hub));
 
   // Static-serve the built fake-phones UI + SPA fallback, AFTER all API routers so
   // reserved prefixes are matched by their routers first; the fallback only catches

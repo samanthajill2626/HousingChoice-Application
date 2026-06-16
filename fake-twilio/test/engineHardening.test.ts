@@ -1,6 +1,7 @@
 // fake-twilio/test/engineHardening.test.ts
 import { describe, expect, it } from 'vitest';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 import type { WebhookParams } from '../src/engine/signer.js';
 
@@ -15,7 +16,7 @@ function makeEngine(post?: (path: string, params: WebhookParams) => Promise<numb
         return 200;
       }),
   };
-  const engine = new FakeTwilioEngine({ clock, dispatcher });
+  const engine = new FakeTwilioEngine({ clock, dispatcher, hub: new EventHub() });
   return { engine, clock, posted };
 }
 

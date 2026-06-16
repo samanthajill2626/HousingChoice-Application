@@ -1,6 +1,7 @@
 // fake-twilio/test/engineEvents.test.ts
 import { describe, expect, it } from 'vitest';
 import { FakeTwilioEngine, type EngineEvent } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 
 function makeEngine() {
@@ -8,6 +9,7 @@ function makeEngine() {
   const engine = new FakeTwilioEngine({
     clock: new ManualClock('2026-06-15T00:00:00.000Z'),
     dispatcher: { post: async () => 200 },
+    hub: new EventHub(),
   });
   const unsub = engine.subscribe((e) => events.push(e));
   return { engine, events, unsub };

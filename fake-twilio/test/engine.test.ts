@@ -1,6 +1,7 @@
 // fake-twilio/test/engine.test.ts
 import { describe, expect, it } from 'vitest';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 import type { WebhookParams } from '../src/engine/signer.js';
 
@@ -8,7 +9,7 @@ function makeEngine() {
   const clock = new ManualClock('2026-06-15T00:00:00.000Z');
   const posted: Array<{ path: string; params: WebhookParams }> = [];
   const dispatcher = { post: async (path: string, params: WebhookParams) => { posted.push({ path, params }); return 200; } };
-  const engine = new FakeTwilioEngine({ clock, dispatcher });
+  const engine = new FakeTwilioEngine({ clock, dispatcher, hub: new EventHub() });
   return { engine, clock, posted };
 }
 

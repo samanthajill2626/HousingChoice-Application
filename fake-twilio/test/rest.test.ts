@@ -4,11 +4,12 @@ import request from 'supertest';
 import { buildFakeTwilioApp } from '../src/server.js';
 import { loadFakeConfig } from '../src/config.js';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 
 function makeApp() {
   const config = loadFakeConfig({ NODE_ENV: 'test', TWILIO_AUTH_TOKEN: 't', APP_BASE_URL: 'http://localhost:8080', APP_PUBLIC_BASE_URL: 'http://localhost:5173' });
-  const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 } });
+  const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 }, hub: new EventHub() });
   return { app: buildFakeTwilioApp({ config, engine }), engine };
 }
 

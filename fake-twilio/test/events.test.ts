@@ -4,6 +4,7 @@ import http from 'node:http';
 import { buildFakeTwilioApp } from '../src/server.js';
 import { loadFakeConfig } from '../src/config.js';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 
 function cfg() {
@@ -12,8 +13,9 @@ function cfg() {
 
 describe('GET /control/events (SSE)', () => {
   it('sends the connected comment then an event when the engine emits', async () => {
-    const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 } });
-    const app = buildFakeTwilioApp({ config: cfg(), engine });
+    const hub = new EventHub();
+    const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 }, hub });
+    const app = buildFakeTwilioApp({ config: cfg(), engine, hub });
     const server = http.createServer(app);
     await new Promise<void>((r) => server.listen(0, r));
     const addr = server.address();
@@ -46,8 +48,9 @@ describe('GET /control/events (SSE)', () => {
   });
 
   it('reclaims a connection slot after a socket drops (cleanup runs once)', async () => {
-    const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 } });
-    const app = buildFakeTwilioApp({ config: cfg(), engine });
+    const hub = new EventHub();
+    const engine = new FakeTwilioEngine({ clock: new ManualClock('2026-06-15T00:00:00.000Z'), dispatcher: { post: async () => 200 }, hub });
+    const app = buildFakeTwilioApp({ config: cfg(), engine, hub });
     const server = http.createServer(app);
     await new Promise<void>((r) => server.listen(0, r));
     const addr = server.address();

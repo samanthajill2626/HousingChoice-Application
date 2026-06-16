@@ -7,20 +7,18 @@ import { plannedTransitions, stepDelayMs } from './delivery.js';
 import type {
   AddAdHocInput, DeliveryProfile, Persona, SendAsPartyInput, SetDeliveryOutcomeInput, Thread, ThreadMessage,
 } from './types.js';
+import type { EventHub } from './eventHub.js';
+import type { EngineEvent, EngineListener } from './engineEvents.js';
+
+// The EngineEvent union + listener type now live in ./engineEvents.js (shared by the
+// messaging engine and the Phase 5 CallEngine). Re-exported here for back-compat with
+// existing importers.
+export type { EngineEvent, EngineListener } from './engineEvents.js';
 
 /** The dispatcher surface the engine needs (real WebhookDispatcher in prod, stub in tests). */
 export interface Dispatcher {
   post(path: string, params: WebhookParams): Promise<number>;
 }
-
-/** A live engine state-change, streamed to the fake-phones UI over SSE (Plan 2). */
-export type EngineEvent =
-  | { type: 'message.appended'; partyNumber: string; message: ThreadMessage }
-  | { type: 'message.updated'; partyNumber: string; message: ThreadMessage }
-  | { type: 'persona.added'; persona: Persona }
-  | { type: 'reset' };
-
-export type EngineListener = (event: EngineEvent) => void;
 
 /** A recorded dispatch failure (non-2xx or rejection), exposed via getDispatchErrors(). */
 export interface DispatchError {
@@ -55,6 +53,8 @@ function isHttpUrl(s: string): boolean {
 export interface FakeTwilioEngineDeps {
   clock: Clock;
   dispatcher: Dispatcher;
+  /** The shared event bus — both the messaging engine and the CallEngine emit through it. */
+  hub: EventHub;
   /** Defaults to APP_NUMBER. */
   appNumber?: string;
   registry?: PersonaRegistry;
@@ -75,31 +75,26 @@ export class FakeTwilioEngine {
   private generation = 0;
   /** Ring buffer of recent dispatch failures (FIX 2). */
   private readonly dispatchErrors: DispatchError[] = [];
-  /** Live subscribers for engine events (the SSE endpoint in Plan 2). */
-  private readonly listeners = new Set<EngineListener>();
+  /** The shared event bus; the SSE endpoint subscribes to it directly. */
+  private readonly hub: EventHub;
 
   constructor(deps: FakeTwilioEngineDeps) {
     this.clock = deps.clock;
     this.dispatcher = deps.dispatcher;
+    this.hub = deps.hub;
     this.appNumber = deps.appNumber ?? APP_NUMBER;
     this.registry = deps.registry ?? new PersonaRegistry();
     this.store = deps.store ?? new ConversationStore();
   }
 
-  /** Subscribe to live engine events; returns an unsubscribe fn. */
+  /** Subscribe to live engine events; returns an unsubscribe fn. Delegates to the
+   *  shared hub (back-compat for callers that subscribe via the engine). */
   subscribe(listener: EngineListener): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    return this.hub.subscribe(listener);
   }
 
   private emit(event: EngineEvent): void {
-    for (const l of this.listeners) {
-      try {
-        l(event);
-      } catch {
-        // A misbehaving subscriber (e.g. a dead SSE socket) must never break the engine.
-      }
-    }
+    this.hub.emit(event);
   }
 
   private mintSid(prefix: 'SM' | 'MM'): string {

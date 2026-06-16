@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync }
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
-import { killTree, isAlive } from './lib/killTree.mjs';
+import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const dashboardDir = path.join(repoRoot, 'dashboard');
@@ -95,6 +95,16 @@ function startFakeTwilio() {
   // the signed URL as `${PUBLIC_BASE_URL}${req.originalUrl}`. CF_ORIGIN_SECRET is
   // inherited from childEnv so the dispatcher's x-origin-verify header satisfies
   // the app's origin-secret validator (which gates /webhooks/* too).
+  //
+  // PREFLIGHT — reap any orphan still holding :8889. On Windows a second
+  // `app.listen()` on an already-bound port does NOT raise EADDRINUSE: the listen
+  // callback fires, the process exits 0 without ever owning the socket, and the
+  // launcher would then track that throwaway child while an untracked orphan keeps
+  // the port — un-killable by killChild/shutdown/e2e:stop. Freeing the port first
+  // guarantees the child we spawn below is the real :8889 owner and a tracked
+  // descendant of this launcher (so tree-kill teardown covers it).
+  const reaped = killPort(8889);
+  if (reaped.length) log(`reaped orphan(s) holding :8889 before start: ${reaped.join(', ')}`);
   spawnNode('fake-twilio', ['--import', 'tsx', path.join('fake-twilio', 'src', 'index.ts')], undefined, {
     FAKE_TWILIO_PORT: '8889',
     APP_BASE_URL: 'http://localhost:8080',

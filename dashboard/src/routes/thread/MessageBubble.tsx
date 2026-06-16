@@ -107,7 +107,7 @@ export function MessageBubble({
               const src = `/api/messages/${encodeURIComponent(message.provider_sid)}/media/${i}`;
               // Images render inline; PDFs open in the browser's sandboxed viewer
               // (the serve endpoint sends them inline); anything else downloads.
-              if (att.contentType.startsWith('image/')) {
+              if (att.contentType?.startsWith('image/')) {
                 return (
                   <a key={i} className={styles.mediaLink} href={src} target="_blank" rel="noopener noreferrer">
                     <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />

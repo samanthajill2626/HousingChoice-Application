@@ -236,6 +236,36 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     await signedTwilioPost(app, SMS_PATH, params);
     expect(world.mediaPuts).toHaveLength(1); // mirrored exactly once
   });
+
+  it('REDELIVERY recovers a PARTIAL first mirror (1 of 2) — completeness-gated, not presence-gated', async () => {
+    const { app, world } = makeWebhookHarness();
+    const params = inboundSmsParams({
+      MessageSid: 'MMpartial1',
+      NumMedia: '2',
+      MediaUrl0: 'https://api.twilio.com/media/ok',
+      MediaContentType0: 'image/jpeg',
+      MediaUrl1: 'https://api.twilio.com/media/flaky',
+      MediaContentType1: 'image/png',
+    });
+
+    // First delivery: attachment 1 fails to fetch → only attachment 0 mirrors.
+    world.failMediaUrls.add('https://api.twilio.com/media/flaky');
+    await signedTwilioPost(app, SMS_PATH, params);
+    const conv = [...world.conversations.values()][0]!;
+    expect(world.messages[0]!.media_attachments).toEqual([
+      { s3Key: `media/${conv.conversationId}/MMpartial1/0`, contentType: 'image/jpeg' },
+    ]);
+
+    // Redelivery (flaky URL now healthy): because the gate is completeness
+    // (1 stored < 2 expected), mirroring RE-RUNS and captures the missing one.
+    // The old presence gate (length > 0) would have skipped this → lost media.
+    world.failMediaUrls.delete('https://api.twilio.com/media/flaky');
+    await signedTwilioPost(app, SMS_PATH, params);
+    expect(world.messages[0]!.media_attachments).toEqual([
+      { s3Key: `media/${conv.conversationId}/MMpartial1/0`, contentType: 'image/jpeg' },
+      { s3Key: `media/${conv.conversationId}/MMpartial1/1`, contentType: 'image/png' },
+    ]);
+  });
 });
 
 describe('POST /webhooks/twilio/sms — conversation resolution', () => {

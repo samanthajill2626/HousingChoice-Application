@@ -5,10 +5,13 @@
 // MediaContentType{i} is attacker-controlled, so anything off this list is
 // treated as an opaque download — never rendered same-origin (stored-XSS guard).
 //
-// Raster images + PDF. A browser's built-in PDF viewer sandboxes any embedded
-// JS (it cannot reach the serving origin's DOM/cookies), so PDF is safe to serve
-// inline alongside nosniff. SVG / HTML / XHTML stay DELIBERATELY EXCLUDED — they
-// can run script on top-level navigation. Pure, no I/O.
+// Raster images + PDF. A browser's built-in PDF viewer runs PDF content in its
+// own sandbox: embedded PDF JS cannot reach the SERVING ORIGIN's DOM or cookies,
+// so a malicious PDF can't achieve same-origin XSS here (combined with nosniff,
+// which stops it being reinterpreted as HTML). PDF is still richer than an image
+// (it can attempt outbound navigation/phishing within the viewer), an accepted
+// trade-off since the bytes are already authed-staff-only. SVG / HTML / XHTML stay
+// DELIBERATELY EXCLUDED — they DO run script on top-level navigation. Pure, no I/O.
 
 /** Content-Types served inline (everything else → octet-stream download). */
 export const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([

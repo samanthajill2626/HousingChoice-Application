@@ -105,11 +105,19 @@ export const LOCAL_S3_SECRET_KEY = 'locallocal';
 export function createMediaStore(deps: CreateMediaStoreDeps = {}): MediaStore | undefined {
   const config = deps.config ?? loadConfig();
   if (!config.mediaBucket) return undefined;
+  // Defense-in-depth (belt to loadConfig's MEDIA_S3_ENDPOINT prod guard): NEVER
+  // attach the local endpoint + fixed dev credentials in production, even if a
+  // caller hands in a config that bypassed loadConfig. The fixed creds must never
+  // reach a real AWS S3Client.
+  const useLocalEndpoint = Boolean(config.mediaS3Endpoint) && config.nodeEnv !== 'production';
+  if (config.mediaS3Endpoint && config.nodeEnv === 'production') {
+    throw new Error('createMediaStore: refusing local S3 endpoint + dev credentials in production.');
+  }
   const client =
     deps.client ??
     new S3Client({
       region: config.awsRegion,
-      ...(config.mediaS3Endpoint
+      ...(useLocalEndpoint
         ? {
             endpoint: config.mediaS3Endpoint,
             forcePathStyle: true,

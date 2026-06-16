@@ -8,6 +8,7 @@
 // PII (doc §9): message bodies and media URLs are NEVER logged — log lines
 // carry SIDs/IDs/lengths only, correlated via the pino mixin.
 import { setTimeout as delay } from 'node:timers/promises';
+import type { Readable } from 'node:stream';
 import { Router } from 'express';
 import type { MediaStore } from '../../adapters/mediaStore.js';
 import { createMediaStore } from '../../adapters/mediaStore.js';
@@ -222,8 +223,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const attachments: MediaAttachment[] = [];
     for (const [i, url] of mediaUrls.entries()) {
       const key = `media/${conversationId}/${messageSid}/${i}`;
+      let stream: Readable | undefined;
       try {
-        const stream = await adapter.getMediaStream(url);
+        stream = await adapter.getMediaStream(url);
         // Normalize the SENDER-supplied MediaContentType before storing: keep it
         // only if it's an allowlisted inline type, else store octet-stream — so
         // a dangerous type (text/html, image/svg+xml) never enters S3 metadata
@@ -233,6 +235,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         await mediaStore.put(key, stream, contentType);
         attachments.push({ s3Key: key, contentType });
       } catch (err) {
+        // Destroy the source stream so a failed put (S3 5xx, network drop) doesn't
+        // leak the upstream socket/handle — lib-storage won't on a caller stream.
+        if (stream !== undefined && !stream.destroyed) stream.destroy();
         log.error(
           { err, providerSid: messageSid, mediaIndex: i },
           'media mirror failed — message record keeps the provider URL',
@@ -477,7 +482,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
       persistedConversationId = persisted.conversationId;
       persistedTsMsgId = persisted.tsMsgId;
-      mediaAlreadyMirrored = mediaAttachmentsOf(persisted).length > 0;
+      // Skip re-mirroring only when ALL attachments are already stored. Gating on
+      // completeness (not mere presence) recovers a PARTIAL first mirror: if the
+      // first delivery stored 1 of 2 (the other's fetch/put threw) and then 5xx'd
+      // downstream, the redelivery re-enters mirroring and captures the missing
+      // one (re-putting the already-stored key is an idempotent same-bytes no-op).
+      mediaAlreadyMirrored = mediaAttachmentsOf(persisted).length >= mediaUrls.length;
       mergeContext({ conversationId: persistedConversationId });
       log.info(
         { providerSid: MessageSid },

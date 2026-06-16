@@ -1,3 +1,4 @@
+import path from 'node:path';
 import express, { type Express } from 'express';
 import type { FakeTwilioConfig } from './config.js';
 import { FakeTwilioEngine } from './engine/engine.js';
@@ -55,5 +56,40 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   app.use(createControlRouter(engine));
   // SSE stream of engine events for the fake-phones UI (Plan 2).
   app.use(createEventsRouter(engine));
+
+  // Static-serve the built fake-phones UI + SPA fallback, AFTER all API routers so
+  // reserved prefixes are matched by their routers first; the fallback only catches
+  // the remainder. Inert when uiDistDir is unset (no UI in plain test/scripted runs).
+  if (deps.config.uiDistDir) {
+    const distDir = path.resolve(deps.config.uiDistDir);
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "frame-ancestors 'none'",
+    ].join('; ');
+    app.use((_req, res, next) => {
+      res.setHeader('Content-Security-Policy', csp);
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      next();
+    });
+    app.use(express.static(distDir));
+    app.use((req, res, next) => {
+      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks'].some(
+        (p) => req.path === p || req.path.startsWith(`${p}/`),
+      );
+      if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {
+        next();
+        return;
+      }
+      res.sendFile(path.join(distDir, 'index.html'), (err) => {
+        if (err) next(err);
+      });
+    });
+  }
+
   return app;
 }

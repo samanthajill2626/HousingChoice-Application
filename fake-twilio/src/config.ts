@@ -19,6 +19,9 @@ export interface FakeTwilioConfig {
    * Vite proxy both use (dev-placeholder-not-a-secret).
    */
   originSecret: string;
+  /** Absolute path to the built fake-phones UI (FAKE_TWILIO_UI_DIST). When set, the
+   *  host static-serves it with a SPA fallback. Dev/e2e only; unset → no UI served. */
+  uiDistDir?: string;
 }
 
 /** The app's local CF_ORIGIN_SECRET default (app/src/lib/config.ts) + the value
@@ -43,5 +46,6 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
     appPublicBaseUrl: appPublicBaseUrl.replace(/\/$/, ''),
     authToken,
     originSecret,
+    ...(env.FAKE_TWILIO_UI_DIST ? { uiDistDir: env.FAKE_TWILIO_UI_DIST } : {}),
   };
 }

@@ -50,7 +50,7 @@
 // real dev contacts; `--local --mock` without --seeded starts with an empty DB,
 // so those personas won't resolve to any seeded contact either. Granular escape
 // hatches: npm run dev:app / dev:worker /
-// dev -w @housingchoice/dashboard / db:* (those do NOT load .env/.env.dev or
+// dev -w @housingchoice/dashboard-legacy / db:* (those do NOT load .env/.env.dev or
 // apply mode defaults).
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -359,7 +359,7 @@ const commands = [
 if (webEnabled) {
   // The dashboard workspace's own `dev` script = Vite (:5173, vite.config.ts).
   commands.push({
-    command: 'npm run dev -w @housingchoice/dashboard',
+    command: 'npm run dev -w @housingchoice/dashboard-legacy',
     name: 'web',
     prefixColor: 'green',
     env: childEnv,
@@ -493,6 +493,6 @@ try {
 logStream?.end();
 console.log(
   (mode === 'local'
-    ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it).'
+    ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it). S3 mock container is still running (npm run s3:stop to stop it).'
     : 'dev — stopped.') + (logRelPath ? ` Full logs: ${logRelPath}` : ''),
 );

@@ -192,6 +192,49 @@ defense #1 — an inbound webhook whose From matches is our own outbound project
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
 
+### fake-twilio (HTTP-seam messaging mock)
+
+**Dev/e2e only — NEVER deployed.** `fake-twilio` (workspace package `@housingchoice/fake-twilio`,
+`fake-twilio/`) is a standalone service that impersonates Twilio's REST API and POSTs
+correctly-signed webhooks back at the app, so the app's **real** `TwilioMessagingDriver` and
+`twilioSignature` middleware run unchanged against a local impersonator — no real Twilio account,
+full HTTP-seam fidelity. It is its own artifact (not in the Docker image / deploy bundle), **refuses
+to boot under `NODE_ENV=production`**, and the app's `TWILIO_API_BASE_URL` redirect is **rejected by
+the prod config validator** (three independent guards — see `fake-twilio/src/config.ts`,
+`app/src/lib/config.ts`).
+
+**How it runs in the stack.** `scripts/e2e-session.mjs` starts it first, on **port 8889**, then
+points the app at it. The app runs the real driver (`MESSAGING_DRIVER=twilio`) redirected via
+`TWILIO_API_BASE_URL=http://localhost:8889`, with a **shared** `TWILIO_AUTH_TOKEN` (the HMAC key both
+sides use), `SMS_SENDING_ENABLED=true` (the A2P kill-switch defaults OFF under the twilio driver, so
+it must be forced on), and `OUR_PHONE_NUMBERS=+15550009999`. The Twilio SID/secret values are
+Twilio-shaped dummies (the fake never authenticates them). `e2e:restart` also bounces the fake so a
+code change to it is picked up.
+
+**Control API (port 8889)** — the scripted-scenario surface (also `GET /health`):
+
+| Verb | Purpose |
+|---|---|
+| `POST /control/send-as-party` | Inject an inbound text/MMS as a party → fires a signed `/webhooks/twilio/sms` at the app |
+| `GET  /control/threads` | List every thread (both directions + delivery status) — the `/__dev/outbox` superset |
+| `POST /control/personas/ad-hoc` | Mint a throwaway caller number |
+| `POST /control/delivery-outcome` | Set the next outbound message's delivery profile (normal / stall / fail + ErrorCode) |
+| `POST /control/reset` | Clear threads + cancel in-flight status timers (wired into `e2e:reseed`) |
+| `GET  /control/dispatch-errors` | The dispatcher's error ring buffer — asserts a signing/middleware regression is observable, not swallowed |
+
+**Sign-vs-deliver split (the crux).** The dispatcher **signs** each webhook against
+`APP_PUBLIC_BASE_URL` (the app's `PUBLIC_BASE_URL`, **:5173**) — because the app's signature
+middleware reconstructs the signed URL as `${PUBLIC_BASE_URL}${req.originalUrl}` — but **POSTs** to
+`APP_BASE_URL` (the app's real address, **:8080**). It also mirrors the dev `x-origin-verify`
+header (from `CF_ORIGIN_SECRET`) so the app's origin-secret gate (which fronts `/webhooks/*`) lets it
+through. **`403`s in the app log mean drift** in one of: the shared `TWILIO_AUTH_TOKEN`,
+`PUBLIC_BASE_URL`, or `CF_ORIGIN_SECRET` between the two sides.
+
+> **Version-pin caveat (from the spike).** The redirect relies on twilio v6's internal
+> `RequestClient` (a **private** API), verified against **`twilio@6.0.2`**. Keep `twilio` pinned and
+> **re-run `app/test/twilioHttpClient.test.ts` on any twilio upgrade** — that test is the contract
+> that the host-rewrite still works.
+
 ### Jobs (async delivery path)
 
 Since M1.2 every job flows: `jobs.enqueue()` (app) → one-off EventBridge Scheduler schedule

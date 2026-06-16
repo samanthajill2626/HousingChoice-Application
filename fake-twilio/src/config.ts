@@ -22,6 +22,17 @@ export interface FakeTwilioConfig {
   /** Absolute path to the built fake-phones UI (FAKE_TWILIO_UI_DIST). When set, the
    *  host static-serves it with a SPA fallback. Dev/e2e only; unset → no UI served. */
   uiDistDir?: string;
+  /**
+   * The fake's OWN externally-reachable base URL — the SAME origin the app is
+   * pointed at via TWILIO_API_BASE_URL (e.g. http://localhost:8889). The CallEngine
+   * mints recording URLs (`${publicBaseUrl}/recordings/${callSid}/${recordingSid}.mp3`)
+   * from this, and the recording-serve route lives at the same origin, so the app's
+   * Phase-1 SSRF dev-override (which accepts a recording URL only when its origin ===
+   * the app's twilioApiBaseUrl origin) resolves the fetch back here. Derived from
+   * FAKE_TWILIO_PUBLIC_URL when set, else `http://localhost:${port}` — kept in lock-step
+   * with the app's TWILIO_API_BASE_URL so it can't drift.
+   */
+  publicBaseUrl: string;
 }
 
 /** The app's local CF_ORIGIN_SECRET default (app/src/lib/config.ts) + the value
@@ -40,12 +51,18 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
   const appPublicBaseUrl = env.APP_PUBLIC_BASE_URL ?? appBaseUrl;
   const authToken = env.TWILIO_AUTH_TOKEN ?? '';
   const originSecret = env.CF_ORIGIN_SECRET ?? DEV_ORIGIN_SECRET_DEFAULT;
+  const port = Number(env.FAKE_TWILIO_PORT ?? 8889);
+  // The fake's own public origin = what the app uses as TWILIO_API_BASE_URL. Default
+  // to localhost:<port> (the e2e/dev wiring sets both to :8889); FAKE_TWILIO_PUBLIC_URL
+  // overrides when the app reaches the fake at a different host (e.g. 127.0.0.1).
+  const publicBaseUrl = (env.FAKE_TWILIO_PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, '');
   return {
-    port: Number(env.FAKE_TWILIO_PORT ?? 8889),
+    port,
     appBaseUrl: appBaseUrl.replace(/\/$/, ''),
     appPublicBaseUrl: appPublicBaseUrl.replace(/\/$/, ''),
     authToken,
     originSecret,
+    publicBaseUrl,
     ...(env.FAKE_TWILIO_UI_DIST ? { uiDistDir: env.FAKE_TWILIO_UI_DIST } : {}),
   };
 }

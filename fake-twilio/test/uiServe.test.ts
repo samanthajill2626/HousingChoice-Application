@@ -7,6 +7,7 @@ import request from 'supertest';
 import { buildFakeTwilioApp } from '../src/server.js';
 import { loadFakeConfig } from '../src/config.js';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { RealClock } from '../src/engine/clock.js';
 
 let distDir: string;
@@ -20,7 +21,7 @@ afterAll(() => rmSync(distDir, { recursive: true, force: true }));
 
 function app() {
   const config = loadFakeConfig({ NODE_ENV: 'test', TWILIO_AUTH_TOKEN: 't', FAKE_TWILIO_UI_DIST: distDir });
-  const engine = new FakeTwilioEngine({ clock: new RealClock(), dispatcher: { post: async () => 200 } });
+  const engine = new FakeTwilioEngine({ clock: new RealClock(), dispatcher: { post: async () => 200 }, hub: new EventHub() });
   return buildFakeTwilioApp({ config, engine });
 }
 

@@ -561,21 +561,20 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     // allowlist keeps a forged URL from pointing our authenticated fetch
     // anywhere else.
     const url = new URL(mediaUrl);
-    const isTwilioMedia = url.protocol === 'https:' && url.hostname === TWILIO_MEDIA_HOST;
-    // Dev/mock seam: when the Twilio REST base URL is overridden to a local fake
-    // (fake-twilio), inbound MediaUrls point at that SAME fake origin
-    // (http://localhost:8889/...). Allow exactly that origin so the mirror can
-    // fetch the canned media. `apiBaseUrl` is NEVER set in production
-    // (config.ts guards TWILIO_API_BASE_URL there), so prod stays https +
-    // api.twilio.com ONLY — this branch is unreachable in a deployed env.
-    let isFakeMedia = false;
-    if (this.deps.apiBaseUrl !== undefined && this.deps.apiBaseUrl !== '') {
-      const fake = new URL(this.deps.apiBaseUrl);
-      isFakeMedia = url.protocol === fake.protocol && url.host === fake.host;
-    }
-    if (!isTwilioMedia && !isFakeMedia) {
+    // Dev-only: when the driver is redirected to a fake Twilio host
+    // (deps.apiBaseUrl, set ONLY when config.twilioApiBaseUrl is configured —
+    // which is rejected in production), also accept that exact origin for media
+    // fetch. The fake serves media/recordings over http on localhost, so this
+    // widens BOTH the protocol and host checks, but ONLY for the configured dev
+    // origin. Needed so the inbound-MMS mirror can fetch the fake's canned URLs.
+    const devOrigin = this.deps.apiBaseUrl !== undefined ? new URL(this.deps.apiBaseUrl).origin : undefined;
+    const isRealTwilio = url.protocol === 'https:' && url.hostname === TWILIO_MEDIA_HOST;
+    const isDevFake = devOrigin !== undefined && url.origin === devOrigin;
+    if (!isRealTwilio && !isDevFake) {
       throw new MediaFetchRefusedError(
-        `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST} (got ${url.protocol}//${url.hostname})`,
+        `${op}: refusing media URL outside https://${TWILIO_MEDIA_HOST}` +
+          (devOrigin !== undefined ? ` or ${devOrigin}` : '') +
+          ` (got ${url.protocol}//${url.hostname})`,
         'host_not_allowed',
       );
     }

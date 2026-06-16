@@ -9,10 +9,14 @@
 //                         can't reach localhost.
 //   --local (hermetic)    npm run dev -- --local:
 //                           1. db:start   DynamoDB Local container
-//                           2. db:create  all tables (idempotent)
-//                           3. db:seed    seed data   (idempotent)
-//                         No AWS credentials needed. Also selected whenever
-//                         DYNAMODB_ENDPOINT is set (env or .env).
+//                           2. db:create  all tables — DROP + recreate (empty)
+//                                         by default; idempotent (skip-existing)
+//                                         with --seeded
+//                           3. db:seed    seed data   (idempotent) — ONLY with --seeded
+//                         Starts with a guaranteed-EMPTY DB by default (a prior
+//                         seed is wiped); pass --seeded to load the demo
+//                         fixtures instead. No AWS credentials needed. Also
+//                         selected whenever DYNAMODB_ENDPOINT is set (env or .env).
 //
 // Either way, step "run": app (tsx watch, :8080) + worker (tsx watch) + the
 // dashboard Vite dev server (:5173, HMR) concurrently with prefixed output.
@@ -35,11 +39,17 @@
 //            :8889 and redirects the app's messaging at it (real Twilio driver
 //            against a local impersonator — never real Twilio). Works in either
 //            DynamoDB mode.
+//   --seeded controls SEED DATA ONLY (local mode): load the demo fixtures
+//            (app/src/lib/seedData.ts) into DynamoDB Local and create tables
+//            idempotently (no wipe). Without it the hermetic DB is dropped +
+//            recreated empty each boot. No effect in live mode (never seeds AWS).
 //   --no-web skip the Vite server — backend only.
-// `--local --mock` is the fully self-consistent combo: the fake's seeded +1555…
-// personas match the hermetic seed data. `--mock` alone redirects Twilio against
-// the LIVE dev backend, where those seeded personas won't map to real dev
-// contacts. Granular escape hatches: npm run dev:app / dev:worker /
+// `--local --mock --seeded` is the fully self-consistent combo: the fake's
+// seeded +1555… personas match the hermetic seed data. `--mock` alone redirects
+// Twilio against the LIVE dev backend, where those seeded personas won't map to
+// real dev contacts; `--local --mock` without --seeded starts with an empty DB,
+// so those personas won't resolve to any seeded contact either. Granular escape
+// hatches: npm run dev:app / dev:worker /
 // dev -w @housingchoice/dashboard / db:* (those do NOT load .env/.env.dev or
 // apply mode defaults).
 import { spawn } from 'node:child_process';
@@ -76,6 +86,10 @@ const localEnv = readDotenv('.env', '.env') ?? {};
 // never real Twilio). It controls ONLY Twilio — it is orthogonal to --local
 // (which alone decides DynamoDB) and composes freely with either DynamoDB mode.
 const mockEnabled = process.argv.includes('--mock');
+
+// --seeded loads the demo fixtures (app/src/lib/seedData.ts) into DynamoDB Local.
+// Local-only: live mode talks to the real AWS dev backend and is never seeded.
+const seedEnabled = process.argv.includes('--seeded');
 
 // Live unless --local or a DynamoDB Local endpoint is in play (mirrors
 // resolveDevEnv's mode decision below). --mock does NOT affect this — it only
@@ -193,9 +207,9 @@ if (mockRedirect) {
 }
 
 /** Run a one-shot tsx script (db:create / db:seed) and await success. */
-function runTsx(scriptRelPath) {
+function runTsx(scriptRelPath, scriptArgs = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', scriptRelPath], {
+    const child = spawn(process.execPath, ['--import', 'tsx', scriptRelPath, ...scriptArgs], {
       cwd: repoRoot,
       env: childEnv,
       stdio: 'inherit',
@@ -226,18 +240,36 @@ function runCommand(cmd, args, label) {
 // Abs path to the fake-phones UI build the fake-twilio host serves under --mock.
 const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 
+// Local boot steps: DB container, MinIO S3, tables+bucket, [seed only with
+// --seeded], then run. MinIO is the storage counterpart of DynamoDB Local — it
+// starts in --local regardless of --mock/--seeded (only inbound MMS fills it).
+const localSteps = seedEnabled ? 5 : 4;
 if (mode === 'local') {
   console.log('dev — mode: hermetic (DynamoDB Local + MinIO S3; no AWS touched)');
-  console.log('dev — step 1/5: DynamoDB Local container');
+  console.log(`dev — step 1/${localSteps}: DynamoDB Local container`);
   await ensureDbStarted();
-  console.log('dev — step 2/5: MinIO local S3 container');
+  console.log(`dev — step 2/${localSteps}: MinIO local S3 container`);
   await ensureS3Started();
-  console.log('dev — step 3/5: tables + media bucket');
-  await runTsx('app/scripts/db-create.ts');
-  await runTsx('app/scripts/s3-create.ts');
-  console.log('dev — step 4/5: seed data');
-  await runTsx('app/scripts/db-seed.ts');
+  if (seedEnabled) {
+    console.log(`dev — step 3/${localSteps}: tables + media bucket`);
+    await runTsx('app/scripts/db-create.ts');
+    await runTsx('app/scripts/s3-create.ts');
+    console.log(`dev — step 4/${localSteps}: seed data (--seeded)`);
+    await runTsx('app/scripts/db-seed.ts');
+  } else {
+    // No --seeded: DROP + recreate the tables so a previously-seeded container
+    // can't leak stale fixtures — a true zero-data start. (--reset is hard-
+    // gated to the localhost endpoint inside db-create.ts.) The media bucket is
+    // ensured either way (s3-create is idempotent).
+    console.log(`dev — step 3/${localSteps}: tables (reset — empty DB) + media bucket`);
+    await runTsx('app/scripts/db-create.ts', ['--reset']);
+    await runTsx('app/scripts/s3-create.ts');
+    console.log('dev — seed data: SKIPPED (empty DB; pass --seeded to load demo fixtures)');
+  }
 } else {
+  if (seedEnabled) {
+    console.warn('dev — --seeded ignored in live mode (the AWS dev backend is never seeded).');
+  }
   const driver =
     childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');
   const secretCount = Object.keys(secretsEnv).length;
@@ -278,7 +310,7 @@ if (mockRedirect) {
   if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
 }
 
-const runStep = mode === 'local' ? 'step 5/5' : 'step 2/2';
+const runStep = mode === 'local' ? `step ${localSteps}/${localSteps}` : 'step 2/2';
 console.log(
   `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +
     `watch mode (Ctrl-C stops all${mode === 'local' ? '; DB container stays up' : ''})`,

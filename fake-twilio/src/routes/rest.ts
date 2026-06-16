@@ -41,17 +41,9 @@ export function createRestRouter(engine: FakeTwilioEngine): Router {
     });
   });
 
-  // Deferred channels — visible 501 seams (voice, number provisioning).
-  const notImplemented = (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) =>
-    res.status(501).json({
-      code: 0,
-      message: 'not-implemented-in-v1 (fake-twilio: SMS/MMS only)',
-      more_info: '',
-      status: 501,
-    });
-  router.post('/2010-04-01/Accounts/:accountSid/Calls.json', notImplemented as never);
-  router.get('/2010-04-01/Accounts/:accountSid/AvailablePhoneNumbers/:country/Local.json', notImplemented as never);
-  router.post('/2010-04-01/Accounts/:accountSid/IncomingPhoneNumbers.json', notImplemented as never);
+  // Voice + number-provisioning (Calls.json, AvailablePhoneNumbers,
+  // IncomingPhoneNumbers) are handled by the voiceRest router (Phase 6) — the
+  // former 501 stubs here are gone now that those routes are real.
 
   return router;
 }

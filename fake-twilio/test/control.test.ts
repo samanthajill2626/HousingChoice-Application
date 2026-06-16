@@ -4,6 +4,7 @@ import request from 'supertest';
 import { buildFakeTwilioApp } from '../src/server.js';
 import { loadFakeConfig } from '../src/config.js';
 import { FakeTwilioEngine } from '../src/engine/engine.js';
+import { EventHub } from '../src/engine/eventHub.js';
 import { ManualClock } from '../src/engine/clock.js';
 import type { WebhookParams } from '../src/engine/signer.js';
 
@@ -13,6 +14,7 @@ function makeApp() {
   const engine = new FakeTwilioEngine({
     clock: new ManualClock('2026-06-15T00:00:00.000Z'),
     dispatcher: { post: async (path, params) => { posted.push({ path, params }); return 200; } },
+    hub: new EventHub(),
   });
   return { app: buildFakeTwilioApp({ config, engine }), posted };
 }

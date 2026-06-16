@@ -61,6 +61,29 @@ export interface PlaceCallInput {
 /** Whether the dialed bridge records, and where to POST the recording callback. */
 type RecordingContext = { enabled: true; callbackUrl: string } | { enabled: false };
 
+/** Click-to-call outbound origination input (Phase 6 Calls.json calls this). */
+export interface OriginateCallInput {
+  to: string;
+  from: string;
+  /** The app TwiML url to fetch (any TwiML it returns is interpreted generically). */
+  url: string;
+  scenario?: CallScenario;
+}
+
+/** Per-call dial context the step methods (pressDigit/answerLeg/hangup) advance.
+ *  Stored once placeCall/originateCall has interpreted the inbound <Dial> TwiML and
+ *  built the legs; cleared once a terminal status is posted. This is the seam that
+ *  lets the auto-run (scenario runner) and the manual step API share ONE advance
+ *  path through runDialChain. */
+interface PendingDial {
+  answering: DialNumber;
+  actionUrl: string | undefined;
+  recording: RecordingContext;
+  scenario: CallScenario;
+  /** Guard so a call advances through the dial chain exactly once. */
+  resolved: boolean;
+}
+
 /** Map a scenario outcome to Twilio's DialCallStatus vocabulary. */
 function outcomeToDialStatus(outcome: NonNullable<CallScenario['outcome']>): CallStatus {
   switch (outcome) {
@@ -82,6 +105,8 @@ export class CallEngine {
   readonly hub: EventHub;
 
   private readonly calls = new Map<string, CallState>();
+  /** Per-call dial context awaiting a step (manual API) or scheduled auto-run. */
+  private readonly pendingDials = new Map<string, PendingDial>();
   private sidSeq = 0;
   /** Deterministic RecordingSid counter (no Date.now()/Math.random()). */
   private recordingSeq = 0;
@@ -143,18 +168,55 @@ export class CallEngine {
 
   /**
    * Place a call: POST the inbound /voice webhook, interpret the TwiML, and (if it
-   * dials) schedule the whisper→gate→status chain for the answering leg.
+   * dials) build the legs. WITH a scenario, schedule the whisper→gate→status chain
+   * (auto-run, expressed via the same step internals). WITHOUT a scenario, pause
+   * after interpret — the call awaits explicit step calls (pressDigit/hangup).
    */
   async placeCall(input: PlaceCallInput): Promise<CallState> {
-    const callSid = this.mintCallSid();
-    const scenario = input.scenario ?? {};
     const kind: CallKind = this.registry.isPool(input.to) ? 'masked' : 'founder';
-    const now = this.clock.nowIso();
-    const call: CallState = {
-      callSid,
+    return this.beginCall({
       from: input.from,
       to: input.to,
       kind,
+      inboundPath: '/webhooks/twilio/voice',
+      scenario: input.scenario,
+    });
+  }
+
+  /**
+   * Click-to-call: originate an OUTBOUND call by fetching the app TwiML at `url`
+   * (POST CallSid/From/To/CallStatus, exactly like an inbound webhook), then drive
+   * it through the SAME interpret→whisper→gate→outcome→(recording) lifecycle as
+   * placeCall. Generic — whatever TwiML `url` returns is interpreted, not hardcoded.
+   * This is the seam Phase 6's Calls.json uses for the dashboard click-to-call.
+   */
+  async originateCall(input: OriginateCallInput): Promise<CallState> {
+    return this.beginCall({
+      from: input.from,
+      to: input.to,
+      kind: 'outbound',
+      inboundPath: this.pathOf(input.url),
+      scenario: input.scenario,
+    });
+  }
+
+  /** Shared origination core for placeCall + originateCall. */
+  private async beginCall(args: {
+    from: string;
+    to: string;
+    kind: CallKind;
+    inboundPath: string;
+    scenario: CallScenario | undefined;
+  }): Promise<CallState> {
+    const callSid = this.mintCallSid();
+    const hasScenario = args.scenario !== undefined;
+    const scenario = args.scenario ?? {};
+    const now = this.clock.nowIso();
+    const call: CallState = {
+      callSid,
+      from: args.from,
+      to: args.to,
+      kind: args.kind,
       status: 'ringing',
       legs: [],
       createdAt: now,
@@ -164,21 +226,13 @@ export class CallEngine {
     this.hub.emit({ type: 'call.placed', call });
 
     const { body } = await this.dispatcher.postForResponse(
-      '/webhooks/twilio/voice',
-      buildInboundVoiceParams({ callSid, from: input.from, to: input.to }),
+      args.inboundPath,
+      buildInboundVoiceParams({ callSid, from: args.from, to: args.to }),
     );
     const plan = interpretTwiml(body);
 
-    if (plan.kind !== 'dial') {
-      // No dial instruction — nothing to bridge. Terminal no-op.
-      call.status = 'completed';
-      this.touch(call);
-      this.hub.emit({ type: 'call.completed', call });
-      return call;
-    }
-
-    // Adversarial-review guard: never index numbers[0] blindly.
-    if (plan.numbers.length === 0) {
+    if (plan.kind !== 'dial' || plan.numbers.length === 0) {
+      // No dial instruction (or no dialable number) — nothing to bridge. Terminal.
       call.status = 'completed';
       this.touch(call);
       this.hub.emit({ type: 'call.completed', call });
@@ -192,15 +246,29 @@ export class CallEngine {
       call.legs.push(leg);
     }
     const answering = this.chooseAnsweringLeg(plan.numbers, scenario);
-    const actionUrl = plan.actionUrl;
-    const recording = this.recordingContextOf(plan);
 
-    // Schedule the whisper/gate/status chain on the injected clock so timing is
-    // deterministic (ManualClock.flush() runs it). Honor scenario.ringMs.
+    // Stash the dial context so BOTH the scenario auto-run and the manual step API
+    // advance the call through the SAME runDialChain path.
+    this.pendingDials.set(callSid, {
+      answering,
+      actionUrl: plan.actionUrl,
+      recording: this.recordingContextOf(plan),
+      scenario,
+      resolved: false,
+    });
+
+    if (!hasScenario) {
+      // Step-API mode: pause here. The call awaits pressDigit/answerLeg/hangup.
+      return call;
+    }
+
+    // Scenario auto-run: schedule a tick that invokes the step methods in order on
+    // the injected clock (deterministic). The auto-run is just the step API driven
+    // by the scenario — keeping the 5.2 webhook sequence + status identical.
     const delayMs = scenario.ringMs ?? (this.scheduleSeq += 1);
     const stepPromise = new Promise<void>((resolve) => {
       this.clock.schedule(delayMs, () => {
-        this.runDialChain(call, answering, actionUrl, scenario, recording)
+        this.runScenario(callSid, scenario)
           .catch(() => {
             /* a step failure must not leave settle() hanging */
           })
@@ -211,6 +279,62 @@ export class CallEngine {
     void stepPromise.finally(() => this.pending.delete(stepPromise));
 
     return call;
+  }
+
+  /** Drive a paused call to its terminal state per the scenario, by invoking the
+   *  SAME step methods the manual API uses. `digit === null` (no press) → hangup;
+   *  otherwise pressDigit(digit). */
+  private async runScenario(callSid: string, scenario: CallScenario): Promise<void> {
+    if (scenario.digit === null) {
+      await this.hangup(callSid);
+      return;
+    }
+    await this.pressDigit(callSid, scenario.digit ?? '1');
+  }
+
+  /** Step API: inject a DTMF digit on the answering leg's whisper gate, then run the
+   *  bridge outcome + <Dial action> status (+ recording/transcription). */
+  async pressDigit(callSid: string, digit: '0' | '1' | string): Promise<void> {
+    const pd = this.pendingDials.get(callSid);
+    const call = this.calls.get(callSid);
+    if (!pd || !call || pd.resolved) return;
+    await this.advanceDial(call, pd, digit);
+  }
+
+  /** Step API: mark a leg answered without a whisper gate (bare/team dial), then run
+   *  the bridge outcome + status. `legSelector` matches a leg phone, or defaults to
+   *  the answering leg. */
+  async answerLeg(callSid: string, legSelector?: string): Promise<void> {
+    const pd = this.pendingDials.get(callSid);
+    const call = this.calls.get(callSid);
+    if (!pd || !call || pd.resolved) return;
+    const phone = legSelector ?? pd.answering.phone;
+    // Treat an explicit answer as accepting the leg with no whisper to play.
+    await this.advanceDial(call, { ...pd, answering: { ...pd.answering, whisperUrl: undefined } }, undefined, phone);
+  }
+
+  /** Step API: caller/callee hangs up before answering → no-answer terminal. */
+  async hangup(callSid: string): Promise<void> {
+    const pd = this.pendingDials.get(callSid);
+    const call = this.calls.get(callSid);
+    if (!pd || !call || pd.resolved) return;
+    // digit === null models "no press" → the gate times out → no-answer.
+    await this.advanceDial(call, pd, null);
+  }
+
+  /** Single advance path shared by the scenario runner and the step API: play the
+   *  answering leg's whisper (if any) with the given gate digit, then post the
+   *  <Dial action> summary, finalize status, and fire recording/transcription. */
+  private async advanceDial(
+    call: CallState,
+    pd: PendingDial,
+    digit: string | null | undefined,
+    answeredPhone?: string,
+  ): Promise<void> {
+    const live = this.pendingDials.get(call.callSid);
+    if (live) live.resolved = true;
+    await this.runDialChain(call, pd.answering, pd.actionUrl, pd.scenario, pd.recording, digit, answeredPhone);
+    this.pendingDials.delete(call.callSid);
   }
 
   /** The dial-level recording instruction extracted from the inbound TwiML plan.
@@ -247,14 +371,16 @@ export class CallEngine {
     actionUrl: string | undefined,
     scenario: CallScenario,
     recording: RecordingContext = { enabled: false },
+    digit: string | null | undefined = scenario.digit,
+    answeredPhone?: string,
   ): Promise<void> {
     let accepted = false;
 
     if (answering.whisperUrl !== undefined) {
-      accepted = await this.advanceWhisper(call, answering, scenario);
+      accepted = await this.advanceWhisper(call, answering, digit);
     } else {
-      // No whisper on this leg (e.g. a bare team dial): treat as answered.
-      this.markAnswered(call, answering.phone);
+      // No whisper on this leg (e.g. a bare team dial / explicit answerLeg): answered.
+      this.markAnswered(call, answeredPhone ?? answering.phone);
       accepted = true;
     }
 
@@ -337,7 +463,7 @@ export class CallEngine {
   private async advanceWhisper(
     call: CallState,
     leg: DialNumber,
-    scenario: CallScenario,
+    gateDigit: string | null | undefined,
   ): Promise<boolean> {
     const whisperUrl = leg.whisperUrl;
     if (whisperUrl === undefined) return false;
@@ -355,10 +481,10 @@ export class CallEngine {
 
     // Model "no press" (digit === null) as a Gather timeout → no-answer. We do NOT
     // POST a gate accept; the call falls through to no-answer.
-    if (scenario.digit === null) {
+    if (gateDigit === null) {
       return false;
     }
-    const digit = scenario.digit ?? '1';
+    const digit = gateDigit ?? '1';
 
     const { body: gateBody } = await this.dispatcher.postForResponse(
       this.pathOf(whisperPlan.actionUrl),

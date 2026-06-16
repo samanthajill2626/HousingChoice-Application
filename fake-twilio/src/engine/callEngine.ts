@@ -333,8 +333,14 @@ export class CallEngine {
   ): Promise<void> {
     const live = this.pendingDials.get(call.callSid);
     if (live) live.resolved = true;
-    await this.runDialChain(call, pd.answering, pd.actionUrl, pd.scenario, pd.recording, digit, answeredPhone);
-    this.pendingDials.delete(call.callSid);
+    try {
+      await this.runDialChain(call, pd.answering, pd.actionUrl, pd.scenario, pd.recording, digit, answeredPhone);
+    } finally {
+      // Always drop the pending-dial entry — even if a webhook in the chain throws —
+      // so a rejected dispatcher call can never leak the map entry (the scheduled
+      // callback's .catch() prevents a crash but would otherwise strand this entry).
+      this.pendingDials.delete(call.callSid);
+    }
   }
 
   /** The dial-level recording instruction extracted from the inbound TwiML plan.
@@ -505,6 +511,10 @@ export class CallEngine {
         const teamPhone = (gatePlan.numbers[0] as DialNumber).phone;
         const teamLeg: CallLeg = { phone: teamPhone, answered: true };
         call.legs.push(teamLeg);
+        // Mirror markAnswered's status transition so the call.answered event
+        // payload is consistent with the normal accept path (status='in-progress',
+        // not the stale 'ringing') BEFORE the event is emitted.
+        call.status = 'in-progress';
         this.touch(call);
         this.hub.emit({ type: 'call.answered', call });
       }

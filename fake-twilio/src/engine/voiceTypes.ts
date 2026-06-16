@@ -20,9 +20,22 @@ export type CallKind = 'masked' | 'founder' | 'outbound';
  *  ring time, recording, and the terminal bridge outcome). All fields optional —
  *  the engine fills sensible defaults (callee answers, digit '1', answered). */
 export interface CallScenario {
+  /**
+   * Advisory hint at which leg is intended to answer. CURRENT behavior:
+   * `chooseAnsweringLeg` always answers the FIRST dialed leg regardless of this
+   * value — `'callee'`/`'founder'` are modelled as that single first leg, and
+   * `'team'` is reached via the press-0 whisper-gate escape path (a returned team
+   * <Dial>), NOT by selecting a different leg here. Kept for scenario
+   * expressiveness/forward-compat (group/parallel fan-out would consult it).
+   */
   answerLeg?: 'callee' | 'founder' | 'team';
   digit?: '0' | '1' | null;
   ringMs?: number;
+  /**
+   * Advisory only — actual recording is driven by the app's returned TwiML
+   * (`record="record-from-answer-dual"` plus a recordingStatusCallback); this flag
+   * does NOT force recording. Kept for scenario expressiveness/forward-compat.
+   */
   record?: boolean;
   transcript?: string;
   outcome?: 'answered' | 'no-answer' | 'busy';

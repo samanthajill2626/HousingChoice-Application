@@ -100,6 +100,15 @@ describe('CallEngine', () => {
 
   it('press-0 (masked): gate(Digits=0) -> team Dial followed -> terminal status', async () => {
     const { engine, clock, calls } = makeEngine(() => GATE_TEAM_DIAL);
+    // Snapshot the call.status at the instant call.answered is emitted, so we can
+    // assert the team-escape path transitions to 'in-progress' (not stale 'ringing')
+    // before the event fires — mirroring the normal markAnswered accept path.
+    let statusAtAnswered: string | undefined;
+    engine.hub.subscribe((e) => {
+      if (e.type === 'call.answered' && statusAtAnswered === undefined) {
+        statusAtAnswered = e.call.status;
+      }
+    });
     await engine.placeCall({
       from: '+15550100001',
       to: '+15550190001',
@@ -110,6 +119,8 @@ describe('CallEngine', () => {
 
     const gate = calls.find((c) => c.path.startsWith('/webhooks/twilio/voice/whisper-gate'));
     expect(gate?.params['Digits']).toBe('0');
+    // The call.answered event for the team escape carried a consistent status.
+    expect(statusAtAnswered).toBe('in-progress');
     // A terminal status was posted.
     const status = calls.find((c) => c.path.startsWith('/webhooks/twilio/voice/status'));
     expect(status).toBeDefined();

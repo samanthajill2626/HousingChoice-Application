@@ -16,9 +16,10 @@ import { createRcsRouter } from './routes/rcs.js';
 import { createEventsRouter } from './routes/events.js';
 
 /** Absolute path to the committed canned recording MP3 the serve route streams.
- *  Resolved from THIS module's location (not cwd) so it works under tsx (src/) and
- *  a built dist/ alike — the asset sits at ../assets relative to src/server.ts and
- *  dist/server.js (the assets dir is copied next to the build). */
+ *  Resolved relative to THIS module via import.meta.url (not cwd) so it works under
+ *  tsx and vitest, which both run this service directly from src/. There is no dist
+ *  build/copy step for the fake-twilio backend — it always executes from src/
+ *  (dev + e2e + tests), so `./assets/...` next to src/server.ts is the only target. */
 const CANNED_RECORDING_PATH = fileURLToPath(new URL('./assets/canned-recording.mp3', import.meta.url));
 
 export interface FakeTwilioAppDeps {

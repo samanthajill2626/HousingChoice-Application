@@ -60,6 +60,23 @@ test('clears the input after a successful send', async () => {
   expect(box).toHaveValue('');
 });
 
+test('keeps the composed message + picked image when the send rejects', async () => {
+  const onSend = vi.fn().mockRejectedValue(new Error('engine refused it'));
+  setup({ onSend });
+  const box = screen.getByRole('textbox', { name: 'Message' });
+  await userEvent.type(box, 'keep me');
+  await userEvent.click(screen.getByRole('button', { name: new RegExp(cannedAssets[0]!.label, 'i') }));
+  await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+  expect(onSend).toHaveBeenCalledWith({ body: 'keep me', mediaUrls: [cannedAssets[0]!.url] });
+  // Rejected → input is preserved for a retry, and the image stays picked.
+  expect(box).toHaveValue('keep me');
+  expect(screen.getByRole('button', { name: new RegExp(cannedAssets[0]!.label, 'i') })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+});
+
 test('the delivery-profile toggle calls onSetDeliveryProfile', async () => {
   const { onSetDeliveryProfile } = setup();
   await userEvent.click(screen.getByRole('radio', { name: /fail/i }));

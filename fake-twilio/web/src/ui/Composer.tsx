@@ -17,7 +17,12 @@ export interface ComposerSendInput {
 }
 
 export interface ComposerProps {
-  onSend: (input: ComposerSendInput) => void;
+  /**
+   * Send the composed message. May be async: the Composer awaits it and only
+   * clears the input on success, so a rejected send (e.g. the engine refuses the
+   * media) keeps the user's text + picked images for a retry.
+   */
+  onSend: (input: ComposerSendInput) => void | Promise<void>;
   onSetDeliveryProfile: (profile: DeliveryProfile) => void;
   disabled?: boolean;
 }
@@ -34,21 +39,31 @@ export function Composer({ onSend, onSetDeliveryProfile, disabled = false }: Com
   const [body, setBody] = useState('');
   const [media, setMedia] = useState<string[]>([]);
   const [profile, setProfile] = useState<ProfileKey>('normal');
+  const [sending, setSending] = useState(false);
   const groupName = useId();
 
-  const canSend = !disabled && (body.trim() !== '' || media.length > 0);
+  const canSend = !disabled && !sending && (body.trim() !== '' || media.length > 0);
 
-  const send = (): void => {
+  const send = async (): Promise<void> => {
     if (!canSend) return;
-    onSend({ body: body.trim(), mediaUrls: media });
-    setBody('');
-    setMedia([]);
+    setSending(true);
+    try {
+      await onSend({ body: body.trim(), mediaUrls: media });
+      // Clear ONLY on success — a rejected send keeps the composed message + the
+      // picked images so the user can fix the cause and retry.
+      setBody('');
+      setMedia([]);
+    } catch {
+      // The parent surfaces the error; we just preserve the input here.
+    } finally {
+      setSending(false);
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      send();
+      void send();
     }
   };
 
@@ -116,7 +131,7 @@ export function Composer({ onSend, onSetDeliveryProfile, disabled = false }: Com
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={onKeyDown}
         />
-        <Button variant="primary" onClick={send} disabled={!canSend}>
+        <Button variant="primary" onClick={() => void send()} disabled={!canSend}>
           Send
         </Button>
       </div>

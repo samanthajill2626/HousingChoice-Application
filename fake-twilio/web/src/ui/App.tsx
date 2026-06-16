@@ -26,11 +26,13 @@ function PhonePanel({
   thread,
   onSend,
   onSetDeliveryProfile,
+  sendError,
 }: {
   persona: Persona | undefined;
   thread: Thread | undefined;
-  onSend: (input: ComposerSendInput) => void;
+  onSend: (input: ComposerSendInput) => void | Promise<void>;
   onSetDeliveryProfile: (profile: DeliveryProfile) => void;
+  sendError?: string;
 }): React.JSX.Element {
   if (!persona) {
     return (
@@ -60,6 +62,12 @@ function PhonePanel({
         )}
       </div>
 
+      {sendError !== undefined && sendError !== '' && (
+        <p role="alert" className={styles.sendError}>
+          {sendError}
+        </p>
+      )}
+
       <Composer onSend={onSend} onSetDeliveryProfile={onSetDeliveryProfile} />
     </section>
   );
@@ -69,17 +77,25 @@ export function App(): React.JSX.Element {
   const phones = useFakePhones();
   const [adHocOpen, setAdHocOpen] = useState(false);
   const [adHocError, setAdHocError] = useState<string | undefined>(undefined);
+  const [sendError, setSendError] = useState<string | undefined>(undefined);
 
   const selectedPersona = phones.personas.find((p) => p.number === phones.selected);
   const selectedThread = phones.threads.find((t) => t.partyNumber === phones.selected);
 
-  const handleSend = (input: ComposerSendInput): void => {
+  const handleSend = async (input: ComposerSendInput): Promise<void> => {
     if (!selectedPersona) return;
-    void phones.sendAsParty({
-      from: selectedPersona.number,
-      body: input.body,
-      ...(input.mediaUrls.length > 0 && { mediaUrls: input.mediaUrls }),
-    });
+    setSendError(undefined);
+    try {
+      await phones.sendAsParty({
+        from: selectedPersona.number,
+        body: input.body,
+        ...(input.mediaUrls.length > 0 && { mediaUrls: input.mediaUrls }),
+      });
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Could not send the message.');
+      // Re-throw so the Composer keeps the composed message + picked images.
+      throw err;
+    }
   };
 
   const handleSetDeliveryProfile = (profile: DeliveryProfile): void => {
@@ -108,7 +124,11 @@ export function App(): React.JSX.Element {
           personas={phones.personas}
           unreadByNumber={phones.unreadByNumber}
           selected={phones.selected}
-          onSelect={phones.select}
+          onSelect={(number) => {
+            // A stale send error belongs to the party it happened on.
+            setSendError(undefined);
+            phones.select(number);
+          }}
           onAddAdHoc={() => {
             setAdHocError(undefined);
             setAdHocOpen(true);
@@ -119,6 +139,7 @@ export function App(): React.JSX.Element {
           thread={selectedThread}
           onSend={handleSend}
           onSetDeliveryProfile={handleSetDeliveryProfile}
+          {...(sendError !== undefined && { sendError })}
         />
       </main>
 

@@ -102,6 +102,23 @@ describe('App shell', () => {
     );
   });
 
+  it('surfaces an error and keeps the typed message when sendAsParty rejects', async () => {
+    const user = userEvent.setup();
+    sendAsParty.mockRejectedValueOnce(new Error('sendAsParty: mediaUrl … is not an http(s) URL'));
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'see this photo');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The failure is shown (not silently swallowed) …
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/not an http\(s\) URL/i);
+    // … and the message is preserved for a retry.
+    expect(box).toHaveValue('see this photo');
+  });
+
   it('a message.updated SSE event flips a message StatusChip to delivered', async () => {
     const user = userEvent.setup();
     render(<App />);

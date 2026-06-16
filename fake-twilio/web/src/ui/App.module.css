@@ -85,6 +85,18 @@
   text-align: center;
 }
 
+/* A failed send (e.g. the engine refused the message) — sits between the
+ * conversation log and the Composer, which still holds the unsent message. */
+.sendError {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--hc-space-2) var(--hc-space-4);
+  border-top: 1px solid var(--hc-color-border);
+  background-color: var(--hc-color-danger-bg);
+  color: var(--hc-color-danger);
+  font-size: var(--hc-font-size-sm);
+}
+
 /* Empty state when nothing is selected (fills the whole panel). */
 .empty {
   flex: 1 1 auto;

@@ -4,7 +4,13 @@ const FAKE_BASE = process.env.FAKE_TWILIO_URL ?? 'http://localhost:8889';
 
 export interface FakeThread {
   partyNumber: string;
-  messages: Array<{ sid: string; direction: 'inbound' | 'outbound'; body?: string; state: string }>;
+  messages: Array<{
+    sid: string;
+    direction: 'inbound' | 'outbound';
+    body?: string;
+    state: string;
+    mediaUrls?: string[];
+  }>;
 }
 
 export async function sendAsParty(request: APIRequestContext, input: { from: string; body?: string; to?: string }): Promise<string> {

@@ -24,6 +24,12 @@ export class WebhookDispatcher {
   constructor(private readonly deps: WebhookDispatcherDeps) {}
 
   async post(path: string, params: WebhookParams): Promise<number> {
+    return this.postForResponse(path, params).then((r) => r.status);
+  }
+
+  /** Like post(), but also returns the response body — for TwiML-returning voice
+   *  webhooks (/voice, /voice/whisper, /voice/whisper-gate) the CallEngine must read. */
+  async postForResponse(path: string, params: WebhookParams): Promise<{ status: number; body: string }> {
     const signedUrl = `${this.deps.appPublicBaseUrl}${path}`;
     const signature = signTwilioWebhook({ authToken: this.deps.authToken, url: signedUrl, params });
     const body = new URLSearchParams(params).toString();
@@ -39,6 +45,6 @@ export class WebhookDispatcher {
       // A hung connection during `e2e:restart` must not block forever (FIX 7).
       signal: AbortSignal.timeout(5000),
     });
-    return res.status;
+    return { status: res.status, body: await res.text() };
   }
 }

@@ -103,7 +103,8 @@ RCS fields parsed anywhere.
 - The **media-fetch SSRF dev-override** (§6) so the app can fetch a fake recording.
 - A **recording-serve** endpoint + a canned `audio/mpeg` asset.
 - Voice **control API** (place-call + step endpoints) and voice **events** on the
-  engine bus. `Calls.json` REST impersonation (for future click-to-call).
+  engine bus. A **real `Calls.json`** outbound-origination impersonation (for
+  click-to-call — fetches the app's TwiML `url` and drives it via the interpreter).
 - **RCS scaffold seams** (§9): a documented contract + thin `501`/stub seams.
 
 ### Out of scope (deferred)
@@ -119,8 +120,9 @@ RCS fields parsed anywhere.
 A new **`CallEngine`** sibling to the messaging engine in the fake-twilio service,
 sharing the signed `WebhookDispatcher`, clock, control-surface, and event bus.
 
-- **`fake-twilio/src/engine/twimlInterpreter.ts`** — parses returned TwiML (XML
-  parse) and walks the used verbs, returning a structured plan: which `<Number>`
+- **`fake-twilio/src/engine/twimlInterpreter.ts`** — parses returned TwiML using a
+  small, well-maintained XML-parse dependency (e.g. `fast-xml-parser`; pin it, no
+  hand-rolled parser) and walks the used verbs, returning a structured plan: which `<Number>`
   legs exist + their `url`(whisper)/`statusCallback`; the `<Dial>` `callerId`,
   `record`, `recordingStatusCallback`, `action`; `<Gather>` `action`/`numDigits`/
   `timeout`; `<Pause>`/`<Say>`/`<Hangup>`. No hardcoded URLs — all read from TwiML.
@@ -135,9 +137,13 @@ sharing the signed `WebhookDispatcher`, clock, control-surface, and event bus.
   `buildWhisperGateParams` (`Digits`), `buildDialStatusParams`
   (`DialCallStatus`,`DialCallDuration`), `buildRecordingParams`,
   `buildTranscriptionParams` — signed exactly like the SMS builders.
-- **REST impersonation** (extend `routes/rest.ts`): `POST /Calls.json` (`CA…`),
-  `GET /AvailablePhoneNumbers/US/Local.json`, `POST /IncomingPhoneNumbers.json`
-  (+ `list`/`update` if the relay path uses them).
+- **REST impersonation** (extend `routes/rest.ts`): `POST /Calls.json` — a **real
+  outbound-origination** path (not a stub): mint a `CA…` Call, then fetch the
+  app-provided TwiML `url` (POST `CallSid`/`From`/`To`/`CallStatus`) and run it
+  through the SAME `twimlInterpreter`/`CallEngine` that drives inbound calls — so
+  future **click-to-call** (`adapter.initiateCall`) works through the mock now (§5,
+  Flow C). Plus `GET /AvailablePhoneNumbers/US/Local.json`, `POST
+  /IncomingPhoneNumbers.json` (+ `list`/`update` if the relay path uses them).
 - **Recording serve:** `GET /recordings/:callSid/:recordingSid(.mp3)` → a tiny
   committed canned `audio/mpeg` blob.
 - **Number registry:** tracks provisioned pool numbers (number + smsUrl/voiceUrl).
@@ -184,6 +190,17 @@ The messaging engine is untouched.
 5. Engine fires `/voice/transcription` (`Transcript=<scenario text>`) → saved verbatim.
    - digit:none → gate `<Hangup/>` → `DialCallStatus=no-answer` → app missed-call
      push + auto-text job; no recording.
+
+### Flow C — outbound origination (click-to-call, future-proofed now)
+The app's future click-to-call will call `adapter.initiateCall({to, from, url})` →
+`POST …/Calls.json`. The fake handles it symmetrically: mint `CA…`, return the Call
+resource, then fetch the app-provided TwiML `url` (POST `CallSid`/`From`/`To`/
+`CallStatus`) and run it through the same interpreter/`CallEngine` (legs, whisper if
+present, status/recording per the TwiML + scenario). A `place-call`-style scenario
+supplies the human choices. The app has no click-to-call endpoint yet, so this path
+is generic (whatever TwiML the app returns is interpreted) and exercised in v1 via a
+test fixture; it's ready the moment the app adds the feature. Not on the masked/
+founder critical path.
 
 Throughout, the interpreter reads the app's **actual TwiML**; the scenario only
 supplies the human choices.
@@ -295,11 +312,12 @@ Driven by the scenario knobs (and REST/signing posture):
 - **Follow-up plan:** the fake-phones **voice UI**.
 - **Future cycle:** real RCS, gated on app support (the §9 contract is the on-ramp).
 
-## 13. Open questions / notes
+## 13. Resolved decisions
 
-- Exact XML parse approach for the interpreter (a tiny dependency vs a minimal
-  hand-rolled parser for the ~6 verbs) — settle in planning; prefer the smallest
-  reliable option, verified against real app TwiML fixtures.
-- Whether `Calls.json` impersonation is needed in v1 at all (the voice path uses
-  TwiML `<Dial>`, not REST `calls.create`) — implement a minimal stub so future
-  click-to-call works, but it is not on the masked/founder critical path.
+- **XML parsing:** use a small, well-maintained XML-parse dependency (e.g.
+  `fast-xml-parser`), pinned — no hand-rolled parser. Verify the interpreter against
+  real app TwiML fixtures.
+- **`Calls.json`:** implement it as a **real outbound-origination** path now (§4/§5
+  Flow C), not a stub, so future click-to-call works through the mock. Generic
+  (interprets whatever TwiML the app's `url` returns); exercised in v1 via a test
+  fixture; off the masked/founder critical path but built in.

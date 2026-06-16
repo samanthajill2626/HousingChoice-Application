@@ -17,6 +17,9 @@ import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const dashboardDir = path.join(repoRoot, 'dashboard');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+// The fake-phones UI is a static build served by the fake-twilio host on :8889.
+// We build it once at session start (below) and point the host at its dist.
+const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const sentinel = path.join(artifactsDir, '.restart');
 const pidFile = path.join(artifactsDir, 'session.pid');
@@ -109,7 +112,24 @@ function startFakeTwilio() {
     FAKE_TWILIO_PORT: '8889',
     APP_BASE_URL: 'http://localhost:8080',
     APP_PUBLIC_BASE_URL: childEnv.PUBLIC_BASE_URL,
+    // Serve the pre-built fake-phones UI (built once in main() before first start).
+    // On a restartBackend() bounce the existing dist is reused — the UI rarely
+    // changes, so we don't rebuild it.
+    FAKE_TWILIO_UI_DIST: fakeUiDistDir,
   });
+}
+
+async function buildFakeUi() {
+  // Build the standalone fake-phones React/Vite app once so the host can serve it
+  // as a static bundle on :8889. Vite caches between runs, so this is cheap after
+  // the first build. Must finish BEFORE startFakeTwilio() so dist/ exists.
+  const started = Date.now();
+  log('building fake-phones UI (npm run build -w @housingchoice/fake-twilio-web)…');
+  // npm-cli.js ships alongside the node binary (…/node_modules/npm/bin/npm-cli.js),
+  // so we run it through process.execPath rather than relying on a PATH lookup.
+  const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  await runOnce('fake-ui-build', [npmCli, 'run', 'build', '-w', '@housingchoice/fake-twilio-web']);
+  log(`fake-phones UI built in ${((Date.now() - started) / 1000).toFixed(1)}s → ${fakeUiDistDir}`);
 }
 
 function killChild(name) {
@@ -204,12 +224,17 @@ async function main() {
   await runOnce('db-create', ['--import', 'tsx', path.join('app', 'scripts', 'db-create.ts')]);
   await runOnce('db-seed', ['--import', 'tsx', path.join('app', 'scripts', 'db-seed.ts')]);
 
+  // Build the fake-phones UI BEFORE starting the host, so its dist/ exists when
+  // the host wires up static serving (FAKE_TWILIO_UI_DIST).
+  await buildFakeUi();
+
   // Start fake-twilio FIRST so the app's very first outbound send has a host to
   // reach (the app only calls it on send, but this avoids a race on boot).
   log('starting fake-twilio (:8889)…');
   startFakeTwilio();
   await waitForHealth('http://localhost:8889/health');
   log('fake-twilio ready (:8889)');
+  log('fake-phones UI → http://localhost:8889/');
 
   log('starting app, worker, web (non-watch)…');
   startApp();

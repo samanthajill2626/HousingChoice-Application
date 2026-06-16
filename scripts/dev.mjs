@@ -28,13 +28,20 @@
 // Google login / Twilio / push — except logs go to THIS terminal (pino
 // stdout), never CloudWatch (that's the deployed server's awslogs driver).
 //
-// Flags: --local (hermetic DynamoDB Local; no secrets/AWS), --no-web (skip the
-// Vite server — backend only), --mock (implies --local; also runs the fake-twilio
-// host + fake-phones UI on :8889 and points the app's messaging at it, so SMS
-// flows exercise the real Twilio driver against a local impersonator — never the
-// real dev backend / real Twilio). Granular escape hatches: npm run dev:app /
-// dev:worker / dev -w @housingchoice/dashboard / db:* (those do NOT load
-// .env/.env.dev or apply mode defaults).
+// Flags — independent, single-purpose, compose freely:
+//   --local  controls DynamoDB ONLY: hermetic DynamoDB Local (no secrets/AWS)
+//            vs the live AWS dev backend (default).
+//   --mock   controls Twilio ONLY: runs the fake-twilio host + fake-phones UI on
+//            :8889 and redirects the app's messaging at it (real Twilio driver
+//            against a local impersonator — never real Twilio). Works in either
+//            DynamoDB mode.
+//   --no-web skip the Vite server — backend only.
+// `--local --mock` is the fully self-consistent combo: the fake's seeded +1555…
+// personas match the hermetic seed data. `--mock` alone redirects Twilio against
+// the LIVE dev backend, where those seeded personas won't map to real dev
+// contacts. Granular escape hatches: npm run dev:app / dev:worker /
+// dev -w @housingchoice/dashboard / db:* (those do NOT load .env/.env.dev or
+// apply mode defaults).
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Writable } from 'node:stream';
@@ -64,15 +71,16 @@ function readDotenv(file, label) {
 const localEnv = readDotenv('.env', '.env') ?? {};
 
 // --mock runs the fake-twilio host + fake-phones UI alongside the app and points
-// the app's messaging at it. It MUST NOT touch the real dev backend / real
-// Twilio, so it implies hermetic local mode (treated like --local everywhere).
+// the app's messaging at it (the real Twilio driver against a local impersonator,
+// never real Twilio). It controls ONLY Twilio — it is orthogonal to --local
+// (which alone decides DynamoDB) and composes freely with either DynamoDB mode.
 const mockEnabled = process.argv.includes('--mock');
 
-// Live unless --local/--mock or a DynamoDB Local endpoint is in play (mirrors
-// resolveDevEnv's mode decision below).
+// Live unless --local or a DynamoDB Local endpoint is in play (mirrors
+// resolveDevEnv's mode decision below). --mock does NOT affect this — it only
+// redirects Twilio, not the database.
 const liveMode =
   !process.argv.includes('--local') &&
-  !mockEnabled &&
   process.env.DYNAMODB_ENDPOINT === undefined &&
   localEnv.DYNAMODB_ENDPOINT === undefined;
 
@@ -99,7 +107,7 @@ const fileEnv = { ...secretsEnv, ...localEnv };
 let resolved;
 try {
   resolved = resolveDevEnv({
-    local: process.argv.includes('--local') || mockEnabled,
+    local: process.argv.includes('--local'),
     processEnv: process.env,
     fileEnv,
     localEndpoint: LOCAL_ENDPOINT,
@@ -137,24 +145,37 @@ if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BAS
 if (childEnv.NODE_ENV === undefined) childEnv.NODE_ENV = 'development';
 if (childEnv.OTEL_SDK_DISABLED === undefined) childEnv.OTEL_SDK_DISABLED = 'true';
 
-// --mock (always hermetic local) points the app's messaging at the local
-// fake-twilio host on :8889 so it runs the REAL Twilio driver + signature
-// middleware against an impersonator (never real Twilio). Mirrors the env that
-// scripts/e2e-session.mjs bakes in. Defensive guard: never apply the redirect if
-// live mode somehow resolved (it can't, since --mock forces local above). Each
-// key is a DEFAULT — an explicit operator value still wins.
-const mockRedirect = mockEnabled && mode === 'local';
+// --mock points the app's messaging at the local fake-twilio host on :8889 so it
+// runs the REAL Twilio driver + signature middleware against an impersonator
+// (never real Twilio). This is orthogonal to the DynamoDB mode: it applies in
+// BOTH live and local, gated purely on --mock. Mirrors the env that
+// scripts/e2e-session.mjs bakes in.
+const mockRedirect = mockEnabled;
 if (mockRedirect) {
+  // FORCED — these define "use the mock", so they override any operator value:
+  // route the driver at the local fake and accept its app-number on inbound.
+  childEnv.MESSAGING_DRIVER = 'twilio';
+  childEnv.TWILIO_API_BASE_URL = 'http://localhost:8889';
+  // Append the fake's app-number to OUR_PHONE_NUMBERS so the app recognizes it,
+  // preserving any real numbers from .env.dev in live mode (and the fake's number
+  // working). Set it outright when unset.
+  {
+    const existing = childEnv.OUR_PHONE_NUMBERS;
+    childEnv.OUR_PHONE_NUMBERS =
+      existing === undefined || existing === ''
+        ? '+15550009999'
+        : `${existing},+15550009999`;
+  }
+
+  // ONLY-IF-ABSENT — respect live .env.dev creds/token; the fake inherits
+  // TWILIO_AUTH_TOKEN from childEnv either way, so signatures still match.
   const mockDefaults = {
-    MESSAGING_DRIVER: 'twilio',
     TWILIO_ACCOUNT_SID: 'ACfake000000000000000000000000000',
     TWILIO_API_KEY_SID: 'SKfake000000000000000000000000000',
     TWILIO_API_KEY_SECRET: 'fake-secret',
     TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
-    TWILIO_API_BASE_URL: 'http://localhost:8889',
     SMS_SENDING_ENABLED: 'true',
-    OUR_PHONE_NUMBERS: '+15550009999',
   };
   for (const [k, v] of Object.entries(mockDefaults)) {
     if (childEnv[k] === undefined || childEnv[k] === '') childEnv[k] = v;
@@ -203,14 +224,6 @@ if (mode === 'local') {
   await runTsx('app/scripts/db-create.ts');
   console.log('dev — step 3/4: seed data');
   await runTsx('app/scripts/db-seed.ts');
-  if (mockRedirect) {
-    console.log('dev — mock: building fake-phones UI (npm run build -w @housingchoice/fake-twilio-web)…');
-    await runCommand('npm', ['run', 'build', '-w', '@housingchoice/fake-twilio-web'], 'fake-phones UI build');
-    // Reap any orphan still holding :8889 before concurrently spawns the host
-    // (a second listen on a held port silently no-ops on Windows — see killTree).
-    const reaped = killPort(8889);
-    if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
-  }
 } else {
   const driver =
     childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');
@@ -239,6 +252,17 @@ if (mode === 'local') {
     console.error(`dev — ${err.message}`);
     process.exit(1);
   }
+}
+
+// --mock prep runs in EITHER mode (orthogonal to the DynamoDB decision above):
+// build the fake-phones UI the host serves and free :8889 before launch.
+if (mockRedirect) {
+  console.log('dev — mock: building fake-phones UI (npm run build -w @housingchoice/fake-twilio-web)…');
+  await runCommand('npm', ['run', 'build', '-w', '@housingchoice/fake-twilio-web'], 'fake-phones UI build');
+  // Reap any orphan still holding :8889 before concurrently spawns the host
+  // (a second listen on a held port silently no-ops on Windows — see killTree).
+  const reaped = killPort(8889);
+  if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
 }
 
 const runStep = mode === 'local' ? 'step 4/4' : 'step 2/2';

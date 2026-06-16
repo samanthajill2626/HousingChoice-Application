@@ -248,8 +248,13 @@ which is what you watch react.
 
 **How to open it.** `npm run e2e:session` builds the UI once and serves it from the host; open
 **`http://localhost:8889/`**. (`npm run dev -- --mock` also runs the mock + fake-phones UI locally
-— hermetic, with the app's messaging redirected to the local mock — open the same
-**`http://localhost:8889/`**.) Pick a persona from the roster (grouped Landlord / Tenant / PM, each
+and redirects the app's messaging to it — open the same **`http://localhost:8889/`**. The dev
+launcher's flags are **orthogonal, single-purpose**: `--local` controls DynamoDB (hermetic Local vs
+the live AWS dev backend) and `--mock` controls Twilio (redirect to this local fake vs real Twilio),
+and they compose freely. `--local --mock` is the **fully hermetic** combo — the fake's seeded
+`+1555…` personas match the hermetic seed data; `--mock` alone redirects Twilio against the **live
+dev backend**, where those seeded personas won't map to real dev contacts.) Pick a persona from the
+roster (grouped Landlord / Tenant / PM, each
 with its number + unread badge; **＋ Ad-hoc number** mints a throwaway caller), type and **Send** to
 fire a signed inbound webhook at the app, flip the per-thread **delivery-profile** toggle (Normal /
 Stall at sent / Fail) to script the next outbound message's status callbacks, and attach a **canned

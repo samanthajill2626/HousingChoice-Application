@@ -279,6 +279,12 @@ action>` summary — driving the app's **real** voice webhooks end-to-end. Every
 (ids from a counter, timing on an injected clock, outcome from a scripted scenario). The fake-phones
 **voice UI is a separate future plan** — not built here; today's surface is the control API below.
 
+**Founder triage is fully enabled** in the mock/e2e stack via a hermetic placeholder `FOUNDER_CELL`
+(`+15550000001`) plus the existing business number (`OUR_PHONE_NUMBERS=+15550009999`), so an inbound
+call to the business number runs the full founder bridge (whisper → press-1 → answer →
+record-to-MinIO → transcribe) rather than degrading to the "text us" fallback; a no-answer scenario
+fires the real missed-call push + autotext job.
+
 **Voice control API (port 8889)** — drives the `CallEngine`:
 
 | Verb | Purpose |

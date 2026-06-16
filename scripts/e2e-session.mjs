@@ -53,6 +53,11 @@ const childEnv = {
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
   TWILIO_API_BASE_URL: 'http://localhost:8889',
   OUR_PHONE_NUMBERS: '+15550009999',
+  // Founder call-triage dial-through target: a fake E.164 so an inbound call to
+  // the business number runs the FULL founder bridge through the fake (whisper →
+  // press-1 → answer → record → transcribe) instead of degrading to the "text us"
+  // fallback. Never a real cell. Externally-provided value wins for a real run.
+  FOUNDER_CELL: process.env.FOUNDER_CELL ?? '+15550000001',
   // A2P kill-switch defaults OFF when MESSAGING_DRIVER=twilio (config.ts), which
   // makes sendMessage throw before anything reaches the fake — force it ON so the
   // hermetic stack actually exercises outbound sends against the fake host.

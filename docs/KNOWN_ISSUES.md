@@ -36,16 +36,20 @@ the preferred tracker.
 
 ---
 
-## 2. [Medium · Test] `boards.spec.ts` relay-intro e2e failure (pre-existing)
+## 2. [Medium · Test] `boards.spec.ts` relay-intro e2e failure — ✅ RESOLVED
 
-- **Where:** [`e2e/tests/flows/boards.spec.ts`](../e2e/tests/flows/boards.spec.ts) — the
+- **Where:** [`e2e/tests/dashboard/boards.spec.ts`](../e2e/tests/dashboard/boards.spec.ts) — the
   "set up its relay thread → both parties get the intro text" test.
-- **Status:** Pre-existing on `main`. Verified **unrelated** to the fake-twilio work — it
-  fails identically with the fake-twilio branch's changes stashed, and the case-detail page
-  renders fully (no crash/unmount). Unfixed.
-- **Problem:** A relay-intro / pool-number provisioning gap — the relay-thread setup does
-  not result in both parties receiving the intro text as the spec expects. (Distinct from
-  the delivery-status render crash that *was* fixed on the fake-twilio branch.)
-- **Next step:** Triage the relay-thread provisioning path (pool-number allocation +
-  intro-text fan-out) against what the spec asserts; determine whether the spec or the
-  implementation is stale.
+- **Status:** **RESOLVED** on the fake-twilio voice work. Live-verified green
+  (`boards.spec.ts` → `ok … both parties get the intro text`, full `5 passed` run incl. the
+  voice flows).
+- **Root cause (two parts):** the relay-thread setup provisions a pool number, which the
+  fake-twilio mock used to `501` (`AvailablePhoneNumbers`/`IncomingPhoneNumbers.json`), AND
+  — once those were implemented — the app's `relayLiveProvisioning` kill-switch still
+  defaulted OFF under `MESSAGING_DRIVER=twilio`, returning `503 relay_provisioning_disabled`
+  before reaching the fake.
+- **Fix:** (a) the fake now implements real number provisioning (Phase 6 of the voice work);
+  (b) `config.relayLiveProvisioning` now defaults ON when `twilioApiBaseUrl` is set (mock
+  mode) — explicit `RELAY_LIVE_PROVISIONING` still wins; prod-safe because
+  `TWILIO_API_BASE_URL` is rejected at boot in production. With both, the pool number is
+  minted through the fake and the intro SMS fans out to both parties as the spec asserts.

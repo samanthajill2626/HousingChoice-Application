@@ -92,6 +92,25 @@
   background-color: var(--hc-color-surface-alt);
 }
 
+/* A non-image attachment (PDF / other doc): a labelled link, not a thumbnail. */
+.mediaFile {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-1);
+  align-self: flex-start;
+  padding: var(--hc-space-1) var(--hc-space-2);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-link, var(--hc-color-text));
+  background-color: var(--hc-color-surface-alt);
+  text-decoration: none;
+}
+
+.mediaFile:hover {
+  text-decoration: underline;
+}
+
 .meta {
   display: flex;
   align-items: center;

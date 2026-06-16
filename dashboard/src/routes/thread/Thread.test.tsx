@@ -177,9 +177,18 @@ describe('<Thread> timeline + bubbles', () => {
     expect(screen.queryByText(/Failed/)).not.toBeInTheDocument();
   });
 
-  it('renders inline <img> for mirrored (S3-backed) MMS media via the authed media endpoint', async () => {
+  it('renders inline <img> for mirrored image attachments via the authed media endpoint', async () => {
     api.listMessages.mockResolvedValue([
-      makeMessage({ tsMsgId: 't1#SM1', provider_sid: 'SM1', type: 'mms', body: '', media_s3_keys: ['k1', 'k2'] }),
+      makeMessage({
+        tsMsgId: 't1#SM1',
+        provider_sid: 'SM1',
+        type: 'mms',
+        body: '',
+        media_attachments: [
+          { s3Key: 'k1', contentType: 'image/png' },
+          { s3Key: 'k2', contentType: 'image/jpeg' },
+        ],
+      }),
     ]);
     renderThread();
 
@@ -191,7 +200,52 @@ describe('<Thread> timeline + bubbles', () => {
     expect(screen.queryByText(/media attachment/i)).not.toBeInTheDocument();
   });
 
-  it('falls back to the placeholder chip for MMS media with no S3 keys (unmirrored)', async () => {
+  it('renders a PDF attachment as a viewer link, not an <img>', async () => {
+    api.listMessages.mockResolvedValue([
+      makeMessage({
+        tsMsgId: 't1#SM2',
+        provider_sid: 'SM2',
+        type: 'mms',
+        body: '',
+        media_attachments: [{ s3Key: 'k1', contentType: 'application/pdf' }],
+      }),
+    ]);
+    renderThread();
+
+    const link = await screen.findByRole('link', { name: /pdf attachment/i });
+    expect(link).toHaveAttribute('href', '/api/messages/SM2/media/0');
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('renders a non-image, non-PDF attachment as a download link', async () => {
+    api.listMessages.mockResolvedValue([
+      makeMessage({
+        tsMsgId: 't1#SM3',
+        provider_sid: 'SM3',
+        type: 'mms',
+        body: '',
+        media_attachments: [{ s3Key: 'k1', contentType: 'application/octet-stream' }],
+      }),
+    ]);
+    renderThread();
+
+    const link = await screen.findByRole('link', { name: /^📎 attachment 1/i });
+    expect(link).toHaveAttribute('href', '/api/messages/SM3/media/0');
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('renders legacy media_s3_keys (no media_attachments) as download links', async () => {
+    api.listMessages.mockResolvedValue([
+      makeMessage({ tsMsgId: 't1#SM4', provider_sid: 'SM4', type: 'mms', body: '', media_s3_keys: ['k1'] }),
+    ]);
+    renderThread();
+
+    const link = await screen.findByRole('link', { name: /attachment 1/i });
+    expect(link).toHaveAttribute('href', '/api/messages/SM4/media/0');
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('falls back to the placeholder chip for MMS media with no attachments (unmirrored)', async () => {
     api.listMessages.mockResolvedValue([
       makeMessage({ tsMsgId: 't1#SM1', type: 'mms', body: '', mediaUrls: ['https://provider/1'] }),
     ]);

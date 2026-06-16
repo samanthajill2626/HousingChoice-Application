@@ -178,7 +178,10 @@ export interface Message {
   body?: string;
   /** Provider media URLs (MMS, inbound). */
   mediaUrls?: string[];
-  /** S3 keys of mirrored MMS media. */
+  /** Mirrored MMS attachments (key + stored content-type, together). Supersedes
+   *  media_s3_keys; the type drives inline-image vs PDF vs download rendering. */
+  media_attachments?: { s3Key: string; contentType: string }[];
+  /** @deprecated Legacy parallel key array (pre-media_attachments). */
   media_s3_keys?: string[];
   provider_sid: string;
   provider_ts: string;

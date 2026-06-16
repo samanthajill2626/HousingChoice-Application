@@ -4,11 +4,12 @@
 // an error) and, on a failed/undelivered send, an inline Retry that re-sends
 // the same body.
 //
-// MMS media: the backend mirrors inbound MMS media to S3 (`media_s3_keys`) and
-// the provider `mediaUrls` are not publicly fetchable, so for M1.4 we render a
-// clear "media attachment" placeholder chip rather than a broken <img>.
-// TODO(foundation): serve signed S3 URLs for media_s3_keys so attachments can
-// render inline — flagged; no media-serving endpoint exists yet in src/api.
+// MMS media: the backend mirrors inbound MMS media to S3 and records
+// `media_attachments` ({s3Key, contentType}). Each is served by the authed
+// same-origin endpoint and rendered BY TYPE: allowlisted images inline, PDFs as
+// a viewer link, anything else as a download. Provider `mediaUrls` are not
+// publicly fetchable, so an UNMIRRORED message (no attachments) still shows a
+// "media attachment" placeholder chip rather than a broken <img>.
 import { Badge, Button, DeliveryBadge, presentDeliveryStatus } from '../../ui';
 import { isPending, type TimelineMessage } from './useThreadMessages';
 import { PerRecipientDeliveryBadges } from './PerRecipientDeliveryBadges';
@@ -40,10 +41,16 @@ export interface MessageBubbleProps {
   roster?: ConversationParticipant[];
 }
 
-function mediaCount(message: TimelineMessage): number {
-  const keys = message.media_s3_keys?.length ?? 0;
-  const urls = message.mediaUrls?.length ?? 0;
-  return Math.max(keys, urls);
+/**
+ * Mirrored attachments for a message: prefers the cohesive media_attachments
+ * record, folding legacy media_s3_keys into it as octet-stream (→ download).
+ */
+function attachmentsOf(message: TimelineMessage): { s3Key: string; contentType: string }[] {
+  if (Array.isArray(message.media_attachments)) return message.media_attachments;
+  if (Array.isArray(message.media_s3_keys)) {
+    return message.media_s3_keys.map((s3Key) => ({ s3Key, contentType: 'application/octet-stream' }));
+  }
+  return [];
 }
 
 export function MessageBubble({
@@ -63,11 +70,12 @@ export function MessageBubble({
   const outbound = message.direction === 'outbound';
   const pending = isPending(message);
   const { isFailure } = presentDeliveryStatus(message.delivery_status);
-  const media = mediaCount(message);
-  // Mirrored (S3-backed) inbound MMS attachments are viewable inline via the
-  // authed same-origin media endpoint (the session cookie rides along). Media
-  // with no s3 keys (e.g. local/unmirrored) falls back to the placeholder chip.
-  const s3Keys = message.media_s3_keys ?? [];
+  // Mirrored (S3-backed) inbound MMS attachments are viewable via the authed
+  // same-origin media endpoint (the session cookie rides along); each renders by
+  // its stored type. Unmirrored media (e.g. local without a bucket) has no
+  // attachments and falls back to the provider-URL placeholder chip.
+  const attachments = attachmentsOf(message);
+  const unmirroredCount = message.mediaUrls?.length ?? 0;
   const hasBody = typeof message.body === 'string' && message.body.length > 0;
 
   // Relay mode (M1.7): only when a roster is supplied. Attribution comes from
@@ -93,26 +101,38 @@ export function MessageBubble({
 
         {hasBody && <p className={styles.body}>{message.body}</p>}
 
-        {s3Keys.length > 0 ? (
+        {attachments.length > 0 ? (
           <div className={styles.mediaGallery}>
-            {s3Keys.map((_, i) => {
+            {attachments.map((att, i) => {
               const src = `/api/messages/${encodeURIComponent(message.provider_sid)}/media/${i}`;
+              // Images render inline; PDFs open in the browser's sandboxed viewer
+              // (the serve endpoint sends them inline); anything else downloads.
+              if (att.contentType.startsWith('image/')) {
+                return (
+                  <a key={i} className={styles.mediaLink} href={src} target="_blank" rel="noopener noreferrer">
+                    <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />
+                  </a>
+                );
+              }
+              const isPdf = att.contentType === 'application/pdf';
               return (
-                <a key={i} className={styles.mediaLink} href={src} target="_blank" rel="noopener noreferrer">
-                  <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />
+                <a key={i} className={styles.mediaFile} href={src} target="_blank" rel="noopener noreferrer">
+                  {isPdf ? `📄 PDF attachment ${i + 1}` : `📎 Attachment ${i + 1}`}
                 </a>
               );
             })}
           </div>
         ) : (
-          media > 0 && (
+          unmirroredCount > 0 && (
             <span className={styles.media} title="Media attachment (not yet viewable)">
-              📎 {media === 1 ? 'Media attachment' : `${media} media attachments`}
+              📎 {unmirroredCount === 1 ? 'Media attachment' : `${unmirroredCount} media attachments`}
             </span>
           )
         )}
 
-        {!hasBody && media === 0 && <p className={styles.empty}>(no content)</p>}
+        {!hasBody && attachments.length === 0 && unmirroredCount === 0 && (
+          <p className={styles.empty}>(no content)</p>
+        )}
 
         {lateReply && (
           <Badge tone="warning" dot title="Arrived after the thread was closed">

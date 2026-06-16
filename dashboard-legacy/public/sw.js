@@ -1,5 +1,5 @@
 /* HousingChoice service worker (M1.4). Plain JS, served statically from
- * dashboard/dist at /sw.js (same-origin — allowed under the app CSP's
+ * dashboard-legacy/dist at /sw.js (same-origin — allowed under the app CSP's
  * script-src 'self' / default worker-src fallback). Registered from main.tsx
  * (guarded to prod/https or localhost).
  *
@@ -25,7 +25,7 @@
  * fields (kind + callId/conversationId + action) into a fixed same-origin
  * allow-list of paths, then re-asserted same-origin before navigate/openWindow.
  * The routing/validation logic below is a VERBATIM MIRROR of the tested ES
- * module dashboard/src/sw/route.ts (resolveSafePath / isPlausibleId /
+ * module dashboard-legacy/src/sw/route.ts (resolveSafePath / isPlausibleId /
  * assertSameOriginPath) — this classic worker can't import it, so keep the two
  * in sync (see route.test.ts for the security cases this locks).
  */
@@ -100,7 +100,7 @@ self.addEventListener('notificationclick', (event) => {
 });
 
 /* ===========================================================================
- * MIRROR of dashboard/src/sw/route.ts (tested in route.test.ts). Keep in sync.
+ * MIRROR of dashboard-legacy/src/sw/route.ts (tested in route.test.ts). Keep in sync.
  * A classic service worker can't import the ES module, so these pure functions
  * are duplicated here verbatim. They guarantee the click target is same-origin
  * and on a fixed allow-list — see the C1 note in the header comment.

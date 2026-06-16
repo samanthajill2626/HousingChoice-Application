@@ -25,12 +25,15 @@ test('renders the body as escaped text (no HTML injection)', () => {
   expect(screen.queryByRole('img')).not.toBeInTheDocument();
 });
 
-test('outbound message shows a StatusChip', () => {
+// PARTY-CENTRIC: the UI is a fake phone for the selected party. An engine
+// `outbound` message is the APP texting the party — i.e. what the party RECEIVES
+// — so it sits LEFT (incoming) and carries the app→party delivery StatusChip.
+test('an app message (engine outbound) shows a StatusChip', () => {
   render(<MessageBubble message={msg({ direction: 'outbound', state: 'sent' })} />);
   expect(screen.getByText(/sent/i)).toBeInTheDocument();
 });
 
-test('outbound failed message surfaces its errorCode via the status chip', () => {
+test('an app failed message (engine outbound) surfaces its errorCode via the status chip', () => {
   render(
     <MessageBubble
       message={msg({ direction: 'outbound', state: 'failed', errorCode: '30005' })}
@@ -41,17 +44,26 @@ test('outbound failed message surfaces its errorCode via the status chip', () =>
   expect(chip).toHaveAccessibleName(/30005/);
 });
 
-test('inbound message shows no StatusChip', () => {
+// The party's OWN message (engine `inbound`, from = the party) is a sent text —
+// it has no app→party delivery chip.
+test("the party's own message (engine inbound) shows no StatusChip", () => {
   render(<MessageBubble message={msg({ direction: 'inbound', state: 'delivered' })} />);
-  // No outbound delivery-state chip is rendered for an inbound message.
+  // No app→party delivery-state chip is rendered for the party's own message.
   expect(screen.queryByText('Delivered')).not.toBeInTheDocument();
 });
 
-test('distinguishes inbound vs outbound for layout', () => {
+test('maps engine direction to a party-centric side', () => {
+  // Engine inbound = the party's OWN message → outgoing (right) side, no chip.
   const { rerender } = render(<MessageBubble message={msg({ direction: 'inbound' })} />);
-  expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-direction', 'inbound');
+  const incoming = screen.getByTestId('message-bubble');
+  expect(incoming).toHaveAttribute('data-party-side', 'outgoing');
+  expect(incoming).toHaveAttribute('data-direction', 'inbound');
+
+  // Engine outbound = the APP's message to the party → incoming (left) side.
   rerender(<MessageBubble message={msg({ direction: 'outbound' })} />);
-  expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-direction', 'outbound');
+  const appMsg = screen.getByTestId('message-bubble');
+  expect(appMsg).toHaveAttribute('data-party-side', 'incoming');
+  expect(appMsg).toHaveAttribute('data-direction', 'outbound');
 });
 
 test('renders a media thumbnail for each mediaUrl', () => {

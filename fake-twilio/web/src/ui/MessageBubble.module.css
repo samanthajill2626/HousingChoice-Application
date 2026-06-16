@@ -2,10 +2,13 @@
   display: flex;
   width: 100%;
 }
-.inbound {
+/* PARTY-CENTRIC sides: `.incoming` = the app's message TO the party (left,
+   neutral, carries the delivery chip); `.outgoing` = the party's OWN sent
+   text (right, brand). */
+.incoming {
   justify-content: flex-start;
 }
-.outbound {
+.outgoing {
   justify-content: flex-end;
 }
 
@@ -21,14 +24,14 @@
   overflow-wrap: anywhere;
 }
 
-.inbound .bubble {
+.incoming .bubble {
   background-color: var(--hc-color-surface);
   border: 1px solid var(--hc-color-border);
   color: var(--hc-color-text);
   border-bottom-left-radius: var(--hc-radius-sm);
 }
 
-.outbound .bubble {
+.outgoing .bubble {
   background-color: var(--hc-color-brand);
   color: var(--hc-color-text-inverse);
   border-bottom-right-radius: var(--hc-radius-sm);
@@ -68,6 +71,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.outbound .time {
+.outgoing .time {
   color: rgba(255, 255, 255, 0.85);
 }

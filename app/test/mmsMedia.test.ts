@@ -159,7 +159,46 @@ describe('GET /api/messages/:providerSid/media/:idx (authed)', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('image/jpeg');
+    // Allowlisted image → INLINE (no attachment disposition) so the <img> renders.
+    expect(res.headers['content-disposition']).toBeUndefined();
+    // Defense headers on every media response.
+    expect(res.headers['content-security-policy']).toContain('sandbox');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect((res.body as Buffer).toString()).toContain('media-bytes-for:');
+  });
+
+  it('XSS GUARD: a dangerous stored Content-Type (text/html) is forced to a download', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    // The MMS sender controls MediaContentType — simulate a malicious html type.
+    await signedTwilioPost(app, '/webhooks/twilio/sms', inboundMmsParams({ MediaContentType0: 'text/html' }));
+
+    const res = await request(app)
+      .get('/api/messages/SMmms0001/media/0')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    // Never served as text/html (would render + run script same-origin).
+    expect(res.headers['content-type']).toContain('application/octet-stream');
+    expect(res.headers['content-type']).not.toContain('text/html');
+    expect(res.headers['content-disposition']).toMatch(/^attachment/);
+    expect(res.headers['content-security-policy']).toContain('sandbox');
+  });
+
+  it('XSS GUARD: image/svg+xml (script-capable) is forced to a download, not served inline', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    await signedTwilioPost(app, '/webhooks/twilio/sms', inboundMmsParams({ MediaContentType0: 'image/svg+xml' }));
+
+    const res = await request(app)
+      .get('/api/messages/SMmms0001/media/0')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.headers['content-type']).toContain('application/octet-stream');
+    expect(res.headers['content-type']).not.toContain('svg');
+    expect(res.headers['content-disposition']).toMatch(/^attachment/);
   });
 
   it('GUARDRAIL: requires auth (no session cookie → 401/403) — MMS media is never public', async () => {

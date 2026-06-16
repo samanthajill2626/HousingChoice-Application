@@ -79,6 +79,22 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   sms_sending_disabled: 503,
 };
 
+/**
+ * Content-Types the MMS media endpoint will serve INLINE (renderable raster
+ * images only). The stored type comes from the MMS SENDER's MediaContentType
+ * (attacker-controlled), so anything off this allowlist — text/html,
+ * image/svg+xml (SVG carries script), application/*, … — is served as an
+ * octet-stream attachment (download, never render) to prevent same-origin
+ * stored XSS when the attachment link is opened top-level. SVG is deliberately
+ * EXCLUDED: it is an image but can execute script on top-level navigation.
+ */
+const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
 /** Page-size bounds shared by the inbox and thread endpoints. */
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
@@ -668,16 +684,28 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       res.status(404).json({ error: 'media_not_found' });
       return;
     }
-    // Content-Type is the stored MMS type (image/jpeg, …) — load-bearing under
-    // the app-wide nosniff header so an <img> renders. Default to a non-inline
-    // octet-stream if it's somehow absent (never sniff PII media as something else).
-    res.setHeader('Content-Type', object.contentType ?? 'application/octet-stream');
+    // XSS HARDENING (the stored Content-Type is the MMS sender's, attacker-
+    // controlled): serve INLINE only for allowlisted raster images; anything
+    // else (text/html, image/svg+xml, application/*, absent) is forced to an
+    // octet-stream ATTACHMENT so the browser downloads rather than renders it —
+    // a malicious type/body can't run script same-origin when the attachment
+    // link is opened top-level. Belt-and-braces: a restrictive CSP (no script,
+    // sandboxed) + nosniff on THIS response neuter execution even if a renderer
+    // is reached. nosniff also stops the browser sniffing octet-stream → html.
+    const stored = object.contentType;
+    const inline = typeof stored === 'string' && INLINE_MEDIA_TYPES.has(stored.toLowerCase());
+    res.setHeader('Content-Type', inline ? stored : 'application/octet-stream');
+    if (!inline) {
+      res.setHeader('Content-Disposition', `attachment; filename="attachment-${idx}"`);
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     if (object.contentLength !== undefined) {
       res.setHeader('Content-Length', String(object.contentLength));
     }
     // Immutable per (MessageSid, idx); private so only this session's browser caches it.
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    log.info({ providerSid, mediaIndex: idx }, 'streaming inbound MMS media to the dashboard');
+    log.info({ providerSid, mediaIndex: idx, inline }, 'streaming inbound MMS media to the dashboard');
     object.body.on('error', (err) => {
       log.error({ err, providerSid, mediaIndex: idx }, 'media stream errored mid-flight');
       res.destroy(err);

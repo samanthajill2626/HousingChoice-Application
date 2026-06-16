@@ -94,6 +94,13 @@ export interface AppConfig {
   /** A2P Messaging Service (MGxxx) all outbound sends go through. */
   twilioMessagingServiceSid?: string;
   /**
+   * Dev-only override of the Twilio REST base URL (e.g. http://localhost:8889 for
+   * the fake-twilio service). Redirects the real TwilioMessagingDriver to a fake
+   * host so the production driver path is exercised in tests. REJECTED in
+   * production (fail-closed) — deployed stacks always use the real Twilio host.
+   */
+  twilioApiBaseUrl?: string;
+  /**
    * Public https base URL of the stack (the CloudFront domain,
    * `https://<domain>`) — Twilio webhook signature reconstruction needs the
    * exact public URL (M1.1 Builder B). Empty locally.
@@ -246,6 +253,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(
       'MESSAGING_RECORD_OUTBOX is set while NODE_ENV=production — refusing to start. The dev ' +
         'message outbox persists message bodies (PII) and must never run in production.',
+    );
+  }
+
+  // Dev-only Twilio REST redirect (fake-twilio host). MUST NOT be set in
+  // production; mirrors the DEV_AUTH_ENABLED / MESSAGING_RECORD_OUTBOX dev-only
+  // gates above and is checked here, before the other prod-wiring validation, so
+  // the dangerous combination fails fast on the right error.
+  const twilioApiBaseUrl = env.TWILIO_API_BASE_URL?.trim();
+  if (twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 && nodeEnv === 'production') {
+    throw new Error(
+      'TWILIO_API_BASE_URL is set while NODE_ENV=production — refusing to start. It is a dev-only ' +
+        'override that redirects Twilio REST calls to a fake host; production must use the real Twilio endpoint.',
     );
   }
 
@@ -518,6 +537,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioApiKeySecret: env.TWILIO_API_KEY_SECRET,
     twilioAuthToken: env.TWILIO_AUTH_TOKEN,
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
+    twilioApiBaseUrl: twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? twilioApiBaseUrl : undefined,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,

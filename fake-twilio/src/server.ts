@@ -11,6 +11,7 @@ import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
 import { createVoiceRestRouter } from './routes/voiceRest.js';
 import { createControlRouter } from './routes/control.js';
+import { createVoiceControlRouter } from './routes/voiceControl.js';
 import { createEventsRouter } from './routes/events.js';
 
 /** Absolute path to the committed canned recording MP3 the serve route streams.
@@ -111,6 +112,12 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   app.use(createVoiceRestRouter({ callEngine, registry, cannedRecordingPath: CANNED_RECORDING_PATH }));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
+  // The VOICE control router shares the `/control` prefix but owns DISJOINT
+  // subpaths (`/control/place-call`, `/control/calls[...]`) — no collision with
+  // the SMS control routes above. It drives the SAME CallEngine instance built
+  // (or injected) here, so a call placed via control is the one the voice REST
+  // surface + SSE stream see.
+  app.use(createVoiceControlRouter({ callEngine }));
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
   // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine
   // emits through — no way to fabricate a mismatched hub even when `engine` is injected

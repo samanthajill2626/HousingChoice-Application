@@ -86,12 +86,36 @@ export interface CreateMediaStoreDeps {
 }
 
 /**
- * Returns undefined when MEDIA_BUCKET is unset (local loop: mirroring is
- * skipped — the webhook logs and keeps the provider URLs on the message).
+ * Fixed credentials for the local S3-compatible store (MinIO). MinIO VALIDATES
+ * credentials (unlike DynamoDB Local, which ignores them), so the client must
+ * present exactly the container's root user/password — and must NOT fall back to
+ * ambient AWS_* env, which would not match. Dev-only and not secret; the launcher
+ * (scripts/s3.mjs) starts MinIO with the same pair.
+ */
+export const LOCAL_S3_ACCESS_KEY = 'local';
+export const LOCAL_S3_SECRET_KEY = 'locallocal';
+
+/**
+ * Returns undefined when MEDIA_BUCKET is unset (local loop without S3: mirroring
+ * is skipped — the webhook logs and keeps the provider URLs on the message).
+ * When `mediaS3Endpoint` is set (local MinIO), the client targets it with
+ * path-style addressing and fixed local creds; unset → real AWS (default
+ * endpoint + instance-role credentials), unchanged.
  */
 export function createMediaStore(deps: CreateMediaStoreDeps = {}): MediaStore | undefined {
   const config = deps.config ?? loadConfig();
   if (!config.mediaBucket) return undefined;
-  const client = deps.client ?? new S3Client({ region: config.awsRegion });
+  const client =
+    deps.client ??
+    new S3Client({
+      region: config.awsRegion,
+      ...(config.mediaS3Endpoint
+        ? {
+            endpoint: config.mediaS3Endpoint,
+            forcePathStyle: true,
+            credentials: { accessKeyId: LOCAL_S3_ACCESS_KEY, secretAccessKey: LOCAL_S3_SECRET_KEY },
+          }
+        : {}),
+    });
   return new S3MediaStore(config.mediaBucket, client);
 }

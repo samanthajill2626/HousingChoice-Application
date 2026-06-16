@@ -135,6 +135,13 @@ export interface AppConfig {
    */
   mediaBucket?: string;
   /**
+   * S3-compatible endpoint override for the media store (MEDIA_S3_ENDPOINT) —
+   * the local-dev seam for MinIO (e.g. http://localhost:9000). Unset in AWS,
+   * where the SDK resolves the real S3 endpoint + instance-role creds. DEV-ONLY:
+   * loadConfig refuses to start if this is set while NODE_ENV=production.
+   */
+  mediaS3Endpoint?: string;
+  /**
    * Max concurrent GET /api/events SSE streams (SSE_MAX_CONNECTIONS,
    * default 50) — each stream holds a socket/timer/listeners until close;
    * beyond the cap new streams get 503.
@@ -265,6 +272,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(
       'TWILIO_API_BASE_URL is set while NODE_ENV=production — refusing to start. It is a dev-only ' +
         'override that redirects Twilio REST calls to a fake host; production must use the real Twilio endpoint.',
+    );
+  }
+
+  // Dev-only S3 endpoint override (MinIO/local S3). MUST NOT be set in
+  // production — same posture as TWILIO_API_BASE_URL above: prod must use the
+  // real AWS S3 endpoint + instance-role credentials.
+  const mediaS3Endpoint = env.MEDIA_S3_ENDPOINT?.trim();
+  if (mediaS3Endpoint !== undefined && mediaS3Endpoint.length > 0 && nodeEnv === 'production') {
+    throw new Error(
+      'MEDIA_S3_ENDPOINT is set while NODE_ENV=production — refusing to start. It is a dev-only ' +
+        'override for local S3-compatible storage (MinIO); production must use the real AWS S3 endpoint.',
     );
   }
 
@@ -543,6 +561,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ourPhoneNumbers,
     ...(founderCell !== undefined && { founderCell }),
     mediaBucket: env.MEDIA_BUCKET,
+    mediaS3Endpoint: mediaS3Endpoint !== undefined && mediaS3Endpoint.length > 0 ? mediaS3Endpoint : undefined,
     sseMaxConnections,
     publicRateLimitMax,
     publicRateLimitWindowMs,

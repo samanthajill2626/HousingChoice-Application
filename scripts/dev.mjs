@@ -49,6 +49,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import concurrently from 'concurrently';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
+import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killPort } from './lib/killTree.mjs';
 import { assertHousingChoiceAccount } from './lib/hcAws.mjs';
 import { resolveDevEnv } from './lib/devMode.mjs';
@@ -121,10 +122,19 @@ const { mode, overlay } = resolved;
 // Whether to also run the dashboard Vite server (default yes; --no-web skips).
 const webEnabled = !process.argv.includes('--no-web');
 
+// In --local, point the media store at the local MinIO (the S3 counterpart of
+// DynamoDB Local). Orthogonal to --mock: the store exists whenever storage is
+// local; --mock only decides whether inbound MMS arrives to fill it.
+const localMediaEnv =
+  mode === 'local'
+    ? { MEDIA_BUCKET: process.env.MEDIA_BUCKET ?? 'hc-local-media', MEDIA_S3_ENDPOINT: LOCAL_S3_ENDPOINT }
+    : {};
+
 // Children also need tsx on PATH even when this script runs outside npm.
 const childEnv = {
   ...process.env,
   ...overlay,
+  ...localMediaEnv,
   PATH: `${path.join(repoRoot, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
 };
 
@@ -217,12 +227,15 @@ function runCommand(cmd, args, label) {
 const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 
 if (mode === 'local') {
-  console.log('dev — mode: hermetic (DynamoDB Local; no AWS touched)');
-  console.log('dev — step 1/4: DynamoDB Local container');
+  console.log('dev — mode: hermetic (DynamoDB Local + MinIO S3; no AWS touched)');
+  console.log('dev — step 1/5: DynamoDB Local container');
   await ensureDbStarted();
-  console.log('dev — step 2/4: tables');
+  console.log('dev — step 2/5: MinIO local S3 container');
+  await ensureS3Started();
+  console.log('dev — step 3/5: tables + media bucket');
   await runTsx('app/scripts/db-create.ts');
-  console.log('dev — step 3/4: seed data');
+  await runTsx('app/scripts/s3-create.ts');
+  console.log('dev — step 4/5: seed data');
   await runTsx('app/scripts/db-seed.ts');
 } else {
   const driver =
@@ -265,7 +278,7 @@ if (mockRedirect) {
   if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
 }
 
-const runStep = mode === 'local' ? 'step 4/4' : 'step 2/2';
+const runStep = mode === 'local' ? 'step 5/5' : 'step 2/2';
 console.log(
   `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +
     `watch mode (Ctrl-C stops all${mode === 'local' ? '; DB container stays up' : ''})`,
@@ -283,6 +296,11 @@ if (mockRedirect) {
   // Printed as a bare URL so the terminal makes it clickable.
   console.log('  ▶ Fake phones (mock): http://localhost:8889/');
   console.log("    (the app's messaging is redirected to this local mock — no real Twilio sends)");
+  console.log('');
+}
+if (mode === 'local') {
+  console.log('  ▶ MinIO console:      http://localhost:9001/  (user: local / pass: locallocal)');
+  console.log('    (local S3 for mirrored MMS media; bucket hc-local-media)');
   console.log('');
 }
 

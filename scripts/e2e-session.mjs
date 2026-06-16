@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync }
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
+import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -30,6 +31,9 @@ const childEnv = {
   OTEL_SDK_DISABLED: process.env.OTEL_SDK_DISABLED ?? 'true',
   DYNAMODB_ENDPOINT: process.env.DYNAMODB_ENDPOINT ?? LOCAL_ENDPOINT,
   TABLE_PREFIX: process.env.TABLE_PREFIX ?? 'hc-local-',
+  // Local S3 (MinIO) so inbound MMS media mirrors + serves back to the dashboard.
+  MEDIA_BUCKET: process.env.MEDIA_BUCKET ?? 'hc-local-media',
+  MEDIA_S3_ENDPOINT: process.env.MEDIA_S3_ENDPOINT ?? LOCAL_S3_ENDPOINT,
   PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? 'http://localhost:5173',
   DEV_AUTH_ENABLED: '1',
   MESSAGING_RECORD_OUTBOX: '1',
@@ -168,7 +172,7 @@ function shutdown(code = 0) {
     clearInterval(parentWatchInterval);
     parentWatchInterval = null;
   }
-  log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB container left running)');
+  log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
   try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
   setTimeout(() => process.exit(code), 500);
@@ -220,8 +224,11 @@ async function main() {
 
   log('ensuring DynamoDB Local…');
   await ensureDbStarted();
-  log('creating tables + seeding…');
+  log('ensuring MinIO local S3…');
+  await ensureS3Started();
+  log('creating tables + media bucket + seeding…');
   await runOnce('db-create', ['--import', 'tsx', path.join('app', 'scripts', 'db-create.ts')]);
+  await runOnce('s3-create', ['--import', 'tsx', path.join('app', 'scripts', 's3-create.ts')]);
   await runOnce('db-seed', ['--import', 'tsx', path.join('app', 'scripts', 'db-seed.ts')]);
 
   // Build the fake-phones UI BEFORE starting the host, so its dist/ exists when
@@ -242,7 +249,7 @@ async function main() {
   startVite();
 
   await waitForHealth();
-  log('ready — app :8080, web :5173, fake-twilio :8889 (MESSAGING_DRIVER=twilio → fake)');
+  log('ready — app :8080, web :5173, fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

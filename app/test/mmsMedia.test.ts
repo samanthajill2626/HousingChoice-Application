@@ -104,6 +104,18 @@ describe('inbound MMS media mirroring', () => {
     expect(msg?.media_s3_keys).toEqual([world.mediaPuts[0]!.key]);
   });
 
+  it('normalizes a dangerous sender Content-Type to octet-stream AT STORE time', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    // The MMS sender controls MediaContentType — a malicious text/html must NOT
+    // be persisted as the object's type (defense-in-depth with the serve-time
+    // allowlist).
+    await signedTwilioPost(app, '/webhooks/twilio/sms', inboundMmsParams({ MediaContentType0: 'text/html' }));
+
+    expect(world.mediaPuts).toHaveLength(1);
+    expect(world.mediaPuts[0]!.contentType).toBe('application/octet-stream');
+  });
+
   it('RELAY inbound MMS now captures + mirrors media (previously dropped)', async () => {
     const world = createFakeWorld();
     registerRelayFanOutJobHandler({

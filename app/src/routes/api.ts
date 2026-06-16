@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
+import { isInlineMediaType } from '../lib/mediaTypes.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
@@ -79,21 +80,6 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   sms_sending_disabled: 503,
 };
 
-/**
- * Content-Types the MMS media endpoint will serve INLINE (renderable raster
- * images only). The stored type comes from the MMS SENDER's MediaContentType
- * (attacker-controlled), so anything off this allowlist — text/html,
- * image/svg+xml (SVG carries script), application/*, … — is served as an
- * octet-stream attachment (download, never render) to prevent same-origin
- * stored XSS when the attachment link is opened top-level. SVG is deliberately
- * EXCLUDED: it is an image but can execute script on top-level navigation.
- */
-const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-]);
 
 /** Page-size bounds shared by the inbox and thread endpoints. */
 const DEFAULT_PAGE_LIMIT = 50;
@@ -693,8 +679,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // sandboxed) + nosniff on THIS response neuter execution even if a renderer
     // is reached. nosniff also stops the browser sniffing octet-stream → html.
     const stored = object.contentType;
-    const inline = typeof stored === 'string' && INLINE_MEDIA_TYPES.has(stored.toLowerCase());
-    res.setHeader('Content-Type', inline ? stored : 'application/octet-stream');
+    const inline = isInlineMediaType(stored);
+    res.setHeader('Content-Type', inline ? stored! : 'application/octet-stream');
     if (!inline) {
       res.setHeader('Content-Disposition', `attachment; filename="attachment-${idx}"`);
     }

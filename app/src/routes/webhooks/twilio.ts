@@ -17,6 +17,7 @@ import {
   type MessagingAdapter,
 } from '../../adapters/messaging.js';
 import { mergeContext } from '../../lib/context.js';
+import { normalizeStoredMediaType } from '../../lib/mediaTypes.js';
 import { loadConfig, type AppConfig } from '../../lib/config.js';
 import {
   appEvents,
@@ -220,7 +221,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const key = `media/${conversationId}/${messageSid}/${i}`;
       try {
         const stream = await adapter.getMediaStream(url);
-        await mediaStore.put(key, stream, params[`MediaContentType${i}`]);
+        // Normalize the SENDER-supplied MediaContentType before storing: keep it
+        // only if it's an allowlisted inline image, else store octet-stream — so
+        // a dangerous type (text/html, image/svg+xml) never enters S3 metadata
+        // (defense-in-depth with the serve-time allowlist). Stored-XSS guard.
+        await mediaStore.put(key, stream, normalizeStoredMediaType(params[`MediaContentType${i}`]));
         keys.push(key);
       } catch (err) {
         log.error(

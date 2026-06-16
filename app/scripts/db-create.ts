@@ -4,12 +4,29 @@
 // safe. Targets DYNAMODB_ENDPOINT (default http://localhost:8000) — this
 // script NEVER creates tables in AWS; Terraform owns those (M0.4).
 // Run from the repo root: `npm run db:create` (tsx).
+//
+// --reset  DROP every table first, then recreate it empty — for a guaranteed
+//          clean slate (no leftover items from a prior seed). DESTRUCTIVE, so
+//          it is hard-gated to a localhost DynamoDB Local endpoint and refuses
+//          to run against anything else. Used by `npm run dev -- --local`
+//          (without --seeded) to start from zero.
+import { waitUntilTableNotExists } from '@aws-sdk/client-dynamodb';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { tableName } from '../src/lib/config.js';
-import { ensureTable } from '../src/lib/dynamoAdmin.js';
+import { ensureTable, deleteTableIfExists } from '../src/lib/dynamoAdmin.js';
 import { TABLES } from '../src/lib/tables.js';
 
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
+
+/** True only for a DynamoDB Local endpoint on this machine. */
+function isLocalEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+  } catch {
+    return false;
+  }
+}
 
 export async function createAllTables(endpoint: string): Promise<void> {
   const client = createDynamoClient({ endpoint });
@@ -33,9 +50,39 @@ export async function createAllTables(endpoint: string): Promise<void> {
   }
 }
 
+/**
+ * Drop every table (tolerating absence), waiting for each deletion to finish so
+ * the immediate recreate can't race a still-deleting table. LOCAL ONLY — the
+ * caller must guard the endpoint; this is destructive.
+ */
+export async function dropAllTables(endpoint: string): Promise<void> {
+  const client = createDynamoClient({ endpoint });
+  try {
+    for (const spec of TABLES) {
+      const physicalName = tableName(spec.baseName);
+      await deleteTableIfExists(client, physicalName);
+      await waitUntilTableNotExists({ client, maxWaitTime: 60 }, { TableName: physicalName });
+      console.log(`  dropped  ${physicalName}`);
+    }
+  } finally {
+    client.destroy();
+  }
+}
+
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
-console.log(`db:create — ensuring ${TABLES.length} tables at ${endpoint}`);
+const reset = process.argv.includes('--reset');
 try {
+  if (reset) {
+    if (!isLocalEndpoint(endpoint)) {
+      throw new Error(
+        `--reset is destructive and only allowed against a localhost DynamoDB Local ` +
+          `endpoint; refusing to drop tables at ${endpoint}`,
+      );
+    }
+    console.log(`db:create — RESET: dropping ${TABLES.length} tables at ${endpoint}`);
+    await dropAllTables(endpoint);
+  }
+  console.log(`db:create — ensuring ${TABLES.length} tables at ${endpoint}`);
   await createAllTables(endpoint);
   console.log('db:create — done');
 } catch (err) {

@@ -36,6 +36,30 @@ export class NumberRegistry {
     return { phoneNumber, sid };
   }
 
+  /**
+   * Commit a SPECIFIC, app-chosen number into the pool + mint its PN sid (the
+   * REST two-step: AvailablePhoneNumbers lists candidates, IncomingPhoneNumbers
+   * POST commits the one the app picked). Mirrors Twilio's purchase-by-number.
+   * Idempotent: re-committing an already-recorded number returns its record
+   * unchanged (a redelivered create never double-mints a sid).
+   */
+  provisionSpecific(phoneNumber: string): { phoneNumber: string; sid: string } {
+    const existing = this.byNumber.get(phoneNumber);
+    if (existing) return { phoneNumber: existing.phoneNumber, sid: existing.sid };
+    this.seq += 1;
+    const sid = `PNfake${String(this.seq).padStart(8, '0')}`;
+    this.byNumber.set(phoneNumber, { phoneNumber, sid });
+    return { phoneNumber, sid };
+  }
+
+  /** Look up a recorded pool number by its PN sid (the update-by-sid path). */
+  getBySid(sid: string): NumberRecord | undefined {
+    for (const rec of this.byNumber.values()) {
+      if (rec.sid === sid) return rec;
+    }
+    return undefined;
+  }
+
   /** Record/update the SMS/voice webhooks for a provisioned number (partial merge). */
   setWebhooks(number: string, urls: { smsUrl?: string; voiceUrl?: string }): void {
     const existing = this.byNumber.get(number);

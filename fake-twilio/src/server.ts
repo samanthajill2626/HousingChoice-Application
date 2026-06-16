@@ -1,13 +1,23 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type Express } from 'express';
 import type { FakeTwilioConfig } from './config.js';
 import { FakeTwilioEngine } from './engine/engine.js';
+import { CallEngine } from './engine/callEngine.js';
+import { NumberRegistry } from './engine/numberRegistry.js';
 import { EventHub } from './engine/eventHub.js';
 import { RealClock } from './engine/clock.js';
 import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
+import { createVoiceRestRouter } from './routes/voiceRest.js';
 import { createControlRouter } from './routes/control.js';
 import { createEventsRouter } from './routes/events.js';
+
+/** Absolute path to the committed canned recording MP3 the serve route streams.
+ *  Resolved from THIS module's location (not cwd) so it works under tsx (src/) and
+ *  a built dist/ alike — the asset sits at ../assets relative to src/server.ts and
+ *  dist/server.js (the assets dir is copied next to the build). */
+const CANNED_RECORDING_PATH = fileURLToPath(new URL('./assets/canned-recording.mp3', import.meta.url));
 
 export interface FakeTwilioAppDeps {
   config: FakeTwilioConfig;
@@ -17,6 +27,13 @@ export interface FakeTwilioAppDeps {
   hub?: EventHub;
   /** Injectable for tests; defaults to a real-clock engine with a real dispatcher. */
   engine?: FakeTwilioEngine;
+  /** The voice CallEngine (Phase 6 click-to-call + recording). Injectable for tests;
+   *  default-constructed sharing the messaging engine's hub + a real clock/dispatcher. */
+  callEngine?: CallEngine;
+  /** The shared pool-number registry (number provisioning + masked-vs-founder routing).
+   *  ONE instance is shared by the CallEngine and the voice REST router so a number
+   *  provisioned via REST is recognized as a pool number by an inbound call. */
+  registry?: NumberRegistry;
 }
 
 export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
@@ -52,6 +69,33 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
       }),
     });
 
+  // ONE pool-number registry shared by the CallEngine (isPool → masked-vs-founder
+  // routing) and the voice REST router (number provisioning) — a number purchased
+  // via IncomingPhoneNumbers.json is then recognized as a pool number by an inbound
+  // masked call. Injectable for tests.
+  const registry = deps.registry ?? new NumberRegistry();
+
+  // The voice CallEngine — shares the messaging engine's SAME hub (so the SSE stream
+  // sees call events too), the registry above, a real clock + a webhook dispatcher.
+  // recordingServeBase is the fake's OWN public origin (config.publicBaseUrl), which
+  // is exactly the app's TWILIO_API_BASE_URL origin — so the recording URLs it mints
+  // (`${publicBaseUrl}/recordings/...`) point back at THIS host's serve route AND
+  // pass the app's Phase-1 SSRF dev-override (url.origin === twilioApiBaseUrl origin).
+  const callEngine =
+    deps.callEngine ??
+    new CallEngine({
+      clock: new RealClock(),
+      dispatcher: new WebhookDispatcher({
+        appBaseUrl: deps.config.appBaseUrl,
+        appPublicBaseUrl: deps.config.appPublicBaseUrl,
+        authToken: deps.config.authToken,
+        originSecret: deps.config.originSecret,
+      }),
+      hub: engine.hub,
+      registry,
+      recordingServeBase: deps.config.publicBaseUrl,
+    });
+
   const app = express();
   // Twilio posts application/x-www-form-urlencoded; the control API uses JSON.
   app.use(express.urlencoded({ extended: false }));
@@ -62,6 +106,9 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   });
 
   app.use(createRestRouter(engine));
+  // Voice REST surface (Calls.json, AvailablePhoneNumbers, IncomingPhoneNumbers) +
+  // the recording-serve route — replaces the former 501 stubs in createRestRouter.
+  app.use(createVoiceRestRouter({ callEngine, registry, cannedRecordingPath: CANNED_RECORDING_PATH }));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
@@ -91,7 +138,7 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks'].some(
+      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks', '/recordings'].some(
         (p) => req.path === p || req.path.startsWith(`${p}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

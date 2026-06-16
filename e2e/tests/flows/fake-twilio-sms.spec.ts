@@ -78,24 +78,64 @@ test('a canned MMS picked in the fake-phones UI sends without error and reaches 
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('');
 
-  // 3) The stored mediaUrl is a real absolute http(s) URL for the canned asset —
+  // 3) The stored mediaUrl is a real absolute http(s) URL for the canned PNG —
   //    NOT a data: URI (which the engine would have rejected).
   await expect
     .poll(async () => {
       const t = (await listThreads(request)).find((x) => x.partyNumber === tenant);
       return t?.messages.find((m) => m.direction === 'inbound' && m.body === body)?.mediaUrls?.[0] ?? '';
     }, { timeout: 10_000 })
-    .toMatch(/^https?:\/\/.*\/canned\/room\.svg$/);
+    .toMatch(/^https?:\/\/.*\/canned\/room\.png$/);
 
-  // 4) END-TO-END: the inbound MMS shows in the staff inbox. Locally MEDIA_BUCKET
-  //    is unset (no S3 mirror), so the thread renders the "Media attachment" chip.
+  // 4) END-TO-END: the inbound MMS mirrors to the local S3 (MinIO) and renders
+  //    INLINE in the staff thread — an <img> served by the authed media endpoint.
   await vaPage.goto('/');
   const convo = vaPage.getByRole('link').filter({ hasText: body });
   await expect(convo.first()).toBeVisible({ timeout: 10_000 });
   await convo.first().click();
   await expect(vaPage).toHaveURL(/\/conversations\//);
   await expect(vaPage.getByText(body)).toBeVisible();
-  await expect(vaPage.getByText(/media attachment/i)).toBeVisible();
+
+  const img = vaPage.getByRole('img', { name: /attachment/i });
+  await expect(img.first()).toBeVisible();
+  const src = await img.first().getAttribute('src');
+  expect(src).toMatch(/^\/api\/messages\/.*\/media\/0$/);
+  // The authed media endpoint serves the mirrored bytes inline as an image.
+  const resp = await vaPage.request.get(src!);
+  expect(resp.status()).toBe(200);
+  expect(resp.headers()['content-type']).toMatch(/^image\//);
+});
+
+// The PDF canned asset exercises the document path end-to-end: application/pdf is
+// on the inline allowlist, so it mirrors to S3 and the dashboard shows a PDF
+// viewer link whose media request serves application/pdf inline.
+test('a canned PDF picked in the fake-phones UI mirrors and shows as a PDF link in the inbox', async ({
+  page,
+  vaPage,
+}) => {
+  const stamp = `${Date.now()}`.slice(-7);
+  const body = `Lease doc ${stamp}`;
+
+  await page.goto(`${FAKE_UI}/`);
+  await page.getByRole('button', { name: /Tasha Nguyen/ }).click();
+  await page.getByRole('button', { name: /^Lease doc$/ }).click();
+  await page.getByRole('textbox', { name: 'Message' }).fill(body);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  await vaPage.goto('/');
+  const convo = vaPage.getByRole('link').filter({ hasText: body });
+  await expect(convo.first()).toBeVisible({ timeout: 10_000 });
+  await convo.first().click();
+  await expect(vaPage).toHaveURL(/\/conversations\//);
+
+  const pdfLink = vaPage.getByRole('link', { name: /pdf attachment/i });
+  await expect(pdfLink.first()).toBeVisible();
+  const href = await pdfLink.first().getAttribute('href');
+  expect(href).toMatch(/^\/api\/messages\/.*\/media\/0$/);
+  const resp = await vaPage.request.get(href!);
+  expect(resp.status()).toBe(200);
+  expect(resp.headers()['content-type']).toMatch(/^application\/pdf/);
 });
 
 // Failure injection: configure the tenant's NEXT outbound message to be reported

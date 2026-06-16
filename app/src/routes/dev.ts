@@ -10,7 +10,13 @@ import { createDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { sealSession, sessionCookieOptions } from '../middleware/auth.js';
 import { SESSION_COOKIE_NAME } from '../lib/sessionCookie.js';
-import { createUsersRepo, sessionEpochOf, type UsersRepo } from '../repos/usersRepo.js';
+import {
+  createUsersRepo,
+  normalizeEmail,
+  sessionEpochOf,
+  type UserRole,
+  type UsersRepo,
+} from '../repos/usersRepo.js';
 import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessaging.js';
 import { resetLocalData } from '../lib/devReset.js';
 
@@ -19,6 +25,18 @@ export interface DevRouterDeps {
   config?: AppConfig;
   usersRepo?: UsersRepo;
   doc?: DynamoDBDocumentClient;
+}
+
+// Role assigned when dev-login auto-provisions a missing user. The seed
+// personas (app/src/lib/seedData.ts) keep their roles so seeded and unseeded
+// runs behave identically; every other email defaults to admin.
+const DEV_LOGIN_PERSONA_ROLES: Record<string, UserRole> = {
+  'founder@example.com': 'admin',
+  'va@example.com': 'va',
+};
+
+function devLoginRoleFor(email: string): UserRole {
+  return DEV_LOGIN_PERSONA_ROLES[normalizeEmail(email)] ?? 'admin';
 }
 
 export function createDevRouter(deps: DevRouterDeps = {}): Router {
@@ -33,17 +51,28 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     res.status(200).json({ dev: true });
   });
 
-  // POST /auth/dev-login — mint a session for a seeded user without Google.
+  // POST /auth/dev-login — mint a session for a dev user without Google.
   // Mirrors the OAuth callback's session minting exactly (same seal + cookie
   // options), so the resulting session is indistinguishable from a real login.
   // json() is scoped to this route only — no global body-parsing side-effects.
+  //
+  // Auto-provisions a missing user so dev-login works on an UNSEEDED DB
+  // (`npm run dev -- --mock --local` without `--seeded` starts with an empty
+  // users table). This deliberately relaxes the repo's invite-first invariant
+  // ("login never mints a user") — but ONLY in this router, which is already a
+  // hard-gated, non-prod, OAuth-bypassing dev seam (config.ts fails fast if the
+  // flag is ever set in production). The real OAuth callback is untouched and
+  // stays invite-first.
   router.post('/auth/dev-login', json(), async (req, res) => {
     const body = (req.body ?? {}) as { email?: unknown };
     const email = typeof body.email === 'string' && body.email.trim() ? body.email : 'va@example.com';
-    const user = await users.findByEmail(email);
+    let user = await users.findByEmail(email);
     if (!user) {
-      res.status(404).json({ error: 'unknown_dev_user', email });
-      return;
+      // Known seed personas keep their roles (va@example.com → va, the default
+      // dev-login identity); any other deliberately-typed email defaults to
+      // admin for full dashboard visibility.
+      ({ user } = await users.invite({ email, role: devLoginRoleFor(email) }));
+      log.info({ email: user.email, role: user.role }, 'dev-login auto-provisioned a user');
     }
     res.cookie(
       SESSION_COOKIE_NAME,

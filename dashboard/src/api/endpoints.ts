@@ -84,8 +84,9 @@ export async function devPing(signal?: AbortSignal): Promise<boolean> {
   }
 }
 
-/** POST /auth/dev-login — log in as a seeded dev user (sets the session cookie).
- *  Throws ApiError(404,'unknown_dev_user') when the email isn't a seeded user. */
+/** POST /auth/dev-login — log in as a dev user (sets the session cookie). The
+ *  server auto-provisions the user if missing, so this works on an unseeded
+ *  local DB too (known personas keep their role; others default to admin). */
 export function devLogin(email = 'va@example.com'): Promise<DevLoginResult> {
   return request<DevLoginResult>('/auth/dev-login', { method: 'POST', body: { email } });
 }

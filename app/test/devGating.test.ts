@@ -128,15 +128,40 @@ describe('dev gating — /auth/dev-login', () => {
     created_at: '2026-06-01T00:00:00.000Z',
     session_epoch: 1,
   };
-  // Minimal fake: dev-login uses findByEmail; sessionMiddleware (on /auth/me)
-  // uses findById for the epoch check.
-  const usersRepo = {
-    findByEmail: async (email: string) =>
-      email.trim().toLowerCase() === VA ? vaUser : undefined,
-    findById: async (userId: string) => (userId === vaUser.userId ? vaUser : undefined),
-  } as unknown as UsersRepo;
+  // In-memory fake mirroring the real repo's lifecycle: dev-login uses
+  // findByEmail (and invite() to auto-provision a missing user); the
+  // sessionMiddleware (on /auth/me) uses findById for the epoch check. The
+  // store starts pre-seeded with the VA so the "user already exists" path is
+  // exercised without an invite, and unknown emails fall through to invite().
+  const makeUsersRepo = () => {
+    const store = new Map<string, UserItem>([[vaUser.userId, vaUser]]);
+    return {
+      findByEmail: async (email: string) => {
+        const norm = email.trim().toLowerCase();
+        return [...store.values()].find((u) => u.email === norm);
+      },
+      findById: async (userId: string) => store.get(userId),
+      invite: async ({ email, role }: { email: string; role: UserItem['role'] }) => {
+        const norm = email.trim().toLowerCase();
+        const userId = userIdForEmail(norm);
+        const existing = store.get(userId);
+        if (existing) return { created: false, user: existing };
+        const user: UserItem = {
+          userId,
+          email: norm,
+          role,
+          status: 'invited',
+          session_epoch: 1,
+          created_at: '2026-06-16T00:00:00.000Z',
+        };
+        store.set(userId, user);
+        return { created: true, user };
+      },
+    } as unknown as UsersRepo;
+  };
 
   const buildDevApp = () => {
+    const usersRepo = makeUsersRepo();
     const config = loadConfig({ NODE_ENV: 'test', DEV_AUTH_ENABLED: '1', CF_ORIGIN_SECRET: SECRET });
     return buildApp({ config, devRouter: createDevRouter({ config, usersRepo }), auth: { usersRepo } });
   };
@@ -164,10 +189,31 @@ describe('dev gating — /auth/dev-login', () => {
     expect(me.body).toMatchObject({ email: VA, role: 'va' });
   });
 
-  it('returns 404 for an unknown email', async () => {
+  it('auto-provisions an unknown email (so dev-login works on an unseeded DB) and round-trips', async () => {
     const app = buildDevApp();
-    const res = await request(app).post('/auth/dev-login').send({ email: 'nobody@example.com' });
-    expect(res.status).toBe(404);
+    const email = 'nobody@example.com';
+    const res = await request(app).post('/auth/dev-login').send({ email });
+    expect(res.status).toBe(200);
+    // Unknown emails default to the admin role (full dashboard visibility when
+    // you deliberately type a custom dev identity).
+    expect(res.body).toMatchObject({ email, role: 'admin' });
+
+    const token = setCookieValue(res, SESSION_COOKIE_NAME);
+    expect(token).toBeTruthy();
+
+    const me = await request(app)
+      .get('/auth/me')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', `${SESSION_COOKIE_NAME}=${token}`);
+    expect(me.status).toBe(200);
+    expect(me.body).toMatchObject({ email, role: 'admin' });
+  });
+
+  it('auto-provisions the founder persona with the admin role', async () => {
+    const app = buildDevApp();
+    const res = await request(app).post('/auth/dev-login').send({ email: 'founder@example.com' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ email: 'founder@example.com', role: 'admin' });
   });
 
   it('does not expose /auth/dev-login when the dev router is absent', async () => {

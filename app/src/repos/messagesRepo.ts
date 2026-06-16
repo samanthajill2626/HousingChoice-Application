@@ -201,6 +201,12 @@ export interface NewMessage {
   transcript?: string;
 }
 
+/** One mirrored MMS attachment: its S3 key + the normalized stored Content-Type. */
+export interface MediaAttachment {
+  s3Key: string;
+  contentType: string;
+}
+
 export interface MessageItem {
   conversationId: string;
   tsMsgId: string;
@@ -214,7 +220,15 @@ export interface MessageItem {
   delivery_status: DeliveryStatus;
   error_code?: string;
   created_at: string;
-  /** S3 keys of mirrored MMS media (M1.1 webhook path), index-aligned-by-key. */
+  /**
+   * Mirrored MMS attachments (M1.1 webhook path): each carries its S3 key AND
+   * the normalized stored Content-Type, together, so key and type can never
+   * drift. Index `i` is the same attachment the `…/media/:i` serve URL selects.
+   * Supersedes `media_s3_keys`; read via `mediaAttachmentsOf()` for compat.
+   */
+  media_attachments?: MediaAttachment[];
+  /** @deprecated Legacy parallel key array (pre-`media_attachments`). Read via
+   *  `mediaAttachmentsOf()`, which folds it into the new shape as octet-stream. */
   media_s3_keys?: string[];
   /** Set on a 30003 retry send: the tsMsgId of the message being retried. */
   retry_of?: string;
@@ -293,9 +307,25 @@ export interface MessageItem {
  * these add operational metadata the same way delivery_status updates do.
  */
 export interface MessageAnnotations {
-  mediaS3Keys?: string[];
+  mediaAttachments?: MediaAttachment[];
   retryOf?: string;
   retryAttempt?: number;
+}
+
+/**
+ * Normalized attachment list for a stored message. Prefers `media_attachments`;
+ * falls back to legacy `media_s3_keys` (type unknown → `application/octet-stream`
+ * → the serve endpoint forces a safe download). The media-serve endpoint and the
+ * dashboard both read through this so old and new messages render uniformly.
+ */
+export function mediaAttachmentsOf(
+  item: Pick<MessageItem, 'media_attachments' | 'media_s3_keys'>,
+): MediaAttachment[] {
+  if (Array.isArray(item.media_attachments)) return item.media_attachments;
+  if (Array.isArray(item.media_s3_keys)) {
+    return item.media_s3_keys.map((s3Key) => ({ s3Key, contentType: 'application/octet-stream' }));
+  }
+  return [];
 }
 
 export interface AppendResult {
@@ -802,9 +832,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     async annotateMessage(conversationId, tsMsgId, annotations) {
       const sets: string[] = [];
       const values: Record<string, unknown> = {};
-      if (annotations.mediaS3Keys !== undefined) {
-        sets.push('media_s3_keys = :mediaKeys');
-        values[':mediaKeys'] = annotations.mediaS3Keys;
+      if (annotations.mediaAttachments !== undefined) {
+        sets.push('media_attachments = :mediaAttachments');
+        values[':mediaAttachments'] = annotations.mediaAttachments;
       }
       if (annotations.retryOf !== undefined) {
         sets.push('retry_of = :retryOf');
@@ -828,7 +858,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         {
           conversationId,
           tsMsgId,
-          mediaKeyCount: annotations.mediaS3Keys?.length,
+          mediaKeyCount: annotations.mediaAttachments?.length,
           retryOf: annotations.retryOf,
           retryAttempt: annotations.retryAttempt,
         },

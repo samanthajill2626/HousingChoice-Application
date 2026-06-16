@@ -2,7 +2,7 @@
 // endpoint GET /api/messages/:providerSid/media/:idx the dashboard <img> hits.
 //
 // Covered:
-//  - 1:1 inbound MMS mirrors to S3 + records media_s3_keys (refactor regression)
+//  - 1:1 inbound MMS mirrors to S3 + records media_attachments (refactor regression)
 //  - RELAY inbound MMS now ALSO captures + mirrors media (the new behavior — the
 //    relay path previously dropped media entirely)
 //  - the serving endpoint streams the stored bytes with the stored content-type,
@@ -88,7 +88,7 @@ afterEach(() => {
 });
 
 describe('inbound MMS media mirroring', () => {
-  it('1:1 inbound MMS mirrors to S3 and records media_s3_keys', async () => {
+  it('1:1 inbound MMS mirrors to S3 and records media_attachments', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });
 
@@ -101,7 +101,9 @@ describe('inbound MMS media mirroring', () => {
     // The key is recorded on the message + it's typed mms.
     const msg = [...world.messages.values()].find((m) => m.provider_sid === 'SMmms0001');
     expect(msg?.type).toBe('mms');
-    expect(msg?.media_s3_keys).toEqual([world.mediaPuts[0]!.key]);
+    expect(msg?.media_attachments).toEqual([
+      { s3Key: world.mediaPuts[0]!.key, contentType: 'image/jpeg' },
+    ]);
   });
 
   it('normalizes a dangerous sender Content-Type to octet-stream AT STORE time', async () => {
@@ -142,7 +144,9 @@ describe('inbound MMS media mirroring', () => {
     expect(world.mediaPuts[0]!.key).toMatch(/^media\/conv-relay-mms\/SMrelaymms1\/0$/);
     const msg = [...world.messages.values()].find((m) => m.provider_sid === 'SMrelaymms1');
     expect(msg?.type).toBe('mms');
-    expect(msg?.media_s3_keys).toEqual([world.mediaPuts[0]!.key]);
+    expect(msg?.media_attachments).toEqual([
+      { s3Key: world.mediaPuts[0]!.key, contentType: 'image/png' },
+    ]);
   });
 });
 

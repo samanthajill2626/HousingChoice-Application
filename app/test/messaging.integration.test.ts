@@ -192,13 +192,13 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
     it('annotateMessage stamps media keys / retry lineage onto an existing message (M1.1 webhooks)', async () => {
       await messages.append(outbound(convId, 'SMannotate1', '2026-06-12T10:04:00.000Z', 'annotate me'));
       await messages.annotateMessage(convId, '2026-06-12T10:04:00.000Z#SMannotate1', {
-        mediaS3Keys: [`media/${convId}/SMannotate1/0`],
+        mediaAttachments: [{ s3Key: `media/${convId}/SMannotate1/0`, contentType: 'image/png' }],
         retryOf: '2026-06-12T10:00:00.000Z#SMdup1',
         retryAttempt: 1,
       });
       const annotated = await messages.getByProviderSid('SMannotate1');
       expect(annotated).toMatchObject({
-        media_s3_keys: [`media/${convId}/SMannotate1/0`],
+        media_attachments: [{ s3Key: `media/${convId}/SMannotate1/0`, contentType: 'image/png' }],
         retry_of: '2026-06-12T10:00:00.000Z#SMdup1',
         retry_attempt: 1,
         body: 'annotate me', // content untouched — annotations only

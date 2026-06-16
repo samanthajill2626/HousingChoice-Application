@@ -464,7 +464,7 @@ export function createFakeWorld(): FakeWorld {
     async annotateMessage(conversationId, tsMsgId, annotations) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`annotateMessage: no message ${conversationId}/${tsMsgId}`);
-      if (annotations.mediaS3Keys !== undefined) item.media_s3_keys = annotations.mediaS3Keys;
+      if (annotations.mediaAttachments !== undefined) item.media_attachments = annotations.mediaAttachments;
       if (annotations.retryOf !== undefined) item.retry_of = annotations.retryOf;
       if (annotations.retryAttempt !== undefined) item.retry_attempt = annotations.retryAttempt;
     },

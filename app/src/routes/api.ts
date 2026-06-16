@@ -35,6 +35,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
+  mediaAttachmentsOf,
   relayMemberKey,
   type MessagesRepo,
   type RelayRecipientDelivery,
@@ -637,9 +638,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // router is behind requireAuth) — MMS media is PII (IDs, personal photos/docs),
   // so it is NEVER public/presigned; the bytes stay behind the session gate, the
   // same posture as the call-recording endpoint above. The S3 key is read from
-  // the message's STORED media_s3_keys[idx] (never client input → no path
-  // traversal); :idx only selects which attachment. 404 for a missing message /
-  // out-of-range idx / unmirrored media (MEDIA_BUCKET unset) / absent object.
+  // the message's STORED media_attachments[idx].s3Key (never client input → no
+  // path traversal); :idx only selects which attachment. 404 for a missing
+  // message / out-of-range idx / unmirrored media (MEDIA_BUCKET unset) / absent.
   router.get('/messages/:providerSid/media/:idx', async (req, res) => {
     const { providerSid } = req.params;
     const idx = Number(req.params['idx']);
@@ -653,8 +654,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
     mergeContext({ conversationId: message.conversationId });
-    const keys = Array.isArray(message.media_s3_keys) ? message.media_s3_keys : [];
-    const key = keys[idx];
+    // Prefer the cohesive media_attachments record; fall back to legacy
+    // media_s3_keys (octet-stream → served as a download) for pre-migration data.
+    const attachments = mediaAttachmentsOf(message);
+    const key = attachments[idx]?.s3Key;
     if (typeof key !== 'string' || key.length === 0) {
       res.status(404).json({ error: 'media_not_found' });
       return;

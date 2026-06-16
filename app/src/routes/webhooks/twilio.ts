@@ -45,8 +45,10 @@ import {
 } from '../../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
+  mediaAttachmentsOf,
   relayMemberKey,
   type DeliveryStatus,
+  type MediaAttachment,
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
@@ -194,8 +196,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
 
   /**
    * Mirror inbound MMS media into S3 under media/<conversationId>/<MessageSid>/<i>
-   * (streams only) and record the resulting keys on the message (media_s3_keys),
-   * which the authed GET /api/messages/:sid/media/:idx endpoint serves. SHARED by
+   * (streams only) and record the resulting {s3Key, contentType} attachments on
+   * the message (media_attachments), which the authed
+   * GET /api/messages/:sid/media/:idx endpoint serves. SHARED by
    * the 1:1 and relay inbound paths. Best-effort: MEDIA_BUCKET unset → log + skip;
    * a per-attachment failure leaves a usable message (provider URLs stay on the
    * item) + a correlated ERROR — never a crash. PII (doc §9): SIDs/indexes/counts
@@ -216,17 +219,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       else log.warn({ providerSid: messageSid, mediaCount: mediaUrls.length }, line);
       return;
     }
-    const keys: string[] = [];
+    const attachments: MediaAttachment[] = [];
     for (const [i, url] of mediaUrls.entries()) {
       const key = `media/${conversationId}/${messageSid}/${i}`;
       try {
         const stream = await adapter.getMediaStream(url);
         // Normalize the SENDER-supplied MediaContentType before storing: keep it
-        // only if it's an allowlisted inline image, else store octet-stream — so
+        // only if it's an allowlisted inline type, else store octet-stream — so
         // a dangerous type (text/html, image/svg+xml) never enters S3 metadata
         // (defense-in-depth with the serve-time allowlist). Stored-XSS guard.
-        await mediaStore.put(key, stream, normalizeStoredMediaType(params[`MediaContentType${i}`]));
-        keys.push(key);
+        // The same normalized type is recorded on the message (key+type together).
+        const contentType = normalizeStoredMediaType(params[`MediaContentType${i}`]);
+        await mediaStore.put(key, stream, contentType);
+        attachments.push({ s3Key: key, contentType });
       } catch (err) {
         log.error(
           { err, providerSid: messageSid, mediaIndex: i },
@@ -234,9 +239,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         );
       }
     }
-    if (keys.length > 0) {
+    if (attachments.length > 0) {
       try {
-        await messages.annotateMessage(conversationId, tsMsgId, { mediaS3Keys: keys });
+        await messages.annotateMessage(conversationId, tsMsgId, { mediaAttachments: attachments });
       } catch (err) {
         log.error({ err, providerSid: messageSid }, 'failed to record mirrored media keys on the message');
       }
@@ -472,7 +477,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
       persistedConversationId = persisted.conversationId;
       persistedTsMsgId = persisted.tsMsgId;
-      mediaAlreadyMirrored = (persisted.media_s3_keys?.length ?? 0) > 0;
+      mediaAlreadyMirrored = mediaAttachmentsOf(persisted).length > 0;
       mergeContext({ conversationId: persistedConversationId });
       log.info(
         { providerSid: MessageSid },

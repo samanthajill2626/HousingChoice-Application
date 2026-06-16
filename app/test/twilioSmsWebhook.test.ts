@@ -203,10 +203,10 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     expect(first.status).toBe(200);
     expect(world.messages).toHaveLength(1);
     expect(world.mediaPuts).toHaveLength(0);
-    expect(world.messages[0]!.media_s3_keys).toBeUndefined();
+    expect(world.messages[0]!.media_attachments).toBeUndefined();
 
     // Twilio redelivers: the append dedupes, but the pipeline continues —
-    // the persisted message lacks media_s3_keys, so mirroring runs this time.
+    // the persisted message lacks media_attachments, so mirroring runs this time.
     world.failMediaUrls.delete('https://api.twilio.com/media/crash');
     const second = await signedTwilioPost(app, SMS_PATH, params);
     expect(second.status).toBe(200);
@@ -214,7 +214,9 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     expect(world.messages).toHaveLength(1); // still exactly one message
     const conv = [...world.conversations.values()][0]!;
     expect(world.mediaPuts.map((p) => p.key)).toEqual([`media/${conv.conversationId}/MMcrash01/0`]);
-    expect(world.messages[0]!.media_s3_keys).toEqual([`media/${conv.conversationId}/MMcrash01/0`]);
+    expect(world.messages[0]!.media_attachments).toEqual([
+      { s3Key: `media/${conv.conversationId}/MMcrash01/0`, contentType: 'image/jpeg' },
+    ]);
     // STOP recording ran on BOTH deliveries (idempotent re-set, no harm).
     expect(conv.sms_opt_out).toBe(true);
     expect(world.contacts[0]!.sms_opt_out).toBe(true);
@@ -620,7 +622,10 @@ describe('POST /webhooks/twilio/sms — MMS media mirroring (streams → S3)', (
     expect(world.mediaPuts.every((p) => p.bytes > 0)).toBe(true);
     expect(world.messages[0]).toMatchObject({
       type: 'mms',
-      media_s3_keys: expectedKeys,
+      media_attachments: [
+        { s3Key: expectedKeys[0], contentType: 'image/jpeg' },
+        { s3Key: expectedKeys[1], contentType: 'image/png' },
+      ],
       mediaUrls: ['https://api.twilio.com/media/0', 'https://api.twilio.com/media/1'],
     });
     expect(world.messages[0]!.body).toBeUndefined(); // empty Body is not stored
@@ -644,7 +649,9 @@ describe('POST /webhooks/twilio/sms — MMS media mirroring (streams → S3)', (
     expect(res.status).toBe(200); // never a crash
     expect(world.messages).toHaveLength(1); // usable message record
     const conv = [...world.conversations.values()][0]!;
-    expect(world.messages[0]!.media_s3_keys).toEqual([`media/${conv.conversationId}/MMmedia02/1`]);
+    expect(world.messages[0]!.media_attachments).toEqual([
+      { s3Key: `media/${conv.conversationId}/MMmedia02/1`, contentType: 'application/octet-stream' },
+    ]);
     const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('media mirror failed'))!;
     expect(err).toBeDefined();
     expect(typeof err['correlationId']).toBe('string');

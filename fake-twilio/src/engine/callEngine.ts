@@ -15,11 +15,13 @@
 
 import type { Clock } from './clock.js';
 import type { EventHub } from './eventHub.js';
-import { interpretTwiml, type DialNumber } from './twimlInterpreter.js';
+import { interpretTwiml, type DialNumber, type TwimlPlan } from './twimlInterpreter.js';
 import {
   buildInboundVoiceParams,
   buildWhisperGateParams,
   buildDialStatusParams,
+  buildRecordingParams,
+  buildTranscriptionParams,
   type WebhookParams,
 } from './signer.js';
 import type { NumberRegistry } from './numberRegistry.js';
@@ -42,6 +44,12 @@ export interface CallEngineDeps {
    *  future use (founder-cell business-number recognition); pool membership is the
    *  primary masked-vs-founder signal today. */
   appNumberFor?: (number: string) => string | undefined;
+  /** Origin the fake recording host serves `.mp3` files from. The RecordingUrl the
+   *  engine posts is `${recordingServeBase}/recordings/${callSid}/${recordingSid}.mp3`;
+   *  in integration this is set to the app's apiBaseUrl origin so the app's
+   *  getRecordingStream fetch (via the Phase-1 SSRF dev-override) resolves here.
+   *  Injectable so unit tests assert against an explicit base. */
+  recordingServeBase?: string;
 }
 
 export interface PlaceCallInput {
@@ -49,6 +57,9 @@ export interface PlaceCallInput {
   to: string;
   scenario?: CallScenario;
 }
+
+/** Whether the dialed bridge records, and where to POST the recording callback. */
+type RecordingContext = { enabled: true; callbackUrl: string } | { enabled: false };
 
 /** Map a scenario outcome to Twilio's DialCallStatus vocabulary. */
 function outcomeToDialStatus(outcome: NonNullable<CallScenario['outcome']>): CallStatus {
@@ -67,10 +78,13 @@ export class CallEngine {
   private readonly dispatcher: VoiceDispatcher;
   private readonly registry: NumberRegistry;
   private readonly appNumberFor: ((number: string) => string | undefined) | undefined;
+  private readonly recordingServeBase: string;
   readonly hub: EventHub;
 
   private readonly calls = new Map<string, CallState>();
   private sidSeq = 0;
+  /** Deterministic RecordingSid counter (no Date.now()/Math.random()). */
+  private recordingSeq = 0;
   /** Per-call step delay so scheduled whisper callbacks fire in a deterministic
    *  ascending order under ManualClock.flush(). */
   private scheduleSeq = 0;
@@ -84,6 +98,7 @@ export class CallEngine {
     this.hub = deps.hub;
     this.registry = deps.registry;
     this.appNumberFor = deps.appNumberFor;
+    this.recordingServeBase = deps.recordingServeBase ?? 'http://localhost:8889';
   }
 
   getCalls(): CallState[] {
@@ -107,6 +122,11 @@ export class CallEngine {
   private mintCallSid(): string {
     this.sidSeq += 1;
     return `CAfake${String(this.sidSeq).padStart(8, '0')}`;
+  }
+
+  private mintRecordingSid(): string {
+    this.recordingSeq += 1;
+    return `REfake${String(this.recordingSeq).padStart(8, '0')}`;
   }
 
   /** Extract pathname+search from an absolute TwiML url. The dispatcher prepends
@@ -173,13 +193,14 @@ export class CallEngine {
     }
     const answering = this.chooseAnsweringLeg(plan.numbers, scenario);
     const actionUrl = plan.actionUrl;
+    const recording = this.recordingContextOf(plan);
 
     // Schedule the whisper/gate/status chain on the injected clock so timing is
     // deterministic (ManualClock.flush() runs it). Honor scenario.ringMs.
     const delayMs = scenario.ringMs ?? (this.scheduleSeq += 1);
     const stepPromise = new Promise<void>((resolve) => {
       this.clock.schedule(delayMs, () => {
-        this.runDialChain(call, answering, actionUrl, scenario)
+        this.runDialChain(call, answering, actionUrl, scenario, recording)
           .catch(() => {
             /* a step failure must not leave settle() hanging */
           })
@@ -190,6 +211,21 @@ export class CallEngine {
     void stepPromise.finally(() => this.pending.delete(stepPromise));
 
     return call;
+  }
+
+  /** The dial-level recording instruction extracted from the inbound TwiML plan.
+   *  `enabled` is true only for the founder dual-channel record-from-answer flow
+   *  WITH a recordingStatusCallback; masked (`record='do-not-record'`, no callback)
+   *  yields enabled:false so neither recording nor transcription fires. */
+  private recordingContextOf(plan: TwimlPlan): RecordingContext {
+    if (
+      plan.kind === 'dial' &&
+      plan.record === 'record-from-answer-dual' &&
+      plan.recordingStatusCallback !== undefined
+    ) {
+      return { enabled: true, callbackUrl: plan.recordingStatusCallback };
+    }
+    return { enabled: false };
   }
 
   /** Pick which dialed leg "answers" per the scenario. Defaults to the first leg. */
@@ -210,6 +246,7 @@ export class CallEngine {
     answering: DialNumber,
     actionUrl: string | undefined,
     scenario: CallScenario,
+    recording: RecordingContext = { enabled: false },
   ): Promise<void> {
     let accepted = false;
 
@@ -243,6 +280,53 @@ export class CallEngine {
     call.status = dialStatus;
     this.touch(call);
     this.hub.emit({ type: 'call.completed', call });
+
+    // After the bridge answered + the <Dial action> status posted, fire the
+    // founder-bridge recording (and then transcription) when the TwiML asked to
+    // record AND the bridge actually answered. Masked (record='do-not-record', no
+    // recordingStatusCallback) yields recording.enabled === false → skip both.
+    if (recording.enabled && accepted && dialStatus === 'completed') {
+      await this.fireRecordingAndTranscription(call, recording.callbackUrl, scenario);
+    }
+  }
+
+  /**
+   * Post the recording callback (RecordingUrl ending in `.mp3` at the fake
+   * recording host) and, if the scenario carries a transcript, the transcription
+   * callback. Mints a deterministic RE… recordingSid and updates CallState +
+   * emits call.recording / call.transcript.
+   */
+  private async fireRecordingAndTranscription(
+    call: CallState,
+    recordingCallbackUrl: string,
+    scenario: CallScenario,
+  ): Promise<void> {
+    const recordingSid = this.mintRecordingSid();
+    // CRITICAL: the URL MUST already end in `.mp3` — the app's getRecordingStream
+    // appends `.mp3` only when the URL lacks `.mp3/.wav`, and Phase 6's
+    // recording-serve route matches exactly this shape.
+    const recordingUrl = `${this.recordingServeBase}/recordings/${call.callSid}/${recordingSid}.mp3`;
+
+    await this.dispatcher.post(
+      this.pathOf(recordingCallbackUrl),
+      buildRecordingParams({ callSid: call.callSid, recordingSid, recordingUrl, durationSec: 1 }),
+    );
+    call.recordingSid = recordingSid;
+    call.recordingUrl = recordingUrl;
+    this.touch(call);
+    this.hub.emit({ type: 'call.recording', call });
+
+    if (scenario.transcript !== undefined) {
+      // There is no TwiML-carried transcription callback URL; the app's
+      // transcription route is the fixed path below.
+      await this.dispatcher.post(
+        '/webhooks/twilio/voice/transcription',
+        buildTranscriptionParams({ callSid: call.callSid, transcript: scenario.transcript }),
+      );
+      call.transcript = scenario.transcript;
+      this.touch(call);
+      this.hub.emit({ type: 'call.transcript', call });
+    }
   }
 
   /**

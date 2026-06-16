@@ -12,6 +12,7 @@ import { createRestRouter } from './routes/rest.js';
 import { createVoiceRestRouter } from './routes/voiceRest.js';
 import { createControlRouter } from './routes/control.js';
 import { createVoiceControlRouter } from './routes/voiceControl.js';
+import { createRcsRouter } from './routes/rcs.js';
 import { createEventsRouter } from './routes/events.js';
 
 /** Absolute path to the committed canned recording MP3 the serve route streams.
@@ -118,6 +119,9 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // (or injected) here, so a call placed via control is the one the voice REST
   // surface + SSE stream see.
   app.use(createVoiceControlRouter({ callEngine }));
+  // RCS 501 seams (Task 7.2): the Content-API REST path + POST /control/send-rcs
+  // both 501 with a pointer to docs/RCS-integration-contract.md. Thin — no engine.
+  app.use(createRcsRouter());
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
   // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine
   // emits through — no way to fabricate a mismatched hub even when `engine` is injected
@@ -145,7 +149,7 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks', '/recordings'].some(
+      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks', '/recordings', '/v1'].some(
         (p) => req.path === p || req.path.startsWith(`${p}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

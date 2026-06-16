@@ -322,7 +322,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // approval; flip RELAY_LIVE_PROVISIONING=true once approved. NOT fail-fast:
   // an unparseable value WARNs (the value is a boolean flag, no PII) and falls
   // back to the default. true: 'true'|'1'|'yes'; false: 'false'|'0'|'no'.
-  const relayLiveProvisioningDefault = messagingDriver === 'console';
+  //
+  // ALSO default ON when pointed at the LOCAL fake Twilio (twilioApiBaseUrl set):
+  // the Twilio client is redirected to a mock host with no real account/numbers/
+  // cost, so the fake's local provisioning REST is safe to exercise — this is the
+  // hermetic dev/e2e mock stack (MESSAGING_DRIVER=twilio redirected to the fake).
+  // This can NEVER engage in production: TWILIO_API_BASE_URL is rejected at boot
+  // there (above), so twilioApiBaseUrl is undefined in any valid prod config.
+  // Precedence: an EXPLICIT RELAY_LIVE_PROVISIONING (true OR false) always wins —
+  // a deployer can still force provisioning off even in mock mode.
+  const relayLiveProvisioningDefault =
+    twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? true : messagingDriver === 'console';
   let relayLiveProvisioning = relayLiveProvisioningDefault;
   const relayLiveProvisioningRaw = env.RELAY_LIVE_PROVISIONING;
   if (relayLiveProvisioningRaw !== undefined && relayLiveProvisioningRaw.trim().length > 0) {

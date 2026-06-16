@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-label="Lease document">
+  <rect width="160" height="120" fill="#f0f2f5"/>
+  <rect x="46" y="18" width="68" height="84" rx="3" fill="#ffffff" stroke="#b6bcc7"/>
+  <polygon points="100,18 114,32 100,32" fill="#d8dce3"/>
+  <rect x="56" y="34" width="48" height="5" rx="2" fill="#111827"/>
+  <rect x="56" y="46" width="48" height="3" rx="1" fill="#b6bcc7"/>
+  <rect x="56" y="54" width="48" height="3" rx="1" fill="#b6bcc7"/>
+  <rect x="56" y="62" width="34" height="3" rx="1" fill="#b6bcc7"/>
+  <rect x="56" y="82" width="28" height="8" rx="2" fill="#1f6feb"/>
+  <text x="80" y="114" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#111827" text-anchor="middle">Lease</text>
+</svg>

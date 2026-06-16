@@ -1,0 +1,37 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-1);
+  padding: 0.1rem var(--hc-space-2);
+  border-radius: var(--hc-radius-pill);
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-semibold);
+  line-height: 1.4;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background-color: currentColor;
+  flex: none;
+}
+
+.neutral {
+  color: var(--hc-color-neutral);
+  background-color: var(--hc-color-neutral-bg);
+}
+.info {
+  color: var(--hc-color-info);
+  background-color: var(--hc-color-info-bg);
+}
+.success {
+  color: var(--hc-color-success);
+  background-color: var(--hc-color-success-bg);
+}
+.danger {
+  color: var(--hc-color-danger);
+  background-color: var(--hc-color-danger-bg);
+}

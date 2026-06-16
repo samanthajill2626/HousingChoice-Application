@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-label="Kitchen photo">
+  <rect width="160" height="120" fill="#e4f5ea"/>
+  <rect x="0" y="64" width="160" height="56" fill="#cbe6d4"/>
+  <rect x="20" y="44" width="120" height="20" fill="#ffffff" stroke="#b6bcc7"/>
+  <rect x="28" y="64" width="40" height="42" fill="#15803d"/>
+  <rect x="92" y="64" width="40" height="42" fill="#ffffff" stroke="#b6bcc7"/>
+  <circle cx="48" cy="85" r="3" fill="#ffffff"/>
+  <rect x="100" y="72" width="24" height="10" fill="#cbe6d4"/>
+  <text x="80" y="112" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#111827" text-anchor="middle">Kitchen</text>
+</svg>

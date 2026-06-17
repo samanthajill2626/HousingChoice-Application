@@ -39,6 +39,29 @@ disabled founder call-triage on dev). Bypass with `--skip-secrets` only when you
 correct — e.g. `.env.<env>` isn't on this machine. To clear a real drift, just
 `npm run secrets:push -- <env>` then re-run the deploy.
 
+### DynamoDB schema changes (apply BEFORE deploying code that uses them)
+
+DynamoDB tables/GSIs are IaC: `app/src/lib/tables.ts` is the source of truth; `npm run gen:tables`
+regenerates `infra/envs/{dev,prod}/tables.auto.tfvars.json`, which Terraform turns into real tables.
+A new table or GSI lands in a real env via **`npm run plan -- <env>` + `npm run apply -- <env>`** —
+NOT via `deploy:<env>` (which only rolls the app image). **Apply the schema BEFORE deploying the code
+that reads/writes it**, or the new endpoints 500 against a missing table/index.
+
+**Pending from the new-dashboard backend slices (BE1–BE6, on `main`, not yet applied to dev/prod):**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| BE2 activity/event log | `activity_events` | **new table** — PK `contactId`, SK `tsEventId` | contact timeline + milestone log |
+| BE4 listings-sent | `listing_sends` | **new table** — PK `unitId`, SK `contactId`, GSI `byContact` (`contactId`+`sentAt`) | "Sent to tenants" / "Listings sent" |
+| BE3 related units | `units` (existing) | **GSI add** — `byProperty` (sparse, hash `propertyId`) | duplex/building "Related listings" |
+
+All three are already in both `tables.auto.tfvars.json` files. To ship: `npm run plan -- dev` (review the
+three adds), `npm run apply -- dev`, then `npm run deploy:dev` (same sequence for prod via the usual
+promote path). The `byProperty` add to `units` is an **online** operation (no recreate, no data
+migration); the two new tables start empty. BE1/BE5/BE6 added NO schema — multi-phone is an item-shape
+change on `contacts` (phone-pointer items live in the existing table), and media/similar/today are
+read-only aggregations over existing tables.
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

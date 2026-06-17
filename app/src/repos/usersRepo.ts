@@ -3,8 +3,8 @@
 // the login path can never mint a user), session lookups, and the user:invite
 // / user:role ops scripts' runtime counterpart.
 //
-// Roles are 'admin' | 'va' (README deviations table 2026-06-12: the doc's
-// founder_admin | va renamed by operator preference, semantics identical).
+// Roles are 'admin' | 'va' (renamed from the doc's role names by operator
+// preference, semantics identical — see the README deviations table 2026-06-12).
 //
 // LIFECYCLE (status): an invited record carries email + role + status
 // 'invited' + created_at + session_epoch 1, but NO google_sub yet. The user's
@@ -34,7 +34,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-/** Team roles (doc §5 founder_admin|va → admin|va, README deviations). */
+/** Team roles — 'admin' | 'va' (renamed from the doc's role names; README deviations). */
 export type UserRole = 'admin' | 'va';
 
 export const USER_ROLES: readonly UserRole[] = ['admin', 'va'] as const;

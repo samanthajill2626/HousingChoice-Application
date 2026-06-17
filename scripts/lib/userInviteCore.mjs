@@ -6,7 +6,7 @@
 
 import { createHash } from 'node:crypto';
 
-/** The two roles (doc §5 founder_admin|va → admin|va, README deviations). */
+/** The two roles, admin|va (renamed from the doc's role names; README deviations). */
 export const USER_ROLES = Object.freeze(['admin', 'va']);
 
 export const STACK_ENVS = Object.freeze(['dev', 'prod']);

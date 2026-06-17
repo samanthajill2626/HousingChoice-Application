@@ -13,7 +13,7 @@ import {
 } from '../../scripts/lib/userRoleCore.mjs';
 
 describe('constants', () => {
-  it('roles are exactly admin|va (README deviations: doc founder_admin → admin)', () => {
+  it('roles are exactly admin|va (README deviations)', () => {
     expect([...USER_ROLES]).toEqual(['admin', 'va']);
     expect(Object.isFrozen(USER_ROLES)).toBe(true);
   });
@@ -44,7 +44,7 @@ describe('parseUserRoleArgs', () => {
     expect(() => parseUserRoleArgs([])).toThrow(/dev, prod/);
     expect(() => parseUserRoleArgs(['dev', 'not-an-email', 'va'])).toThrow(/email/);
     expect(() => parseUserRoleArgs(['dev', 'a@b', 'va'])).toThrow(/email/);
-    expect(() => parseUserRoleArgs(['dev', 'a@b.org', 'founder_admin'])).toThrow(/admin, va/);
+    expect(() => parseUserRoleArgs(['dev', 'a@b.org', 'manager'])).toThrow(/admin, va/);
     expect(() => parseUserRoleArgs(['dev', 'a@b.org', 'va', 'extra'])).toThrow(/extra/);
   });
 });

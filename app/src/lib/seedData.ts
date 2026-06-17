@@ -203,7 +203,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     {
       userId: IDS.founder,
       email: 'founder@example.com', // byEmail
-      role: 'founder_admin',
+      role: 'admin',
       name: 'Jordan Avery',
       google_sub: 'google-oauth2|seed-founder',
       scopes: ['*'],

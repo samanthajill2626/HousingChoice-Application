@@ -58,7 +58,7 @@ describe('parseUserInviteArgs', () => {
     expect(() => parseUserInviteArgs([])).toThrow(/dev, prod/);
     expect(() => parseUserInviteArgs(['dev', 'not-an-email', 'va'])).toThrow(/email/);
     expect(() => parseUserInviteArgs(['dev', 'a@b', 'va'])).toThrow(/email/);
-    expect(() => parseUserInviteArgs(['dev', 'a@b.org', 'founder_admin'])).toThrow(/admin, va/);
+    expect(() => parseUserInviteArgs(['dev', 'a@b.org', 'manager'])).toThrow(/admin, va/);
     expect(() => parseUserInviteArgs(['dev', 'a@b.org', 'va', 'extra'])).toThrow(/extra/);
   });
 });

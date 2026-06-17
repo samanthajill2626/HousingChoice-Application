@@ -464,6 +464,7 @@ export interface TimelineMessage extends TimelineBase {
   body?: string; // FULL body (no server truncation)
   media_attachments?: { s3Key: string; contentType: string }[];
   delivery_status: DeliveryStatus; // reuse legacy
+  error_code?: string; // Twilio error code on a failure → human-readable reason
   fromPhone?: string;
   toPhone?: string; // which number this used
 }

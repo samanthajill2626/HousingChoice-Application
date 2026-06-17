@@ -70,6 +70,15 @@
   gap: var(--sp-2);
 }
 
+/* Per-day group. MUST be a flex column so the bubbles' align-self (in→left /
+ * out→right) takes effect — a plain block here is what made every bubble fall
+ * left and look identical. */
+.day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
 .divider {
   text-align: center;
   color: var(--c-divider);
@@ -136,9 +145,63 @@
 }
 
 .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
   margin-top: var(--sp-1);
+}
+
+/* The transport · number · time line never breaks mid-value; the status chip
+ * wraps to its own line instead when a failure reason makes the row too long. */
+.metaText {
+  white-space: nowrap;
+}
+
+/* Delivery-state chip on OUTBOUND bubbles (Sent/Delivered/Failed/…). Sits at the
+ * trailing edge of the meta row. Tone classes are distinct from the milestone
+ * pin tones to avoid any selector overlap. */
+.status {
+  font-weight: var(--fw-medium);
+}
+
+.toneNeutral {
+  color: var(--c-text-subtle);
+}
+.toneInfo {
+  color: var(--c-brand);
+}
+.toneSuccess {
+  color: var(--c-success);
+}
+.toneDanger {
+  color: var(--c-danger);
+}
+
+/* Retry affordance under a failed/undelivered outbound bubble. */
+.retry {
+  margin-top: var(--sp-1);
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--c-danger);
+  color: var(--c-danger);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.retry:hover {
+  background: var(--c-danger);
+  color: var(--c-text-inverse);
+}
+
+.retry:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
 }
 
 /* --- Milestone pins ------------------------------------------------------- */

@@ -187,4 +187,44 @@ describe('Timeline', () => {
     expect(screen.getByText('flyer')).toBeInTheDocument();
     expect(screen.getByText(/1 attachment/i)).toBeInTheDocument();
   });
+
+  it('shows the delivery status on an OUTBOUND bubble', () => {
+    renderTimeline({ items: [MESSAGE_OUT] }); // delivery_status: 'sent'
+    expect(screen.getByText('Sent')).toBeInTheDocument();
+  });
+
+  it('shows NO delivery status on an inbound bubble (delivery state is outbound-only)', () => {
+    renderTimeline({ items: [MESSAGE_IN] }); // inbound, even though it carries a status
+    expect(screen.queryByText('Delivered')).not.toBeInTheDocument();
+  });
+
+  it('shows Failed + reason + Retry on a failed outbound message, and retries on click', () => {
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'This one failed',
+    };
+    const onRetry = vi.fn();
+    renderTimeline({ items: [failed], onRetry });
+    expect(screen.getByText(/Failed · Carrier filtered the message/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no status chip (and no Retry) when delivery_status is absent — seed/legacy rows', () => {
+    const noStatus = {
+      ...MESSAGE_OUT,
+      id: 'm-nostatus',
+      tsMsgId: 'm-nostatus',
+      body: 'legacy row',
+      delivery_status: undefined,
+    } as unknown as TimelineItem;
+    renderTimeline({ items: [noStatus] });
+    expect(screen.getByText('legacy row')).toBeInTheDocument();
+    expect(screen.queryByText('Sent')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Retry/i })).not.toBeInTheDocument();
+  });
 });

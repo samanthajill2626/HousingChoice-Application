@@ -8,7 +8,7 @@
 // posts to that conversation, else Send is disabled.
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { sendMessage } from '../../api/index.js';
+import { sendMessage, type TimelineMessage } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
@@ -66,6 +66,13 @@ export function ContactDetail(): React.JSX.Element {
   const onSend = (body: string): Promise<void> => {
     if (!sendConvId) return Promise.resolve();
     return sendMessage(sendConvId, { body }).then(() => undefined);
+  };
+  // Retry a failed outbound message: resend its body to its OWN conversation (a new
+  // send, like the legacy retry). The SSE message.persisted refetch reconciles the
+  // stream so the resent message + its fresh status appear.
+  const onRetry = (msg: TimelineMessage): void => {
+    if (msg.body === undefined || msg.body.length === 0) return;
+    void sendMessage(msg.conversationId, { body: msg.body });
   };
 
   // Header facts subline: voucher / authority for tenants, company / listing
@@ -125,6 +132,7 @@ export function ContactDetail(): React.JSX.Element {
             replyToLabel={defaultPhoneLabel(phones)}
             canSend={canSend}
             onSend={onSend}
+            onRetry={onRetry}
           />
         </div>
         <div

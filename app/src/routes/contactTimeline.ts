@@ -84,6 +84,7 @@ interface TimelineMessage extends TimelineBase {
   body?: string;
   media_attachments?: MediaAttachment[];
   delivery_status: DeliveryStatus;
+  error_code?: string;
   fromPhone?: string;
   toPhone?: string;
 }
@@ -210,6 +211,7 @@ function toTimelineMessage(
     ...(m.body !== undefined && { body: m.body }),
     ...(media.length > 0 && { media_attachments: media }),
     delivery_status: m.delivery_status,
+    ...(m.error_code !== undefined && { error_code: m.error_code }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
   };

@@ -19,6 +19,7 @@ import type {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
+import { deliveryReason, presentDeliveryStatus } from './deliveryStatus.js';
 import styles from './Timeline.module.css';
 
 export type TimelineStatus = 'loading' | 'ready' | 'error';
@@ -39,6 +40,8 @@ export interface TimelineProps {
   /** Called with the textarea body when the operator sends. Returns a promise so
    *  the reply box can show an in-flight state and restore the draft on failure. */
   onSend?: (body: string) => Promise<void>;
+  /** Retry a failed outbound message — resends its body to its own conversation. */
+  onRetry?: (msg: TimelineMessage) => void;
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
@@ -94,7 +97,13 @@ function MilestonePin({ ms }: { ms: TimelineMilestone }): React.JSX.Element {
   );
 }
 
-function MessageBubble({ msg }: { msg: TimelineMessage }): React.JSX.Element {
+function MessageBubble({
+  msg,
+  onRetry,
+}: {
+  msg: TimelineMessage;
+  onRetry?: (msg: TimelineMessage) => void;
+}): React.JSX.Element {
   const outbound = msg.direction === 'outbound';
   const number = outbound ? msg.toPhone : msg.fromPhone;
   const transport = msg.type.toUpperCase();
@@ -107,6 +116,19 @@ function MessageBubble({ msg }: { msg: TimelineMessage }): React.JSX.Element {
     .join(' · ');
   const attachments = msg.media_attachments ?? [];
 
+  // Delivery state is meaningful only for OUTBOUND; seed/legacy rows (no status)
+  // show no chip. Failures expose a reason (when error_code is present) + Retry.
+  const delivery = outbound ? presentDeliveryStatus(msg.delivery_status) : null;
+  const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
+  const toneClass = delivery
+    ? ({
+        neutral: styles.toneNeutral,
+        info: styles.toneInfo,
+        success: styles.toneSuccess,
+        danger: styles.toneDanger,
+      }[delivery.tone] ?? '')
+    : '';
+
   return (
     <div className={`${styles.bubble} ${outbound ? styles.out : styles.in}`}>
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
@@ -115,7 +137,28 @@ function MessageBubble({ msg }: { msg: TimelineMessage }): React.JSX.Element {
           📎 {attachments.length === 1 ? '1 attachment' : `${attachments.length} attachments`}
         </div>
       ) : null}
-      <div className={styles.meta}>{meta}</div>
+      <div className={styles.meta}>
+        <span className={styles.metaText}>{meta}</span>
+        {delivery ? (
+          <span
+            className={`${styles.status} ${toneClass}`}
+            {...(reason !== undefined && { title: reason })}
+          >
+            {delivery.label}
+            {reason !== undefined ? ` · ${reason}` : ''}
+          </span>
+        ) : null}
+      </div>
+      {delivery?.isFailure && onRetry ? (
+        <button
+          type="button"
+          className={styles.retry}
+          onClick={() => onRetry(msg)}
+          aria-label="Retry sending this message"
+        >
+          ↻ Retry
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -154,10 +197,16 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   );
 }
 
-function StreamItem({ item }: { item: TimelineItem }): React.JSX.Element {
+function StreamItem({
+  item,
+  onRetry,
+}: {
+  item: TimelineItem;
+  onRetry?: (msg: TimelineMessage) => void;
+}): React.JSX.Element {
   switch (item.kind) {
     case 'message':
-      return <MessageBubble msg={item} />;
+      return <MessageBubble msg={item} onRetry={onRetry} />;
     case 'call':
       return <CallCard call={item} />;
     case 'milestone':
@@ -166,7 +215,7 @@ function StreamItem({ item }: { item: TimelineItem }): React.JSX.Element {
 }
 
 export function Timeline(props: TimelineProps): React.JSX.Element {
-  const { status, items, source, replyToPhone, replyToLabel, canSend, onSend } = props;
+  const { status, items, source, replyToPhone, replyToLabel, canSend, onSend, onRetry } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -259,10 +308,10 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           ? days.map((day, di) => (
               // `day.key` can be empty when an item lacks `at` — fall back to the
               // index so the key is always unique/defined (no React key warning).
-              <div key={day.key || `day-${di}`}>
+              <div key={day.key || `day-${di}`} className={styles.day}>
                 {day.label ? <div className={styles.divider}>{day.label}</div> : null}
                 {day.items.map((item, ii) => (
-                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} />
+                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} onRetry={onRetry} />
                 ))}
               </div>
             ))

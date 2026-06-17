@@ -23,11 +23,19 @@ import { validateUnitBody } from '../lib/unitFields.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
+  CannotRemovePrimaryLandlordError,
   createUnitsRepo,
+  unitContacts,
+  UNIT_CONTACT_ROLES,
   type ListUnitsOpts,
+  type RelatedUnit,
+  type UnitContact,
+  type UnitItem,
   type UnitsPage,
+  type UnitStatus,
   type UnitsRepo,
 } from '../repos/unitsRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createListingSendsRepo,
   ListingSendNotFoundError,
@@ -44,6 +52,8 @@ export interface UnitsRouterDeps {
   logger?: Logger;
   unitsRepo?: UnitsRepo;
   auditRepo?: AuditRepo;
+  /** BE3/C3: resolve a roster contact's display name/company for denormalization. */
+  contactsRepo?: ContactsRepo;
   /** BE4/C4: the listing-send record (recipients + response). */
   listingSendsRepo?: ListingSendsRepo;
   /** BE4/C4: emit a `listing_reviewed` milestone on a real interested/not_a_fit change. */
@@ -55,6 +65,42 @@ const LISTING_RESPONSES: readonly ListingResponse[] = ['interested', 'not_a_fit'
 
 function isListingResponse(value: unknown): value is ListingResponse {
   return typeof value === 'string' && (LISTING_RESPONSES as readonly string[]).includes(value);
+}
+
+/** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
+function isUnitContactRole(value: unknown): value is UnitContact['role'] {
+  return typeof value === 'string' && (UNIT_CONTACT_ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * BE3/C3: the denormalized display name for a roster row, from the contact's
+ * firstName/lastName (joined + trimmed). HONEST — undefined when no name is
+ * known (never invents one); the roster row then has no `name`.
+ */
+function displayNameOfContact(contact: ContactItem): string | undefined {
+  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : undefined;
+}
+
+/**
+ * BE3/C3: project a unit onto the RelatedUnit wire shape (contract verbatim).
+ * `address` reuses the legacy unit address field (structured or legacy string);
+ * `status` reuses the legacy status. `label` is a short human hint.
+ */
+function toRelatedUnit(
+  unit: UnitItem,
+  relation: RelatedUnit['relation'],
+  label?: string,
+): RelatedUnit {
+  return {
+    unitId: unit.unitId,
+    ...(unit.address !== undefined && { address: unit.address }),
+    status: unit.status as UnitStatus,
+    relation,
+    ...(label !== undefined && { label }),
+  };
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -106,6 +152,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
@@ -185,7 +232,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     res.status(201).json({ unit });
   });
 
-  // GET /api/units/:unitId — one unit.
+  // GET /api/units/:unitId — one unit. BE3/C3: the returned unit is a strict
+  // SUPERSET of the legacy shape — every stored field (incl. landlordId) is
+  // preserved, plus a `contacts` roster (via unitContacts: the stored roster
+  // when present, else the back-compat single-row roster derived from
+  // landlordId). The serializer never mutates the stored item.
   router.get('/:unitId', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
@@ -193,7 +244,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    res.json({ unit });
+    res.json({ unit: { ...unit, contacts: unitContacts(unit) } });
   });
 
   // SEAM (BE4/C4 — individual flyer send): there is currently NO individual-send
@@ -219,6 +270,144 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
     const rows = await listingSends.listByUnit(unitId);
     res.json({ recipients: rows.map(toListingSendRow) });
+  });
+
+  // POST /api/units/:unitId/contacts { contactId, role, primaryVoice? } (BE3/C3).
+  // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
+  // resolves the contact's denormalized name/company (so the roster row is
+  // self-describing); the repo maintains the single-primaryVoice invariant and
+  // keeps primary_voice_contact (voice routing) consistent. 404 unknown unit /
+  // unknown contact; 400 bad role / primaryVoice; audit unit_contact_added.
+  router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    const contactId = b['contactId'];
+    if (typeof contactId !== 'string' || contactId.length === 0) {
+      res.status(400).json({ error: 'contactId is required' });
+      return;
+    }
+    const role = b['role'];
+    if (!isUnitContactRole(role)) {
+      res.status(400).json({ error: `role must be one of: ${UNIT_CONTACT_ROLES.join(', ')}` });
+      return;
+    }
+    const primaryVoiceRaw = b['primaryVoice'];
+    if (primaryVoiceRaw !== undefined && typeof primaryVoiceRaw !== 'boolean') {
+      res.status(400).json({ error: 'primaryVoice must be a boolean' });
+      return;
+    }
+    const primaryVoice = primaryVoiceRaw === true;
+
+    // The unit must exist (404). We check up-front so an unknown unit is a clean
+    // 404 distinct from the unknown-contact 404 below.
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+
+    // Resolve the contact for denormalization (404 when the contact doesn't
+    // exist — never roster a phantom). name/company are best-effort honest:
+    // omitted when unknown, never invented.
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const name = displayNameOfContact(contact);
+    const company = typeof contact['company'] === 'string' ? (contact['company'] as string) : undefined;
+
+    const updated = await units.addContact(unitId, {
+      contactId,
+      role,
+      primaryVoice,
+      ...(name !== undefined && { name }),
+      ...(company !== undefined && { company }),
+    });
+    await audit.append(`units#${unitId}`, 'unit_contact_added', {
+      actor: req.user?.userId,
+      contactId,
+      role,
+      primaryVoice,
+    });
+    log.info({ unitId, contactId, role, primaryVoice, actor: req.user?.userId }, 'unit contact added via api');
+    res.json({ unit: { ...updated, contacts: unitContacts(updated) } });
+  });
+
+  // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) → { unit }. 404
+  // unknown unit / contact-not-on-roster; 409 removing the primary landlord
+  // (cannot_remove_primary_landlord — reassign landlordId first); audit
+  // unit_contact_removed.
+  router.delete('/:unitId/contacts/:contactId', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const contactId = String(req.params['contactId'] ?? '');
+    let updated: UnitItem;
+    try {
+      updated = await units.removeContact(unitId, contactId);
+    } catch (err) {
+      if (err instanceof CannotRemovePrimaryLandlordError) {
+        res.status(409).json({ error: 'cannot_remove_primary_landlord' });
+        return;
+      }
+      if (err instanceof ConditionalCheckFailedException) {
+        // Unknown unit OR contact-not-on-roster — both 404 (mirrors the unit
+        // 404 posture; the message distinguishes them in logs only).
+        res.status(404).json({ error: 'unit_or_contact_not_found' });
+        return;
+      }
+      throw err; // Express 5 forwards async throws to the error handler.
+    }
+    await audit.append(`units#${unitId}`, 'unit_contact_removed', {
+      actor: req.user?.userId,
+      contactId,
+    });
+    log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact removed via api');
+    res.json({ unit: { ...updated, contacts: unitContacts(updated) } });
+  });
+
+  // GET /api/units/:unitId/related → { related: RelatedUnit[] } (BE3/C3). 404
+  // unknown unit. same_property = the byProperty siblings (when propertyId set)
+  // minus self; same_landlord = listByLandlord minus self AND minus any unit
+  // already counted as same_property (a sibling shouldn't appear twice). Order:
+  // same_property first, then same_landlord.
+  router.get('/:unitId/related', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+
+    const seen = new Set<string>([unitId]); // never relate a unit to itself
+    const related: RelatedUnit[] = [];
+
+    // same_property — the building/duplex group (sparse byProperty GSI).
+    if (typeof unit.propertyId === 'string' && unit.propertyId.length > 0) {
+      const siblings = await units.listByProperty(unit.propertyId);
+      for (const u of siblings.items) {
+        if (seen.has(u.unitId)) continue;
+        seen.add(u.unitId);
+        related.push(toRelatedUnit(u, 'same_property', 'Same building'));
+      }
+    }
+
+    // same_landlord — other units owned by the same landlord, deduped against
+    // self + the same_property siblings already added.
+    if (typeof unit.landlordId === 'string' && unit.landlordId.length > 0) {
+      const owned = await units.listByLandlord(unit.landlordId);
+      for (const u of owned.items) {
+        if (seen.has(u.unitId)) continue;
+        seen.add(u.unitId);
+        related.push(toRelatedUnit(u, 'same_landlord', 'Same landlord'));
+      }
+    }
+
+    res.json({ related });
   });
 
   // PATCH /api/units/:unitId/recipients/:contactId { response } (BE4/C4).

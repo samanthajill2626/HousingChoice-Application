@@ -174,3 +174,41 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
     expect(xml).toContain(`callerId="${POOL}"`); // guardrail intact on the fallback
   });
 });
+
+// BE3/C3 cross-cutting: the roster's ☎ primaryVoice drives the SAME voice field
+// (primary_voice_contact) the masked-call bridge reads. Setting a roster contact
+// as primaryVoice must therefore route the landlord leg to that contact; a
+// roster-less unit (no primaryVoice ever set) must still route to landlordId.
+describe('BE3 roster primaryVoice ↔ masked-call routing consistency', () => {
+  it('setting a roster contact as primaryVoice routes the landlord leg to that contact', async () => {
+    const world = createFakeWorld();
+    seedCaseRelay(world, {}); // no primary_voice_contact seeded
+    // The operator adds the PM to the roster as the ☎ primary — this is what
+    // the route does on POST /api/units/:id/contacts.
+    await world.unitsRepo.addContact('unit-vr', {
+      contactId: 'c-pm',
+      role: 'pm',
+      primaryVoice: true,
+    });
+    // The voice-routing field is now the PM (the roster ☎ primary).
+    expect(world.units.get('unit-vr')?.primary_voice_contact).toBe('c-pm');
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
+    expect(res.status).toBe(200);
+    const xml = res.text;
+    expect(xml).toContain(VOICE_CONTACT); // dials the PM (the roster ☎ primary)
+    expect(xml).not.toContain(LANDLORD_SMS);
+    expect(xml).toContain(`callerId="${POOL}"`);
+  });
+
+  it('a roster-less unit still routes the landlord leg to the legacy landlordId', async () => {
+    const world = createFakeWorld();
+    seedCaseRelay(world, {}); // no roster, no primary_voice_contact
+    const { app } = makeWebhookHarness({ world });
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
+    const xml = res.text;
+    expect(xml).toContain(LANDLORD_SMS);
+    expect(xml).not.toContain(VOICE_CONTACT);
+  });
+});

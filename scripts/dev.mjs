@@ -504,6 +504,6 @@ try {
 logStream?.end();
 console.log(
   (mode === 'local'
-    ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it). S3 mock container is still running (npm run s3:stop to stop it).'
+    ? 'dev — stopped. DynamoDB Local container is still running (npm run db:stop to stop it).\nS3 mock container is still running (npm run s3:stop to stop it).'
     : 'dev — stopped.') + (logRelPath ? ` Full logs: ${logRelPath}` : ''),
 );

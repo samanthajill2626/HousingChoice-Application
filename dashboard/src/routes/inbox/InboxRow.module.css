@@ -1,0 +1,154 @@
+/* InboxRow — a contact/unknown comms row. All values from ui/tokens.css. */
+.rowItem {
+  list-style: none;
+  margin-bottom: var(--sp-2);
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.row:hover {
+  border-color: var(--c-border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+/* Unread emphasis: a left accent bar. */
+.unread {
+  border-left: 3px solid var(--c-brand);
+}
+
+.main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  text-decoration: none;
+  color: inherit;
+}
+.main:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-text-subtle);
+}
+.dot_tenant {
+  background: var(--c-dot-tenant);
+}
+.dot_landlord {
+  background: var(--c-dot-landlord);
+}
+.dot_unknown {
+  background: var(--c-dot-unknown);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+.name {
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+.bold {
+  font-weight: var(--fw-bold);
+}
+.channel {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+.tag,
+.assigned {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.triage {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.count {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--c-danger) 12%, transparent);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+}
+
+/* Inline actions — present + focusable always; visible on hover / focus / swipe. */
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  padding-right: var(--sp-3);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.row:hover .actions,
+.row:focus-within .actions,
+.revealed .actions {
+  opacity: 1;
+}
+.action {
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.action:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.action:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}

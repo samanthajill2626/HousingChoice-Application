@@ -1,0 +1,139 @@
+/* File-pane cards — stacked white sections in the contact detail right pane.
+ * All values from ui/tokens.css. */
+
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+  font-weight: var(--fw-semibold);
+}
+
+.aside {
+  margin-left: auto;
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.pending,
+.empty {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-subtle);
+}
+
+.kv {
+  display: flex;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  margin: 2px 0;
+}
+
+.k {
+  color: var(--c-text-muted);
+  min-width: 120px;
+  flex: 0 0 auto;
+}
+
+.v {
+  color: var(--c-text);
+}
+
+/* --- List rows (Cases / Tours / Listings / Listings-sent) ---------------- */
+
+.li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-surface-2);
+  color: var(--c-text);
+  text-decoration: none;
+}
+
+.li:last-child {
+  border-bottom: none;
+}
+
+a.li:hover .liLabel {
+  text-decoration: underline;
+}
+
+a.li:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.liLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.liRight {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  flex: 0 0 auto;
+}
+
+.yes {
+  color: var(--c-resp-yes);
+}
+
+.no {
+  color: var(--c-resp-no);
+}
+
+.wait {
+  color: var(--c-resp-wait);
+}
+
+.muted {
+  color: var(--c-text-muted);
+}
+
+/* --- Status dots (unit availability) ------------------------------------- */
+
+.statusAvailable {
+  color: var(--c-resp-yes);
+}
+
+.statusPlaced {
+  color: var(--c-text-muted);
+}
+
+.statusInactive {
+  color: var(--c-resp-wait);
+}
+
+/* --- Preference chips ----------------------------------------------------- */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.chip {
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-brand-soft);
+  color: var(--c-brand);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-xs);
+}

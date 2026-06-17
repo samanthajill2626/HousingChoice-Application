@@ -154,10 +154,19 @@
   margin-top: var(--sp-1);
 }
 
-/* The transport · number · time line never breaks mid-value; the status chip
- * wraps to its own line instead when a failure reason makes the row too long. */
+/* The transport · number · time line is HIDDEN by default (messaging-app style)
+ * and revealed on hover (desktop) or tap (the .revealed toggle, mobile). The day
+ * dividers give at-a-glance time context; this is the precise per-message detail.
+ * The line never breaks mid-value; the status chip wraps below if a reason makes
+ * the row too long. */
 .metaText {
+  display: none;
   white-space: nowrap;
+}
+
+.bubble:hover .metaText,
+.bubble.revealed .metaText {
+  display: inline;
 }
 
 /* Delivery-state chip on OUTBOUND bubbles (Sent/Delivered/Failed/…). Sits at the

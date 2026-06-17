@@ -104,6 +104,7 @@ function MessageBubble({
   msg: TimelineMessage;
   onRetry?: (msg: TimelineMessage) => void;
 }): React.JSX.Element {
+  const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
   const number = outbound ? msg.toPhone : msg.fromPhone;
   const transport = msg.type.toUpperCase();
@@ -129,8 +130,19 @@ function MessageBubble({
       }[delivery.tone] ?? '')
     : '';
 
+  // The transport · number · time line is hidden by default (messaging-app style)
+  // and revealed on hover (desktop, via CSS) or tap (mobile, this toggle). Don't
+  // toggle while the user is selecting text in the bubble.
+  const toggleMeta = (): void => {
+    if ((window.getSelection()?.toString() ?? '').length > 0) return;
+    setRevealed((r) => !r);
+  };
+
   return (
-    <div className={`${styles.bubble} ${outbound ? styles.out : styles.in}`}>
+    <div
+      className={`${styles.bubble} ${outbound ? styles.out : styles.in} ${revealed ? styles.revealed ?? '' : ''}`}
+      onClick={toggleMeta}
+    >
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
       {attachments.length > 0 ? (
         <div className={styles.media}>
@@ -153,7 +165,10 @@ function MessageBubble({
         <button
           type="button"
           className={styles.retry}
-          onClick={() => onRetry(msg)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRetry(msg);
+          }}
           aria-label="Retry sending this message"
         >
           ↻ Retry

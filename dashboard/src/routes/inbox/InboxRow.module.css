@@ -127,12 +127,14 @@
   gap: var(--sp-1);
   padding-right: var(--sp-3);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.12s ease;
 }
 .row:hover .actions,
 .row:focus-within .actions,
 .revealed .actions {
   opacity: 1;
+  pointer-events: auto;
 }
 .action {
   padding: var(--sp-1) var(--sp-2);

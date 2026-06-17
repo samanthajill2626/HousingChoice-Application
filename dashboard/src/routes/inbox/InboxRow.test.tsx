@@ -95,11 +95,16 @@ describe('InboxRow', () => {
     expect(onAssign).toHaveBeenCalledWith(expect.objectContaining({ contactId: 'c1' }), 'me1', 'navi@example.com');
   });
 
-  it('shows the Assigned chip and an Unassign action when assigned', () => {
-    renderRow(mkRow({ assignment: { userId: 'me1', name: 'Navi' } }));
-    expect(screen.getByText(/Navi/)).toBeInTheDocument();
+  it('shows "You" on the Assigned chip when assigned to the current user', () => {
+    renderRow(mkRow({ assignment: { userId: 'me1', name: 'navi@example.com' } }));
+    expect(screen.getByText(/Assigned · You/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /unassign/i }));
     expect(onAssign).toHaveBeenCalledWith(expect.objectContaining({ contactId: 'c1' }), null, '');
+  });
+
+  it('shows the assignee name on the Assigned chip when assigned to someone else', () => {
+    renderRow(mkRow({ assignment: { userId: 'other', name: 'Sam Lee' } }));
+    expect(screen.getByText(/Assigned · Sam Lee/)).toBeInTheDocument();
   });
 
   it('offers no assign action on an unknown row (no contactId)', () => {

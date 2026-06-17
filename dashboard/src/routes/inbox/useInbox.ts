@@ -73,14 +73,19 @@ export function useInbox(filter: InboxFilter): InboxState {
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
 
   const abortRef = useRef<AbortController | null>(null);
+  // Bumped on every committed optimistic mutation; a first-page refetch that
+  // started before the commit (so it read pre-mutation server state) is then
+  // discarded instead of clobbering the commit.
+  const genRef = useRef(0);
 
   const fetchFirstPage = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    const gen = genRef.current;
     try {
       const pageData = await getInbox({ filter, limit: PAGE_LIMIT }, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || gen !== genRef.current) return;
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
       setStatus('ready');
@@ -155,11 +160,17 @@ export function useInbox(filter: InboxFilter): InboxState {
       return next;
     });
   }, []);
-  const clearPatch = useCallback((key: string) => {
+  // Clear only the field this mutation owns — so a concurrent mark-read + assign
+  // on the same row don't wipe each other's still-in-flight overlay.
+  const clearPatch = useCallback((key: string, field: keyof Pending) => {
     setPending((prev) => {
-      if (!prev.has(key)) return prev;
+      const entry = prev.get(key);
+      if (entry === undefined || !(field in entry)) return prev;
       const next = new Map(prev);
-      next.delete(key);
+      const remaining = { ...entry };
+      delete remaining[field];
+      if (Object.keys(remaining).length === 0) next.delete(key);
+      else next.set(key, remaining);
       return next;
     });
   }, []);
@@ -178,13 +189,14 @@ export function useInbox(filter: InboxFilter): InboxState {
       setPatch(key, { unreadCount: 0 });
       markInboxRead(target)
         .then(() => {
+          genRef.current += 1; // commit wins over any in-flight pre-commit refetch
           // Commit to base so clearing the patch doesn't reveal a stale count.
           setBase((prev) => prev.map((r) => (rowKey(r) === key ? { ...r, unreadCount: 0 } : r)));
         })
         .catch(() => {
           /* rollback: dropping the patch restores base's original count */
         })
-        .finally(() => clearPatch(key));
+        .finally(() => clearPatch(key, 'unreadCount'));
     },
     [setPatch, clearPatch],
   );
@@ -197,6 +209,7 @@ export function useInbox(filter: InboxFilter): InboxState {
       setPatch(key, { assignment: optimistic });
       assignInbox(row.contactId, userId)
         .then(() => {
+          genRef.current += 1;
           setBase((prev) =>
             prev.map((r) => (rowKey(r) === key ? { ...r, assignment: optimistic ?? undefined } : r)),
           );
@@ -204,7 +217,7 @@ export function useInbox(filter: InboxFilter): InboxState {
         .catch(() => {
           /* rollback */
         })
-        .finally(() => clearPatch(key));
+        .finally(() => clearPatch(key, 'assignment'));
     },
     [setPatch, clearPatch],
   );

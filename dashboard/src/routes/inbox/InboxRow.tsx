@@ -75,7 +75,11 @@ export function InboxRow({
             <span className={styles.channel}>{CHANNEL_LABEL[row.channel]}</span>
             {row.caseContext ? <span className={styles.tag}>{row.caseContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
-            {row.assignment ? <span className={styles.assigned}>Assigned · {row.assignment.name}</span> : null}
+            {row.assignment ? (
+              <span className={styles.assigned}>
+                Assigned · {row.assignment.userId === currentUserId ? 'You' : row.assignment.name}
+              </span>
+            ) : null}
           </span>
           <span className={`${styles.preview} ${unread ? styles.bold : ''}`}>
             {row.direction === 'outbound' ? `You: ${row.preview}` : row.preview}

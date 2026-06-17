@@ -181,4 +181,71 @@ describe('useInbox', () => {
     });
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
   });
+
+  it('keeps an optimistic mark-read visible across an interleaved refetch that still shows it unread', async () => {
+    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    let releaseRead: () => void = () => {};
+    markInboxRead.mockImplementation(() => new Promise<void>((res) => { releaseRead = () => res(); }));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    // An SSE refetch lands returning the row STILL unread (server not caught up yet).
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
+        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+      });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
+    // The in-flight overlay protects it — still 0.
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+    act(() => releaseRead());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+  });
+
+  it('keeps BOTH overlays when mark-read and assign run concurrently on one row', async () => {
+    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 2, assignment: undefined })]));
+    let releaseRead: () => void = () => {};
+    let releaseAssign: () => void = () => {};
+    markInboxRead.mockImplementation(() => new Promise<void>((res) => { releaseRead = () => res(); }));
+    assignInbox.mockImplementation(() => new Promise<void>((res) => { releaseAssign = () => res(); }));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    act(() => screen.getByRole('button', { name: 'assign:c:c1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    expect(screen.getByTestId('assigned')).toHaveTextContent('Nav');
+    // Assign settles first — its field-scoped clear must NOT drop the unread overlay.
+    act(() => releaseAssign());
+    await waitFor(() => expect(assignInbox).toHaveBeenCalled());
+    expect(screen.getByTestId('unread')).toHaveTextContent('0');
+    act(() => releaseRead());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+  });
+
+  it('does not let a stale in-flight refetch overwrite a committed mark-read', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    // An SSE refetch starts and HANGS (in flight, reading pre-read state).
+    let releaseStale: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () => new Promise((res) => { releaseStale = () => res(pageOf([mkRow({ contactId: 'c1', unreadCount: 2 })])); }),
+    );
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
+        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+      });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
+    // Mark read resolves and commits (generation bump).
+    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    // The stale refetch now resolves — the generation guard must discard it.
+    act(() => releaseStale());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+  });
 });

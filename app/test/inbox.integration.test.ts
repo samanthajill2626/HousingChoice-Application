@@ -23,6 +23,7 @@ import { createEventBus } from '../src/lib/events.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { createMessagesRepo } from '../src/repos/messagesRepo.js';
 import { buildApp } from '../src/app.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { makeFakeUsersRepo, testUserItem, adminUserItem, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
@@ -61,10 +62,11 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
   const conversations = createConversationsRepo(repoDeps);
   const contacts = createContactsRepo(repoDeps);
   const audit = createAuditRepo(repoDeps);
+  const messages = createMessagesRepo(repoDeps);
   const events = createEventBus();
 
   // Tables needed for the inbox feed.
-  const bases = ['contacts', 'conversations', 'audit_events'] as const;
+  const bases = ['contacts', 'conversations', 'audit_events', 'messages'] as const;
 
   // HTTP server wrapping the real app (so we can hit it with fetch).
   let server: Server;
@@ -97,6 +99,7 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
       auth: { usersRepo: fakeUsers.repo },
       api: {
         conversationsRepo: conversations,
+        messagesRepo: messages,
         auditRepo: audit,
         contactsRepo: contacts,
         usersRepo: fakeUsers.repo,
@@ -241,6 +244,22 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
     await seedConv({ phone: PHONE_C,  lastActivityAt: '2026-06-17T08:00:00.000Z', unread: 1 });
     const cUnk = await seedConv({ phone: PHONE_UNK, lastActivityAt: '2026-06-17T06:00:00.000Z', unread: 1 });
     convUnkId = cUnk.conversationId;
+
+    // Seed a real inbound MMS on conv-A2 (the representative/newest conv for
+    // contact A). This exercises the real message-derived channel/direction/
+    // preview path in aggregateInbox → latestMessageOf → deriveLatest.
+    // providerTs matches lastActivityAt so the SK sorts as the newest item.
+    await messages.append({
+      conversationId: convA2Id,
+      providerSid: 'SM-it-inbound-mms-a2',
+      providerTs: '2026-06-17T05:00:00.000Z',
+      type: 'mms',
+      direction: 'inbound',
+      author: 'unknown',
+      body: 'Here is my photo',
+      mediaUrls: ['https://api.twilio.com/fake-media/photo.jpg'],
+      deliveryStatus: 'delivered',
+    });
   }, 60_000);
 
   // ---------------------------------------------------------------------------
@@ -273,6 +292,20 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
     expect(rowUnk).toBeDefined();
     expect(rowUnk!['needsTriage']).toBe(true);
     expect(rowUnk!['phone']).toBe(PHONE_UNK);
+  });
+
+  it('contact A row derives channel=mms, direction=inbound, non-empty preview from real seeded message', async () => {
+    const resp = await get('/api/inbox');
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { rows: Array<Record<string, unknown>> };
+
+    const rowA = body.rows.find((r) => r['contactId'] === contactAId);
+    expect(rowA).toBeDefined();
+    // These fields are derived from the real inbound MMS we seeded on conv-A2.
+    expect(rowA!['channel']).toBe('mms');
+    expect(rowA!['direction']).toBe('inbound');
+    expect(typeof rowA!['preview']).toBe('string');
+    expect((rowA!['preview'] as string).length).toBeGreaterThan(0);
   });
 
   it('filter=unread returns only rows with unreadCount > 0 (A, C, UNK)', async () => {

@@ -57,15 +57,17 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     ]);
   });
 
-  it('returns the stored roster when present', async () => {
+  it('returns the stored roster when present, name/company enriched at read time', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-2', {
       landlordId: 'c-ll-1',
       contacts: [
         { contactId: 'c-ll-1', role: 'landlord', primaryVoice: false },
-        { contactId: 'c-pm-1', role: 'pm', primaryVoice: true, name: 'Pat M', company: 'Acme PM' },
+        { contactId: 'c-pm-1', role: 'pm', primaryVoice: true },
       ],
     });
+    // The pm contact carries the CURRENT name/company — read-time enrichment.
+    seedContact(world, 'c-pm-1', { type: 'pm', firstName: 'Pat', lastName: 'M', company: 'Acme PM' });
     const res = await request(app)
       .get('/api/units/u-2')
       .set('x-origin-verify', SECRET)
@@ -89,6 +91,74 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('unit_not_found');
+  });
+
+  it('enriches the back-compat landlord row with name/company resolved at read time', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-enrich', { landlordId: 'c-ll-named' });
+    seedContact(world, 'c-ll-named', {
+      type: 'landlord',
+      firstName: 'Lee',
+      lastName: 'Lord',
+      company: 'Lord Realty',
+    } as Partial<ContactItem>);
+
+    const res = await request(app)
+      .get('/api/units/u-enrich')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const landlordRow = (res.body.unit.contacts as Array<Record<string, unknown>>).find(
+      (c) => c.contactId === 'c-ll-named',
+    );
+    expect(landlordRow).toMatchObject({
+      contactId: 'c-ll-named',
+      role: 'landlord',
+      name: 'Lee Lord',
+      company: 'Lord Realty',
+    });
+  });
+
+  it('reflects the CURRENT contact name at read time (stored roster goes fresh on rename)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-fresh', {
+      landlordId: 'c-ll-1',
+      contacts: [
+        { contactId: 'c-ll-1', role: 'landlord', primaryVoice: false },
+        // Stale denormalized name stored on the row.
+        { contactId: 'c-pm-fresh', role: 'pm', primaryVoice: true, name: 'Old Name' },
+      ],
+    });
+    seedContact(world, 'c-pm-fresh', { type: 'pm', firstName: 'New', lastName: 'Name' });
+
+    const res = await request(app)
+      .get('/api/units/u-fresh')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const pmRow = (res.body.unit.contacts as Array<Record<string, unknown>>).find(
+      (c) => c.contactId === 'c-pm-fresh',
+    );
+    // Read-time enrichment wins over the stale stored value.
+    expect(pmRow?.name).toBe('New Name');
+  });
+
+  it('a missing contact leaves name/company absent (never 500)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // The landlord contact does NOT exist in the contacts store.
+    seedUnit(world, 'u-missing', { landlordId: 'c-ghost-ll' });
+
+    const res = await request(app)
+      .get('/api/units/u-missing')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const row = (res.body.unit.contacts as Array<Record<string, unknown>>).find(
+      (c) => c.contactId === 'c-ghost-ll',
+    );
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty('name');
+    expect(row).not.toHaveProperty('company');
   });
 });
 

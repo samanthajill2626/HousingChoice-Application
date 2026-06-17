@@ -169,6 +169,45 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   const router = Router();
 
+  /**
+   * BE3/C3 FIX: enrich a unit's roster at READ time. For each UnitContact (incl.
+   * the back-compat landlord row synthesized from landlordId), resolve the
+   * contact and set `name` (firstName+lastName) + `company` from the CURRENT
+   * contact doc — so the roster never goes stale on rename and the synthesized
+   * landlord row is self-describing too. Best-effort: a missing/failed lookup
+   * leaves name/company absent (the client falls back to the id) and NEVER
+   * throws (consistent with /api/today's read-time enrichment). Contacts are
+   * deduped per contactId (a roster is small).
+   */
+  async function enrichRoster(unit: UnitItem): Promise<UnitContact[]> {
+    const roster = unitContacts(unit);
+    const byId = new Map<string, ContactItem | undefined>();
+    for (const row of roster) {
+      if (byId.has(row.contactId)) continue;
+      try {
+        byId.set(row.contactId, await contacts.getById(row.contactId));
+      } catch (err) {
+        // Never 500 the roster on a contact-lookup failure.
+        log.warn({ unitId: unit.unitId, contactId: row.contactId, err }, 'roster enrich: contact lookup failed (best-effort)');
+        byId.set(row.contactId, undefined);
+      }
+    }
+    return roster.map((row) => {
+      const contact = byId.get(row.contactId);
+      const name = contact ? displayNameOfContact(contact) : undefined;
+      const company =
+        contact && typeof contact['company'] === 'string' ? (contact['company'] as string) : undefined;
+      // Read-time enrichment is authoritative: drop any stale stored name/company
+      // and re-set ONLY when the contact currently carries one.
+      const { name: _staleName, company: _staleCompany, ...rest } = row;
+      return {
+        ...rest,
+        ...(name !== undefined && { name }),
+        ...(company !== undefined && { company }),
+      };
+    });
+  }
+
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
   // order landlordId > status > jurisdiction (each a single-partition Query);
   // with no filter, a paginated Scan (repo.list). This keeps every list read a
@@ -254,7 +293,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    res.json({ unit: { ...unit, contacts: unitContacts(unit) } });
+    res.json({ unit: { ...unit, contacts: await enrichRoster(unit) } });
   });
 
   // SEAM (BE4/C4 — individual flyer send): there is currently NO individual-send
@@ -346,7 +385,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       primaryVoice,
     });
     log.info({ unitId, contactId, role, primaryVoice, actor: req.user?.userId }, 'unit contact added via api');
-    res.json({ unit: { ...updated, contacts: unitContacts(updated) } });
+    res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 
   // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) → { unit }. 404
@@ -377,7 +416,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       contactId,
     });
     log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact removed via api');
-    res.json({ unit: { ...updated, contacts: unitContacts(updated) } });
+    res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 
   // GET /api/units/:unitId/related → { related: RelatedUnit[] } (BE3/C3). 404

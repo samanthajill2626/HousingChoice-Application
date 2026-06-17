@@ -295,6 +295,31 @@ export const TABLES: readonly TableSpec[] = [
     rangeKey: { name: 'tsEventId', type: 'S' },
     gsis: [],
   },
+  {
+    // NEW in BE4/C4 (NOT in the doc §5 9-table model — new-dashboard build): the
+    // listing-send record. ONE row per unit↔contact pairing captures that a
+    // listing (a `unit`, tenant-facing "home") was sent to a tenant and the
+    // tenant's response (interested / not_a_fit / no_reply). Two read directions
+    // share these rows: GET /api/units/:id/recipients ("Sent to tenants") reads
+    // the base table by unitId; GET /api/contacts/:id/listings-sent reads the
+    // byContact GSI by contactId.
+    //
+    // PK is unitId; SK is contactId (one upsert-keyed row per pairing, so a
+    // re-send never duplicates). GSI byContact inverts the direction: PK
+    // contactId, SK sentAt — so a contact's listings-sent comes back newest-first
+    // by sentAt (one Query, never a scan). Item is a flexible document; only the
+    // key + the byContact GSI key attrs are contractual (this module). No stream.
+    baseName: 'listing_sends',
+    hashKey: { name: 'unitId', type: 'S' },
+    rangeKey: { name: 'contactId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byContact',
+        hashKey: { name: 'contactId', type: 'S' },
+        rangeKey: { name: 'sentAt', type: 'S' },
+      },
+    ],
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -32,6 +32,7 @@ describe('tables.ts — the table contract', () => {
       'pool_numbers',
       'broadcasts',
       'activity_events',
+      'listing_sends',
     ]);
   });
 
@@ -40,6 +41,18 @@ describe('tables.ts — the table contract', () => {
     expect(t.hashKey.name).toBe('contactId');
     expect(t.rangeKey?.name).toBe('tsEventId');
     expect(t.gsis).toHaveLength(0);
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
+  });
+
+  it('listing_sends (BE4/C4): PK unitId + SK contactId; GSI byContact (contactId + sentAt); no stream/TTL', () => {
+    const t = spec('listing_sends');
+    expect(t.hashKey.name).toBe('unitId');
+    expect(t.rangeKey?.name).toBe('contactId');
+    expect(gsiNames(t)).toEqual(['byContact']);
+    const byContact = t.gsis.find((g) => g.indexName === 'byContact');
+    expect(byContact?.hashKey.name).toBe('contactId');
+    expect(byContact?.rangeKey?.name).toBe('sentAt');
     expect(t.stream).toBeUndefined();
     expect(t.ttlAttribute).toBeUndefined();
   });

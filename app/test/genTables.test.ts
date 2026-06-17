@@ -9,7 +9,7 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'activity_events',
       'audit_events',
@@ -18,6 +18,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'contacts',
       'conversations',
       'invoices',
+      'listing_sends',
       'matches',
       'messages',
       'pool_numbers',
@@ -32,6 +33,22 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       hash_key: { name: 'contactId', type: 'S' },
       range_key: { name: 'tsEventId', type: 'S' },
       gsis: [],
+      stream: false,
+      pitr: true,
+    });
+  });
+
+  it('listing_sends (BE4/C4): PK unitId + SK contactId; GSI byContact (contactId + sentAt); no stream/TTL', () => {
+    expect(tables['listing_sends']).toEqual({
+      hash_key: { name: 'unitId', type: 'S' },
+      range_key: { name: 'contactId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byContact',
+          hash_key: { name: 'contactId', type: 'S' },
+          range_key: { name: 'sentAt', type: 'S' },
+        },
+      ],
       stream: false,
       pitr: true,
     });

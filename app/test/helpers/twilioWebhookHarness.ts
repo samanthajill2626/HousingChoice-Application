@@ -54,6 +54,10 @@ import {
   type ActivityEventsRepo,
 } from '../../src/repos/activityEventsRepo.js';
 import {
+  type ListingSendItem,
+  type ListingSendsRepo,
+} from '../../src/repos/listingSendsRepo.js';
+import {
   type BroadcastItem,
   type BroadcastsRepo,
   type BroadcastStats,
@@ -144,6 +148,9 @@ export interface FakeWorld {
   /** In-memory activity events (BE2/C2), in insert order. */
   activityEvents: ActivityEventItem[];
   activityEventsRepo: ActivityEventsRepo;
+  /** In-memory listing sends (BE4/C4), keyed `${unitId}#${contactId}`. */
+  listingSends: ListingSendItem[];
+  listingSendsRepo: ListingSendsRepo;
   /** In-memory broadcasts (M1.8a), keyed by broadcastId. */
   broadcasts: Map<string, BroadcastItem>;
   broadcastsRepo: BroadcastsRepo;
@@ -922,6 +929,64 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory listing sends (BE4/C4): mirror the repo's contractual semantics —
+  // an UPSERT keyed by (unitId, contactId) that seeds response='no_reply' on the
+  // FIRST send and NEVER resets it on a re-send (only refreshes sentAt/via/
+  // broadcastId), setResponse conditional on the row existing (404-shaped throw
+  // when absent), listByUnit (base table) + listByContact (newest-first by
+  // sentAt, the byContact GSI direction).
+  const listingSends: ListingSendItem[] = [];
+  const findListingSend = (unitId: string, contactId: string): ListingSendItem | undefined =>
+    listingSends.find((r) => r.unitId === unitId && r.contactId === contactId);
+  const listingSendsRepo: ListingSendsRepo = {
+    async recordSend(input) {
+      const now = new Date().toISOString();
+      const sentAt = input.sentAt ?? now;
+      const existing = findListingSend(input.unitId, input.contactId);
+      if (existing) {
+        // RE-SEND: refresh sentAt/via/broadcastId + updated_at; NEVER reset
+        // response. An individual re-send with no broadcastId clears the prior
+        // attribution (mirrors the real repo's REMOVE).
+        existing.sentAt = sentAt;
+        existing.via = input.via;
+        existing.updated_at = now;
+        if (input.broadcastId !== undefined) existing.broadcastId = input.broadcastId;
+        else delete existing.broadcastId;
+        return { ...existing };
+      }
+      const item: ListingSendItem = {
+        unitId: input.unitId,
+        contactId: input.contactId,
+        response: 'no_reply',
+        sentAt,
+        via: input.via,
+        created_at: now,
+        updated_at: now,
+        ...(input.broadcastId !== undefined && { broadcastId: input.broadcastId }),
+      };
+      listingSends.push(item);
+      return { ...item };
+    },
+    async setResponse(unitId, contactId, response) {
+      const existing = findListingSend(unitId, contactId);
+      if (!existing) {
+        throw conditionalCheckFailed(`setResponse: no listing send ${unitId}/${contactId}`);
+      }
+      existing.response = response;
+      existing.updated_at = new Date().toISOString();
+      return { ...existing };
+    },
+    async listByUnit(unitId) {
+      return listingSends.filter((r) => r.unitId === unitId).map((r) => ({ ...r }));
+    },
+    async listByContact(contactId) {
+      return listingSends
+        .filter((r) => r.contactId === contactId)
+        .sort((a, b) => (a.sentAt < b.sentAt ? 1 : -1)) // newest-first by sentAt
+        .map((r) => ({ ...r }));
+    },
+  };
+
   // In-memory broadcasts (M1.8a): mirror the repo's contractual semantics —
   // generate-id create, markSending draft-gate + recipients seed, setRecipient
   // map slot, atomic bumpStats, terminal markSent/markFailed.
@@ -1150,6 +1215,8 @@ export function createFakeWorld(): FakeWorld {
     casesRepo,
     activityEvents,
     activityEventsRepo,
+    listingSends,
+    listingSendsRepo,
     broadcasts,
     broadcastsRepo,
     settings,

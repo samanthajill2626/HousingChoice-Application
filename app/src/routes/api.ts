@@ -67,6 +67,7 @@ import { createBroadcastsRouter } from './broadcasts.js';
 import { createCasesRouter } from './cases.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
+import { createInboxRouter } from './inbox.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -382,6 +383,25 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+    }),
+  );
+  // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,
+  // contact-aggregated lens over conversations/contacts/messages/cases/users —
+  // its only path is GET / (GET /api/inbox), a distinct segment from every
+  // router above. Shares the process conversations + messages repos; cases/
+  // contacts/users default to the real repos unless injected (tests pass the
+  // world fakes).
+  router.use(
+    '/inbox',
+    createInboxRouter({
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      auditRepo: audit,
+      events,
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
     }),
   );
 

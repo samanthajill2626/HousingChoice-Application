@@ -77,9 +77,9 @@ export interface UserItem {
    */
   google_sub?: string;
   /**
-   * Freeform display name from the user's Google profile `name` claim. Trimmed
-   * and capped at write time; ABSENT until a login carries the claim. Never
-   * lowercased — preserved as Google returns it. NEVER logged (PII).
+   * Freeform Google profile display name. Trimmed here before write; length-capped
+   * by the auth adapter at capture. Absent until a login carries the name claim.
+   * Never lowercased; never logged.
    */
   name?: string;
   role: UserRole;

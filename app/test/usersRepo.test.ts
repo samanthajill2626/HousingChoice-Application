@@ -114,6 +114,21 @@ describe('activateOnLogin — present-only name refresh', () => {
     expect(input.UpdateExpression as string).not.toContain(':name');
   });
 
+  it('does NOT mention #name when name is whitespace-only', async () => {
+    const { doc, getLastInput } = makeFakeDoc();
+    const users = makeRepo(doc);
+
+    await users.activateOnLogin('u1', 'sub-1', '   ', '2026-06-17T00:00:00.000Z');
+
+    const input = getLastInput()!;
+    expect(input.UpdateExpression as string).not.toContain('#name');
+    expect(input.UpdateExpression as string).not.toContain(':name');
+    const attrNames = (input.ExpressionAttributeNames as Record<string, string> | undefined) ?? {};
+    expect(Object.keys(attrNames)).not.toContain('#name');
+    const attrValues = (input.ExpressionAttributeValues as Record<string, unknown> | undefined) ?? {};
+    expect(Object.keys(attrValues)).not.toContain(':name');
+  });
+
   it('still SETs google_sub, #status, and last_login_at regardless of name', async () => {
     const { doc, getLastInput } = makeFakeDoc();
     const users = makeRepo(doc);
@@ -157,6 +172,8 @@ describe('touchLastLogin — present-only name refresh', () => {
     expect(input.UpdateExpression as string).not.toContain('#name');
     const attrNames = (input.ExpressionAttributeNames as Record<string, string> | undefined) ?? {};
     expect(Object.keys(attrNames)).not.toContain('#name');
+    const attrValues = (input.ExpressionAttributeValues as Record<string, unknown> | undefined) ?? {};
+    expect(Object.keys(attrValues ?? {})).not.toContain(':name');
   });
 
   it('does NOT mention #name when name is a blank string', async () => {

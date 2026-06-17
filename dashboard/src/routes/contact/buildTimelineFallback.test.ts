@@ -151,4 +151,24 @@ describe('buildTimelineFallback', () => {
     expect(items.map((i) => i.body)).toEqual(['a', 'b']);
     expect(items[0]?.at).toBe('2026-06-08T08:00:00Z');
   });
+
+  it('derives the instant from tsMsgId ("<ISO ts>#<id>") when provider_ts/created_at are absent', () => {
+    const conversations = [convOf({ conversationId: 'c1' })];
+    // The API returns messages NEWEST-FIRST; the seed shape carries only tsMsgId
+    // (no provider_ts/created_at). Output must be chronological (oldest first).
+    const messagesByConvId = new Map<string, Message[]>([
+      [
+        'c1',
+        [
+          msgOf({ conversationId: 'c1', tsMsgId: '2026-06-08T11:00:00Z#m3', provider_ts: '', created_at: '', body: 'third' }),
+          msgOf({ conversationId: 'c1', tsMsgId: '2026-06-08T10:00:00Z#m2', provider_ts: '', created_at: '', body: 'second' }),
+          msgOf({ conversationId: 'c1', tsMsgId: '2026-06-08T09:00:00Z#m1', provider_ts: '', created_at: '', body: 'first' }),
+        ],
+      ],
+    ]);
+
+    const items = buildTimelineFallback(conversations, messagesByConvId) as TimelineMessage[];
+    expect(items.map((i) => i.body)).toEqual(['first', 'second', 'third']);
+    expect(items[0]?.at).toBe('2026-06-08T09:00:00Z');
+  });
 });

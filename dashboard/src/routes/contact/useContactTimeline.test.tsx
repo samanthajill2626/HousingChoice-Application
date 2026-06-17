@@ -28,7 +28,7 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useContactTimeline } from './useContactTimeline.js';
+import { involvesContact, useContactTimeline } from './useContactTimeline.js';
 
 function Probe({ contactId, kinds }: { contactId: string; kinds?: string }): React.JSX.Element {
   const { status, items, source } = useContactTimeline(contactId, kinds);
@@ -171,5 +171,22 @@ describe('useContactTimeline', () => {
       { kinds: 'message,call' },
       expect.anything(),
     );
+  });
+});
+
+describe('involvesContact', () => {
+  it('matches a roster of {contactId} objects', () => {
+    expect(involvesContact([{ contactId: 'c1' }, { contactId: 'c2' }], 'c2')).toBe(true);
+    expect(involvesContact([{ contactId: 'c1' }], 'cX')).toBe(false);
+  });
+
+  it('matches a roster of bare contactId strings (seeded / 1:1 shape)', () => {
+    expect(involvesContact(['c1', 'contact-tenant-0001'], 'contact-tenant-0001')).toBe(true);
+    expect(involvesContact(['c1'], 'contact-tenant-0001')).toBe(false);
+  });
+
+  it('handles an empty / undefined roster', () => {
+    expect(involvesContact([], 'c1')).toBe(false);
+    expect(involvesContact(undefined, 'c1')).toBe(false);
   });
 });

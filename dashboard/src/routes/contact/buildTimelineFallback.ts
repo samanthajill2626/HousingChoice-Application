@@ -7,10 +7,14 @@
 // timeline). Pure + deterministic so it's unit-tested in isolation.
 import type { ConversationSummary, Message, TimelineMessage } from '../../api/index.js';
 
-/** The sort/display instant for a message: prefer provider_ts (the wire sort
- *  key's time component), else created_at. */
+/** The sort/display instant for a message. Prefer provider_ts / created_at; else
+ *  derive it from tsMsgId — the sort key shape is "<ISO ts>#<id>", so its prefix
+ *  IS the provider timestamp. Many wire/seeded messages carry only tsMsgId (no
+ *  provider_ts/created_at); without this the rows tie and render newest-first. */
 function instantOf(message: Message): string {
-  return message.provider_ts || message.created_at || '';
+  if (message.provider_ts) return message.provider_ts;
+  if (message.created_at) return message.created_at;
+  return message.tsMsgId.split('#')[0] ?? '';
 }
 
 /**

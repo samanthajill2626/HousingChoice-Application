@@ -33,12 +33,18 @@ export interface ContactTimelineState {
  *  message/conversation events into one refetch. */
 const REFETCH_DEBOUNCE_MS = 300;
 
-/** True when the conversation summary's participant roster includes this contact. */
-function involvesContact(
-  participants: { contactId: string }[] | undefined,
+/** True when the conversation summary's participant roster includes this contact.
+ *  Tolerates BOTH wire shapes: a roster of `{contactId}` objects (the contract /
+ *  relay groups) and a roster of bare contactId STRINGS (how seeded + some 1:1
+ *  conversations serialize today — the API passes `item.participants` through
+ *  unchanged). Without the string case, seeded 1:1 timelines come back empty. */
+export function involvesContact(
+  participants: ReadonlyArray<string | { contactId?: string }> | undefined,
   contactId: string,
 ): boolean {
-  return (participants ?? []).some((p) => p.contactId === contactId);
+  return (participants ?? []).some((p) =>
+    typeof p === 'string' ? p === contactId : p.contactId === contactId,
+  );
 }
 
 async function loadTimeline(

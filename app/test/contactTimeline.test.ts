@@ -96,7 +96,7 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(res.body.error).toBe('invalid cursor');
   });
 
-  it('merges messages from TWO of the contact numbers + an interleaved milestone, newest-first', async () => {
+  it('merges messages from TWO of the contact numbers + an interleaved milestone, oldest→newest (C2 ascending)', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);
     seedConversation('conv-b', PHONE_B);
@@ -116,14 +116,64 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     const res = await authedGet('/api/contacts/c-tenant/timeline');
     expect(res.status).toBe(200);
     const kindsAt = res.body.items.map((i: { kind: string; at: string }) => [i.kind, i.at]);
-    // Newest-first.
+    // C2: the server returns ascending (oldest→newest); the client renders as-is.
     expect(kindsAt).toEqual([
-      ['message', '2026-06-16T13:00:00.000Z'],
-      ['milestone', '2026-06-16T12:00:00.000Z'],
-      ['message', '2026-06-16T11:00:00.000Z'],
       ['message', '2026-06-16T10:00:00.000Z'],
+      ['message', '2026-06-16T11:00:00.000Z'],
+      ['milestone', '2026-06-16T12:00:00.000Z'],
+      ['message', '2026-06-16T13:00:00.000Z'],
     ]);
     expect(res.body.nextCursor).toBeNull();
+  });
+
+  it('every item carries a non-empty `at`: a provider_ts-less message + a milestone (sourced from the sort-key prefix)', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // Append a message via the repo, then STRIP its provider_ts to simulate a
+    // seed / provider_ts-less row — `at` must still come back as the tsMsgId prefix.
+    await seedMessage('conv-a', '2026-06-16T10:00:00.000Z', 'SM-nots', { body: 'no provider_ts' });
+    const stored = world.messages.find((m) => m.provider_sid === 'SM-nots')!;
+    // The sort key (tsMsgId) keeps the ISO prefix even when provider_ts is gone.
+    delete (stored as { provider_ts?: string }).provider_ts;
+    // A milestone (id = evt-<uuid>, no embeddable timestamp in the id itself —
+    // `at` must be sourced from its tsEventId prefix).
+    await world.activityEventsRepo.record({
+      contactId: TENANT,
+      type: 'case_opened',
+      label: 'Case opened',
+      at: '2026-06-16T11:00:00.000Z',
+    });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+    const msg = res.body.items.find((i: { kind: string }) => i.kind === 'message');
+    const milestone = res.body.items.find((i: { kind: string }) => i.kind === 'milestone');
+    // The message's `at` is non-empty and equals its tsMsgId prefix (the sort key).
+    expect(typeof msg.at).toBe('string');
+    expect(msg.at.length).toBeGreaterThan(0);
+    expect(msg.at).toBe('2026-06-16T10:00:00.000Z');
+    expect(msg.tsMsgId.startsWith(`${msg.at}#`)).toBe(true);
+    // The milestone's `at` is non-empty.
+    expect(typeof milestone.at).toBe('string');
+    expect(milestone.at).toBe('2026-06-16T11:00:00.000Z');
+    // No item in the page is missing `at`.
+    for (const item of res.body.items as Array<{ at?: string }>) {
+      expect(typeof item.at).toBe('string');
+      expect((item.at ?? '').length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a single page is in ascending `at` order', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    for (let i = 0; i < 4; i++) {
+      await seedMessage('conv-a', `2026-06-16T1${i}:00:00.000Z`, `SM-${i}`, { body: `m${i}` });
+    }
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+    const ats = (res.body.items as Array<{ at: string }>).map((i) => i.at);
+    const sortedAsc = [...ats].sort();
+    expect(ats).toEqual(sortedAsc);
   });
 
   it('kinds=message,call excludes milestones; kinds=message excludes calls', async () => {
@@ -292,16 +342,16 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     const call = res.body.items.find((i: { kind: string }) => i.kind === 'call');
     // at == provider_ts (not the divergent started_at).
     expect(call.at).toBe('2026-06-16T11:00:00.000Z');
-    // And it sorts strictly between the two messages by that key (newest-first).
+    // And it sorts strictly between the two messages by that key (C2 ascending).
     const kindsAt = res.body.items.map((i: { kind: string; at: string }) => [i.kind, i.at]);
     expect(kindsAt).toEqual([
-      ['message', '2026-06-16T12:00:00.000Z'],
-      ['call', '2026-06-16T11:00:00.000Z'],
       ['message', '2026-06-16T10:00:00.000Z'],
+      ['call', '2026-06-16T11:00:00.000Z'],
+      ['message', '2026-06-16T12:00:00.000Z'],
     ]);
   });
 
-  it('multi-source cursor walk: paginates messages from TWO conversations + milestones with no dups/skips, strictly descending across page boundaries', async () => {
+  it('multi-source cursor walk: paginates messages from TWO conversations + milestones with no dups/skips, ascending within each page while the cursor pages older', async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);
     seedConversation('conv-b', PHONE_B);
@@ -328,11 +378,10 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     await seedMessage('conv-a', '2026-06-16T16:00:00.000Z', 'SM-a3', { body: 'a3' });
     await seedMessage('conv-b', '2026-06-16T17:00:00.000Z', 'SM-b3', { body: 'b3' });
 
-    // Walk every page with a small limit until nextCursor is null.
-    const seenIds: string[] = [];
-    const seenAts: string[] = [];
+    // Walk every page with a small limit until nextCursor is null. Collect each
+    // page separately so we can assert per-page ascending + page-level ordering.
+    const pagesItems: Array<Array<{ id: string; at: string }>> = [];
     let cursor: string | null = null;
-    let pages = 0;
     do {
       const url: string =
         cursor === null
@@ -340,25 +389,37 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
           : `/api/contacts/c-tenant/timeline?limit=3&cursor=${encodeURIComponent(cursor)}`;
       const res = await authedGet(url);
       expect(res.status).toBe(200);
-      for (const item of res.body.items as Array<{ id: string; at: string }>) {
-        seenIds.push(item.id);
-        seenAts.push(item.at);
-      }
+      pagesItems.push(res.body.items as Array<{ id: string; at: string }>);
       cursor = res.body.nextCursor;
-      pages += 1;
-    } while (cursor !== null && pages < 20);
+    } while (cursor !== null && pagesItems.length < 20);
+
+    const pages = pagesItems.length;
+    const seenIds = pagesItems.flatMap((p) => p.map((i) => i.id));
+    const seenAts = pagesItems.flatMap((p) => p.map((i) => i.at));
 
     // (a) the collected set equals all 8 items.
     expect(seenIds).toHaveLength(8);
     // (b) no item id appears twice.
     expect(new Set(seenIds).size).toBe(8);
-    // (c) global order is STRICTLY descending by `at` across the whole walk
-    //     (no skips/dups across page boundaries).
-    const sortedDesc = [...seenAts].sort().reverse();
-    expect(seenAts).toEqual(sortedDesc);
-    for (let i = 1; i < seenAts.length; i++) {
-      expect(seenAts[i]! < seenAts[i - 1]!).toBe(true); // strictly descending
+    // (c) each page's items are ASCENDING within the page (C2 server order).
+    for (const page of pagesItems) {
+      const ats = page.map((i) => i.at);
+      expect(ats).toEqual([...ats].sort());
     }
+    // (d) the cursor pages OLDER: each page is strictly older than the previous
+    //     (the oldest `at` of page N exceeds the newest `at` of page N+1).
+    for (let p = 1; p < pagesItems.length; p++) {
+      const prevOldest = pagesItems[p - 1]!.map((i) => i.at).sort()[0]!;
+      const thisNewest = pagesItems[p]!.map((i) => i.at).sort().at(-1)!;
+      expect(thisNewest < prevOldest).toBe(true);
+    }
+    // (e) concatenating pages newest-page-first reconstructs the WHOLE history:
+    //     reversing each page (asc→desc) then flattening yields strict descending.
+    const newestFirst = pagesItems.flatMap((p) => [...p].reverse().map((i) => i.at));
+    for (let i = 1; i < newestFirst.length; i++) {
+      expect(newestFirst[i]! < newestFirst[i - 1]!).toBe(true);
+    }
+    expect(new Set([...seenAts]).size).toBe(8);
     // Really walked multiple pages (8 items / limit 3 = ceil 3 pages).
     expect(pages).toBeGreaterThanOrEqual(3);
   });

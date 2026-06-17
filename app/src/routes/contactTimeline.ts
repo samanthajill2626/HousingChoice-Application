@@ -8,11 +8,14 @@
 // (messages + call entries) UNION the activity-event log (milestones), sorted
 // newest-first by a global `<at>#<id>` key and paginated by an opaque cursor.
 //
-// ORDER (locked, C2): the page is returned NEWEST-FIRST (descending) and the
-// cursor pages BACKWARD in time (each nextCursor fetches the next-older page).
-// The C2 client renders oldest→newest by reversing a page; the SERVER stays
-// consistently descending so the cursor boundary is unambiguous and there are
-// no dups/skips across pages.
+// ORDER (locked, C2): the response `items` are returned ASCENDING (oldest→
+// newest) so the client renders them as-is. The CURSOR still pages BACKWARD in
+// time (each nextCursor fetches the next-OLDER page) — internally we gather
+// candidates, sort DESC, take the newest `limit`, derive nextCursor from the
+// OLDEST item of that descending slice, and only THEN reverse the page to
+// ascending for the wire. Keeping the merge/cursor descending makes the cursor
+// boundary unambiguous with no dups/skips across pages; the final reverse is
+// purely a presentation step.
 //
 // PII (doc §9) — load-bearing:
 //   - messages: FULL body (no truncation); fromPhone/toPhone derive ONLY from
@@ -169,6 +172,19 @@ function ourNumberOf(config: AppConfig): string | undefined {
   return config.ourPhoneNumbers[0];
 }
 
+/**
+ * The ISO `at` for a wire item, sourced from a `<ISO ts>#<id>` sort-key prefix.
+ * The tsMsgId / tsEventId prefix IS the timestamp the server sorts + paginates
+ * by, so deriving `at` from it makes `at` ALWAYS a non-empty ISO string AND
+ * exactly equal to the sort/cursor key (provider_ts-less rows + milestones
+ * included). Falls back to a supplied value, then the whole key, so `at` is
+ * never empty/undefined.
+ */
+function atOf(sortKey: string, fallback?: string): string {
+  const i = sortKey.indexOf('#');
+  return i > 0 ? sortKey.slice(0, i) : (fallback ?? sortKey);
+}
+
 /** Map a stored message → a TimelineMessage (sms/mms). FULL body, no truncation. */
 function toTimelineMessage(
   m: MessageItem,
@@ -185,7 +201,7 @@ function toTimelineMessage(
   return {
     kind: 'message',
     id: m.tsMsgId,
-    at: m.provider_ts,
+    at: atOf(m.tsMsgId, m.provider_ts),
     conversationId: m.conversationId,
     tsMsgId: m.tsMsgId,
     direction: m.direction,
@@ -220,7 +236,7 @@ function toTimelineCall(
   return {
     kind: 'call',
     id: m.tsMsgId,
-    at: m.provider_ts,
+    at: atOf(m.tsMsgId, m.provider_ts),
     ...(m.conversationId !== undefined && { conversationId: m.conversationId }),
     // call_outcome is required on the wire; default 'missed' when a call entry
     // has no recorded outcome yet (a ringing/unanswered metadata row).
@@ -238,7 +254,7 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
   return {
     kind: 'milestone',
     id: e.eventId,
-    at: e.at,
+    at: atOf(e.tsEventId, e.at),
     type: e.type,
     label: e.label,
     ...(e.refType !== undefined && { refType: e.refType }),
@@ -359,8 +375,11 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       'contact timeline page served',
     );
 
-    // 6. Respond newest-first (the cursor pages backward in time).
-    res.json({ items: page.map((c) => c.item), nextCursor });
+    // 6. Respond ASCENDING (oldest→newest) per C2: reverse the descending page
+    //    for the wire. nextCursor was derived above from the descending slice's
+    //    LAST element (the OLDEST returned item) BEFORE this reverse, so the
+    //    cursor still pages backward in time (older) with no dups/skips.
+    res.json({ items: page.map((c) => c.item).reverse(), nextCursor });
   });
 
   return router;

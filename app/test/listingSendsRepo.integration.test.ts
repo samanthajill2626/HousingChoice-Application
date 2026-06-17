@@ -9,14 +9,16 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
+import {
+  createListingSendsRepo,
+  ListingSendNotFoundError,
+} from '../src/repos/listingSendsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -102,7 +104,10 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     await repo.recordSend({ contactId, unitId, via: 'broadcast' });
-    await repo.setResponse(unitId, contactId, 'not_a_fit');
+    const result = await repo.setResponse(unitId, contactId, 'not_a_fit');
+    // A real transition reports changed:true with the updated row.
+    expect(result.changed).toBe(true);
+    expect(result.row.response).toBe('not_a_fit');
 
     const byUnit = await repo.listByUnit(unitId);
     const byContact = await repo.listByContact(contactId);
@@ -114,10 +119,35 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     expect(byContact[0]?.contactId).toBe(contactId);
   });
 
-  it('setResponse on a missing row throws ConditionalCheckFailedException (route → 404)', async () => {
+  it('setResponse is atomic-conditional: an unchanged value is a no-op (changed:false), no double-write', async () => {
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+    const contactId = `contact-${randomUUID().slice(0, 8)}`;
+    await repo.recordSend({ contactId, unitId, via: 'broadcast' });
+
+    const first = await repo.setResponse(unitId, contactId, 'interested');
+    expect(first.changed).toBe(true);
+
+    // Same value again — the conditional does NOT write; changed:false.
+    const second = await repo.setResponse(unitId, contactId, 'interested');
+    expect(second.changed).toBe(false);
+    expect(second.row.response).toBe('interested');
+  });
+
+  it('getByKey point-reads a single row (and returns undefined when absent)', async () => {
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+    const contactId = `contact-${randomUUID().slice(0, 8)}`;
+    expect(await repo.getByKey(unitId, contactId)).toBeUndefined();
+    await repo.recordSend({ contactId, unitId, via: 'individual' });
+    const row = await repo.getByKey(unitId, contactId);
+    expect(row?.unitId).toBe(unitId);
+    expect(row?.contactId).toBe(contactId);
+    expect(row?.response).toBe('no_reply');
+  });
+
+  it('setResponse on a missing row throws ListingSendNotFoundError (route → 404)', async () => {
     await expect(
       repo.setResponse(`unit-${randomUUID().slice(0, 8)}`, `contact-${randomUUID().slice(0, 8)}`, 'interested'),
-    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    ).rejects.toBeInstanceOf(ListingSendNotFoundError);
   });
 
   it('listByContact returns a contact’s sends newest-first by sentAt', async () => {

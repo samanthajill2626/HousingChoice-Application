@@ -496,4 +496,35 @@ describe('broadcast.send (M1.8a)', () => {
 
     expect(world.listingSends).toHaveLength(0);
   });
+
+  it('best-effort capture isolation: a recordSend failure NEVER fails the send (SMS still out, recipient counted sent, error logged)', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedUnit(world); // unit-1
+    seedBroadcast(world, [alice]); // unitId: 'unit-1' → would normally record a listing-send
+
+    // Capture the fan-out's own logs so we can assert the swallowed error logged.
+    const capture = createLogCapture();
+    const capturingLogger = createLogger({ level: 'info', destination: capture.stream });
+
+    // The listing-send capture throws — it must be swallowed and never propagate.
+    world.listingSendsRepo.recordSend = async () => {
+      throw new Error('listing_sends table is on fire');
+    };
+    wireHandler(world, capturingLogger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    // (a) The SMS still went out to the recipient.
+    expect(world.sent.map((s) => s.to)).toEqual([alice.phone]);
+    // (b) The broadcast finalized with the recipient counted as sent.
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.stats.sent).toBe(1);
+    expect(bcast.recipients['c-alice']?.status).toBe('sent');
+    expect(bcast.status).toBe('sent');
+    // (c) The recordSend failure was logged (error level) and swallowed.
+    const errs = capture
+      .atLevel(50)
+      .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('listing-send row failed'));
+    expect(errs.length).toBeGreaterThanOrEqual(1);
+  });
 });

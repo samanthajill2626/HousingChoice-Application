@@ -22,7 +22,7 @@
 //
 // PII (doc §9): NEVER log names/phones — IDs/type/response only.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -80,6 +80,24 @@ export interface RecordSendInput {
   sentAt?: string;
 }
 
+/**
+ * setResponse outcome — the stored row plus whether the value actually
+ * TRANSITIONED. `changed:false` is a no-op set (the row already held this
+ * value); the route uses it to suppress a duplicate `listing_reviewed`.
+ */
+export interface SetResponseResult {
+  row: ListingSendItem;
+  changed: boolean;
+}
+
+/** Thrown by setResponse when the (unitId, contactId) row does not exist. */
+export class ListingSendNotFoundError extends Error {
+  constructor(unitId: string, contactId: string) {
+    super(`listing send not found: ${unitId}/${contactId}`);
+    this.name = 'ListingSendNotFoundError';
+  }
+}
+
 export interface ListingSendsRepo {
   /**
    * UPSERT a listing-send keyed by (unitId, contactId). CREATE seeds
@@ -87,15 +105,21 @@ export interface ListingSendsRepo {
    * NEVER resets `response`. Returns the stored row (ALL_NEW).
    */
   recordSend(input: RecordSendInput): Promise<ListingSendItem>;
+  /** Point read of a single row by its full key (PK+SK). */
+  getByKey(unitId: string, contactId: string): Promise<ListingSendItem | undefined>;
   /**
-   * Set the tenant's response on an EXISTING row (+ updated_at). Throws
-   * ConditionalCheckFailedException when the row is absent (route → 404).
+   * Atomically set the tenant's response on an EXISTING row, ONLY when the value
+   * actually transitions. Returns { row, changed } — `changed:false` is a no-op
+   * (the row already held `response`). Throws ListingSendNotFoundError when the
+   * row is absent (route → 404). Concurrency-safe: two racing identical sets
+   * collapse to ONE `changed:true` (the conditional write), so the route emits
+   * `listing_reviewed` exactly once.
    */
   setResponse(
     unitId: string,
     contactId: string,
     response: ListingResponse,
-  ): Promise<ListingSendItem>;
+  ): Promise<SetResponseResult>;
   /** The unit's recipients (base-table Query, PK=unitId). */
   listByUnit(unitId: string): Promise<ListingSendItem[]>;
   /** The contact's listings-sent (byContact GSI, newest-first by sentAt). */
@@ -121,6 +145,16 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('listing_sends', deps.env);
   const log = deps.logger ?? defaultLogger;
+
+  const getByKey = async (
+    unitId: string,
+    contactId: string,
+  ): Promise<ListingSendItem | undefined> => {
+    const { Item } = await doc.send(
+      new GetCommand({ TableName: table, Key: { unitId, contactId } }),
+    );
+    return Item as ListingSendItem | undefined;
+  };
 
   return {
     async recordSend(input) {
@@ -172,25 +206,40 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
       return Attributes as ListingSendItem;
     },
 
+    getByKey,
+
     async setResponse(unitId, contactId, response) {
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { unitId, contactId },
-          UpdateExpression: 'SET #response = :response, updated_at = :now',
-          // Only an EXISTING row may be transitioned — a missing pairing throws
-          // ConditionalCheckFailedException (route → 404).
-          ConditionExpression: 'attribute_exists(unitId)',
-          ExpressionAttributeNames: { '#response': 'response' },
-          ExpressionAttributeValues: {
-            ':response': response,
-            ':now': new Date().toISOString(),
-          },
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info({ unitId, contactId, response }, 'listing send response set');
-      return Attributes as ListingSendItem;
+      // Atomic conditional: write ONLY when the value actually transitions —
+      // the row must exist AND its current `response` must differ (or be unset).
+      // This makes a no-op set / a concurrent double-set collapse to a single
+      // write, so the route emits `listing_reviewed` exactly once.
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId, contactId },
+            UpdateExpression: 'SET #response = :response, updated_at = :now',
+            ConditionExpression:
+              'attribute_exists(unitId) AND (attribute_not_exists(#response) OR #response <> :response)',
+            ExpressionAttributeNames: { '#response': 'response' },
+            ExpressionAttributeValues: {
+              ':response': response,
+              ':now': new Date().toISOString(),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ unitId, contactId, response }, 'listing send response set');
+        return { row: Attributes as ListingSendItem, changed: true };
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The condition failed for one of two reasons — disambiguate with a
+        // point read: either the row is absent (→ not-found) or it already holds
+        // this exact value (→ a no-op, changed:false, NO milestone).
+        const existing = await getByKey(unitId, contactId);
+        if (existing === undefined) throw new ListingSendNotFoundError(unitId, contactId);
+        return { row: existing, changed: false };
+      }
     },
 
     async listByUnit(unitId) {

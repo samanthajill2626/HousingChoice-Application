@@ -30,6 +30,7 @@ import {
 } from '../repos/unitsRepo.js';
 import {
   createListingSendsRepo,
+  ListingSendNotFoundError,
   toListingSendRow,
   type ListingResponse,
   type ListingSendsRepo,
@@ -239,30 +240,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
 
-    // Read the prior row so we only emit listing_reviewed on a REAL change to a
-    // reviewed response (interested/not_a_fit) — a no-op set, or a set back to
-    // no_reply, emits nothing. Also lets us 404 cheaply before the write.
-    const existingRows = await listingSends.listByUnit(unitId);
-    const existing = existingRows.find((r) => r.contactId === contactId);
-    if (!existing) {
-      res.status(404).json({ error: 'listing_send_not_found' });
-      return;
-    }
-    const wasReviewed = existing.response === response; // same value → no change
-
-    let updated;
+    // Atomically set the response. `changed` reports a REAL value transition
+    // (the conditional only writes when the value actually changes), so two
+    // concurrent identical PATCHes collapse to one change — never a duplicate
+    // milestone. A missing row throws ListingSendNotFoundError → 404.
+    let result;
     try {
-      updated = await listingSends.setResponse(unitId, contactId, response);
+      result = await listingSends.setResponse(unitId, contactId, response);
     } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
+      if (err instanceof ListingSendNotFoundError) {
         res.status(404).json({ error: 'listing_send_not_found' });
         return;
       }
       throw err;
     }
+    const { row: updated, changed } = result;
 
     // Emit listing_reviewed ONLY on a real change to a reviewed response.
-    if (!wasReviewed && (response === 'interested' || response === 'not_a_fit')) {
+    if (changed && (response === 'interested' || response === 'not_a_fit')) {
       const label = response === 'interested' ? 'Listing reviewed · Interested' : 'Listing reviewed · Not a fit';
       try {
         await activityEvents.record({
@@ -277,12 +272,16 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
     }
 
-    await audit.append(`units#${unitId}`, 'listing_response_set', {
-      actor: req.user?.userId,
-      contactId,
-      response,
-    });
-    log.info({ unitId, contactId, response, actor: req.user?.userId }, 'listing response set via api');
+    // Audit only a REAL change (a no-op set writes nothing, so it warrants no
+    // audit row either — matches the milestone gate above).
+    if (changed) {
+      await audit.append(`units#${unitId}`, 'listing_response_set', {
+        actor: req.user?.userId,
+        contactId,
+        response,
+      });
+    }
+    log.info({ unitId, contactId, response, changed, actor: req.user?.userId }, 'listing response set via api');
     res.json({ recipient: toListingSendRow(updated) });
   });
 

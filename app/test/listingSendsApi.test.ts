@@ -218,6 +218,36 @@ describe('PATCH /api/units/:unitId/recipients/:contactId (BE4/C4 — response)',
     expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
   });
 
+  it('no double-emit: two identical interested sets collapse to ONE listing_reviewed (atomic conditional)', async () => {
+    // The atomic-conditional setResponse only "changes" on a real value
+    // transition. Two PATCHes of no_reply→interested (the second hitting the
+    // changed:false / ConditionalCheckFailed path) is exactly what a concurrent
+    // double-PATCH collapses to — exactly ONE milestone must result.
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+
+    const first = await request(app)
+      .patch('/api/units/unit-1/recipients/c-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ response: 'interested' });
+    expect(first.status).toBe(200);
+
+    // Second identical set: the row already === 'interested', so the conditional
+    // does NOT write and changed === false → NO second milestone.
+    const second = await request(app)
+      .patch('/api/units/unit-1/recipients/c-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ response: 'interested' });
+    expect(second.status).toBe(200);
+    expect(second.body.recipient).toMatchObject({ contactId: 'c-1', response: 'interested' });
+
+    // Exactly ONE listing_reviewed despite two interested PATCHes.
+    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
+  });
+
   it('a re-send does not reset an already-set response (no_reset invariant)', async () => {
     const { world } = makeWebhookHarness();
     await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });

@@ -54,6 +54,7 @@ import {
   type ActivityEventsRepo,
 } from '../../src/repos/activityEventsRepo.js';
 import {
+  ListingSendNotFoundError,
   type ListingSendItem,
   type ListingSendsRepo,
 } from '../../src/repos/listingSendsRepo.js';
@@ -967,14 +968,24 @@ export function createFakeWorld(): FakeWorld {
       listingSends.push(item);
       return { ...item };
     },
+    async getByKey(unitId, contactId) {
+      const existing = findListingSend(unitId, contactId);
+      return existing ? { ...existing } : undefined;
+    },
     async setResponse(unitId, contactId, response) {
+      // Mirror the real repo's atomic conditional: not-found throws; an
+      // unchanged value is a no-op (changed:false, NO milestone); a real
+      // transition writes and returns changed:true.
       const existing = findListingSend(unitId, contactId);
       if (!existing) {
-        throw conditionalCheckFailed(`setResponse: no listing send ${unitId}/${contactId}`);
+        throw new ListingSendNotFoundError(unitId, contactId);
+      }
+      if (existing.response === response) {
+        return { row: { ...existing }, changed: false };
       }
       existing.response = response;
       existing.updated_at = new Date().toISOString();
-      return { ...existing };
+      return { row: { ...existing }, changed: true };
     },
     async listByUnit(unitId) {
       return listingSends.filter((r) => r.unitId === unitId).map((r) => ({ ...r }));

@@ -104,6 +104,10 @@ export function useListing(unitId: string): ListingState {
 
         const [landlord, units, cases, relatedSlice, recipients, similar] = await Promise.all([
           loadLandlord(unit.landlordId, signal),
+          // NOTE: first inbox page only (nextCursor not paged) for the
+          // same-landlord Related + cases-on-unit derivations — a transitional
+          // limitation matching the project-wide pattern; BE3's /related and a
+          // unit-scoped cases query supersede it.
           getUnits(signal),
           getCases(signal),
           loadSlice((s) => getUnitRelated(unitId, s), signal),

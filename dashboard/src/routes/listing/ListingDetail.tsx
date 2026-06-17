@@ -24,7 +24,6 @@ import {
   shortAddress,
   statusLabel,
 } from './listingFormat.js';
-import { flyerPath } from './listingLinks.js';
 import styles from './ListingDetail.module.css';
 
 const STAGE_LABEL: Record<string, string> = {
@@ -84,15 +83,8 @@ export function ListingDetail(): React.JSX.Element {
   const address = shortAddress(unit.address, unit.unitId);
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
-  const flyer = flyerPath(unit.unitId);
   const programs = unit.accepted_programs ?? [];
   const media = unit.media ?? [];
-
-  const onCopyLink = (): void => {
-    const absolute =
-      typeof window !== 'undefined' ? `${window.location.origin}${flyer}` : flyer;
-    void navigator.clipboard?.writeText?.(absolute);
-  };
 
   return (
     <div className={styles.page}>
@@ -128,14 +120,14 @@ export function ListingDetail(): React.JSX.Element {
             <div className={styles.hero} aria-hidden="true" />
           )}
 
+          {/* Flyer affordance is PENDING: the public flyer is currently a JSON
+              endpoint (and only for `available` units), not a shareable HTML page.
+              The new dashboard's public flyer route lands in a later public-routes
+              phase — surface an honest note rather than a misleading JSON link. */}
           <div className={styles.flyerLine}>
-            <a className={styles.flyerLink} href={flyer} target="_blank" rel="noreferrer">
-              🖼 View flyer ↗
-            </a>
-            <button type="button" className={styles.flyerCopy} onClick={onCopyLink}>
-              🔗 Copy public link
-            </button>
-            <span className={styles.flyerNote}>a live public page from this listing</span>
+            <span className={styles.flyerNote}>
+              🖼 Public flyer page arrives with the new public routes.
+            </span>
           </div>
 
           <Card title="Listing details" aside="Edit">

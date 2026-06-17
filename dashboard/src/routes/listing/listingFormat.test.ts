@@ -75,14 +75,15 @@ describe('buildListingFacts', () => {
 });
 
 describe('isMediaUrl', () => {
-  it('accepts urls + root-relative paths', () => {
+  it('accepts http(s)/blob urls + root-relative paths', () => {
     expect(isMediaUrl('https://x/y.jpg')).toBe(true);
     expect(isMediaUrl('http://x/y.jpg')).toBe(true);
+    expect(isMediaUrl('blob:https://x/abc')).toBe(true);
     expect(isMediaUrl('/media/y.jpg')).toBe(true);
-    expect(isMediaUrl('data:image/png;base64,AAA')).toBe(true);
   });
-  it('rejects a bare S3 key', () => {
+  it('rejects a bare S3 key and data: URIs (hardening)', () => {
     expect(isMediaUrl('units/u1/photo-1.jpg')).toBe(false);
+    expect(isMediaUrl('data:image/png;base64,AAA')).toBe(false);
   });
 });
 

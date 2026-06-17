@@ -89,12 +89,12 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
 
-  it('renders the flyer link to the public route + a copy-link button', () => {
+  it('shows an honest pending note for the flyer (no misleading JSON link)', () => {
     useListing.mockReturnValue(READY);
     renderAt();
-    const flyer = screen.getByRole('link', { name: /View flyer/ });
-    expect(flyer).toHaveAttribute('href', '/public/units/u1/flyer');
-    expect(screen.getByRole('button', { name: /Copy public link/ })).toBeInTheDocument();
+    expect(screen.getByText(/Public flyer page arrives with the new public routes/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View flyer/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Copy public link/ })).not.toBeInTheDocument();
   });
 
   it('renders listing details and accepted vouchers as a bulleted list', () => {

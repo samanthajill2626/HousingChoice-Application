@@ -48,10 +48,12 @@ export function buildListingFacts(unit: UnitItem, landlordName?: string): string
   return parts.join(' · ');
 }
 
-/** True when a media entry looks like a resolvable URL (http/https/data/blob or
- *  a root-relative path) we can put in <img src>; false for a bare S3 key. */
+/** True when a media entry looks like a resolvable URL (http/https/blob or a
+ *  root-relative path) we can put in <img src>; false for a bare S3 key. `data:`
+ *  is deliberately NOT accepted — listing media is never a data URI, and keeping
+ *  it out avoids ever placing operator-supplied `data:` content in the DOM. */
 export function isMediaUrl(media: string): boolean {
-  return /^(https?:|data:|blob:|\/)/.test(media);
+  return /^(https?:|blob:|\/)/.test(media);
 }
 
 /** A short address label for a related/similar row (or the unitId fallback). */

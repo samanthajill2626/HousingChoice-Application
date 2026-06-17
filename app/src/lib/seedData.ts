@@ -204,6 +204,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       userId: IDS.founder,
       email: 'founder@example.com', // byEmail
       role: 'founder_admin',
+      name: 'Jordan Avery',
       google_sub: 'google-oauth2|seed-founder',
       scopes: ['*'],
       created_at: T0,
@@ -212,6 +213,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       userId: IDS.va,
       email: 'va@example.com',
       role: 'va',
+      name: 'Sam Rivera',
       google_sub: 'google-oauth2|seed-va',
       scopes: ['conversations:rw', 'contacts:rw'],
       created_at: T0,

@@ -53,6 +53,7 @@ describe('GET /api/users', () => {
       'created_at',
       'email',
       'last_login_at',
+      'name',
       'role',
       'status',
       'userId',
@@ -281,5 +282,54 @@ describe('PATCH /api/users/:userId/role', () => {
       .set('cookie', TEST_SESSION_COOKIE) // VA
       .send({ role: 'va' });
     expect(res.status).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3 — GET /api/users projection includes name via displayNameOf
+// ---------------------------------------------------------------------------
+
+describe('GET /api/users — name field via displayNameOf', () => {
+  it('a user with a name shows the name in the projection', async () => {
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set('usr_named', {
+      userId: 'usr_named',
+      email: 'named@housingchoice.org',
+      role: 'va',
+      status: 'active',
+      session_epoch: 1,
+      created_at: '2026-06-01T00:00:00.000Z',
+      name: 'Jordan Avery',
+    });
+
+    const res = await request(app)
+      .get('/api/users')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+
+    expect(res.status).toBe(200);
+    const named = res.body.users.find((u: { userId: string }) => u.userId === 'usr_named');
+    expect(named?.name).toBe('Jordan Avery');
+  });
+
+  it('a user without a name shows the email as the name (displayNameOf fallback)', async () => {
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set('usr_noname', {
+      userId: 'usr_noname',
+      email: 'noname@housingchoice.org',
+      role: 'va',
+      status: 'active',
+      session_epoch: 1,
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+
+    const res = await request(app)
+      .get('/api/users')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+
+    expect(res.status).toBe(200);
+    const noname = res.body.users.find((u: { userId: string }) => u.userId === 'usr_noname');
+    expect(noname?.name).toBe('noname@housingchoice.org');
   });
 });

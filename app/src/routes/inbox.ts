@@ -60,7 +60,7 @@ import {
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
-import { createUsersRepo, type UsersRepo } from '../repos/usersRepo.js';
+import { createUsersRepo, displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -194,17 +194,8 @@ function roleFromContact(contact: ContactItem | undefined): 'tenant' | 'landlord
   return 'unknown';
 }
 
-/** A team user's display name: an explicit name, else the email, else the id. */
-function userDisplayName(
-  user: { name?: unknown; email?: unknown } | undefined,
-  fallbackUserId: string,
-): string {
-  if (user) {
-    if (typeof user.name === 'string' && user.name.length > 0) return user.name;
-    if (typeof user.email === 'string' && user.email.length > 0) return user.email;
-  }
-  return fallbackUserId;
-}
+// userDisplayName removed — callers now route through displayNameOf (imported
+// from usersRepo) so the fallback chain (name → email → userId) is canonical.
 
 /**
  * The unread count carried on a conversation row (sparse → 0). Pulled into a
@@ -336,7 +327,8 @@ export async function aggregateInbox(
     let name = assigneeId;
     try {
       const user = await users.findById(assigneeId);
-      name = userDisplayName(user, assigneeId);
+      // displayNameOf: name (trimmed) → email → userId — canonical, never inline.
+      name = user ? displayNameOf(user) : assigneeId;
     } catch (err) {
       log.warn({ err }, 'inbox: assignee name hydration failed (best-effort)');
     }

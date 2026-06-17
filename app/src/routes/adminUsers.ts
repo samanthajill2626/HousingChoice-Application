@@ -16,6 +16,7 @@ import { requireRole, type AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createUsersRepo,
+  displayNameOf,
   isUserRole,
   normalizeEmail,
   USER_ROLES,
@@ -41,6 +42,7 @@ function toAdminUserView(u: UserItem): Record<string, unknown> {
   return {
     userId: u.userId,
     email: u.email,
+    name: displayNameOf(u),
     role: u.role,
     status: u.status ?? null,
     created_at: u.created_at,

@@ -16,7 +16,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
-import { createUsersRepo, userIdForEmail } from '../src/repos/usersRepo.js';
+import { createUsersRepo, displayNameOf, userIdForEmail } from '../src/repos/usersRepo.js';
 import { AccessDeniedError, resolveInvitedUser } from '../src/services/resolveInvitedUser.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -218,5 +218,53 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
       status: 'active',
       session_epoch: 1, // the kill switch starts at 1 on invite
     });
+  });
+
+  // Task 3 integration: displayNameOf present-only name refresh over real DynamoDB.
+  // Verifies: name stored on first login, NOT clobbered when absent, refreshed when changed.
+  it('displayNameOf: first login stores name; absent claim does NOT clobber; changed name refreshes', async () => {
+    const email = 'name-refresh@housingchoice.org';
+    await users.invite({ email, role: 'va' });
+    const userId = userIdForEmail(email);
+    const deps = { usersRepo: users, auditRepo: audit, logger };
+
+    // First login WITH a name — name should be stored.
+    const { user: user1 } = await resolveInvitedUser(deps, {
+      sub: 'sub-name-refresh',
+      email,
+      emailVerified: true,
+      name: 'Sam Rivera',
+    });
+    expect(user1.name).toBe('Sam Rivera');
+    expect(displayNameOf(user1)).toBe('Sam Rivera');
+    const stored1 = await users.findById(userId);
+    expect(stored1?.name).toBe('Sam Rivera');
+
+    // Second login WITHOUT a name claim — stored name must be PRESERVED (present-only).
+    const { user: user2 } = await resolveInvitedUser(deps, {
+      sub: 'sub-name-refresh',
+      email,
+      emailVerified: true,
+      // name absent intentionally
+    });
+    // The returned user merges the stored name (already present in the item).
+    const stored2 = await users.findById(userId);
+    expect(stored2?.name).toBe('Sam Rivera'); // DynamoDB value unchanged
+    expect(displayNameOf(stored2!)).toBe('Sam Rivera');
+    // The service return value for the no-claim login reflects existing stored name.
+    expect(displayNameOf(user2)).toBe('Sam Rivera');
+
+    // Third login WITH a CHANGED name — stored name should refresh.
+    const { user: user3 } = await resolveInvitedUser(deps, {
+      sub: 'sub-name-refresh',
+      email,
+      emailVerified: true,
+      name: 'Samantha Rivera',
+    });
+    expect(user3.name).toBe('Samantha Rivera');
+    expect(displayNameOf(user3)).toBe('Samantha Rivera');
+    const stored3 = await users.findById(userId);
+    expect(stored3?.name).toBe('Samantha Rivera');
+    expect(displayNameOf(stored3!)).toBe('Samantha Rivera');
   });
 });

@@ -20,6 +20,7 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
+import { rankSimilarUnits } from '../lib/similarUnits.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -408,6 +409,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     res.json({ related });
+  });
+
+  // GET /api/units/:unitId/similar → { similar: SimilarUnit[] } (BE5/C6). 404
+  // unknown unit. Ranks the AVAILABLE units by attribute similarity (beds, area/
+  // subzone, rent band, accepted programs) to the target via the pure,
+  // deterministic rankSimilarUnits, returning the top N. (When the target itself
+  // is not available, it still ranks available alternatives — the endpoint
+  // surfaces "what else like this is open".) `similar` is a distinct segment
+  // from the bare :unitId routes, so there is no route collision.
+  router.get('/:unitId/similar', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const available = await units.listByStatus('available');
+    const similar = rankSimilarUnits(unit, available.items);
+    log.info({ unitId, candidateCount: available.items.length, returned: similar.length }, 'similar units served');
+    res.json({ similar });
   });
 
   // PATCH /api/units/:unitId/recipients/:contactId { response } (BE4/C4).

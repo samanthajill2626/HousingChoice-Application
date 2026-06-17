@@ -178,6 +178,82 @@ describe('cases API (M1.10b)', () => {
   });
 });
 
+describe('cases API — BE2/C2 activity milestones', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+  });
+
+  const authedPost = (path: string, body: object) =>
+    request(app).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+  const authedPatch = (path: string, body: object) =>
+    request(app).patch(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+  const milestonesFor = (tenantId: string) =>
+    world.activityEvents.filter((e) => e.contactId === tenantId);
+
+  it('case create emits case_opened against the tenant (refType case)', async () => {
+    const res = await authedPost('/api/cases', { tenantId: 'c-keisha', unitId: 'unit-1' });
+    const caseId = res.body.case.caseId;
+    const ev = milestonesFor('c-keisha');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ type: 'case_opened', refType: 'case', refId: caseId });
+  });
+
+  it('a real stage change emits stage_changed (and NONE when the stage is unchanged)', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'interested' });
+    await authedPatch(`/api/cases/${c.caseId}`, { stage: 'touring' });
+    let ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toBe('Stage → Touring');
+
+    // Re-PATCH a non-stage field → no new stage_changed milestone.
+    await authedPatch(`/api/cases/${c.caseId}`, { notes: 'hi' });
+    ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1); // unchanged
+  });
+
+  it('moving to a terminal stage emits case_closed (lost includes the lost_reason)', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'applied' });
+    await authedPatch(`/api/cases/${c.caseId}`, { stage: 'lost', lost_reason: 'changed_mind' });
+    const ev = world.activityEvents.filter((e) => e.type === 'case_closed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toContain('changed_mind');
+    // No spurious stage_changed for a terminal move.
+    expect(world.activityEvents.filter((e) => e.type === 'stage_changed')).toHaveLength(0);
+  });
+
+  it('newly setting tour_date emits tour_scheduled', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'touring' });
+    await authedPatch(`/api/cases/${c.caseId}`, { tour_date: '2026-07-02' });
+    const ev = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toContain('2026-07-02');
+  });
+
+  it('a tour gaining an outcome emits tour_took_place (and NOT before the outcome lands)', async () => {
+    const c = await world.casesRepo.create({
+      tenantId: 'c-t',
+      unitId: 'u',
+      stage: 'touring',
+      tours: [{ date: '2026-07-02' }],
+    });
+    // PATCH a tour WITHOUT an outcome yet → no tour_took_place.
+    await authedPatch(`/api/cases/${c.caseId}`, { tours: [{ date: '2026-07-02' }] });
+    expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(0);
+
+    // Now the tour gains an outcome → tour_took_place.
+    await authedPatch(`/api/cases/${c.caseId}`, { tours: [{ date: '2026-07-02', outcome: 'attended' }] });
+    const ev = world.activityEvents.filter((e) => e.type === 'tour_took_place');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toContain('Attended');
+  });
+});
+
 describe('toCaseUpdatedEvent (M1.10b live-update payload)', () => {
   it('maps attention to a boolean (both states) and never carries PII', () => {
     const base = { caseId: 'c', tenantId: 't', unitId: 'u', stage: 'applied' } as CaseItem;

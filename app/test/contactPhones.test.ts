@@ -236,3 +236,21 @@ describe('DELETE /api/contacts/:id/phones/:phone — detach (C1)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('POST /api/contacts/:id/phones — BE2/C2 number_added milestone', () => {
+  it('records a number_added activity event on a real add (and none on an idempotent re-add)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant', phone: '+15550100001' });
+
+    const res = await auth(request(app).post('/api/contacts/c-1/phones').send({ phone: '+15550100002' }));
+    expect(res.status).toBe(201);
+    let ev = world.activityEvents.filter((e) => e.type === 'number_added');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.contactId).toBe('c-1');
+
+    // Re-adding the SAME number is an idempotent no-op → no second milestone.
+    await auth(request(app).post('/api/contacts/c-1/phones').send({ phone: '+15550100002' }));
+    ev = world.activityEvents.filter((e) => e.type === 'number_added');
+    expect(ev).toHaveLength(1);
+  });
+});

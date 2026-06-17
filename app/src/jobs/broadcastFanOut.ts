@@ -56,6 +56,10 @@ import {
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
+import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
@@ -135,6 +139,8 @@ export interface BroadcastSendJobDeps {
   messagesRepo?: MessagesRepo;
   unitsRepo?: UnitsRepo;
   sendMessageService?: SendMessageService;
+  /** BE2/C2: emit a `listing_sent` milestone per recipient actually sent. */
+  activityEventsRepo?: ActivityEventsRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   events?: EventBus;
@@ -161,6 +167,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     units ??= createUnitsRepo({ logger: deps.logger });
     const messages: MessagesRepo =
       deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+    const activityEvents: ActivityEventsRepo =
+      deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
     sendMessage ??= createSendMessageService({
       config,
       logger: deps.logger,
@@ -266,6 +274,26 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         });
         await broadcasts.bumpStats(payload.broadcastId, { sent: 1, queued: -1 });
         sentCount += 1;
+        // BE2/C2: a delivered listing is a `listing_sent` milestone on the
+        // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
+        // target; fall back to the broadcast when the broadcast has no unitId.
+        // Best-effort — a milestone failure must NEVER fail the send (the SMS is
+        // already out + the recipient slot recorded), so it is swallowed + logged.
+        try {
+          const hasUnit = typeof broadcast.unitId === 'string' && broadcast.unitId.length > 0;
+          await activityEvents.record({
+            contactId: contact.contactId,
+            type: 'listing_sent',
+            label: 'Listing sent',
+            refType: hasUnit ? 'unit' : 'broadcast',
+            refId: hasUnit ? broadcast.unitId! : payload.broadcastId,
+          });
+        } catch (milestoneErr) {
+          log.error(
+            { err: milestoneErr, broadcastId: payload.broadcastId, contactKey },
+            'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
+          );
+        }
       } catch (err) {
         if (err instanceof SendRefusedError) {
           // Opt-out / breaker / manual — a by-design refusal for THIS recipient.

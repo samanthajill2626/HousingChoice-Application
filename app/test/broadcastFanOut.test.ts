@@ -125,6 +125,7 @@ function wireHandler(world: FakeWorld, logger = createLogger({ destination: crea
     messagesRepo: world.messagesRepo,
     unitsRepo: world.unitsRepo,
     sendMessageService,
+    activityEventsRepo: world.activityEventsRepo,
     events: world.events,
     logger,
     ...(tokenBucket !== undefined && { tokenBucket }),
@@ -423,5 +424,33 @@ describe('broadcast.send (M1.8a)', () => {
     expect(expected).toBe(10_000);
     // The recorded DelaySeconds matches the 2nd-step backoff exactly.
     expect(item.delaySeconds).toBe(10);
+  });
+
+  // --- BE2/C2: listing_sent milestone per recipient actually sent ----------
+  it('records a listing_sent activity event per recipient sent (refType unit when the broadcast has a unitId)', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });
+    seedUnit(world); // unit-1
+    seedBroadcast(world, [alice, bob]); // seedBroadcast sets unitId: 'unit-1'
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    const sent = world.activityEvents.filter((e) => e.type === 'listing_sent');
+    expect(sent).toHaveLength(2);
+    expect(sent.map((e) => e.contactId).sort()).toEqual(['c-alice', 'c-bob']);
+    // Deep-links to the unit (the thing sent), not the broadcast.
+    expect(sent.every((e) => e.refType === 'unit' && e.refId === 'unit-1')).toBe(true);
+  });
+
+  it('does NOT record listing_sent for a skipped (opted-out) recipient', async () => {
+    const optedOut = seedTenant(world, { contactId: 'c-opt', phone: '+15550100009', sms_opt_out: true });
+    seedUnit(world);
+    seedBroadcast(world, [optedOut]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(0);
   });
 });

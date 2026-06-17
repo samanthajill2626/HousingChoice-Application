@@ -52,6 +52,15 @@ import {
   RelayProvisioningDisabledError,
   type PoolNumbersService,
 } from '../services/poolNumbers.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
+import {
+  TERMINAL_STAGES,
+  type CaseItem,
+  type CaseTour,
+} from '../repos/casesRepo.js';
 
 export interface CasesRouterDeps {
   config?: AppConfig;
@@ -64,6 +73,35 @@ export interface CasesRouterDeps {
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
   poolNumbersService?: PoolNumbersService;
+  /** BE2/C2: emit case_opened/case_closed/stage_changed/tour_* milestones. */
+  activityEventsRepo?: ActivityEventsRepo;
+}
+
+/** Title-case a stage value for milestone labels, e.g. touring → "Touring". */
+function stageLabel(stage: string): string {
+  return stage
+    .split('_')
+    .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+/**
+ * Count tours that carry a (non-empty) outcome. A tour gaining an outcome
+ * (count increases) is the `tour_took_place` signal.
+ */
+function outcomeTourCount(tours: CaseTour[] | undefined): number {
+  if (!Array.isArray(tours)) return 0;
+  return tours.filter((t) => typeof t?.outcome === 'string' && t.outcome.length > 0).length;
+}
+
+/** The newest tour outcome (for the tour_took_place label), or undefined. */
+function latestTourOutcome(tours: CaseTour[] | undefined): string | undefined {
+  if (!Array.isArray(tours)) return undefined;
+  for (let i = tours.length - 1; i >= 0; i--) {
+    const o = tours[i]?.outcome;
+    if (typeof o === 'string' && o.length > 0) return o;
+  }
+  return undefined;
 }
 
 /** Resolved "First Last" from a contact, or undefined (never a guess). */
@@ -264,8 +302,27 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const activityEvents =
+    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+
+  // BE2/C2: record one case milestone against the tenant contact. Best-effort —
+  // a log failure must NEVER fail the operator's board action (the case is
+  // already persisted); follows the neighbors' try/catch+log convention.
+  async function recordCaseMilestone(
+    tenantId: string,
+    type: 'case_opened' | 'case_closed' | 'stage_changed' | 'tour_scheduled' | 'tour_took_place',
+    label: string,
+    caseId: string,
+  ): Promise<void> {
+    if (typeof tenantId !== 'string' || tenantId.length === 0) return;
+    try {
+      await activityEvents.record({ contactId: tenantId, type, label, refType: 'case', refId: caseId });
+    } catch (err) {
+      log.error({ err, caseId, type }, 'case milestone record failed (best-effort)');
+    }
+  }
 
   const router = Router();
 
@@ -371,6 +428,8 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       unitId: created.unitId,
       stage: created.stage,
     });
+    // BE2/C2: a new case is a "case opened" milestone on the tenant's timeline.
+    await recordCaseMilestone(created.tenantId, 'case_opened', 'Case opened', created.caseId);
     events.emit('case.updated', toCaseUpdatedEvent(created));
     log.info(
       { caseId: created.caseId, stage: created.stage, actor: req.user?.userId },
@@ -400,6 +459,10 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
+    // Load the BEFORE state so we can detect real transitions (a stage actually
+    // changing, a tour_date newly set, a tour gaining an outcome) — milestones
+    // are emitted only for genuine changes, never on a no-op write.
+    const before: CaseItem | undefined = await cases.getById(caseId);
     let item;
     try {
       item = await cases.update(caseId, validation.fields);
@@ -415,6 +478,51 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       fields: Object.keys(validation.fields),
       ...(typeof validation.fields['stage'] === 'string' && { stage: validation.fields['stage'] }),
     });
+
+    // BE2/C2 milestones — only on a REAL transition (before vs. after). All
+    // best-effort (recordCaseMilestone swallows + logs); they never block the
+    // PATCH response.
+    if (before !== undefined) {
+      const tenantId = item.tenantId;
+      // Stage change → case_closed (terminal: moved_in/lost, label incl.
+      // lost_reason on lost) else stage_changed.
+      if (item.stage !== before.stage) {
+        if (TERMINAL_STAGES.has(item.stage)) {
+          const reason =
+            item.stage === 'lost' && typeof item.lost_reason === 'string' && item.lost_reason.length > 0
+              ? ` · ${item.lost_reason}`
+              : '';
+          await recordCaseMilestone(
+            tenantId,
+            'case_closed',
+            `Case closed · ${stageLabel(item.stage)}${reason}`,
+            caseId,
+          );
+        } else {
+          await recordCaseMilestone(tenantId, 'stage_changed', `Stage → ${stageLabel(item.stage)}`, caseId);
+        }
+      }
+      // tour_date NEWLY set (absent/changed → a value) → tour_scheduled.
+      if (
+        typeof item.tour_date === 'string' &&
+        item.tour_date.length > 0 &&
+        item.tour_date !== before.tour_date
+      ) {
+        await recordCaseMilestone(tenantId, 'tour_scheduled', `Tour scheduled · ${item.tour_date}`, caseId);
+      }
+      // A tour gained an OUTCOME (the count of outcome-bearing tours rose) →
+      // tour_took_place (label incl. the new outcome).
+      if (outcomeTourCount(item.tours) > outcomeTourCount(before.tours)) {
+        const outcome = latestTourOutcome(item.tours);
+        await recordCaseMilestone(
+          tenantId,
+          'tour_took_place',
+          outcome !== undefined ? `Tour took place · ${stageLabel(outcome)}` : 'Tour took place',
+          caseId,
+        );
+      }
+    }
+
     events.emit('case.updated', toCaseUpdatedEvent(item));
     log.info(
       { caseId, fields: Object.keys(validation.fields).length, actor: req.user?.userId },

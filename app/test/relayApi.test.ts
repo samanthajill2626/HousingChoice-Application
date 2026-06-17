@@ -254,6 +254,55 @@ describe('relay-group API (M1.7)', () => {
     expect(delAgain.body.members).toHaveLength(1);
   });
 
+  // --- BE2/C2: added_to_group_text / removed_from_group_text milestones -----
+  it('records added_to_group_text on a real add and removed_from_group_text on a real remove (for members with a contactId)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, contactId: 'c-alice', name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+
+    // Add Bob (has a contactId) → one added_to_group_text for c-bob.
+    await request(app)
+      .post(`/api/conversations/${id}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, contactId: 'c-bob', name: 'Bob' });
+    let added = world.activityEvents.filter((e) => e.type === 'added_to_group_text');
+    expect(added).toHaveLength(1);
+    expect(added[0]!.contactId).toBe('c-bob');
+    expect(added[0]!.refType).toBe('conversation');
+    expect(added[0]!.refId).toBe(id);
+
+    // Add Bob AGAIN (idempotent) → NO second milestone.
+    await request(app)
+      .post(`/api/conversations/${id}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, contactId: 'c-bob' });
+    added = world.activityEvents.filter((e) => e.type === 'added_to_group_text');
+    expect(added).toHaveLength(1); // still 1 — no emit on a no-op
+
+    // Remove Bob → one removed_from_group_text for c-bob.
+    await request(app)
+      .delete(`/api/conversations/${id}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const removed = world.activityEvents.filter((e) => e.type === 'removed_from_group_text');
+    expect(removed).toHaveLength(1);
+    expect(removed[0]!.contactId).toBe('c-bob');
+
+    // Remove Bob AGAIN (idempotent) → NO second milestone.
+    await request(app)
+      .delete(`/api/conversations/${id}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(world.activityEvents.filter((e) => e.type === 'removed_from_group_text')).toHaveLength(1);
+  });
+
   it('PATCH close releases the pool number to quarantine; reopen provisions a fresh one', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);

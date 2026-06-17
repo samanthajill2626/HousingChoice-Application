@@ -34,12 +34,18 @@ import {
   type ConversationsRepo,
   type ConversationType,
 } from '../repos/conversationsRepo.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
   auditRepo?: AuditRepo;
+  /** BE2/C2: emit a `number_added` milestone on a successful phone add. */
+  activityEventsRepo?: ActivityEventsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -315,6 +321,8 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents =
+    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -571,6 +579,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
+    // Was the number already attached? addPhone is an idempotent no-op for an
+    // existing number — so we only emit the `number_added` milestone for a
+    // genuinely NEW number (computed before the write, from the resolved owner
+    // above: a known number resolving to THIS contact is already attached).
+    const alreadyAttached = owner?.contactId === contactId;
+
     let updated: ContactItem;
     try {
       updated = await contacts.addPhone(contactId, {
@@ -589,6 +603,19 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       phone: normalized,
     });
+    // BE2/C2: a real number-add is a timeline milestone. Best-effort — a log
+    // failure must never fail the curation action (the phone is already saved).
+    if (!alreadyAttached) {
+      try {
+        await activityEvents.record({
+          contactId,
+          type: 'number_added',
+          label: 'Number added',
+        });
+      } catch (err) {
+        log.error({ err, contactId }, 'contact phone: recording number_added milestone failed');
+      }
+    }
     log.info({ contactId, actor: req.user?.userId }, 'contact phone added via api');
     res.status(201).json({ contact: withPhones(updated) });
   });

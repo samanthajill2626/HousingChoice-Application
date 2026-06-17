@@ -38,6 +38,10 @@ import {
   RelayProvisioningDisabledError,
   type PoolNumbersService,
 } from '../services/poolNumbers.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
 
 export interface RelayGroupsRouterDeps {
   config?: AppConfig;
@@ -46,6 +50,8 @@ export interface RelayGroupsRouterDeps {
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   poolNumbersService?: PoolNumbersService;
+  /** BE2/C2: emit added_to_group_text / removed_from_group_text milestones. */
+  activityEventsRepo?: ActivityEventsRepo;
   events?: EventBus;
 }
 
@@ -83,6 +89,8 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents =
+    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
@@ -185,6 +193,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       return;
     }
     const member = await resolveMemberName(parsed);
+    // addMember is idempotent on phone — capture whether this member was already
+    // on the roster so we only emit added_to_group_text for a REAL add.
+    const wasMember = (conversation.participants ?? []).some((p) => p.phone === member.phone);
     let updated: ConversationItem;
     try {
       updated = await conversations.addMember(conversationId, member);
@@ -204,6 +215,22 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       actor,
       contactId: member.contactId || null,
     });
+    // BE2/C2: a real member-add is a timeline milestone for THAT member's
+    // contact (link-out to the relay conversation). Only for members with a
+    // contactId; best-effort (a log failure must not fail the roster mutation).
+    if (!wasMember && member.contactId && member.contactId.length > 0) {
+      try {
+        await activityEvents.record({
+          contactId: member.contactId,
+          type: 'added_to_group_text',
+          label: 'Added to group text',
+          refType: 'conversation',
+          refId: conversationId,
+        });
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay member add: recording milestone failed');
+      }
+    }
     events.emit('conversation.updated', toConversationUpdatedEvent(updated));
     log.info(
       { conversationId, memberCount: (updated.participants ?? []).length, actor },
@@ -227,6 +254,10 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(404).json({ error: 'relay_group_not_found' });
       return;
     }
+    // Capture the member being removed (for the milestone's contactId) BEFORE
+    // the mutation — removeMember is idempotent, so a no-op (absent phone)
+    // leaves removedMember undefined and we emit nothing.
+    const removedMember = (conversation.participants ?? []).find((p) => p.phone === phone);
     let updated: ConversationItem;
     try {
       updated = await conversations.removeMember(conversationId, phone);
@@ -245,6 +276,21 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     await audit.append(`conversations#${conversationId}`, 'relay_member_removed', {
       actor,
     });
+    // BE2/C2: a real member-remove is a timeline milestone for THAT member's
+    // contact. Only for members with a contactId; best-effort.
+    if (removedMember?.contactId && removedMember.contactId.length > 0) {
+      try {
+        await activityEvents.record({
+          contactId: removedMember.contactId,
+          type: 'removed_from_group_text',
+          label: 'Removed from group text',
+          refType: 'conversation',
+          refId: conversationId,
+        });
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay member remove: recording milestone failed');
+      }
+    }
     events.emit('conversation.updated', toConversationUpdatedEvent(updated));
     log.info(
       { conversationId, memberCount: (updated.participants ?? []).length, actor },

@@ -10,10 +10,16 @@
 // "Today action queue", and the contract in
 // docs/superpowers/plans/2026-06-16-new-dashboard-build.md → C7).
 //
-// "Today" date basis: UTC. There is NO org-timezone config anywhere in the system
-// (grep confirms), tour_date is a UTC-validated YYYY-MM-DD (cases route isValidYmd
-// validates against T00:00:00.000Z), and the breaker minute-bucket is explicitly
-// UTC — so "today" for tours_today is new Date().toISOString().slice(0, 10).
+// "Today" date basis (tours_today only): the BACKEND IS TIMEZONE-AGNOSTIC. The
+// only calendar-day input is which day's tours to fold in; every other group is
+// "as of now" (deadline instants are absolute ISO, unread is current state). The
+// CALLER decides the day: pass ?day=YYYY-MM-DD (the browser's LOCAL date) and the
+// tours group filters tour_date == that day (a plain string compare — tour_date is
+// a UTC-validated YYYY-MM-DD). When ?day= is absent we fall back to the UTC date
+// (new Date().toISOString().slice(0,10)); a malformed ?day= is a 400. This makes
+// the server and the client-side fallback agree by construction (both derive "today"
+// from the operator's browser). A richer date-navigable queue is a separate,
+// frontend-driven contract question (not built here).
 //
 // Every repo read is a bounded GSI Query (never a Scan): listByNextDeadline (per
 // deadline type), listByTourDate, listByLastActivity({status:'open'}), and
@@ -150,6 +156,25 @@ interface Ranked {
   at: number;
 }
 
+/**
+ * Validate the optional ?day= param as a strict YYYY-MM-DD calendar date (the
+ * browser's LOCAL date for the tours_today grouping). Returns `undefined` when
+ * absent (caller falls back to the UTC date), `{ day }` when valid, or
+ * `{ error }` for a malformed value (→ 400). Round-trips through UTC midnight so
+ * impossible dates (2026-13-40) are rejected, not silently normalized.
+ */
+function parseDayParam(raw: unknown): { day: string } | { error: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return { error: 'day must be a YYYY-MM-DD date' };
+  }
+  const d = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== raw) {
+    return { error: 'day must be a valid YYYY-MM-DD date' };
+  }
+  return { day: raw };
+}
+
 export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
@@ -158,11 +183,18 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
 
   const router = Router();
 
-  // GET /api/today → TodayResponse
-  router.get('/', async (_req, res) => {
+  // GET /api/today?day=YYYY-MM-DD → TodayResponse
+  router.get('/', async (req, res) => {
     const nowIso = new Date().toISOString();
     const now = Date.parse(nowIso);
-    const todayYmd = nowIso.slice(0, 10);
+    // tours_today scopes to the caller's day (browser's LOCAL date) when given —
+    // the backend stays timezone-agnostic — else the UTC date as a fallback.
+    const parsedDay = parseDayParam(req.query['day']);
+    if (parsedDay !== undefined && 'error' in parsedDay) {
+      res.status(400).json({ error: parsedDay.error });
+      return;
+    }
+    const todayYmd = parsedDay?.day ?? nowIso.slice(0, 10);
 
     // A best-effort name cache so we resolve each tenant contact at most once
     // (the same tenant may anchor several cases). A missing contact must never

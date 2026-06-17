@@ -268,6 +268,53 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(tours.map((i) => i.refId)).toEqual(['case-today']);
   });
 
+  it('?day= scopes tours_today to the caller\'s day (backend tz-agnostic; browser passes its local date)', async () => {
+    // Two tours on distinct FAR-FUTURE days so neither collides with UTC-today.
+    seedTenant('t-d2', 'Day', 'Two');
+    seedTenant('t-d3', 'Day', 'Three');
+    seedCase({ caseId: 'case-d2', tenantId: 't-d2', stage: 'touring', tour_date: '2030-01-02' });
+    seedCase({ caseId: 'case-d3', tenantId: 't-d3', stage: 'touring', tour_date: '2030-01-03' });
+
+    // Without ?day=, UTC-today is used → neither far-future tour appears.
+    const noneByDefault = (await getItems()).filter((i) => i.group === 'tours_today');
+    expect(noneByDefault).toEqual([]);
+
+    // ?day=2030-01-02 → only that day's tour; ?day=2030-01-03 → only the other.
+    const d2 = await authedGet('/api/today?day=2030-01-02');
+    expect(d2.status).toBe(200);
+    expect(
+      (d2.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
+    ).toEqual(['case-d2']);
+
+    const d3 = await authedGet('/api/today?day=2030-01-03');
+    expect(
+      (d3.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
+    ).toEqual(['case-d3']);
+  });
+
+  it('a malformed ?day= is a 400 (not a 500, not silently ignored)', async () => {
+    for (const bad of ['garbage', '2026-13-40', '06-17-2026', '2026-6-7', '2026-06-17T00:00:00Z']) {
+      const res = await authedGet(`/api/today?day=${encodeURIComponent(bad)}`);
+      expect(res.status, `day=${bad}`).toBe(400);
+    }
+  });
+
+  it('?day= scopes ONLY tours_today — the now-relative groups are unaffected', async () => {
+    // A due deadline (needs_you_now) is "as of now" regardless of ?day=.
+    seedTenant('t-dl', 'Dead', 'Line');
+    seedCase({
+      caseId: 'case-dl',
+      tenantId: 't-dl',
+      stage: 'rta_submitted',
+      next_deadline_type: 'rta_window',
+      next_deadline_at: iso(-1000),
+    });
+    const res = await authedGet('/api/today?day=2030-01-02');
+    expect(res.status).toBe(200);
+    const needs = (res.body as TodayResponse).items.filter((i) => i.group === 'needs_you_now');
+    expect(needs.map((i) => i.refId)).toContain('case-dl');
+  });
+
   it('best-effort hydration: a missing tenant contact degrades who to the id, never a 500', async () => {
     // No contact seeded for t-missing.
     seedCase({

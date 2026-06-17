@@ -349,7 +349,22 @@ export interface UnitItem {
   rent_max?: number;
   payment_standard?: number;
   deposit?: number;
+  /** Utilities arrangement, e.g. "Tenant-paid". */
+  utilities?: string;
+  /** Accessibility note, e.g. "Ground floor". */
+  accessibility?: string;
+  /** Pet policy, e.g. "Cats only". */
+  pets?: string;
+  /** S3 keys / URLs of listing media (the Photos gallery + hero). */
+  media?: string[];
   listing_link?: string;
+  /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
+   *  single `landlordId` for a one-row roster. */
+  contacts?: UnitContact[];
+  /** Free-text "how to tour" copy (the listing page's process card). */
+  tour_process?: string;
+  /** Free-text "how to apply" copy (the listing page's process card). */
+  application_process?: string;
   primary_voice_contact?: string;
   created_at?: string;
   updated_at?: string;
@@ -496,4 +511,38 @@ export interface ContactMediaItem {
   contentType: string;
   at: string;
   conversationId: string;
+}
+
+// --- C3: Unit ↔ contacts roster + related (§API Contract C3) ----------------
+// Copied verbatim from the build plan §C3. The listing page's Contacts roster
+// (landlord/PM, each opening their contact page) + Related-listings panel.
+// UnitItem gains an optional `contacts[]` (BE3); legacy `landlordId` stays = the
+// primary landlord, which the page uses as a single-row FALLBACK until BE3 lands.
+
+export interface UnitContact {
+  contactId: string;
+  role: 'landlord' | 'pm' | 'owner' | 'other';
+  primaryVoice: boolean; // the ☎ primary
+  name?: string;
+  company?: string; // denormalized for the roster row
+}
+// UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the primary landlord)
+export interface RelatedUnit {
+  unitId: string;
+  address?: Address | string; // reuse legacy
+  status: UnitStatus; // reuse legacy
+  relation: 'same_property' | 'same_landlord';
+  label?: string; // "Same building (duplex)"
+}
+
+// --- C6: Similar listings (§API Contract C6) --------------------------------
+// Copied verbatim from the build plan §C6. The listing page's "Similar listings"
+// comps panel. 404s until BE6 lands → an honest pending state.
+
+export interface SimilarUnit {
+  unitId: string;
+  address?: Address | string;
+  status: UnitStatus;
+  matchPct: number;
+  summary: string;
 }

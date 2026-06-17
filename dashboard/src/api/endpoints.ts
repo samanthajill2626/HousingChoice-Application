@@ -12,8 +12,11 @@ import type {
   ListingSendRow,
   Me,
   Message,
+  RelatedUnit,
   SendMessageResult,
+  SimilarUnit,
   TodayResponse,
+  UnitItem,
   UnitsPage,
 } from './types.js';
 
@@ -86,9 +89,61 @@ export function sendMessage(
 }
 
 /** GET /api/units — the unit records. The landlord file filters this by
- *  landlordId === contactId to show the landlord's own listings. */
+ *  landlordId === contactId to show the landlord's own listings; the listing
+ *  page reuses it for "Related listings" (same landlord). */
 export function getUnits(signal?: AbortSignal): Promise<UnitsPage> {
   return request<UnitsPage>('/api/units', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/units/:id — a single unit record (the listing detail page header +
+ *  details + photos). Wrapped under { unit } on the wire; unwrapped here. */
+export async function getUnit(unitId: string, signal?: AbortSignal): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.unit;
+}
+
+/** GET /api/units/:id/related (§C3) — duplex-sibling / same-landlord listings.
+ *  404s until BE3 lands → the listing page degrades to a same-landlord FALLBACK
+ *  it derives from getUnits(). */
+export async function getUnitRelated(
+  unitId: string,
+  signal?: AbortSignal,
+): Promise<RelatedUnit[]> {
+  const res = await request<{ related: RelatedUnit[] }>(
+    `/api/units/${encodeURIComponent(unitId)}/related`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.related;
+}
+
+/** GET /api/units/:id/recipients (§C4) — the "Sent to tenants" rows (recipients
+ *  + responses). 404s until BE4 lands → the panel renders a "pending backend"
+ *  state. */
+export async function getUnitRecipients(
+  unitId: string,
+  signal?: AbortSignal,
+): Promise<ListingSendRow[]> {
+  const res = await request<{ recipients: ListingSendRow[] }>(
+    `/api/units/${encodeURIComponent(unitId)}/recipients`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.recipients;
+}
+
+/** GET /api/units/:id/similar (§C6) — available comps ranked by similarity.
+ *  404s until BE6 lands → the "Similar listings" panel renders a "pending
+ *  backend" state. */
+export async function getUnitSimilar(
+  unitId: string,
+  signal?: AbortSignal,
+): Promise<SimilarUnit[]> {
+  const res = await request<{ similar: SimilarUnit[] }>(
+    `/api/units/${encodeURIComponent(unitId)}/similar`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.similar;
 }
 
 // --- Contacts (/api/contacts) -----------------------------------------------

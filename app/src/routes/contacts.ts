@@ -669,7 +669,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     return { ...contact, phones: contactPhones(contact) };
   }
 
-  // POST /api/contacts/:contactId/phones { phone, label? } → 201 { contact }.
+  // POST /api/contacts/:contactId/phones { phone, label? } → 200 { contact }.
+  // 200 (not 201): this is an idempotent upsert into the contact's phone roster
+  // returning the parent contact (re-posting the same number is a no-op), NOT a
+  // new top-level resource — consistent with POST /api/units/:id/contacts (BE3).
   // 404 unknown contact; 400 invalid body; 409 when the (normalized) number
   // already resolves to a DIFFERENT contact (one-number-per-contact, mirroring
   // the POST / dedupe policy).
@@ -749,7 +752,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
     log.info({ contactId, actor: req.user?.userId }, 'contact phone added via api');
-    res.status(201).json({ contact: withPhones(updated) });
+    res.status(200).json({ contact: withPhones(updated) });
   });
 
   // PATCH /api/contacts/:contactId/phones/:phone { primary?, label? } → { contact }.

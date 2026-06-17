@@ -8,6 +8,7 @@ import { Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
+import { UnreadProvider } from './app/UnreadContext.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
 import { ContactsList } from './routes/contacts/ContactsList.js';
@@ -34,7 +35,13 @@ export default function App(): React.JSX.Element {
     <AuthProvider>
       <AuthGate>
         <Routes>
-          <Route element={<AppFrame />}>
+          <Route
+            element={
+              <UnreadProvider>
+                <AppFrame />
+              </UnreadProvider>
+            }
+          >
             <Route index element={<Today />} />
 
             {/* Contacts list views (§IA: Contacts parent ▸ Tenants/Landlords/

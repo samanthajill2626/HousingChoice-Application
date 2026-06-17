@@ -10,6 +10,7 @@ import { Button } from '../ui/index.js';
 import { NAV_ICONS } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
 import { NAV_FOOTER, NAV_GROUPS, isNavParent, type NavLeaf } from './nav.js';
+import { useUnread } from './UnreadContext.js';
 import styles from './AppFrame.module.css';
 
 function linkClass({ isActive }: { isActive: boolean }): string {
@@ -28,15 +29,24 @@ const DOT_CLASS: Record<NonNullable<NavLeaf['dot']>, string> = {
 
 function NavLeafLink({ item }: { item: NavLeaf }): React.JSX.Element {
   const Icon = item.icon ? NAV_ICONS[item.icon] : undefined;
+  const { unread } = useUnread();
+  const badge = item.badge === 'inbox-unread' && unread !== null && unread > 0 ? unread : null;
   return (
-    <NavLink to={item.to} end={item.end ?? false} className={linkClass}>
-      {Icon ? (
-        <span className={styles.icon}>
-          <Icon />
+    <div className={styles.linkRow}>
+      <NavLink to={item.to} end={item.end ?? false} className={linkClass}>
+        {Icon ? (
+          <span className={styles.icon}>
+            <Icon />
+          </span>
+        ) : null}
+        <span className={styles.linkLabel}>{item.label}</span>
+      </NavLink>
+      {badge !== null ? (
+        <span className={styles.badge} aria-label={`${badge} unread`}>
+          {badge > 99 ? '99+' : badge}
         </span>
       ) : null}
-      <span className={styles.linkLabel}>{item.label}</span>
-    </NavLink>
+    </div>
   );
 }
 

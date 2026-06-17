@@ -59,10 +59,13 @@ export function ContactDetail(): React.JSX.Element {
   // this is the common 1:1 case. Multi-thread → no unambiguous target yet.
   const sendConvId = resolveSingleConversation(timeline.items);
   const canSend = sendConvId !== null;
-  const onSend = (body: string): void => {
-    if (!sendConvId) return;
-    // Fire-and-forget: the SSE message.persisted refetch reconciles the stream.
-    void sendMessage(sendConvId, { body });
+  // Returns the send promise so the Timeline can show an in-flight state and
+  // surface a failure (restore the draft) — a failed manual reply must NOT look
+  // like it sent. The SSE message.persisted refetch reconciles the stream on
+  // success.
+  const onSend = (body: string): Promise<void> => {
+    if (!sendConvId) return Promise.resolve();
+    return sendMessage(sendConvId, { body }).then(() => undefined);
   };
 
   // Header facts subline: voucher / authority for tenants, company / listing

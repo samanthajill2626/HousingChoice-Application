@@ -55,6 +55,13 @@ export function buildTimelineFallback(
 
   // Stable chronological sort. localeCompare on the ISO instant orders correctly
   // for same-format timestamps; ties keep insertion order (Array.sort is stable).
-  items.sort((a, b) => a.at.localeCompare(b.at));
+  // A message with neither provider_ts nor created_at (at === '') sorts LAST
+  // rather than to the top.
+  items.sort((a, b) => {
+    if (a.at === b.at) return 0;
+    if (a.at === '') return 1;
+    if (b.at === '') return -1;
+    return a.at.localeCompare(b.at);
+  });
   return items;
 }

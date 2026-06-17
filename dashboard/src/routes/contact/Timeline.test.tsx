@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline } from './Timeline.js';
@@ -124,14 +124,26 @@ describe('Timeline', () => {
     expect(send).toBeDisabled();
   });
 
-  it('sends the typed reply when a conversation is resolvable', () => {
-    const onSend = vi.fn();
+  it('sends the typed reply and clears the draft on success', async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
     renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
-    fireEvent.change(screen.getByRole('textbox', { name: /reply/i }), {
-      target: { value: 'On my way' },
-    });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'On my way' } });
     fireEvent.click(screen.getByRole('button', { name: /Send/i }));
     expect(onSend).toHaveBeenCalledWith('On my way');
+    // Draft is cleared ONLY after the send resolves.
+    await waitFor(() => expect(box).toHaveValue(''));
+  });
+
+  it('keeps the draft and surfaces an error when the send fails', async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error('network'));
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'Important reply' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    // Failure is surfaced (role=alert) and the draft is NOT lost.
+    await screen.findByRole('alert');
+    expect(box).toHaveValue('Important reply');
   });
 
   it('shows the reply target number + label', () => {

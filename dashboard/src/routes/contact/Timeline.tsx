@@ -36,8 +36,9 @@ export interface TimelineProps {
   /** Whether a single conversation is resolvable to actually send into. When
    *  false the Send button is disabled with an explanatory tooltip. */
   canSend: boolean;
-  /** Called with the textarea body when the operator sends. */
-  onSend?: (body: string) => void;
+  /** Called with the textarea body when the operator sends. Returns a promise so
+   *  the reply box can show an in-flight state and restore the draft on failure. */
+  onSend?: (body: string) => Promise<void>;
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
@@ -168,6 +169,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const { status, items, source, replyToPhone, replyToLabel, canSend, onSend } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   // Client-side "Comms only" filter (the server can also do this via kinds=, but
   // filtering here keeps the toggle instant + works with the fallback too).
@@ -192,11 +195,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return out;
   }, [visible]);
 
-  const handleSend = (): void => {
+  const handleSend = async (): Promise<void> => {
     const text = draft.trim();
-    if (!text || !canSend) return;
-    onSend?.(text);
-    setDraft('');
+    if (!text || !canSend || sending) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      await onSend?.(text);
+      setDraft(''); // clear ONLY after a confirmed send
+    } catch {
+      // Keep the draft so the operator doesn't lose their message; surface it.
+      setSendError("Couldn't send — please try again.");
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -267,6 +279,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />
+        {sendError ? (
+          <p className={styles.error} role="alert">
+            {sendError}
+          </p>
+        ) : null}
         <div className={styles.replyFoot}>
           <span className={styles.replyTarget}>
             Reply sends to <strong>{formatPhone(replyToPhone) || 'this contact'}</strong>
@@ -275,11 +292,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           <button
             type="button"
             className={styles.sendBtn}
-            onClick={handleSend}
-            disabled={!canSend || draft.trim().length === 0}
+            onClick={() => void handleSend()}
+            disabled={!canSend || draft.trim().length === 0 || sending}
             title={canSend ? undefined : 'No single conversation to send into yet'}
           >
-            Send
+            {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
       </div>

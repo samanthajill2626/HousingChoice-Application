@@ -59,15 +59,24 @@ async function loadTimeline(
     // state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
 
+    // NOTE: reads only the FIRST inbox page (no nextCursor paging). A
+    // transitional limitation — BE2's /timeline supersedes this entirely, and a
+    // single contact's threads almost always fit one page.
     const conversations = (await getConversations(signal)).conversations.filter((c) =>
       involvesContact(c.participants, contactId),
     );
     const messagesByConvId = new Map<string, Message[]>();
-    await Promise.all(
-      conversations.map(async (c) => {
-        messagesByConvId.set(c.conversationId, await getConversationMessages(c.conversationId, signal));
-      }),
+    // allSettled: one failed per-conversation fetch drops THAT thread rather
+    // than failing the whole timeline (the others still render).
+    const results = await Promise.allSettled(
+      conversations.map(async (c) => ({
+        id: c.conversationId,
+        messages: await getConversationMessages(c.conversationId, signal),
+      })),
     );
+    for (const r of results) {
+      if (r.status === 'fulfilled') messagesByConvId.set(r.value.id, r.value.messages);
+    }
     return { items: buildTimelineFallback(conversations, messagesByConvId), source: 'fallback' };
   }
 }

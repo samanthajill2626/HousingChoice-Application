@@ -82,6 +82,45 @@
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
   --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.1);
 
+  /* --- Contact detail (B2/B3) -------------------------------------------- */
+  /* The near-black header band atop the tenant/landlord detail page. */
+  --c-header-bg: #111827;
+  --c-header-text: #ffffff;
+  --c-header-facts: #cbd5e1;
+  --c-header-btn-bg: #2563eb;
+  --c-header-kebab-bg: #374151;
+
+  /* Type pills (audience: tenant blue / landlord teal). */
+  --c-pill-tenant-bg: #1d4ed8;
+  --c-pill-landlord-bg: #0e7490;
+
+  /* Timeline surfaces. */
+  --c-comms-bg: #f4f6fa;
+  --c-bubble-in-bg: #ffffff;
+  --c-bubble-in-border: #e3e7ec;
+  --c-bubble-out-bg: #dbeafe;
+  --c-bubble-out-border: #bfdbfe;
+  --c-divider: #94a3b8;
+
+  /* Milestone-pin variants (kind → color). */
+  --c-evt-neutral-bg: #ffffff;
+  --c-evt-neutral-border: #dde2e8;
+  --c-evt-neutral-text: #475569;
+  --c-evt-amber-bg: #fef3c7;
+  --c-evt-amber-border: #fde68a;
+  --c-evt-amber-text: #92400e;
+  --c-evt-purple-bg: #ede9fe;
+  --c-evt-purple-border: #ddd6fe;
+  --c-evt-purple-text: #5b21b6;
+  --c-evt-green-bg: #dcfce7;
+  --c-evt-green-border: #bbf7d0;
+  --c-evt-green-text: #166534;
+
+  /* Listing/tour response colors (👍/👎/⏳ rows). */
+  --c-resp-yes: #15803d;
+  --c-resp-no: #b91c1c;
+  --c-resp-wait: #a16207;
+
   /* --- Layout ------------------------------------------------------------- */
   --nav-width: 240px;
 }

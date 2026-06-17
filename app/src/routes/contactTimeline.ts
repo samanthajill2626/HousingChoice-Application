@@ -211,14 +211,16 @@ function toTimelineCall(
   conversation: ConversationItem | undefined,
 ): TimelineCall {
   const masked = m.masked === true;
-  // started_at is the call's first-seen time; fall back to provider_ts for the
-  // sort key when a call entry predates the started_at field.
-  const at = typeof m.started_at === 'string' && m.started_at.length > 0 ? m.started_at : m.provider_ts;
+  // at == sort-key == cursor: all provider_ts. The merge/sort + cursor use
+  // globalKey = m.tsMsgId (`<provider_ts>#<sid>`) and messagesRepo paginates on
+  // tsMsgId, so the displayed `at` MUST be provider_ts (which append always sets)
+  // to stay consistent with what the server sorts/paginates by — same as
+  // TimelineMessage. (started_at is the call's first-seen time, not a sort key.)
   const partyPhone = masked ? undefined : conversation?.participant_phone;
   return {
     kind: 'call',
     id: m.tsMsgId,
-    at,
+    at: m.provider_ts,
     ...(m.conversationId !== undefined && { conversationId: m.conversationId }),
     // call_outcome is required on the wire; default 'missed' when a call entry
     // has no recorded outcome yet (a ringing/unanswered metadata row).

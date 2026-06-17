@@ -267,6 +267,102 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(JSON.stringify(masked)).not.toContain('should-not-leak');
   });
 
+  it("a call's at equals its provider_ts (sort-key parity) and sorts among messages", async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // A message before and after the call so the call must sort by its provider_ts.
+    await seedMessage('conv-a', '2026-06-16T10:00:00.000Z', 'SM-before', { body: 'before' });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-mid',
+      providerTs: '2026-06-16T11:00:00.000Z',
+      // started_at intentionally DIVERGES from provider_ts to prove `at` tracks
+      // provider_ts (the sort/cursor key), not started_at.
+      startedAt: '2026-06-16T09:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'answered',
+    });
+    await seedMessage('conv-a', '2026-06-16T12:00:00.000Z', 'SM-after', { body: 'after' });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    expect(res.status).toBe(200);
+    const call = res.body.items.find((i: { kind: string }) => i.kind === 'call');
+    // at == provider_ts (not the divergent started_at).
+    expect(call.at).toBe('2026-06-16T11:00:00.000Z');
+    // And it sorts strictly between the two messages by that key (newest-first).
+    const kindsAt = res.body.items.map((i: { kind: string; at: string }) => [i.kind, i.at]);
+    expect(kindsAt).toEqual([
+      ['message', '2026-06-16T12:00:00.000Z'],
+      ['call', '2026-06-16T11:00:00.000Z'],
+      ['message', '2026-06-16T10:00:00.000Z'],
+    ]);
+  });
+
+  it('multi-source cursor walk: paginates messages from TWO conversations + milestones with no dups/skips, strictly descending across page boundaries', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    seedConversation('conv-b', PHONE_B);
+    // 8 items across THREE sources, interleaved in time (all distinct `at`):
+    //   conv-a: A1 @10:00, A2 @13:00, A3 @16:00
+    //   conv-b: B1 @11:00, B2 @14:00, B3 @17:00
+    //   milestones: M1 @12:00, M2 @15:00
+    await seedMessage('conv-a', '2026-06-16T10:00:00.000Z', 'SM-a1', { body: 'a1' });
+    await seedMessage('conv-b', '2026-06-16T11:00:00.000Z', 'SM-b1', { body: 'b1' });
+    await world.activityEventsRepo.record({
+      contactId: TENANT,
+      type: 'stage_changed',
+      label: 'M1',
+      at: '2026-06-16T12:00:00.000Z',
+    });
+    await seedMessage('conv-a', '2026-06-16T13:00:00.000Z', 'SM-a2', { body: 'a2' });
+    await seedMessage('conv-b', '2026-06-16T14:00:00.000Z', 'SM-b2', { body: 'b2' });
+    await world.activityEventsRepo.record({
+      contactId: TENANT,
+      type: 'case_opened',
+      label: 'M2',
+      at: '2026-06-16T15:00:00.000Z',
+    });
+    await seedMessage('conv-a', '2026-06-16T16:00:00.000Z', 'SM-a3', { body: 'a3' });
+    await seedMessage('conv-b', '2026-06-16T17:00:00.000Z', 'SM-b3', { body: 'b3' });
+
+    // Walk every page with a small limit until nextCursor is null.
+    const seenIds: string[] = [];
+    const seenAts: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const url: string =
+        cursor === null
+          ? '/api/contacts/c-tenant/timeline?limit=3'
+          : `/api/contacts/c-tenant/timeline?limit=3&cursor=${encodeURIComponent(cursor)}`;
+      const res = await authedGet(url);
+      expect(res.status).toBe(200);
+      for (const item of res.body.items as Array<{ id: string; at: string }>) {
+        seenIds.push(item.id);
+        seenAts.push(item.at);
+      }
+      cursor = res.body.nextCursor;
+      pages += 1;
+    } while (cursor !== null && pages < 20);
+
+    // (a) the collected set equals all 8 items.
+    expect(seenIds).toHaveLength(8);
+    // (b) no item id appears twice.
+    expect(new Set(seenIds).size).toBe(8);
+    // (c) global order is STRICTLY descending by `at` across the whole walk
+    //     (no skips/dups across page boundaries).
+    const sortedDesc = [...seenAts].sort().reverse();
+    expect(seenAts).toEqual(sortedDesc);
+    for (let i = 1; i < seenAts.length; i++) {
+      expect(seenAts[i]! < seenAts[i - 1]!).toBe(true); // strictly descending
+    }
+    // Really walked multiple pages (8 items / limit 3 = ceil 3 pages).
+    expect(pages).toBeGreaterThanOrEqual(3);
+  });
+
   it('excludes relay_group threads (group-text content is never inlined)', async () => {
     seedContact();
     // A relay_group thread fronted by a pool number that happens to also be one

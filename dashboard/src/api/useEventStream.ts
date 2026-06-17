@@ -8,12 +8,18 @@
 // trimmed to the events the new dashboard's Today queue consumes
 // (conversation.updated, case.updated); add more handlers as later phases need.
 import { useEffect, useRef } from 'react';
-import type { CaseUpdatedEvent, ConversationUpdatedEvent } from './types.js';
+import type {
+  CaseUpdatedEvent,
+  ConversationUpdatedEvent,
+  MessagePersistedEvent,
+} from './types.js';
 
 export interface EventStreamHandlers {
   onConversationUpdated?: (event: ConversationUpdatedEvent) => void;
   /** A case (M1.10) changed — live board move / attention / tour / deadline. */
   onCaseUpdated?: (event: CaseUpdatedEvent) => void;
+  /** A message was persisted — the contact timeline refetches to show it live. */
+  onMessagePersisted?: (event: MessagePersistedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -71,6 +77,11 @@ export function useEventStream(handlers: EventStreamHandlers): void {
       source.addEventListener('case.updated', (ev) => {
         const data = parse<CaseUpdatedEvent>((ev as MessageEvent).data);
         if (data) handlersRef.current.onCaseUpdated?.(data);
+      });
+
+      source.addEventListener('message.persisted', (ev) => {
+        const data = parse<MessagePersistedEvent>((ev as MessageEvent).data);
+        if (data) handlersRef.current.onMessagePersisted?.(data);
       });
 
       source.addEventListener('error', () => {

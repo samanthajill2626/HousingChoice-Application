@@ -211,6 +211,19 @@ export interface CasesPage {
 /** Message direction relative to the platform. */
 export type MessageDirection = 'inbound' | 'outbound';
 
+/** Who authored a message. `unknown` = from an un-triaged contact (never guessed). */
+export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown';
+
+/** Message transport. `call` is a metadata-only voice-call timeline entry. */
+export type MessageType = 'sms' | 'mms' | 'call';
+
+/** Coarse human-facing call outcome: `answered` (a leg connected), `missed`
+ *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
+export type CallOutcome = 'answered' | 'missed' | 'voicemail';
+
+/** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
+export type ContactType = 'tenant' | 'landlord' | 'pm' | 'team_member' | 'unknown';
+
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
 
@@ -266,4 +279,221 @@ export interface CaseUpdatedEvent {
   attention: boolean;
   lost_reason: string | null;
   updated_at: string | null;
+}
+
+/** GET /api/events 'message.persisted' payload (legacy reuse — verbatim). The
+ *  contact timeline refetches on this so a new inbound/outbound shows up live. */
+export interface MessagePersistedEvent {
+  conversationId: string;
+  tsMsgId: string;
+  direction: MessageDirection;
+  deliveryStatus: DeliveryStatus;
+}
+
+// --- Contacts (legacy reuse — verbatim from the proven contract) -------------
+// Copied from dashboard-legacy/src/api/types.ts. The contact detail page reads
+// type/status/phone/firstName/lastName/voucherSize/notes off this flexible doc.
+
+/** A contact (GET /api/contacts/:id → { contact }). Flexible document. C1 adds
+ *  an optional `phones[]`; when absent, synthesize [{phone, primary:true}]. */
+export interface Contact {
+  contactId: string;
+  type: ContactType;
+  status?: string;
+  phone?: string;
+  firstName?: string;
+  lastName?: string;
+  voucherSize?: number;
+  notes?: string;
+  sms_opt_out?: boolean;
+  sms_unreachable?: boolean;
+  capture_source?: string;
+  captured_at?: string;
+  created_at?: string;
+  /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
+  phones?: ContactPhone[];
+  [key: string]: unknown;
+}
+
+// --- Units (legacy reuse — verbatim) ----------------------------------------
+
+/** A structured US postal address. Every part is optional — intake is
+ *  partial-by-design. */
+export interface Address {
+  line1?: string;
+  line2?: string;
+  city?: string;
+  /** 2-letter US state. */
+  state?: string;
+  zip?: string;
+}
+
+/** A unit's lifecycle status. */
+export type UnitStatus = 'available' | 'placed' | 'inactive';
+
+/** A unit record (GET /api/units → { units }, GET /api/units/:id → { unit }).
+ *  Flexible document; the landlord file reads landlordId/status/address/beds. */
+export interface UnitItem {
+  unitId: string;
+  landlordId: string;
+  status: UnitStatus;
+  jurisdiction?: string;
+  /** Structured street address, or a plain string on pre-contract dev records. */
+  address?: Address | string;
+  accepted_programs?: string[];
+  beds?: number;
+  baths?: number;
+  area?: string;
+  subzone?: string;
+  rent_min?: number;
+  rent_max?: number;
+  payment_standard?: number;
+  deposit?: number;
+  listing_link?: string;
+  primary_voice_contact?: string;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/units page. */
+export interface UnitsPage {
+  units: UnitItem[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+// --- Messages (legacy reuse — verbatim) -------------------------------------
+// Copied from dashboard-legacy/src/api/types.ts. The timeline fallback maps
+// these into TimelineMessage; the relay/voice fields are carried but unused here.
+
+/** One timeline message (GET /api/conversations/:id/messages → { messages }).
+ *  Newest-first. Field names are the server's persisted shape. */
+export interface Message {
+  conversationId: string;
+  /** Sort key: `<providerTs>#<providerSid>`; unique per message. */
+  tsMsgId: string;
+  type: MessageType;
+  direction: MessageDirection;
+  author: MessageAuthor;
+  body?: string;
+  /** Provider media URLs (MMS, inbound). */
+  mediaUrls?: string[];
+  /** Mirrored MMS attachments (key + stored content-type, together). */
+  media_attachments?: { s3Key: string; contentType: string }[];
+  /** @deprecated Legacy parallel key array (pre-media_attachments). */
+  media_s3_keys?: string[];
+  provider_sid: string;
+  provider_ts: string;
+  delivery_status: DeliveryStatus;
+  error_code?: string;
+  // --- Voice call — present only on a type:'call' entry --------------------
+  call_outcome?: CallOutcome;
+  started_at?: string;
+  call_duration?: number;
+  /** S3 key of the mirrored recording (founder-bridge calls only). */
+  recording_s3_key?: string;
+  /** VERBATIM call transcript (founder-bridge calls only). */
+  transcript?: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+// --- C1: Contact ↔ multiple phone numbers (§API Contract C1) ----------------
+// Copied verbatim from the build plan §C1. Extends Contact with phones[].
+
+export interface ContactPhone {
+  phone: string; // E.164
+  label?: string; // "cell", "work", operator note
+  primary: boolean; // exactly one true
+  firstSeenAt?: string; // ISO; when first observed
+  lastSeenAt?: string; // ISO; most recent inbound/outbound
+}
+
+// --- C2: Person-centric merged timeline (§API Contract C2) ------------------
+// Copied verbatim from the build plan §C2. The blended stream the contact
+// detail page renders: message bubbles + collapsed call cards + milestone pins.
+
+export type TimelineMilestoneType =
+  | 'case_opened'
+  | 'case_closed'
+  | 'listing_sent'
+  | 'listing_reviewed'
+  | 'tour_scheduled'
+  | 'tour_took_place'
+  | 'stage_changed'
+  | 'number_added'
+  | 'added_to_group_text'
+  | 'removed_from_group_text';
+
+interface TimelineBase {
+  id: string;
+  at: string; /* ISO, sort key */
+}
+
+export interface TimelineMessage extends TimelineBase {
+  kind: 'message';
+  conversationId: string;
+  tsMsgId: string;
+  direction: MessageDirection; // reuse legacy
+  author: MessageAuthor; // reuse legacy
+  type: 'sms' | 'mms';
+  body?: string; // FULL body (no server truncation)
+  media_attachments?: { s3Key: string; contentType: string }[];
+  delivery_status: DeliveryStatus; // reuse legacy
+  fromPhone?: string;
+  toPhone?: string; // which number this used
+}
+export interface TimelineCall extends TimelineBase {
+  kind: 'call';
+  conversationId?: string;
+  call_outcome: CallOutcome; // reuse legacy
+  call_duration?: number;
+  party_phone?: string; // which number
+  recording_s3_key?: string; // present ⇒ playable
+  transcript?: string; // present ⇒ collapsible (never auto-shown)
+}
+export interface TimelineMilestone extends TimelineBase {
+  kind: 'milestone';
+  type: TimelineMilestoneType;
+  label: string; // human text, e.g. "Tour took place · Toured"
+  refType?: 'case' | 'unit' | 'conversation' | 'broadcast';
+  refId?: string; // deep-link target (links out, no inline content)
+}
+export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
+
+export interface ContactTimelinePage {
+  items: TimelineItem[]; // chronological; client renders oldest→newest
+  nextCursor: string | null;
+}
+
+// --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------
+// Copied verbatim from the build plan §C4. The tenant file's "Listings sent".
+
+export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
+export interface ListingSendRow {
+  contactId: string;
+  unitId: string;
+  response: ListingResponse;
+  sentAt: string; // ISO
+  via: 'broadcast' | 'individual';
+  broadcastId?: string;
+}
+
+/** Result of POST /api/conversations/:id/messages (legacy reuse). */
+export interface SendMessageResult {
+  conversationId: string;
+  providerSid: string;
+  tsMsgId: string;
+  status: DeliveryStatus;
+}
+
+// --- C5: Media aggregation (§API Contract C5) -------------------------------
+// Copied verbatim from the build plan §C5. The "Media from comms" card.
+
+export interface ContactMediaItem {
+  s3Key: string;
+  contentType: string;
+  at: string;
+  conversationId: string;
 }

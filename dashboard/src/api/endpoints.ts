@@ -4,10 +4,17 @@
 import { request } from './client.js';
 import type {
   CasesPage,
+  Contact,
+  ContactMediaItem,
+  ContactTimelinePage,
   ConversationsPage,
   DevLoginResult,
+  ListingSendRow,
   Me,
+  Message,
+  SendMessageResult,
   TodayResponse,
+  UnitsPage,
 } from './types.js';
 
 // --- Auth (/auth) -----------------------------------------------------------
@@ -51,6 +58,96 @@ export function getConversations(signal?: AbortSignal): Promise<ConversationsPag
   return request<ConversationsPage>('/api/conversations', {
     ...(signal !== undefined && { signal }),
   });
+}
+
+/** GET /api/conversations/:id/messages — newest-first page of a conversation's
+ *  messages (the contact timeline FALLBACK's source). The server wraps the page
+ *  under { messages }; we unwrap it here so callers get a plain Message[]. */
+export async function getConversationMessages(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<Message[]> {
+  const res = await request<{ messages: Message[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.messages;
+}
+
+/** POST /api/conversations/:id/messages — a manual human send (the reply box). */
+export function sendMessage(
+  conversationId: string,
+  body: { body?: string; mediaUrls?: string[] },
+): Promise<SendMessageResult> {
+  return request<SendMessageResult>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { method: 'POST', body },
+  );
+}
+
+/** GET /api/units — the unit records. The landlord file filters this by
+ *  landlordId === contactId to show the landlord's own listings. */
+export function getUnits(signal?: AbortSignal): Promise<UnitsPage> {
+  return request<UnitsPage>('/api/units', { ...(signal !== undefined && { signal }) });
+}
+
+// --- Contacts (/api/contacts) -----------------------------------------------
+// The contact detail page (B2 tenant / B3 landlord). getContact exists today
+// (legacy Contact, single `phone`); the timeline / listings-sent / media slices
+// (C2/C4/C5) 404 until BE1–BE5 land, so callers degrade gracefully.
+
+/** GET /api/contacts/:id — the contact record (the detail page header + file).
+ *  Wrapped under { contact } on the wire; unwrapped here. */
+export async function getContact(contactId: string, signal?: AbortSignal): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.contact;
+}
+
+/** GET /api/contacts/:id/timeline (§C2) — the server-merged person-centric
+ *  timeline. 404s until BE2 lands; useContactTimeline catches that and assembles
+ *  a message-only fallback from the contact's conversations. `kinds` filters
+ *  (e.g. 'message,call' for the "Comms only" toggle). */
+export function getContactTimeline(
+  contactId: string,
+  opts: { kinds?: string } = {},
+  signal?: AbortSignal,
+): Promise<ContactTimelinePage> {
+  return request<ContactTimelinePage>(
+    `/api/contacts/${encodeURIComponent(contactId)}/timeline`,
+    {
+      query: { kinds: opts.kinds },
+      ...(signal !== undefined && { signal }),
+    },
+  );
+}
+
+/** GET /api/contacts/:id/listings-sent (§C4) — the "Listings sent" rows. 404s
+ *  until BE4 lands → the panel renders a "pending backend" state. */
+export async function getContactListingsSent(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<ListingSendRow[]> {
+  const res = await request<{ sent: ListingSendRow[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/listings-sent`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.sent;
+}
+
+/** GET /api/contacts/:id/media (§C5) — aggregated comms media. 404s until BE5
+ *  lands → the "Media from comms" panel renders a "pending backend" state. */
+export async function getContactMedia(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<ContactMediaItem[]> {
+  const res = await request<{ media: ContactMediaItem[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/media`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.media;
 }
 
 // --- Dev-only auth (/__dev, /auth/dev-login) --------------------------------

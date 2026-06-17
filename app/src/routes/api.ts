@@ -70,6 +70,7 @@ import { createContactTimelineRouter } from './contactTimeline.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
+import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
@@ -365,6 +366,20 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // BE2: emit case_opened/case_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
       events,
+    }),
+  );
+  // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only
+  // aggregation over cases/conversations/contacts — its only path is GET / (i.e.
+  // GET /api/today), a distinct segment from every router above. Shares the
+  // process conversations repo; cases/contacts default to the real repos unless
+  // injected (tests pass the world fakes).
+  router.use(
+    '/today',
+    createTodayRouter({
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
     }),
   );
 

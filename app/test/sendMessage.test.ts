@@ -128,6 +128,10 @@ function makeFakes(
     setFlag: async () => {},
     clearFlag: async () => {},
     update: async () => contact!,
+    addPhone: async () => contact!,
+    setPhone: async () => contact!,
+    removePhone: async () => contact!,
+    touchPhoneLastSeen: async () => {},
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

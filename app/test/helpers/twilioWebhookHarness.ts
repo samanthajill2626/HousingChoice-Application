@@ -20,7 +20,14 @@ import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../sr
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
 import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
-import type { ContactFlag, ContactItem, ContactsRepo } from '../../src/repos/contactsRepo.js';
+import {
+  phoneRefId,
+  PrimaryPhoneRemovalError,
+  type ContactFlag,
+  type ContactItem,
+  type ContactPhone,
+  type ContactsRepo,
+} from '../../src/repos/contactsRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -503,15 +510,69 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // BE1/C1: the fake mirrors the real repo's phone invariants — phones[] seeded
+  // from the scalar when absent, exactly-one-primary, and phone-pointer items
+  // stored AS ENTRIES in the same `contacts` array (phone_ref/phone_ref_owner)
+  // so the byPhone lookup resolves a non-primary number to its owner.
+  const fakeSeededPhones = (contact: ContactItem): ContactPhone[] => {
+    if (Array.isArray(contact.phones) && contact.phones.length > 0) {
+      return contact.phones.map((p) => ({ ...p }));
+    }
+    if (typeof contact.phone === 'string' && contact.phone.length > 0) {
+      return [
+        {
+          phone: contact.phone,
+          primary: true,
+          ...(typeof contact.created_at === 'string' && { firstSeenAt: contact.created_at }),
+          lastSeenAt: new Date().toISOString(),
+        },
+      ];
+    }
+    return [];
+  };
+  const fakePutPointer = (phone: string, owner: string): void => {
+    const id = phoneRefId(phone);
+    if (contacts.some((c) => c.contactId === id)) return;
+    // A pointer carries NO type/status (invisible to byTypeStatus) — but the
+    // ContactItem type requires `type`, so use a non-listed sentinel. The real
+    // item simply omits type; listByType filters by exact value either way.
+    contacts.push({
+      contactId: id,
+      type: 'unknown',
+      phone,
+      phone_ref: true,
+      phone_ref_owner: owner,
+    } as ContactItem);
+  };
+  const fakeDeletePointer = (phone: string): void => {
+    const id = phoneRefId(phone);
+    const idx = contacts.findIndex((c) => c.contactId === id);
+    if (idx >= 0) contacts.splice(idx, 1);
+  };
+  const fakeRequireContact = (contactId: string): ContactItem => {
+    const contact = contacts.find((c) => c.contactId === contactId && c.phone_ref !== true);
+    if (!contact) throw conditionalCheckFailed(`no contact ${contactId}`);
+    return contact;
+  };
+
   const contactsRepo: ContactsRepo = {
     async findByPhone(phone) {
-      return contacts.find((c) => c.phone === phone);
+      const hit = contacts.find((c) => c.phone === phone);
+      if (!hit) return undefined;
+      if (hit.phone_ref === true) {
+        const owner = typeof hit.phone_ref_owner === 'string' ? hit.phone_ref_owner : undefined;
+        if (owner === undefined) return undefined;
+        return contacts.find((c) => c.contactId === owner);
+      }
+      return hit;
     },
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
     },
     async listByType(type, opts = {}) {
       const items = contacts
+        // BE1: pointer items carry no real type/status → invisible to this GSI.
+        .filter((c) => c.phone_ref !== true)
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         .slice(0, opts.limit ?? 50);
@@ -519,8 +580,10 @@ export function createFakeWorld(): FakeWorld {
     },
     async listByHousingAuthority(housingAuthority, opts = {}) {
       // Mirror the byHousingAuthority GSI: tenant-sparse (only tenants carry the
-      // attribute). The service defends the type invariant either way.
+      // attribute). The service defends the type invariant either way. BE1:
+      // pointer items carry no housing_authority → never indexed here.
       const items = contacts
+        .filter((c) => c.phone_ref !== true)
         .filter((c) => c['housing_authority'] === housingAuthority)
         .slice(0, opts.limit ?? 50);
       return { items };
@@ -567,6 +630,62 @@ export function createFakeWorld(): FakeWorld {
         if (value !== undefined) contact[key] = value;
       }
       return contact;
+    },
+
+    // --- BE1/C1 multi-phone primitives (mirror the real repo's invariants) ---
+    async addPhone(contactId, { phone, label }) {
+      const contact = fakeRequireContact(contactId);
+      const phones = fakeSeededPhones(contact);
+      if (phones.some((p) => p.phone === phone)) {
+        if (!Array.isArray(contact.phones)) contact.phones = phones;
+        return contact;
+      }
+      const now = new Date().toISOString();
+      contact.phones = [
+        ...phones,
+        {
+          phone,
+          primary: false,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          ...(label !== undefined && { label }),
+        },
+      ];
+      fakePutPointer(phone, contactId);
+      return contact;
+    },
+    async setPhone(contactId, phone, { primary, label }) {
+      const contact = fakeRequireContact(contactId);
+      const phones = fakeSeededPhones(contact);
+      const target = phones.find((p) => p.phone === phone);
+      if (!target) throw conditionalCheckFailed(`contact ${contactId} has no phone ${phone}`);
+      if (label !== undefined) target.label = label;
+      const oldPrimary = phones.find((p) => p.primary && p.phone !== phone);
+      if (primary === true && !target.primary) {
+        for (const p of phones) p.primary = p.phone === phone;
+        contact.phone = phone; // scalar swap
+        fakeDeletePointer(phone);
+        if (oldPrimary) fakePutPointer(oldPrimary.phone, contactId);
+      }
+      contact.phones = phones;
+      return contact;
+    },
+    async removePhone(contactId, phone) {
+      const contact = fakeRequireContact(contactId);
+      const phones = fakeSeededPhones(contact);
+      const target = phones.find((p) => p.phone === phone);
+      if (!target) throw conditionalCheckFailed(`contact ${contactId} has no phone ${phone}`);
+      if (target.primary) throw new PrimaryPhoneRemovalError();
+      contact.phones = phones.filter((p) => p.phone !== phone);
+      fakeDeletePointer(phone);
+      return contact;
+    },
+    async touchPhoneLastSeen(contactId, phone, at) {
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact || !Array.isArray(contact.phones) || contact.phones.length === 0) return;
+      const target = contact.phones.find((p) => p.phone === phone);
+      if (!target) return;
+      target.lastSeenAt = at;
     },
   };
 

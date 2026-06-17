@@ -75,6 +75,16 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
     async update(contactId) {
       return { contactId, type: 'tenant' };
     },
+    async addPhone(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async setPhone(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async removePhone(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async touchPhoneLastSeen() {},
   };
 }
 

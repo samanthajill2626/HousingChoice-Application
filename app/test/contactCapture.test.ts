@@ -91,6 +91,17 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async update(contactId) {
       return contacts.find((c) => c.contactId === contactId)!;
     },
+    // BE1 multi-phone primitives — unused by the capture service.
+    async addPhone(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async setPhone(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async removePhone(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async touchPhoneLastSeen() {},
   };
 
   const conversationsRepo: ConversationsRepo = {

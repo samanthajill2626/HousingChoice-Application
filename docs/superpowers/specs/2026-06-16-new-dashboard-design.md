@@ -162,12 +162,20 @@ until the corresponding backend slice lands.
    View/Copy-link (no "create"); accepted vouchers = plain bulleted detail; Activity
    on the left; Broadcast must allow adding non-matching tenants with a flag.
 
+9. Inbox **LOCKED** (2026-06-17) — its own spec:
+   [2026-06-17-inbox-design.md](./2026-06-17-inbox-design.md). Entity-centric
+   contact-rows (one row per contact; opening → contact page, no reading pane/
+   quick-reply); default `All` filter (+ Unread/Unknown/Assigned-to-me); unknowns
+   inline; inline Mark-read/Assign (hover desktop / swipe mobile); new backend
+   contract **C8 — Inbox feed** (`GET /api/inbox` + read/assign + SSE).
+
 ## Still to detail (piecemeal, upcoming)
 
 **Cases pipeline** (kanban/views over `CASE_STAGES`) → Contacts list views
-(Tenants/Landlords/Unknown) → Inbox (comms hub) → Broadcasts → Settings/Admin →
-public pages (housing-fair signup, flyer) → mobile treatments → then architecture +
-design-system approaches → finalize this spec → writing-plans → phased implementation.
+(Tenants/Landlords/Unknown) → ~~Inbox~~ (LOCKED, see above) → Broadcasts →
+Settings/Admin → public pages (housing-fair signup, flyer) → mobile treatments →
+then architecture + design-system approaches → finalize this spec → writing-plans →
+phased implementation.
 
 ## Visual record (committed)
 

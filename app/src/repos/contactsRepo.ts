@@ -552,6 +552,10 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       }
       if (label !== undefined) target.label = label;
 
+      // NOTE: `primary: false` is intentionally IGNORED — the primary is changed
+      // only by promoting ANOTHER number (primary: true on it), never by demoting
+      // the current one in isolation. This guarantees we never create a
+      // zero-primary state (a contact always has exactly one primary).
       let scalarSwap: string | undefined;
       const oldPrimary = phones.find((p) => p.primary && p.phone !== phone);
       if (primary === true && !target.primary) {
@@ -559,15 +563,24 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         scalarSwap = phone;
       }
 
+      // Crash-safe promote ordering (BE1): EVERY number must resolve to the owner
+      // at EVERY step. Order:
+      //   1. putPointer(oldPrimary) FIRST — while scalar still = old, so old now
+      //      resolves via BOTH the scalar AND the new pointer (both → owner).
+      //   2. persistPhones with the scalar swap → new (new now resolves via the
+      //      scalar; old still resolves via its pointer from step 1).
+      //   3. deletePointer(new) — the new primary no longer needs a pointer
+      //      (it resolves via the scalar).
+      // The earlier order (persist → deletePointer(new) → putPointer(old)) left a
+      // window where the OLD primary resolved to NOBODY (scalar already moved off
+      // it, its pointer not yet written). pointers self-heal on a retried
+      // setPhone regardless (phones[]/scalar is the source of truth).
+      if (scalarSwap !== undefined && oldPrimary) {
+        await putPointer(oldPrimary.phone, contactId);
+      }
       const updated = await persistPhones(contactId, phones, scalarSwap);
-
-      // Reconcile pointers AFTER the item write (so a crash leaves a recoverable
-      // state: the source of truth is phones[]/scalar, pointers self-heal on a
-      // retried setPhone). The new primary loses its pointer; the demoted old
-      // primary gains one.
       if (scalarSwap !== undefined) {
         await deletePointer(phone);
-        if (oldPrimary) await putPointer(oldPrimary.phone, contactId);
         log.info({ contactId, newPrimary: phone }, 'contact primary phone changed');
       }
       return updated;

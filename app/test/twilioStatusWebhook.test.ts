@@ -48,9 +48,10 @@ async function seedOutbound(
   world: FakeWorld,
   sid: string,
   overrides: Partial<MessageItem> = {},
+  participantPhone: string = TENANT_PHONE,
 ): Promise<MessageItem> {
   const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(
-    TENANT_PHONE,
+    participantPhone,
     'tenant_1to1',
   );
   const providerTs = '2026-06-12T10:00:00.000Z';
@@ -233,6 +234,47 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(outbound.delayed).toHaveLength(0);
     });
 
+    it('30005 on an ATTACHED SECONDARY number does NOT flag the owner sms_unreachable (number-scoped); the SAME on the PRIMARY does', async () => {
+      const SECOND = '+15550100002';
+
+      // (a) Failure on the SECONDARY number → owner contact flag NOT set.
+      {
+        const { app, world } = makeWebhookHarness();
+        world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+        await world.contactsRepo.addPhone('contact-T', { phone: SECOND });
+        // The outbound that failed went to the SECONDARY number's conversation.
+        await seedOutbound(world, 'SMsecond', {}, SECOND);
+
+        await signedTwilioPost(
+          app,
+          STATUS_PATH,
+          statusParams({ MessageSid: 'SMsecond', MessageStatus: 'failed', ErrorCode: '30005' }),
+        );
+
+        expect(world.flagWrites).toHaveLength(0);
+        const owner = world.contacts.find((c) => c.contactId === 'contact-T')!;
+        expect(owner.sms_unreachable).toBeFalsy();
+      }
+
+      // (b) The SAME failure on the PRIMARY number still flags the contact.
+      {
+        const { app, world } = makeWebhookHarness();
+        world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+        await world.contactsRepo.addPhone('contact-T', { phone: SECOND });
+        await seedOutbound(world, 'SMprimary', {}, TENANT_PHONE);
+
+        await signedTwilioPost(
+          app,
+          STATUS_PATH,
+          statusParams({ MessageSid: 'SMprimary', MessageStatus: 'failed', ErrorCode: '30005' }),
+        );
+
+        expect(world.flagWrites).toEqual([
+          { contactId: 'contact-T', flag: 'sms_unreachable', value: true },
+        ]);
+      }
+    });
+
     it('30007 (carrier filtering) ERROR-logs with correlation and never retries', async () => {
       const { app, world, capture } = makeWebhookHarness();
       const seeded = await seedOutbound(world, 'SMout0001');
@@ -259,6 +301,50 @@ describe('POST /webhooks/twilio/status — transitions', () => {
         expect.objectContaining({ entityKey: 'contacts#contact-T', event_type: 'sms_opt_out_recorded' }),
       ]);
       expect(outbound.delayed).toHaveLength(0);
+    });
+
+    it('21610 on an ATTACHED SECONDARY number does NOT flag the owner sms_opt_out (number-scoped); the SAME on the PRIMARY does', async () => {
+      const SECOND = '+15550100002';
+
+      // (a) Suppression on the SECONDARY number → owner contact flag + audit NOT set.
+      {
+        const { app, world } = makeWebhookHarness();
+        world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+        await world.contactsRepo.addPhone('contact-T', { phone: SECOND });
+        await seedOutbound(world, 'SMsecond21610', {}, SECOND);
+
+        await signedTwilioPost(
+          app,
+          STATUS_PATH,
+          statusParams({ MessageSid: 'SMsecond21610', MessageStatus: 'failed', ErrorCode: '21610' }),
+        );
+
+        expect(world.flagWrites).toHaveLength(0);
+        const owner = world.contacts.find((c) => c.contactId === 'contact-T')!;
+        expect(owner.sms_opt_out).toBeFalsy();
+        expect(world.auditEvents.some((e) => e.entityKey === 'contacts#contact-T')).toBe(false);
+      }
+
+      // (b) The SAME suppression on the PRIMARY number still flags + audits.
+      {
+        const { app, world } = makeWebhookHarness();
+        world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+        await world.contactsRepo.addPhone('contact-T', { phone: SECOND });
+        await seedOutbound(world, 'SMprimary21610', {}, TENANT_PHONE);
+
+        await signedTwilioPost(
+          app,
+          STATUS_PATH,
+          statusParams({ MessageSid: 'SMprimary21610', MessageStatus: 'failed', ErrorCode: '21610' }),
+        );
+
+        expect(world.flagWrites).toEqual([
+          { contactId: 'contact-T', flag: 'sms_opt_out', value: true },
+        ]);
+        expect(world.auditEvents).toContainEqual(
+          expect.objectContaining({ entityKey: 'contacts#contact-T', event_type: 'sms_opt_out_recorded' }),
+        );
+      }
     });
 
     it('the error code is recorded on the message item either way', async () => {

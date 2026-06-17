@@ -552,10 +552,31 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
         const source =
           OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
-        if (effectiveContact) {
+        // BE1 number-scoped consent: the CONTACT-level flag (which suppresses the
+        // contact's GOOD primary number across broadcasts + 1:1 sends) is set ONLY
+        // when the STOP/START arrived on the contact's PRIMARY number (From ===
+        // contact.phone). A STOP on an ATTACHED secondary number must NOT
+        // contaminate the primary — the conversation-level flag above already
+        // suppresses this thread (the correct per-number scope).
+        const isPrimaryNumber =
+          effectiveContact !== undefined && From === effectiveContact.phone;
+        if (effectiveContact && isPrimaryNumber) {
           if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
           else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
           await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
+            providerSid: MessageSid,
+            conversationId: conversation.conversationId,
+            source,
+          });
+        } else if (effectiveContact) {
+          // Non-primary (attached) number: the contact flag is NOT touched (per-
+          // number scope) — only this conversation is suppressed (above). Audit on
+          // the conversation so the trail records the number-scoped opt-out/in.
+          log.info(
+            { providerSid: MessageSid, optOut: optedOut },
+            'opt-out/in on a non-primary attached number — conversation suppressed, contact flag NOT changed (number-scoped)',
+          );
+          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
             providerSid: MessageSid,
             conversationId: conversation.conversationId,
             source,
@@ -828,11 +849,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           case '30005':
           case '30006': {
             // Permanent (invalid number / landline): flag the CONTACT, not
-            // the message — prompt voice instead. Never retry.
+            // the message — prompt voice instead. Never retry. BE1 number-scoped:
+            // only flag when the failing number IS the contact's PRIMARY
+            // (participant_phone === contact.phone) — an unreachable SECONDARY
+            // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
             const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact) {
+            if (contact && conversation?.participant_phone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_unreachable');
+            } else if (contact) {
+              log.warn(
+                { providerSid: MessageSid, errorCode: ErrorCode },
+                'sms_unreachable on a non-primary attached number — contact flag NOT set (number-scoped)',
+              );
             } else {
               log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, 'sms_unreachable: no contact record to flag');
             }
@@ -851,16 +880,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           }
           case '21610': {
             // Provider-side opt-out suppression: confirm our suppression
-            // state + audit. Never retry.
+            // state + audit. Never retry. BE1 number-scoped: only flag + audit
+            // on the contact when the suppressed number IS the contact's PRIMARY
+            // (participant_phone === contact.phone) — a 21610 on a SECONDARY
+            // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
             const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact) {
+            if (contact && conversation?.participant_phone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_opt_out');
               await audit.append(`contacts#${contact.contactId}`, 'sms_opt_out_recorded', {
                 providerSid: MessageSid,
                 conversationId: message.conversationId,
                 source: 'twilio_21610',
               });
+            } else if (contact) {
+              log.warn(
+                { providerSid: MessageSid, errorCode: ErrorCode },
+                '21610 suppression on a non-primary attached number — contact flag NOT set (number-scoped)',
+              );
             } else {
               log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, '21610 suppression: no contact record to flag');
             }

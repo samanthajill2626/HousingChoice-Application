@@ -52,6 +52,28 @@ describe('GET /api/contacts/:id — phones serialization (C1)', () => {
     const res = await auth(request(app).get('/api/contacts/nope'));
     expect(res.status).toBe(404);
   });
+
+  it('serves phones=[] for a contact with neither a scalar phone nor phones[] (back-compat empty)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-nophone', type: 'tenant' });
+
+    const res = await auth(request(app).get('/api/contacts/c-nophone'));
+    expect(res.status).toBe(200);
+    expect(res.body.contact.phones).toEqual([]);
+  });
+
+  it('404s a phone-pointer item id (internal routing record, never a contact)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Seed a contact with an attached secondary number → a phone-pointer item
+    // (phoneref#<E164>) materializes in the world.
+    seedContact(world, { contactId: 'c-1', type: 'tenant', phone: '+15550100001' });
+    await world.contactsRepo.addPhone('c-1', { phone: '+15550100002' });
+
+    const pointerId = `phoneref#${'+15550100002'}`;
+    const res = await auth(request(app).get(`/api/contacts/${encodeURIComponent(pointerId)}`));
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('contact_not_found');
+  });
 });
 
 describe('POST /api/contacts/:id/phones — attach (C1)', () => {
@@ -150,6 +172,17 @@ describe('PATCH /api/contacts/:id/phones/:phone — promote/label (C1)', () => {
       request(app).patch(`/api/contacts/c-1/phones/${encodeURIComponent('+15550100001')}`).send({}),
     );
     expect(empty.status).toBe(400);
+  });
+
+  it('400s (not 500) a malformed %-escape in the :phone param', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-1', type: 'tenant', phone: '+15550100001' });
+    // `%E0%A4%A` is a truncated UTF-8 escape → decodeURIComponent throws URIError.
+    const res = await auth(
+      request(app).patch('/api/contacts/c-1/phones/%E0%A4%A').send({ primary: true }),
+    );
+    // 400 (a bad request), NOT a 500 (which would trip the error-logs alarm).
+    expect(res.status).toBe(400);
   });
 });
 

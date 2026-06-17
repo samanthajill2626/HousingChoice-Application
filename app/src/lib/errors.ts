@@ -56,14 +56,30 @@ export function installProcessErrorHandlers(
  */
 export function createExpressErrorHandler(log: Logger = defaultLogger): ErrorRequestHandler {
   return (err, req, res, next) => {
+    if (res.headersSent) {
+      log.error(
+        { err: toError(err), method: req.method, path: req.path },
+        'unhandled error while handling request',
+      );
+      next(err);
+      return;
+    }
+    // A malformed %-escape in the URL path/params makes Express's route matcher
+    // throw URIError (decodeURIComponent) BEFORE any handler runs. That is a
+    // client error (a bad request), NOT a server fault — respond 400 and WARN
+    // (not ERROR), so it never trips the hc-<env>-error-logs alarm.
+    if (err instanceof URIError) {
+      log.warn(
+        { err: toError(err), method: req.method, path: req.path },
+        'malformed URI in request — rejected as 400',
+      );
+      res.status(400).json({ error: 'bad request' });
+      return;
+    }
     log.error(
       { err: toError(err), method: req.method, path: req.path },
       'unhandled error while handling request',
     );
-    if (res.headersSent) {
-      next(err);
-      return;
-    }
     res.status(500).json({ error: 'internal server error' });
   };
 }

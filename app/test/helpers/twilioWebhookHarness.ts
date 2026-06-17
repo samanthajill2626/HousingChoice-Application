@@ -662,10 +662,15 @@ export function createFakeWorld(): FakeWorld {
       if (label !== undefined) target.label = label;
       const oldPrimary = phones.find((p) => p.primary && p.phone !== phone);
       if (primary === true && !target.primary) {
+        // Mirror the real repo's crash-safe promote ordering (BE1 FIX 4):
+        // putPointer(old) FIRST (old still resolves), THEN swap scalar+phones[],
+        // THEN deletePointer(new). Every number resolves to the owner throughout.
+        if (oldPrimary) fakePutPointer(oldPrimary.phone, contactId);
         for (const p of phones) p.primary = p.phone === phone;
         contact.phone = phone; // scalar swap
+        contact.phones = phones;
         fakeDeletePointer(phone);
-        if (oldPrimary) fakePutPointer(oldPrimary.phone, contactId);
+        return contact;
       }
       contact.phones = phones;
       return contact;

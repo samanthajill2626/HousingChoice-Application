@@ -103,6 +103,23 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
   }
 }
 
+/**
+ * Decode a URL-encoded :phone route param to a normalized E.164, or undefined
+ * when it's missing/malformed/uncanonicalizable. decodeURIComponent throws
+ * URIError on a malformed %-sequence (e.g. `%E0%A4%A`) — caught here so the
+ * route returns a 400 (invalid phone) instead of a 500 + an error-logs alarm.
+ */
+function decodePhoneParam(raw: unknown): string | undefined {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(String(raw ?? ''));
+  } catch {
+    // URIError on a malformed escape → treat as an invalid phone (400).
+    return undefined;
+  }
+  return normalizeToE164(decoded);
+}
+
 /** A resolved-identity 1:1 type for the conversation, or undefined when not propagatable. */
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
@@ -412,6 +429,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
+    // BE1 hardening: a phone-pointer item (phone_ref) is an INTERNAL routing
+    // record, not a contact — never surface it as one. (Repo getById stays
+    // pointer-returning because the pointer-hop in findByPhone relies on it; the
+    // guard lives at the route only.)
+    if (contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
     res.json({ contact: { ...contact, phones: contactPhones(contact) } });
   });
 
@@ -574,7 +599,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   router.patch('/:contactId/phones/:phone', async (req: AuthedRequest, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
-    const normalized = normalizeToE164(decodeURIComponent(String(req.params['phone'] ?? '')));
+    const normalized = decodePhoneParam(req.params['phone']);
     if (normalized === undefined) {
       res.status(400).json({ error: 'phone is not a valid phone number' });
       return;
@@ -633,7 +658,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   router.delete('/:contactId/phones/:phone', async (req: AuthedRequest, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
-    const normalized = normalizeToE164(decodeURIComponent(String(req.params['phone'] ?? '')));
+    const normalized = decodePhoneParam(req.params['phone']);
     if (normalized === undefined) {
       res.status(400).json({ error: 'phone is not a valid phone number' });
       return;

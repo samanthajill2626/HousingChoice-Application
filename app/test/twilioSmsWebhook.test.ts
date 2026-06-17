@@ -126,6 +126,15 @@ describe('POST /webhooks/twilio/sms — multi-phone resolution (BE1/C1)', () => 
     await world.contactsRepo.addPhone('contact-multi', { phone: SECOND, label: 'work' });
     const contactCountBefore = world.contacts.filter((c) => c.phone_ref !== true).length;
 
+    // FIX 2: addPhone stamps B's lastSeenAt to NOW, so asserting "lastSeenAt is
+    // defined / != created_at" would pass even if the webhook's touchPhoneLastSeen
+    // were removed. Overwrite B's entry to a fixed PAST sentinel directly on the
+    // world contact, so the only thing that can move it off the sentinel is the
+    // webhook path's touchPhoneLastSeen call (proves it actually ran).
+    const PAST_SENTINEL = '2020-01-01T00:00:00.000Z';
+    const seededOwner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
+    seededOwner.phones!.find((p) => p.phone === SECOND)!.lastSeenAt = PAST_SENTINEL;
+
     const res = await signedTwilioPost(
       app,
       SMS_PATH,
@@ -138,11 +147,15 @@ describe('POST /webhooks/twilio/sms — multi-phone resolution (BE1/C1)', () => 
     expect(realContacts).toHaveLength(contactCountBefore);
     expect(world.contactCreates).toHaveLength(0);
 
-    // B's lastSeenAt was bumped (A's was not).
+    // B's lastSeenAt was bumped off the past sentinel by the webhook's
+    // touchPhoneLastSeen (and parses to a recent time). A's was untouched.
     const owner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
     const bEntry = owner.phones?.find((p) => p.phone === SECOND);
     expect(bEntry?.lastSeenAt).toBeDefined();
-    expect(bEntry?.lastSeenAt).not.toBe('2026-06-10T00:00:00.000Z');
+    expect(bEntry?.lastSeenAt).not.toBe(PAST_SENTINEL);
+    const bumpedMs = Date.parse(bEntry!.lastSeenAt!);
+    expect(Number.isNaN(bumpedMs)).toBe(false);
+    expect(Date.now() - bumpedMs).toBeLessThan(60_000); // recent
   });
 
   it('inbound from a brand-new UNKNOWN number still mints its own stub (never auto-attached)', async () => {
@@ -397,6 +410,72 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     });
     expect(world.messages).toHaveLength(1); // the STOP itself is on the timeline
     expect(world.messages[0]!.body).toBe('STOP');
+  });
+
+  it('STOP on an ATTACHED SECONDARY number does NOT flag the owner contact (number-scoped); the SAME STOP on the PRIMARY does', async () => {
+    const SECOND = '+15550100002';
+
+    // (a) STOP arriving on the contact's SECONDARY number: the owner's
+    // contact-level sms_opt_out must NOT be set (it would suppress the good
+    // primary). Only this conversation is suppressed.
+    {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({
+        contactId: 'contact-multi',
+        type: 'tenant',
+        status: 'active',
+        phone: TENANT_PHONE, // primary
+        created_at: '2026-06-10T00:00:00.000Z',
+      });
+      await world.contactsRepo.addPhone('contact-multi', { phone: SECOND });
+
+      await signedTwilioPost(
+        app,
+        SMS_PATH,
+        inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP', From: SECOND, MessageSid: 'SMstopSecond' }),
+      );
+
+      // No contact-level flag write for the owner …
+      expect(world.flagWrites).toHaveLength(0);
+      const owner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
+      expect(owner.sms_opt_out).toBeFalsy();
+      // … but the conversation IS suppressed (per-number scope) + audited on the
+      // conversation, not the contact.
+      const conv = [...world.conversations.values()].find((c) => c.participant_phone === SECOND)!;
+      expect(conv.sms_opt_out).toBe(true);
+      expect(world.auditEvents).toContainEqual(
+        expect.objectContaining({
+          entityKey: `conversations#${conv.conversationId}`,
+          event_type: 'sms_opt_out_recorded',
+        }),
+      );
+      expect(world.auditEvents.some((e) => e.entityKey === 'contacts#contact-multi')).toBe(false);
+    }
+
+    // (b) The SAME STOP on the PRIMARY number still sets the contact flag.
+    {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({
+        contactId: 'contact-multi',
+        type: 'tenant',
+        status: 'active',
+        phone: TENANT_PHONE, // primary
+        created_at: '2026-06-10T00:00:00.000Z',
+      });
+      await world.contactsRepo.addPhone('contact-multi', { phone: SECOND });
+
+      await signedTwilioPost(
+        app,
+        SMS_PATH,
+        inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP', From: TENANT_PHONE, MessageSid: 'SMstopPrimary' }),
+      );
+
+      expect(world.flagWrites).toEqual([
+        { contactId: 'contact-multi', flag: 'sms_opt_out', value: true },
+      ]);
+      const owner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
+      expect(owner.sms_opt_out).toBe(true);
+    }
   });
 
   it('recognizes every standard stop keyword case-insensitively (no OptOutType param)', async () => {

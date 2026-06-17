@@ -48,6 +48,7 @@ import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
+import { createCasesRepo, type CaseItem, type CasesRepo } from '../repos/casesRepo.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -59,6 +60,8 @@ export interface UnitsRouterDeps {
   listingSendsRepo?: ListingSendsRepo;
   /** BE4/C4: emit a `listing_reviewed` milestone on a real interested/not_a_fit change. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** FIX 3: GET /:id/cases lists the unit's cases (tenant-name enriched). */
+  casesRepo?: CasesRepo;
 }
 
 /** The valid tenant responses (C4 `ListingResponse`). */
@@ -166,6 +169,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -457,6 +461,40 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     res.json({ related });
+  });
+
+  // GET /api/units/:unitId/cases → { cases: Array<CaseItem & { tenantName }> }
+  // (FIX 3). The "Cases on this listing" read: every case on this unit, each
+  // enriched with the tenant's display name resolved at READ time (null when the
+  // tenant has no contact — never 500). 404 unknown unit (matches GET /:id).
+  // Bounded (a unit has few cases); `cases` is a distinct segment so there is no
+  // route collision with the bare :unitId routes.
+  router.get('/:unitId/cases', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const { items } = await cases.listByUnit(unitId);
+    // Resolve tenant names at read time, deduped per tenantId (a unit's cases
+    // are few but may share a tenant). A missing/failed lookup → tenantName null.
+    const nameByTenant = new Map<string, string | null>();
+    for (const c of items) {
+      if (nameByTenant.has(c.tenantId)) continue;
+      try {
+        const contact = await contacts.getById(c.tenantId);
+        nameByTenant.set(c.tenantId, contact ? (displayNameOfContact(contact) ?? null) : null);
+      } catch (err) {
+        log.warn({ unitId, tenantId: c.tenantId, err }, 'unit cases: tenant lookup failed (best-effort)');
+        nameByTenant.set(c.tenantId, null);
+      }
+    }
+    const enriched = items.map((c: CaseItem) => ({
+      ...c,
+      tenantName: nameByTenant.get(c.tenantId) ?? null,
+    }));
+    res.json({ cases: enriched });
   });
 
   // GET /api/units/:unitId/similar → { similar: SimilarUnit[] } (BE5/C6). 404

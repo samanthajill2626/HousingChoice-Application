@@ -310,6 +310,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       listingSendsRepo: listingSends,
       // BE4: emit `listing_reviewed` on a real interested/not_a_fit change.
       activityEventsRepo: activityEvents,
+      // FIX 3: GET /:id/cases lists the unit's cases (tenant-name enriched).
+      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

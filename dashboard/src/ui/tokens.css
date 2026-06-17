@@ -121,6 +121,21 @@
   --c-resp-no: #b91c1c;
   --c-resp-wait: #a16207;
 
+  /* --- Listing detail (B4) ----------------------------------------------- */
+  /* Header status badge (pill in the dark band): availability → bg color. */
+  --c-status-available-bg: #15803d;
+  --c-status-placed-bg: #475569;
+  --c-status-inactive-bg: #a16207;
+  /* The small hero + photo-thumbnail placeholders (no real image / S3 key). */
+  --c-media-placeholder-bg: #dde3ea;
+  --c-media-placeholder-border: #cbd5e1;
+  /* The dashed "+ Add" photo affordance. */
+  --c-media-add-border: #9aa6b6;
+  /* Similar-listings match % chip. */
+  --c-match-bg: #ecfdf5;
+  --c-match-border: #a7f3d0;
+  --c-match-text: #15803d;
+
   /* --- Layout ------------------------------------------------------------- */
   --nav-width: 240px;
 }

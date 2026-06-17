@@ -481,3 +481,58 @@ describe('POST /api/inbox/:contactId/assign (C8)', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 3 — displayNameOf routing for inbox assignment.name (C8)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/inbox — assignment.name resolved through displayNameOf', () => {
+  it('assignee with name → assignment.name equals the stored name', async () => {
+    const { app, world, fakeUsers } = makeWebhookHarness();
+    // Seed the assignee user with a real name — Sam Rivera is the seeded VA.
+    fakeUsers.users.set(TEST_SESSION_USER.userId, {
+      userId: TEST_SESSION_USER.userId,
+      email: TEST_SESSION_USER.email,
+      role: 'va',
+      status: 'active',
+      session_epoch: 1,
+      created_at: '2026-06-01T00:00:00.000Z',
+      name: 'Sam Rivera',
+    });
+
+    seedContact(world, { contactId: 'c-named', type: 'tenant', phone: '+15550000031' });
+    seedConversation(world, 'conv-named', {
+      participant_phone: '+15550000031',
+      last_activity_at: '2026-06-12T10:00:00.000Z',
+      assignment: TEST_SESSION_USER.userId,
+    });
+
+    const res = await auth(request(app).get('/api/inbox?filter=mine'));
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toHaveLength(1);
+    expect(res.body.rows[0].assignment).toEqual({
+      userId: TEST_SESSION_USER.userId,
+      name: 'Sam Rivera', // name present → use it
+    });
+  });
+
+  it('assignee without name → assignment.name falls back to email', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Default testUserItem() has no name → falls back to email.
+
+    seedContact(world, { contactId: 'c-noname', type: 'tenant', phone: '+15550000032' });
+    seedConversation(world, 'conv-noname', {
+      participant_phone: '+15550000032',
+      last_activity_at: '2026-06-12T10:00:00.000Z',
+      assignment: TEST_SESSION_USER.userId,
+    });
+
+    const res = await auth(request(app).get('/api/inbox?filter=mine'));
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toHaveLength(1);
+    expect(res.body.rows[0].assignment).toEqual({
+      userId: TEST_SESSION_USER.userId,
+      name: TEST_SESSION_USER.email, // no name → email fallback
+    });
+  });
+});

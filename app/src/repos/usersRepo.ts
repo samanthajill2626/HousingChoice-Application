@@ -76,6 +76,12 @@ export interface UserItem {
    * invited record is activated — ABSENT on an 'invited' record.
    */
   google_sub?: string;
+  /**
+   * Freeform Google profile display name. Trimmed here before write; length-capped
+   * by the auth adapter at capture. Absent until a login carries the name claim.
+   * Never lowercased; never logged.
+   */
+  name?: string;
   role: UserRole;
   /** Lifecycle status (see UserStatus). */
   status?: UserStatus;
@@ -101,6 +107,22 @@ export interface UserItem {
 /** The user's current session epoch — legacy items without the attribute read as 1. */
 export function sessionEpochOf(item: UserItem): number {
   return typeof item.session_epoch === 'number' ? item.session_epoch : 1;
+}
+
+/**
+ * Canonical display-name resolver: name (trimmed, if non-blank) → email → userId.
+ * Use this everywhere a human-readable label is needed — never inline the fallback chain.
+ * name is freeform (never normalized/lowercased). NEVER pass the result to log.*  (PII).
+ * email is optional in the input shape so callers can pass partial records.
+ */
+export function displayNameOf(user: {
+  name?: string;
+  email?: string;
+  userId: string;
+}): string {
+  return (typeof user.name === 'string' && user.name.trim().length > 0 ? user.name.trim() : '') ||
+    (user.email ?? '') ||
+    user.userId;
 }
 
 /**
@@ -145,11 +167,16 @@ export interface UsersRepo {
    * Activate an invited user on their first login: write google_sub, flip
    * status → 'active', stamp last_login_at — in ONE update. The google_sub
    * write is conditional-safe so two concurrent first logins don't clobber.
+   * When `name` is a non-empty trimmed string, also SETs `name` (present-only:
+   * a missing/blank claim never clobbers a previously stored name).
    * Throws if the user does not exist (the caller must have found it first).
    */
-  activateOnLogin(userId: string, googleSub: string, at?: string): Promise<void>;
-  /** Stamp last_login_at (ISO 8601); throws if the user does not exist. */
-  touchLastLogin(userId: string, at?: string): Promise<void>;
+  activateOnLogin(userId: string, googleSub: string, name?: string, at?: string): Promise<void>;
+  /**
+   * Stamp last_login_at (ISO 8601); throws if the user does not exist.
+   * When `name` is a non-empty trimmed string, also SETs `name` (present-only).
+   */
+  touchLastLogin(userId: string, name?: string, at?: string): Promise<void>;
   /** Flip the role; throws if the user does not exist (ops script path). */
   setRole(userId: string, role: UserRole): Promise<void>;
   /**
@@ -261,31 +288,50 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       return { created: true, user: item };
     },
 
-    async activateOnLogin(userId, googleSub, at = new Date().toISOString()) {
+    async activateOnLogin(userId, googleSub, name, at = new Date().toISOString()) {
+      // `name` is a DynamoDB reserved word — always alias it via ExpressionAttributeNames.
+      // Present-only SET: append name clause only when the caller provided a non-empty
+      // trimmed string; a missing/blank claim must never clobber a previously stored name.
+      const trimmedName = typeof name === 'string' ? name.trim() : '';
+      const hasName = trimmedName.length > 0;
+      // One write: set google_sub (conditional-safe — only if absent, so
+      // a racing second first-login is a harmless no-op rather than a
+      // clobber), flip status → active, stamp last_login_at.
+      const updateExpr =
+        'SET google_sub = if_not_exists(google_sub, :sub), #status = :active, last_login_at = :at' +
+        (hasName ? ', #name = :name' : '');
       await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { userId },
-          // One write: set google_sub (conditional-safe — only if absent, so
-          // a racing second first-login is a harmless no-op rather than a
-          // clobber), flip status → active, stamp last_login_at.
-          UpdateExpression:
-            'SET google_sub = if_not_exists(google_sub, :sub), #status = :active, last_login_at = :at',
+          UpdateExpression: updateExpr,
           ConditionExpression: 'attribute_exists(userId)',
-          ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: { ':sub': googleSub, ':active': 'active', ':at': at },
+          ExpressionAttributeNames: hasName
+            ? { '#status': 'status', '#name': 'name' }
+            : { '#status': 'status' },
+          ExpressionAttributeValues: hasName
+            ? { ':sub': googleSub, ':active': 'active', ':at': at, ':name': trimmedName }
+            : { ':sub': googleSub, ':active': 'active', ':at': at },
         }),
       );
     },
 
-    async touchLastLogin(userId, at = new Date().toISOString()) {
+    async touchLastLogin(userId, name, at = new Date().toISOString()) {
+      // Present-only SET: append name clause only when caller provides a non-empty trimmed string.
+      const trimmedName = typeof name === 'string' ? name.trim() : '';
+      const hasName = trimmedName.length > 0;
       await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { userId },
-          UpdateExpression: 'SET last_login_at = :at',
+          UpdateExpression: 'SET last_login_at = :at' + (hasName ? ', #name = :name' : ''),
           ConditionExpression: 'attribute_exists(userId)',
-          ExpressionAttributeValues: { ':at': at },
+          ...(hasName
+            ? {
+                ExpressionAttributeNames: { '#name': 'name' },
+                ExpressionAttributeValues: { ':at': at, ':name': trimmedName },
+              }
+            : { ExpressionAttributeValues: { ':at': at } }),
         }),
       );
     },

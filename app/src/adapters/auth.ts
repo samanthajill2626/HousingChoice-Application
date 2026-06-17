@@ -38,6 +38,13 @@ export interface AuthIdentity {
    * this as corroboration (routes/auth.ts).
    */
   hostedDomain?: string;
+  /**
+   * Freeform Google profile display name (`name` claim from the `profile` scope).
+   * Absent when the claim is not granted, empty, or blank. Trimmed and capped at
+   * 120 characters by the adapter — callers receive a non-empty string or nothing.
+   * NEVER logged (PII posture, doc §9).
+   */
+  name?: string;
 }
 
 export interface AuthProvider {
@@ -63,7 +70,7 @@ export interface GoogleAuthProviderOptions {
 }
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
-const GOOGLE_SCOPE = 'openid email';
+const GOOGLE_SCOPE = 'openid email profile';
 
 export function createGoogleAuthProvider(opts: GoogleAuthProviderOptions): AuthProvider {
   const log = opts.logger ?? defaultLogger;
@@ -115,6 +122,11 @@ export function createGoogleAuthProvider(opts: GoogleAuthProviderOptions): AuthP
         throw new Error('ID token carried no email claim (is the email scope granted?)');
       }
       const hostedDomain = claims['hd'];
+      const rawName = claims['name'];
+      const name =
+        typeof rawName === 'string' && rawName.trim().length > 0
+          ? rawName.trim().slice(0, 120)
+          : undefined;
       const identity: AuthIdentity = {
         sub,
         email: email.trim().toLowerCase(),
@@ -122,8 +134,9 @@ export function createGoogleAuthProvider(opts: GoogleAuthProviderOptions): AuthP
         ...(typeof hostedDomain === 'string' && hostedDomain.length > 0
           ? { hostedDomain: hostedDomain.toLowerCase() }
           : {}),
+        ...(name !== undefined && { name }),
       };
-      // sub only — emails stay out of logs (PII posture, doc §9).
+      // sub only — emails and names stay out of logs (PII posture, doc §9).
       log.info({ sub }, 'oauth code exchange completed');
       return identity;
     },

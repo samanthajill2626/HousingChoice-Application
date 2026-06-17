@@ -122,6 +122,16 @@ export interface FakeUsersRepo {
   activations: string[];
   /** Every findById call, in order — asserts the epoch cache's read economy. */
   findByIdCalls: string[];
+  /**
+   * Recorded activateOnLogin calls — each entry holds the name argument as
+   * passed (undefined when absent), for PII-forwarding assertions in Task 2 tests.
+   */
+  activateCalls: { userId: string; name: string | undefined }[];
+  /**
+   * Recorded touchLastLogin calls — each entry holds the name argument as
+   * passed (undefined when absent).
+   */
+  touchCalls: { userId: string; name: string | undefined }[];
   repo: UsersRepo;
 }
 
@@ -131,6 +141,8 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
   const creates: string[] = [];
   const activations: string[] = [];
   const findByIdCalls: string[] = [];
+  const activateCalls: { userId: string; name: string | undefined }[] = [];
+  const touchCalls: { userId: string; name: string | undefined }[] = [];
   const repo: UsersRepo = {
     async findByEmail(email) {
       const e = normalizeEmail(email);
@@ -157,19 +169,23 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       creates.push(userId);
       return { created: true, user: item };
     },
-    async activateOnLogin(userId, googleSub, at = new Date().toISOString()) {
+    async activateOnLogin(userId, googleSub, name, at = new Date().toISOString()) {
       const user = users.get(userId);
       if (!user) throw new Error(`activateOnLogin: no user ${userId}`);
       // if_not_exists(google_sub): a racing second activation never clobbers.
       if (user.google_sub === undefined) user.google_sub = googleSub;
       user.status = 'active';
       user.last_login_at = at;
+      if (name !== undefined) user.name = name;
       activations.push(userId);
+      activateCalls.push({ userId, name });
     },
-    async touchLastLogin(userId, at = new Date().toISOString()) {
+    async touchLastLogin(userId, name, at = new Date().toISOString()) {
       const user = users.get(userId);
       if (!user) throw new Error(`touchLastLogin: no user ${userId}`);
       user.last_login_at = at;
+      if (name !== undefined) user.name = name;
+      touchCalls.push({ userId, name });
     },
     async setRole(userId, role) {
       const user = users.get(userId);
@@ -217,5 +233,5 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       return remaining;
     },
   };
-  return { users, creates, activations, findByIdCalls, repo };
+  return { users, creates, activations, findByIdCalls, activateCalls, touchCalls, repo };
 }

@@ -70,11 +70,9 @@ export async function resolveInvitedUser(
 
   // First login of an invited record: activate it.
   if (existing.status === 'invited' || existing.google_sub === undefined) {
-    // name wiring is Task 2 (identity.name not yet threaded in); pass undefined so
-    // the signature change compiles — name refresh will be added in the next task.
-    await deps.usersRepo.activateOnLogin(existing.userId, identity.sub, undefined, now);
+    await deps.usersRepo.activateOnLogin(existing.userId, identity.sub, identity.name, now);
     // §5 mandate: activation is an audit-trail event. Payload (email) lives in
-    // DynamoDB, never in logs.
+    // DynamoDB, never in logs. Name is PII and not access-audit-relevant — omit.
     await deps.auditRepo.append(`users#${existing.userId}`, 'user_activated', {
       email: existing.email,
       role: existing.role,
@@ -82,7 +80,13 @@ export async function resolveInvitedUser(
     });
     log.info({ userId: existing.userId, role: existing.role }, 'invited user activated on first login');
     return {
-      user: { ...existing, google_sub: identity.sub, status: 'active', last_login_at: now },
+      user: {
+        ...existing,
+        google_sub: identity.sub,
+        status: 'active',
+        last_login_at: now,
+        ...(identity.name !== undefined && { name: identity.name }),
+      },
       activated: true,
     };
   }
@@ -95,7 +99,13 @@ export async function resolveInvitedUser(
       'login google_sub differs from the activated google_sub (account recreated?)',
     );
   }
-  // name wiring is Task 2; pass undefined for now.
-  await deps.usersRepo.touchLastLogin(existing.userId, undefined, now);
-  return { user: { ...existing, last_login_at: now }, activated: false };
+  await deps.usersRepo.touchLastLogin(existing.userId, identity.name, now);
+  return {
+    user: {
+      ...existing,
+      last_login_at: now,
+      ...(identity.name !== undefined && { name: identity.name }),
+    },
+    activated: false,
+  };
 }

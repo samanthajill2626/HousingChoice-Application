@@ -8,6 +8,7 @@
 //   GET  /auth/me           shapes (200 / 401)
 //   /api requireAuth        401 without/with-tampered session, SSE included
 //   /api CSRF origin check  cross-origin mutating requests 403
+//   Task 2: profile scope + name claim capture + resolveInvitedUser wiring
 //   requireRole             401/403/next
 //   session epoch           server-side revocation: logout kills COPIED
 //                           cookies, role bumps revoke, cache read economy
@@ -940,6 +941,149 @@ describe('config fail-fast (M1.3 auth wiring)', () => {
       expect(() => loadConfig({ NODE_ENV: 'test', OAUTH_ALLOWED_DOMAINS: bad }), bad).toThrow(
         /OAUTH_ALLOWED_DOMAINS/,
       );
+    }
+  });
+});
+
+// --- Task 2: resolveInvitedUser — name forwarding to usersRepo ------------------
+// Note: createGoogleAuthProvider name-claim extraction tests live in
+// auth.adapter.test.ts (isolated vi.mock of openid-client).
+
+describe('resolveInvitedUser — name forwarding from identity', () => {
+  const BASE_EMAIL = 'va@housingchoice.org';
+  const BASE_IDENTITY: AuthIdentity = {
+    sub: 'google-sub-1',
+    email: BASE_EMAIL,
+    emailVerified: true,
+    name: 'Ada Lovelace',
+  };
+
+  function makeDeps(seed: UserItem[]) {
+    const fakeUsers = makeFakeUsersRepo(seed);
+    const audits: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[] = [];
+    const deps = {
+      usersRepo: fakeUsers.repo,
+      auditRepo: {
+        async append(entityKey: string, eventType: string, payload?: Record<string, unknown>) {
+          audits.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
+        },
+      },
+    };
+    return { fakeUsers, audits, deps };
+  }
+
+  it('first-login (invited) path: forwards identity.name to activateOnLogin and reflects it on returned user', async () => {
+    const userId = userIdForEmail(BASE_EMAIL);
+    const { fakeUsers, deps } = makeDeps([
+      invitedUserItem({ userId, email: BASE_EMAIL, role: 'va' }),
+    ]);
+    const result = await resolveInvitedUser(deps, BASE_IDENTITY);
+    // name forwarded to the repo
+    expect(fakeUsers.activateCalls).toHaveLength(1);
+    expect(fakeUsers.activateCalls[0]!.name).toBe('Ada Lovelace');
+    // name reflected on the returned in-memory user
+    expect(result.user.name).toBe('Ada Lovelace');
+    expect(result.activated).toBe(true);
+  });
+
+  it('already-active path: forwards identity.name to touchLastLogin and reflects it on returned user', async () => {
+    const userId = userIdForEmail(BASE_EMAIL);
+    const { fakeUsers, deps } = makeDeps([
+      {
+        userId,
+        email: BASE_EMAIL,
+        google_sub: 'google-sub-1',
+        role: 'va',
+        status: 'active' as const,
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    const result = await resolveInvitedUser(deps, BASE_IDENTITY);
+    // name forwarded to the repo
+    expect(fakeUsers.touchCalls).toHaveLength(1);
+    expect(fakeUsers.touchCalls[0]!.name).toBe('Ada Lovelace');
+    // name reflected on the returned in-memory user
+    expect(result.user.name).toBe('Ada Lovelace');
+    expect(result.activated).toBe(false);
+  });
+
+  it('first-login path: name is undefined when identity has no name — login must not fail', async () => {
+    const userId = userIdForEmail(BASE_EMAIL);
+    const { fakeUsers, deps } = makeDeps([
+      invitedUserItem({ userId, email: BASE_EMAIL, role: 'va' }),
+    ]);
+    // Build identity without the name property at all.
+    const { name: _drop, ...noNameIdentity } = BASE_IDENTITY;
+    const result = await resolveInvitedUser(deps, noNameIdentity);
+    expect(fakeUsers.activateCalls[0]!.name).toBeUndefined();
+    expect('name' in result.user).toBe(false);
+    expect(result.activated).toBe(true);
+  });
+
+  it('active path: name is undefined when identity has no name — login must not fail', async () => {
+    const userId = userIdForEmail(BASE_EMAIL);
+    const { fakeUsers, deps } = makeDeps([
+      {
+        userId,
+        email: BASE_EMAIL,
+        google_sub: 'google-sub-1',
+        role: 'va',
+        status: 'active' as const,
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    const { name: _drop, ...noNameIdentity } = BASE_IDENTITY;
+    const result = await resolveInvitedUser(deps, noNameIdentity);
+    expect(fakeUsers.touchCalls[0]!.name).toBeUndefined();
+    expect('name' in result.user).toBe(false);
+    expect(result.activated).toBe(false);
+  });
+
+  it('audit payload does NOT include name (PII stays minimal — email/role/google_sub only)', async () => {
+    const userId = userIdForEmail(BASE_EMAIL);
+    const { audits, deps } = makeDeps([
+      invitedUserItem({ userId, email: BASE_EMAIL, role: 'va' }),
+    ]);
+    await resolveInvitedUser(deps, BASE_IDENTITY);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.payload).not.toHaveProperty('name');
+    expect(JSON.stringify(audits[0]!)).not.toContain('Ada Lovelace');
+  });
+
+  it('log lines do NOT include name in either login branch', async () => {
+    const { createLogger } = await import('../src/lib/logger.js');
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+
+    // First-login (invited) branch
+    const userId1 = userIdForEmail('log-invited@housingchoice.org');
+    const fakeUsers1 = makeFakeUsersRepo([
+      invitedUserItem({ userId: userId1, email: 'log-invited@housingchoice.org', role: 'va' }),
+    ]);
+    await resolveInvitedUser(
+      { usersRepo: fakeUsers1.repo, auditRepo: { async append() {} }, logger: log },
+      { sub: 'sub-1', email: 'log-invited@housingchoice.org', emailVerified: true, name: 'Grace Hopper' },
+    );
+
+    // Already-active branch
+    const userId2 = userIdForEmail('log-active@housingchoice.org');
+    const fakeUsers2 = makeFakeUsersRepo([
+      {
+        userId: userId2,
+        email: 'log-active@housingchoice.org',
+        google_sub: 'sub-2',
+        role: 'va',
+        status: 'active' as const,
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    await resolveInvitedUser(
+      { usersRepo: fakeUsers2.repo, auditRepo: { async append() {} }, logger: log },
+      { sub: 'sub-2', email: 'log-active@housingchoice.org', emailVerified: true, name: 'Grace Hopper' },
+    );
+
+    for (const line of capture.lines) {
+      expect(JSON.stringify(line)).not.toContain('Grace Hopper');
     }
   });
 });

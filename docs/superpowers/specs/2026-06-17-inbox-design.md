@@ -1,7 +1,8 @@
 # Inbox — Design Spec (new dashboard, :5174)
 
-**Status:** Design locked 2026-06-17 (brainstormed + approved). Feeds the
-implementation plan (writing-plans next).
+**Status:** Design locked 2026-06-17. Backend **C8 complete + reviewed** on branch
+`inbox-backend` (no schema change; 3 implementation flags surfaced + resolved here —
+see Live updates / Semantics / Deferred); frontend in progress.
 
 **Context:** The new entity-centric dashboard
 ([2026-06-16-new-dashboard-design.md](./2026-06-16-new-dashboard-design.md)) has
@@ -74,7 +75,7 @@ export interface InboxRow {
   channel: InboxChannel;       // channel of the latest item
   direction: 'inbound' | 'outbound';   // 'outbound' → render "You: …"
   lastActivityAt: string;      // ISO; sort key (newest first)
-  assignment?: { userId: string; name: string };   // the Assigned chip
+  assignment?: { userId: string; name: string };   // Assigned chip. NOTE: `name` may be an EMAIL today — UserItem has no display-name field (see Semantics / Deferred).
   needsTriage: boolean;        // true for untriaged unknowns
 }
 
@@ -87,9 +88,10 @@ export interface InboxPage {
 Endpoints:
 - `GET /api/inbox?filter=all|unread|unknown|mine&cursor=&limit=` → `InboxPage`.
   Server-side aggregation (one row per contact, cross-number unread) + cursor paging.
-- `POST /api/inbox/:contactId/read` → marks the contact's comms read. (Unknown rows
-  keyed by phone: `POST /api/inbox/read { phone }` — backend's call on keying.)
-- `POST /api/inbox/:contactId/assign { userId }` → set/clear assignment.
+- `POST /api/inbox/:contactId/read` → marks the contact's comms read. **Unknown rows
+  have no contactId — mark read via `POST /api/inbox/read { phone }`.**
+- `POST /api/inbox/:contactId/assign { userId | null }` → set/clear assignment.
+  **Contact rows only** — unknown rows are not assignable (you assign after triage).
 
 The backend may implement these over existing conversation/assignment storage; the
 **wire shape above is the contract**. Reuse existing read/assignment semantics where
@@ -99,15 +101,16 @@ present rather than inventing parallel state.
 
 ## Live updates & nav badge
 
-- Reuse SSE via `useEventStream`. On an inbox-affecting event for a row **already in
-  the list**, patch in place (preview / unreadCount / lastActivityAt / assignment)
-  and re-sort newest-first — no network call. For an **unknown/new** row (not in the
-  loaded pages), debounce-coalesce a first-page refetch and merge over the head.
-  (This is the legacy `useInbox` policy, which is correct and battle-tested.)
-- **Nav Inbox badge = total unread rows**, kept live off the same stream.
-- Backend emits an inbox-affecting event (a dedicated `inbox.updated`, or the
-  existing `conversation.updated` the frontend maps) — backend's call; the frontend
-  treats either as "something changed, reconcile."
+- Reuse SSE via `useEventStream`, bound to the existing **`conversation.updated`**
+  event (the backend reused it — no new event). **RESOLVED (C8):** the event carries
+  `conversationId`, NOT `contactId`, and rows are contact-keyed — so surgical
+  patch-in-place by row is not possible. The frontend treats every
+  `conversation.updated` as "something changed → **debounced first-page refetch**"
+  (coalesce bursts), which is the spec's blessed reconcile policy. (Per-contact
+  patch-in-place is a future optimization needing `contactId` on the event — see
+  Deferred.)
+- **Nav Inbox badge = total unread rows**, kept live off the same stream (recomputed
+  on refetch).
 
 ---
 
@@ -118,7 +121,9 @@ present rather than inventing parallel state.
   app; reconciled by the server. The explicit **Mark read** action does the same
   without opening.
 - **Assign** sets the assignment (to me or another workspace user); the **Assigned**
-  chip reflects it and updates live.
+  chip reflects it and updates live. The chip renders `assignment.name` (currently an
+  **email** — UserItem has no name field; show **"You"** when it is the current
+  user). A real display name is a tracked future enhancement (see Deferred).
 - **Unknown rows** route to the contact/triage view. The triage UI itself lives with
   **Contacts ▸ Unknown** (out of scope here); the Inbox only surfaces + links.
 - **Filters:** All (default) · Unread · Unknown · Assigned-to-me. **Cursor
@@ -158,8 +163,29 @@ present rather than inventing parallel state.
   page).
 - No triage UI in the Inbox (lives with Contacts ▸ Unknown).
 - No search yet (placeholder only); no bulk actions; no saved/custom filters.
+- **Group texts (`relay_group`) are excluded from v1** (C8 `kind` is only
+  `contact|unknown`). They WILL be added later — see Deferred / future.
 
 ---
+
+## Deferred / future (tracked — do not lose)
+
+- **Group texts in the Inbox — COMMITTED future work (Cameron: "we definitely want
+  group texts included").** v1 excludes `relay_group` conversations because a group
+  text has no single contact-row and no open-target yet (no group-conversation view;
+  Cases page unbuilt). The intended treatment: a new `InboxRow` `kind: 'group'`
+  opening to the related **Case**. Decide the exact shape when we design the **Cases
+  pipeline**, then extend C8 with the new `kind`. Interim: group texts stay visible in
+  legacy (:5173) until the new dashboard replaces it, so no coverage is lost meanwhile.
+- **Real assignee display name.** Add a `name` attribute to `UserItem` (DynamoDB is
+  schemaless — UserItem already has `[key]: unknown`, so NO table/GSI migration),
+  sourced either from the Google **profile** name claim (needs `profile` added to the
+  OAuth scope `'openid email'` + capture at activation; users re-consent on next
+  login) or an **admin-entered** name at invite time. Email is the interim display.
+  Non-blocking; the C8 wire shape (`assignment.name`) does not change either way.
+- **Per-contact SSE patch-in-place.** Add `contactId` to `conversation.updated` to
+  allow surgical row patching instead of debounced refetch (perf only, not needed at
+  current scale).
 
 ## Dependencies & sequencing
 

@@ -154,7 +154,27 @@ export interface TodayItem {
 }
 export interface TodayResponse { items: TodayItem[]; generatedAt: string; }
 ```
-Backend: `GET /api/today → TodayResponse`. **Frontend fallback** (B1 ships with this if `/api/today` 404s): assemble client-side from `/api/cases` (`next_deadline_*`, `attention`, `tour_date`) + `/api/conversations` (`unread_count`).
+Backend: `GET /api/today?day=YYYY-MM-DD → TodayResponse`. **Frontend fallback** (B1
+ships with this if `/api/today` 404s): assemble client-side from `/api/cases`
+(`next_deadline_*`, `attention`, `tour_date`) + `/api/conversations` (`unread_count`).
+
+**`?day=` (timezone fix, shipped):** optional `YYYY-MM-DD`. The server is
+timezone-agnostic; `?day=` scopes ONLY the `tours_today` group. The **browser owns
+"today"** — the frontend sends the operator's LOCAL calendar day (local
+`getFullYear/getMonth/getDate`, never `toISOString()`), computed once and reused for
+both the server call and the fallback's `tour_date` basis (shared `localYmd`). Absent
+`day` → server uses the UTC date; malformed → 400. `generatedAt` = server now (ISO).
+
+**DECISION — Today stays now-anchored (Option A; Cameron, 2026-06-17).** `/api/today`
+is a **now-triage queue** ("what should I act on right now"), NOT a date-navigable
+view. 3 of the 4 groups are inherently present-tense (`needs_you_now`, `unreplied`,
+`follow_ups` — "unreplied as of last Tuesday" is meaningless); only `tours_today` is
+date-scoped, which `?day=` already covers. We will NOT reshape `/api/today` into a
+generic day-parameterized route. If a calendar / day-navigable surface is ever
+designed, it becomes a **separate `GET /api/agenda?day=X`** (Option B) returning the
+date-scoped things (tours + deadlines landing on X) — an agenda/schedule, distinct
+from the triage queue, most likely alongside the deferred Cases-pipeline/scheduling
+work. No backend change is needed now.
 
 ---
 

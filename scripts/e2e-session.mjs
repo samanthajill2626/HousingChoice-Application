@@ -17,6 +17,9 @@ import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const dashboardDir = path.join(repoRoot, 'dashboard-legacy');
+// The NEW entity-centric dashboard (:5174). Served alongside legacy so the
+// dashboard-next/* specs can drive it; legacy specs keep hitting :5173.
+const dashboardNextDir = path.join(repoRoot, 'dashboard');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 // The fake-phones UI is a static build served by the fake-twilio host on :8889.
 // We build it once at session start (below) and point the host at its dist.
@@ -106,6 +109,14 @@ function startVite() {
   if (reaped.length) log(`reaped orphan(s) holding :5173 before start: ${reaped.join(', ')}`);
   // Run Vite's bin directly so it's a single node process we can kill cleanly.
   spawnNode('web', [viteBin], dashboardDir);
+}
+function startViteNext() {
+  // PREFLIGHT — reap any orphan holding :5174 before spawning the NEW dashboard's
+  // Vite (it also pins strictPort, so a held port makes it exit non-zero rather
+  // than drift). Same rationale as startVite's :5173 reap.
+  const reaped = killPort(5174);
+  if (reaped.length) log(`reaped orphan(s) holding :5174 before start: ${reaped.join(', ')}`);
+  spawnNode('web-next', [viteBin], dashboardNextDir);
 }
 function startFakeTwilio() {
   // The fake-twilio host impersonates Twilio's REST API (the app's redirected
@@ -257,13 +268,14 @@ async function main() {
   log('fake-twilio ready (:8889)');
   log('fake-phones UI → http://localhost:8889/');
 
-  log('starting app, worker, web (non-watch)…');
+  log('starting app, worker, web :5173 (legacy), web :5174 (new) (non-watch)…');
   startApp();
   startWorker();
   startVite();
+  startViteNext();
 
   await waitForHealth();
-  log('ready — app :8080, web :5173, fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
+  log('ready — app :8080, web :5173 (legacy), web :5174 (new), fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

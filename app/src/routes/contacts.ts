@@ -38,6 +38,11 @@ import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
+import {
+  createListingSendsRepo,
+  toListingSendRow,
+  type ListingSendsRepo,
+} from '../repos/listingSendsRepo.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -46,6 +51,8 @@ export interface ContactsRouterDeps {
   auditRepo?: AuditRepo;
   /** BE2/C2: emit a `number_added` milestone on a successful phone add. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** BE4/C4: serve a contact's "Listings sent" (GET /:id/listings-sent). */
+  listingSendsRepo?: ListingSendsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -323,6 +330,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -446,6 +454,24 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
     res.json({ contact: { ...contact, phones: contactPhones(contact) } });
+  });
+
+  // GET /api/contacts/:contactId/listings-sent — the tenant page's "Listings
+  // sent" (BE4/C4). Returns { sent: ListingSendRow[] } via listByContact
+  // (newest-first by sentAt). Returns [] for none. A phone-pointer id (BE1's
+  // internal routing record) is a 404 — never a contact, never a listings owner.
+  // (`listings-sent` is a distinct segment from the bare :contactId routes, so
+  // there is no route collision.)
+  router.get('/:contactId/listings-sent', async (req, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const rows = await listingSends.listByContact(contactId);
+    res.json({ sent: rows.map(toListingSendRow) });
   });
 
   // PATCH /api/contacts/:contactId — triage an existing contact.

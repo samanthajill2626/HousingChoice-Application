@@ -42,6 +42,7 @@ import {
 } from '../repos/messagesRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
 import { type CasesRepo } from '../repos/casesRepo.js';
@@ -128,6 +129,8 @@ export interface ApiRouterDeps {
   casesRepo?: CasesRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
+  listingSendsRepo?: ListingSendsRepo;
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
   contactsRepoForRelay?: ContactsRepo;
@@ -210,6 +213,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // BE2/C2: the activity-event log feeds the merged timeline + is emitted into
   // by the case/relay/phone flows. Shared across the sub-routers below.
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  // BE4/C4: the listing-send record — read by the units recipients + contacts
+  // listings-sent endpoints, written by the response PATCH. Shared across the
+  // sub-routers below.
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const events = deps.events ?? appEvents;
@@ -268,6 +275,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit `number_added` on a successful POST /:id/phones.
       activityEventsRepo: activityEvents,
+      // BE4: serve GET /:id/listings-sent.
+      listingSendsRepo: listingSends,
       events,
     }),
   );
@@ -292,6 +301,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       auditRepo: audit,
+      // BE4: GET /:id/recipients + PATCH /:id/recipients/:contactId (response).
+      listingSendsRepo: listingSends,
+      // BE4: emit `listing_reviewed` on a real interested/not_a_fit change.
+      activityEventsRepo: activityEvents,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

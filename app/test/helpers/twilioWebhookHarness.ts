@@ -1310,6 +1310,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       unitsRepo: world.unitsRepo,
       casesRepo: world.casesRepo,
       activityEventsRepo: world.activityEventsRepo,
+      listingSendsRepo: world.listingSendsRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).

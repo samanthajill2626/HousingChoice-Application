@@ -28,11 +28,32 @@ import {
   type UnitsPage,
   type UnitsRepo,
 } from '../repos/unitsRepo.js';
+import {
+  createListingSendsRepo,
+  toListingSendRow,
+  type ListingResponse,
+  type ListingSendsRepo,
+} from '../repos/listingSendsRepo.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
   unitsRepo?: UnitsRepo;
   auditRepo?: AuditRepo;
+  /** BE4/C4: the listing-send record (recipients + response). */
+  listingSendsRepo?: ListingSendsRepo;
+  /** BE4/C4: emit a `listing_reviewed` milestone on a real interested/not_a_fit change. */
+  activityEventsRepo?: ActivityEventsRepo;
+}
+
+/** The valid tenant responses (C4 `ListingResponse`). */
+const LISTING_RESPONSES: readonly ListingResponse[] = ['interested', 'not_a_fit', 'no_reply'] as const;
+
+function isListingResponse(value: unknown): value is ListingResponse {
+  return typeof value === 'string' && (LISTING_RESPONSES as readonly string[]).includes(value);
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -84,6 +105,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  const activityEvents =
+    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -169,6 +193,97 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
     res.json({ unit });
+  });
+
+  // SEAM (BE4/C4 — individual flyer send): there is currently NO individual-send
+  // route in the codebase (only the share-broadcast fan-out sends a listing). The
+  // data model already supports `via:'individual'`; when an individual-send
+  // endpoint lands, it should call
+  //   listingSends.recordSend({ contactId, unitId, via: 'individual' })
+  // (best-effort, alongside the send) so a one-off flyer send shows up in both
+  // the "Sent to tenants" and "Listings sent" lists, exactly like a broadcast.
+  // Individual-send CAPTURE is therefore a seam pending that endpoint.
+
+  // GET /api/units/:unitId/recipients — the "Sent to tenants" list (BE4/C4).
+  // Returns { recipients: ListingSendRow[] } from listByUnit. Mirrors the units
+  // 404 posture: an unknown unit is a 404 (consistent with GET /:unitId); a real
+  // unit with zero recipients returns []. (`recipients` is a distinct segment
+  // from the bare :unitId routes, so there is no route collision.)
+  router.get('/:unitId/recipients', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const rows = await listingSends.listByUnit(unitId);
+    res.json({ recipients: rows.map(toListingSendRow) });
+  });
+
+  // PATCH /api/units/:unitId/recipients/:contactId { response } (BE4/C4).
+  // Set the tenant's response on an existing send row → { recipient }. 400 on an
+  // invalid response; 404 when the send row doesn't exist. On a CHANGE to
+  // 'interested' / 'not_a_fit', emit a `listing_reviewed` milestone (best-effort)
+  // + audit the change (listing_response_set).
+  router.patch('/:unitId/recipients/:contactId', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const contactId = String(req.params['contactId'] ?? '');
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const response = (body as Record<string, unknown>)['response'];
+    if (!isListingResponse(response)) {
+      res.status(400).json({ error: `response must be one of: ${LISTING_RESPONSES.join(', ')}` });
+      return;
+    }
+
+    // Read the prior row so we only emit listing_reviewed on a REAL change to a
+    // reviewed response (interested/not_a_fit) — a no-op set, or a set back to
+    // no_reply, emits nothing. Also lets us 404 cheaply before the write.
+    const existingRows = await listingSends.listByUnit(unitId);
+    const existing = existingRows.find((r) => r.contactId === contactId);
+    if (!existing) {
+      res.status(404).json({ error: 'listing_send_not_found' });
+      return;
+    }
+    const wasReviewed = existing.response === response; // same value → no change
+
+    let updated;
+    try {
+      updated = await listingSends.setResponse(unitId, contactId, response);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'listing_send_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    // Emit listing_reviewed ONLY on a real change to a reviewed response.
+    if (!wasReviewed && (response === 'interested' || response === 'not_a_fit')) {
+      const label = response === 'interested' ? 'Listing reviewed · Interested' : 'Listing reviewed · Not a fit';
+      try {
+        await activityEvents.record({
+          contactId,
+          type: 'listing_reviewed',
+          label,
+          refType: 'unit',
+          refId: unitId,
+        });
+      } catch (err) {
+        log.error({ err, unitId, contactId }, 'unit recipients: recording listing_reviewed milestone failed (best-effort)');
+      }
+    }
+
+    await audit.append(`units#${unitId}`, 'listing_response_set', {
+      actor: req.user?.userId,
+      contactId,
+      response,
+    });
+    log.info({ unitId, contactId, response, actor: req.user?.userId }, 'listing response set via api');
+    res.json({ recipient: toListingSendRow(updated) });
   });
 
   // PATCH /api/units/:unitId — partial update (SET-merge, no-overwrite).

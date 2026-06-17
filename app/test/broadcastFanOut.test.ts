@@ -126,6 +126,7 @@ function wireHandler(world: FakeWorld, logger = createLogger({ destination: crea
     unitsRepo: world.unitsRepo,
     sendMessageService,
     activityEventsRepo: world.activityEventsRepo,
+    listingSendsRepo: world.listingSendsRepo,
     events: world.events,
     logger,
     ...(tokenBucket !== undefined && { tokenBucket }),
@@ -452,5 +453,47 @@ describe('broadcast.send (M1.8a)', () => {
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
 
     expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(0);
+  });
+
+  // --- BE4/C4: listing-send record per recipient (when unit-targeted) --------
+  it('records a listing-send row (via=broadcast, no_reply) per recipient sent when the broadcast has a unitId', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });
+    seedUnit(world); // unit-1
+    seedBroadcast(world, [alice, bob]); // seedBroadcast sets unitId: 'unit-1'
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    expect(world.listingSends).toHaveLength(2);
+    expect(world.listingSends.map((r) => r.contactId).sort()).toEqual(['c-alice', 'c-bob']);
+    expect(world.listingSends.every((r) => r.unitId === 'unit-1')).toBe(true);
+    expect(world.listingSends.every((r) => r.via === 'broadcast')).toBe(true);
+    expect(world.listingSends.every((r) => r.broadcastId === 'bcast-1')).toBe(true);
+    expect(world.listingSends.every((r) => r.response === 'no_reply')).toBe(true);
+  });
+
+  it('records NO listing-send rows for a unit-less broadcast', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', phone: '+15550100001' });
+    // A unit-less broadcast: no unitId on the broadcast (and no unit seeded).
+    seedBroadcast(world, [alice], { unitId: undefined });
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    // The SMS still goes out (sanity) but no listing-send row is recorded.
+    expect(world.sent).toHaveLength(1);
+    expect(world.listingSends).toHaveLength(0);
+  });
+
+  it('does NOT record a listing-send row for a skipped (opted-out) recipient', async () => {
+    const optedOut = seedTenant(world, { contactId: 'c-opt', phone: '+15550100009', sms_opt_out: true });
+    seedUnit(world);
+    seedBroadcast(world, [optedOut]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    expect(world.listingSends).toHaveLength(0);
   });
 });

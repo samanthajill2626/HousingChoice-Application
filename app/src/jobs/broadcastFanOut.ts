@@ -60,6 +60,10 @@ import {
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
 import {
+  createListingSendsRepo,
+  type ListingSendsRepo,
+} from '../repos/listingSendsRepo.js';
+import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
@@ -141,6 +145,8 @@ export interface BroadcastSendJobDeps {
   sendMessageService?: SendMessageService;
   /** BE2/C2: emit a `listing_sent` milestone per recipient actually sent. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** BE4/C4: record the listing-send row per recipient sent (when unit-targeted). */
+  listingSendsRepo?: ListingSendsRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   events?: EventBus;
@@ -169,6 +175,8 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
     const activityEvents: ActivityEventsRepo =
       deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+    const listingSends: ListingSendsRepo =
+      deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
     sendMessage ??= createSendMessageService({
       config,
       logger: deps.logger,
@@ -293,6 +301,28 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
             { err: milestoneErr, broadcastId: payload.broadcastId, contactKey },
             'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
           );
+        }
+        // BE4/C4: record the unit↔contact listing-send row so the "Sent to
+        // tenants" / "Listings sent" pages light up. ONLY when the broadcast
+        // targets a unit (a unit-less broadcast records nothing — there is no
+        // listing to attribute). Best-effort + idempotent: the upsert is safe on
+        // SQS redelivery (and the job's terminal-recipient skip already prevents
+        // re-entry), and a failure must NEVER fail the send (the SMS is already
+        // out + the recipient slot recorded) — so it is swallowed + logged.
+        if (typeof broadcast.unitId === 'string' && broadcast.unitId.length > 0) {
+          try {
+            await listingSends.recordSend({
+              contactId: contact.contactId,
+              unitId: broadcast.unitId,
+              via: 'broadcast',
+              broadcastId: payload.broadcastId,
+            });
+          } catch (sendErr) {
+            log.error(
+              { err: sendErr, broadcastId: payload.broadcastId, contactKey },
+              'broadcastFanOut: recording listing-send row failed (best-effort)',
+            );
+          }
         }
       } catch (err) {
         if (err instanceof SendRefusedError) {

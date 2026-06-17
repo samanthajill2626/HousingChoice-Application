@@ -36,6 +36,10 @@ export function useEventStream(handlers: EventStreamHandlers): void {
 
   useEffect(() => {
     if (!enabled) return;
+    // Feature-detect EventSource: it's absent in non-browser environments (e.g.
+    // jsdom under unit tests that don't stub it). Without this the hook would
+    // throw on connect; degrade to "no live updates" instead.
+    if (typeof EventSource === 'undefined') return;
 
     let source: EventSource | null = null;
     let reconnectDelay = RECONNECT_MIN_MS;

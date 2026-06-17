@@ -8,6 +8,7 @@ import { AuthProvider } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
 import { Placeholder } from './routes/Placeholder.js';
+import { Today } from './routes/today/Today.js';
 import { allNavTargets } from './app/nav.js';
 
 export default function App(): React.JSX.Element {
@@ -18,7 +19,7 @@ export default function App(): React.JSX.Element {
           <Route element={<AppFrame />}>
             {allNavTargets().map(({ to, label }) =>
               to === '/' ? (
-                <Route key={to} index element={<Placeholder title={label} />} />
+                <Route key={to} index element={<Today />} />
               ) : (
                 <Route key={to} path={to.slice(1)} element={<Placeholder title={label} />} />
               ),

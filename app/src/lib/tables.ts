@@ -278,6 +278,23 @@ export const TABLES: readonly TableSpec[] = [
       },
     ],
   },
+  {
+    // NEW in BE2/C2 (NOT in the doc §5 9-table model — new-dashboard build): the
+    // person-centric activity-event log. Each row is one milestone (a case
+    // opened/closed, a stage change, a listing sent, a number added, group-text
+    // membership, …) for a contact, so the contact-timeline endpoint can MERGE
+    // these with the contact's messages/calls into one chronological feed.
+    //
+    // PK is contactId; SK is `<ISO at>#<eventId>` — mirroring the messages SK
+    // (`<ISO ts>#<msgId>`) so a Query is naturally chronological and pages
+    // backward with a `tsEventId < :before` bound. Item is a flexible document;
+    // only the two key attrs are contractual (this module). No GSIs (the only
+    // read is "events for THIS contact, newest-first"), no stream.
+    baseName: 'activity_events',
+    hashKey: { name: 'contactId', type: 'S' },
+    rangeKey: { name: 'tsEventId', type: 'S' },
+    gsis: [],
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

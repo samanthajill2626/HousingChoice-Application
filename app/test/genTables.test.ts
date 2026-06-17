@@ -9,8 +9,9 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
+      'activity_events',
       'audit_events',
       'broadcasts',
       'cases',
@@ -24,6 +25,16 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'units',
       'users',
     ]);
+  });
+
+  it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs, no stream/TTL', () => {
+    expect(tables['activity_events']).toEqual({
+      hash_key: { name: 'contactId', type: 'S' },
+      range_key: { name: 'tsEventId', type: 'S' },
+      gsis: [],
+      stream: false,
+      pitr: true,
+    });
   });
 
   it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus + byCreatedAt; no stream/TTL', () => {

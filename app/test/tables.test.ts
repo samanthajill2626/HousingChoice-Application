@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -31,7 +31,17 @@ describe('tables.ts — the table contract', () => {
       'settings',
       'pool_numbers',
       'broadcasts',
+      'activity_events',
     ]);
+  });
+
+  it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs/stream/TTL', () => {
+    const t = spec('activity_events');
+    expect(t.hashKey.name).toBe('contactId');
+    expect(t.rangeKey?.name).toBe('tsEventId');
+    expect(t.gsis).toHaveLength(0);
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus (status), byCreatedAt (created_by + created_at); no stream/TTL', () => {

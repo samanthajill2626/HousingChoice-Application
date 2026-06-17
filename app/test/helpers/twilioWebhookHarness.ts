@@ -49,6 +49,11 @@ import {
 import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
 import { type CaseDeadline, type CaseItem, type CasesRepo } from '../../src/repos/casesRepo.js';
 import {
+  buildTsEventId,
+  type ActivityEventItem,
+  type ActivityEventsRepo,
+} from '../../src/repos/activityEventsRepo.js';
+import {
   type BroadcastItem,
   type BroadcastsRepo,
   type BroadcastStats,
@@ -136,6 +141,9 @@ export interface FakeWorld {
   /** In-memory cases (M1.10), keyed by caseId. */
   cases: Map<string, CaseItem>;
   casesRepo: CasesRepo;
+  /** In-memory activity events (BE2/C2), in insert order. */
+  activityEvents: ActivityEventItem[];
+  activityEventsRepo: ActivityEventsRepo;
   /** In-memory broadcasts (M1.8a), keyed by broadcastId. */
   broadcasts: Map<string, BroadcastItem>;
   broadcastsRepo: BroadcastsRepo;
@@ -879,6 +887,41 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory activity events (BE2/C2): mirror the repo's semantics — a Put with
+  // a fresh `<at>#<eventId>` SK (so no append is ever a redelivery), and a
+  // listByContact that returns newest-first with an exclusive `before` bound +
+  // limit (the merged-timeline endpoint reads through this).
+  const activityEvents: ActivityEventItem[] = [];
+  let activityEventCounter = 0;
+  const activityEventsRepo: ActivityEventsRepo = {
+    async record(input) {
+      const at = input.at ?? new Date().toISOString();
+      const eventId = `evt-fake-${++activityEventCounter}`;
+      const item: ActivityEventItem = {
+        contactId: input.contactId,
+        tsEventId: buildTsEventId(at, eventId),
+        eventId,
+        at,
+        type: input.type,
+        label: input.label,
+        created_at: new Date().toISOString(),
+        ...(input.refType !== undefined && { refType: input.refType }),
+        ...(input.refId !== undefined && { refId: input.refId }),
+      };
+      activityEvents.push(item);
+      return { ...item };
+    },
+    async listByContact(contactId, opts = {}) {
+      const items = activityEvents
+        .filter((e) => e.contactId === contactId)
+        .filter((e) => (opts.before === undefined ? true : e.tsEventId < opts.before))
+        .sort((a, b) => (a.tsEventId < b.tsEventId ? 1 : -1)) // newest-first
+        .slice(0, opts.limit ?? 50)
+        .map((e) => ({ ...e }));
+      return { items };
+    },
+  };
+
   // In-memory broadcasts (M1.8a): mirror the repo's contractual semantics —
   // generate-id create, markSending draft-gate + recipients seed, setRecipient
   // map slot, atomic bumpStats, terminal markSent/markFailed.
@@ -1105,6 +1148,8 @@ export function createFakeWorld(): FakeWorld {
     unitsRepo,
     cases,
     casesRepo,
+    activityEvents,
+    activityEventsRepo,
     broadcasts,
     broadcastsRepo,
     settings,
@@ -1197,6 +1242,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       settingsRepo: world.settingsRepo,
       unitsRepo: world.unitsRepo,
       casesRepo: world.casesRepo,
+      activityEventsRepo: world.activityEventsRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).

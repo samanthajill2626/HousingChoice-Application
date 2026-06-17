@@ -3,3 +3,4 @@
 export * from './types.js';
 export { ApiError } from './client.js';
 export * from './endpoints.js';
+export { useEventStream, type EventStreamHandlers } from './useEventStream.js';

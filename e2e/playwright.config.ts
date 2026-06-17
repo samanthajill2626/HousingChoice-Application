@@ -17,30 +17,32 @@ export default defineConfig({
     ['json', { outputFile: '.artifacts/results.json' }],
   ],
   use: {
-    baseURL: 'http://localhost:5173',
+    // The NEW dashboard (:5174). Legacy (:5173) is deprecated and no longer has
+    // e2e specs; the surviving specs hit :5174, the fake-phones host (:8889), or
+    // the backend API directly. Specs that need a different origin use an
+    // absolute URL.
+    baseURL: 'http://localhost:5174',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     navigationTimeout: 15_000,
   },
   projects: [
-    { name: 'setup', testDir: '.', testMatch: /auth\.setup\.ts/ },
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-      dependencies: ['setup'],
     },
   ],
   webServer: {
-    // Boots DynamoDB Local + app(:8080) + worker + Vite(:5173) in hermetic
-    // mode. No AWS creds or secrets needed; messaging defaults to console.
-    // Env (DEV_AUTH_ENABLED, MESSAGING_RECORD_OUTBOX, etc.) is baked into the
-    // launcher — no env block needed here.
+    // Boots DynamoDB Local + app(:8080) + worker + Vite (:5173 legacy + :5174
+    // new) + fake-twilio (:8889) in hermetic mode. No AWS creds or secrets
+    // needed; messaging defaults to console. Env (DEV_AUTH_ENABLED,
+    // MESSAGING_RECORD_OUTBOX, etc.) is baked into the launcher.
     command: 'node scripts/e2e-session.mjs',
     cwd: repoRoot,
-    // Readiness gate: the Vite server is the surface the spec hits, and the
-    // launcher only logs 'ready' after db:start/create/seed + app health.
-    url: 'http://localhost:5173',
+    // Readiness gate: the launcher only logs 'ready' after db:start/create/seed
+    // + app health; probe the new dashboard the specs hit.
+    url: 'http://localhost:5174',
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
     stdout: 'pipe',

@@ -89,18 +89,32 @@ no voucher) · Preferences (landlord-style: accepts-programs, lease terms, pet
 policy, contact pref) · **Listings = the units they own** (with status) · **Cases on
 their units** · Group texts · Media. Listing rows hint co-contacts ("+N contacts").
 
-## Listing detail — DRAFT (feedback pending)
+## Listing detail — LOCKED
 
-A **structured record, NOT a comms hub** (comms live on contacts). **Left:** photos +
-listing facts (beds/baths, rent, payment standard, deposit, programs, jurisdiction,
-utilities, accessibility, pets, public link) + tour/application process. **Right,
-leading with the Contacts roster:** multiple landlord/PM contacts per unit, each
-"Open ↗" pivots to that person's page where their comms live (resolves "these comms
-aren't with this landlord — who else is on this listing?"). Then Cases on the unit +
-an Activity log.
+A **structured record, NOT a comms hub** (comms live on contacts; "who did we talk
+to about this unit" is answered by **pivoting through the contact roster**, not an
+aggregated unit-comms view — that is **deferred**, not built).
 
-**OPEN:** should the listing page also offer an aggregated *"all comms about this
-unit across its contacts"* view, or is roster-pivot enough?
+- **Header:** address · status · facts · **📣 Broadcast to tenants** (opens the
+  broadcast composer pre-filled with this unit) · Edit · ⋯.
+- **Left column:** a single small **hero image**; a **flyer** affordance —
+  **View flyer ↗** + **Copy public link** (the flyer is a live public page generated
+  from the listing — there is **no "create" step**); **Listing details** (beds/baths,
+  rent, payment standard, deposit, jurisdiction, utilities, accessibility, pets) with
+  **Accepted vouchers as a bulleted list** (programs + housing authorities + best-fit
+  size) rendered as a normal detail (not emphasized); **Tour & application process**;
+  **Activity** (this listing's history — lives on the left, under the process card).
+- **Right column:** **Contacts** (landlord/PM roster — many per unit, each opens that
+  contact's page) · **Sent to tenants** (recipients + responses 👍/👎/⏳; the inverse
+  of the tenant page's "Listings sent"; each links to the tenant) · **Cases on this
+  listing** · **Related listings** (duplex siblings / same landlord or property) ·
+  **Similar listings** (other *available* units with comparable beds/area/rent/
+  accepted vouchers — alternatives, with a match %).
+- **Bottom (full-width):** **Photos** — thumbnail gallery with "+ Add".
+
+**Broadcast composer note (for when we design it):** the recipient chooser must allow
+adding **specific tenants — even one, even if they don't match the listing's
+requirements** — with a **mismatch flag shown before confirm**.
 
 ## Conventions
 
@@ -120,8 +134,14 @@ unit across its contacts"* view, or is roster-pivot enough?
 4. **Media aggregation** from a contact's comms.
 5. **Unit ↔ contacts many-to-many** (a roster of landlord/PM contacts with roles) —
    replaces the single `unit.landlordId`.
-6. *(later phase)* **auto-gleaned preferences** from comms.
-7. *(open)* listing-level comms aggregation across the roster, if adopted.
+6. Per-listing **recipients + responses** (the listing-side inverse of #3 — the
+   "Sent to tenants" list on the Listing page).
+7. **Related-unit grouping**: a parent "property" (duplex/building) link + a
+   same-landlord lookup, to populate "Related listings".
+8. **Similar-listings matching**: rank available units by attribute similarity
+   (beds/area/rent/accepted vouchers) for the "Similar listings" pane.
+9. *(later phase)* **auto-gleaned preferences** from comms.
+10. *(deferred — not building now)* listing-level comms aggregation across the roster.
 
 Design the pages for these now; launch against the primary number / single landlord
 until the corresponding backend slice lands.
@@ -137,14 +157,17 @@ until the corresponding backend slice lands.
 5. Landlord page = same shell, listings-centric file.
 6. Multi-number designed now; backend flagged.
 7. Listing page = roster pivot (multi-contact per unit); backend many-to-many flagged.
+8. Listing detail **LOCKED**: roster-pivot only (aggregated unit-comms deferred);
+   added "Sent to tenants" (inverse roster), Related + Similar listings; flyer =
+   View/Copy-link (no "create"); accepted vouchers = plain bulleted detail; Activity
+   on the left; Broadcast must allow adding non-matching tenants with a flag.
 
 ## Still to detail (piecemeal, upcoming)
 
-Finalize Listing detail → **Cases pipeline** (kanban over `CASE_STAGES`) → Contacts
-list views (Tenants/Landlords/Unknown) → Inbox (comms hub) → Broadcasts → Settings/
-Admin → public pages (housing-fair signup, flyer) → mobile treatments → then
-architecture + design-system approaches → finalize this spec → writing-plans →
-phased implementation.
+**Cases pipeline** (kanban/views over `CASE_STAGES`) → Contacts list views
+(Tenants/Landlords/Unknown) → Inbox (comms hub) → Broadcasts → Settings/Admin →
+public pages (housing-fair signup, flyer) → mobile treatments → then architecture +
+design-system approaches → finalize this spec → writing-plans → phased implementation.
 
 ## Visual record (committed)
 

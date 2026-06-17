@@ -10,6 +10,7 @@ import { AppFrame } from './app/AppFrame.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
+import { ListingDetail } from './routes/listing/ListingDetail.js';
 import { allNavTargets } from './app/nav.js';
 
 export default function App(): React.JSX.Element {
@@ -29,6 +30,9 @@ export default function App(): React.JSX.Element {
                 /contacts/tenants|landlords|unknown placeholders above take
                 priority over this dynamic segment in react-router. */}
             <Route path="contacts/:contactId" element={<ContactDetail />} />
+            {/* B4: the listing detail page. The static /listings list
+                placeholder above takes priority over this dynamic segment. */}
+            <Route path="listings/:unitId" element={<ListingDetail />} />
             <Route path="*" element={<Placeholder title="Not found" />} />
           </Route>
         </Routes>

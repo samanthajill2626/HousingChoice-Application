@@ -1,0 +1,325 @@
+/* ListingDetail — the locked v4 Listing page: a dark header band, a two-column
+ * body (left details / right roster + panels) and a full-width Photos gallery.
+ * All values from ui/tokens.css; the page scrolls as one column. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-7);
+}
+
+.error {
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+/* --- Header band ---------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-header-bg);
+  color: var(--c-header-text);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-lg);
+  color: var(--c-header-text);
+}
+
+.badge {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  color: var(--c-text-inverse);
+  background: var(--c-status-placed-bg);
+}
+
+.badgeAvailable {
+  background: var(--c-status-available-bg);
+}
+
+.badgePlaced {
+  background: var(--c-status-placed-bg);
+}
+
+.badgeInactive {
+  background: var(--c-status-inactive-bg);
+}
+
+.facts {
+  margin-top: 2px;
+  color: var(--c-header-facts);
+  font-size: var(--fs-xs);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.btn {
+  background: var(--c-header-btn-bg);
+  color: var(--c-text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.btnAlt {
+  background: var(--c-header-kebab-bg);
+  font-weight: var(--fw-regular);
+}
+
+.kebab {
+  background: var(--c-header-kebab-bg);
+  color: var(--c-text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.btn:focus-visible,
+.kebab:focus-visible,
+.flyerCopy:focus-visible,
+.addPhoto:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+/* --- Two-column body ------------------------------------------------------ */
+
+.cols {
+  display: flex;
+  background: var(--c-bg);
+  align-items: flex-start;
+}
+
+.left {
+  flex: 1.4;
+  min-width: 0;
+  padding: var(--sp-3);
+  border-right: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.right {
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+@media (max-width: 860px) {
+  .cols {
+    flex-direction: column;
+  }
+  .left {
+    border-right: none;
+    border-bottom: 1px solid var(--c-border);
+  }
+}
+
+/* --- Hero + flyer line ---------------------------------------------------- */
+
+.hero {
+  height: 150px;
+  width: 100%;
+  object-fit: cover;
+  background: var(--c-media-placeholder-bg);
+  border: 1px solid var(--c-media-placeholder-border);
+  border-radius: var(--radius-md);
+}
+
+.flyerLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  align-items: center;
+  font-size: var(--fs-xs);
+  margin-top: calc(-1 * var(--sp-1));
+}
+
+.flyerLink {
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+.flyerLink:hover {
+  text-decoration: underline;
+}
+
+.flyerCopy {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.flyerCopy:hover {
+  text-decoration: underline;
+}
+
+.flyerNote {
+  color: var(--c-text-subtle);
+}
+
+/* --- Listing details ------------------------------------------------------ */
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px var(--sp-5);
+}
+
+.vouchers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-surface-2);
+}
+
+.vouchersLabel {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.vouchersList {
+  margin: 0;
+  padding-left: var(--sp-5);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.vouchersList li {
+  padding: 1px 0;
+}
+
+/* --- Process + sublines --------------------------------------------------- */
+
+.process {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  line-height: var(--lh-normal);
+}
+
+.process p {
+  margin: 0 0 var(--sp-1);
+}
+
+.process p:last-child {
+  margin-bottom: 0;
+}
+
+.subLabel,
+.roleLine {
+  display: block;
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}
+
+.roleLine {
+  color: var(--c-text-muted);
+}
+
+.primaryStar {
+  color: var(--c-warning);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+
+.openLink {
+  color: var(--c-brand);
+}
+
+.match {
+  color: var(--c-match-text);
+  background: var(--c-match-bg);
+  border: 1px solid var(--c-match-border);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--sp-2);
+}
+
+/* --- Photos (full width) -------------------------------------------------- */
+
+.photos {
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.photosHeading {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+  font-weight: var(--fw-semibold);
+}
+
+.gallery {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.thumb {
+  width: 92px;
+  height: 64px;
+  object-fit: cover;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-media-placeholder-border);
+  border-radius: var(--radius-sm);
+}
+
+.addPhoto {
+  width: 92px;
+  height: 64px;
+  border: 1px dashed var(--c-media-add-border);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.photosNote {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}

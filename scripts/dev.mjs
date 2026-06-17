@@ -152,14 +152,17 @@ const childEnv = {
   PATH: `${path.join(repoRoot, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH ?? ''}`,
 };
 
-// Local Google login must ride the Vite proxy: a direct hit on the app's
-// :8080 carries no x-origin-verify header (the origin-secret validator 403s
-// it), but Vite (:5173) stamps it on proxied /auth + /api. So the OAuth
-// redirect_uri has to target :5173 — point the app there unless the operator
-// set PUBLIC_BASE_URL explicitly. (Register http://localhost:5173/auth/callback
-// on the dev Google OAuth client.) Skipped with --no-web — no UI to log in via.
+// Local Google login must ride a Vite proxy: a direct hit on the app's :8080
+// carries no x-origin-verify header (the origin-secret validator 403s it), but
+// Vite stamps it on proxied /auth + /api. The NEW dashboard (:5174) owns Google
+// OAuth in local dev, so the redirect_uri targets :5174 — point the app there
+// unless the operator set PUBLIC_BASE_URL explicitly. (Register
+// http://localhost:5174/auth/callback on the dev Google OAuth client.) The
+// legacy dashboard stays reachable on :5173 (its proxy still serves /api+/auth),
+// but the OAuth round-trip lands on :5174. Skipped with --no-web — no UI to log
+// in via.
 if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BASE_URL === '')) {
-  childEnv.PUBLIC_BASE_URL = 'http://localhost:5173';
+  childEnv.PUBLIC_BASE_URL = 'http://localhost:5174';
 }
 
 // Local-dev invariants: development NODE_ENV (console messaging driver, non-
@@ -325,20 +328,28 @@ if (mockRedirect) {
 if (webEnabled) {
   const reapedWeb = killPort(5173);
   if (reapedWeb.length) console.log(`dev — reaped orphan(s) on :5173 before start: ${reapedWeb.join(', ')}`);
+  // Same rationale for the NEW dashboard on :5174 (also strictPort): free it
+  // before concurrently spawns its Vite server so a stale orphan can't EADDRINUSE
+  // and trip killOthersOn:['failure'] into tearing down the whole stack.
+  const reapedNext = killPort(5174);
+  if (reapedNext.length) console.log(`dev — reaped orphan(s) on :5174 before start: ${reapedNext.join(', ')}`);
 }
 
 const runStep = mode === 'local' ? `step ${localSteps}/${localSteps}` : 'step 2/2';
 console.log(
-  `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5173)' : ''}, ` +
+  `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5174) + legacy (:5173)' : ''}, ` +
     `watch mode (Ctrl-C stops all${mode === 'local' ? '; DB container stays up' : ''})`,
 );
 if (webEnabled) {
   // Printed as bare URLs so the terminal makes them clickable.
   console.log('');
-  console.log('  ▶ Open the dashboard:  http://localhost:5173');
+  console.log('  ▶ Open the NEW dashboard:  http://localhost:5174');
   console.log('    (UI with hot-reload; proxies /api + /auth to the app on http://localhost:8080)');
-  console.log('    Google sign-in works here once http://localhost:5173/auth/callback is');
-  console.log('    registered on the dev OAuth client (PUBLIC_BASE_URL set to :5173 for you).');
+  console.log('    Google sign-in works here once http://localhost:5174/auth/callback is');
+  console.log('    registered on the dev OAuth client (PUBLIC_BASE_URL set to :5174 for you).');
+  console.log('');
+  console.log('  ▶ Legacy dashboard:        http://localhost:5173');
+  console.log('    (still served + proxies /api + /auth; the Google OAuth round-trip lands on :5174)');
   console.log('');
 }
 if (mockRedirect) {
@@ -368,11 +379,21 @@ const commands = [
   },
 ];
 if (webEnabled) {
-  // The dashboard workspace's own `dev` script = Vite (:5173, vite.config.ts).
+  // The NEW dashboard workspace's own `dev` script = Vite (:5174, its
+  // vite.config.ts). This is the dashboard that owns Google OAuth in local dev
+  // (PUBLIC_BASE_URL above).
+  commands.push({
+    command: 'npm run dev -w @housingchoice/dashboard',
+    name: 'dashboard',
+    prefixColor: 'green',
+    env: childEnv,
+  });
+  // The LEGACY dashboard's own `dev` script = Vite (:5173, its vite.config.ts).
+  // Kept reachable alongside the new one during the migration.
   commands.push({
     command: 'npm run dev -w @housingchoice/dashboard-legacy',
-    name: 'web',
-    prefixColor: 'green',
+    name: 'legacy',
+    prefixColor: 'blue',
     env: childEnv,
   });
 }
@@ -406,7 +427,12 @@ if (mockRedirect) {
 // runner SHOWS vs. FILES. concurrently writes its prefixed child output to
 // `outputStream` below instead of straight to the terminal, so we intercept it.
 const STRIP_ANSI = /\x1b\[[0-9;]*m/g;
-const NAME_COLOR = { app: '\x1b[36m', worker: '\x1b[35m', web: '\x1b[32m' };
+const NAME_COLOR = {
+  app: '\x1b[36m',
+  worker: '\x1b[35m',
+  dashboard: '\x1b[32m',
+  legacy: '\x1b[34m',
+};
 const ANSI_RESET = '\x1b[0m';
 const PREFIXED = /^\[([^\]]+)\]\s?([\s\S]*)$/;
 // After the message, show the DOMAIN fields (method, path, statusCode,

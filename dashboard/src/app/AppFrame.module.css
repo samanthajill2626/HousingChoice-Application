@@ -1,0 +1,216 @@
+.shell {
+  display: grid;
+  grid-template-columns: var(--nav-width) 1fr;
+  height: 100%;
+}
+
+/* --- Left nav ------------------------------------------------------------- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  background: var(--c-nav-bg);
+  padding: var(--sp-4) var(--sp-3);
+  overflow-y: auto;
+}
+
+.brand {
+  display: block;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+  color: var(--c-nav-brand);
+  padding: var(--sp-2) var(--sp-2) var(--sp-4);
+}
+
+.brand:hover {
+  text-decoration: none;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  flex: 1;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.groupLabel {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-nav-label);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--radius-md);
+  color: var(--c-nav-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.link:hover {
+  background: var(--c-nav-hover-bg);
+  text-decoration: none;
+  color: var(--c-nav-active-text);
+}
+
+.linkActive,
+.linkActive:hover {
+  background: var(--c-nav-active-bg);
+  color: var(--c-nav-active-text);
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.92;
+}
+
+.linkLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 2px var(--sp-5);
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--c-nav-border);
+}
+
+.childLink {
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+}
+
+.dotTenant {
+  background: var(--c-dot-tenant);
+}
+.dotLandlord {
+  background: var(--c-dot-landlord);
+}
+.dotUnknown {
+  background: var(--c-dot-unknown);
+}
+
+.footer {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--c-nav-border);
+}
+
+/* --- Main column --------------------------------------------------------- */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-5);
+}
+
+/* --- Account menu -------------------------------------------------------- */
+.account {
+  position: relative;
+}
+
+.accountTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+  max-width: 220px;
+}
+
+.accountTrigger:hover {
+  background: var(--c-surface-2);
+}
+
+.accountEmail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  min-width: 220px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--sp-3);
+  z-index: 20;
+}
+
+.identity {
+  padding: var(--sp-1) var(--sp-2) var(--sp-3);
+}
+
+.identityEmail {
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.identityRole {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.divider {
+  height: 1px;
+  background: var(--c-border);
+  margin: 0 0 var(--sp-3);
+}

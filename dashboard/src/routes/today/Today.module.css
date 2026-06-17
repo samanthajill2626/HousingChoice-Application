@@ -1,0 +1,178 @@
+/* Today action queue — grouped sections of white row cards. Visual structure
+ * matches the locked mockup (who · why · red urgency chip · tag · amber
+ * attention dot) rendered in the new design language: light content area, all
+ * values from ui/tokens.css (never hard-coded). */
+
+.page {
+  max-width: 880px;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+
+.sub {
+  margin: var(--sp-1) 0 var(--sp-5);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- Groups --------------------------------------------------------------- */
+
+.group {
+  margin-bottom: var(--sp-5);
+}
+
+.groupHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rowItem {
+  margin-bottom: var(--sp-2);
+}
+
+/* --- Row card ------------------------------------------------------------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.row:hover {
+  border-color: var(--c-border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-warning);
+}
+
+.who {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+.why {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.urg {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--c-danger) 12%, transparent);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+/* When there's no urgency chip, the tag is what pins to the right edge. */
+.urg + .tag {
+  margin-left: var(--sp-2);
+}
+
+.tag {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* --- States --------------------------------------------------------------- */
+
+.error {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.empty {
+  margin-top: var(--sp-6);
+  padding: var(--sp-6);
+  text-align: center;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+}
+
+.emptyTitle {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}

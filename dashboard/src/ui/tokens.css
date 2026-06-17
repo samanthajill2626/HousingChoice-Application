@@ -1,0 +1,141 @@
+/* Design tokens — the foundation of the NEW dashboard's look. A fresh, minimal
+ * set (color, type scale, spacing, radius, elevation) authored for the entity-
+ * centric redesign; deliberately NOT a copy of the legacy palette. Expanded as
+ * the page phases land. Everything else in the UI consumes these variables —
+ * never hard-coded values. */
+:root {
+  /* --- Color: neutral ramp ------------------------------------------------ */
+  --c-bg: #f7f8fa;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f3f6;
+  --c-border: #e2e5ea;
+  --c-border-strong: #c9cfd9;
+
+  --c-text: #1a1d23;
+  --c-text-muted: #5b6472;
+  --c-text-subtle: #8a93a3;
+  --c-text-inverse: #ffffff;
+
+  /* --- Color: brand + accents -------------------------------------------- */
+  --c-brand: #1f6feb;
+  --c-brand-hover: #1a5fd0;
+  --c-brand-soft: #e7f0fe;
+
+  --c-success: #1a7f4b;
+  --c-warning: #b06a00;
+  --c-danger: #c23934;
+  --c-danger-hover: #a52f2b;
+
+  --c-focus-ring: rgba(31, 111, 235, 0.45);
+
+  /* --- Color: sidebar (dark) --------------------------------------------- */
+  --c-nav-bg: #1f2937;
+  --c-nav-brand: #ffffff;
+  --c-nav-label: #8a99ad;
+  --c-nav-text: #d7dde7;
+  --c-nav-hover-bg: #283242;
+  --c-nav-active-bg: #374151;
+  --c-nav-active-text: #ffffff;
+  --c-nav-border: #374151;
+  /* Contacts filter dots */
+  --c-dot-tenant: #34d399;
+  --c-dot-landlord: #60a5fa;
+  --c-dot-unknown: #fbbf24;
+
+  /* --- Typography --------------------------------------------------------- */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Code', Menlo, Consolas,
+    monospace;
+
+  --fs-xs: 0.75rem; /* 12 */
+  --fs-sm: 0.8125rem; /* 13 */
+  --fs-md: 0.9375rem; /* 15 */
+  --fs-lg: 1.125rem; /* 18 */
+  --fs-xl: 1.5rem; /* 24 */
+  --fs-2xl: 2rem; /* 32 */
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  --lh-tight: 1.2;
+  --lh-normal: 1.5;
+
+  /* --- Spacing (4px base) ------------------------------------------------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+
+  /* --- Radius ------------------------------------------------------------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* --- Elevation ---------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.1);
+
+  /* --- Contact detail (B2/B3) -------------------------------------------- */
+  /* The near-black header band atop the tenant/landlord detail page. */
+  --c-header-bg: #111827;
+  --c-header-text: #ffffff;
+  --c-header-facts: #cbd5e1;
+  --c-header-btn-bg: #2563eb;
+  --c-header-kebab-bg: #374151;
+
+  /* Type pills (audience: tenant blue / landlord teal). */
+  --c-pill-tenant-bg: #1d4ed8;
+  --c-pill-landlord-bg: #0e7490;
+
+  /* Timeline surfaces. */
+  --c-comms-bg: #f4f6fa;
+  --c-bubble-in-bg: #ffffff;
+  --c-bubble-in-border: #e3e7ec;
+  --c-bubble-out-bg: #dbeafe;
+  --c-bubble-out-border: #bfdbfe;
+  --c-divider: #94a3b8;
+
+  /* Milestone-pin variants (kind → color). */
+  --c-evt-neutral-bg: #ffffff;
+  --c-evt-neutral-border: #dde2e8;
+  --c-evt-neutral-text: #475569;
+  --c-evt-amber-bg: #fef3c7;
+  --c-evt-amber-border: #fde68a;
+  --c-evt-amber-text: #92400e;
+  --c-evt-purple-bg: #ede9fe;
+  --c-evt-purple-border: #ddd6fe;
+  --c-evt-purple-text: #5b21b6;
+  --c-evt-green-bg: #dcfce7;
+  --c-evt-green-border: #bbf7d0;
+  --c-evt-green-text: #166534;
+
+  /* Listing/tour response colors (👍/👎/⏳ rows). */
+  --c-resp-yes: #15803d;
+  --c-resp-no: #b91c1c;
+  --c-resp-wait: #a16207;
+
+  /* --- Listing detail (B4) ----------------------------------------------- */
+  /* Header status badge (pill in the dark band): availability → bg color. */
+  --c-status-available-bg: #15803d;
+  --c-status-placed-bg: #475569;
+  --c-status-inactive-bg: #a16207;
+  /* The small hero + photo-thumbnail placeholders (no real image / S3 key). */
+  --c-media-placeholder-bg: #dde3ea;
+  --c-media-placeholder-border: #cbd5e1;
+  /* The dashed "+ Add" photo affordance. */
+  --c-media-add-border: #9aa6b6;
+  /* Similar-listings match % chip. */
+  --c-match-bg: #ecfdf5;
+  --c-match-border: #a7f3d0;
+  --c-match-text: #15803d;
+
+  /* --- Layout ------------------------------------------------------------- */
+  --nav-width: 240px;
+}

@@ -78,6 +78,12 @@ describe('useToday', () => {
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
     expect(getCases).not.toHaveBeenCalled();
+    // The browser owns "today": the server call carries the operator's LOCAL
+    // calendar day (YYYY-MM-DD), not a UTC toISOString() date.
+    expect(getToday).toHaveBeenCalledWith(
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      expect.anything(),
+    );
   });
 
   it('falls back to cases+conversations on a 404', async () => {

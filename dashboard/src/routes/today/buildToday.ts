@@ -106,8 +106,11 @@ function conversationWho(conv: ConversationSummary): string {
   return conv.participant_display_name ?? formatPhone(conv.participant_phone);
 }
 
-/** YYYY-MM-DD in LOCAL time for a Date (the tour_date comparison basis). */
-function localYmd(d: Date): string {
+/** YYYY-MM-DD in LOCAL time for a Date — the browser's definition of "today".
+ *  Used BOTH as the tour_date comparison basis here AND as the `?day=` the hook
+ *  sends to /api/today, so the server and this fallback agree on which day. Built
+ *  from local fields (getFullYear/Month/Date), never toISOString() (that's UTC). */
+export function localYmd(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');

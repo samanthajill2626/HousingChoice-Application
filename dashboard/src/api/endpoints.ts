@@ -46,9 +46,14 @@ export function loginUrl(): string {
 // same shape client-side from getCases() + getConversations().
 
 /** GET /api/today — the server-assembled Today queue, or throws ApiError(404)
- *  until the backend slice lands (the caller falls back to the client build). */
-export function getToday(signal?: AbortSignal): Promise<TodayResponse> {
-  return request<TodayResponse>('/api/today', { ...(signal !== undefined && { signal }) });
+ *  until the backend slice lands (the caller falls back to the client build).
+ *  `day` = the operator's LOCAL calendar date (YYYY-MM-DD); the timezone-agnostic
+ *  server uses it ONLY to choose the tours_today group (omitting it makes the
+ *  server use the UTC date). Compute `day` from local fields (see localYmd),
+ *  never toISOString(). A malformed `day` returns 400. */
+export function getToday(day?: string, signal?: AbortSignal): Promise<TodayResponse> {
+  const path = day !== undefined ? `/api/today?day=${encodeURIComponent(day)}` : '/api/today';
+  return request<TodayResponse>(path, { ...(signal !== undefined && { signal }) });
 }
 
 /** GET /api/cases — the case board (the Today fallback's deadline/tour/attention

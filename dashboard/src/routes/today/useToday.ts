@@ -13,7 +13,7 @@ import {
   useEventStream,
   type TodayItem,
 } from '../../api/index.js';
-import { buildTodayFromSources } from './buildToday.js';
+import { buildTodayFromSources, localYmd } from './buildToday.js';
 
 export type TodayStatus = 'loading' | 'ready' | 'error';
 export type TodaySource = 'server' | 'fallback';
@@ -32,15 +32,21 @@ const REFETCH_DEBOUNCE_MS = 300;
 async function loadToday(
   signal: AbortSignal,
 ): Promise<{ items: TodayItem[]; source: TodaySource }> {
+  // The BROWSER owns "today". Compute the operator's local calendar day once and
+  // use it for BOTH paths: pass it as ?day= to the timezone-agnostic server, and
+  // (via the same `now`) as the tour_date basis in the fallback — so the server
+  // and the client build always agree on which day's tours to show.
+  const now = new Date();
+  const day = localYmd(now);
   try {
-    const res = await getToday(signal);
+    const res = await getToday(day, signal);
     return { items: res.items, source: 'server' };
   } catch (err) {
     // Only a 404 means "endpoint not live yet" → assemble client-side. Any other
     // failure (and the fallback's own failures) propagates to the error state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
     const [cases, conversations] = await Promise.all([getCases(signal), getConversations(signal)]);
-    const items = buildTodayFromSources(cases.cases, conversations.conversations, new Date());
+    const items = buildTodayFromSources(cases.cases, conversations.conversations, now);
     return { items, source: 'fallback' };
   }
 }

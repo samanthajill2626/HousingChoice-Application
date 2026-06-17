@@ -47,6 +47,29 @@ export function involvesContact(
   );
 }
 
+/** Defensive normalization of the SERVER timeline. Per contract C2 the server
+ *  owns `at` (the ISO sort key) and returns items chronological — but to be
+ *  robust to an item that omits `at`, derive it from the `<ISO ts>#<id>` prefix
+ *  of `id` (the message sort-key shape), and (stable-)sort oldest→newest. A no-op
+ *  when the server already provides a proper `at` + order. (Items with no
+ *  derivable instant keep their relative order and sort last.) */
+export function normalizeServerItems(items: TimelineItem[]): TimelineItem[] {
+  const withAt = items.map((item) => {
+    if (item.at && item.at.length > 0) return { item, at: item.at };
+    const prefix = item.id.split('#')[0] ?? '';
+    const at = /^\d{4}-\d{2}-\d{2}T/.test(prefix) ? prefix : '';
+    return { item: at ? { ...item, at } : item, at };
+  });
+  return withAt
+    .sort((a, b) => {
+      if (a.at === b.at) return 0;
+      if (a.at === '') return 1;
+      if (b.at === '') return -1;
+      return a.at.localeCompare(b.at);
+    })
+    .map((x) => x.item);
+}
+
 async function loadTimeline(
   contactId: string,
   kinds: string | undefined,
@@ -58,7 +81,7 @@ async function loadTimeline(
       kinds !== undefined ? { kinds } : {},
       signal,
     );
-    return { items: page.items, source: 'server' };
+    return { items: normalizeServerItems(page.items), source: 'server' };
   } catch (err) {
     // Only a 404 means "endpoint not live yet" → assemble the fallback. Any
     // other failure (and the fallback's own failures) propagates to the error

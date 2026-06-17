@@ -256,11 +256,13 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         ) : null}
 
         {status === 'ready'
-          ? days.map((day) => (
-              <div key={day.key}>
-                <div className={styles.divider}>{day.label}</div>
-                {day.items.map((item) => (
-                  <StreamItem key={`${item.kind}:${item.id}`} item={item} />
+          ? days.map((day, di) => (
+              // `day.key` can be empty when an item lacks `at` — fall back to the
+              // index so the key is always unique/defined (no React key warning).
+              <div key={day.key || `day-${di}`}>
+                {day.label ? <div className={styles.divider}>{day.label}</div> : null}
+                {day.items.map((item, ii) => (
+                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} />
                 ))}
               </div>
             ))

@@ -28,7 +28,12 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { involvesContact, useContactTimeline } from './useContactTimeline.js';
+import type { TimelineItem } from '../../api/index.js';
+import {
+  involvesContact,
+  normalizeServerItems,
+  useContactTimeline,
+} from './useContactTimeline.js';
 
 function Probe({ contactId, kinds }: { contactId: string; kinds?: string }): React.JSX.Element {
   const { status, items, source } = useContactTimeline(contactId, kinds);
@@ -188,5 +193,42 @@ describe('involvesContact', () => {
   it('handles an empty / undefined roster', () => {
     expect(involvesContact([], 'c1')).toBe(false);
     expect(involvesContact(undefined, 'c1')).toBe(false);
+  });
+});
+
+describe('normalizeServerItems', () => {
+  const msg = (id: string, at?: string): TimelineItem =>
+    ({ kind: 'message', id, type: 'sms', direction: 'inbound', author: 'tenant', delivery_status: 'delivered', ...(at !== undefined && { at }) }) as TimelineItem;
+
+  it('derives at from the id prefix when the server omits it, ordered oldest→newest', () => {
+    // Server shape observed in integration: id is "<ISO ts>#<msgid>", no `at`,
+    // newest-first. Normalize → chronological with `at` populated.
+    const out = normalizeServerItems([
+      msg('2026-06-01T14:05:45.000Z#msg-0003'),
+      msg('2026-06-01T14:02:10.000Z#msg-0002'),
+      msg('2026-06-01T14:00:00.000Z#msg-0001'),
+    ]);
+    expect(out.map((i) => i.id)).toEqual([
+      '2026-06-01T14:00:00.000Z#msg-0001',
+      '2026-06-01T14:02:10.000Z#msg-0002',
+      '2026-06-01T14:05:45.000Z#msg-0003',
+    ]);
+    expect(out[0]?.at).toBe('2026-06-01T14:00:00.000Z');
+  });
+
+  it('keeps a proper server-provided at + order untouched (no-op)', () => {
+    const a = msg('x#1', '2026-06-01T09:00:00.000Z');
+    const b = msg('y#2', '2026-06-01T10:00:00.000Z');
+    const out = normalizeServerItems([a, b]);
+    expect(out).toEqual([a, b]);
+  });
+
+  it('sorts items with no derivable instant last, without crashing', () => {
+    const out = normalizeServerItems([
+      msg('not-an-iso-id'),
+      msg('2026-06-01T08:00:00.000Z#m'),
+    ]);
+    expect(out[0]?.id).toBe('2026-06-01T08:00:00.000Z#m');
+    expect(out[1]?.id).toBe('not-an-iso-id');
   });
 });

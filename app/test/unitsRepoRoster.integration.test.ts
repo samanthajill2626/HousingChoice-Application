@@ -105,6 +105,51 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     expect(removed.primary_voice_contact).toBe('c-ll-4');
   });
 
+  it('removeContact of the ☎-primary pm: exactly one primaryVoice (the landlord) AND scalar === landlordId (FIX B)', async () => {
+    const unit = await units.create({ landlordId: 'c-ll-b1', status: 'available' });
+    // pm becomes the ☎ primary (landlord demoted to primaryVoice:false).
+    await units.addContact(unit.unitId, { contactId: 'c-pm-b1', role: 'pm', primaryVoice: true });
+    const removed = await units.removeContact(unit.unitId, 'c-pm-b1');
+    const roster = removed.contacts ?? [];
+    // Exactly one primaryVoice — the landlord — and the scalar AGREES.
+    const primaries = roster.filter((c) => c.primaryVoice);
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0]?.contactId).toBe('c-ll-b1');
+    expect(removed.primary_voice_contact).toBe('c-ll-b1');
+  });
+
+  it('removeContact of the ☎-primary with NO landlordId clears the scalar (no dangling) and leaves no primaryVoice (FIX B)', async () => {
+    // A landlord-less unit. landlordId is the byLandlord GSI hash key, so an
+    // empty string is illegal at write time — create with a real landlordId,
+    // then REMOVE it (null→REMOVE) to reach the no-landlord state, then seed the
+    // roster + the ☎-primary scalar.
+    const created = await units.create({ landlordId: 'c-temp', status: 'available' });
+    const unit = await units.update(created.unitId, {
+      landlordId: null,
+      contacts: [
+        { contactId: 'c-a', role: 'owner', primaryVoice: false },
+        { contactId: 'c-b', role: 'pm', primaryVoice: true },
+      ],
+      primary_voice_contact: 'c-b',
+    });
+    expect(unit.landlordId).toBeUndefined();
+    const removed = await units.removeContact(unit.unitId, 'c-b');
+    const roster = removed.contacts ?? [];
+    expect(roster.map((c) => c.contactId)).toEqual(['c-a']);
+    // No landlord to promote → no primaryVoice and the scalar is CLEARED (not
+    // left dangling at the removed contact).
+    expect(roster.filter((c) => c.primaryVoice)).toHaveLength(0);
+    expect(removed.primary_voice_contact).toBeUndefined();
+  });
+
+  it('addContact pins the owning landlord row to role:landlord even when added as a non-landlord role (FIX C)', async () => {
+    const unit = await units.create({ landlordId: 'c-ll-c1', status: 'available' });
+    // Add the landlord's own contactId but (mistakenly) as a 'pm'.
+    const updated = await units.addContact(unit.unitId, { contactId: 'c-ll-c1', role: 'pm' });
+    const landlord = (updated.contacts ?? []).find((c) => c.contactId === 'c-ll-c1');
+    expect(landlord?.role).toBe('landlord'); // pinned, not 'pm'
+  });
+
   it('removeContact rejects removing the primary landlord (CannotRemovePrimaryLandlordError)', async () => {
     const unit = await units.create({ landlordId: 'c-ll-5', status: 'available' });
     await expect(units.removeContact(unit.unitId, 'c-ll-5')).rejects.toBeInstanceOf(

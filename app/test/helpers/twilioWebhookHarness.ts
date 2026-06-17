@@ -784,7 +784,12 @@ export function createFakeWorld(): FakeWorld {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`update: no unit ${unitId}`);
       for (const [key, value] of Object.entries(patch)) {
-        if (value !== undefined) unit[key] = value;
+        if (value === undefined) continue; // omitted → untouched
+        if (value === null) {
+          delete unit[key]; // null → REMOVE (mirror the real repo)
+        } else {
+          unit[key] = value;
+        }
       }
       unit.updated_at = new Date().toISOString();
       return unit;
@@ -823,15 +828,19 @@ export function createFakeWorld(): FakeWorld {
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
       const primaryVoice = contact.primaryVoice === true;
+      // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
+      const isPrimaryLandlord =
+        typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
+      const role: UnitContact['role'] = isPrimaryLandlord ? 'landlord' : contact.role;
       if (existing) {
-        existing.role = contact.role;
+        existing.role = role;
         existing.primaryVoice = primaryVoice;
         if (contact.name !== undefined) existing.name = contact.name;
         if (contact.company !== undefined) existing.company = contact.company;
       } else {
         const entry: UnitContact = {
           contactId: contact.contactId,
-          role: contact.role,
+          role,
           primaryVoice,
           ...(contact.name !== undefined ? { name: contact.name } : {}),
           ...(contact.company !== undefined ? { company: contact.company } : {}),
@@ -857,13 +866,20 @@ export function createFakeWorld(): FakeWorld {
       const target = roster.find((c) => c.contactId === contactId);
       if (!target) throw conditionalCheckFailed(`removeContact: unit ${unitId} has no contact ${contactId}`);
       const removedWasPrimaryVoice = target.primaryVoice;
-      unit.contacts = roster.filter((c) => c.contactId !== contactId);
-      if (
-        removedWasPrimaryVoice &&
-        typeof unit.landlordId === 'string' &&
-        unit.landlordId.length > 0
-      ) {
-        unit.primary_voice_contact = unit.landlordId;
+      const next = roster.filter((c) => c.contactId !== contactId);
+      unit.contacts = next;
+      // FIX B: keep the roster primaryVoice flag and the primary_voice_contact
+      // scalar in agreement after removing the ☎ primary (lockstep with the real
+      // repo).
+      if (removedWasPrimaryVoice) {
+        const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
+        if (landlordId.length > 0) {
+          for (const c of next) c.primaryVoice = c.contactId === landlordId;
+          unit.primary_voice_contact = landlordId;
+        } else {
+          for (const c of next) c.primaryVoice = false;
+          delete unit.primary_voice_contact; // null → REMOVE; never dangling
+        }
       }
       unit.updated_at = new Date().toISOString();
       return unit;

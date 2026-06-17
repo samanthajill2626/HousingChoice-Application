@@ -47,6 +47,12 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   tour_process: 'string',
   application_process: 'string',
   primary_voice_contact: 'string',
+  // BE3/C3: the PARENT property/building group id (byProperty GSI hash). WRITABLE
+  // so the related-units `same_property` branch is reachable through the API
+  // (create/PATCH), not only via seeded fakes — without this it'd be permanently
+  // empty in production. A plain string id; the sparse GSI only indexes units
+  // that carry it.
+  propertyId: 'string',
 };
 
 function isFiniteNumber(v: unknown): v is number {

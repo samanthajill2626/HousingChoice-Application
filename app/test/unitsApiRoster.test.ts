@@ -133,6 +133,9 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
     const roster = res.body.unit.contacts as Array<Record<string, unknown>>;
     expect(roster.filter((c) => c.primaryVoice === true)).toHaveLength(1);
     expect(roster.find((c) => c.primaryVoice === true)?.contactId).toBe('c-pm-4');
+    // The WIRE response carries the updated voice-routing field (serializer
+    // verified, not just the fake's backing map).
+    expect(res.body.unit.primary_voice_contact).toBe('c-pm-4');
     // The stored unit's voice-routing field tracks the roster ☎ primary.
     expect(world.units.get('u-4')?.primary_voice_contact).toBe('c-pm-4');
   });
@@ -186,7 +189,52 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   });
 });
 
+describe('POST /api/units/:id/contacts — landlord role is pinned (BE3/C3 FIX C)', () => {
+  it('keeps the landlord row role:landlord even when added with a non-landlord role', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-pin', { landlordId: 'c-ll-pin' });
+    // The contact IS the unit's landlord, but is (mistakenly) posted as a 'pm'.
+    seedContact(world, 'c-ll-pin', { type: 'landlord', firstName: 'Lee', lastName: 'Lord' });
+
+    const res = await request(app)
+      .post('/api/units/u-pin/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ contactId: 'c-ll-pin', role: 'pm' });
+
+    expect(res.status).toBe(200);
+    const roster = res.body.unit.contacts as Array<Record<string, unknown>>;
+    const landlordRow = roster.find((c) => c.contactId === 'c-ll-pin');
+    // Role is forced back to 'landlord' (structural), NOT the supplied 'pm'.
+    expect(landlordRow?.role).toBe('landlord');
+  });
+});
+
 describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
+  it('removing the ☎-primary pm keeps the roster flag and scalar in agreement (FIX B)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Landlord present; the pm is the current ☎ primary.
+    seedUnit(world, 'u-consist', {
+      landlordId: 'c-ll-c',
+      primary_voice_contact: 'c-pm-c',
+      contacts: [
+        { contactId: 'c-ll-c', role: 'landlord', primaryVoice: false },
+        { contactId: 'c-pm-c', role: 'pm', primaryVoice: true },
+      ],
+    });
+    const res = await request(app)
+      .delete('/api/units/u-consist/contacts/c-pm-c')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const roster = res.body.unit.contacts as Array<Record<string, unknown>>;
+    // Exactly one primaryVoice — the landlord — and the scalar agrees.
+    expect(roster.filter((c) => c.primaryVoice === true)).toHaveLength(1);
+    expect(roster.find((c) => c.primaryVoice === true)?.contactId).toBe('c-ll-c');
+    expect(res.body.unit.primary_voice_contact).toBe('c-ll-c');
+    expect(world.units.get('u-consist')?.primary_voice_contact).toBe('c-ll-c');
+  });
+
   it('removes a non-landlord roster contact + audits unit_contact_removed', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-8', {
@@ -260,6 +308,47 @@ describe('GET /api/units/:id/related (BE3/C3)', () => {
     const firstLandlordIdx = related.findIndex((r) => r.relation === 'same_landlord');
     const lastPropertyIdx = related.map((r) => r.relation).lastIndexOf('same_property');
     expect(lastPropertyIdx).toBeLessThan(firstLandlordIdx);
+  });
+
+  it('propertyId is WRITABLE end-to-end: create + PATCH two units to the same property, then related → same_property (FIX A)', async () => {
+    const { app } = makeWebhookHarness();
+    // Create the target unit WITH a propertyId straight through the API
+    // (proves propertyId passes the strict field allowlist on create).
+    const createA = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'c-ll-prop', status: 'available', propertyId: 'prop-API' });
+    expect(createA.status).toBe(201);
+    const targetId = createA.body.unit.unitId as string;
+    expect(createA.body.unit.propertyId).toBe('prop-API');
+
+    // Create a sibling without propertyId, then PATCH it to the same property
+    // (proves propertyId passes the allowlist on update too).
+    const createB = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'c-ll-other', status: 'available' });
+    expect(createB.status).toBe(201);
+    const siblingId = createB.body.unit.unitId as string;
+
+    const patchB = await request(app)
+      .patch(`/api/units/${siblingId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ propertyId: 'prop-API' });
+    expect(patchB.status).toBe(200);
+    expect(patchB.body.unit.propertyId).toBe('prop-API');
+
+    // The related endpoint now finds the sibling via the same_property branch.
+    const res = await request(app)
+      .get(`/api/units/${targetId}/related`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const related = res.body.related as Array<{ unitId: string; relation: string }>;
+    expect(related.find((r) => r.unitId === siblingId)?.relation).toBe('same_property');
   });
 
   it('returns { related: [] } for a roster-less + property-less unit (only itself owned)', async () => {

@@ -255,9 +255,12 @@ export interface UnitsRepo {
    * primary landlord (contactId === unit.landlordId) with
    * CannotRemovePrimaryLandlordError (route 409). A contact not on the roster
    * throws ConditionalCheckFailedException (route 404). When the removed contact
-   * was the current primaryVoice (and isn't the landlord), the unit's
-   * `primary_voice_contact` falls back to the legacy `landlordId` (never left
-   * dangling). Persists contacts[] + the voice field. Returns the unit.
+   * was the current primaryVoice, the roster flag and the `primary_voice_contact`
+   * scalar are kept in AGREEMENT: with a `landlordId`, the landlord row is
+   * promoted to the lone primaryVoice and the scalar points at it; with NO
+   * `landlordId`, both are cleared (the scalar is REMOVEd, never left dangling at
+   * the removed contact, and no row stays primaryVoice). Persists contacts[] +
+   * the voice field. Returns the unit.
    */
   removeContact(unitId: string, contactId: string): Promise<UnitItem>;
   /**
@@ -330,38 +333,50 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     },
 
     async update(unitId, patch) {
-      // SET-only merge: each supplied field is written; omitted fields are
-      // untouched. Names are expression-aliased so reserved words (`status`,
-      // `priority`, `media`) are always legal. updated_at is always bumped.
+      // SET each supplied non-null field; REMOVE each explicit-null field (the
+      // only way to truly CLEAR an attribute — e.g. removeContact dropping a
+      // dangling primary_voice_contact when no landlord remains; mirrors
+      // casesRepo.update). Omitted (undefined) fields are LEFT untouched (the
+      // no-overwrite contract). Names are expression-aliased so reserved words
+      // (`status`, `priority`, `media`) are always legal. updated_at is always
+      // bumped.
       const sets: string[] = [];
+      const removes: string[] = [];
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) continue;
+        if (value === undefined) continue; // omitted → untouched
         const nameKey = `#k${i}`;
-        const valueKey = `:v${i}`;
         names[nameKey] = key;
-        values[valueKey] = value;
-        sets.push(`${nameKey} = ${valueKey}`);
+        if (value === null) {
+          removes.push(nameKey);
+        } else {
+          const valueKey = `:v${i}`;
+          values[valueKey] = value;
+          sets.push(`${nameKey} = ${valueKey}`);
+        }
         i += 1;
       }
       names['#updatedAt'] = 'updated_at';
       values[':updatedAt'] = new Date().toISOString();
       sets.push('#updatedAt = :updatedAt');
 
+      const clauses = [`SET ${sets.join(', ')}`];
+      if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { unitId },
-          UpdateExpression: `SET ${sets.join(', ')}`,
+          UpdateExpression: clauses.join(' '),
           ConditionExpression: 'attribute_exists(unitId)',
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: 'ALL_NEW',
         }),
       );
-      log.info({ unitId, fields: Object.keys(values).length - 1 }, 'unit updated');
+      log.info({ unitId, fields: sets.length - 1 + removes.length }, 'unit updated');
       return Attributes as UnitItem;
     },
 
@@ -393,15 +408,21 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       // landlord is always represented), then upsert this contact by contactId.
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
+      // The owning landlord's role is STRUCTURAL: a row for the unit's
+      // landlordId is always 'landlord', regardless of the supplied role — a
+      // non-'landlord' add must never overwrite it (BE3/C3 FIX C).
+      const isPrimaryLandlord =
+        typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
+      const role: UnitContact['role'] = isPrimaryLandlord ? 'landlord' : contact.role;
       const next: UnitContact = {
         contactId: contact.contactId,
-        role: contact.role,
+        role,
         primaryVoice: contact.primaryVoice === true,
         ...(contact.name !== undefined ? { name: contact.name } : {}),
         ...(contact.company !== undefined ? { company: contact.company } : {}),
       };
       if (existing) {
-        existing.role = next.role;
+        existing.role = next.role; // pinned to 'landlord' for the owning landlord
         existing.primaryVoice = next.primaryVoice;
         // Denormalized fields: update when supplied, preserve otherwise.
         if (contact.name !== undefined) existing.name = contact.name;
@@ -460,12 +481,25 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       const next = roster.filter((c) => c.contactId !== contactId);
 
       const patch: Record<string, unknown> = { contacts: next };
-      // When the removed contact was the ☎ primary, the voice field falls back
-      // to the legacy landlordId (never left pointing at a removed contact). The
-      // landlord itself can't be removed (guarded above), so landlordId is a
-      // valid fallback target.
-      if (removedWasPrimaryVoice && typeof unit.landlordId === 'string' && unit.landlordId.length > 0) {
-        patch['primary_voice_contact'] = unit.landlordId;
+      // When the removed contact was the ☎ primary, keep the roster flag and the
+      // scalar `primary_voice_contact` in AGREEMENT (BE3/C3 FIX B) — a frontend
+      // deriving "which is the ☎ primary" from either source must get the same
+      // answer, and the scalar must never dangle at the removed contact.
+      if (removedWasPrimaryVoice) {
+        const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
+        if (landlordId.length > 0) {
+          // Promote the landlord row to the ☎ primary (exactly one) and point
+          // the scalar at it. The landlord can't be removed (guarded above), so
+          // its row is still present in `next`.
+          for (const c of next) c.primaryVoice = c.contactId === landlordId;
+          patch['primary_voice_contact'] = landlordId;
+        } else {
+          // No landlord to fall back to: clear the scalar (never leave it
+          // dangling at the removed contact) and leave the roster with no ☎
+          // primary. null → UpdateExpression REMOVE (see update()).
+          for (const c of next) c.primaryVoice = false;
+          patch['primary_voice_contact'] = null;
+        }
       }
 
       const updated = await this.update(unitId, patch);

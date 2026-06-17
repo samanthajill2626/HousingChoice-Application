@@ -1,0 +1,96 @@
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Contact } from '../../api/index.js';
+import type { ContactsState } from './useContacts.js';
+
+// Drive the view through a mocked useContacts so these tests are independent of
+// fetching (covered separately) and assert the route → filter behavior, the
+// rendered rows/links, the search box, and the loading/error/empty states.
+let state: ContactsState = { status: 'loading', contacts: [] };
+vi.mock('./useContacts.js', () => ({ useContacts: () => state }));
+
+import { ContactsList } from './ContactsList.js';
+
+const CONTACTS: Contact[] = [
+  { contactId: 'c1', type: 'tenant', firstName: 'Tasha', lastName: 'Williams', phone: '+14040100007', status: 'active' },
+  { contactId: 'c2', type: 'landlord', firstName: 'James', lastName: 'Porter', phone: '+14040100008' },
+  { contactId: 'c3', type: 'unknown', phone: '+14040100009' },
+];
+
+function renderList(filter: 'all' | 'tenant' | 'landlord' | 'unknown' = 'all'): void {
+  render(
+    <MemoryRouter>
+      <ContactsList filter={filter} />
+    </MemoryRouter>,
+  );
+}
+
+beforeEach(() => {
+  state = { status: 'loading', contacts: [] };
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('ContactsList', () => {
+  it('shows a spinner while loading', () => {
+    state = { status: 'loading', contacts: [] };
+    renderList();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+  });
+
+  it('shows an inline error on failure', () => {
+    state = { status: 'error', contacts: [] };
+    renderList();
+    expect(screen.getByText(/couldn.t load|try again/i)).toBeInTheDocument();
+  });
+
+  it('shows a friendly empty state when there are no contacts', () => {
+    state = { status: 'ready', contacts: [] };
+    renderList('tenant');
+    expect(screen.getByText(/no tenants yet/i)).toBeInTheDocument();
+  });
+
+  it('uses a heading that reflects the active filter', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('tenant');
+    expect(screen.getByRole('heading', { level: 1, name: 'Tenants' })).toBeInTheDocument();
+  });
+
+  it('renders a row per contact with name, phone, type, and a detail link', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    const tasha = screen.getByRole('link', { name: /Tasha Williams/ });
+    expect(tasha).toHaveAttribute('href', '/contacts/c1');
+    expect(within(tasha).getByText(/\(404\) 010-0007/)).toBeInTheDocument();
+    expect(within(tasha).getByText(/tenant/i)).toBeInTheDocument();
+  });
+
+  it('falls back to the formatted phone when a contact has no name', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    const unknown = screen.getByRole('link', { name: /\(404\) 010-0009/ });
+    expect(unknown).toHaveAttribute('href', '/contacts/c3');
+  });
+
+  it('filters the rows client-side via the search box (by name or phone)', async () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+
+    const search = screen.getByRole('searchbox', { name: /search/i });
+    await userEvent.type(search, 'porter');
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByText(/James Porter/)).toBeInTheDocument();
+  });
+
+  it('shows a no-matches state when the search excludes every row', async () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'zzzzz');
+    expect(screen.getByText(/no matches|nothing/i)).toBeInTheDocument();
+  });
+});

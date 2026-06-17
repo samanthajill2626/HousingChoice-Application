@@ -7,11 +7,25 @@
 // `end` marks an exact-match link (react-router NavLink `end`) so a parent route
 // isn't highlighted while a child route is active.
 
+/** Icon id → resolved to a component via `ui/icons.tsx` NAV_ICONS. */
+export type NavIconName =
+  | 'today'
+  | 'cases'
+  | 'contacts'
+  | 'listings'
+  | 'inbox'
+  | 'broadcasts'
+  | 'settings';
+
 export interface NavLeaf {
   to: string;
   label: string;
   /** Exact-match active state (NavLink `end`). */
   end?: boolean;
+  /** Leading nav icon (top-level items only). */
+  icon?: NavIconName;
+  /** Colored filter dot (the Contacts children: tenant/landlord/unknown). */
+  dot?: 'tenant' | 'landlord' | 'unknown';
 }
 
 export interface NavParent extends NavLeaf {
@@ -34,32 +48,33 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Workspace',
     items: [
-      { to: '/', label: 'Today', end: true },
-      { to: '/cases', label: 'Cases' },
+      { to: '/', label: 'Today', end: true, icon: 'today' },
+      { to: '/cases', label: 'Cases', icon: 'cases' },
       {
         to: '/contacts',
         label: 'Contacts',
         end: true,
+        icon: 'contacts',
         children: [
-          { to: '/contacts/tenants', label: 'Tenants' },
-          { to: '/contacts/landlords', label: 'Landlords' },
-          { to: '/contacts/unknown', label: 'Unknown' },
+          { to: '/contacts/tenants', label: 'Tenants', dot: 'tenant' },
+          { to: '/contacts/landlords', label: 'Landlords', dot: 'landlord' },
+          { to: '/contacts/unknown', label: 'Unknown', dot: 'unknown' },
         ],
       },
-      { to: '/listings', label: 'Listings' },
+      { to: '/listings', label: 'Listings', icon: 'listings' },
     ],
   },
   {
     label: 'Communications',
     items: [
-      { to: '/inbox', label: 'Inbox' },
-      { to: '/broadcasts', label: 'Broadcasts' },
+      { to: '/inbox', label: 'Inbox', icon: 'inbox' },
+      { to: '/broadcasts', label: 'Broadcasts', icon: 'broadcasts' },
     ],
   },
 ];
 
 /** The footer nav link (rendered apart from the two groups). */
-export const NAV_FOOTER: NavLeaf = { to: '/settings', label: 'Settings' };
+export const NAV_FOOTER: NavLeaf = { to: '/settings', label: 'Settings', icon: 'settings' };
 
 /** Every nav target, flattened (parents + children + footer) — used to mount a
  *  placeholder route per destination so the frame is fully navigable in B0. */

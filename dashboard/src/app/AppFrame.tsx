@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { logout } from '../api/index.js';
 import { Button } from '../ui/index.js';
+import { NAV_ICONS } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
 import { NAV_FOOTER, NAV_GROUPS, isNavParent, type NavLeaf } from './nav.js';
 import styles from './AppFrame.module.css';
@@ -19,10 +20,22 @@ function childLinkClass({ isActive }: { isActive: boolean }): string {
   return `${styles.link} ${styles.childLink} ${isActive ? styles.linkActive : ''}`;
 }
 
+const DOT_CLASS: Record<NonNullable<NavLeaf['dot']>, string> = {
+  tenant: styles.dotTenant ?? '',
+  landlord: styles.dotLandlord ?? '',
+  unknown: styles.dotUnknown ?? '',
+};
+
 function NavLeafLink({ item }: { item: NavLeaf }): React.JSX.Element {
+  const Icon = item.icon ? NAV_ICONS[item.icon] : undefined;
   return (
     <NavLink to={item.to} end={item.end ?? false} className={linkClass}>
-      {item.label}
+      {Icon ? (
+        <span className={styles.icon}>
+          <Icon />
+        </span>
+      ) : null}
+      <span className={styles.linkLabel}>{item.label}</span>
     </NavLink>
   );
 }
@@ -56,7 +69,10 @@ export function AppFrame(): React.JSX.Element {
                     <div className={styles.children}>
                       {item.children.map((child) => (
                         <NavLink key={child.to} to={child.to} className={childLinkClass}>
-                          {child.label}
+                          {child.dot ? (
+                            <span className={`${styles.dot} ${DOT_CLASS[child.dot]}`} />
+                          ) : null}
+                          <span className={styles.linkLabel}>{child.label}</span>
                         </NavLink>
                       ))}
                     </div>

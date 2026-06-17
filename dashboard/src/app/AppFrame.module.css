@@ -8,8 +8,7 @@
 .sidebar {
   display: flex;
   flex-direction: column;
-  background: var(--c-surface);
-  border-right: 1px solid var(--c-border);
+  background: var(--c-nav-bg);
   padding: var(--sp-4) var(--sp-3);
   overflow-y: auto;
 }
@@ -19,7 +18,7 @@
   font-size: var(--fs-lg);
   font-weight: var(--fw-bold);
   letter-spacing: -0.01em;
-  color: var(--c-text);
+  color: var(--c-nav-brand);
   padding: var(--sp-2) var(--sp-2) var(--sp-4);
 }
 
@@ -37,7 +36,7 @@
 .group {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: 2px;
 }
 
 .groupLabel {
@@ -45,47 +44,86 @@
   font-weight: var(--fw-semibold);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--c-text-subtle);
+  color: var(--c-nav-label);
   padding: var(--sp-1) var(--sp-2);
 }
 
 .link {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-2);
   border-radius: var(--radius-md);
-  color: var(--c-text-muted);
-  font-size: var(--fs-md);
+  color: var(--c-nav-text);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
 }
 
 .link:hover {
-  background: var(--c-surface-2);
+  background: var(--c-nav-hover-bg);
   text-decoration: none;
-  color: var(--c-text);
+  color: var(--c-nav-active-text);
 }
 
-.linkActive {
-  background: var(--c-brand-soft);
-  color: var(--c-brand);
+.linkActive,
+.linkActive:hover {
+  background: var(--c-nav-active-bg);
+  color: var(--c-nav-active-text);
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.92;
+}
+
+.linkLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .children {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
-  margin: var(--sp-1) 0 var(--sp-1) var(--sp-3);
+  gap: 2px;
+  margin: 2px 0 2px var(--sp-5);
   padding-left: var(--sp-2);
-  border-left: 1px solid var(--c-border);
+  border-left: 1px solid var(--c-nav-border);
 }
 
 .childLink {
   font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+}
+
+.dotTenant {
+  background: var(--c-dot-tenant);
+}
+.dotLandlord {
+  background: var(--c-dot-landlord);
+}
+.dotUnknown {
+  background: var(--c-dot-unknown);
 }
 
 .footer {
   margin-top: var(--sp-4);
   padding-top: var(--sp-4);
-  border-top: 1px solid var(--c-border);
+  border-top: 1px solid var(--c-nav-border);
 }
 
 /* --- Main column --------------------------------------------------------- */

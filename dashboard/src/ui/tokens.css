@@ -28,6 +28,20 @@
 
   --c-focus-ring: rgba(31, 111, 235, 0.45);
 
+  /* --- Color: sidebar (dark) --------------------------------------------- */
+  --c-nav-bg: #1f2937;
+  --c-nav-brand: #ffffff;
+  --c-nav-label: #8a99ad;
+  --c-nav-text: #d7dde7;
+  --c-nav-hover-bg: #283242;
+  --c-nav-active-bg: #374151;
+  --c-nav-active-text: #ffffff;
+  --c-nav-border: #374151;
+  /* Contacts filter dots */
+  --c-dot-tenant: #34d399;
+  --c-dot-landlord: #60a5fa;
+  --c-dot-unknown: #fbbf24;
+
   /* --- Typography --------------------------------------------------------- */
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
     sans-serif;

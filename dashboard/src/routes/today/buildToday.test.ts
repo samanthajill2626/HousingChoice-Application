@@ -222,4 +222,61 @@ describe('buildTodayFromSources', () => {
       'follow_ups',
     ]);
   });
+
+  it('attention takes precedence over a follow-up deadline (needs_you_now only, not duplicated)', () => {
+    const items = buildTodayFromSources(
+      [
+        caseOf({
+          caseId: 'esc',
+          stage: 'applied',
+          next_deadline_type: 'follow_up',
+          next_deadline_at: at(DAY),
+          attention: { reason: 'Send failed — needs a call', at: NOW.toISOString() },
+        }),
+      ],
+      [],
+      NOW,
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]?.group).toBe('needs_you_now');
+    expect(items[0]?.attention).toBe(true);
+    expect(items[0]?.why).toMatch(/send failed/i);
+    expect(items.some((i) => i.group === 'follow_ups')).toBe(false);
+  });
+
+  it('renders an unknown stage / deadline type literally rather than "undefined"', () => {
+    const items = buildTodayFromSources(
+      [
+        caseOf({
+          caseId: 'weird',
+          // Flexible server doc: values outside the known enums.
+          stage: 'archived' as CaseItem['stage'],
+          next_deadline_type: 'mystery' as CaseItem['next_deadline_type'],
+          next_deadline_at: at(HOUR),
+        }),
+      ],
+      [],
+      NOW,
+    );
+    expect(items[0]?.tag).toBe('Case · archived');
+    expect(items[0]?.why).toBe('Deadline');
+    expect(items[0]?.why).not.toContain('undefined');
+    expect(items[0]?.tag).not.toContain('undefined');
+  });
+
+  it('does not crash on a malformed deadline instant (sorts after valid ones)', () => {
+    const items = buildTodayFromSources(
+      [
+        caseOf({ caseId: 'good', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
+        caseOf({ caseId: 'bad', next_deadline_type: 'rta_window', next_deadline_at: 'not-a-date' }),
+      ],
+      [],
+      NOW,
+    );
+    expect(items).toHaveLength(2);
+    // The valid-deadline row sorts before the malformed (null-sort) one.
+    expect(items[0]?.refId).toBe('good');
+    expect(items[1]?.refId).toBe('bad');
+    expect(items[1]?.urgency).toBe('');
+  });
 });

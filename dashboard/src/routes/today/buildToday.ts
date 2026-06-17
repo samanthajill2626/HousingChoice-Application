@@ -81,7 +81,8 @@ function humanizeUrgency(deadlineAt: string, now: Date): string {
   if (Number.isNaN(delta)) return '';
   if (delta <= 0) return 'overdue';
   if (delta < HOUR_MS) {
-    const mins = Math.max(1, Math.round(delta / 60_000));
+    // Clamp to 59 so a 59m59s delta never renders "60m left" (→ would read as 1h).
+    const mins = Math.min(59, Math.max(1, Math.round(delta / 60_000)));
     return `${mins}m left`;
   }
   if (delta < DAY_MS) {
@@ -134,35 +135,43 @@ export function buildTodayFromSources(
   const unreplied: TodayItem[] = [];
 
   for (const c of cases) {
-    const tag = `Case · ${STAGE_LABELS[c.stage]}`;
+    // `?? c.stage` guards an unknown stage (CaseItem is a flexible server doc) so
+    // the tag never renders "Case · undefined".
+    const tag = `Case · ${STAGE_LABELS[c.stage] ?? c.stage}`;
     const deadlineType = c.next_deadline_type;
     const isFollowUp = deadlineType !== undefined && FOLLOW_UP_DEADLINES.has(deadlineType);
 
-    // follow_ups: follow-up / stuck deadlines.
-    if (isFollowUp && deadlineType !== undefined) {
+    // follow_ups: follow-up / stuck deadlines — UNLESS the case also carries an
+    // `attention` escalation, which takes precedence and routes it to
+    // needs_you_now instead (a case appears in exactly one of the two groups).
+    if (isFollowUp && deadlineType !== undefined && !c.attention) {
       followUps.push({
         group: 'follow_ups',
         refType: 'case',
         refId: c.caseId,
+        // who = tenantId: a KNOWN fallback-only cosmetic gap. CaseItem carries no
+        // tenant name on the wire; the real /api/today resolves it server-side.
         who: c.tenantId,
-        why: DEADLINE_WHY[deadlineType],
+        why: DEADLINE_WHY[deadlineType] ?? 'Deadline',
         tag,
       });
     }
 
     // needs_you_now: a non-follow-up deadline.
     if (c.next_deadline_at !== undefined && deadlineType !== undefined && !isFollowUp) {
+      const t = new Date(c.next_deadline_at).getTime();
       needs.push({
         item: {
           group: 'needs_you_now',
           refType: 'case',
           refId: c.caseId,
           who: c.tenantId,
-          why: DEADLINE_WHY[deadlineType],
+          why: DEADLINE_WHY[deadlineType] ?? 'Deadline',
           urgency: humanizeUrgency(c.next_deadline_at, now),
           tag,
         },
-        sortAt: new Date(c.next_deadline_at).getTime(),
+        // Coerce a malformed deadline (NaN) to null so it sorts after valid ones.
+        sortAt: Number.isNaN(t) ? null : t,
       });
     } else if (c.attention) {
       // needs_you_now: an escalation flag (only when not already added via a
@@ -218,7 +227,7 @@ export function buildTodayFromSources(
         refId: conv.conversationId,
         who: conversationWho(conv),
         why: conv.preview ?? 'Unread message',
-        tag: `Contact · ${CONTACT_TYPE_LABELS[conv.type]}`,
+        tag: `Contact · ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,
       });
     }
   }

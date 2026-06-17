@@ -8,12 +8,14 @@ import { Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
+import { UnreadProvider } from './app/UnreadContext.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
 import { ContactsList } from './routes/contacts/ContactsList.js';
 import { ListingsList } from './routes/listings/ListingsList.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
 import { ListingDetail } from './routes/listing/ListingDetail.js';
+import { Inbox } from './routes/inbox/Inbox.js';
 import { allNavTargets } from './app/nav.js';
 
 // Nav destinations that now have a REAL page (handled by an explicit <Route>
@@ -25,6 +27,7 @@ const IMPLEMENTED = new Set<string>([
   '/contacts/landlords',
   '/contacts/unknown',
   '/listings',
+  '/inbox',
 ]);
 
 export default function App(): React.JSX.Element {
@@ -32,7 +35,13 @@ export default function App(): React.JSX.Element {
     <AuthProvider>
       <AuthGate>
         <Routes>
-          <Route element={<AppFrame />}>
+          <Route
+            element={
+              <UnreadProvider>
+                <AppFrame />
+              </UnreadProvider>
+            }
+          >
             <Route index element={<Today />} />
 
             {/* Contacts list views (§IA: Contacts parent ▸ Tenants/Landlords/
@@ -45,6 +54,9 @@ export default function App(): React.JSX.Element {
 
             {/* Listings list view. Static — ranks above listings/:unitId. */}
             <Route path="listings" element={<ListingsList />} />
+
+            {/* Communications ▸ Inbox (replaces the generated placeholder). */}
+            <Route path="inbox" element={<Inbox />} />
 
             {/* The remaining nav destinations stay placeholders for now. */}
             {allNavTargets()

@@ -11,6 +11,8 @@ import type {
   ContactType,
   ConversationsPage,
   DevLoginResult,
+  InboxFilter,
+  InboxPage,
   ListingSendRow,
   Me,
   Message,
@@ -252,4 +254,53 @@ export async function devPing(signal?: AbortSignal): Promise<boolean> {
  *  local DB too (known personas keep their role; others default to admin). */
 export function devLogin(email = 'va@example.com'): Promise<DevLoginResult> {
   return request<DevLoginResult>('/auth/dev-login', { method: 'POST', body: { email } });
+}
+
+// --- Inbox (/api/inbox) (§API Contract C8) ----------------------------------
+// The entity-centric inbox feed + its read/assign mutations. GET 404s until the
+// BE7/C8 backend slice lands → useInbox catches that and degrades to 'pending'.
+
+/** GET /api/inbox — one page of inbox rows for a filter (newest-activity-first,
+ *  one row per contact). Throws ApiError(404) until the backend slice lands. */
+export function getInbox(
+  params: { filter?: InboxFilter; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<InboxPage> {
+  return request<InboxPage>('/api/inbox', {
+    query: { filter: params.filter, cursor: params.cursor, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/inbox/:contactId/read (contact rows) — or POST /api/inbox/read
+ *  { phone } (unknown rows, keyed by number) — mark the comms read. */
+export function markInboxRead(
+  target: { contactId: string } | { phone: string },
+  signal?: AbortSignal,
+): Promise<void> {
+  if ('contactId' in target) {
+    return request<void>(`/api/inbox/${encodeURIComponent(target.contactId)}/read`, {
+      method: 'POST',
+      ...(signal !== undefined && { signal }),
+    });
+  }
+  return request<void>('/api/inbox/read', {
+    method: 'POST',
+    body: { phone: target.phone },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/inbox/:contactId/assign { userId } — set (userId) or clear
+ *  (userId=null) the contact row's assignment. */
+export function assignInbox(
+  contactId: string,
+  userId: string | null,
+  signal?: AbortSignal,
+): Promise<void> {
+  return request<void>(`/api/inbox/${encodeURIComponent(contactId)}/assign`, {
+    method: 'POST',
+    body: { userId },
+    ...(signal !== undefined && { signal }),
+  });
 }

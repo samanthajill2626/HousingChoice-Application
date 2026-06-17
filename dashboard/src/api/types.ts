@@ -554,3 +554,33 @@ export interface SimilarUnit {
   matchPct: number;
   summary: string;
 }
+
+// --- C8: Inbox feed (§API Contract C8) --------------------------------------
+// Copied verbatim from the spec (2026-06-17-inbox-design.md §C8). The entity-
+// centric inbox: ONE row per contact (or one untriaged unknown number),
+// newest-activity-first, aggregating all of a contact's numbers. GET /api/inbox
+// 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
+
+export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
+export type InboxChannel = 'sms' | 'mms' | 'call';
+
+export interface InboxRow {
+  kind: 'contact' | 'unknown';
+  contactId?: string; // present when kind='contact'
+  phone?: string; // E.164; the number (esp. for unknown rows)
+  name: string; // contact name, or formatted number when unknown
+  role?: 'tenant' | 'landlord' | 'unknown';
+  caseContext?: { caseId: string; label: string }; // e.g. "Touring" — optional
+  unreadCount: number; // aggregate across ALL of the contact's numbers
+  preview: string; // latest item's text as a preview (UI shows one line, ellipsized)
+  channel: InboxChannel; // channel of the latest item
+  direction: 'inbound' | 'outbound'; // 'outbound' → render "You: …"
+  lastActivityAt: string; // ISO; sort key (newest first)
+  assignment?: { userId: string; name: string }; // the Assigned chip
+  needsTriage: boolean; // true for untriaged unknowns
+}
+
+export interface InboxPage {
+  rows: InboxRow[]; // newest-activity-first; ONE row per contact
+  nextCursor: string | null;
+}

@@ -3,6 +3,11 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../App.js';
 
+vi.mock('./UnreadContext.js', () => ({
+  UnreadProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useUnread: () => ({ unread: 4 }),
+}));
+
 // Render the whole app authenticated as the seeded VA (mock /auth/me 200), so
 // the AppFrame mounts with a real AuthContext + router.
 function renderAuthedApp(): void {
@@ -68,5 +73,13 @@ describe('AppFrame', () => {
     const menu = screen.getByRole('menu');
     expect(within(menu).getByText('va@example.com')).toBeInTheDocument();
     expect(within(menu).getByRole('button', { name: /Sign out/i })).toBeInTheDocument();
+  });
+
+  it('shows the Inbox unread badge from the unread provider', async () => {
+    renderAuthedApp();
+    await waitFor(() =>
+      expect(screen.getByRole('navigation', { name: 'Communications' })).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText('4 unread')).toBeInTheDocument();
   });
 });

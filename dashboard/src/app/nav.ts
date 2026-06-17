@@ -26,6 +26,9 @@ export interface NavLeaf {
   icon?: NavIconName;
   /** Colored filter dot (the Contacts children: tenant/landlord/unknown). */
   dot?: 'tenant' | 'landlord' | 'unknown';
+  /** Marks a leaf that renders a live count badge (resolved from context, not
+   *  the static model). Currently only the Inbox unread count. */
+  badge?: 'inbox-unread';
 }
 
 export interface NavParent extends NavLeaf {
@@ -67,7 +70,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Communications',
     items: [
-      { to: '/inbox', label: 'Inbox', icon: 'inbox' },
+      { to: '/inbox', label: 'Inbox', icon: 'inbox', badge: 'inbox-unread' },
       { to: '/broadcasts', label: 'Broadcasts', icon: 'broadcasts' },
     ],
   },

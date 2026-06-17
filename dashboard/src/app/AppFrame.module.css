@@ -214,3 +214,29 @@
   background: var(--c-border);
   margin: 0 0 var(--sp-3);
 }
+
+/* Wraps a nav leaf link + its optional unread badge as siblings (the badge is
+   a sibling of the <a>, not nested inside it, to keep the link's accessible
+   name clean). The link (flex, flex:1) fills the row; badge sits at the end. */
+.linkRow {
+  display: flex;
+  align-items: center;
+}
+
+.linkRow > .link {
+  flex: 1;
+}
+
+.badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--c-danger);
+  color: var(--c-text-inverse);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+}

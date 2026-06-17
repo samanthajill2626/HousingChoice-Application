@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App.js';
 
 // Helper: stub fetch so /auth/me resolves to an authenticated principal — the
-// app then renders its authenticated shell (the HousingChoice brand heading).
+// app then renders its authenticated shell (the AppFrame).
 function mockMe(): void {
   vi.stubGlobal(
     'fetch',
@@ -23,15 +23,17 @@ afterEach(() => {
 });
 
 describe('App', () => {
-  it('renders the HousingChoice brand heading once authenticated', async () => {
+  it('renders the HousingChoice shell once authenticated', async () => {
     mockMe();
     render(
       <MemoryRouter>
         <App />
       </MemoryRouter>,
     );
+    // The shell brand + the Today landing page render once /auth/me resolves.
     await waitFor(() =>
-      expect(screen.getByRole('heading', { name: /HousingChoice/i })).toBeInTheDocument(),
+      expect(screen.getByRole('link', { name: 'HousingChoice' })).toBeInTheDocument(),
     );
+    expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument();
   });
 });

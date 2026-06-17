@@ -21,7 +21,9 @@ import { normalizeToE164 } from '../lib/phone.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
+  contactPhones,
   createContactsRepo,
+  PrimaryPhoneRemovalError,
   type ContactItem,
   type ContactsRepo,
   type ContactType,
@@ -398,7 +400,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.status(201).json({ contact });
   });
 
-  // GET /api/contacts/:contactId — the side-panel contact item.
+  // GET /api/contacts/:contactId — the side-panel contact item. The returned
+  // shape is a SUPERSET of the legacy one: the scalar `phone` stays intact and
+  // `phones` (C1) is populated from contactPhones() (back-compat: a scalar-only
+  // contact serializes as [{phone, primary:true}]). Never mutates stored items.
   router.get('/:contactId', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
@@ -407,7 +412,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
-    res.json({ contact });
+    res.json({ contact: { ...contact, phones: contactPhones(contact) } });
   });
 
   // PATCH /api/contacts/:contactId — triage an existing contact.
@@ -489,6 +494,172 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     );
 
     res.json({ contact: updated });
+  });
+
+  // --- BE1/C1 contact-phones CRUD (manual curation / merge) ------------------
+  // The response always re-serializes phones via contactPhones() so the wire
+  // shape is consistent with GET /:contactId (an addPhone that just materialized
+  // phones[] from the scalar still returns the canonical array).
+  function withPhones(contact: ContactItem): ContactItem & { phones: ReturnType<typeof contactPhones> } {
+    return { ...contact, phones: contactPhones(contact) };
+  }
+
+  // POST /api/contacts/:contactId/phones { phone, label? } → 201 { contact }.
+  // 404 unknown contact; 400 invalid body; 409 when the (normalized) number
+  // already resolves to a DIFFERENT contact (one-number-per-contact, mirroring
+  // the POST / dedupe policy).
+  router.post('/:contactId/phones', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    if (typeof b['phone'] !== 'string') {
+      res.status(400).json({ error: 'phone is required and must be a string' });
+      return;
+    }
+    const normalized = normalizeToE164(b['phone']);
+    if (normalized === undefined) {
+      res.status(400).json({ error: 'phone is not a valid phone number' });
+      return;
+    }
+    let label: string | undefined;
+    if ('label' in b) {
+      if (typeof b['label'] !== 'string') {
+        res.status(400).json({ error: 'label must be a string' });
+        return;
+      }
+      label = b['label'];
+    }
+
+    // Conflict guard: the number must not already resolve to another contact
+    // (findByPhone is pointer-aware, so this covers BOTH a primary scalar AND a
+    // pointer-attached number on some other contact). A number that already
+    // resolves to THIS contact falls through to addPhone's idempotent no-op.
+    const owner = await contacts.findByPhone(normalized);
+    if (owner && owner.contactId !== contactId) {
+      res.status(409).json({ error: 'phone_in_use', contact: owner });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.addPhone(contactId, {
+        phone: normalized,
+        ...(label !== undefined && { label }),
+      });
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_phone_added', {
+      actor: req.user?.userId,
+      phone: normalized,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact phone added via api');
+    res.status(201).json({ contact: withPhones(updated) });
+  });
+
+  // PATCH /api/contacts/:contactId/phones/:phone { primary?, label? } → { contact }.
+  // :phone is a URL-encoded E.164; decode + normalize. 404 contact-or-phone
+  // missing; 400 invalid body / no updatable field.
+  router.patch('/:contactId/phones/:phone', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const normalized = normalizeToE164(decodeURIComponent(String(req.params['phone'] ?? '')));
+    if (normalized === undefined) {
+      res.status(400).json({ error: 'phone is not a valid phone number' });
+      return;
+    }
+
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    const opts: { primary?: boolean; label?: string } = {};
+    if ('primary' in b) {
+      if (typeof b['primary'] !== 'boolean') {
+        res.status(400).json({ error: 'primary must be a boolean' });
+        return;
+      }
+      opts.primary = b['primary'];
+    }
+    if ('label' in b) {
+      if (typeof b['label'] !== 'string') {
+        res.status(400).json({ error: 'label must be a string' });
+        return;
+      }
+      opts.label = b['label'];
+    }
+    if (opts.primary === undefined && opts.label === undefined) {
+      res.status(400).json({ error: 'no updatable fields supplied (primary and/or label)' });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.setPhone(contactId, normalized, opts);
+    } catch (err) {
+      // setPhone throws the conditional-check error for BOTH an unknown contact
+      // and a phone not on the contact — either way the resource isn't there.
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_or_phone_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_phone_updated', {
+      actor: req.user?.userId,
+      phone: normalized,
+      ...(opts.primary !== undefined && { primary: opts.primary }),
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact phone updated via api');
+    res.json({ contact: withPhones(updated) });
+  });
+
+  // DELETE /api/contacts/:contactId/phones/:phone → 200 { contact }. 404
+  // contact-or-phone missing; 409 when removing the primary while others remain.
+  router.delete('/:contactId/phones/:phone', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const normalized = normalizeToE164(decodeURIComponent(String(req.params['phone'] ?? '')));
+    if (normalized === undefined) {
+      res.status(400).json({ error: 'phone is not a valid phone number' });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.removePhone(contactId, normalized);
+    } catch (err) {
+      if (err instanceof PrimaryPhoneRemovalError) {
+        res.status(409).json({ error: 'cannot_remove_primary' });
+        return;
+      }
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_or_phone_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_phone_removed', {
+      actor: req.user?.userId,
+      phone: normalized,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact phone removed via api');
+    res.json({ contact: withPhones(updated) });
   });
 
   return router;

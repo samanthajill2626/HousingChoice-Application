@@ -41,6 +41,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
 import { type CasesRepo } from '../repos/casesRepo.js';
@@ -64,6 +65,7 @@ import { createAdminUsersRouter } from './adminUsers.js';
 import { createBroadcastsRouter } from './broadcasts.js';
 import { createCasesRouter } from './cases.js';
 import { createContactsRouter } from './contacts.js';
+import { createContactTimelineRouter } from './contactTimeline.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -124,6 +126,8 @@ export interface ApiRouterDeps {
   unitsRepo?: UnitsRepo;
   /** M1.10 boards/cases — injected in tests; default to the real repo. */
   casesRepo?: CasesRepo;
+  /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
+  activityEventsRepo?: ActivityEventsRepo;
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
   contactsRepoForRelay?: ContactsRepo;
@@ -203,6 +207,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  // BE2/C2: the activity-event log feeds the merged timeline + is emitted into
+  // by the case/relay/phone flows. Shared across the sub-routers below.
+  const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const events = deps.events ?? appEvents;
@@ -259,7 +266,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
       auditRepo: audit,
+      // BE2: emit `number_added` on a successful POST /:id/phones.
+      activityEventsRepo: activityEvents,
       events,
+    }),
+  );
+  // BE2/C2 person-centric merged timeline. Mounted at /contacts too (its only
+  // path is GET /:contactId/timeline — a distinct segment from the contacts
+  // router's routes, so the two never collide; both sit behind the same auth).
+  router.use(
+    '/contacts',
+    createContactTimelineRouter({
+      logger: deps.logger,
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      activityEventsRepo: activityEvents,
+      config,
     }),
   );
   // Units CRUD (M1.5; requireAuth — VAs maintain listings, no admin gate).
@@ -286,6 +309,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined &&
         deps.contactsRepoForRelay === undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
+      // BE2: emit added_to_group_text / removed_from_group_text on membership.
+      activityEventsRepo: activityEvents,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       events,
     }),
@@ -320,6 +345,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       auditRepo: audit,
+      // BE2: emit case_opened/case_closed/stage_changed/tour_* milestones.
+      activityEventsRepo: activityEvents,
       events,
     }),
   );

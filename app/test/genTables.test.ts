@@ -100,7 +100,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
   it('carries the contractual GSI names per table', () => {
     const gsiNames = (base: string) => tables[base]?.gsis.map((g) => g.index_name);
     expect(gsiNames('contacts')).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
-    expect(gsiNames('units')).toEqual(['byLandlord', 'byStatus', 'byJurisdiction']);
+    expect(gsiNames('units')).toEqual(['byLandlord', 'byStatus', 'byJurisdiction', 'byProperty']);
     expect(gsiNames('conversations')).toEqual([
       'byParticipantPhone',
       'byLastActivity',

@@ -103,6 +103,13 @@ export const TABLES: readonly TableSpec[] = [
       { indexName: 'byLandlord', hashKey: { name: 'landlordId', type: 'S' } },
       { indexName: 'byStatus', hashKey: { name: 'status', type: 'S' } },
       { indexName: 'byJurisdiction', hashKey: { name: 'jurisdiction', type: 'S' } },
+      // BE3/C3 (new-dashboard): the property/building group siblings index. A
+      // `property` is the PARENT of units (a duplex/building) — NOT a single
+      // dwelling (GLOSSARY); units in the same building share a `propertyId`.
+      // Sparse by data convention: only units the operator has grouped carry
+      // propertyId, so ungrouped units never index here (and the related-units
+      // same_property lookup is a single-partition Query, never a Scan).
+      { indexName: 'byProperty', hashKey: { name: 'propertyId', type: 'S' }, sparse: true },
     ],
   },
   {

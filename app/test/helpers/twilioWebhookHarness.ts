@@ -46,7 +46,13 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../../src/repos/messagesRepo.js';
-import { type UnitItem, type UnitsRepo } from '../../src/repos/unitsRepo.js';
+import {
+  CannotRemovePrimaryLandlordError,
+  unitContacts,
+  type UnitContact,
+  type UnitItem,
+  type UnitsRepo,
+} from '../../src/repos/unitsRepo.js';
 import { type CaseDeadline, type CaseItem, type CasesRepo } from '../../src/repos/casesRepo.js';
 import {
   buildTsEventId,
@@ -800,6 +806,67 @@ export function createFakeWorld(): FakeWorld {
         .filter((u) => u.jurisdiction === jurisdiction)
         .slice(0, opts.limit ?? 50);
       return { items };
+    },
+    async listByProperty(propertyId, opts = {}) {
+      // Mirror the sparse byProperty GSI: only units carrying propertyId index.
+      const items = [...units.values()]
+        .filter((u) => typeof u.propertyId === 'string' && u.propertyId === propertyId)
+        .slice(0, opts.limit ?? 50);
+      return { items };
+    },
+    async addContact(unitId, contact) {
+      // Mirror the real repo's invariants: seed from landlordId, upsert by
+      // contactId, exactly-one-primaryVoice, and keep primary_voice_contact
+      // consistent with the roster's ☎ primary.
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const existing = roster.find((c) => c.contactId === contact.contactId);
+      const primaryVoice = contact.primaryVoice === true;
+      if (existing) {
+        existing.role = contact.role;
+        existing.primaryVoice = primaryVoice;
+        if (contact.name !== undefined) existing.name = contact.name;
+        if (contact.company !== undefined) existing.company = contact.company;
+      } else {
+        const entry: UnitContact = {
+          contactId: contact.contactId,
+          role: contact.role,
+          primaryVoice,
+          ...(contact.name !== undefined ? { name: contact.name } : {}),
+          ...(contact.company !== undefined ? { company: contact.company } : {}),
+        };
+        roster.push(entry);
+      }
+      if (primaryVoice) {
+        for (const c of roster) c.primaryVoice = c.contactId === contact.contactId;
+      }
+      unit.contacts = roster;
+      const primary = roster.find((c) => c.primaryVoice);
+      if (primary !== undefined) unit.primary_voice_contact = primary.contactId;
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async removeContact(unitId, contactId) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`removeContact: no unit ${unitId}`);
+      if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
+        throw new CannotRemovePrimaryLandlordError();
+      }
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const target = roster.find((c) => c.contactId === contactId);
+      if (!target) throw conditionalCheckFailed(`removeContact: unit ${unitId} has no contact ${contactId}`);
+      const removedWasPrimaryVoice = target.primaryVoice;
+      unit.contacts = roster.filter((c) => c.contactId !== contactId);
+      if (
+        removedWasPrimaryVoice &&
+        typeof unit.landlordId === 'string' &&
+        unit.landlordId.length > 0
+      ) {
+        unit.primary_voice_contact = unit.landlordId;
+      }
+      unit.updated_at = new Date().toISOString();
+      return unit;
     },
     async list(opts = {}) {
       const items = [...units.values()].slice(0, opts.limit ?? 50);

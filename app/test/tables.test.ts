@@ -100,11 +100,15 @@ describe('tables.ts — the table contract', () => {
     expect(gsiNames(t)).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
   });
 
-  it('units: PK unitId; GSIs byLandlord, byStatus, byJurisdiction', () => {
+  it('units: PK unitId; GSIs byLandlord, byStatus, byJurisdiction, byProperty (sparse, BE3)', () => {
     const t = spec('units');
     expect(t.hashKey.name).toBe('unitId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byLandlord', 'byStatus', 'byJurisdiction']);
+    expect(gsiNames(t)).toEqual(['byLandlord', 'byStatus', 'byJurisdiction', 'byProperty']);
+    const byProperty = t.gsis.find((g) => g.indexName === 'byProperty');
+    expect(byProperty?.hashKey.name).toBe('propertyId');
+    expect(byProperty?.rangeKey).toBeUndefined();
+    expect(byProperty?.sparse).toBe(true);
   });
 
   it('conversations: PK conversationId; GSIs byParticipantPhone, byLastActivity, byPoolNumber (M1.7)', () => {

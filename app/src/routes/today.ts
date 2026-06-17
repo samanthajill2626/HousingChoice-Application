@@ -28,6 +28,7 @@ import {
   createCasesRepo,
   type CaseDeadlineType,
   type CasesRepo,
+  TERMINAL_STAGES,
 } from '../repos/casesRepo.js';
 import {
   createConversationsRepo,
@@ -204,6 +205,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       const page = await cases.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`needs_you_now:${type}`, page.items.length);
       for (const c of page.items) {
+        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // deadline that was never cleared on the transition must not surface.
+        if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue;
         placedCaseIds.add(c.caseId);
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
@@ -268,6 +272,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       const page = await cases.listByTourDate(todayYmd, { limit: GROUP_FETCH_LIMIT });
       warnIfCapped('tours_today', page.items.length);
       for (const c of page.items) {
+        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // tour_date that was never cleared on the transition must not surface.
+        if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now
         placedCaseIds.add(c.caseId);
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
@@ -289,6 +296,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       const page = await cases.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`follow_ups:${type}`, page.items.length);
       for (const c of page.items) {
+        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // deadline that was never cleared on the transition must not surface.
+        if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now / tours_today
         placedCaseIds.add(c.caseId);
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
@@ -309,6 +319,11 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // --- conversations: ONE bounded inbox Query (byLastActivity, open) --------
     // Untriaged inbounds (unknown_1to1 + unread) → needs_you_now (refType
     // 'conversation'); every other open conversation with unread → unreplied.
+    // Phones already emitted as an untriaged unknown_1to1 conversation row — so
+    // the contacts triage pass below can de-dupe the SAME person (auto-capture
+    // usually creates BOTH an unknown_1to1 conversation AND a needs_review
+    // contact) to one item, preferring the conversation (the actionable target).
+    const emittedUnknownPhones = new Set<string>();
     {
       const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
       warnIfCapped('conversations', page.items.length);
@@ -317,6 +332,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (unread <= 0) continue; // only inbound-last (unread) threads are actionable
         const who = whoOfConversation(conv);
         if (conv.type === 'unknown_1to1') {
+          if (typeof conv.participant_phone === 'string') emittedUnknownPhones.add(conv.participant_phone);
           needsYouNow.push({
             item: {
               group: 'needs_you_now',
@@ -328,7 +344,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             },
             at: now,
           });
-        } else {
+        } else if (conv.type === 'tenant_1to1' || conv.type === 'landlord_1to1') {
+          // Unreplied is anchored to a 1:1 tenant/landlord thread only. A
+          // relay_group's participant_phone is the synthetic POOL number (no
+          // display name) — surfacing it as an Unreplied row whose `who` is an
+          // internal pool number violates "anchored to a case/contact". Skip it
+          // (and anything that isn't a known 1:1 type).
           unreplied.push({
             item: {
               group: 'unreplied',
@@ -356,6 +377,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       warnIfCapped('contacts:triage', page.items.length);
       for (const contact of page.items) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;
+        // De-dupe by phone: if this person already emitted an unknown_1to1
+        // conversation row above, skip the contact (prefer the conversation —
+        // it carries the unread and is the actionable triage target). A
+        // needs_review contact with NO matching emitted conversation still
+        // emits its own row.
+        if (typeof contact.phone === 'string' && emittedUnknownPhones.has(contact.phone)) continue;
         const who = nameFromContact(contact) ?? contact.phone ?? contact.contactId;
         needsYouNow.push({
           item: {

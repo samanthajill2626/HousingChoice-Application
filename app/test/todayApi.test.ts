@@ -296,6 +296,142 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(first).toEqual(['case-aaa', 'case-bbb']); // tie-break by refId ascending
   });
 
+  // --- FIX A: terminal cases (moved_in/lost) never surface in case-bearing groups -
+  it('a lost case with an overdue hard-clock deadline does NOT appear in needs_you_now (active one does)', async () => {
+    seedTenant('t-lost', 'Lost', 'Case');
+    seedTenant('t-live', 'Live', 'Case');
+    seedCase({
+      caseId: 'case-lost-deadline',
+      tenantId: 't-lost',
+      stage: 'lost',
+      next_deadline_type: 'rta_window',
+      next_deadline_at: iso(-3_600_000), // overdue, but terminal
+    });
+    seedCase({
+      caseId: 'case-live-deadline',
+      tenantId: 't-live',
+      stage: 'rta_submitted',
+      next_deadline_type: 'rta_window',
+      next_deadline_at: iso(-3_600_000), // same overdue deadline, but active
+    });
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const ids = needs.map((i) => i.refId);
+    expect(ids).toContain('case-live-deadline'); // stage-scoped, not deadline-scoped
+    expect(ids).not.toContain('case-lost-deadline');
+  });
+
+  it('a moved_in case with today\'s tour_date does NOT appear in tours_today (active one does)', async () => {
+    seedTenant('t-movedin', 'Moved', 'In');
+    seedTenant('t-touring', 'Still', 'Touring');
+    seedCase({ caseId: 'case-movedin-tour', tenantId: 't-movedin', stage: 'moved_in', tour_date: todayYmd() });
+    seedCase({ caseId: 'case-touring-tour', tenantId: 't-touring', stage: 'touring', tour_date: todayYmd() });
+
+    const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+    const ids = tours.map((i) => i.refId);
+    expect(ids).toContain('case-touring-tour');
+    expect(ids).not.toContain('case-movedin-tour');
+  });
+
+  it('a lost case with a due follow-up deadline does NOT appear in follow_ups (active one does)', async () => {
+    seedTenant('t-lostfu', 'Lost', 'Followup');
+    seedTenant('t-livefu', 'Live', 'Followup');
+    seedCase({
+      caseId: 'case-lost-fu',
+      tenantId: 't-lostfu',
+      stage: 'lost',
+      next_deadline_type: 'stuck_case',
+      next_deadline_at: iso(-60_000),
+    });
+    seedCase({
+      caseId: 'case-live-fu',
+      tenantId: 't-livefu',
+      stage: 'applied',
+      next_deadline_type: 'follow_up',
+      next_deadline_at: iso(-60_000),
+    });
+
+    const follow = (await getItems()).filter((i) => i.group === 'follow_ups');
+    const ids = follow.map((i) => i.refId);
+    expect(ids).toContain('case-live-fu');
+    expect(ids).not.toContain('case-lost-fu');
+  });
+
+  // --- FIX B: relay_group threads never surface in unreplied --------------------
+  it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
+    seedConversation({
+      conversationId: 'conv-relay',
+      participant_phone: '+15550107777', // synthetic pool number, no display name
+      status: 'open',
+      last_activity_at: iso(-90_000),
+      type: 'relay_group',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 3,
+    });
+    seedConversation({
+      conversationId: 'conv-tenant',
+      participant_phone: '+15550106666',
+      participant_display_name: 'Real Tenant',
+      status: 'open',
+      last_activity_at: iso(-50_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 1,
+    });
+
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+    const ids = unrep.map((i) => i.refId);
+    expect(ids).toContain('conv-tenant');
+    expect(ids).not.toContain('conv-relay');
+    // And the relay group is nowhere else either (not an unreplied or needs_you_now row).
+    expect(items.some((i) => i.refId === 'conv-relay')).toBe(false);
+  });
+
+  // --- FIX C: de-dupe untriaged inbounds by phone (one item per person) ----------
+  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item (the conversation)', async () => {
+    const phone = '+15550105555';
+    seedConversation({
+      conversationId: 'conv-untriaged',
+      participant_phone: phone,
+      status: 'open',
+      last_activity_at: iso(-30_000),
+      type: 'unknown_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-60_000),
+      unread_count: 1,
+    });
+    world.contacts.push({
+      contactId: 'contact-untriaged',
+      type: 'unknown',
+      status: 'needs_review',
+      phone, // same phone as the unknown conversation
+    });
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const untriaged = needs.filter(
+      (i) => (i.refType === 'conversation' && i.refId === 'conv-untriaged') ||
+        (i.refType === 'contact' && i.refId === 'contact-untriaged'),
+    );
+    expect(untriaged).toHaveLength(1); // one item per person
+    expect(untriaged[0]).toMatchObject({ refType: 'conversation', refId: 'conv-untriaged' }); // conversation preferred
+  });
+
+  it('a needs_review contact whose phone has no unread unknown conversation still emits its own row', async () => {
+    world.contacts.push({
+      contactId: 'contact-only',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15550104444',
+    });
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const contact = needs.find((i) => i.refType === 'contact' && i.refId === 'contact-only');
+    expect(contact).toMatchObject({ refId: 'contact-only', who: '+15550104444', attention: true });
+  });
+
   it('the envelope is { items, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     seedCase({ caseId: 'case-env', tenantId: 't-env', stage: 'touring', tour_date: todayYmd() });

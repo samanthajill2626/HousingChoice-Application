@@ -72,11 +72,7 @@ export function InboxRow({
           {row.role ? <span className={`${styles.dot} ${styles[`dot_${row.role}`] ?? ''}`} aria-hidden="true" /> : null}
           <span className={styles.head}>
             <span className={`${styles.name} ${unread ? styles.bold : ''}`}>{row.name}</span>
-            <span
-              className={styles.channel}
-              data-channel={row.channel}
-              aria-label={`${CHANNEL_LABEL[row.channel]} channel`}
-            />
+            <span className={styles.channel}>{CHANNEL_LABEL[row.channel]}</span>
             {row.caseContext ? <span className={styles.tag}>{row.caseContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.assignment ? <span className={styles.assigned}>Assigned · {row.assignment.name}</span> : null}

@@ -109,6 +109,6 @@ describe('InboxRow', () => {
 
   it('shows a call channel label for call rows', () => {
     renderRow(mkRow({ channel: 'call', preview: 'Missed call' }));
-    expect(screen.getByText(/call/i)).toBeInTheDocument();
+    expect(screen.getByText('Call')).toBeInTheDocument();
   });
 });

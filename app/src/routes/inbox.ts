@@ -31,9 +31,19 @@
 //
 // PII (doc §9): responses carry names/previews to the authed client; LOG LINES
 // are counts/IDs only.
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import {
+  appEvents,
+  toConversationUpdatedEvent,
+  type EventBus,
+} from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
+import {
+  createAuditRepo,
+  type AuditRepo,
+} from '../repos/auditRepo.js';
 import {
   createCasesRepo,
   type CasesRepo,
@@ -88,6 +98,8 @@ export interface InboxRouterDeps {
   messagesRepo?: MessagesRepo;
   casesRepo?: CasesRepo;
   usersRepo?: UsersRepo;
+  auditRepo?: AuditRepo;
+  events?: EventBus;
 }
 
 // --- Tuning -----------------------------------------------------------------
@@ -441,10 +453,10 @@ export async function aggregateInbox(
 
   const rows: InboxRow[] = [];
   let nextCursor: string | null = null;
-  // The resume key for the CURRENT chunk (the cursor passed in, then each
-  // chunk's terminal LEK). A chunk is a raw byLastActivity Query of CHUNK_SIZE
-  // conversations; its LEK is the EXACT boundary after the chunk's last
-  // conversation. We never break a page mid-chunk WITHOUT recovering the precise
+  // The resume key for the CURRENT fetch batch (the cursor passed in, then each
+  // batch's terminal LEK). A batch is a raw byLastActivity Query of chunkSize
+  // conversations; its LEK is the EXACT boundary after the batch's last
+  // conversation. We never break a page mid-batch WITHOUT recovering the precise
   // boundary (see the re-query below), so the emitted cursor always resumes
   // exactly after the conversation that filled the page — no rows skipped, none
   // double-served.
@@ -452,7 +464,7 @@ export async function aggregateInbox(
 
   // The page is `limit` CONTACT rows, but each row can consume several raw
   // conversations (multi-number contacts, relay-skips, filter-drops), so we pull
-  // chunks until the page fills or the stream is exhausted. CHUNK_SIZE is the
+  // batches until the page fills or the stream is exhausted. chunkSize is the
   // raw conversations per Query: at least the page size (so a page of all-1:1
   // contacts fills in one Query), capped at FETCH_BATCH.
   const chunkSize = Math.min(FETCH_BATCH, Math.max(limit, DEFAULT_INBOX_LIMIT));
@@ -519,16 +531,25 @@ function parseLimit(raw: unknown): number {
 
 export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
+  const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const events = deps.events ?? appEvents;
   const router = Router();
 
   // GET /api/inbox?filter=all|unread|unknown|mine&cursor=&limit= → InboxPage
   router.get('/', async (req, res) => {
     const rawFilter = req.query['filter'];
-    const filter: InboxFilter = rawFilter === undefined ? 'all' : (rawFilter as InboxFilter);
-    if (!isInboxFilter(filter)) {
+    // Default to 'all' when the param is absent; reject anything that's not a
+    // recognised InboxFilter string (array / nested object values → 400).
+    // We pass rawFilter directly to the type-guard (takes unknown) so there is
+    // no premature cast; after the guard TypeScript knows it's InboxFilter.
+    const filterRaw = rawFilter === undefined ? 'all' : rawFilter;
+    if (!isInboxFilter(filterRaw)) {
       res.status(400).json({ error: `filter must be one of: ${[...INBOX_FILTERS].join(', ')}` });
       return;
     }
+    const filter: InboxFilter = filterRaw;
     const limit = parseLimit(req.query['limit']);
     const rawCursor = req.query['cursor'];
     const cursor = typeof rawCursor === 'string' && rawCursor.length > 0 ? rawCursor : undefined;
@@ -549,6 +570,141 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       log.error({ err }, 'inbox feed failed');
       throw err; // Express 5 forwards async throws to the error handler.
     }
+  });
+
+  // POST /api/inbox/read { phone } — mark-read for an unknown number (no
+  // contactId). Must be registered BEFORE /:contactId/read so the literal path
+  // segment "read" is matched first (different depth: /read vs /:contactId/read,
+  // but we keep explicit ordering as belt-and-braces).
+  router.post('/read', async (req, res) => {
+    const payload = (req.body ?? {}) as { phone?: unknown };
+    const phone = payload.phone;
+    if (typeof phone !== 'string' || phone.length === 0) {
+      res.status(400).json({ error: 'phone must be a non-empty string' });
+      return;
+    }
+    // Basic E.164-ish: must start with + and contain only digits after it.
+    if (!/^\+\d+$/.test(phone)) {
+      res.status(400).json({ error: 'phone must be E.164 (e.g. +15550001234)' });
+      return;
+    }
+
+    const convs = await conversations.findByParticipantPhone(phone);
+    if (convs.length === 0) {
+      res.status(404).json({ error: 'no_conversation_for_phone' });
+      return;
+    }
+
+    await Promise.all(
+      convs
+        .filter((c) => unreadOf(c) > 0)
+        .map(async (c) => {
+          try {
+            const updated = await conversations.resetUnread(c.conversationId);
+            events.emit('conversation.updated', toConversationUpdatedEvent(updated));
+          } catch (err) {
+            if (err instanceof ConditionalCheckFailedException) return; // race: already gone
+            throw err;
+          }
+        }),
+    );
+
+    log.info({ phone, count: convs.length }, 'inbox: unknown-number mark-read fan-out');
+    res.json({ ok: true });
+  });
+
+  // POST /api/inbox/:contactId/read — fan-out mark-read across ALL the
+  // contact's conversations.
+  router.post('/:contactId/read', async (req, res) => {
+    const { contactId } = req.params;
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Gather all conversations across every phone number the contact owns.
+    const phones = contactPhones(contact);
+    const convMap = new Map<string, ConversationItem>();
+    for (const cp of phones) {
+      const convs = await conversations.findByParticipantPhone(cp.phone);
+      for (const c of convs) convMap.set(c.conversationId, c);
+    }
+    const all = [...convMap.values()];
+
+    await Promise.all(
+      all
+        .filter((c) => unreadOf(c) > 0)
+        .map(async (c) => {
+          try {
+            const updated = await conversations.resetUnread(c.conversationId);
+            events.emit('conversation.updated', toConversationUpdatedEvent(updated));
+          } catch (err) {
+            if (err instanceof ConditionalCheckFailedException) return; // race: already gone
+            throw err;
+          }
+        }),
+    );
+
+    log.info({ contactId, count: all.length }, 'inbox: contact mark-read fan-out');
+    res.json({ ok: true });
+  });
+
+  // POST /api/inbox/:contactId/assign { userId: string | null } — fan-out
+  // assignment across ALL the contact's conversations.
+  router.post('/:contactId/assign', async (req, res) => {
+    const { contactId } = req.params;
+    const payload = (req.body ?? {}) as Record<string, unknown>;
+
+    // `userId` key must be present; value may be string (assign) or null (clear).
+    if (!('userId' in payload)) {
+      res.status(400).json({ error: 'userId is required (string or null)' });
+      return;
+    }
+    const userId = payload['userId'];
+    if (!(userId === null || (typeof userId === 'string' && userId.length > 0))) {
+      res.status(400).json({ error: 'userId must be a non-empty string or null' });
+      return;
+    }
+
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Gather all conversations across every phone number the contact owns.
+    const phones = contactPhones(contact);
+    const convMap = new Map<string, ConversationItem>();
+    for (const cp of phones) {
+      const convs = await conversations.findByParticipantPhone(cp.phone);
+      for (const c of convs) convMap.set(c.conversationId, c);
+    }
+    const all = [...convMap.values()];
+
+    await Promise.all(
+      all.map(async (c) => {
+        try {
+          const { conversation, previousAssigneeUserId } = await conversations.setAssignment(
+            c.conversationId,
+            userId,
+          );
+          // §5 mandate: assignment flips are audit-trail events (old → new),
+          // exactly as the existing PATCH /conversations/:id/assignment does.
+          await audit.append(`conversations#${c.conversationId}`, 'assignment_changed', {
+            from: previousAssigneeUserId,
+            to: userId,
+          });
+          events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) return; // race: already gone
+          throw err;
+        }
+      }),
+    );
+
+    log.info({ contactId, userId, count: all.length }, 'inbox: contact assign fan-out');
+    res.json({ ok: true });
   });
 
   return router;

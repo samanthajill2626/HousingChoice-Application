@@ -518,6 +518,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       );
     }
 
+    // (3.6) Multi-phone lastSeenAt touch (BE1/C1). Because findByPhone is now
+    // pointer-aware, an inbound from an ALREADY-ATTACHED second number resolved
+    // to the owner above (no new stub minted). Bump that number's lastSeenAt so
+    // "most recent number" stays accurate. Best-effort + no-op when phones[] is
+    // absent (a legacy/stub contact is NOT churn-seeded). NEVER auto-attaches a
+    // brand-new unknown number to an existing contact (honest-identity mandate:
+    // an unknown phone gets its own stub via captureContact above). Failure here
+    // never 5xxs the webhook (Twilio redelivery re-runs it idempotently).
+    if (effectiveContact) {
+      try {
+        await contacts.touchPhoneLastSeen(effectiveContact.contactId, From, providerTs);
+      } catch (err) {
+        log.error(
+          { err, providerSid: MessageSid },
+          'phone lastSeenAt touch failed — message persisted, lastSeenAt stale',
+        );
+      }
+    }
+
     // (4) STOP/opt-out recording (doc §7.1; Twilio Advanced Opt-Out already
     // auto-replied at the provider). The message itself stays on the
     // timeline either way (persisted above).

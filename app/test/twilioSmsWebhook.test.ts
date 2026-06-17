@@ -108,6 +108,66 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
   });
 });
 
+describe('POST /webhooks/twilio/sms — multi-phone resolution (BE1/C1)', () => {
+  const PRIMARY = TENANT_PHONE; // phone A (primary)
+  const SECOND = '+15550100002'; // phone B (attached, pointer present)
+
+  it('inbound from an ATTACHED second number resolves to the owner (no new contact) and bumps B.lastSeenAt', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A contact owning A (primary) + B (attached). Seeding via the repo writes
+    // both phones[] and the phone-pointer for B (the resolution seam under test).
+    world.contacts.push({
+      contactId: 'contact-multi',
+      type: 'tenant',
+      status: 'active',
+      phone: PRIMARY,
+      created_at: '2026-06-10T00:00:00.000Z',
+    });
+    await world.contactsRepo.addPhone('contact-multi', { phone: SECOND, label: 'work' });
+    const contactCountBefore = world.contacts.filter((c) => c.phone_ref !== true).length;
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ MessageSid: 'SMfromB0001', From: SECOND, Body: 'it is me again' }),
+    );
+    expect(res.status).toBe(200);
+
+    // No NEW real contact was minted — the pointer resolved B to the owner.
+    const realContacts = world.contacts.filter((c) => c.phone_ref !== true);
+    expect(realContacts).toHaveLength(contactCountBefore);
+    expect(world.contactCreates).toHaveLength(0);
+
+    // B's lastSeenAt was bumped (A's was not).
+    const owner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
+    const bEntry = owner.phones?.find((p) => p.phone === SECOND);
+    expect(bEntry?.lastSeenAt).toBeDefined();
+    expect(bEntry?.lastSeenAt).not.toBe('2026-06-10T00:00:00.000Z');
+  });
+
+  it('inbound from a brand-new UNKNOWN number still mints its own stub (never auto-attached)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-multi',
+      type: 'tenant',
+      status: 'active',
+      phone: PRIMARY,
+    });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ MessageSid: 'SMunknown01', From: '+15550109999', Body: 'who is this' }),
+    );
+    expect(res.status).toBe(200);
+    // A new stub was created for the unknown number (honest-identity mandate) —
+    // it was NOT silently attached to the existing contact.
+    expect(world.contactCreates).toHaveLength(1);
+    const owner = world.contacts.find((c) => c.contactId === 'contact-multi')!;
+    expect(owner.phones).toBeUndefined(); // existing contact untouched
+  });
+});
+
 describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
   it('drops a webhook whose From is OUR number: 200 TwiML, zero persisted, zero side effects', async () => {
     const { app, world } = makeWebhookHarness();

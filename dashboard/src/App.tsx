@@ -9,6 +9,7 @@ import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
+import { ContactDetail } from './routes/contact/ContactDetail.js';
 import { allNavTargets } from './app/nav.js';
 
 export default function App(): React.JSX.Element {
@@ -24,6 +25,10 @@ export default function App(): React.JSX.Element {
                 <Route key={to} path={to.slice(1)} element={<Placeholder title={label} />} />
               ),
             )}
+            {/* B2/B3: the tenant + landlord detail page (one shell). The static
+                /contacts/tenants|landlords|unknown placeholders above take
+                priority over this dynamic segment in react-router. */}
+            <Route path="contacts/:contactId" element={<ContactDetail />} />
             <Route path="*" element={<Placeholder title="Not found" />} />
           </Route>
         </Routes>

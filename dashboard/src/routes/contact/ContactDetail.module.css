@@ -1,0 +1,199 @@
+/* ContactDetail — the shared tenant/landlord shell: dark header band over a
+ * comms-left / file-right two-pane body. All values from ui/tokens.css. The page
+ * fills the AppFrame content area; the two panes scroll independently. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-7);
+}
+
+.error {
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+/* --- Header band ---------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-header-bg);
+  color: var(--c-header-text);
+}
+
+.avatar {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-pill);
+  background: var(--c-nav-active-bg);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.name {
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-lg);
+  color: var(--c-header-text);
+}
+
+.pill {
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  color: var(--c-text-inverse);
+}
+
+.pillTenant {
+  background: var(--c-pill-tenant-bg);
+}
+
+.pillLandlord {
+  background: var(--c-pill-landlord-bg);
+}
+
+.facts {
+  margin-top: 2px;
+  color: var(--c-header-facts);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.callBtn {
+  background: var(--c-header-btn-bg);
+  color: var(--c-text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.callBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.callBtn:focus-visible,
+.kebab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.kebab {
+  background: var(--c-header-kebab-bg);
+  color: var(--c-text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+/* --- Body (two panes) ----------------------------------------------------- */
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.left {
+  flex: 1.4;
+  min-width: 0;
+  display: flex;
+}
+
+.right {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--c-bg);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* --- Narrow-width segmented toggle --------------------------------------- */
+
+.segMobile {
+  display: none;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.segBtn,
+.segOn {
+  font-size: var(--fs-sm);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-4);
+  cursor: pointer;
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
+.segOn {
+  background: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+  border-color: var(--c-nav-bg);
+}
+
+.segBtn:focus-visible,
+.segOn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Wide screens: both panes show; the mobile toggle + hide classes are inert. */
+.paneActive,
+.paneHidden {
+  /* default (wide): visible */
+}
+
+@media (max-width: 860px) {
+  .segMobile {
+    display: flex;
+  }
+  .body {
+    flex-direction: column;
+  }
+  .left,
+  .right {
+    flex: 1;
+  }
+  .paneHidden {
+    display: none;
+  }
+}

@@ -272,6 +272,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // BE5/C5: GET /:id/media aggregates a contact's MMS attachments.
+      messagesRepo: messages,
       auditRepo: audit,
       // BE2: emit `number_added` on a successful POST /:id/phones.
       activityEventsRepo: activityEvents,

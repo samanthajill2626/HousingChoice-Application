@@ -35,6 +35,11 @@ import {
   type ConversationType,
 } from '../repos/conversationsRepo.js';
 import {
+  createMessagesRepo,
+  mediaAttachmentsOf,
+  type MessagesRepo,
+} from '../repos/messagesRepo.js';
+import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
@@ -48,6 +53,8 @@ export interface ContactsRouterDeps {
   logger?: Logger;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
+  /** BE5/C5: aggregate a contact's media across their conversations (GET /:id/media). */
+  messagesRepo?: MessagesRepo;
   auditRepo?: AuditRepo;
   /** BE2/C2: emit a `number_added` milestone on a successful phone add. */
   activityEventsRepo?: ActivityEventsRepo;
@@ -56,6 +63,30 @@ export interface ContactsRouterDeps {
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
+
+/**
+ * BE5/C5 wire shape (VERBATIM — the frontend imports identical field names).
+ * One mirrored media attachment surfaced on the contact's Media panel: its S3
+ * key + normalized content-type, the source message's provider_ts, and the 1:1
+ * conversation it lives on. NO URL is generated — the frontend fetches bytes via
+ * the existing GET /api/messages/:sid/media/:idx endpoint using s3Key.
+ */
+interface ContactMediaItem {
+  s3Key: string;
+  contentType: string;
+  /** ISO 8601 — the source message's provider_ts (the sort key). */
+  at: string;
+  conversationId: string;
+}
+
+/**
+ * Bound on messages pulled per conversation when aggregating media. The contact
+ * media panel is a recent-media view, not an archive; a single page per
+ * conversation at this scale covers the working set. If a conversation has more
+ * than this, the older media is dropped — and that drop is LOGGED (no silent
+ * truncation). Generous (a thread rarely has hundreds of MMS).
+ */
+const MEDIA_SCAN_PAGE_LIMIT = 200;
 
 /** The contact types triage may set (the full union incl. 'unknown'). */
 const CONTACT_TYPES: readonly ContactType[] = [
@@ -327,6 +358,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
@@ -472,6 +504,75 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     }
     const rows = await listingSends.listByContact(contactId);
     res.json({ sent: rows.map(toListingSendRow) });
+  });
+
+  // GET /api/contacts/:contactId/media → { media: ContactMediaItem[] } (BE5/C5).
+  // The tenant/landlord page's Media panel: every mirrored MMS attachment across
+  // the contact's 1:1 conversations (ALL their numbers), newest-first. Reuses the
+  // timeline's cross-phone resolution (contactPhones → findByParticipantPhone →
+  // dedupe conversationIds) and EXCLUDES relay_group threads (those front a pool
+  // number, never the contact's real 1:1 — group-text media is never inlined).
+  // 404 unknown contact / phone-pointer id (mirrors BE1's GET). Returns [] for a
+  // contact with no media (never a 404 for "no media"). NO URL is generated —
+  // the frontend fetches bytes via GET /api/messages/:sid/media/:idx using s3Key.
+  // Auth-gated (this router sits behind requireAuth via the /api mount).
+  router.get('/:contactId/media', async (req, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Resolve the contact's 1:1 conversations across ALL their numbers — exactly
+    // like the merged timeline. relay_group threads front a pool number (never
+    // the contact's real phone), so they are excluded purely on type.
+    const phones = contactPhones(contact).map((p) => p.phone);
+    const convById = new Map<string, string>(); // conversationId → (presence)
+    for (const phone of phones) {
+      const linked = await conversations.findByParticipantPhone(phone);
+      for (const conv of linked) {
+        if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+        convById.set(conv.conversationId, conv.conversationId);
+      }
+    }
+
+    // Single pass: collect every attachment of every media-bearing message.
+    const media: ContactMediaItem[] = [];
+    for (const conversationId of convById.keys()) {
+      const page = await messages.listByConversation(conversationId, {
+        limit: MEDIA_SCAN_PAGE_LIMIT,
+      });
+      if (page.length === MEDIA_SCAN_PAGE_LIMIT) {
+        // No silent truncation — record that older media for this thread was not
+        // scanned (the page is newest-first, so the dropped media is the oldest).
+        log.warn(
+          { contactId, conversationId, scanned: page.length, cap: MEDIA_SCAN_PAGE_LIMIT },
+          'contact media: conversation hit the scan cap — older media not aggregated',
+        );
+      }
+      for (const m of page) {
+        const attachments = mediaAttachmentsOf(m);
+        for (const a of attachments) {
+          media.push({
+            s3Key: a.s3Key,
+            contentType: a.contentType,
+            at: m.provider_ts,
+            conversationId,
+          });
+        }
+      }
+    }
+
+    // Newest-first by `at`; stable tie-break by s3Key so equal-timestamp items
+    // (and multiple attachments on one message) order deterministically.
+    media.sort((a, b) =>
+      a.at < b.at ? 1 : a.at > b.at ? -1 : a.s3Key < b.s3Key ? -1 : a.s3Key > b.s3Key ? 1 : 0,
+    );
+
+    log.info({ contactId, conversationCount: convById.size, mediaCount: media.length }, 'contact media served');
+    res.json({ media });
   });
 
   // PATCH /api/contacts/:contactId — triage an existing contact.

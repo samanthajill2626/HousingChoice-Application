@@ -114,7 +114,7 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     await users.invite({ email, role: 'va' });
     const userId = userIdForEmail(email);
 
-    await users.activateOnLogin(userId, 'sub-first', '2026-06-12T12:34:56.000Z');
+    await users.activateOnLogin(userId, 'sub-first', undefined, '2026-06-12T12:34:56.000Z');
     const activated = (await users.findById(userId))!;
     expect(activated.status).toBe('active');
     expect(activated.google_sub).toBe('sub-first');
@@ -122,7 +122,7 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     expect(activated.role).toBe('va'); // untouched
 
     // A racing second activation must NOT clobber the google_sub (if_not_exists).
-    await users.activateOnLogin(userId, 'sub-second', '2026-06-12T13:00:00.000Z');
+    await users.activateOnLogin(userId, 'sub-second', undefined, '2026-06-12T13:00:00.000Z');
     expect((await users.findById(userId))!.google_sub).toBe('sub-first');
 
     await expect(users.activateOnLogin('usr_doesnotexist0000000000', 'x')).rejects.toBeInstanceOf(
@@ -139,7 +139,7 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
 
   it('touchLastLogin stamps the time and throws for unknown users', async () => {
     const { user } = await users.invite({ email: 'touch@housingchoice.org', role: 'va' });
-    await users.touchLastLogin(user.userId, '2026-06-12T12:34:56.000Z');
+    await users.touchLastLogin(user.userId, undefined, '2026-06-12T12:34:56.000Z');
     expect((await users.findById(user.userId))!.last_login_at).toBe('2026-06-12T12:34:56.000Z');
 
     await expect(users.touchLastLogin('usr_doesnotexist0000000000')).rejects.toBeInstanceOf(

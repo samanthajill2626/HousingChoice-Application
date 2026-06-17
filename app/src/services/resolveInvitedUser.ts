@@ -70,7 +70,9 @@ export async function resolveInvitedUser(
 
   // First login of an invited record: activate it.
   if (existing.status === 'invited' || existing.google_sub === undefined) {
-    await deps.usersRepo.activateOnLogin(existing.userId, identity.sub, now);
+    // name wiring is Task 2 (identity.name not yet threaded in); pass undefined so
+    // the signature change compiles — name refresh will be added in the next task.
+    await deps.usersRepo.activateOnLogin(existing.userId, identity.sub, undefined, now);
     // §5 mandate: activation is an audit-trail event. Payload (email) lives in
     // DynamoDB, never in logs.
     await deps.auditRepo.append(`users#${existing.userId}`, 'user_activated', {
@@ -93,6 +95,7 @@ export async function resolveInvitedUser(
       'login google_sub differs from the activated google_sub (account recreated?)',
     );
   }
-  await deps.usersRepo.touchLastLogin(existing.userId, now);
+  // name wiring is Task 2; pass undefined for now.
+  await deps.usersRepo.touchLastLogin(existing.userId, undefined, now);
   return { user: { ...existing, last_login_at: now }, activated: false };
 }

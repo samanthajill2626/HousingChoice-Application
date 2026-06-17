@@ -2,7 +2,13 @@
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { request } from './client.js';
-import type { DevLoginResult, Me } from './types.js';
+import type {
+  CasesPage,
+  ConversationsPage,
+  DevLoginResult,
+  Me,
+  TodayResponse,
+} from './types.js';
 
 // --- Auth (/auth) -----------------------------------------------------------
 
@@ -20,6 +26,31 @@ export function logout(): Promise<void> {
  *  Not a fetch: use it as an <a href> / window.location.assign(loginUrl()). */
 export function loginUrl(): string {
   return '/auth/login';
+}
+
+// --- Today (/api) -----------------------------------------------------------
+// The server-assembled action queue (§API Contract C7). When the backend slice
+// isn't live yet this 404s; useToday catches ApiError(404) and assembles the
+// same shape client-side from getCases() + getConversations().
+
+/** GET /api/today — the server-assembled Today queue, or throws ApiError(404)
+ *  until the backend slice lands (the caller falls back to the client build). */
+export function getToday(signal?: AbortSignal): Promise<TodayResponse> {
+  return request<TodayResponse>('/api/today', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/cases — the case board (the Today fallback's deadline/tour/attention
+ *  source). The server pages; the Today fallback reads the first page. */
+export function getCases(signal?: AbortSignal): Promise<CasesPage> {
+  return request<CasesPage>('/api/cases', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/conversations — the inbox rows (the Today fallback's unread +
+ *  untriaged source). */
+export function getConversations(signal?: AbortSignal): Promise<ConversationsPage> {
+  return request<ConversationsPage>('/api/conversations', {
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 // --- Dev-only auth (/__dev, /auth/dev-login) --------------------------------

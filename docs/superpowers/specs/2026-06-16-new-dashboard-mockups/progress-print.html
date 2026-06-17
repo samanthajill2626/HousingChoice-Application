@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HousingChoice · new dashboard — progress</title>
+<style>
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; margin:0; background:#eef1f5; color:#111827; }
+  .wrap { max-width:1040px; margin:0 auto; padding:24px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .lede { color:#6b7280; font-size:13px; margin:0 0 20px; line-height:1.45; }
+  .pgcap { font-size:14px; font-weight:700; color:#111827; margin:0 0 4px; }
+  .pgsub { font-size:12px; color:#6b7280; margin:0 0 10px; }
+  .screen-page { margin-bottom:30px; }
+
+  /* ---- Home frame ---- */
+  .app { display:flex; border:1px solid #d7dbe0; border-radius:10px; overflow:hidden; font-size:13px; background:#fff; }
+  .app .nav { flex:0 0 210px; background:#1f2937; color:#e2e8f0; display:flex; flex-direction:column; padding:12px 8px; gap:1px; }
+  .app .brand { color:#fff; font-weight:700; font-size:14px; padding:6px 10px 10px; }
+  .app .glabel { font-size:10px; text-transform:uppercase; letter-spacing:.07em; color:#8a99ad; padding:10px 10px 4px; }
+  .app .item { display:flex; align-items:center; gap:9px; padding:7px 10px; border-radius:6px; color:#e2e8f0; }
+  .app .item .ic { width:15px; text-align:center; opacity:.9; }
+  .app .item.active { background:#374151; color:#fff; }
+  .app .item .badge { margin-left:auto; background:#3b82f6; color:#fff; border-radius:10px; font-size:10px; padding:1px 6px; }
+  .app .item .chev { margin-left:auto; opacity:.6; font-size:10px; }
+  .app .child { display:flex; align-items:center; gap:8px; padding:6px 10px 6px 32px; border-radius:6px; color:#c2ccda; font-size:12px; }
+  .app .child .fdot { width:6px; height:6px; border-radius:50%; }
+  .app .child .cc { margin-left:auto; font-size:10px; color:#8a99ad; }
+  .app .divider { border-top:1px solid #374151; margin:8px 6px 2px; }
+  .app .sep { flex:1; }
+  .app .foot { border-top:1px solid #374151; margin-top:6px; padding-top:6px; }
+  .app .main { flex:1; background:#f7f9fc; padding:18px 20px; }
+  .app .day { margin:0; font-size:18px; color:#111827; font-weight:700; }
+  .app .sub { color:#6b7280; margin:2px 0 16px; font-size:12px; }
+  .app .grp { margin-bottom:15px; }
+  .app .gh { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#6b7280; margin-bottom:6px; display:flex; gap:8px; align-items:center; }
+  .app .gh .ct { background:#e5e7eb; color:#374151; border-radius:10px; padding:0 7px; font-size:10px; }
+  .app .row { background:#fff; border:1px solid #e5e7eb; border-radius:7px; padding:9px 11px; margin-bottom:6px; display:flex; align-items:center; gap:10px; }
+  .app .who { font-weight:600; color:#111827; }
+  .app .why { color:#4b5563; }
+  .app .tag { margin-left:auto; font-size:11px; color:#6b7280; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:5px; padding:1px 7px; white-space:nowrap; }
+  .app .urg { font-size:11px; color:#b91c1c; font-weight:600; background:#fee2e2; border-radius:5px; padding:1px 7px; white-space:nowrap; }
+  .app .dot { width:7px; height:7px; border-radius:50%; background:#f59e0b; flex:0 0 auto; }
+
+  /* ---- contact pages ---- */
+  .td { border:1px solid #d7dbe0; border-radius:10px; overflow:hidden; font-size:12.5px; background:#fff; }
+  .td .hdr { background:#111827; color:#fff; padding:10px 14px; display:flex; align-items:center; gap:12px; }
+  .td .av { width:34px; height:34px; border-radius:50%; background:#475569; }
+  .td .nm { font-weight:700; font-size:15px; }
+  .td .pill { font-size:10px; background:#1d4ed8; padding:1px 7px; border-radius:10px; margin-left:6px; vertical-align:middle; }
+  .td .facts { color:#cbd5e1; font-size:11px; margin-top:2px; }
+  .td .acts { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .td .btn { background:#2563eb; color:#fff; border-radius:6px; padding:5px 10px; font-size:11px; display:inline-flex; gap:5px; align-items:center; }
+  .td .kebab { background:#374151; color:#fff; border-radius:6px; padding:5px 9px; font-size:13px; }
+  .td .bodyc { display:flex; min-height:470px; }
+  .td .comms { flex:1.4; background:#f4f6fa; border-right:1px solid #e3e7ec; display:flex; flex-direction:column; }
+  .td .ch { padding:8px 12px; border-bottom:1px solid #e3e7ec; display:flex; gap:8px; align-items:center; background:#fff; }
+  .td .ch .t { font-weight:600; }
+  .td .seg { margin-left:auto; display:flex; gap:4px; }
+  .td .seg b { font-size:10px; color:#475569; background:#eef1f5; border:1px solid #dde2e8; border-radius:5px; padding:2px 7px; font-weight:500; }
+  .td .seg b.on { background:#1f2937; color:#fff; border-color:#1f2937; }
+  .td .stream { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .td .dd { text-align:center; color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:.06em; margin:3px 0; }
+  .td .b { max-width:80%; border-radius:10px; padding:7px 10px; line-height:1.34; }
+  .td .b.in { background:#fff; border:1px solid #e3e7ec; align-self:flex-start; }
+  .td .b.out { background:#dbeafe; border:1px solid #bfdbfe; align-self:flex-end; }
+  .td .meta { font-size:9.5px; color:#94a3b8; margin-top:3px; }
+  .td .media { width:90px; height:60px; background:#e2e8f0; border:1px solid #cbd5e1; border-radius:6px; }
+  .td .evt { align-self:stretch; display:flex; align-items:center; gap:8px; color:#475569; font-size:10.5px; padding:1px 4px; }
+  .td .evt::before, .td .evt::after { content:""; flex:1; height:1px; background:#e3e7ec; }
+  .td .evt .pill2 { background:#fff; border:1px solid #dde2e8; border-radius:20px; padding:2px 10px; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; color:#475569; }
+  .td .evt .vl { color:#2563eb; }
+  .td .evt.relay .pill2 { background:#ede9fe; border-color:#ddd6fe; color:#5b21b6; }
+  .td .evt.num .pill2 { background:#fef3c7; border-color:#fde68a; color:#92400e; }
+  .td .evt.win .pill2 { background:#dcfce7; border-color:#bbf7d0; color:#166534; }
+  .td .callcard { align-self:center; width:84%; background:#fff; border:1px solid #e3e7ec; border-radius:8px; padding:7px 10px; }
+  .td .callcard .top { display:flex; align-items:center; gap:8px; font-size:11.5px; }
+  .td .callcard .pd { margin-left:auto; color:#2563eb; font-size:10.5px; }
+  .td .reply { border-top:1px solid #e3e7ec; background:#fff; padding:8px 12px; }
+  .td .reply .box { border:1px solid #cbd5e1; border-radius:7px; height:32px; }
+  .td .reply .rn { font-size:10px; color:#64748b; margin-top:4px; }
+  .td .file { flex:1; background:#fbfcfe; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .td .card2 { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:9px 11px; }
+  .td .card2 h4 { margin:0 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#6b7280; display:flex; align-items:center; gap:6px; }
+  .td .card2 h4 .ed { margin-left:auto; color:#2563eb; font-size:10px; font-weight:400; }
+  .td .kv { display:flex; gap:6px; font-size:12px; margin:2px 0; }
+  .td .kv .k { color:#6b7280; min-width:100px; }
+  .td .chips { display:flex; flex-wrap:wrap; gap:5px; }
+  .td .chip { background:#eef2ff; border:1px solid #e0e7ff; color:#3730a3; border-radius:12px; padding:2px 9px; font-size:11px; }
+  .td .li { display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0; border-bottom:1px solid #f1f3f6; }
+  .td .li:last-child { border-bottom:none; }
+  .td .li .r { margin-left:auto; font-size:11px; }
+  .td .yes { color:#15803d; } .td .no { color:#b91c1c; } .td .wait { color:#a16207; }
+  .td .thumbs { display:flex; gap:6px; } .td .thumbs .m { width:46px; height:46px; background:#e2e8f0; border:1px solid #cbd5e1; border-radius:5px; }
+  .lord .pill { background:#0e7490; }
+  .lord .chip { background:#ecfeff; border-color:#cffafe; color:#155e75; }
+  .lord .st-av { color:#15803d; } .lord .st-pl { color:#6b7280; } .lord .st-in { color:#a16207; }
+
+  @page { margin:14mm; }
+  @media print {
+    body { background:#fff; }
+    .wrap { max-width:none; padding:0; }
+    .noprint { display:none !important; }
+    .td .bodyc { min-height:0; }
+    .td .stream, .td .file { overflow:visible; }
+    .screen-page { margin-bottom:0; }
+    .screen-page + .screen-page { break-before:page; padding-top:6mm; }
+    .app, .td { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HousingChoice · new dashboard — progress</h1>
+  <p class="lede">Three screens locked in. These are <strong>structure / layout wireframes</strong> — not final visual design (colors, type, and polish come later). The throughline: the app is organized around <strong>people and cases</strong>, and communications always live in the context of a contact.</p>
+
+  <!-- 1 HOME -->
+  <div class="screen-page">
+    <div class="pgcap">1 · Home — “Today” action queue</div>
+    <div class="pgsub">Persistent left nav; the home screen is a prioritized queue of what needs you, every item anchored to a case or contact.</div>
+    <div class="app">
+      <div class="nav">
+        <div class="brand">HousingChoice</div>
+        <div class="glabel">Workspace</div>
+        <div class="item active"><span class="ic">◎</span> Today <span class="badge">9</span></div>
+        <div class="item"><span class="ic">▤</span> Cases</div>
+        <div class="item"><span class="ic">○</span> Contacts <span class="chev">▾</span></div>
+          <div class="child"><span class="fdot" style="background:#34d399;"></span> Tenants <span class="cc">214</span></div>
+          <div class="child"><span class="fdot" style="background:#60a5fa;"></span> Landlords <span class="cc">63</span></div>
+          <div class="child"><span class="fdot" style="background:#fbbf24;"></span> Unknown <span class="cc">7</span></div>
+        <div class="item"><span class="ic">▦</span> Listings</div>
+        <div class="divider"></div>
+        <div class="glabel">Communications</div>
+        <div class="item"><span class="ic">💬</span> Inbox <span class="badge">5</span></div>
+        <div class="item"><span class="ic">📣</span> Broadcasts</div>
+        <div class="sep"></div>
+        <div class="foot">
+          <div class="item"><span class="ic">⚙</span> Settings</div>
+          <div class="item"><span class="ic">◍</span> VA · va@example.com</div>
+        </div>
+      </div>
+      <div class="main">
+        <h3 class="day">Today · Tue Jun 16</h3>
+        <div class="sub">What needs you, across every case and contact.</div>
+        <div class="grp">
+          <div class="gh">Needs you now <span class="ct">4</span></div>
+          <div class="row"><span class="who">Tasha Williams</span><span class="why">RTA window closing</span><span class="urg">2h left</span><span class="tag">Case · Touring</span></div>
+          <div class="row"><span class="who">Marcus Lee</span><span class="why">Voucher expires</span><span class="urg">3 days</span><span class="tag">Case · Interested</span></div>
+          <div class="row"><span class="dot"></span><span class="who">1450 Joseph Blvd</span><span class="why">Send failed — needs a call</span><span class="tag">Case · Applied</span></div>
+          <div class="row"><span class="dot"></span><span class="who">(404) 010-0007</span><span class="why">New inbound — untriaged</span><span class="tag">Contact · Unknown</span></div>
+        </div>
+        <div class="grp">
+          <div class="gh">Tours today <span class="ct">2</span></div>
+          <div class="row"><span class="who">Tasha Williams</span><span class="why">Tour 10:00am · 1450 Joseph Blvd NW</span><span class="tag">Case · Touring</span></div>
+          <div class="row"><span class="who">Dana Cole</span><span class="why">Tour 2:30pm · 88 Lindbergh</span><span class="tag">Case · Touring</span></div>
+        </div>
+        <div class="grp">
+          <div class="gh">Unreplied <span class="ct">5</span></div>
+          <div class="row"><span class="who">James Porter</span><span class="why">"Is the 2BR still open?"</span><span class="tag">Contact · Landlord</span></div>
+          <div class="row"><span class="who">Tasha Williams</span><span class="why">"Saturday morning works!"</span><span class="tag">Case · Touring</span></div>
+        </div>
+        <div class="grp">
+          <div class="gh">Follow-ups due <span class="ct">3</span></div>
+          <div class="row"><span class="who">Renee Adams</span><span class="why">Stuck 6 days in Applied</span><span class="tag">Case · Applied</span></div>
+          <div class="row"><span class="who">Carlos Marín</span><span class="why">No reply since tour</span><span class="tag">Case · Touring</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2 TENANT -->
+  <div class="screen-page">
+    <div class="pgcap">2 · Tenant detail</div>
+    <div class="pgsub">Left: one communications + activity timeline across all the tenant’s numbers. Right: the tenant’s evolving file.</div>
+    <div class="td">
+      <div class="hdr">
+        <div class="av"></div>
+        <div>
+          <div class="nm">Tasha Williams <span class="pill">Tenant</span></div>
+          <div class="facts">Voucher 2BR · Atlanta Housing · 2 numbers · Active · linked case: 1450 Joseph Blvd (Touring)</div>
+        </div>
+        <div class="acts"><div class="btn">📞 Call <span style="opacity:.8;">(470) 555-0148 ▾</span></div><div class="kebab">⋯</div></div>
+      </div>
+      <div class="bodyc">
+        <div class="comms">
+          <div class="ch"><span class="t">Communications &amp; activity</span><span style="color:#94a3b8;font-size:10.5px;">all numbers</span><span class="seg"><b class="on">All</b><b>Comms only</b></span></div>
+          <div class="stream">
+            <div class="dd">Mon Jun 8</div>
+            <div class="evt"><span class="pill2">📋 Case opened · 1450 Joseph Blvd <span class="vl">View</span></span></div>
+            <div class="b in">Hi, got your number from the housing fair — looking for a 2 bedroom.<div class="meta">SMS · (404) 010-0007 · 9:14a</div></div>
+            <div class="b out">Welcome Tasha! I'll send options that take your voucher. 🏡<div class="meta">SMS · to (404) 010-0007 · 9:20a</div></div>
+            <div class="evt"><span class="pill2">🏷 Listing sent · 2BR near MARTA <span class="vl">View</span></span></div>
+            <div class="b out">Here's one near MARTA — <span style="color:#2563eb;">flyer.pdf</span><div class="media" style="margin-top:5px;"></div><div class="meta">MMS · via Broadcast · 9:21a</div></div>
+            <div class="dd">Wed Jun 10</div>
+            <div class="evt num"><span class="pill2">📱 Now also texting from (470) 555-0148</span></div>
+            <div class="b in">Yes! That one looks great, when can I see it? Also I really need a ground floor because my mom uses a walker, and we have a small quiet dog. Mornings/weekends are best to tour.<div class="meta">SMS · (470) 555-0148 · 1:02p</div></div>
+            <div class="evt"><span class="pill2">🗓 Tour scheduled · 1450 Joseph Blvd · Sat Jun 13, 10:00a <span class="vl">View</span></span></div>
+            <div class="callcard"><div class="top">📞 Outbound call · 4m 12s · <span style="color:#15803d;">Answered</span><span class="pd">▸ Transcript</span></div></div>
+            <div class="evt"><span class="pill2">⤴ Stage → Touring <span class="vl">View case</span></span></div>
+            <div class="evt relay"><span class="pill2">➕ Added to group text · 1450 Joseph Blvd <span style="text-decoration:underline;">open group text</span></span></div>
+            <div class="dd">Sat Jun 13</div>
+            <div class="b in">Running 10 min late, sorry!<div class="meta">SMS · (470) 555-0148 · 9:52a</div></div>
+            <div class="evt win"><span class="pill2">✓ Tour took place · 1450 Joseph Blvd · Toured <span class="vl">View</span></span></div>
+          </div>
+          <div class="reply"><div class="box"></div><div class="rn">Reply sends to <strong>(470) 555-0148</strong> (most recent) · change ▾</div></div>
+        </div>
+        <div class="file">
+          <div class="card2"><h4>Details <span class="ed">Edit</span></h4>
+            <div class="kv"><span class="k">Voucher size</span><span>2 BR</span></div>
+            <div class="kv"><span class="k">Housing authority</span><span>Atlanta Housing</span></div>
+            <div class="kv"><span class="k">Current address</span><span>123 Main St, Atlanta GA</span></div>
+            <div class="kv"><span class="k">Phone numbers</span><span>(404) 010-0007 · (470) 555-0148</span></div>
+            <div class="kv"><span class="k">Status</span><span>Active</span></div>
+          </div>
+          <div class="card2"><h4>Preferences &amp; notes <span class="ed">+ Add</span></h4>
+            <div class="chips"><span class="chip">Ground floor</span><span class="chip">Near MARTA</span><span class="chip">No stairs (walker)</span><span class="chip">Small dog</span><span class="chip">Mornings/weekends</span></div>
+          </div>
+          <div class="card2"><h4>Listings sent <span class="ed">3</span></h4>
+            <div class="li">1450 Joseph Blvd NW<span class="r yes">👍 Yes</span></div>
+            <div class="li">88 Lindbergh Dr<span class="r no">👎 No</span></div>
+            <div class="li">2BR near MARTA<span class="r wait">⏳ No reply</span></div>
+          </div>
+          <div class="card2"><h4>Tours <span class="ed">2</span></h4>
+            <div class="li">1450 Joseph Blvd · Jun 13<span class="r yes">Toured</span></div>
+            <div class="li">88 Lindbergh · Jun 5<span class="r no">No-show</span></div>
+          </div>
+          <div class="card2"><h4>Cases <span class="ed">1</span></h4><div class="li">1450 Joseph Blvd NW<span class="r">Touring</span></div></div>
+          <div class="card2"><h4>Group texts <span class="ed">1</span></h4><div class="li">1450 Joseph Blvd<span class="r yes">Active</span></div></div>
+          <div class="card2"><h4>Media from comms <span class="ed">4</span></h4><div class="thumbs"><div class="m"></div><div class="m"></div><div class="m"></div><div class="m"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3 LANDLORD -->
+  <div class="screen-page">
+    <div class="pgcap">3 · Landlord detail</div>
+    <div class="pgsub">Same shell as the tenant page; the right file centers on the landlord’s listings (the units they own) and the deals on them.</div>
+    <div class="td lord">
+      <div class="hdr">
+        <div class="av"></div>
+        <div>
+          <div class="nm">James Porter <span class="pill">Landlord</span></div>
+          <div class="facts">Porter Properties · 3 listings · 1 number · Active</div>
+        </div>
+        <div class="acts"><div class="btn">📞 Call <span style="opacity:.8;">(404) 222-0190 ▾</span></div><div class="kebab">⋯</div></div>
+      </div>
+      <div class="bodyc">
+        <div class="comms">
+          <div class="ch"><span class="t">Communications &amp; activity</span><span style="color:#94a3b8;font-size:10.5px;">all numbers</span><span class="seg"><b class="on">All</b><b>Comms only</b></span></div>
+          <div class="stream">
+            <div class="dd">Fri Jun 5</div>
+            <div class="evt"><span class="pill2">🏠 Listing added · 88 Lindbergh Dr <span class="vl">View</span></span></div>
+            <div class="dd">Mon Jun 8</div>
+            <div class="b out">Hi James — confirming the 2BR at 1450 Joseph Blvd is still open for a voucher tenant?<div class="meta">SMS · to (404) 222-0190 · 10:02a</div></div>
+            <div class="b in">Yes it's open, happy to work with vouchers. Can show it this week.<div class="meta">SMS · (404) 222-0190 · 10:15a</div></div>
+            <div class="evt win"><span class="pill2">✓ Listing confirmed available · 1450 Joseph Blvd <span class="vl">View</span></span></div>
+            <div class="dd">Wed Jun 10</div>
+            <div class="b out">Great — I have an interested tenant. Saturday 10am for a tour?<div class="meta">SMS · to (404) 222-0190 · 1:20p</div></div>
+            <div class="b in">Saturday 10am works, I'll meet them there.<div class="meta">SMS · (404) 222-0190 · 1:31p</div></div>
+            <div class="evt"><span class="pill2">🗓 Tour scheduled · 1450 Joseph Blvd · Sat Jun 13, 10:00a <span class="vl">View</span></span></div>
+            <div class="evt relay"><span class="pill2">➕ Added to group text · 1450 Joseph Blvd <span style="text-decoration:underline;">open group text</span></span></div>
+            <div class="dd">Sat Jun 13</div>
+            <div class="callcard"><div class="top">📞 Inbound call · 1m 48s · <span style="color:#15803d;">Answered</span><span class="pd">▸ Transcript</span></div></div>
+            <div class="evt win"><span class="pill2">✓ Tour took place · 1450 Joseph Blvd · Toured <span class="vl">View</span></span></div>
+          </div>
+          <div class="reply"><div class="box"></div><div class="rn">Reply sends to <strong>(404) 222-0190</strong> · change ▾</div></div>
+        </div>
+        <div class="file">
+          <div class="card2"><h4>Details <span class="ed">Edit</span></h4>
+            <div class="kv"><span class="k">Role</span><span>Landlord</span></div>
+            <div class="kv"><span class="k">Company</span><span>Porter Properties</span></div>
+            <div class="kv"><span class="k">Phone numbers</span><span>(404) 222-0190</span></div>
+            <div class="kv"><span class="k">Preferred contact</span><span>Text</span></div>
+            <div class="kv"><span class="k">Status</span><span>Active</span></div>
+          </div>
+          <div class="card2"><h4>Preferences &amp; notes <span class="ed">+ Add</span></h4>
+            <div class="chips"><span class="chip">Accepts HCV</span><span class="chip">12-mo lease</span><span class="chip">No large pets</span><span class="chip">Texts preferred</span></div>
+          </div>
+          <div class="card2"><h4>Listings <span class="ed">3</span></h4>
+            <div class="li">1450 Joseph Blvd NW · 2BR<span class="r st-av">● Available</span></div>
+            <div class="li">88 Lindbergh Dr · 1BR<span class="r st-pl">● Placed</span></div>
+            <div class="li">222 Edgewood Ave · 3BR<span class="r st-in">● Inactive</span></div>
+          </div>
+          <div class="card2"><h4>Cases on their units <span class="ed">1</span></h4><div class="li">Tasha Williams · 1450 Joseph Blvd<span class="r">Applied</span></div></div>
+          <div class="card2"><h4>Group texts <span class="ed">1</span></h4><div class="li">1450 Joseph Blvd<span class="r st-av">Active</span></div></div>
+          <div class="card2"><h4>Media from comms <span class="ed">2</span></h4><div class="thumbs"><div class="m"></div><div class="m"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="lede noprint" style="margin-top:18px;">Viewing at <strong>http://localhost:7321</strong>. To save the PDF: browser menu → Print → Destination “Save as PDF” (Background graphics ON for the colors). The Home screen now renders full-length with no scrollbar, and each screen prints on its own page.</p>
+</div>
+</body>
+</html>

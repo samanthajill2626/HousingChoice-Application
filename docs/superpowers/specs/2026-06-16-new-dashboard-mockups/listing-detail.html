@@ -1,0 +1,112 @@
+<h2>Listing detail (a unit)</h2>
+<p class="subtitle">A different kind of page from the contact pages — a structured record, <strong>not</strong> a comms hub (comms live on the contacts). Its job: the listing's facts, its media, and crucially the <strong>contact roster</strong> that lets you pivot to the right person's comms. <span style="color:#b45309;">Amber</span> = the roster, the thing your scenario needs.</p>
+
+<style>
+  .ld { border:1px solid #d7dbe0; border-radius:10px; overflow:hidden; font-size:12.5px; }
+  .hdr { background:#111827; color:#fff; padding:11px 14px; display:flex; align-items:center; gap:12px; }
+  .hdr .nm { font-weight:700; font-size:16px; }
+  .hdr .st { font-size:10px; background:#15803d; padding:1px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
+  .hdr .facts { color:#cbd5e1; font-size:11px; margin-top:2px; }
+  .hdr .acts { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .hdr .btn { background:#2563eb; color:#fff; border-radius:6px; padding:5px 10px; font-size:11px; }
+  .hdr .btn.alt { background:#374151; }
+  .hdr .kebab { background:#374151; color:#fff; border-radius:6px; padding:5px 9px; font-size:13px; }
+  .body { display:flex; min-height:440px; background:#fbfcfe; }
+  .left { flex:1.5; padding:12px; border-right:1px solid #e3e7ec; display:flex; flex-direction:column; gap:10px; }
+  .right { flex:1; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .gallery { display:flex; gap:6px; }
+  .gallery .big { flex:2; height:120px; background:#dde3ea; border:1px solid #cbd5e1; border-radius:8px; }
+  .gallery .col { flex:1; display:flex; flex-direction:column; gap:6px; }
+  .gallery .col .m { flex:1; background:#e2e8f0; border:1px solid #cbd5e1; border-radius:6px; }
+  .card2 { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px 11px; }
+  .card2.diff { border-color:#fcd9a8; box-shadow:0 0 0 1px #fcd9a8 inset; }
+  .card2 h4 { margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#6b7280; display:flex; align-items:center; gap:6px; }
+  .card2 h4 .ed { margin-left:auto; color:#2563eb; font-size:10px; font-weight:400; }
+  .card2 h4 .df { margin-left:auto; color:#b45309; font-size:9px; font-weight:600; text-transform:none; letter-spacing:0; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:5px 14px; }
+  .grid .k { color:#6b7280; font-size:11px; } .grid .v { font-size:12px; }
+  .gi { display:flex; justify-content:space-between; gap:8px; padding:2px 0; }
+  .ct { display:flex; align-items:center; gap:9px; padding:7px 0; border-bottom:1px solid #f1f3f6; }
+  .ct:last-child { border-bottom:none; }
+  .ct .av { width:26px; height:26px; border-radius:50%; background:#cbd5e1; flex:0 0 auto; }
+  .ct .nm { font-weight:600; }
+  .ct .role { font-size:10.5px; color:#6b7280; }
+  .ct .lk { margin-left:auto; color:#2563eb; font-size:11px; }
+  .ct .star { color:#a16207; font-size:10px; }
+  .li { display:flex; align-items:center; gap:8px; font-size:12px; padding:4px 0; border-bottom:1px solid #f1f3f6; }
+  .li:last-child { border-bottom:none; }
+  .li .r { margin-left:auto; font-size:11px; color:#6b7280; }
+  .evtline { font-size:11.5px; color:#475569; padding:3px 0; display:flex; gap:8px; }
+  .evtline .d { color:#94a3b8; min-width:48px; }
+  .note { color:#94a3b8; font-size:10px; margin-top:7px; }
+  .addrow { color:#2563eb; font-size:11px; margin-top:7px; }
+</style>
+
+<div class="ld">
+  <div class="hdr">
+    <div>
+      <div class="nm">1450 Joseph Blvd NW <span class="st">Available</span></div>
+      <div class="facts">2 BR · 1 BA · $1,400–1,600/mo · Voucher OK · West End, Atlanta</div>
+    </div>
+    <div class="acts">
+      <div class="btn">📣 Share flyer</div>
+      <div class="btn alt">✎ Edit</div>
+      <div class="kebab">⋯</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="left">
+      <div class="gallery">
+        <div class="big"></div>
+        <div class="col"><div class="m"></div><div class="m"></div></div>
+      </div>
+
+      <div class="card2">
+        <h4>Listing details <span class="ed">Edit</span></h4>
+        <div class="grid">
+          <div class="gi"><span class="k">Beds / Baths</span><span class="v">2 / 1</span></div>
+          <div class="gi"><span class="k">Rent</span><span class="v">$1,400–1,600</span></div>
+          <div class="gi"><span class="k">Payment standard</span><span class="v">$1,550</span></div>
+          <div class="gi"><span class="k">Deposit</span><span class="v">$1,400</span></div>
+          <div class="gi"><span class="k">Programs</span><span class="v">HCV · Section 8</span></div>
+          <div class="gi"><span class="k">Jurisdiction</span><span class="v">Atlanta</span></div>
+          <div class="gi"><span class="k">Utilities</span><span class="v">Tenant-paid</span></div>
+          <div class="gi"><span class="k">Accessibility</span><span class="v">Ground floor</span></div>
+          <div class="gi"><span class="k">Pets</span><span class="v">Cats only</span></div>
+          <div class="gi"><span class="k">Public link</span><span class="v" style="color:#2563eb;">View ↗</span></div>
+        </div>
+      </div>
+
+      <div class="card2">
+        <h4>Tour &amp; application process <span class="ed">Edit</span></h4>
+        <div style="font-size:12px;color:#374151;line-height:1.4;">Text the landlord to arrange access · self-show lockbox after confirm. Apply via the property's online portal; $35 app fee (often waived for vouchers).</div>
+      </div>
+    </div>
+
+    <div class="right">
+      <div class="card2 diff">
+        <h4>Contacts <span class="df">roster — multiple per listing</span></h4>
+        <div class="ct"><div class="av"></div><div><div class="nm">James Porter <span class="star">☎ primary</span></div><div class="role">Landlord · Porter Properties</div></div><div class="lk">Open ↗</div></div>
+        <div class="ct"><div class="av"></div><div><div class="nm">Maria Gomez</div><div class="role">Property manager · Porter Properties</div></div><div class="lk">Open ↗</div></div>
+        <div class="addrow">+ Add contact</div>
+        <div class="note">Each opens that contact's page — where their communications live. This is how you find “who did we actually talk to about this unit.”</div>
+      </div>
+
+      <div class="card2">
+        <h4>Cases on this listing <span class="ed">1</span></h4>
+        <div class="li">Tasha Williams<span class="r">Applied</span></div>
+      </div>
+
+      <div class="card2">
+        <h4>Activity</h4>
+        <div class="evtline"><span class="d">Jun 5</span><span>Listing added</span></div>
+        <div class="evtline"><span class="d">Jun 8</span><span>Confirmed available (James Porter)</span></div>
+        <div class="evtline"><span class="d">Jun 13</span><span>Tour took place · Tasha Williams</span></div>
+        <div class="evtline"><span class="d">Jun 13</span><span>Application received</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:12px;"><strong>http://localhost:7321</strong> — left = facts + photos + process; right leads with the <strong>Contacts roster</strong> (each "Open ↗" pivots to that person's comms), then Cases on the unit and an Activity log. Does this resolve the scenario? Should the listing page <em>also</em> offer an aggregated "all comms about this unit (across its contacts)" view, or is pivoting through the roster enough?</p>

@@ -315,6 +315,14 @@ export interface Contact {
   [key: string]: unknown;
 }
 
+/** GET /api/contacts page (the records list — the Contacts list views read the
+ *  first page). Mirrors the proven legacy contract. */
+export interface ContactsPage {
+  contacts: Contact[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
 // --- Units (legacy reuse — verbatim) ----------------------------------------
 
 /** A structured US postal address. Every part is optional — intake is

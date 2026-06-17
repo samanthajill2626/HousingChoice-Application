@@ -6,7 +6,9 @@ import type {
   CasesPage,
   Contact,
   ContactMediaItem,
+  ContactsPage,
   ContactTimelinePage,
+  ContactType,
   ConversationsPage,
   DevLoginResult,
   ListingSendRow,
@@ -150,6 +152,21 @@ export async function getUnitSimilar(
 // The contact detail page (B2 tenant / B3 landlord). getContact exists today
 // (legacy Contact, single `phone`); the timeline / listings-sent / media slices
 // (C2/C4/C5) 404 until BE1–BE5 land, so callers degrade gracefully.
+
+/** GET /api/contacts — the records list (the Contacts list views' source). The
+ *  server REQUIRES a `type` filter (unless an exact `phone` lookup is given), so
+ *  callers fetch one type at a time; the "all Contacts" view fans out per type
+ *  and merges. First page only (the server pages via nextCursor) — the list
+ *  views note this transitional limitation. */
+export function getContacts(
+  params: { type?: ContactType; status?: string } = {},
+  signal?: AbortSignal,
+): Promise<ContactsPage> {
+  return request<ContactsPage>('/api/contacts', {
+    query: { type: params.type, status: params.status },
+    ...(signal !== undefined && { signal }),
+  });
+}
 
 /** GET /api/contacts/:id — the contact record (the detail page header + file).
  *  Wrapped under { contact } on the wire; unwrapped here. */

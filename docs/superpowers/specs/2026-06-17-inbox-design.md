@@ -167,7 +167,13 @@ present rather than inventing parallel state.
   to the backend agent as a self-contained handoff (builder → reviewer → adversarial
   review), like BE1–BE6. Frontend ships against the contract and degrades until it
   lands.
-- **Frontend:** route + components + `useInbox` + states + tests, orchestrated
-  (builder → reviewer → adversarial review), live-verified on :5174.
+- **Frontend:** route + components + `useInbox` + states, orchestrated (builder →
+  reviewer → adversarial review). Verified **autonomously with unit tests only** (no
+  browser stack) — both worktrees defer the full browser hermetic stack to avoid the
+  fixed-port collision.
+- **Integration (gated):** after BOTH branches merge, the main session runs a single
+  integration pass — the `/inbox` browser e2e, the live :5174 verification, and the
+  SMS/MMS/voice/intake round-trip rebuild — **gated by the human's approval**. This
+  is where the e2e (incl. the comms-coverage rebuild) actually lands.
 - Mockups captured during brainstorming (ephemeral, gitignored under
   `.superpowers/brainstorm/`); the locked decisions are recorded in this spec.

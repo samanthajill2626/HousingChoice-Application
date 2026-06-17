@@ -6,9 +6,10 @@
 > done for every surface so far. Use the **superpowers:subagent-driven-development**
 > sub-skill to run each phase (builder implements TDD-style → reviewer checks →
 > adversarial reviewer attacks). You decide which findings are real; fix those, drop
-> the pedantic ones. **Self-QA (incl. a live click-through on :5174) before you
-> declare done — the human is NOT your bug-finder** (a hard expectation on this
-> project: see "state-sync" below).
+> the pedantic ones. **Self-QA before you declare done — the human is NOT your
+> bug-finder** (a hard expectation on this project: see "state-sync" below). Your
+> autonomous verification is **unit tests + reviews ONLY** — do NOT run the browser
+> hermetic stack, e2e, or a live :5174 pass (see *Acceptance* for why).
 
 ## Goal
 
@@ -72,7 +73,8 @@ optimistic-update rollback-on-failure. This is the project's #1 historical UI de
 2. `Inbox.tsx` + `InboxRow.tsx` + states + filter tabs; nav badge.
 3. Live updates (SSE patch/refetch) + optimistic mark-read/assign + inline actions
    (hover/swipe).
-4. e2e + adversarial review; fix real findings; live-verify on :5174.
+4. Adversarial review across the whole slice; fix real findings. (No e2e / live
+   :5174 pass — deferred to the integration phase; see *Acceptance*.)
 
 ## Conventions & guardrails
 
@@ -92,35 +94,41 @@ fallback), **mobile swipe** correctness, **contract drift** vs C8, **XSS** in
 preview/name rendering, and missed renames/terminology ("relay"→"group text").
 **You confirm each finding is real before acting; drop pedantic ones.**
 
-## Acceptance / verification
+## Acceptance / verification (autonomous = UNIT ONLY; e2e is deferred)
 
-- `npm test -w @housingchoice/dashboard` (unit) green; `npm run typecheck -w
-  @housingchoice/dashboard`; `npx eslint dashboard/`; `npm run build -w
-  @housingchoice/dashboard` — all clean.
-- Add an e2e spec at `e2e/tests/dashboard-next/inbox.spec.ts` (dev-login → `/inbox` →
-  rows render across states → tap a row → lands on the contact page). Use the
-  graceful-degradation path if the backend isn't merged in your worktree.
-- **Live-verify on :5174**: `npm run e2e:session` + the Playwright MCP (dev-login
-  button → `/inbox` → click through filters, a row, inline actions). Capture/confirm
-  it actually behaves — do not claim done from unit tests alone.
-- **Note on dropped comms e2e:** the full SMS/MMS/voice/intake round-trip coverage
-  (deleted in `40bd4f0`) can only be rebuilt once inbound data flows into the Inbox
-  (needs the backend slice merged). Build the **structural** `/inbox` e2e now; call
-  out the round-trip rebuild as an **integration follow-up** in your summary — do not
-  silently skip it.
+Run autonomously, all must be clean:
+- `npm test -w @housingchoice/dashboard` (vitest unit — port-free, hermetic),
+- `npm run typecheck -w @housingchoice/dashboard`,
+- `npx eslint dashboard/`,
+- `npm run build -w @housingchoice/dashboard`.
 
-## Ports (coordination — important)
+**Do NOT run `e2e:session`, do NOT run/author browser e2e, do NOT do a live :5174
+pass.** Rationale: the browser hermetic stack uses fixed ports shared across
+worktrees (can't run concurrently), AND the Inbox only behaves for real once C8 is
+merged behind it — in isolation it can only exercise the 404/degrade path. So **all
+e2e + the live UI verification are deferred to a single integration pass** that the
+**main session** runs **after both branches merge, gated by Cameron's approval**.
 
-The hermetic stack uses **fixed ports** (app 8080, vites 5173/5174, fake-twilio
-8889, MinIO 9000, DynamoDB Local), shared with the main checkout and the backend
-worktree. **Don't assume you can run `e2e:session` while another stack is up** — run
-it transiently to verify, then `npm run e2e:stop`. Avoid simultaneous stacks.
+Cover behavior thoroughly in **unit tests** instead — including the state-sync paths
+(mark-read/assign/new-inbound → row + nav badge + filter counts), optimistic-update
+rollback, and SSE patch-vs-refetch — since that's your only autonomous safety net.
+
+**Deferred to integration (do NOT do these now; note them in your summary):** the
+`/inbox` browser e2e (`e2e/tests/dashboard-next/inbox.spec.ts`), the live :5174
+click-through, and the SMS/MMS/voice/intake round-trip rebuild (dropped in
+`40bd4f0`, needs C8 + inbound data).
+
+## Ports
+
+You do **not** run the hermetic stack, so no port coordination is needed. Unit
+tests are port-free and run fine alongside the other worktree.
 
 ## Reporting (do not merge)
 
-When green + reviewed + live-verified, **STOP**. Write a short handoff summary: what
-you built, how you verified (incl. the live click-through), the integration
-follow-ups (comms e2e rebuild; anything that lights up only once C8 merges), and any
-contract notes. Leave branch `inbox-frontend` for the human to merge. **If you find
+When unit tests + reviews are green, **STOP**. Write a short handoff summary: what
+you built, how you verified (unit coverage), the **integration follow-ups deferred
+to the main session** (the `/inbox` browser e2e, live :5174 pass, and the comms
+round-trip rebuild — all run after C8 merges, gated by Cameron), and any contract
+notes. Leave branch `inbox-frontend` for the human to merge. **If you find
 C8 needs to change, do NOT silently diverge** — flag it back; the design is owned by
 the main session.

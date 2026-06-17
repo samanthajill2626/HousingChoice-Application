@@ -88,20 +88,27 @@ correctness (event fires on every relevant change; no stale/duplicate), **N+1 /
 perf** over the resolve-number→contact path, and missed renames. **You confirm each
 finding is real before acting; drop pedantic ones.**
 
-## Acceptance / verification (run the stack only transiently — see Ports)
+## Acceptance / verification (autonomous = unit + API/integration; NO browser stack)
 
-- `npm test -w @housingchoice/app` green (existing suite + your new tests).
+Run autonomously, all must be clean:
+- `npm test -w @housingchoice/app` green (existing suite + your new tests). This
+  includes your **API / DynamoDB-Local integration tests** — that's how C8's
+  aggregation, filters, pagination, read/assign, and the SSE emission are proven.
 - `npm run typecheck` clean.
-- The endpoint returns `InboxPage` per C8 over the hermetic seed; filters work;
-  mutations update read/assignment; an SSE event fires on change; all auth-gated.
+- Confirm via those tests: the endpoint returns `InboxPage` per C8 over the seed;
+  filters work; mutations update read/assignment; an SSE event fires on change; all
+  auth-gated.
 
-## Ports (coordination — important)
+**Do NOT run the full browser hermetic stack (`e2e:session`) and do NOT do
+browser/full-stack e2e.** The end-to-end browser verification (frontend + your C8
+together) is a single integration pass the **main session** runs **after both
+branches merge, gated by Cameron's approval** — not part of your autonomous run.
 
-The hermetic stack uses **fixed ports** (app 8080, vites 5173/5174, fake-twilio
-8889, MinIO 9000, DynamoDB Local). Your worktree shares them with the main checkout
-and the frontend worktree. **Do not assume you can run `e2e:session` while another
-stack is up** — run it only transiently to verify, then `npm run e2e:stop`. Avoid
-simultaneous stacks across worktrees.
+## Ports
+
+Your tests may use **DynamoDB Local** (port 8000); they do not need the browser
+stack. Don't run `e2e:session`. If the Dynamo port is busy, another run is active —
+don't run concurrently with the other worktree; otherwise no coordination is needed.
 
 ## Reporting (do not merge)
 

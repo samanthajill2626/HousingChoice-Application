@@ -108,6 +108,15 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
+ * BE5/C6: the cap on how many `available` units the similar-listings endpoint
+ * will sweep before ranking. The ranker is O(candidates) and the result is a
+ * top-N panel, so 500 is a generous bound on a single jurisdiction's open
+ * inventory. If MORE than this remain, we stop and log.warn (the ranker ran on
+ * a prefix of the available set — never silent truncation).
+ */
+const SIMILAR_SCAN_LIMIT = 500;
+
+/**
  * Parse ?limit= into 1..MAX_PAGE_LIMIT (default DEFAULT_PAGE_LIMIT). undefined
  * means "invalid" — the caller responds 400.
  */
@@ -425,9 +434,37 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    const available = await units.listByStatus('available');
-    const similar = rankSimilarUnits(unit, available.items);
-    log.info({ unitId, candidateCount: available.items.length, returned: similar.length }, 'similar units served');
+    // Sweep ALL available units before ranking — the ranker must see the whole
+    // open inventory, not one DynamoDB page (a best match could otherwise be on
+    // a later page and silently missed). Loop on lastEvaluatedKey up to a sane
+    // total cap; if the cap is hit with more remaining, log.warn (no silent
+    // truncation — the ranker ran on a prefix only).
+    const candidates: UnitItem[] = [];
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    let capped = false;
+    do {
+      const remaining = SIMILAR_SCAN_LIMIT - candidates.length;
+      const page = await units.listByStatus('available', {
+        limit: remaining,
+        ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      });
+      candidates.push(...page.items);
+      exclusiveStartKey = page.lastEvaluatedKey;
+      if (candidates.length >= SIMILAR_SCAN_LIMIT && exclusiveStartKey !== undefined) {
+        capped = true;
+        break;
+      }
+    } while (exclusiveStartKey !== undefined);
+
+    if (capped) {
+      log.warn(
+        { unitId, scanned: candidates.length, cap: SIMILAR_SCAN_LIMIT },
+        'similar units: hit the available-scan cap — ranked a prefix of available units only',
+      );
+    }
+
+    const similar = rankSimilarUnits(unit, candidates);
+    log.info({ unitId, candidateCount: candidates.length, returned: similar.length }, 'similar units served');
     res.json({ similar });
   });
 

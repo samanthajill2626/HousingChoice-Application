@@ -46,8 +46,10 @@ describe('rankSimilarUnits (BE5/C6)', () => {
       payment_standard: 1500,
       accepted_programs: ['HCV', 'VASH'],
     });
+    // `few` matches only ONE dimension (off-by-one beds → 0.5) so it scores
+    // >0% (still rankable after the 0%-drop) but far below `all`.
     const few = unit('few', {
-      beds: 4,
+      beds: 3,
       area: 'South',
       subzone: 'South-Z',
       payment_standard: 3000,
@@ -61,9 +63,12 @@ describe('rankSimilarUnits (BE5/C6)', () => {
   });
 
   it('off-by-one beds scores between an exact and a far match', () => {
-    const exact = unit('beds-exact', { beds: 2 });
-    const off = unit('beds-off', { beds: 3 });
-    const far = unit('beds-far', { beds: 6 });
+    // Give all three a shared `area` (a non-zero baseline) so the far-beds one
+    // still scores >0% (rankable after the 0%-drop); the BEDS contribution is
+    // the only thing that varies, so it drives the ordering.
+    const exact = unit('beds-exact', { beds: 2, area: 'North' });
+    const off = unit('beds-off', { beds: 3, area: 'North' });
+    const far = unit('beds-far', { beds: 6, area: 'North' });
     const bare = unit('beds-bare', { beds: 2 }); // for reference
     void bare;
     const out = rankSimilarUnits(target, [far, off, exact]);
@@ -122,6 +127,63 @@ describe('rankSimilarUnits (BE5/C6)', () => {
     // Equal score → ascending unitId.
     expect(run1.map((u) => u.unitId)).toEqual(['a-unit', 'z-unit']);
     expect(run1[0]!.matchPct).toBe(run1[1]!.matchPct);
+  });
+
+  it('tie-break gives a TOTAL order: N≥4 equal-matchPct candidates sort identically regardless of input order', () => {
+    // Several candidates that ALL score identically (same beds/area/subzone) —
+    // a coincidental 2-element stability wouldn't prove the unitId tie-break is
+    // a total order, so use 4+ and shuffle the input across two runs.
+    const ids = ['m', 'b', 'q', 'a', 'z'];
+    const make = () =>
+      ids.map((id) => unit(id, { beds: 2, area: 'North', subzone: 'North-A' }));
+    const run1 = rankSimilarUnits(target, make(), { limit: 10 });
+    // A different input order (reversed) must yield the IDENTICAL output order.
+    const run2 = rankSimilarUnits(target, [...make()].reverse(), { limit: 10 });
+    expect(run1).toEqual(run2);
+    // All equal matchPct → fully ascending unitId order (a total order).
+    expect(run1.map((u) => u.matchPct).every((p) => p === run1[0]!.matchPct)).toBe(true);
+    expect(run1.map((u) => u.unitId)).toEqual([...ids].sort());
+  });
+
+  it('drops 0%-match candidates (no empty-summary noise card)', () => {
+    // Shares NO scored dimension with the target: beds far off (≥2), different
+    // area/subzone, far rent, disjoint programs → final matchPct 0 → excluded.
+    const zero = unit('zero-match', {
+      beds: 9,
+      area: 'South',
+      subzone: 'South-Z',
+      payment_standard: 9000,
+      accepted_programs: ['NONE'],
+    });
+    const real = unit('real-match', { beds: 2, area: 'North', subzone: 'North-A' });
+    const out = rankSimilarUnits(target, [zero, real]);
+    const ids = out.map((u) => u.unitId);
+    expect(ids).not.toContain('zero-match'); // 0% is not "similar"
+    expect(ids).toContain('real-match');
+  });
+
+  it('every returned summary is non-empty across a mixed candidate set', () => {
+    const out = rankSimilarUnits(
+      target,
+      [
+        unit('full', {
+          beds: 2,
+          area: 'North',
+          subzone: 'North-A',
+          payment_standard: 1500,
+          accepted_programs: ['HCV', 'VASH'],
+        }),
+        unit('beds-only', { beds: 2 }), // no area/rent/programs scored, but beds led
+        unit('off-beds', { beds: 3 }), // off-by-one beds only
+        unit('area-only', { beds: 2, area: 'North', subzone: 'North-B' }),
+      ],
+      { limit: 10 },
+    );
+    expect(out.length).toBeGreaterThan(0);
+    for (const item of out) {
+      expect(typeof item.summary).toBe('string');
+      expect(item.summary.length).toBeGreaterThan(0);
+    }
   });
 
   it('builds a deterministic, human summary from the high-scoring dimensions', () => {

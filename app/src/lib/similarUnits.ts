@@ -120,6 +120,10 @@ function buildSummary(
     const programs = c.accepted_programs.filter((p) => typeof p === 'string');
     if (programs.length > 0) parts.push(`Accepts ${programs.join(', ')}`);
   }
+  // Never emit an empty-summary card: when no dimension part accumulated (e.g.
+  // an available unit with no comparable attributes), fall back to a neutral,
+  // non-empty label rather than ''.
+  if (parts.length === 0) return 'Available unit';
   return parts.join(' · ');
 }
 
@@ -153,6 +157,11 @@ export function rankSimilarUnits(
       scores.rent * WEIGHT_RENT +
       scores.programs * WEIGHT_PROGRAMS;
     const matchPct = Math.round(score * 100);
+
+    // A 0% match shares NO scored dimension with the target — it is not
+    // "similar". Drop it (removes noise and avoids emitting a card whose only
+    // honest summary would be the neutral fallback) BEFORE taking the top-N.
+    if (matchPct === 0) continue;
 
     ranked.push({
       unitId: c.unitId,

@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import type { LogCapture } from './helpers/logCapture.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { phoneRefId } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
@@ -23,12 +24,32 @@ const PHONE_B = '+15550100002';
 describe('GET /api/contacts/:id/media (BE5/C5)', () => {
   let app: Express;
   let world: FakeWorld;
+  let capture: LogCapture;
 
   beforeEach(() => {
     const h = makeWebhookHarness();
     app = h.app;
     world = h.world;
+    capture = h.capture;
   });
+
+  /** Append N plain text (no-media) messages to a conversation, oldest-first. */
+  async function seedTextMessages(conversationId: string, count: number): Promise<void> {
+    for (let i = 0; i < count; i += 1) {
+      // Distinct, monotonically-increasing provider_ts → stable newest-first sort.
+      const ts = `2026-06-16T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+      await world.messagesRepo.append({
+        conversationId,
+        providerSid: `SM-bulk-${i}`,
+        providerTs: ts,
+        type: 'sms',
+        direction: 'inbound',
+        author: 'tenant',
+        deliveryStatus: 'delivered',
+        body: `m${i}`,
+      });
+    }
+  }
 
   const authedGet = (path: string) =>
     request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
@@ -207,14 +228,43 @@ describe('GET /api/contacts/:id/media (BE5/C5)', () => {
 
   it('excludes media on a relay_group thread (pool number, never the contact 1:1)', async () => {
     seedContact();
-    // A relay_group thread fronted by a pool number that happens to also be one
-    // of the contact's numbers — it must STILL be excluded purely on type.
+    // A relay_group thread fronted by a pool number that happens to also be the
+    // contact's PRIMARY number (PHONE_A) — excluded purely on type.
     seedConversation('conv-relay', PHONE_A, 'relay_group');
     await seedMediaMessage('conv-relay', '2026-06-16T10:00:00.000Z', 'MM-relay', [
       { s3Key: 'media/group.jpg', contentType: 'image/jpeg' },
     ]);
+    // And another relay_group fronted by the contact's SECONDARY number
+    // (PHONE_B) — relay exclusion must hold across ALL the contact's numbers,
+    // not just the primary.
+    seedConversation('conv-relay-b', PHONE_B, 'relay_group');
+    await seedMediaMessage('conv-relay-b', '2026-06-16T12:00:00.000Z', 'MM-relay-b', [
+      { s3Key: 'media/group-b.jpg', contentType: 'image/jpeg' },
+    ]);
     const res = await authedGet('/api/contacts/c-tenant/media');
     expect(res.status).toBe(200);
     expect(res.body.media).toEqual([]);
+  });
+
+  it('does NOT warn on a thread of EXACTLY the scan cap (200) — complete, not truncated', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await seedTextMessages('conv-a', 200); // exactly the cap
+    const res = await authedGet('/api/contacts/c-tenant/media');
+    expect(res.status).toBe(200);
+    const warns = capture.atLevel(40).filter((l) => l['conversationId'] === 'conv-a');
+    expect(warns).toHaveLength(0); // off-by-one fix: exactly-cap is not overflow
+  });
+
+  it('warns only on REAL overflow (>200 messages in a thread)', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    await seedTextMessages('conv-a', 201); // one past the cap → real overflow
+    const res = await authedGet('/api/contacts/c-tenant/media');
+    expect(res.status).toBe(200);
+    const warns = capture.atLevel(40).filter((l) => l['conversationId'] === 'conv-a');
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!['cap']).toBe(200);
+    expect(warns[0]!['scanned']).toBe(200); // processed at most the newest 200
   });
 });

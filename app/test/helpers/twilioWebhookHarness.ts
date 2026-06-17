@@ -801,10 +801,29 @@ export function createFakeWorld(): FakeWorld {
       return { items };
     },
     async listByStatus(status, opts = {}) {
-      const items = [...units.values()]
-        .filter((u) => u.status === status)
-        .slice(0, opts.limit ?? 50);
-      return { items };
+      // Honor the same paging contract as the real repo (BE5/C6 parity): resume
+      // after the cursor's unitId, return at most `limit` items, and emit a
+      // lastEvaluatedKey only when more remain. When NO limit is passed, return
+      // ALL matching units (never a hidden default cap that drops candidates).
+      const all = [...units.values()].filter((u) => u.status === status);
+      let start = 0;
+      const cursorId = opts.exclusiveStartKey?.['unitId'];
+      if (typeof cursorId === 'string') {
+        const idx = all.findIndex((u) => u.unitId === cursorId);
+        if (idx >= 0) start = idx + 1;
+      }
+      const window =
+        opts.limit === undefined ? all.slice(start) : all.slice(start, start + opts.limit);
+      const items = window.map((u) => ({ ...u }));
+      const last = window[window.length - 1];
+      const hasMore = opts.limit !== undefined && start + opts.limit < all.length;
+      return {
+        items,
+        ...(hasMore &&
+          last !== undefined && {
+            lastEvaluatedKey: { unitId: last.unitId } as Record<string, unknown>,
+          }),
+      };
     },
     async listByJurisdiction(jurisdiction, opts = {}) {
       const items = [...units.values()]

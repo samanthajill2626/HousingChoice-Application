@@ -541,10 +541,15 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // Single pass: collect every attachment of every media-bearing message.
     const media: ContactMediaItem[] = [];
     for (const conversationId of convById.keys()) {
-      const page = await messages.listByConversation(conversationId, {
-        limit: MEDIA_SCAN_PAGE_LIMIT,
+      // Probe one PAST the cap (limit = cap + 1): if MORE than the cap came back
+      // the thread is genuinely truncated; a thread of EXACTLY the cap is
+      // complete (no false-positive warn). Process at most the newest `cap`.
+      const fetched = await messages.listByConversation(conversationId, {
+        limit: MEDIA_SCAN_PAGE_LIMIT + 1,
       });
-      if (page.length === MEDIA_SCAN_PAGE_LIMIT) {
+      const truncated = fetched.length > MEDIA_SCAN_PAGE_LIMIT;
+      const page = truncated ? fetched.slice(0, MEDIA_SCAN_PAGE_LIMIT) : fetched;
+      if (truncated) {
         // No silent truncation — record that older media for this thread was not
         // scanned (the page is newest-first, so the dropped media is the oldest).
         log.warn(

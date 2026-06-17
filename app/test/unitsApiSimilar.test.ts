@@ -75,6 +75,46 @@ describe('GET /api/units/:id/similar (BE5/C6)', () => {
     expect((res.body.similar as Array<{ unitId: string }>).map((s) => s.unitId)).toContain('u-alt');
   });
 
+  it('sweeps ALL available units (not one page) so a late-seeded best match is ranked', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-target', {
+      beds: 2,
+      area: 'North',
+      subzone: 'North-A',
+      payment_standard: 1500,
+      accepted_programs: ['HCV', 'VASH'],
+    });
+    // Seed MORE available units than one notional DynamoDB page (the legacy
+    // default cap was 50) — all weak matches (off beds, different area).
+    for (let i = 0; i < 80; i += 1) {
+      seedUnit(world, `u-filler-${String(i).padStart(3, '0')}`, {
+        beds: 4,
+        area: 'South',
+        subzone: 'South-Z',
+        payment_standard: 3000,
+      });
+    }
+    // The clearly-best match is seeded LAST (so it lands on a later page); a
+    // single-page read would miss it entirely.
+    seedUnit(world, 'u-best-late', {
+      beds: 2,
+      area: 'North',
+      subzone: 'North-A',
+      payment_standard: 1500,
+      accepted_programs: ['HCV', 'VASH'],
+    });
+
+    const res = await request(app)
+      .get('/api/units/u-target/similar')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const similar = res.body.similar as Array<{ unitId: string; matchPct: number }>;
+    expect(similar[0]!.unitId).toBe('u-best-late'); // the ranker considered all
+    expect(similar[0]!.matchPct).toBe(100);
+  });
+
   it('404s an unknown unit', async () => {
     const { app } = makeWebhookHarness();
     const res = await request(app)

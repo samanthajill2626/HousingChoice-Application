@@ -300,6 +300,25 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('address');
   }
 
+  if ('role' in b) {
+    const r = parseRole(b['role']);
+    if (typeof r !== 'string') return r;
+    patch['role'] = r;                  // may be '' to clear
+    changedFields.push('role');
+  }
+  if ('relationships' in b) {
+    const rels = parseRelationships(b['relationships']);
+    if (!Array.isArray(rels)) return rels;
+    patch['relationships'] = rels;
+    changedFields.push('relationships');
+  }
+  if ('customFields' in b) {
+    const cf = parseCustomFields(b['customFields']);
+    if (!Array.isArray(cf)) return cf;
+    patch['customFields'] = cf;
+    changedFields.push('customFields');
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }

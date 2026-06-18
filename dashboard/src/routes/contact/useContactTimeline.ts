@@ -24,12 +24,17 @@ import { buildTimelineFallback } from './buildTimelineFallback.js';
 export type TimelineStatus = 'loading' | 'ready' | 'error';
 export type TimelineSource = 'server' | 'fallback';
 
-export interface ContactTimelineState {
+/** The async-loaded data the hook holds internally (the public return type adds the
+ *  optimistic-send methods, which live outside this state). */
+interface TimelineData {
   status: TimelineStatus;
   /** Server items merged with any in-flight OPTIMISTIC sends (deduped by tsMsgId). */
   items: TimelineItem[];
   /** Which path produced `items` — 'server' (/timeline) or 'fallback' (assembled). */
   source: TimelineSource;
+}
+
+export interface ContactTimelineState extends TimelineData {
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
   addOptimistic: (conversationId: string, body: string, toPhone?: string) => string;
@@ -127,7 +132,7 @@ async function loadTimeline(
 }
 
 export function useContactTimeline(contactId: string, kinds?: string): ContactTimelineState {
-  const [state, setState] = useState<ContactTimelineState>({
+  const [state, setState] = useState<TimelineData>({
     status: 'loading',
     items: [],
     source: 'server',

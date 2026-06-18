@@ -1,11 +1,23 @@
 // ContactEditForm — the edit dialog for a contact's details. Type-aware fields:
 // name + status + notes for everyone, voucher size for tenants, company for
-// landlords/PMs. Dirty-tracked: only the changed fields are PATCHed (the server
-// SET-merges, so an untouched field is never blanked). On success the parent
-// applies the returned contact in place (no refetch).
+// landlords/PMs. Also: Role (datalist), Relationships, and Custom fields sections.
+// Dirty-tracked: only the changed fields are PATCHed (the server SET-merges, so
+// an untouched field is never blanked). On success the parent applies the returned
+// contact in place (no refetch).
 import { useState } from 'react';
-import { updateContact, type Address, type Contact, type ContactPatch } from '../../api/index.js';
+import {
+  updateContact,
+  type Address,
+  type Contact,
+  type ContactPatch,
+  type Relationship,
+  type CustomField,
+} from '../../api/index.js';
 import { Button } from '../../ui/index.js';
+import { RelationshipsEditor } from './RelationshipsEditor.js';
+import { CustomFieldsEditor } from './CustomFieldsEditor.js';
+import { useContactVocabulary } from './useContactVocabulary.js';
+import { normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
 import { Modal } from './Modal.js';
 import styles from './ContactEditForm.module.css';
 
@@ -13,6 +25,7 @@ export interface ContactEditFormProps {
   contact: Contact;
   onClose: () => void;
   onSaved: (updated: Contact) => void;
+  candidates?: Contact[];
 }
 
 const STATUSES: { value: string; label: string }[] = [
@@ -24,9 +37,10 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
-export function ContactEditForm({ contact, onClose, onSaved }: ContactEditFormProps): React.JSX.Element {
+export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
   const isLandlord = contact.type === 'landlord' || contact.type === 'pm';
   const isTenant = contact.type === 'tenant';
+  const vocab = useContactVocabulary();
 
   const [firstName, setFirstName] = useState(str(contact.firstName));
   const [lastName, setLastName] = useState(str(contact.lastName));
@@ -37,6 +51,27 @@ export function ContactEditForm({ contact, onClose, onSaved }: ContactEditFormPr
   );
   const [company, setCompany] = useState(str(contact['company']));
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
+  const [role, setRole] = useState(str(contact.role));
+  const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
+  const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
+  // Track whether the editors have been expanded (start collapsed to keep the
+  // form clean when there is no pre-existing data).
+  const [showRelationships, setShowRelationships] = useState(
+    (contact.relationships ?? []).length > 0,
+  );
+  const [showCustomFields, setShowCustomFields] = useState(
+    (contact.customFields ?? []).length > 0,
+  );
+
+  function handleShowRelationships(): void {
+    setShowRelationships(true);
+    if (relRows.length === 0) setRelRows([{ role: '', name: '' }]);
+  }
+
+  function handleShowCustomFields(): void {
+    setShowCustomFields(true);
+    if (cfRows.length === 0) setCfRows([{ label: '', value: '' }]);
+  }
   // Initial address parts (a structured object, or a legacy string folded into line1).
   const addrObj: Partial<Address> =
     typeof contact.address === 'object' && contact.address !== null ? contact.address : {};
@@ -63,6 +98,21 @@ export function ContactEditForm({ contact, onClose, onSaved }: ContactEditFormPr
     if (status !== (str(contact.status) || 'needs_review')) patch.status = status;
     if (notes !== str(contact.notes)) patch.notes = notes;
     if (isLandlord && company !== str(contact['company'])) patch.company = company;
+
+    // Role — a cleared role sends '' (the server clears it).
+    const roleTrimmed = role.trim();
+    if (roleTrimmed !== str(contact.role).trim()) patch.role = roleTrimmed;
+
+    // Relationships — only send if the normalized form changed.
+    const normRel = normalizeRelationships(relRows);
+    const initRel = normalizeRelationships(contact.relationships ?? []);
+    if (JSON.stringify(normRel) !== JSON.stringify(initRel)) patch.relationships = normRel;
+
+    // Custom fields — only send if the normalized form changed.
+    const normCf = normalizeCustomFields(cfRows);
+    const initCf = normalizeCustomFields(contact.customFields ?? []);
+    if (JSON.stringify(normCf) !== JSON.stringify(initCf)) patch.customFields = normCf;
+
     if (isTenant) {
       const initialVoucher = typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '';
       if (voucher !== initialVoucher) {
@@ -272,6 +322,60 @@ export function ContactEditForm({ contact, onClose, onSaved }: ContactEditFormPr
             rows={3}
           />
         </label>
+
+        {/* Role — datalist from vocabulary */}
+        <label className={styles.field}>
+          <span className={styles.label}>Role</span>
+          <input
+            id="edit-role"
+            className={styles.input}
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            autoComplete="off"
+            list="edit-role-suggestions"
+            aria-label="Role"
+          />
+          {vocab.roles.length > 0 && (
+            <datalist id="edit-role-suggestions">
+              {vocab.roles.map((r) => (
+                <option key={r} value={r} />
+              ))}
+            </datalist>
+          )}
+        </label>
+
+        {/* Relationships */}
+        {showRelationships ? (
+          <div className={styles.fieldset}>
+            <span className={styles.label}>Relationships</span>
+            <RelationshipsEditor
+              rows={relRows}
+              onChange={setRelRows}
+              candidates={candidates}
+              roleSuggestions={vocab.relationshipRoles}
+            />
+          </div>
+        ) : (
+          <Button variant="secondary" size="sm" type="button" onClick={handleShowRelationships}>
+            + Add relationship
+          </Button>
+        )}
+
+        {/* Custom fields */}
+        {showCustomFields ? (
+          <div className={styles.fieldset}>
+            <span className={styles.label}>Custom fields</span>
+            <CustomFieldsEditor
+              rows={cfRows}
+              onChange={setCfRows}
+              labelSuggestions={vocab.fieldLabels}
+            />
+          </div>
+        ) : (
+          <Button variant="secondary" size="sm" type="button" onClick={handleShowCustomFields}>
+            + Add custom field
+          </Button>
+        )}
 
         {error !== null ? (
           <p role="alert" className={styles.error}>

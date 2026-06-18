@@ -290,6 +290,42 @@ export interface MessagePersistedEvent {
   deliveryStatus: DeliveryStatus;
 }
 
+// --- Contact creation / vocabulary (extensible create flow) ------------------
+
+/** A relationship link on a contact (e.g. spouse, employer, property manager). */
+export interface Relationship {
+  role: string;
+  name: string;
+  contactId?: string;
+}
+
+/** A freeform key→value pair stored on a contact (custom intake fields). */
+export interface CustomField {
+  label: string;
+  value: string;
+}
+
+/** GET /api/contacts/vocabulary — the operator-configured pick-lists used by the
+ *  contact creation form. */
+export interface ContactVocabulary {
+  roles: string[];
+  relationshipRoles: string[];
+  fieldLabels: string[];
+}
+
+/** POST /api/contacts — create a brand-new contact record. */
+export interface ContactCreate {
+  type: ContactType;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  voucherSize?: number;
+  company?: string;
+  role?: string;
+  relationships?: Relationship[];
+  customFields?: CustomField[];
+}
+
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------
 // Copied from dashboard-legacy/src/api/types.ts. The contact detail page reads
 // type/status/phone/firstName/lastName/voucherSize/notes off this flexible doc.
@@ -318,6 +354,12 @@ export interface Contact {
   housingAuthority?: string;
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
+  /** Contact's role within the organisation (e.g. case manager, property manager). */
+  role?: string;
+  /** Linked contacts (relationships) stored on this record. */
+  relationships?: Relationship[];
+  /** Operator-defined custom fields stored on this record. */
+  customFields?: CustomField[];
   [key: string]: unknown;
 }
 
@@ -335,6 +377,12 @@ export interface ContactPatch {
   housingAuthority?: string;
   /** Structured address; the server stores only the non-empty parts. */
   address?: Address;
+  /** Contact's role within the organisation (e.g. case manager, property manager). */
+  role?: string;
+  /** Linked contacts (relationships) stored on this record. */
+  relationships?: Relationship[];
+  /** Operator-defined custom fields stored on this record. */
+  customFields?: CustomField[];
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the

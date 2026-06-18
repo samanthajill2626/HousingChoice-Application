@@ -18,6 +18,7 @@ import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/eve
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -48,6 +49,10 @@ import {
   toListingSendRow,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
+import {
+  createContactVocabularyRepo,
+  type ContactVocabularyRepo,
+} from '../repos/contactVocabularyRepo.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -60,6 +65,8 @@ export interface ContactsRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4: serve a contact's "Listings sent" (GET /:id/listings-sent). */
   listingSendsRepo?: ListingSendsRepo;
+  /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
+  vocabularyRepo?: ContactVocabularyRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -299,6 +306,25 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('address');
   }
 
+  if ('role' in b) {
+    const r = parseRole(b['role']);
+    if (typeof r !== 'string') return r;
+    patch['role'] = r;                  // may be '' to clear
+    changedFields.push('role');
+  }
+  if ('relationships' in b) {
+    const rels = parseRelationships(b['relationships']);
+    if (!Array.isArray(rels)) return rels;
+    patch['relationships'] = rels;
+    changedFields.push('relationships');
+  }
+  if ('customFields' in b) {
+    const cf = parseCustomFields(b['customFields']);
+    if (!Array.isArray(cf)) return cf;
+    patch['customFields'] = cf;
+    changedFields.push('customFields');
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
@@ -383,6 +409,26 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     item.phone = normalized;
   }
 
+  if ('company' in b) {
+    if (typeof b['company'] !== 'string') return { error: 'company must be a string' };
+    item.company = b['company'];
+  }
+  if ('role' in b) {
+    const r = parseRole(b['role']);
+    if (typeof r !== 'string') return r;            // { error }
+    if (r.length > 0) item.role = r;
+  }
+  if ('relationships' in b) {
+    const rels = parseRelationships(b['relationships']);
+    if (!Array.isArray(rels)) return rels;          // { error }
+    item.relationships = rels;
+  }
+  if ('customFields' in b) {
+    const cf = parseCustomFields(b['customFields']);
+    if (!Array.isArray(cf)) return cf;              // { error }
+    item.customFields = cf;
+  }
+
   // A manual create asserts identity — default to active (not needs_review).
   if (item.status === undefined) item.status = 'active';
 
@@ -398,6 +444,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  const vocabulary = deps.vocabularyRepo ?? createContactVocabularyRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -497,7 +544,35 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       { contactId: contact.contactId, type: contact.type, actor: req.user?.userId },
       'contact created via api',
     );
+    // Best-effort vocabulary write: collect tokens from the newly created contact.
+    // Never fails the response — if DynamoDB is unavailable, the create still succeeds.
+    try {
+      const { item } = parsed;
+      const vocabRoles =
+        typeof item.role === 'string' && item.role.length > 0 ? [item.role] : [];
+      const vocabRels = Array.isArray(item.relationships)
+        ? item.relationships.map((r) => r.role)
+        : [];
+      const vocabCf = Array.isArray(item.customFields)
+        ? item.customFields.map((c) => c.label)
+        : [];
+      await vocabulary.add({
+        ...(vocabRoles.length > 0 && { roles: vocabRoles }),
+        ...(vocabRels.length > 0 && { relationshipRoles: vocabRels }),
+        ...(vocabCf.length > 0 && { fieldLabels: vocabCf }),
+      });
+    } catch (err) {
+      log.warn({ err, contactId: contact.contactId }, 'vocabulary add failed (best-effort)');
+    }
     res.status(201).json({ contact });
+  });
+
+  // GET /api/contacts/vocabulary — auto-suggest vocabulary (sorted, deduped).
+  // MUST be registered BEFORE GET /:contactId so the literal segment `vocabulary`
+  // is not captured as a contactId param.
+  router.get('/vocabulary', async (_req, res) => {
+    const vocab = await vocabulary.get();
+    res.json({ vocabulary: vocab });
   });
 
   // GET /api/contacts/:contactId — the side-panel contact item. The returned
@@ -692,6 +767,28 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       { contactId, fields: parsed.changedFields, propagatedConversations, actor: req.user?.userId },
       'contact triaged',
     );
+
+    // Best-effort vocabulary write: collect tokens from this patch.
+    // Never fails the response.
+    try {
+      const patchRoles =
+        typeof parsed.patch['role'] === 'string' && parsed.patch['role'].length > 0
+          ? [parsed.patch['role']]
+          : [];
+      const patchRels = Array.isArray(parsed.patch['relationships'])
+        ? (parsed.patch['relationships'] as { role: string }[]).map((r) => r.role)
+        : [];
+      const patchCf = Array.isArray(parsed.patch['customFields'])
+        ? (parsed.patch['customFields'] as { label: string }[]).map((c) => c.label)
+        : [];
+      await vocabulary.add({
+        ...(patchRoles.length > 0 && { roles: patchRoles }),
+        ...(patchRels.length > 0 && { relationshipRoles: patchRels }),
+        ...(patchCf.length > 0 && { fieldLabels: patchCf }),
+      });
+    } catch (err) {
+      log.warn({ err, contactId }, 'vocabulary add failed on patch (best-effort)');
+    }
 
     res.json({ contact: updated });
   });

@@ -11,6 +11,12 @@ import type { ContactsState } from './useContacts.js';
 let state: ContactsState = { status: 'loading', contacts: [] };
 vi.mock('./useContacts.js', () => ({ useContacts: () => state }));
 
+// ContactCreateForm uses useContactVocabulary (makes a network call on mount).
+// Mock it to keep these tests hermetic.
+vi.mock('../contact/useContactVocabulary.js', () => ({
+  useContactVocabulary: () => ({ roles: [], relationshipRoles: [], fieldLabels: [] }),
+}));
+
 import { ContactsList } from './ContactsList.js';
 
 const CONTACTS: Contact[] = [
@@ -105,5 +111,20 @@ describe('ContactsList', () => {
     renderList('all');
     await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'zzzzz');
     expect(screen.getByText(/no matches|nothing/i)).toBeInTheDocument();
+  });
+
+  it('renders a "New contact" button in the list header', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    expect(screen.getByRole('button', { name: 'New contact' })).toBeInTheDocument();
+  });
+
+  it('clicking "New contact" opens the create dialog', async () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('all');
+    await userEvent.click(screen.getByRole('button', { name: 'New contact' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // The dialog title heading should read "New contact"
+    expect(screen.getByRole('heading', { name: 'New contact' })).toBeInTheDocument();
   });
 });

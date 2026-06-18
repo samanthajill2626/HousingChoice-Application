@@ -9,6 +9,10 @@ vi.mock('../../api/index.js', async () => {
   return { ...actual, updateContact: (...a: unknown[]) => updateContact(...a) };
 });
 
+vi.mock('./useContactVocabulary.js', () => ({
+  useContactVocabulary: () => ({ roles: [], relationshipRoles: [], fieldLabels: [] }),
+}));
+
 import { ContactEditForm } from './ContactEditForm.js';
 
 const TENANT: Contact = {
@@ -130,5 +134,68 @@ describe('ContactEditForm', () => {
     await user.type(screen.getByLabelText(/First name/i), 'X');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t save/i));
+  });
+
+  it('editing the Role input → PATCH includes {role} and unchanged sections are NOT in the patch', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, role: 'Case worker' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/^Role$/i), 'Case worker');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', { role: 'Case worker' }),
+    );
+    const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('relationships' in patch).toBe(false);
+    expect('customFields' in patch).toBe(false);
+  });
+
+  it('adding a relationship (role + name) → PATCH includes {relationships: [...]}', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // Click "+ Add relationship" to expand the editor
+    await user.click(screen.getByRole('button', { name: /\+ Add relationship/i }));
+    await user.type(screen.getByLabelText(/Relationship role 1/i), 'Spouse');
+    await user.type(screen.getByLabelText(/Contact search 1/i), 'Jane Doe');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ relationships: [{ role: 'Spouse', name: 'Jane Doe' }] }),
+      ),
+    );
+  });
+
+  it('adding a custom field (label + value) → PATCH includes {customFields: [...]}', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // Click "+ Add custom field" to expand the editor
+    await user.click(screen.getByRole('button', { name: /\+ Add custom field/i }));
+    await user.type(screen.getByLabelText(/Field label 1/i), 'Notes');
+    await user.type(screen.getByLabelText(/Field value 1/i), 'Prefers calls');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ customFields: [{ label: 'Notes', value: 'Prefers calls' }] }),
+      ),
+    );
+  });
+
+  it('only changing the name does NOT include role/relationships/customFields in the patch', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, firstName: 'Natasha' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const first = screen.getByLabelText(/First name/i);
+    await user.clear(first);
+    await user.type(first, 'Natasha');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('role' in patch).toBe(false);
+    expect('relationships' in patch).toBe(false);
+    expect('customFields' in patch).toBe(false);
   });
 });

@@ -158,4 +158,30 @@ describe('POST /api/contacts — manual create', () => {
     }
     expect(world.auditEvents).toHaveLength(0);
   });
+
+  it('creates a contact with role, company, relationships, and customFields', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        type: 'tenant', firstName: 'Carla', lastName: 'Reyes', role: 'Case worker', company: 'AH Agency',
+        relationships: [{ role: 'Client', name: 'Tasha Nguyen', contactId: 'contact-tenant-0001' }],
+        customFields: [{ label: 'Agency', value: 'Atlanta Housing' }],
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.contact).toMatchObject({
+      type: 'tenant', role: 'Case worker', company: 'AH Agency',
+      relationships: [{ role: 'Client', name: 'Tasha Nguyen', contactId: 'contact-tenant-0001' }],
+      customFields: [{ label: 'Agency', value: 'Atlanta Housing' }],
+    });
+  });
+
+  it('400s an invalid relationship on create', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app).post('/api/contacts')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', relationships: [{ role: 'Client' }] }); // missing name
+    expect(res.status).toBe(400);
+  });
 });

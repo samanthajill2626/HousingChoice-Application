@@ -35,6 +35,9 @@ import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.
 import { buildReplyTargets } from './replyTargets.js';
 import { messageSid } from './media.js';
 import { landlordUnits } from './buildContactFile.js';
+import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
+import { RelationshipsCard } from './RelationshipsCard.js';
+import { CustomFieldsCard } from './CustomFieldsCard.js';
 import styles from './ContactDetail.module.css';
 
 type Pane = 'comms' | 'profile';
@@ -92,12 +95,13 @@ export function ContactDetail(): React.JSX.Element {
         ? 'unknown'
         : 'tenant';
   const isLandlord = kind === 'landlord';
+  const kindLabel = displayKind(contact, (t) => CONTACT_TYPE_LABEL[t]);
   const pill =
     kind === 'landlord'
-      ? { label: 'Landlord', cls: styles.pillLandlord }
+      ? { label: kindLabel, cls: styles.pillLandlord }
       : kind === 'unknown'
-        ? { label: 'Unknown', cls: styles.pillUnknown }
-        : { label: 'Tenant', cls: styles.pillTenant };
+        ? { label: kindLabel, cls: styles.pillUnknown }
+        : { label: kindLabel, cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
@@ -241,41 +245,53 @@ export function ContactDetail(): React.JSX.Element {
               We couldn&apos;t load this file.
             </p>
           ) : kind === 'landlord' ? (
-            <LandlordFile
-              contact={contact}
-              phones={phones}
-              cases={file.cases}
-              units={file.units}
-              media={media}
-              mediaLoading={mediaLoading}
-              onEdit={() => setEditing(true)}
-              onManagePhones={() => setManagingPhones(true)}
-            />
+            <>
+              <LandlordFile
+                contact={contact}
+                phones={phones}
+                cases={file.cases}
+                units={file.units}
+                media={media}
+                mediaLoading={mediaLoading}
+                onEdit={() => setEditing(true)}
+                onManagePhones={() => setManagingPhones(true)}
+              />
+              <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
+              <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
+            </>
           ) : kind === 'unknown' ? (
-            <UnknownFile
-              contact={contact}
-              phones={phones}
-              cases={file.cases}
-              units={file.units}
-              media={media}
-              mediaLoading={mediaLoading}
-              onEdit={() => setEditing(true)}
-              onManagePhones={() => setManagingPhones(true)}
-              onTriage={onTriage}
-              triaging={triaging}
-            />
+            <>
+              <UnknownFile
+                contact={contact}
+                phones={phones}
+                cases={file.cases}
+                units={file.units}
+                media={media}
+                mediaLoading={mediaLoading}
+                onEdit={() => setEditing(true)}
+                onManagePhones={() => setManagingPhones(true)}
+                onTriage={onTriage}
+                triaging={triaging}
+              />
+              <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
+              <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
+            </>
           ) : (
-            <TenantFile
-              contact={contact}
-              phones={phones}
-              cases={file.cases}
-              units={file.units}
-              listingsSentPending={file.listingsSent.status !== 'ready'}
-              media={media}
-              mediaLoading={mediaLoading}
-              onEdit={() => setEditing(true)}
-              onManagePhones={() => setManagingPhones(true)}
-            />
+            <>
+              <TenantFile
+                contact={contact}
+                phones={phones}
+                cases={file.cases}
+                units={file.units}
+                listingsSentPending={file.listingsSent.status !== 'ready'}
+                media={media}
+                mediaLoading={mediaLoading}
+                onEdit={() => setEditing(true)}
+                onManagePhones={() => setManagingPhones(true)}
+              />
+              <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
+              <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
+            </>
           )}
         </div>
       </div>

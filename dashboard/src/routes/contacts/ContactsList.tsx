@@ -1,20 +1,22 @@
-// ContactsList â€” the Contacts list views (Â§IA: Contacts parent â–¸ Tenants /
+// ContactsList — the Contacts list views (§IA: Contacts parent ? Tenants /
 // Landlords / Unknown). ONE component used by four routes; the `filter` prop
 // (route-driven in App.tsx) selects which audience the page shows and its
 // heading. FIRST-PASS / pending-design: a clean, conventional, accessible
-// records list (heading Â· search box Â· a table-style list of rows linking to
+// records list (heading · search box · a table-style list of rows linking to
 // the contact detail page) in the new design language (tokens + CSS Modules).
-// Not the final visual design â€” deliberately low-risk.
+// Not the final visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import type { Contact, ContactType } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Link, useNavigate } from 'react-router-dom';
+import type { Contact } from '../../api/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
+import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
+import { ContactCreateForm } from '../contact/ContactCreateForm.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
 
 export interface ContactsListProps {
-  /** Which audience to show â€” route-driven (App.tsx). */
+  /** Which audience to show — route-driven (App.tsx). */
   filter: ContactsFilter;
 }
 
@@ -36,16 +38,7 @@ const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
   { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
 ];
 
-/** A human label for a contact's type badge. `pm` reads as "Property mgr". */
-const TYPE_LABEL: Record<ContactType, string> = {
-  tenant: 'Tenant',
-  landlord: 'Landlord',
-  pm: 'Property mgr',
-  team_member: 'Team',
-  unknown: 'Unknown',
-};
-
-/** Status label, e.g. 'active' â†’ "Active"; empty stays empty. */
+/** Status label, e.g. 'active' ? "Active"; empty stays empty. */
 function statusLabel(status: string | undefined): string {
   if (!status) return '';
   return status.charAt(0).toUpperCase() + status.slice(1);
@@ -72,7 +65,7 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
     <li className={styles.rowItem}>
       <Link to={`/contacts/${contact.contactId}`} className={styles.row}>
         <span className={styles.name}>{name}</span>
-        <span className={styles.badge}>{TYPE_LABEL[contact.type]}</span>
+        <span className={styles.badge}>{displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])}</span>
         <span className={styles.phone}>{phone}</span>
         {status ? <span className={styles.status}>{status}</span> : null}
       </Link>
@@ -83,6 +76,8 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
 export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   const { status, contacts } = useContacts(filter);
   const [query, setQuery] = useState('');
+  const [createOpen, setCreateOpen] = useState(false);
+  const navigate = useNavigate();
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -92,9 +87,24 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
 
   const heading = HEADING[filter];
 
+  function handleCreated(c: Contact): void {
+    setCreateOpen(false);
+    void navigate('/contacts/' + c.contactId);
+  }
+
+  function handleOpenExisting(id: string): void {
+    setCreateOpen(false);
+    void navigate('/contacts/' + id);
+  }
+
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>{heading}</h1>
+      <div className={styles.header}>
+        <h1 className={styles.title}>{heading}</h1>
+        <Button variant="primary" size="sm" type="button" onClick={() => setCreateOpen(true)}>
+          New contact
+        </Button>
+      </div>
       <p className={styles.sub}>
         Showing the first page of records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
       </p>
@@ -152,6 +162,15 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         ) : (
           <p className={styles.noMatches}>No matches for &ldquo;{query.trim()}&rdquo;.</p>
         )
+      ) : null}
+
+      {createOpen ? (
+        <ContactCreateForm
+          candidates={contacts}
+          onClose={() => setCreateOpen(false)}
+          onCreated={handleCreated}
+          onOpenExisting={handleOpenExisting}
+        />
       ) : null}
     </div>
   );

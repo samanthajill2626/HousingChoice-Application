@@ -351,6 +351,33 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .send({ type: 'tenant' });
     expect(res.status).toBe(404);
   });
+
+  it('edits role + relationships + customFields', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-cw', type: 'tenant', status: 'active', phone: '+15550104444', created_at: '2026-06-12T10:00:00.000Z' });
+    const res = await request(app).patch('/api/contacts/c-cw')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({ role: 'Case worker', relationships: [{ role: 'Client', name: 'Tasha' }], customFields: [{ label: 'Agency', value: 'AH' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ role: 'Case worker', relationships: [{ role: 'Client', name: 'Tasha' }], customFields: [{ label: 'Agency', value: 'AH' }] });
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated' && e.entityKey === 'contacts#c-cw');
+    expect(audit?.payload?.['fields']).toEqual(expect.arrayContaining(['role', 'relationships', 'customFields']));
+  });
+
+  it('400s an invalid customField on edit', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-cw', type: 'tenant', status: 'active', phone: '+15550104445' });
+    const res = await request(app).patch('/api/contacts/c-cw')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({ customFields: 'nope' });
+    expect(res.status).toBe(400);
+    // Proves this is the parseCustomFields validator path (not the empty-guard).
+    // The empty-guard would return "no updatable fields supplied"; the validator
+    // returns "customFields must be an array". A future regression where the
+    // validator silently drops invalid input would hit the empty-guard instead,
+    // producing a different message — caught here.
+    expect(res.body.error).toMatch(/customFields/);
+  });
 });
 
 describe('POST /api/contacts/:contactId/opt-out — manual Do-Not-Contact toggle', () => {

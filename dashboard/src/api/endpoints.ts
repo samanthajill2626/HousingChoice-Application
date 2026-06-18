@@ -5,11 +5,13 @@ import { request } from './client.js';
 import type {
   CasesPage,
   Contact,
+  ContactCreate,
   ContactMediaItem,
   ContactPatch,
   ContactsPage,
   ContactTimelinePage,
   ContactType,
+  ContactVocabulary,
   ConversationsPage,
   DevLoginResult,
   InboxFilter,
@@ -256,6 +258,23 @@ export async function updateContact(contactId: string, patch: ContactPatch): Pro
     { method: 'PATCH', body: patch },
   );
   return res.contact;
+}
+
+/** POST /api/contacts — create a brand-new contact record. Returns the new
+ *  contact (unwrapped from { contact }). */
+export async function createContact(body: ContactCreate): Promise<Contact> {
+  const res = await request<{ contact: Contact }>('/api/contacts', { method: 'POST', body });
+  return res.contact;
+}
+
+/** GET /api/contacts/vocabulary — the operator-configured pick-lists used by
+ *  the contact creation form (roles, relationship roles, custom field labels).
+ *  Unwrapped from { vocabulary }. */
+export async function getContactVocabulary(signal?: AbortSignal): Promise<ContactVocabulary> {
+  const res = await request<{ vocabulary: ContactVocabulary }>('/api/contacts/vocabulary', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.vocabulary;
 }
 
 /** POST /api/contacts/:id/phones — add a number to the contact's roster (idempotent

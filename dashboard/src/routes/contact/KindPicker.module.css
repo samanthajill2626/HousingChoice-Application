@@ -1,0 +1,98 @@
+/* KindPicker — segmented contact-kind selector. Tokens only. */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* --- Primary segment bar --------------------------------------------------- */
+
+.segmentBar {
+  display: flex;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.segment {
+  flex: 1;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-surface);
+  border: none;
+  border-right: 1px solid var(--c-border);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.segment:last-child {
+  border-right: none;
+}
+
+.segment:hover:not(.segmentActive) {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.segment:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+  z-index: 1;
+  position: relative;
+}
+
+.segmentActive {
+  background: var(--c-brand-soft);
+  color: var(--c-brand);
+  font-weight: var(--fw-semibold);
+}
+
+/* --- Other sub-panel ------------------------------------------------------- */
+
+.otherPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+}
+
+.roleLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.roleInput {
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.roleInput:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.roleInput::placeholder {
+  color: var(--c-text-subtle);
+}
+
+/* --- Base-type sub-choice -------------------------------------------------- */
+
+.subSegmentBar {
+  display: flex;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}

@@ -18,6 +18,7 @@ import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/eve
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -381,6 +382,26 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     }
     phone = normalized;
     item.phone = normalized;
+  }
+
+  if ('company' in b) {
+    if (typeof b['company'] !== 'string') return { error: 'company must be a string' };
+    item.company = b['company'];
+  }
+  if ('role' in b) {
+    const r = parseRole(b['role']);
+    if (typeof r !== 'string') return r;            // { error }
+    if (r.length > 0) item.role = r;
+  }
+  if ('relationships' in b) {
+    const rels = parseRelationships(b['relationships']);
+    if (!Array.isArray(rels)) return rels;          // { error }
+    item.relationships = rels;
+  }
+  if ('customFields' in b) {
+    const cf = parseCustomFields(b['customFields']);
+    if (!Array.isArray(cf)) return cf;              // { error }
+    item.customFields = cf;
   }
 
   // A manual create asserts identity — default to active (not needs_review).

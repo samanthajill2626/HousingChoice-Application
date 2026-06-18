@@ -105,16 +105,14 @@ export function ContactCreateForm({
       body['company'] = company.trim();
     }
 
-    // Filter relationships: drop rows missing both role and name.
+    // Filter relationships: keep only rows where BOTH role and name are non-empty.
     const validRelationships = relationships
-      .filter((r) => r.role.trim() !== '' || r.name.trim() !== '')
+      .filter((r) => r.role.trim() !== '' && r.name.trim() !== '')
       .map((r) => {
         const row: Relationship = { role: r.role.trim(), name: r.name.trim() };
         if (r.contactId) row.contactId = r.contactId;
         return row;
-      })
-      // Drop rows where BOTH role and name are empty after trim (belt-and-suspenders)
-      .filter((r) => r.role !== '' || r.name !== '');
+      });
 
     if (validRelationships.length > 0) {
       body['relationships'] = validRelationships;

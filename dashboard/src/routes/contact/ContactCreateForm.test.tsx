@@ -191,6 +191,28 @@ describe('ContactCreateForm', () => {
   });
 
   // ── Test 6: Empty relationship row / empty-label custom field dropped from body
+  it('relationship row with role but empty name is dropped from the submitted body', async () => {
+    const user = userEvent.setup();
+    const newContact: Contact = { contactId: 'new-6a', type: 'tenant' };
+    createContact.mockResolvedValue(newContact);
+
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+
+    // Expand relationships and fill in role but leave name blank
+    await user.click(screen.getByRole('button', { name: /\+ Add relationship/i }));
+    await user.type(screen.getByLabelText(/Relationship role 1/i), 'Spouse');
+    // Leave Contact search 1 (name) empty
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    // Partial row (role only, no name) must be dropped — no relationships key
+    expect('relationships' in body).toBe(false);
+  });
+
   it('empty relationship row and empty-label custom field are dropped from the body', async () => {
     const user = userEvent.setup();
     const newContact: Contact = { contactId: 'new-6', type: 'tenant' };

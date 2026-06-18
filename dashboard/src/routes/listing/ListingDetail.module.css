@@ -118,6 +118,7 @@
 
 .cols {
   display: flex;
+  gap: var(--sp-4);
   background: var(--c-bg);
   align-items: flex-start;
 }
@@ -125,8 +126,9 @@
 .left {
   flex: 1.4;
   min-width: 0;
-  padding: var(--sp-3);
-  border-right: 1px solid var(--c-border);
+  /* No horizontal padding — cards fill the column width (the row gap below + the
+   * .cols column-gap give separation). Vertical padding stays for top/bottom. */
+  padding: var(--sp-3) 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
@@ -135,7 +137,7 @@
 .right {
   flex: 1;
   min-width: 0;
-  padding: var(--sp-3);
+  padding: var(--sp-3) 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
@@ -144,6 +146,10 @@
 @media (max-width: 860px) {
   .cols {
     flex-direction: column;
+    /* Stacked: stretch the columns to full width. (The row layout uses
+     * flex-start to top-align them; in a column that would size them to content,
+     * so .left/.right wouldn't fill .cols.) */
+    align-items: stretch;
   }
   .left {
     border-right: none;
@@ -322,4 +328,37 @@
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
+}
+
+/* --- Mobile (≤768px) ------------------------------------------------------- */
+/* LAST in the file so these win over the base rules at equal specificity.
+ * The header was one flex row — address (+ badge + facts) beside a fixed-width
+ * 3-button cluster — which on a phone squeezed the title to ~one word per line
+ * and overflowed the viewport. Stack it: identity on top, actions a wrapping row
+ * below (Broadcast full-width, Edit + ⋯ on the next line). And collapse the
+ * cramped 2-up detail grid to a single readable column. */
+@media (max-width: 768px) {
+  .header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-2);
+  }
+  .name {
+    flex-wrap: wrap;
+  }
+  .actions {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .actions .btn:first-child {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+  .btnAlt {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
 }

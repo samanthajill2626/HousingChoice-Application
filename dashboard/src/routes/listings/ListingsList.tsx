@@ -6,7 +6,7 @@
 // visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { UnitItem } from '../../api/index.js';
+import type { UnitItem, UnitStatus } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import {
   formatBedsBaths,
@@ -16,6 +16,26 @@ import {
 } from '../listing/listingFormat.js';
 import { useListings } from './useListings.js';
 import styles from './ListingsList.module.css';
+
+type StatusFilter = UnitStatus | 'all';
+
+const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'available', label: 'Available' },
+  { value: 'placed', label: 'Placed' },
+  { value: 'inactive', label: 'Inactive' },
+];
+
+/** Humanize a jurisdiction slug for the filter chips: tokens ≤3 chars become
+ *  acronyms, longer ones are title-cased — 'atlanta_housing' → "Atlanta Housing",
+ *  'ga_dca' → "GA DCA". */
+function humanizeAuthority(slug: string): string {
+  return slug
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => (w.length <= 3 ? w.toUpperCase() : `${w[0]!.toUpperCase()}${w.slice(1)}`))
+    .join(' ');
+}
 
 function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
   const address = shortAddress(unit.address, unit.unitId);
@@ -36,17 +56,105 @@ function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
 export function ListingsList(): React.JSX.Element {
   const { status, units } = useListings();
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  // Multi-select of housing authorities (unit.jurisdiction). EMPTY = no filter →
+  // show every authority (the "cleared" state).
+  const [selectedHAs, setSelectedHAs] = useState<Set<string>>(new Set());
+
+  // The housing authorities present in the loaded listings — the multi-select
+  // options (distinct `jurisdiction` values, sorted).
+  const housingAuthorities = useMemo(() => {
+    const set = new Set<string>();
+    for (const u of units) {
+      if (typeof u.jurisdiction === 'string' && u.jurisdiction) set.add(u.jurisdiction);
+    }
+    return [...set].sort();
+  }, [units]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return units;
-    return units.filter((u) => shortAddress(u.address, u.unitId).toLowerCase().includes(q));
-  }, [units, query]);
+    return units.filter((u) => {
+      if (statusFilter !== 'all' && u.status !== statusFilter) return false;
+      if (
+        selectedHAs.size > 0 &&
+        !(typeof u.jurisdiction === 'string' && selectedHAs.has(u.jurisdiction))
+      ) {
+        return false;
+      }
+      if (q && !shortAddress(u.address, u.unitId).toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [units, query, statusFilter, selectedHAs]);
+
+  const toggleHA = (ha: string): void =>
+    setSelectedHAs((prev) => {
+      const next = new Set(prev);
+      if (next.has(ha)) next.delete(ha);
+      else next.add(ha);
+      return next;
+    });
+
+  const showControls = status === 'ready' && units.length > 0;
 
   return (
     <div className={styles.page}>
       <h1 className={styles.title}>Listings</h1>
       <p className={styles.sub}>Showing the first page of unit records.</p>
+
+      {showControls ? (
+        <div className={styles.controls}>
+          <div className={styles.control}>
+            <label className={styles.controlLabel} htmlFor="listings-status">
+              Status
+            </label>
+            <select
+              id="listings-status"
+              className={styles.select}
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            >
+              {STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {housingAuthorities.length > 0 ? (
+            <div className={styles.control}>
+              <span className={styles.controlLabel} id="ha-filter-label">
+                Housing authority
+              </span>
+              <div className={styles.chips} role="group" aria-labelledby="ha-filter-label">
+                {housingAuthorities.map((ha) => {
+                  const on = selectedHAs.has(ha);
+                  return (
+                    <button
+                      key={ha}
+                      type="button"
+                      className={`${styles.chip} ${on ? styles.chipOn : ''}`}
+                      aria-pressed={on}
+                      onClick={() => toggleHA(ha)}
+                    >
+                      {humanizeAuthority(ha)}
+                    </button>
+                  );
+                })}
+                {selectedHAs.size > 0 ? (
+                  <button
+                    type="button"
+                    className={styles.clear}
+                    onClick={() => setSelectedHAs(new Set())}
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className={styles.search}>
         <label className={styles.searchLabel} htmlFor="listings-search">
@@ -86,7 +194,11 @@ export function ListingsList(): React.JSX.Element {
             ))}
           </ul>
         ) : (
-          <p className={styles.noMatches}>No matches for &ldquo;{query.trim()}&rdquo;.</p>
+          <p className={styles.noMatches}>
+            {query.trim()
+              ? `No matches for “${query.trim()}”.`
+              : 'No listings match the selected filters.'}
+          </p>
         )
       ) : null}
     </div>

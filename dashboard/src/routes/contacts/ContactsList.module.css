@@ -20,6 +20,44 @@
   color: var(--c-text-muted);
 }
 
+/* --- Filter tabs (live on the page; the nav links are shortcuts here) ----- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.filter {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+}
+
+.filter:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+  text-decoration: none;
+}
+
+.filterActive,
+.filterActive:hover {
+  background: var(--c-nav-bg);
+  border-color: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+}
+
+.filter:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 /* --- Search --------------------------------------------------------------- */
 
 .search {

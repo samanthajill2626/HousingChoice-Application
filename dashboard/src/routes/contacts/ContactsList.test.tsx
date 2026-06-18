@@ -59,6 +59,19 @@ describe('ContactsList', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Tenants' })).toBeInTheDocument();
   });
 
+  it('renders on-page filter tabs linking to each filtered route, marking the active one', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    renderList('tenant');
+    const bar = screen.getByRole('navigation', { name: /filter contacts/i });
+    expect(within(bar).getByRole('link', { name: 'All' })).toHaveAttribute('href', '/contacts');
+    expect(within(bar).getByRole('link', { name: 'Tenants' })).toHaveAttribute('href', '/contacts/tenants');
+    expect(within(bar).getByRole('link', { name: 'Landlords' })).toHaveAttribute('href', '/contacts/landlords');
+    expect(within(bar).getByRole('link', { name: 'Unknown' })).toHaveAttribute('href', '/contacts/unknown');
+    // The active tab reflects the current filter (and only it).
+    expect(within(bar).getByRole('link', { name: 'Tenants' })).toHaveAttribute('aria-current', 'page');
+    expect(within(bar).getByRole('link', { name: 'All' })).not.toHaveAttribute('aria-current');
+  });
+
   it('renders a row per contact with name, phone, type, and a detail link', () => {
     state = { status: 'ready', contacts: CONTACTS };
     renderList('all');

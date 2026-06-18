@@ -26,6 +26,16 @@ const HEADING: Record<ContactsFilter, string> = {
   unknown: 'Unknown',
 };
 
+/** On-page filter tabs. Each is a link to the SAME route the nav uses, so the URL
+ *  stays the source of truth: switching here and the nav shortcuts land on the
+ *  identical filtered view (and the active tab reflects the current `filter`). */
+const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
+  { filter: 'all', label: 'All', to: '/contacts' },
+  { filter: 'tenant', label: 'Tenants', to: '/contacts/tenants' },
+  { filter: 'landlord', label: 'Landlords', to: '/contacts/landlords' },
+  { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
+];
+
 /** A human label for a contact's type badge. `pm` reads as "Property mgr". */
 const TYPE_LABEL: Record<ContactType, string> = {
   tenant: 'Tenant',
@@ -88,6 +98,19 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
       <p className={styles.sub}>
         Showing the first page of records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
       </p>
+
+      <nav className={styles.filters} aria-label="Filter contacts">
+        {FILTERS.map((f) => (
+          <Link
+            key={f.filter}
+            to={f.to}
+            className={`${styles.filter} ${f.filter === filter ? styles.filterActive : ''}`}
+            {...(f.filter === filter && { 'aria-current': 'page' })}
+          >
+            {f.label}
+          </Link>
+        ))}
+      </nav>
 
       <div className={styles.search}>
         <label className={styles.searchLabel} htmlFor="contacts-search">

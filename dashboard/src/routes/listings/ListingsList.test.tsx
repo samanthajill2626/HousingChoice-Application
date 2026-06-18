@@ -18,6 +18,7 @@ const UNITS: UnitItem[] = [
     unitId: 'u1',
     landlordId: 'l1',
     status: 'available',
+    jurisdiction: 'atlanta_housing',
     address: { line1: '123 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
     beds: 2,
     baths: 1,
@@ -28,6 +29,7 @@ const UNITS: UnitItem[] = [
     unitId: 'u2',
     landlordId: 'l2',
     status: 'placed',
+    jurisdiction: 'ga_dca',
     address: { line1: '88 Oak Ave', city: 'Decatur', state: 'GA' },
     beds: 3,
     baths: 2,
@@ -97,5 +99,47 @@ describe('ListingsList', () => {
     renderList();
     await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'zzzzz');
     expect(screen.getByText(/no matches/i)).toBeInTheDocument();
+  });
+
+  it('filters by status via the dropdown', async () => {
+    state = { status: 'ready', units: UNITS };
+    renderList();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    await userEvent.selectOptions(screen.getByLabelText('Status'), 'placed');
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByText(/88 Oak Ave/)).toBeInTheDocument();
+  });
+
+  it('multi-selects housing authorities and clears back to all listings', async () => {
+    state = { status: 'ready', units: UNITS };
+    renderList();
+    const haGroup = screen.getByRole('group', { name: /housing authority/i });
+
+    // Pick one authority → only its listing shows.
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'Atlanta Housing' }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByRole('link', { name: /123 Peachtree St/ })).toBeInTheDocument();
+
+    // Add a second (multi-select) → both show.
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'GA DCA' }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    // Clear → back to all, and the Clear control disappears.
+    await userEvent.click(within(haGroup).getByRole('button', { name: /clear/i }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+    expect(within(haGroup).queryByRole('button', { name: /clear/i })).not.toBeInTheDocument();
+  });
+
+  it('combines the status + housing-authority filters (AND)', async () => {
+    state = { status: 'ready', units: UNITS };
+    renderList();
+    // Status=available (u1) AND authority=GA DCA (u2) → no overlap → no matches.
+    await userEvent.selectOptions(screen.getByLabelText('Status'), 'available');
+    const haGroup = screen.getByRole('group', { name: /housing authority/i });
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'GA DCA' }));
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+    expect(screen.getByText(/no listings match the selected filters/i)).toBeInTheDocument();
   });
 });

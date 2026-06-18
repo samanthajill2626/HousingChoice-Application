@@ -1,9 +1,11 @@
 // KindPicker — unified "What kind of contact is this?" control.
-// Segments: Tenant / Landlord / Property mgr / Other.
-// Picking Tenant/Landlord/PM resolves directly to {type, role:''}.
+// Segments: Tenant / Landlord / Property Manager / Other.
+// Picking Tenant/Landlord resolves directly to {type, role:''}.
+// Picking Property Manager is a preset: {type:'landlord', role:PM_ROLE}.
 // Picking Other reveals a Role text input + a base-type sub-choice.
 import { useEffect, useId, useState } from 'react';
 import { type ContactType } from '../../api/index.js';
+import { PM_ROLE } from './contactProfile.js';
 import styles from './KindPicker.module.css';
 
 export interface KindPickerValue {
@@ -19,16 +21,22 @@ export interface KindPickerProps {
 
 type PrimarySegment = 'tenant' | 'landlord' | 'pm' | 'other';
 
+/** True when the value is exactly the Property Manager preset (landlord + PM_ROLE)
+ *  and the user did NOT explicitly enter Other mode. */
+function isPmPresetValue(value: KindPickerValue, otherSelected: boolean): boolean {
+  return !otherSelected && value.type === 'landlord' && value.role === PM_ROLE;
+}
+
 /** Derive which primary segment button should appear "active". */
 function activePrimarySegment(
   value: KindPickerValue,
   otherSelected: boolean,
 ): PrimarySegment | null {
+  if (isPmPresetValue(value, otherSelected)) return 'pm';
   const inOtherMode = otherSelected || value.role.trim() !== '';
   if (inOtherMode) return 'other';
   if (value.type === 'tenant') return 'tenant';
   if (value.type === 'landlord') return 'landlord';
-  if (value.type === 'pm') return 'pm';
   return null;
 }
 
@@ -55,26 +63,28 @@ export function KindPicker({
   const roleInputId = `${uid}-role`;
 
   const suggestions = roleSuggestions ?? [];
-  const inOtherMode = otherSelected || value.role.trim() !== '';
+  const isPmPreset = isPmPresetValue(value, otherSelected);
+  const inOtherMode = !isPmPreset && (otherSelected || value.role.trim() !== '');
   const active = activePrimarySegment(value, otherSelected);
 
   function handleSegment(seg: PrimarySegment): void {
     if (seg === 'other') {
-      // Fix 2: when already in Other mode, preserve the current type+role (no-op).
-      // Only reset type to null when entering Other from a plain selection.
       if (inOtherMode) {
-        // Already in Other mode — keep everything as-is.
+        // Already in Other mode — keep type+role as-is (don't wipe a chosen base).
         onChange({ type: value.type, role: value.role });
       } else {
         setOtherSelected(true);
         onChange({ type: null, role: value.role });
       }
+    } else if (seg === 'pm') {
+      // Property Manager preset: a custom kind on the landlord base.
+      setOtherSelected(false);
+      onChange({ type: 'landlord', role: PM_ROLE });
     } else {
       setOtherSelected(false);
-      const typeMap: Record<Exclude<PrimarySegment, 'other'>, ContactType> = {
+      const typeMap: Record<'tenant' | 'landlord', ContactType> = {
         tenant: 'tenant',
         landlord: 'landlord',
-        pm: 'pm',
       };
       onChange({ type: typeMap[seg], role: '' });
     }
@@ -99,7 +109,7 @@ export function KindPicker({
               : seg === 'landlord'
                 ? 'Landlord'
                 : seg === 'pm'
-                  ? 'Property mgr'
+                  ? 'Property Manager'
                   : 'Other';
           return (
             <button
@@ -149,7 +159,6 @@ export function KindPicker({
               [
                 ['tenant', 'Tenant'],
                 ['landlord', 'Landlord'],
-                ['pm', 'Property mgr'],
               ] as [ContactType, string][]
             ).map(([t, label]) => (
               <button

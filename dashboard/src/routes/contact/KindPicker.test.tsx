@@ -85,11 +85,11 @@ describe('KindPicker', () => {
 
     // Role input should be visible
     expect(screen.getByLabelText(/role/i)).toBeInTheDocument();
-    // Base-type sub-choices should appear — use getAllByRole since both the segment bar
-    // and the sub-choice panel share the "Tenant"/"Landlord"/"Property mgr" labels.
+    // Base-type sub-choices appear; Tenant/Landlord are shared with the segment bar
+    // (length 2). Property Manager is a primary segment only (no base sub-choice).
     expect(screen.getAllByRole('button', { name: 'Tenant' })).toHaveLength(2);
     expect(screen.getAllByRole('button', { name: 'Landlord' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Property mgr' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Property Manager' })).toHaveLength(1);
   });
 
   it('in Other mode, typing a role then clicking base Tenant calls onChange with both', () => {
@@ -139,6 +139,14 @@ describe('KindPicker', () => {
 
     // Other panel should now be hidden
     expect(screen.queryByLabelText(/role/i)).toBeNull();
+  });
+
+  it('clicking Property Manager presets landlord + role and does NOT open Other', () => {
+    const { onChange } = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Property Manager' }));
+    expect(onChange).toHaveBeenCalledWith({ type: 'landlord', role: 'Property Manager' });
+    // It is a preset, not Other — no role input is revealed.
+    expect(screen.queryByLabelText(/^role$/i)).toBeNull();
   });
 
   // Fix 2: re-clicking Other when already in Other mode must NOT wipe the base type

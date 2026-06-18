@@ -99,7 +99,6 @@ const MEDIA_SCAN_PAGE_LIMIT = 200;
 const CONTACT_TYPES: readonly ContactType[] = [
   'tenant',
   'landlord',
-  'pm',
   'team_member',
   'unknown',
 ] as const;
@@ -175,7 +174,7 @@ function decodePhoneParam(raw: unknown): string | undefined {
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
   if (contactType === 'landlord') return 'landlord_1to1';
-  // pm/team_member/unknown have no 1:1 conversation type to propagate.
+  // team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
 }
 

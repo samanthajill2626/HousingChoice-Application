@@ -708,7 +708,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact off the needs_review triage queue at the moment the identity is
     // known — but only when the caller didn't set status itself (an explicit
     // status always wins). 'active' is allowlisted in CONTACT_STATUSES. We
-    // never auto-advance for unknown/pm/team_member (they don't resolve a 1:1
+    // never auto-advance for unknown/team_member (they don't resolve a 1:1
     // identity) — and we never fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
       parsed.patch['status'] = 'active';

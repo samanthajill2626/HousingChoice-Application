@@ -43,14 +43,18 @@ harness before claiming the work is done** — and add/extend a spec for new beh
   `Chromium distribution 'chrome' is not found`, a one-time **Administrator**
   `npx playwright install chrome` fixes it (see [e2e/README.md](../e2e/README.md)
   → Setup). The suite and `--headed`/`--ui` runs need no admin.
-- **MCP artifacts go in `.playwright-mcp/` (gitignored).** Screenshots and page
-  snapshots from BOTH Playwright MCP servers are pinned to that dir: the project
-  server via `--output-dir` in [.mcp.json](../.mcp.json), and the plugin server
-  via `PLAYWRIGHT_MCP_OUTPUT_DIR` in [settings.json](settings.json) `env` (which
-  Claude Code passes to every spawned MCP). A bare `filename` on
-  `browser_take_screenshot` resolves *into* that dir — so the repo root stays
-  clean and real images can still live at the root. Don't pass an absolute path
-  or a `../`-escaping name unless you mean to write outside it.
+- **MCP artifacts go in `.playwright-mcp/` (gitignored).** Auto-named files —
+  page snapshots and screenshots taken with NO `filename` — land there for both
+  servers: the project server is pinned via `--output-dir` in
+  [.mcp.json](../.mcp.json), and `PLAYWRIGHT_MCP_OUTPUT_DIR` in
+  [settings.json](settings.json) `env` (passed to every spawned MCP) plus the
+  tool's own `<cwd>/.playwright-mcp` default cover the plugin server.
+  **Caveat (verified):** `browser_take_screenshot` with an explicit `filename`
+  resolves it against the repo ROOT, not the output dir — output-dir is bypassed
+  for named files *by design* (a named file means "save into my workspace"). So
+  when you name a screenshot, **prefix it**: `filename: ".playwright-mcp/foo.png"`
+  — or just omit `filename` and let it auto-name into the dir. We deliberately do
+  NOT blanket-ignore root images, so real images can still live at the root.
 
 Full workflow, modes, and how to add tests: **[e2e/README.md](../e2e/README.md)**.
 

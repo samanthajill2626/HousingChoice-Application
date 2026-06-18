@@ -6,6 +6,10 @@
 // Edit forms use these to avoid drifting from each other or the backend rules.
 import type { Contact, ContactType, Relationship, CustomField } from '../../api/index.js';
 
+/** Canonical custom-kind role for a property manager. "Property Manager" is a
+ *  custom kind on the `landlord` base type (there is no `pm` ContactType). */
+export const PM_ROLE = 'Property Manager';
+
 /** A human label for a contact's type badge. `pm` reads as "Property mgr".
  *  VERBATIM from the original TYPE_LABEL in ContactsList — do not change values. */
 export const CONTACT_TYPE_LABEL: Record<ContactType, string> = {

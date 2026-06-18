@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONTACT_TYPE_LABEL, displayKind, normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
+import { PM_ROLE, CONTACT_TYPE_LABEL, displayKind, normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
 
 describe('displayKind', () => {
   it('returns the role when role is set', () => {
@@ -97,4 +97,9 @@ describe('CONTACT_TYPE_LABEL', () => {
   it('maps unknown to "Unknown"', () => {
     expect(CONTACT_TYPE_LABEL['unknown']).toBe('Unknown');
   });
+});
+
+it('PM_ROLE is the spelled-out label and drives the badge for a landlord-based PM', () => {
+  expect(PM_ROLE).toBe('Property Manager');
+  expect(displayKind({ type: 'landlord', role: PM_ROLE }, () => 'Landlord')).toBe('Property Manager');
 });

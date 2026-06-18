@@ -41,3 +41,8 @@ Thumbs.db
 
 # Brainstorming visual-companion scratch
 .superpowers/
+
+# Issue tracker: INDEX.md is a derived, regenerable view (`npm run issues`) — the
+# per-issue docs/issues/<slug>.md files are the committed source of truth. Keeping
+# the index out of git is what makes concurrent issue-filing conflict-free.
+docs/issues/INDEX.md

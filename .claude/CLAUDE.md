@@ -45,3 +45,21 @@ harness before claiming the work is done** — and add/extend a spec for new beh
   → Setup). The suite and `--headed`/`--ui` runs need no admin.
 
 Full workflow, modes, and how to add tests: **[e2e/README.md](../e2e/README.md)**.
+
+## Issue, TODO & known-problem tracking (one consistent way)
+
+There is no external issue tracker (the remote is Azure DevOps; `gh` issues are
+unavailable), so issues live in-repo, in **two tiers**. Full reference:
+[docs/issues/README.md](../docs/issues/README.md).
+
+- **Tier 1 — inline markers** for code-local notes: `TODO(area):`, `FIXME(area):`,
+  `HACK(area):`. Reference a registry item with `TODO(<issue-slug>):`.
+- **Tier 2 — the registry** `docs/issues/<slug>.md` (one file per issue, slug = id =
+  filename) for anything **important, cross-cutting, or triage-worthy**. Frontmatter
+  (`type`/`severity`/`status`/…) + prose. Copy `docs/issues/_TEMPLATE.md`.
+- **Graduation rule:** the moment an inline TODO is important/cross-cutting/triage-worthy,
+  give it a registry file. Otherwise leave it inline.
+- **See all issues:** `npm run issues` (writes the gitignored `docs/issues/INDEX.md`), or
+  agents grep directly: `rg -l "^status: open$" docs/issues/ -g '!_*'`. Never hand-maintain a list —
+  it's derived, which is what keeps concurrent issue-filing conflict-free.
+- **RUNBOOK.md is operational only** — bugs/gaps/deferrals go in `docs/issues/`, not there.

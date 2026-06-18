@@ -593,11 +593,11 @@ purpose** — it never shows up as drift.
 
 | Alarm (dev / prod) | Fires when | What it means | First response |
 |---|---|---|---|
-| `hc-dev-orphan-logs` / `hc-prod-orphan-logs` | `OrphanLogs` sum > 0 over 5 min | A code path logged outside the correlation context (binding guideline #4 says this must be zero) | Run Insights query (c) above to find the offending lines. If they are only the `app listening` / `worker ready` boot lines, this is the known deploy-time artifact — it clears at the next 5-min evaluation that sees log traffic (observed: ~6–15 min; with zero traffic it can linger until the next request, so hit `/health` once to hurry it). Fix tracked in the backlog below. Anything else: find the code path and fix the gate (route the log through the correlation context / `jobs` envelope). |
+| `hc-dev-orphan-logs` / `hc-prod-orphan-logs` | `OrphanLogs` sum > 0 over 5 min | A code path logged outside the correlation context (binding guideline #4 says this must be zero) | Run Insights query (c) above to find the offending lines. If they are only the `app listening` / `worker ready` boot lines, this is the known deploy-time artifact — it clears at the next 5-min evaluation that sees log traffic (observed: ~6–15 min; with zero traffic it can linger until the next request, so hit `/health` once to hurry it). The boot-log correlation fix shipped 2026-06-12, so any orphan hit now is a real bug. Anything else: find the code path and fix the gate (route the log through the correlation context / `jobs` envelope). |
 | `hc-dev-error-logs` / `hc-prod-error-logs` | `ErrorLogs` sum >= 5 over 5 min | App/worker emitting error/fatal (pino level >= 50) at volume | Insights query (b) for the stacks; every error line carries a `correlationId` — pivot to query (a)/(d) for the full story. Roll back (`-- --tag <previous>`) if a deploy caused it. |
 | `hc-dev-status-check-failed` / `hc-prod-status-check-failed` | EC2 `StatusCheckFailed` >= 1 (missing data = breaching) | Instance or underlying AWS hardware/network problem — also fires if the instance stops reporting entirely | Check SSM: `aws ssm describe-instance-information --profile housingchoice --region us-east-1`. If unreachable, reboot **via CLI** (console stays read-only): `aws ec2 reboot-instances --instance-ids <id> --profile housingchoice --region us-east-1`. Containers restart on boot (`restart: unless-stopped`). If the instance is truly dead, `npm run plan/apply -- <env>` will recreate it; then re-deploy the current `DEPLOYED_TAG`. |
 | `hc-dev-jobs-dlq-depth` / `hc-prod-jobs-dlq-depth` | `ApproximateNumberOfMessagesVisible` > 0 on `hc-<env>-jobs-dlq` | A job envelope failed all 5 worker dispatch attempts and was dead-lettered — reminders/follow-ups are revenue-critical (doc §9 "Job/DLQ depth") | Worker ERROR logs first: Insights query (b) — the `job failed` lines carry `jobName`, stack, and the originating request's correlation IDs. Peek the DLQ to see the stuck envelopes, fix the handler/data (deploy), then redrive — exact one-liners in [Jobs](#jobs-async-delivery-path). The alarm clears once the DLQ drains. |
-| `hc-dev-disk-used` / `hc-prod-disk-used` | `disk_used_percent` (root) > 80% | 10 GB root volume filling — usually Docker images/layers | Inspect via SSM Run Command (no SSH): `docker system df`, then `docker image prune -af` (safe: the running containers' images are in use). **Caveat:** this metric comes from the CloudWatch agent, which is NOT installed yet — the alarm currently sees no data and `notBreaching` keeps it quietly OK. It cannot actually fire until the agent ships (backlog below). The deploy's prune-on-success keeps disk in check meanwhile (post-deploy: 26% used). |
+| `hc-dev-disk-used` / `hc-prod-disk-used` | `disk_used_percent` (root) > 80% | 10 GB root volume filling — usually Docker images/layers | Inspect via SSM Run Command (no SSH): `docker system df`, then `docker image prune -af` (safe: the running containers' images are in use). **Caveat:** this metric comes from the CloudWatch agent, which is NOT installed yet — the alarm currently sees no data and `notBreaching` keeps it quietly OK. It cannot actually fire until the agent ships (tracked: `docs/issues/cloudwatch-agent-disk-metric.md`). The deploy's prune-on-success keeps disk in check meanwhile (post-deploy: 26% used). |
 
 ## Costs
 
@@ -690,22 +690,24 @@ Then exercise the app paths: OAuth login completes on the new host; an inbound t
 - The default `*.cloudfront.net` hostname + cert stay valid throughout — always the safety net.
 - The phase-2 OAuth/Twilio re-point doesn't need undoing: the original `*.cloudfront.net` OAuth callback URIs and Twilio webhooks were never removed (Change Order 3 adds the custom-host ones alongside), so login and webhooks keep working after a rollback. Leave the custom-host registrations in place.
 
-## Security / hardening backlog
+## Security / hardening
 
-Tracked here so nothing silently becomes permanent:
+Tracked items (gaps, deferrals, one-time actions) now live in the issue registry —
+`npm run issues` or `rg "^type: security" docs/issues/` — so this runbook stays
+operational. Migrated 2026-06-18: [`iam-user-mfa`](docs/issues/iam-user-mfa.md),
+[`ses-sandbox-exit`](docs/issues/ses-sandbox-exit.md),
+[`cloudwatch-agent-disk-metric`](docs/issues/cloudwatch-agent-disk-metric.md),
+[`otlp-exporter-wiring`](docs/issues/otlp-exporter-wiring.md),
+[`messaging-delivery-alarms`](docs/issues/messaging-delivery-alarms.md),
+[`api-rate-limiting`](docs/issues/api-rate-limiting.md),
+[`sns-prod-alert-confirmation`](docs/issues/sns-prod-alert-confirmation.md). Already
+addressed (no longer tracked): orphan boot-log lines (correlation fix shipped
+2026-06-12 — any orphan hit is now a real bug); custom domain + ACM (shipped in Phase 1
+Change Order 3 — see [Custom domain & TLS](#custom-domain--tls)).
 
-| Item | Status / decision | Notes |
-|---|---|---|
-| IAM-user MFA | **Deferred by decision 2026-06-11** | Root has MFA; the `housingchoice` IAM user does not. Mitigations in place: account-ID guard in every mutating script, named profile only (default chain never used), console read-only by policy. Revisit when the team is > 1. |
-| Access-key rotation | Cadence: **rotate every 90 days** | `aws iam create-access-key` → update profile → `aws iam delete-access-key` for the old one. No automation yet; calendar it. |
-| SES sandbox exit | Phase 1 | Both SES identities are sandboxed (verified recipients only). Production-access request goes in when Phase 1 needs real outbound mail. |
-| CloudWatch agent (disk metric) | **Not installed** — disk alarms can't fire (no data → `notBreaching` → OK) | Install via user-data or SSM Distributor; config must emit `CWAgent disk_used_percent` with dimensions `InstanceId, path="/", fstype="xfs"` to match the alarm. Until then disk is only protected by deploy-time pruning. |
-| OTLP exporter wiring | **OTel SDK currently runs with no exporter in BOTH envs** | Reality check 2026-06-11: neither `/hc/dev/app` nor `/hc/prod/app` sets `OTEL_SDK_DISABLED`, so the SDK starts and instruments http/express in both envs — but `app/src/lib/otel.ts` configures no `traceExporter`/`metricReader`, so traces/metrics are exported **nowhere** (locally `OTEL_SDK_DISABLED=true` makes it a true no-op). Wire OTLP → CloudWatch Application Signals via the existing `OTEL_EXPORTER_OTLP_ENDPOINT` seam. |
-| Orphan boot-log lines | **Fixed 2026-06-12** | Lifecycle lines (boot/shutdown/process-level errors) now run inside a per-process `bootId` correlation context, so container starts no longer trip `hc-<env>-orphan-logs`. Any orphan hit is now a real bug. (Images tagged before 2026-06-12 still carry the old behavior.) |
-| Custom domain + ACM | **Addressed in Phase 1 (Change Order 3)** | Per-stack ACM cert (us-east-1, DNS-validated) + CloudFront alias for `app` / `dev.app` on `housingchoice.org`, staged via the `custom_domain_phase` local. DNS hand-maintained at Namecheap (zone not in Route 53 — migration parked, doc §14). See [Custom domain & TLS](#custom-domain--tls). |
-| SNS prod confirmation | **Action needed once:** click the confirmation email for `hc-prod-alerts` | See the Alarms section note. |
-| Messaging delivery alarms | M1.1 gap | Metric filter + alarm for webhook signature rejections and for undelivered-rate / 429-30022 throttling errors (the doc-§9 alarm table) — today only 30007 carrier filtering and breaker trips reach ERROR/the error-logs alarm. |
-| /api rate limiting | Before M1.3 auth lands | Express rate limit on the /api manual-send route — it is origin-secret-protected only until OAuth/RBAC (M1.3), so a leaked origin secret currently means unthrottled sends. |
+**Access-key rotation (operational procedure).** Rotate the `housingchoice` IAM user's
+access key every ~90 days: `aws iam create-access-key` → update the profile →
+`aws iam delete-access-key` for the old key. Not automated; calendar it.
 
 ## State & bootstrap
 

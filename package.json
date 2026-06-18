@@ -28,6 +28,7 @@
     "s3:stop": "node scripts/s3.mjs stop",
     "s3:create": "tsx app/scripts/s3-create.ts",
     "gen:tables": "tsx app/scripts/gen-tables.ts",
+    "issues": "node scripts/issues.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:fake-twilio": "npm run test -w @housingchoice/fake-twilio",
     "e2e": "npm run e2e -w @housingchoice/e2e",

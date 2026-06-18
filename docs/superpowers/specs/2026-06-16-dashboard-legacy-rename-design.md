@@ -1,3 +1,12 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed task, merged to `main`.** This document describes the
+> dashboard-legacy rename as *designed/planned at the time of writing*. The rename shipped and
+> is live on `main` (the old UI moved to the `dashboard-legacy` workspace /
+> `@housingchoice/dashboard-legacy`; `dashboard/` now holds the new app). **This file is
+> NOT current documentation and may have drifted from the live code. Do not treat it as
+> authoritative guidance on how the system is built or behaves today.** For current truth read
+> the code and the living docs (e.g. `RUNBOOK.md`, `documentation/GLOSSARY.md`). Kept only
+> as a point-in-time record of intent.
 # Design — Preserve & rename the old dashboard (sub-project A)
 
 **Date:** 2026-06-16

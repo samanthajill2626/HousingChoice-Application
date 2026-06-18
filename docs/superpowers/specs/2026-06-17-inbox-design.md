@@ -1,8 +1,17 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-06-18).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted on 2026-06-18. **This file is NOT
+> current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/GLOSSARY.md`). Kept only as a point-in-time record of intent.
 # Inbox — Design Spec (new dashboard, :5174)
 
-**Status:** Design locked 2026-06-17. Backend **C8 complete + reviewed** on branch
-`inbox-backend` (no schema change; 3 implementation flags surfaced + resolved here —
-see Live updates / Semantics / Deferred); frontend in progress.
+**Status:** Implemented & merged to `main` — backend (C8/"BE7") + frontend (`/inbox`)
+both shipped; the `inbox-backend` and `inbox-frontend` branches + worktrees were merged
+and deleted 2026-06-18 (no schema change; the 3 implementation flags surfaced here were
+resolved — see Live updates / Semantics / Deferred).
 
 **Context:** The new entity-centric dashboard
 ([2026-06-16-new-dashboard-design.md](./2026-06-16-new-dashboard-design.md)) has

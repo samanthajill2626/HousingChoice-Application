@@ -1,7 +1,16 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-06-18).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted on 2026-06-18. **This file is NOT
+> current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/GLOSSARY.md`). Kept only as a point-in-time record of intent.
 # Fake-Twilio Voice (+ RCS seams) — Design & Scope
 
 - **Date:** 2026-06-16
-- **Status:** Designed (brainstorming complete) — not yet implemented
+- **Status:** Implemented, live-verified & merged to `main` — all 9 plan phases
+  complete; the `fake-twilio-voice` branch + worktree were merged and deleted 2026-06-18.
 - **Owner:** Cameron Abt
 - **Authored with:** Claude Code (brainstorming skill)
 - **Builds on:** the fake-twilio mock (SMS/MMS) + fake-phones UI, now merged to `main`

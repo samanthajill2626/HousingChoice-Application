@@ -67,7 +67,7 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
       ],
     });
     // The pm contact carries the CURRENT name/company — read-time enrichment.
-    seedContact(world, 'c-pm-1', { type: 'pm', firstName: 'Pat', lastName: 'M', company: 'Acme PM' });
+    seedContact(world, 'c-pm-1', { type: 'landlord', firstName: 'Pat', lastName: 'M', company: 'Acme PM' });
     const res = await request(app)
       .get('/api/units/u-2')
       .set('x-origin-verify', SECRET)
@@ -129,7 +129,7 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
         { contactId: 'c-pm-fresh', role: 'pm', primaryVoice: true, name: 'Old Name' },
       ],
     });
-    seedContact(world, 'c-pm-fresh', { type: 'pm', firstName: 'New', lastName: 'Name' });
+    seedContact(world, 'c-pm-fresh', { type: 'landlord', firstName: 'New', lastName: 'Name' });
 
     const res = await request(app)
       .get('/api/units/u-fresh')
@@ -166,7 +166,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   it('adds a roster contact, denormalizes name/company, and audits unit_contact_added', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-3', { landlordId: 'c-ll-1' });
-    seedContact(world, 'c-pm-3', { type: 'pm', firstName: 'Pat', lastName: 'Manager', company: 'Acme PM' });
+    seedContact(world, 'c-pm-3', { type: 'landlord', firstName: 'Pat', lastName: 'Manager', company: 'Acme PM' });
 
     const res = await request(app)
       .post('/api/units/u-3/contacts')
@@ -191,7 +191,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   it('setting primaryVoice keeps a single ☎ primary and updates the voice-routing field', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-4', { landlordId: 'c-ll-1' });
-    seedContact(world, 'c-pm-4', { type: 'pm', firstName: 'Pat', lastName: 'M' });
+    seedContact(world, 'c-pm-4', { type: 'landlord', firstName: 'Pat', lastName: 'M' });
 
     const res = await request(app)
       .post('/api/units/u-4/contacts')
@@ -212,7 +212,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
 
   it('404s an unknown unit', async () => {
     const { app, world } = makeWebhookHarness();
-    seedContact(world, 'c-pm-x', { type: 'pm' });
+    seedContact(world, 'c-pm-x', { type: 'landlord' });
     const res = await request(app)
       .post('/api/units/ghost/contacts')
       .set('x-origin-verify', SECRET)
@@ -237,7 +237,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   it('400s a bad role', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-6', { landlordId: 'c-ll-1' });
-    seedContact(world, 'c-pm-6', { type: 'pm' });
+    seedContact(world, 'c-pm-6', { type: 'landlord' });
     const res = await request(app)
       .post('/api/units/u-6/contacts')
       .set('x-origin-verify', SECRET)
@@ -249,7 +249,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   it('400s a non-boolean primaryVoice', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-7', { landlordId: 'c-ll-1' });
-    seedContact(world, 'c-pm-7', { type: 'pm' });
+    seedContact(world, 'c-pm-7', { type: 'landlord' });
     const res = await request(app)
       .post('/api/units/u-7/contacts')
       .set('x-origin-verify', SECRET)

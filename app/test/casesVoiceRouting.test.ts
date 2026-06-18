@@ -36,7 +36,7 @@ function seedCaseRelay(
   } = opts;
   world.contacts.push({ contactId: 'c-tenant', type: 'tenant', phone: TENANT });
   world.contacts.push({ contactId: 'c-landlord', type: 'landlord', phone: LANDLORD_SMS });
-  world.contacts.push({ contactId: 'c-pm', type: 'pm', ...(voiceContactHasPhone && { phone: voiceContactPhone }) });
+  world.contacts.push({ contactId: 'c-pm', type: 'landlord', ...(voiceContactHasPhone && { phone: voiceContactPhone }) });
   world.units.set('unit-vr', {
     unitId: 'unit-vr',
     landlordId: 'c-landlord',

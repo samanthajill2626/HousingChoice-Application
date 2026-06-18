@@ -44,18 +44,13 @@ describe('useContacts', () => {
     expect(screen.getByTestId('count')).toHaveTextContent('1');
   });
 
-  it('fans out across landlord + pm for the landlord filter and merges', async () => {
-    getContacts.mockImplementation((params: { type: ContactType }) =>
-      Promise.resolve(
-        params.type === 'landlord'
-          ? page({ contactId: 'l1', type: 'landlord' })
-          : page({ contactId: 'p1', type: 'pm' }),
-      ),
-    );
+  it('fetches just the landlord type for the landlord filter', async () => {
+    getContacts.mockResolvedValue(page({ contactId: 'l1', type: 'landlord' }));
     render(<Probe filter="landlord" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(getContacts).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('count')).toHaveTextContent('2');
+    expect(getContacts).toHaveBeenCalledTimes(1);
+    expect((getContacts.mock.calls[0]?.[0] as { type: ContactType }).type).toBe('landlord');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
   });
 
   it('fans out across all audience types for the all filter', async () => {
@@ -64,8 +59,8 @@ describe('useContacts', () => {
     );
     render(<Probe filter="all" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(getContacts).toHaveBeenCalledTimes(4);
-    expect(screen.getByTestId('count')).toHaveTextContent('4');
+    expect(getContacts).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('count')).toHaveTextContent('3');
   });
 
   it('goes to the error state when a fetch fails', async () => {

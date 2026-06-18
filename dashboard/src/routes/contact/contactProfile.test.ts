@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONTACT_TYPE_LABEL, displayKind, normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
+import { PM_ROLE, CONTACT_TYPE_LABEL, displayKind, normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
 
 describe('displayKind', () => {
   it('returns the role when role is set', () => {
@@ -7,11 +7,11 @@ describe('displayKind', () => {
   });
 
   it('returns the type label when role is empty string', () => {
-    expect(displayKind({ type: 'pm', role: '' }, (t) => CONTACT_TYPE_LABEL[t])).toBe('Property mgr');
+    expect(displayKind({ type: 'landlord', role: '' }, (t) => CONTACT_TYPE_LABEL[t])).toBe('Landlord');
   });
 
   it('returns the type label when role is undefined', () => {
-    expect(displayKind({ type: 'pm', role: undefined }, (t) => CONTACT_TYPE_LABEL[t])).toBe('Property mgr');
+    expect(displayKind({ type: 'landlord', role: undefined }, (t) => CONTACT_TYPE_LABEL[t])).toBe('Landlord');
   });
 
   it('trims whitespace-only role and falls back to type label', () => {
@@ -78,10 +78,6 @@ describe('normalizeCustomFields', () => {
 });
 
 describe('CONTACT_TYPE_LABEL', () => {
-  it('maps pm to "Property mgr"', () => {
-    expect(CONTACT_TYPE_LABEL['pm']).toBe('Property mgr');
-  });
-
   it('maps tenant to "Tenant"', () => {
     expect(CONTACT_TYPE_LABEL['tenant']).toBe('Tenant');
   });
@@ -97,4 +93,9 @@ describe('CONTACT_TYPE_LABEL', () => {
   it('maps unknown to "Unknown"', () => {
     expect(CONTACT_TYPE_LABEL['unknown']).toBe('Unknown');
   });
+});
+
+it('PM_ROLE is the spelled-out label and drives the badge for a landlord-based PM', () => {
+  expect(PM_ROLE).toBe('Property Manager');
+  expect(displayKind({ type: 'landlord', role: PM_ROLE }, () => 'Landlord')).toBe('Property Manager');
 });

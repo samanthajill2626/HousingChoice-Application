@@ -38,7 +38,7 @@ function str(v: unknown): string {
 }
 
 export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
-  const isLandlord = contact.type === 'landlord' || contact.type === 'pm';
+  const isLandlord = contact.type === 'landlord';
   const isTenant = contact.type === 'tenant';
   const vocab = useContactVocabulary();
 

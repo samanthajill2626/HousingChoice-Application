@@ -99,7 +99,6 @@ const MEDIA_SCAN_PAGE_LIMIT = 200;
 const CONTACT_TYPES: readonly ContactType[] = [
   'tenant',
   'landlord',
-  'pm',
   'team_member',
   'unknown',
 ] as const;
@@ -175,7 +174,7 @@ function decodePhoneParam(raw: unknown): string | undefined {
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
   if (contactType === 'landlord') return 'landlord_1to1';
-  // pm/team_member/unknown have no 1:1 conversation type to propagate.
+  // team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
 }
 
@@ -709,7 +708,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact off the needs_review triage queue at the moment the identity is
     // known — but only when the caller didn't set status itself (an explicit
     // status always wins). 'active' is allowlisted in CONTACT_STATUSES. We
-    // never auto-advance for unknown/pm/team_member (they don't resolve a 1:1
+    // never auto-advance for unknown/team_member (they don't resolve a 1:1
     // identity) — and we never fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
       parsed.patch['status'] = 'active';

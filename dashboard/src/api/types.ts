@@ -222,7 +222,7 @@ export type MessageType = 'sms' | 'mms' | 'call';
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
-export type ContactType = 'tenant' | 'landlord' | 'pm' | 'team_member' | 'unknown';
+export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
 
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';

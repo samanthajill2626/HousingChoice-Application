@@ -3,8 +3,6 @@
 // server REQUIRES a `type` filter on GET /api/contacts (unless an exact phone
 // lookup), so:
 //   - 'tenant' / 'landlord' / 'unknown' fetch that type directly;
-//   - 'landlord' also pulls 'pm' (the design groups property-managers under
-//     Landlords) and merges them;
 //   - 'all' fans out across every audience type and merges.
 // First page per type only (the server pages via nextCursor) — a transitional
 // limitation the list view notes; the type-specific slices supersede it later.
@@ -22,13 +20,13 @@ export interface ContactsState {
   contacts: Contact[];
 }
 
-/** The contact `type`s to fetch for a given filter. Landlords include property
- *  managers; 'all' fans out across every audience type (team members excluded —
- *  they aren't part of the navigator's contact roster). */
+/** The contact `type`s to fetch for a given filter. Property managers are
+ *  `landlord`-typed (role "Property Manager"), so the Landlords filter covers
+ *  them; 'all' fans out across every audience type (team members excluded). */
 const TYPES_FOR: Record<ContactsFilter, ContactType[]> = {
-  all: ['tenant', 'landlord', 'pm', 'unknown'],
+  all: ['tenant', 'landlord', 'unknown'],
   tenant: ['tenant'],
-  landlord: ['landlord', 'pm'],
+  landlord: ['landlord'],
   unknown: ['unknown'],
 };
 

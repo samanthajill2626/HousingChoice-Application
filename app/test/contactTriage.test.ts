@@ -170,16 +170,16 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
   });
 
-  it('setting type=pm/team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit', async () => {
+  it('setting type=team_member/unknown does NOT propagate a 1:1 type, auto-advance status, or emit', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
     const res = await request(app)
       .patch('/api/contacts/contact-triage-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ type: 'pm' });
+      .send({ type: 'team_member' });
     expect(world.conversations.get('conv-triage-1')?.type).toBe('unknown_1to1');
-    // pm/team_member/unknown do not resolve a 1:1 identity → no auto-advance.
+    // team_member/unknown do not resolve a 1:1 identity → no auto-advance.
     expect(res.body.contact.status).toBe('needs_review');
     // No name known and no type flip → nothing to denormalize → no live emit.
     expect(world.emitted).toHaveLength(0);
@@ -377,6 +377,17 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     // validator silently drops invalid input would hit the empty-guard instead,
     // producing a different message — caught here.
     expect(res.body.error).toMatch(/customFields/);
+  });
+
+  it('400s a PATCH that tries to set the removed pm type', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-x', type: 'tenant', status: 'active', phone: '+15550109999' });
+    const res = await request(app)
+      .patch('/api/contacts/c-x')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'pm' });
+    expect(res.status).toBe(400);
   });
 });
 

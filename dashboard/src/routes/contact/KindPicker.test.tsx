@@ -149,6 +149,18 @@ describe('KindPicker', () => {
     expect(screen.queryByLabelText(/^role$/i)).toBeNull();
   });
 
+  it('clicking Other after the Property Manager preset enters Other mode preserving the role', () => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Property Manager' }));
+    // preset active — no Other panel yet
+    expect(screen.queryByLabelText(/^role$/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    // Other panel now open, role carried forward from the preset
+    const roleInput = screen.getByLabelText(/^role$/i);
+    expect(roleInput).toBeInTheDocument();
+    expect(roleInput).toHaveValue('Property Manager');
+  });
+
   // Fix 2: re-clicking Other when already in Other mode must NOT wipe the base type
   it('clicking Other when already in Other mode keeps type and role unchanged', () => {
     const onChange = vi.fn();

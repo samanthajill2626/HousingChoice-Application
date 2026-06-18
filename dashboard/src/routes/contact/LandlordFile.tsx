@@ -18,6 +18,7 @@ import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordCases, landlordUnits } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
+import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 
 export interface LandlordFileProps {
   contact: Contact;
@@ -76,7 +77,7 @@ export function LandlordFile({
           )
         }
       >
-        <KV k="Role" v={contact.type === 'pm' ? 'Property manager' : 'Landlord'} />
+        <KV k="Role" v={displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])} />
         <KV k="Company" v={company} />
         <KV
           k="Phone numbers"

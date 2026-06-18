@@ -84,12 +84,10 @@ export function ContactDetail(): React.JSX.Element {
     );
   }
 
-  // Three-way by audience, NOT binary: landlord/pm → landlord, unknown →
-  // untriaged, everything else (tenant + team_member) → tenant. The old binary
-  // `else = tenant` mislabeled untriaged inbounds as tenants and showed them the
-  // tenant file. `pill`/file are chosen from this.
+  // Three-way by audience: landlord → landlord, unknown → untriaged, everything
+  // else (tenant + team_member) → tenant. `pill`/file are chosen from this.
   const kind: 'tenant' | 'landlord' | 'unknown' =
-    contact.type === 'landlord' || contact.type === 'pm'
+    contact.type === 'landlord'
       ? 'landlord'
       : contact.type === 'unknown'
         ? 'unknown'

@@ -60,7 +60,7 @@ export function ContactCreateForm({
 
   const resolvedType = kind.type;
   const isTenant = resolvedType === 'tenant';
-  const isLandlordOrPm = resolvedType === 'landlord' || resolvedType === 'pm';
+  const isLandlordOrPm = resolvedType === 'landlord';
   const canCreate = resolvedType !== null && !busy;
 
   function handleShowRelationships(): void {

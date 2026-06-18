@@ -13,6 +13,7 @@ const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
 const updateContact = vi.fn();
+const getContacts = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -27,6 +28,7 @@ vi.mock('../../api/index.js', async () => {
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
+    getContacts: (...a: unknown[]) => getContacts(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -82,6 +84,15 @@ const UNITS: UnitsPage = {
   units: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
 };
 
+// A second contact used in relationship-candidate tests.
+const OTHER: Contact = {
+  contactId: 'z99',
+  type: 'tenant',
+  firstName: 'Bob',
+  lastName: 'Other',
+  phone: '+14045550099',
+};
+
 beforeEach(() => {
   getContact.mockReset();
   getContactTimeline.mockReset();
@@ -91,12 +102,16 @@ beforeEach(() => {
   getUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
+  getContacts.mockReset();
   getCases.mockResolvedValue(CASES);
   getUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });
   getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+  // Default: return a roster containing the current contact + OTHER so tests
+  // that don't override still work (useContacts fans out to tenant/landlord/unknown).
+  getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -170,5 +185,70 @@ describe('ContactDetail', () => {
     await waitFor(() =>
       expect(screen.getByText(/couldn.t load this contact/i)).toBeInTheDocument(),
     );
+  });
+
+  describe('edit dialog relationship candidates (finding #1 + #5)', () => {
+    it('shows other contacts as relationship candidates in the edit dialog', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+
+      // Roster: TENANT (k1, the contact being edited) + OTHER (z99, Bob Other).
+      getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
+      getContact.mockResolvedValue(TENANT);
+      renderAt('k1');
+
+      // Wait for the contact to load.
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      // Open the edit dialog via the ⋯ actions menu → "Edit contact details".
+      await user.click(screen.getByRole('button', { name: /More actions/i }));
+      await user.click(screen.getByRole('menuitem', { name: /edit contact details/i }));
+
+      // The edit dialog is now open; expand the Relationships section.
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Add relationship/i })).toBeInTheDocument(),
+      );
+      await user.click(screen.getByRole('button', { name: /Add relationship/i }));
+
+      // Type "Bob" into the contact-search field — should match Bob Other.
+      const searchInput = screen.getByRole('combobox', { name: /Contact search/i });
+      await user.type(searchInput, 'Bob');
+
+      // Bob Other must appear as a candidate option in the listbox.
+      await waitFor(() =>
+        expect(screen.getByRole('option', { name: /Bob Other/i })).toBeInTheDocument(),
+      );
+    });
+
+    it('does NOT show the contact being edited as its own relationship candidate', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+
+      // Roster includes TENANT itself (Tasha Williams) + OTHER.
+      getContacts.mockResolvedValue({ nextCursor: null, contacts: [TENANT, OTHER] });
+      getContact.mockResolvedValue(TENANT);
+      renderAt('k1');
+
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      // Open edit dialog.
+      await user.click(screen.getByRole('button', { name: /More actions/i }));
+      await user.click(screen.getByRole('menuitem', { name: /edit contact details/i }));
+
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Add relationship/i })).toBeInTheDocument(),
+      );
+      await user.click(screen.getByRole('button', { name: /Add relationship/i }));
+
+      // Type "Tasha" — matches TENANT (the current contact) but it should be excluded.
+      const searchInput = screen.getByRole('combobox', { name: /Contact search/i });
+      await user.type(searchInput, 'Tasha');
+
+      // Allow time for any async updates.
+      await waitFor(() => expect(searchInput).toHaveValue('Tasha'));
+
+      // No option for Tasha (the contact herself) must appear — self-link guard.
+      expect(screen.queryByRole('option', { name: /Tasha Williams/i })).not.toBeInTheDocument();
+    });
   });
 });

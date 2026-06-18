@@ -38,6 +38,36 @@ function setup(initial: KindValue = { type: null, role: '' }, roleSuggestions?: 
   return { onChange };
 }
 
+/** Externally-controlled wrapper that lets tests drive value from outside. */
+function ControlledKindPicker({
+  initial,
+  onChange,
+}: {
+  initial: KindValue;
+  onChange: (v: KindValue) => void;
+}) {
+  const [value, setValue] = useState<KindValue>(initial);
+  // expose a data attribute so tests can simulate parent rehydrating the value
+  return (
+    <>
+      <KindPicker
+        value={value}
+        onChange={(v) => {
+          setValue(v);
+          onChange(v);
+        }}
+      />
+      {/* hidden button the test clicks to simulate a parent resetting the value */}
+      <button
+        data-testid="rehydrate"
+        onClick={() => setValue({ type: 'tenant', role: '' })}
+      >
+        Rehydrate
+      </button>
+    </>
+  );
+}
+
 describe('KindPicker', () => {
   it('clicking Tenant calls onChange with {type:"tenant", role:""} and shows no role input', () => {
     const { onChange } = setup();
@@ -93,5 +123,39 @@ describe('KindPicker', () => {
     expect(screen.getByLabelText(/role/i)).toBeInTheDocument();
     // The role input should have the right value
     expect(screen.getByLabelText(/role/i)).toHaveValue('Case worker');
+  });
+
+  // Fix 1: parent rehydrating to a plain standard kind must exit Other mode
+  it('parent rehydrating to {type:"tenant", role:""} clears Other mode', () => {
+    const onChange = vi.fn();
+    render(<ControlledKindPicker initial={{ type: null, role: '' }} onChange={onChange} />);
+
+    // Enter Other mode
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    expect(screen.getByLabelText(/role/i)).toBeInTheDocument();
+
+    // Simulate parent resetting the value to a plain Tenant selection
+    fireEvent.click(screen.getByTestId('rehydrate'));
+
+    // Other panel should now be hidden
+    expect(screen.queryByLabelText(/role/i)).toBeNull();
+  });
+
+  // Fix 2: re-clicking Other when already in Other mode must NOT wipe the base type
+  it('clicking Other when already in Other mode keeps type and role unchanged', () => {
+    const onChange = vi.fn();
+    // Start in Other mode with a base type and a role already set
+    render(
+      <KindPicker
+        value={{ type: 'tenant', role: 'Case worker' }}
+        onChange={onChange}
+      />,
+    );
+
+    // Click the "Other" segment button — should be a no-op on type+role
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+
+    // onChange should have been called with the same type+role (not null+role)
+    expect(onChange).toHaveBeenCalledWith({ type: 'tenant', role: 'Case worker' });
   });
 });

@@ -2,7 +2,7 @@
 // Segments: Tenant / Landlord / Property mgr / Other.
 // Picking Tenant/Landlord/PM resolves directly to {type, role:''}.
 // Picking Other reveals a Role text input + a base-type sub-choice.
-import { useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { type ContactType } from '../../api/index.js';
 import styles from './KindPicker.module.css';
 
@@ -16,8 +16,6 @@ export interface KindPickerProps {
   onChange: (v: KindPickerValue) => void;
   roleSuggestions?: string[];
 }
-
-const DATALIST_ID = 'kind-picker-role-suggestions';
 
 type PrimarySegment = 'tenant' | 'landlord' | 'pm' | 'other';
 
@@ -43,15 +41,34 @@ export function KindPicker({
   // We also treat a non-empty role as implying Other mode (for edit/re-hydration).
   const [otherSelected, setOtherSelected] = useState(false);
 
+  // Fix 1: Clear otherSelected when the parent rehydrates to a resolved standard kind
+  // (non-null type with empty role = plain Tenant/Landlord/PM selection).
+  useEffect(() => {
+    if (value.type !== null && value.role.trim() === '') {
+      setOtherSelected(false);
+    }
+  }, [value.type, value.role]);
+
+  // Fix 5: use useId() for stable, instance-unique ids
+  const uid = useId();
+  const datalistId = `${uid}-role-suggestions`;
+  const roleInputId = `${uid}-role`;
+
   const suggestions = roleSuggestions ?? [];
   const inOtherMode = otherSelected || value.role.trim() !== '';
   const active = activePrimarySegment(value, otherSelected);
 
   function handleSegment(seg: PrimarySegment): void {
     if (seg === 'other') {
-      setOtherSelected(true);
-      // Keep existing type/role if already in Other mode; otherwise reset type to null
-      onChange({ type: null, role: value.role });
+      // Fix 2: when already in Other mode, preserve the current type+role (no-op).
+      // Only reset type to null when entering Other from a plain selection.
+      if (inOtherMode) {
+        // Already in Other mode — keep everything as-is.
+        onChange({ type: value.type, role: value.role });
+      } else {
+        setOtherSelected(true);
+        onChange({ type: null, role: value.role });
+      }
     } else {
       setOtherSelected(false);
       const typeMap: Record<Exclude<PrimarySegment, 'other'>, ContactType> = {
@@ -102,24 +119,24 @@ export function KindPicker({
       {inOtherMode && (
         <div className={styles.otherPanel}>
           {suggestions.length > 0 && (
-            <datalist id={DATALIST_ID}>
+            <datalist id={datalistId}>
               {suggestions.map((s) => (
                 <option key={s} value={s} />
               ))}
             </datalist>
           )}
 
-          <label className={styles.roleLabel} htmlFor="kind-picker-role">
+          <label className={styles.roleLabel} htmlFor={roleInputId}>
             Role
           </label>
           <input
-            id="kind-picker-role"
+            id={roleInputId}
             type="text"
             className={styles.roleInput}
             value={value.role}
             onChange={(e) => handleRoleChange(e.target.value)}
             placeholder="e.g. Case worker, Social worker…"
-            list={suggestions.length > 0 ? DATALIST_ID : undefined}
+            list={suggestions.length > 0 ? datalistId : undefined}
           />
 
           {/* Base-type sub-choice */}

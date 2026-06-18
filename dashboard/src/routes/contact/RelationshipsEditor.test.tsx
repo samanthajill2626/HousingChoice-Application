@@ -99,4 +99,28 @@ describe('RelationshipsEditor', () => {
     expect(values).toContain('Spouse');
     expect(values).toContain('Employer');
   });
+
+  // Fix 4: free-typing after a pick must drop the contactId key entirely
+  it('free-typing after a pick emits a row with NO contactId key', () => {
+    const onChange = vi.fn();
+    // Start with a linked row (has contactId)
+    render(
+      <RelationshipsEditor
+        rows={[{ role: 'Spouse', name: 'Alice Smith', contactId: 'c1' }]}
+        onChange={onChange}
+        candidates={CANDIDATES}
+      />,
+    );
+
+    // Type something free-form in the contact search input (not a candidate pick)
+    const searchInput = screen.getByLabelText('Contact search 1');
+    fireEvent.change(searchInput, { target: { value: 'Someone Else' } });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const emittedRows = onChange.mock.calls[0]?.[0] as Relationship[];
+    const emittedRow = emittedRows?.[0];
+    expect(emittedRow).toBeDefined();
+    expect(emittedRow!.name).toBe('Someone Else');
+    expect('contactId' in emittedRow!).toBe(false);
+  });
 });

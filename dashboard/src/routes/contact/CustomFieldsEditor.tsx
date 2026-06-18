@@ -3,11 +3,10 @@
 // Renders one labelled row per entry (label input + value input + Remove button),
 // plus an "+ Add custom field" button. All mutations are propagated via onChange —
 // this component holds NO local state for the rows.
+import { useId } from 'react';
 import { type CustomField } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import styles from './CustomFieldsEditor.module.css';
-
-const DATALIST_ID = 'custom-field-label-suggestions';
 
 export interface CustomFieldsEditorProps {
   rows: CustomField[];
@@ -20,6 +19,10 @@ export function CustomFieldsEditor({
   onChange,
   labelSuggestions,
 }: CustomFieldsEditorProps): React.JSX.Element {
+  // Fix 5: instance-unique id for the datalist (no module-level constant)
+  const uid = useId();
+  const datalistId = `${uid}-label-suggestions`;
+
   const suggestions = labelSuggestions ?? [];
 
   function onLabelChange(index: number, newLabel: string): void {
@@ -43,7 +46,7 @@ export function CustomFieldsEditor({
   return (
     <div className={styles.editor}>
       {suggestions.length > 0 && (
-        <datalist id={DATALIST_ID}>
+        <datalist id={datalistId}>
           {suggestions.map((s) => (
             <option key={s} value={s} />
           ))}
@@ -63,7 +66,7 @@ export function CustomFieldsEditor({
                   onChange={(e) => onLabelChange(i, e.target.value)}
                   placeholder="Field label"
                   aria-label={`Field label ${n}`}
-                  list={suggestions.length > 0 ? DATALIST_ID : undefined}
+                  list={suggestions.length > 0 ? datalistId : undefined}
                 />
                 <input
                   className={styles.input}

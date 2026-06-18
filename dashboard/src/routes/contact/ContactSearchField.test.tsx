@@ -21,7 +21,7 @@ function setup(
 describe('ContactSearchField', () => {
   it('renders a text input bound to value.name', () => {
     setup({ name: 'Alice' });
-    const input = screen.getByRole('textbox');
+    const input = screen.getByRole('combobox');
     expect(input).toHaveValue('Alice');
   });
 
@@ -53,7 +53,7 @@ describe('ContactSearchField', () => {
         candidates={CANDIDATES}
       />,
     );
-    const input = screen.getByRole('textbox');
+    const input = screen.getByRole('combobox');
     fireEvent.change(input, { target: { value: 'Zara' } });
     const call = onChange.mock.calls[0] as [{ name: string; contactId?: string }];
     expect(call[0]).toEqual({ name: 'Zara' });
@@ -93,5 +93,25 @@ describe('ContactSearchField', () => {
     const option = screen.getByRole('option', { name: /Alice Smith/i });
     expect(option).toBeInTheDocument();
     expect(option.innerHTML).not.toContain('<script');
+  });
+
+  // Fix 3: keyboard navigation — ArrowDown then Enter selects the active candidate
+  it('ArrowDown then Enter selects the active candidate via onChange', () => {
+    const onChange = vi.fn();
+    // "ali" matches Alice Smith (first candidate)
+    render(
+      <ContactSearchField value={{ name: 'ali' }} onChange={onChange} candidates={CANDIDATES} />,
+    );
+
+    const input = screen.getByRole('combobox');
+    // List should be visible (Alice Smith matches)
+    expect(screen.getByRole('option', { name: /Alice Smith/i })).toBeInTheDocument();
+
+    // ArrowDown moves activeIndex from -1 → 0
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    // Enter should pick the active option (Alice Smith)
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
   });
 });

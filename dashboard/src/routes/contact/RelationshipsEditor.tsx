@@ -2,12 +2,11 @@
 // Each row has a role input (with datalist suggestions) + a ContactSearchField
 // (bound to name/contactId) + a Remove button. All mutations go via onChange —
 // no local state for the rows.
+import { useId } from 'react';
 import { type Contact, type Relationship } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { ContactSearchField } from './ContactSearchField.js';
 import styles from './RelationshipsEditor.module.css';
-
-const DATALIST_ID = 'relationship-role-suggestions';
 
 export interface RelationshipsEditorProps {
   rows: Relationship[];
@@ -22,6 +21,10 @@ export function RelationshipsEditor({
   candidates,
   roleSuggestions,
 }: RelationshipsEditorProps): React.JSX.Element {
+  // Fix 5: instance-unique id for the datalist (no module-level constant)
+  const uid = useId();
+  const datalistId = `${uid}-role-suggestions`;
+
   const suggestions = roleSuggestions ?? [];
 
   function onRoleChange(index: number, newRole: string): void {
@@ -33,9 +36,21 @@ export function RelationshipsEditor({
     index: number,
     newValue: { name: string; contactId?: string },
   ): void {
-    const updated = rows.map((row, i) =>
-      i === index ? { ...row, name: newValue.name, contactId: newValue.contactId } : row,
-    );
+    // Fix 4: omit contactId entirely when the user has not linked a contact
+    // (free-typed name). Spread the existing row (which may have a contactId from
+    // a prior pick), then overwrite name, and conditionally add contactId so
+    // any previously-set key is removed when the new value has none.
+    const updated = rows.map((row, i) => {
+      if (i !== index) return row;
+      // Build a fresh object without contactId, then conditionally add it back.
+      // Omitting contactId entirely (not setting it to undefined) is important
+      // so the key is absent on unlinked rows.
+      const base: Relationship = { role: row.role, name: newValue.name };
+      if (newValue.contactId) {
+        base.contactId = newValue.contactId;
+      }
+      return base;
+    });
     onChange(updated);
   }
 
@@ -50,7 +65,7 @@ export function RelationshipsEditor({
   return (
     <div className={styles.editor}>
       {suggestions.length > 0 && (
-        <datalist id={DATALIST_ID}>
+        <datalist id={datalistId}>
           {suggestions.map((s) => (
             <option key={s} value={s} />
           ))}
@@ -70,7 +85,7 @@ export function RelationshipsEditor({
                   onChange={(e) => onRoleChange(i, e.target.value)}
                   placeholder="Role"
                   aria-label={`Relationship role ${n}`}
-                  list={suggestions.length > 0 ? DATALIST_ID : undefined}
+                  list={suggestions.length > 0 ? datalistId : undefined}
                 />
                 <ContactSearchField
                   value={{ name: row.name, contactId: row.contactId }}

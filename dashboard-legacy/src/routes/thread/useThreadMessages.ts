@@ -243,7 +243,7 @@ export function useThreadMessages(conversationId: string): UseThreadMessages {
       // pending state (clearing its error_code), then on success swap it for the
       // server's persisted message — so exactly one bubble is ever shown.
       //
-      // TODO(idempotency): the residual risk is a transient where the POST
+      // TODO(send-idempotency-key): the residual risk is a transient where the POST
       // reached Twilio but the client saw a network failure — the user then
       // retries and the SMS goes out TWICE. The real fix is a server-honored
       // idempotency key on POST /api/conversations/:id/messages: the client

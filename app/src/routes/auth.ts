@@ -217,10 +217,9 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
     // activates an invited record on first login (writes google_sub, flips
     // status → active) or throws AccessDeniedError when there is no invite.
     //
-    // TODO(M1.4): the admin-only user-management UI (list / invite / role-
-    // change) will wrap usersRepo.invite + usersRepo.setRole behind
-    // requireRole('admin') — the FIRST admin-only /api surface. Build nothing
-    // here; M1.4 picks it up. Until then invites come from `npm run user:invite`.
+    // Admin user-management (list / invite / role-change) lives in its own
+    // requireRole('admin') surface — app/src/routes/adminUsers.ts (/api/users) —
+    // not in this login handler. Bootstrap invites: `npm run user:invite`.
     let user: UserItem;
     try {
       ({ user } = await resolveInvitedUser({ usersRepo, auditRepo, logger: log }, identity));

@@ -29,7 +29,7 @@ export interface ContactFileState {
   cases: CaseItem[];
   units: UnitItem[];
   listingsSent: Slice<ListingSendRow>;
-  // TODO(dead-code): `media` is no longer read by any consumer. The contact
+  // TODO(contact-file-dead-media-slice): `media` is no longer read by any consumer. The contact
   // file's "Media from comms" gallery now derives from the LIVE timeline
   // (commsMedia in media.ts → MediaGallery) so it updates on send; this C5 slice
   // (GET /api/contacts/:id/media) is a redundant once-on-mount fetch. Safe to
@@ -80,7 +80,7 @@ export function useContactFile(contactId: string): ContactFileState {
           getCases(signal),
           getUnits(signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
-          // TODO(dead-code): unused — see the `media` field above. The gallery
+          // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
           // now derives from the live timeline; this fetch can be removed.
           loadSlice((s) => getContactMedia(contactId, s), signal),
         ]);

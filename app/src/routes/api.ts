@@ -858,8 +858,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     mergeContext({ conversationId });
     const payload = (req.body ?? {}) as { assigneeUserId?: unknown };
     const assigneeUserId = payload.assigneeUserId;
-    // TODO(M1.4): validate assigneeUserId against the users table (users
-    // exist since M1.3) — until then any non-empty string is accepted.
+    // TODO(validate-assignee-userid): not validated against the users table yet —
+    // any non-empty string is accepted (users exist since M1.3).
     if (
       !(assigneeUserId === null || (typeof assigneeUserId === 'string' && assigneeUserId.length > 0))
     ) {

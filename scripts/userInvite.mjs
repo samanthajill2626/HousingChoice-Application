@@ -18,8 +18,8 @@
 //     and NO google_sub — google_sub + status 'active' are written by the app
 //     on the user's first successful login.
 //
-// TODO(M1.4): the admin-only user-management UI will offer invite/list/role-
-// change in-app (requireRole('admin')); this script remains the bootstrap path.
+// TODO(admin-user-management-ui): an in-app dashboard UI will offer invite/list/
+// role-change (the /api/users surface exists); this script remains the bootstrap path.
 //
 // Pure logic (argv validation, item shapes) lives in
 // scripts/lib/userInviteCore.mjs and is unit-tested offline.

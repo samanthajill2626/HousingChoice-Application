@@ -81,9 +81,9 @@ function asParams(body: unknown): WebhookParams {
  * yet, or a contact whose type is 'unknown'/'pm'/'team_member', is
  * `unknown_1to1` — never a guess.
  *
- * TODO(M1.5): when the team sets a contact's real type, the records CRUD must
- * propagate the conversation type (unknown_1to1 → tenant_1to1/landlord_1to1).
- * Seam only — nothing is built here yet.
+ * When the team sets a contact's real type, the conversation-type propagation
+ * (unknown_1to1 → tenant_1to1/landlord_1to1) is handled where triage happens —
+ * see app/src/routes/contacts.ts (the PATCH handler's propagatedConversations).
  */
 function conversationTypeFor(contact: ContactItem | undefined): ConversationType {
   switch (contact?.type) {

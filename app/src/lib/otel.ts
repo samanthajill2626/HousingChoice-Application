@@ -7,7 +7,7 @@
 //
 // Instrumentation is deliberately lean: http + express only.
 //
-// TODO(M0.4/M0.6): wire the OTLP exporter to CloudWatch Application Signals.
+// TODO(otlp-exporter-wiring): wire the OTLP exporter to CloudWatch Application Signals.
 // Env seam already in place: OTEL_EXPORTER_OTLP_ENDPOINT (see .env.example).
 // Until then the SDK starts with default (no-op) export config in AWS.
 
@@ -31,7 +31,7 @@ export async function startOtel(): Promise<void> {
   const sdk = new NodeSDK({
     serviceName: process.env.HC_PROCESS === 'worker' ? 'housingchoice-worker' : 'housingchoice-app',
     instrumentations: [new HttpInstrumentation(), new ExpressInstrumentation()],
-    // TODO(M0.4/M0.6): traceExporter/metricReader → OTLP at
+    // TODO(otlp-exporter-wiring): traceExporter/metricReader → OTLP at
     // process.env.OTEL_EXPORTER_OTLP_ENDPOINT (CloudWatch Application Signals).
   });
   sdk.start();

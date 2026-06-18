@@ -82,6 +82,15 @@ Preferences & notes (chips; **manual now, auto-gleaned later**) · Listings sent
 overflow (merge duplicate contact · mark unreachable · opt-out). Messaging = the
 reply box (no redundant header button on desktop); editing = inline per section.
 
+> **Superseded since this lock:** the header "type pill" now shows the contact's
+> **kind = `role` ?? type** (custom kinds layer on a base type), and the file pane
+> gained two **type-agnostic** cards — **Relationships** and **Custom fields** —
+> rendered by the shared shell for all kinds. See
+> [2026-06-18-extensible-contact-creation-design.md](./2026-06-18-extensible-contact-creation-design.md).
+> Contact-detail comms/UX behaviours added later (Unknown-contact triage file,
+> Do-Not-Contact flag, optimistic send) are in
+> [2026-06-18-contact-comms-and-listings-refinements-design.md](./2026-06-18-contact-comms-and-listings-refinements-design.md).
+
 ## Landlord detail — LOCKED (for now)
 
 Same shell as the tenant page. The **right file** differs: Details (role/company,

@@ -1,11 +1,21 @@
-// ContactDetail — the shared shell for the Tenant (B2) + Landlord (B3) detail
-// pages. A near-black header band (avatar · bold name · type pill [tenant blue /
-// landlord teal] · facts subline · "Call ▾" + "⋯") over a two-pane body:
-// comms-LEFT (the Timeline) / file-RIGHT (a type-driven TenantFile vs
-// LandlordFile). On narrow widths it leads with comms and offers a simple
-// segmented Comms | Profile toggle. The page resolves the reply target (primary
-// / most-recent number) and whether a single conversation is sendable; sending
-// posts to that conversation, else Send is disabled.
+// ContactDetail — the shared shell for the contact detail page (tenant /
+// landlord / untriaged). A near-black header band (avatar · name · KIND pill ·
+// facts · Call ▾ · ⋯) over a two-pane body: comms-LEFT (the Timeline) / file-RIGHT.
+//
+// KIND, not a binary: a three-way `kind` (landlord/pm → landlord, unknown →
+// unknown, else → tenant) chooses the file pane (TenantFile / LandlordFile /
+// UnknownFile) and pill colour; the pill/badge LABEL is `displayKind` = role ??
+// type, so a custom kind (e.g. "Case worker", base type tenant) reads its role.
+// Custom kinds layer on a base type — see 2026-06-18-extensible-contact-creation.
+// UnknownFile leads with a triage CTA (Mark as Tenant/Landlord → PATCH type).
+//
+// Type-AGNOSTIC cards rendered here for every kind: Relationships, Custom fields.
+// Comms behaviours: opt-out (Do-Not-Contact) flag + refusal messaging; OPTIMISTIC
+// send (Sending… → Sent → Delivered via the timeline's add/resolve/fail);
+// "Media from comms" derived from the live timeline. Narrow widths lead with comms
+// + a segmented Comms | Profile toggle. The page resolves the reply target
+// (primary / picker) and whether a conversation is sendable, else Send is disabled.
+// Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {

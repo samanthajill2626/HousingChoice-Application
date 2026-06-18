@@ -201,6 +201,24 @@
 }
 
 @media (max-width: 860px) {
+  /* Header: the actions (Call ▾ + ⋯) drop to their own row so the identity gets
+   * the full width beside the avatar — otherwise the wide Call button starves the
+   * name column and a phone-number "name" (unknown contact) shreds into stacked
+   * blocks. Below 860 the nav is still a sidebar, so the content is already narrow
+   * enough to hit this. */
+  .header {
+    flex-wrap: wrap;
+  }
+  .identity {
+    flex: 1 1 auto;
+  }
+  .nameRow {
+    flex-wrap: wrap;
+  }
+  .actions {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
   .segMobile {
     display: flex;
   }

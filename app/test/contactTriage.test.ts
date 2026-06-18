@@ -371,6 +371,12 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
       .send({ customFields: 'nope' });
     expect(res.status).toBe(400);
+    // Proves this is the parseCustomFields validator path (not the empty-guard).
+    // The empty-guard would return "no updatable fields supplied"; the validator
+    // returns "customFields must be an array". A future regression where the
+    // validator silently drops invalid input would hit the empty-guard instead,
+    // producing a different message — caught here.
+    expect(res.body.error).toMatch(/customFields/);
   });
 });
 

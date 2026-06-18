@@ -107,4 +107,49 @@ test.describe('Extensible contact creation', () => {
     await expect(page).toHaveURL(new RegExp(`/contacts/${SEEDED_TENANT}$`));
     await expect(page.getByText('Tasha Nguyen').first()).toBeVisible();
   });
+
+  test('creates a Property Manager via the preset (landlord + role, under Landlords)', async ({
+    page,
+  }) => {
+    const stamp = Date.now();
+    const lastName = `PM ${stamp}`;
+    const fullName = `Pat ${lastName}`;
+    const company = `Acme Mgmt ${stamp}`;
+
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts`);
+
+    await page.getByRole('button', { name: 'New contact' }).click();
+    const dialog = page.getByRole('dialog', { name: /New contact/i });
+    await expect(dialog).toBeVisible();
+
+    // The Property Manager preset is a custom kind on the landlord base — clicking
+    // it must NOT open the "Other" guided panel (no Role text input is revealed).
+    await dialog
+      .getByRole('group', { name: 'Contact kind' })
+      .getByRole('button', { name: 'Property Manager' })
+      .click();
+    await expect(dialog.getByLabel('Role')).toHaveCount(0);
+
+    // Landlord-base standard fields appear (Company, not Voucher size).
+    await dialog.getByLabel('First name').fill('Pat');
+    await dialog.getByLabel('Last name').fill(lastName);
+    await dialog.getByLabel('Company').fill(company);
+
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/);
+
+    // Badged "Property Manager" (role ?? type) with the landlord file's Company.
+    await expect(page.getByText('Property Manager').first()).toBeVisible();
+    await expect(page.getByText(company).first()).toBeVisible();
+
+    // Persists across a reload.
+    await page.reload();
+    await expect(page.getByText('Property Manager').first()).toBeVisible();
+
+    // It lives under the Landlords filter (it is landlord-typed).
+    await page.goto(`${NEXT}/contacts/landlords`);
+    await expect(page.getByText(fullName)).toBeVisible();
+  });
 });

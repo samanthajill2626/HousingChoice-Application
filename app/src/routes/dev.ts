@@ -89,6 +89,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // the fake-twilio thread store (GET /control/threads on the fake-twilio service),
   // which captures both directions + delivery status. Retained only so the three
   // pre-existing green specs don't churn; do not extend.
+  // TODO(remove-dev-outbox-proof-of-send): migrate those 3 specs, then delete this + the driver.
   // GET /__dev/outbox?to=&since= — recorded outbound messages (newest last).
   router.get('/__dev/outbox', async (req, res) => {
     const table = tableName(OUTBOX_TABLE_BASE);

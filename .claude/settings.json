@@ -1,12 +1,9 @@
 {
   "permissions": {
     "allow": [
-
+      
     ],
     "ask": [
     ]
-  },
-  "env": {
-    "PLAYWRIGHT_MCP_OUTPUT_DIR": ".playwright-mcp"
   }
 }

@@ -5,7 +5,7 @@
 // native radiogroup (Normal / Stall at sent / Fail) that drives the next
 // outbound message's status callbacks. Pure presentational: onSend gets the body
 // + chosen media; onSetDeliveryProfile fires whenever the profile changes.
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Button } from './Button.js';
 import { cannedAssets, isImageAsset } from '../assets/canned/index.js';
 import type { DeliveryProfile } from '../api/types.js';
@@ -24,6 +24,13 @@ export interface ComposerProps {
    */
   onSend: (input: ComposerSendInput) => void | Promise<void>;
   onSetDeliveryProfile: (profile: DeliveryProfile) => void;
+  /**
+   * The fake consumes a non-normal delivery profile ONE-SHOT (on the next
+   * app→party outbound), then reverts to normal. Bump this number whenever that
+   * happens (or when the selected party changes) and the radio snaps back to
+   * "Normal" so the control never lies about what's armed. Ignored on mount.
+   */
+  resetSignal?: number;
   disabled?: boolean;
 }
 
@@ -35,12 +42,30 @@ const PROFILES: ReadonlyArray<{ key: ProfileKey; label: string; profile: Deliver
   { key: 'fail', label: 'Fail', profile: { kind: 'fail' } },
 ];
 
-export function Composer({ onSend, onSetDeliveryProfile, disabled = false }: ComposerProps): React.JSX.Element {
+export function Composer({
+  onSend,
+  onSetDeliveryProfile,
+  resetSignal = 0,
+  disabled = false,
+}: ComposerProps): React.JSX.Element {
   const [body, setBody] = useState('');
   const [media, setMedia] = useState<string[]>([]);
   const [profile, setProfile] = useState<ProfileKey>('normal');
   const [sending, setSending] = useState(false);
   const groupName = useId();
+
+  // The armed delivery profile is one-shot in the engine; when the parent says it
+  // was consumed (or the party changed), reflect that by reverting the radio to
+  // "Normal". Skip the mount run so an initial signal value doesn't clobber a
+  // profile the user armed before the first outbound.
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    setProfile('normal');
+  }, [resetSignal]);
 
   const canSend = !disabled && !sending && (body.trim() !== '' || media.length > 0);
 

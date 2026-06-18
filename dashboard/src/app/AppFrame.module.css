@@ -1,29 +1,101 @@
+/* Flex (not grid) so the sidebar can animate its WIDTH between expanded and the
+ * icon rail — width transitions are smooth + universally supported, whereas
+ * grid-template-columns is not. height:100% + stretched children keep .main
+ * clamped to the viewport so its internal scroll regions work (no page scroll). */
 .shell {
-  display: grid;
-  grid-template-columns: var(--nav-width) 1fr;
+  display: flex;
   height: 100%;
 }
 
-/* --- Left nav ------------------------------------------------------------- */
+/* --- Left nav (desktop persistent sidebar; becomes a drawer <768px) ------- */
 .sidebar {
+  flex: 0 0 var(--nav-width);
+  width: var(--nav-width);
   display: flex;
   flex-direction: column;
   background: var(--c-nav-bg);
   padding: var(--sp-4) var(--sp-3);
+  overflow-x: hidden;
   overflow-y: auto;
+  transition: flex-basis 0.18s ease, width 0.18s ease;
+}
+
+/* Collapsed icon rail. overflow:visible (not the base auto) so the Contacts
+ * children flyout can escape the rail's narrow width — a scroll container would
+ * clip it. The rail's short icon list rarely needs its own scroll. */
+.sidebar.collapsed {
+  flex-basis: var(--nav-width-rail);
+  width: var(--nav-width-rail);
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
+  overflow: visible;
+}
+
+/* Brand row: full wordmark + collapse toggle (expanded) → just the toggle over a
+ * compact "HC" mark (rail). */
+.brandRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-1) var(--sp-4);
+}
+
+.sidebar.collapsed .brandRow {
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .brand {
   display: block;
+  flex: 1;
+  min-width: 0;
   font-size: var(--fs-lg);
   font-weight: var(--fw-bold);
   letter-spacing: -0.01em;
   color: var(--c-nav-brand);
-  padding: var(--sp-2) var(--sp-2) var(--sp-4);
 }
 
 .brand:hover {
   text-decoration: none;
+}
+
+.brandMark {
+  display: none;
+}
+
+/* Rail: swap the full wordmark for the compact mark. */
+.sidebar.collapsed .brandFull {
+  display: none;
+}
+.sidebar.collapsed .brandMark {
+  display: block;
+  text-align: center;
+}
+
+.collapseToggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-nav-text);
+  cursor: pointer;
+}
+
+.collapseToggle:hover {
+  background: var(--c-nav-hover-bg);
+  color: var(--c-nav-active-text);
+}
+
+.collapseToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
 }
 
 .nav {
@@ -126,27 +198,230 @@
   border-top: 1px solid var(--c-nav-border);
 }
 
+/* Anchors a parent's children flyout in the rail (see below). */
+.parent {
+  position: relative;
+}
+
+/* --- Rail (collapsed) overrides ------------------------------------------ */
+/* Group headers fall away; icons center. Accessible names survive via each link's
+ * aria-label (set in NavContents), so screen readers are unaffected. */
+.sidebar.collapsed .groupLabel {
+  display: none;
+}
+
+.sidebar.collapsed .link {
+  position: relative;
+  justify-content: center;
+  padding: var(--sp-2);
+}
+
+/* Top-level labels become an instant tooltip chip beside the icon on hover/focus,
+ * so you can tell what each icon is. (Children labels stay inline in the flyout —
+ * see below; they aren't inside a .linkRow, so this rule doesn't touch them.) */
+.sidebar.collapsed .linkRow .linkLabel {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  background: var(--c-surface);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: 3px var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 60;
+}
+
+.sidebar.collapsed .linkRow .link:hover .linkLabel,
+.sidebar.collapsed .linkRow .link:focus-visible .linkLabel {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* The Contacts parent uses its children flyout (below) as its hover affordance,
+ * so suppress its own tooltip to avoid clashing with the panel. */
+.sidebar.collapsed .parent > .linkRow .linkLabel {
+  display: none;
+}
+
+/* Inbox unread badge → a compact count pinned to the icon's top-right. */
+.sidebar.collapsed .linkRow {
+  position: relative;
+  justify-content: center;
+}
+
+.sidebar.collapsed .badge {
+  position: absolute;
+  top: 1px;
+  right: 6px;
+  min-width: 0.95rem;
+  padding: 0 4px;
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+/* Contacts' children can't indent in a rail, so they surface as a flyout panel
+ * to the right of the icon on hover (mouse) or focus-within (keyboard: focusing
+ * the parent link reveals it, then you can tab into the children). */
+.sidebar.collapsed .children {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin: 0;
+  padding: var(--sp-2);
+  min-width: 184px;
+  background: var(--c-nav-bg);
+  border: 1px solid var(--c-nav-border);
+  /* A TRANSPARENT left border acts as a hoverable bridge spanning the gap between
+   * the rail icon and the visible panel — the mouse can cross it without leaving
+   * the parent's :hover (which would close the flyout before you reach it). The
+   * panel's background starts after it (background-clip: padding-box). */
+  border-left: var(--sp-3) solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 30;
+}
+
+.sidebar.collapsed .parent:hover > .children,
+.sidebar.collapsed .parent:focus-within > .children {
+  display: flex;
+}
+
+/* Children render as normal inline links inside the flyout (left-aligned, their
+ * own padding restored from the rail's centered/compact link rules). */
+.sidebar.collapsed .children .childLink {
+  justify-content: flex-start;
+  padding: var(--sp-1) var(--sp-2);
+}
+
 /* --- Main column --------------------------------------------------------- */
 .main {
+  /* flex:1 so it fills the row beside the sidebar (the grid→flex switch dropped
+   * the implicit 1fr; without this .main sizes to content and leaves dead space
+   * on the right). min-width:0 lets inner content shrink/scroll rather than
+   * forcing the column wider. */
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
   height: 100%;
 }
 
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--c-border);
   background: var(--c-surface);
+}
+
+/* Account menu pushed to the right edge; on desktop the hamburger + brand are
+ * hidden (display:none below), so this keeps the menu right-aligned as before. */
+.topbarRight {
+  margin-left: auto;
+}
+
+/* Hamburger + brand: mobile-only (shown in the <768px media query). */
+.hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.hamburger:hover {
+  background: var(--c-surface-2);
+}
+
+.hamburger:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.topbarBrand {
+  display: none;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+  color: var(--c-text);
 }
 
 .content {
   flex: 1;
   overflow-y: auto;
   padding: var(--sp-5);
+}
+
+/* --- Mobile drawer + scrim ----------------------------------------------- */
+/* Both render only at <768px (gated in AppFrame on isMobile). The drawer is the
+ * full expanded sidebar sliding in from the left over a dimming scrim. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+  z-index: 40;
+}
+
+.scrimOpen {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--nav-width);
+  max-width: 84vw;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-nav-bg);
+  padding: var(--sp-3) var(--sp-3) var(--sp-4);
+  overflow-y: auto;
+  z-index: 50;
+  transform: translateX(-100%);
+  /* Closed: off-screen AND not focusable (visibility removes it from tab order).
+   * The visibility flip is DELAYED by the slide duration so the close animation
+   * plays out before it's hidden; opening flips it immediately (0s). */
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s linear 0.2s;
+}
+
+.drawerOpen {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.2s ease, visibility 0s linear 0s;
+}
+
+.drawerHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-1) var(--sp-3);
+}
+
+.drawerHead .brand {
+  flex: 1;
 }
 
 /* --- Account menu -------------------------------------------------------- */
@@ -239,4 +514,20 @@
   color: var(--c-text-inverse);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
+}
+
+/* --- Mobile (<768px): persistent sidebar → off-canvas drawer -------------- */
+/* 768px = the nav breakpoint (NAV_BREAKPOINT_PX in useNavChrome.ts — keep in
+ * sync). Below it the persistent sidebar is hidden and the top-bar hamburger +
+ * brand take over; the drawer (rendered only when isMobile) does the navigating. */
+@media (max-width: 767.98px) {
+  .sidebar {
+    display: none;
+  }
+  .hamburger {
+    display: inline-flex;
+  }
+  .topbarBrand {
+    display: block;
+  }
 }

@@ -119,6 +119,36 @@ describe('App shell', () => {
     expect(box).toHaveValue('see this photo');
   });
 
+  it('reverts the delivery-profile radio to Normal after an outbound consumes the one-shot', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+
+    // Arm "Fail" for the selected party.
+    await user.click(screen.getByRole('radio', { name: /fail/i }));
+    expect(screen.getByRole('radio', { name: /fail/i })).toBeChecked();
+    expect(setDeliveryOutcome).toHaveBeenCalledWith('+15550100001', { kind: 'fail' });
+
+    // An app→party OUTBOUND lands — the engine consumed the armed one-shot — so the
+    // radio must stop claiming "Fail" is still armed.
+    act(() =>
+      capturedOnEvent?.({
+        type: 'message.appended',
+        partyNumber: '+15550100001',
+        message: {
+          ...seededMsg,
+          sid: 'SMoutbound2',
+          state: 'failed',
+          errorCode: '30007',
+          createdAt: '2026-06-15T00:02:00.000Z',
+          updatedAt: '2026-06-15T00:02:00.000Z',
+        },
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByRole('radio', { name: /normal/i })).toBeChecked());
+  });
+
   it('a message.updated SSE event flips a message StatusChip to delivered', async () => {
     const user = userEvent.setup();
     render(<App />);

@@ -106,6 +106,32 @@ function conversationWho(conv: ConversationSummary): string {
   return conv.participant_display_name ?? formatPhone(conv.participant_phone);
 }
 
+/** The external participant's contact id (match by phone, else the first
+ *  participant). Undefined when the summary carries no participant contact id. */
+function participantContactId(conv: ConversationSummary): string | undefined {
+  const p = conv.participants.find((x) => x.phone === conv.participant_phone) ?? conv.participants[0];
+  return p?.contactId;
+}
+
+/** A `refType:'contact'` refId for a 1:1 conversation row: the contact's id when
+ *  resolvable (→ /contacts/:id, the detail page), else the Unknown list filtered
+ *  by phone (→ /contacts/unknown?phone=…, mirroring the Inbox). NEVER a
+ *  `refType:'conversation'` ref — /conversations/:id is an unrouted placeholder
+ *  ("Not found"), which is the dead-link this fixes. */
+function contactRefId(conv: ConversationSummary): string {
+  return (
+    participantContactId(conv) ?? `unknown?phone=${encodeURIComponent(conv.participant_phone)}`
+  );
+}
+
+/** 1:1 conversation types (one external contact) — these route to the contact
+ *  page. relay_group has no single contact, so it keeps a conversation ref. */
+const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
+  'tenant_1to1',
+  'landlord_1to1',
+  'unknown_1to1',
+]);
+
 /** YYYY-MM-DD in LOCAL time for a Date — the browser's definition of "today".
  *  Used BOTH as the tour_date comparison basis here AND as the `?day=` the hook
  *  sends to /api/today, so the server and this fallback agree on which day. Built
@@ -208,12 +234,14 @@ export function buildTodayFromSources(
 
   for (const conv of conversations) {
     if (conv.type === 'unknown_1to1') {
-      // Untriaged inbound — needs triage (surfaces in needs_you_now, not unreplied).
+      // Untriaged inbound — needs triage (surfaces in needs_you_now, not
+      // unreplied). Links to the unknown CONTACT's page (the inbound created an
+      // unknown contact record), NOT /conversations/:id (an unrouted placeholder).
       needs.push({
         item: {
           group: 'needs_you_now',
-          refType: 'conversation',
-          refId: conv.conversationId,
+          refType: 'contact',
+          refId: contactRefId(conv),
           who: conversationWho(conv),
           why: 'New inbound — untriaged',
           tag: 'Contact · Unknown',
@@ -224,10 +252,13 @@ export function buildTodayFromSources(
       continue;
     }
     if (conv.unread_count > 0) {
+      // A 1:1 thread opens its contact page; a relay group has no single contact,
+      // so it keeps a conversation ref (a separate, future concern).
+      const is1to1 = ONE_TO_ONE.has(conv.type);
       unreplied.push({
         group: 'unreplied',
-        refType: 'conversation',
-        refId: conv.conversationId,
+        refType: is1to1 ? 'contact' : 'conversation',
+        refId: is1to1 ? contactRefId(conv) : conv.conversationId,
         who: conversationWho(conv),
         why: conv.preview ?? 'Unread message',
         tag: `Contact · ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,

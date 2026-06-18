@@ -12,6 +12,7 @@ const getCases = vi.fn();
 const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
+const updateContact = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -25,6 +26,10 @@ vi.mock('../../api/index.js', async () => {
     getUnits: (...a: unknown[]) => getUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
+    updateContact: (...a: unknown[]) => updateContact(...a),
+    // The page marks the contact read on view (useMarkContactRead) — stub it so
+    // the tests don't fire a real fetch.
+    markInboxRead: vi.fn(() => Promise.resolve()),
     useEventStream: () => {},
   };
 });
@@ -59,6 +64,13 @@ const LANDLORD: Contact = {
   status: 'Active',
   phone: '+14042220190',
   company: 'Porter Properties',
+};
+
+const UNKNOWN: Contact = {
+  contactId: 'u9',
+  type: 'unknown',
+  status: 'needs_review',
+  phone: '+15550100001',
 };
 
 const CASES: CasesPage = {
@@ -99,6 +111,13 @@ describe('ContactDetail', () => {
     expect(screen.getByRole('region', { name: /Communications and activity/i })).toBeInTheDocument();
   });
 
+  it('flags a Do-Not-Contact (opted-out) contact with a header badge', async () => {
+    getContact.mockResolvedValue({ ...TENANT, sms_opt_out: true });
+    renderAt('k1');
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    expect(screen.getByText(/Do Not Contact/i)).toBeInTheDocument();
+  });
+
   it('renders the landlord file (Listings card) for a landlord', async () => {
     getContact.mockResolvedValue(LANDLORD);
     renderAt('L1');
@@ -109,6 +128,40 @@ describe('ContactDetail', () => {
     await waitFor(() =>
       expect(screen.getByRole('link', { name: /1450 Joseph Blvd · 2BR/ })).toBeInTheDocument(),
     );
+  });
+
+  it('renders the Unknown treatment (Unknown pill + enabled triage CTA, no tenant cards) for an untriaged contact', async () => {
+    getContact.mockResolvedValue(UNKNOWN);
+    renderAt('u9');
+    // Pill reads "Unknown", NOT "Tenant".
+    await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
+    expect(screen.queryByText('Tenant')).not.toBeInTheDocument();
+    // Triage CTA present + ENABLED (wired to PATCH /api/contacts/:id { type }).
+    expect(screen.getByRole('button', { name: /Mark as Tenant/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Mark as Landlord/i })).toBeEnabled();
+    // None of the tenant-specific cards/fields leak in.
+    expect(screen.queryByText('Voucher size')).not.toBeInTheDocument();
+    expect(screen.queryByText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.queryByText('Listings sent')).not.toBeInTheDocument();
+  });
+
+  it('triages an Unknown contact: clicking "Mark as Tenant" PATCHes type and switches to the Tenant view', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    // The PATCH returns the now-tenant contact; the page applies it in place.
+    updateContact.mockResolvedValue({ ...UNKNOWN, type: 'tenant', status: 'active' });
+    renderAt('u9');
+
+    await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /Mark as Tenant/i }));
+
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
+    // The view re-derives from the returned contact: pill flips to Tenant, the
+    // tenant-only "Voucher size" field now shows, and the triage CTA is gone.
+    await waitFor(() => expect(screen.getByText('Tenant')).toBeInTheDocument());
+    expect(screen.getByText('Voucher size')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Mark as Tenant/i })).not.toBeInTheDocument();
   });
 
   it('shows an error state when the contact fails to load', async () => {

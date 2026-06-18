@@ -85,6 +85,9 @@ interface TimelineMessage extends TimelineBase {
   media_attachments?: MediaAttachment[];
   delivery_status: DeliveryStatus;
   error_code?: string;
+  /** tsMsgId of the FAILED message a retry supersedes — the client hides the
+   *  superseded predecessor so a delivered retry replaces the stale bubble. */
+  retry_of?: string;
   fromPhone?: string;
   toPhone?: string;
 }
@@ -212,6 +215,7 @@ function toTimelineMessage(
     ...(media.length > 0 && { media_attachments: media }),
     delivery_status: m.delivery_status,
     ...(m.error_code !== undefined && { error_code: m.error_code }),
+    ...(m.retry_of !== undefined && { retry_of: m.retry_of }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
   };

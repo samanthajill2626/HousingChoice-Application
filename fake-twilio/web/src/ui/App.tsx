@@ -9,7 +9,7 @@
 //   - Composer.onSend            → sendAsParty({ from: selected.number, body, mediaUrls })
 //   - Composer.onSetDeliveryProfile → setDeliveryOutcome(selected.number, profile)
 //   - RosterRail ＋ Ad-hoc        → AdHocDialog → addAdHoc(input)
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useFakePhones } from '../state/useFakePhones.js';
 import { AdHocDialog } from './AdHocDialog.js';
 import { Composer, type ComposerSendInput } from './Composer.js';
@@ -26,12 +26,14 @@ function PhonePanel({
   thread,
   onSend,
   onSetDeliveryProfile,
+  deliveryResetSignal,
   sendError,
 }: {
   persona: Persona | undefined;
   thread: Thread | undefined;
   onSend: (input: ComposerSendInput) => void | Promise<void>;
   onSetDeliveryProfile: (profile: DeliveryProfile) => void;
+  deliveryResetSignal: number;
   sendError?: string;
 }): React.JSX.Element {
   if (!persona) {
@@ -68,7 +70,11 @@ function PhonePanel({
         </p>
       )}
 
-      <Composer onSend={onSend} onSetDeliveryProfile={onSetDeliveryProfile} />
+      <Composer
+        onSend={onSend}
+        onSetDeliveryProfile={onSetDeliveryProfile}
+        resetSignal={deliveryResetSignal}
+      />
     </section>
   );
 }
@@ -81,6 +87,21 @@ export function App(): React.JSX.Element {
 
   const selectedPersona = phones.personas.find((p) => p.number === phones.selected);
   const selectedThread = phones.threads.find((t) => t.partyNumber === phones.selected);
+
+  // The Composer's delivery-profile radio is one-shot in the engine: a non-normal
+  // profile is consumed on the next app→party OUTBOUND, then the engine reverts to
+  // normal. Bump this signal so the radio follows suit — when that outbound lands
+  // (the selected thread gains an outbound), and when the selected party changes.
+  const [deliveryResetSignal, setDeliveryResetSignal] = useState(0);
+  const selectedOutboundCount =
+    selectedThread?.messages.filter((m) => m.direction === 'outbound').length ?? 0;
+  const prevOutboundCountRef = useRef(selectedOutboundCount);
+  useEffect(() => {
+    if (selectedOutboundCount > prevOutboundCountRef.current) {
+      setDeliveryResetSignal((n) => n + 1);
+    }
+    prevOutboundCountRef.current = selectedOutboundCount;
+  }, [selectedOutboundCount]);
 
   const handleSend = async (input: ComposerSendInput): Promise<void> => {
     if (!selectedPersona) return;
@@ -127,6 +148,9 @@ export function App(): React.JSX.Element {
           onSelect={(number) => {
             // A stale send error belongs to the party it happened on.
             setSendError(undefined);
+            // The armed delivery profile is per-party + one-shot; don't carry one
+            // party's selection over to the next. Reset the radio on every switch.
+            setDeliveryResetSignal((n) => n + 1);
             phones.select(number);
           }}
           onAddAdHoc={() => {
@@ -139,6 +163,7 @@ export function App(): React.JSX.Element {
           thread={selectedThread}
           onSend={handleSend}
           onSetDeliveryProfile={handleSetDeliveryProfile}
+          deliveryResetSignal={deliveryResetSignal}
           {...(sendError !== undefined && { sendError })}
         />
       </main>

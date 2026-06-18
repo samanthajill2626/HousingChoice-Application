@@ -1,16 +1,23 @@
 // useContact — fetches a single contact (GET /api/contacts/:id) for the detail
 // page header + file. getContact exists today (legacy Contact, single phone);
 // C1's phones[] is handled downstream by contactPhones(). Loading/error/ready.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getContact, type Contact } from '../../api/index.js';
 
 export interface ContactState {
   status: 'loading' | 'ready' | 'error';
   contact: Contact | null;
+  /** Replace the in-memory contact after a mutation. The edit/phone/opt-out
+   *  endpoints RETURN the updated contact, so callers apply it directly (instant,
+   *  no refetch) — header + file + reply target all re-derive from it. */
+  setContact: (contact: Contact) => void;
 }
 
 export function useContact(contactId: string): ContactState {
-  const [state, setState] = useState<ContactState>({ status: 'loading', contact: null });
+  const [state, setState] = useState<Omit<ContactState, 'setContact'>>({
+    status: 'loading',
+    contact: null,
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -30,5 +37,9 @@ export function useContact(contactId: string): ContactState {
     return () => controller.abort();
   }, [contactId]);
 
-  return state;
+  const setContact = useCallback((contact: Contact) => {
+    setState({ status: 'ready', contact });
+  }, []);
+
+  return { ...state, setContact };
 }

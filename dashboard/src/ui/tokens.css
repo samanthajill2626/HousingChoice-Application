@@ -90,9 +90,11 @@
   --c-header-btn-bg: #2563eb;
   --c-header-kebab-bg: #374151;
 
-  /* Type pills (audience: tenant blue / landlord teal). */
+  /* Type pills (audience: tenant blue / landlord teal / unknown amber — the same
+   * amber family as the nav's Unknown dot, darkened for white-text contrast). */
   --c-pill-tenant-bg: #1d4ed8;
   --c-pill-landlord-bg: #0e7490;
+  --c-pill-unknown-bg: #b45309;
 
   /* Timeline surfaces. */
   --c-comms-bg: #f4f6fa;
@@ -138,4 +140,7 @@
 
   /* --- Layout ------------------------------------------------------------- */
   --nav-width: 240px;
+  /* Collapsed icon-only rail (desktop ≥768px). Wide enough for a 18px icon with
+   * comfortable touch padding centered in it. */
+  --nav-width-rail: 64px;
 }

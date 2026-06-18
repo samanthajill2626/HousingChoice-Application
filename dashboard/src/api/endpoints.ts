@@ -6,6 +6,7 @@ import type {
   CasesPage,
   Contact,
   ContactMediaItem,
+  ContactPatch,
   ContactsPage,
   ContactTimelinePage,
   ContactType,
@@ -94,6 +95,22 @@ export function sendMessage(
   return request<SendMessageResult>(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
     { method: 'POST', body },
+  );
+}
+
+/** POST /api/conversations/:id/messages/:providerSid/retry — re-send a FAILED
+ *  outbound message (the Retry button). The server re-reads the original by its
+ *  provider SID (resending body + media correctly) and stamps `retry_of` so the
+ *  timeline collapses the stale failed bubble. */
+export function retryMessage(
+  conversationId: string,
+  providerSid: string,
+): Promise<SendMessageResult> {
+  return request<SendMessageResult>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(
+      providerSid,
+    )}/retry`,
+    { method: 'POST' },
   );
 }
 
@@ -227,6 +244,66 @@ export async function getContactMedia(
     { ...(signal !== undefined && { signal }) },
   );
   return res.media;
+}
+
+// --- Contact mutations (edit / triage / phones / opt-out) -------------------
+
+/** PATCH /api/contacts/:id — edit/triage a contact. Send only the changed fields
+ *  (the server SET-merges). Returns the updated contact (unwrapped). */
+export async function updateContact(contactId: string, patch: ContactPatch): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'PATCH', body: patch },
+  );
+  return res.contact;
+}
+
+/** POST /api/contacts/:id/phones — add a number to the contact's roster (idempotent
+ *  upsert). Returns the updated contact with the canonical `phones[]`. */
+export async function addContactPhone(
+  contactId: string,
+  phone: string,
+  label?: string,
+): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/phones`,
+    { method: 'POST', body: { phone, ...(label !== undefined && { label }) } },
+  );
+  return res.contact;
+}
+
+/** PATCH /api/contacts/:id/phones/:phone — set a number primary and/or relabel it.
+ *  Returns the updated contact with the canonical `phones[]`. */
+export async function updateContactPhone(
+  contactId: string,
+  phone: string,
+  opts: { primary?: boolean; label?: string },
+): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/phones/${encodeURIComponent(phone)}`,
+    { method: 'PATCH', body: opts },
+  );
+  return res.contact;
+}
+
+/** DELETE /api/contacts/:id/phones/:phone — remove a non-primary number. Returns
+ *  the updated contact with the canonical `phones[]`. */
+export async function removeContactPhone(contactId: string, phone: string): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/phones/${encodeURIComponent(phone)}`,
+    { method: 'DELETE' },
+  );
+  return res.contact;
+}
+
+/** POST /api/contacts/:id/opt-out — mark the contact Do-Not-Contact (sms_opt_out)
+ *  or clear it. Returns the updated contact. */
+export async function setContactOptOut(contactId: string, optOut: boolean): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/opt-out`,
+    { method: 'POST', body: { optOut } },
+  );
+  return res.contact;
 }
 
 // --- Dev-only auth (/__dev, /auth/dev-login) --------------------------------

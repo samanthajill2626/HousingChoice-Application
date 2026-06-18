@@ -166,6 +166,14 @@ export interface NewMessage {
    * broadcast's recipient slot to update by the provider SID alone.
    */
   broadcastId?: string;
+  /**
+   * Manual retry (dashboard Retry button): the tsMsgId of the FAILED message this
+   * send supersedes. Stamped as `retry_of` at append so the timeline can collapse
+   * the stale failed bubble atomically (no annotate-after race). The 30003
+   * auto-retry job sets retry_of via annotateMessage instead (it also writes
+   * retry_attempt for the chain cap).
+   */
+  retryOf?: string;
 
   // --- Voice calls (M1.9a) -------------------------------------------------
   // A `type:'call'` message is a metadata-only timeline entry for a masked
@@ -538,6 +546,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           delivery_recipients: message.deliveryRecipients,
         }),
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
+        // Manual retry (dashboard Retry button): stamp retry_of AT APPEND so the
+        // new message carries its lineage atomically — no annotate-after race. The
+        // 30003 auto-retry still annotates post-send (it also needs retry_attempt).
+        ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
         // Voice call (M1.9a): metadata-only fields on a type:'call' item. The
         // same sid#<CallSid> pointer the append already writes lets the status
         // callback recover context via getByProviderSid(CallSid). Masked calls

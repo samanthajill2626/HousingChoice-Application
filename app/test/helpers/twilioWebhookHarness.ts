@@ -409,6 +409,9 @@ export function createFakeWorld(): FakeWorld {
         }),
         // Share-broadcast (M1.8a): preserve the broadcast id stamp.
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
+        // Manual-retry lineage: preserve retry_of so the timeline serializer can
+        // emit it (mirrors the real repo's append passthrough).
+        ...(message.retryOf !== undefined && { retry_of: message.retryOf }),
         // Voice call (M1.9a): preserve the metadata-only call fields so tests
         // can assert masked/CallSid-idempotent/forward-only behavior.
         ...(message.callStatus !== undefined && { call_status: message.callStatus }),
@@ -603,10 +606,10 @@ export function createFakeWorld(): FakeWorld {
     async listByHousingAuthority(housingAuthority, opts = {}) {
       // Mirror the byHousingAuthority GSI: tenant-sparse (only tenants carry the
       // attribute). The service defends the type invariant either way. BE1:
-      // pointer items carry no housing_authority → never indexed here.
+      // pointer items carry no housingAuthority → never indexed here.
       const items = contacts
         .filter((c) => c.phone_ref !== true)
-        .filter((c) => c['housing_authority'] === housingAuthority)
+        .filter((c) => c['housingAuthority'] === housingAuthority)
         .slice(0, opts.limit ?? 50);
       return { items };
     },

@@ -364,29 +364,42 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (unread <= 0) continue; // only inbound-last (unread) threads are actionable
         const who = whoOfConversation(conv);
         if (conv.type === 'unknown_1to1') {
-          if (typeof conv.participant_phone === 'string') emittedUnknownPhones.add(conv.participant_phone);
-          needsYouNow.push({
-            item: {
-              group: 'needs_you_now',
-              refType: 'conversation',
-              refId: conv.conversationId,
-              who,
-              why: 'New unknown contact',
-              attention: true,
-            },
-            at: now,
-          });
+          // Untriaged inbound → link to the unknown CONTACT's page (the
+          // auto-captured needs_review contact), NOT /conversations/:id — the
+          // dashboard has no conversation route, so that was a DEAD link. When the
+          // roster isn't linked yet (auto-capture race), DEFER to the contacts
+          // triage pass below (it emits the proper contact row) rather than
+          // emitting a dead conversation ref — so we never produce a nowhere-link.
+          const contactId = oneToOneContactId(conv);
+          if (contactId !== undefined) {
+            if (typeof conv.participant_phone === 'string') {
+              emittedUnknownPhones.add(conv.participant_phone);
+            }
+            needsYouNow.push({
+              item: {
+                group: 'needs_you_now',
+                refType: 'contact',
+                refId: contactId,
+                who,
+                why: 'New unknown contact',
+                attention: true,
+              },
+              at: now,
+            });
+          }
         } else if (conv.type === 'tenant_1to1' || conv.type === 'landlord_1to1') {
           // Unreplied is anchored to a 1:1 tenant/landlord thread only. A
           // relay_group's participant_phone is the synthetic POOL number (no
           // display name) — surfacing it as an Unreplied row whose `who` is an
           // internal pool number violates "anchored to a case/contact". Skip it
-          // (and anything that isn't a known 1:1 type).
+          // (and anything that isn't a known 1:1 type). Link to the contact page;
+          // fall back to the conversation ref only if the roster isn't linked yet.
+          const contactId = oneToOneContactId(conv);
           unreplied.push({
             item: {
               group: 'unreplied',
-              refType: 'conversation',
-              refId: conv.conversationId,
+              refType: contactId !== undefined ? 'contact' : 'conversation',
+              refId: contactId ?? conv.conversationId,
               who,
               why: 'Unreplied',
             },
@@ -485,4 +498,13 @@ function whoOfConversation(conv: ConversationItem): string {
     return conv.participant_display_name;
   }
   return conv.participant_phone;
+}
+
+/** A 1:1 thread's external contact id (its single participant), or undefined when
+ *  the roster isn't linked yet (the M1.2 auto-capture race, before
+ *  setParticipantsIfAbsent runs). Used to deep-link Today rows to the CONTACT
+ *  page (/contacts/:id) — the dashboard has no /conversations route. */
+function oneToOneContactId(conv: ConversationItem): string | undefined {
+  const p = conv.participants?.[0];
+  return typeof p?.contactId === 'string' && p.contactId.length > 0 ? p.contactId : undefined;
 }

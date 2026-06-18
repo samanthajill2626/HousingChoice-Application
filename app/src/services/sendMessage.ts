@@ -141,6 +141,13 @@ export interface SendMessageInput {
    * otherwise UNCHANGED — absent on every non-broadcast send (relay + 1:1).
    */
   broadcastId?: string;
+  /**
+   * Manual retry (dashboard Retry button): the tsMsgId of the FAILED message this
+   * send supersedes. Persisted as `retry_of` on the new message so the contact
+   * timeline collapses the stale failed bubble. ADDITIVE — absent on a normal
+   * send. (The 30003 auto-retry annotates retry_of itself; it doesn't use this.)
+   */
+  retryOf?: string;
 }
 
 export interface SendMessageOutcome {
@@ -175,7 +182,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from, broadcastId } = input;
+    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from, broadcastId, retryOf } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
@@ -259,6 +266,8 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       // this recipient's broadcast slot by the SID alone (additive — absent on
       // 1:1 / relay sends).
       ...(broadcastId !== undefined && { broadcastId }),
+      // Manual-retry lineage (additive — absent on a normal send).
+      ...(retryOf !== undefined && { retryOf }),
     });
 
     // (5) Inbox touch — denormalized last-activity + preview (doc §5) — and

@@ -1,0 +1,81 @@
+/* ContactActionsMenu — the ⋯ kebab + its popover. Tokens only. The kebab matches
+ * the header's dark band; the menu is a light popover anchored to its right. */
+
+.wrap {
+  position: relative;
+}
+
+.kebab {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-header-kebab-bg);
+  color: var(--c-header-text);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kebab:hover {
+  filter: brightness(1.15);
+}
+
+.kebab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 30;
+  min-width: 13rem;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.item:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.danger {
+  color: var(--c-danger);
+}
+
+.divider {
+  height: 1px;
+  margin: var(--sp-1) 0;
+  background: var(--c-border);
+}

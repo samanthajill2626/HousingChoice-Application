@@ -1,0 +1,11 @@
+.note {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}

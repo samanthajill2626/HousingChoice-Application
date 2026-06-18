@@ -71,6 +71,24 @@
   background: var(--c-pill-landlord-bg);
 }
 
+.pillUnknown {
+  background: var(--c-pill-unknown-bg);
+}
+
+/* Unmissable flag when the contact is on the Do-Not-Contact (sms_opt_out) list —
+ * texting is refused server-side, so make that state obvious in the header. */
+.doNotContact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-danger);
+  color: var(--c-text-inverse);
+}
+
 .facts {
   margin-top: 2px;
   color: var(--c-header-facts);
@@ -192,6 +210,12 @@
   .left,
   .right {
     flex: 1;
+    /* In the column layout the panes' main axis is vertical, so their default
+     * min-height:auto would refuse to shrink below content — ballooning comms to
+     * full height, pushing the reply box off-screen and forcing a page scroll on
+     * top of the stream's own scroll (double scrollbar). min-height:0 lets the
+     * pane shrink to the bounded body height so the stream scrolls internally. */
+    min-height: 0;
   }
   .paneHidden {
     display: none;

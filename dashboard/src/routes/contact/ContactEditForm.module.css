@@ -1,0 +1,86 @@
+/* ContactEditForm — stacked labelled fields. Tokens only. */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-3);
+}
+
+.row > .field {
+  flex: 1;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+}
+
+.input,
+.textarea {
+  width: 100%;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 3.5rem;
+}
+
+.input:focus-visible,
+.textarea:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Address group — a labelled stack of street / unit / city·state·zip. */
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.stateField {
+  flex: 0 1 5rem;
+}
+
+.zipField {
+  flex: 0 1 6rem;
+}
+
+/* Visually-hidden sub-labels (the placeholder shows the visible hint; the label
+ * still names the input for assistive tech + tests). */
+.srLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}

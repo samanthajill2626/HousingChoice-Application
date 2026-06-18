@@ -4,7 +4,18 @@
 // Group texts · Media. Listings + Cases are REAL (from /api/units + /api/cases);
 // Preferences + Group texts + Media are pending until their backend slices land.
 import type { CaseItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
-import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from './Card.js';
+import {
+  Card,
+  CardAction,
+  CardInlineAction,
+  EmptyRow,
+  KV,
+  PendingPanel,
+  Row,
+  responseClass,
+} from './Card.js';
+import { MediaGallery } from './MediaGallery.js';
+import type { CommsMediaItem } from './media.js';
 import { landlordCases, landlordUnits } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
 
@@ -13,6 +24,13 @@ export interface LandlordFileProps {
   phones: ContactPhone[];
   cases: CaseItem[];
   units: UnitItem[];
+  /** "Media from comms" — derived from the live timeline (updates on send). */
+  media: CommsMediaItem[];
+  mediaLoading?: boolean;
+  /** Open the edit dialog (Details "Edit" + Preferences "+ Add"). */
+  onEdit?: () => void;
+  /** Open the "Manage numbers" dialog (Phone numbers row). */
+  onManagePhones?: () => void;
 }
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -33,6 +51,10 @@ export function LandlordFile({
   phones,
   cases,
   units,
+  media,
+  mediaLoading,
+  onEdit,
+  onManagePhones,
 }: LandlordFileProps): React.JSX.Element {
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
@@ -42,14 +64,51 @@ export function LandlordFile({
 
   return (
     <>
-      <Card title="Details" aside="Edit">
+      <Card
+        title="Details"
+        aside={
+          onEdit ? (
+            <CardAction onClick={onEdit} label="Edit contact details">
+              Edit
+            </CardAction>
+          ) : (
+            'Edit'
+          )
+        }
+      >
         <KV k="Role" v={contact.type === 'pm' ? 'Property manager' : 'Landlord'} />
         <KV k="Company" v={company} />
-        <KV k="Phone numbers" v={phoneList || '—'} />
+        <KV
+          k="Phone numbers"
+          v={
+            <>
+              {phoneList || '—'}
+              {onManagePhones ? (
+                <>
+                  {' · '}
+                  <CardInlineAction onClick={onManagePhones} label="Manage phone numbers">
+                    Manage
+                  </CardInlineAction>
+                </>
+              ) : null}
+            </>
+          }
+        />
         <KV k="Status" v={contact.status ?? '—'} />
       </Card>
 
-      <Card title="Preferences & notes" aside="+ Add">
+      <Card
+        title="Preferences & notes"
+        aside={
+          onEdit ? (
+            <CardAction onClick={onEdit} label="Add a note">
+              + Add
+            </CardAction>
+          ) : (
+            '+ Add'
+          )
+        }
+      >
         <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
       </Card>
 
@@ -88,7 +147,7 @@ export function LandlordFile({
       </Card>
 
       <Card title="Media from comms">
-        <PendingPanel />
+        <MediaGallery media={media} loading={mediaLoading ?? false} />
       </Card>
     </>
   );

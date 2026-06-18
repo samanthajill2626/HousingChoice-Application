@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline } from './Timeline.js';
+import { ApiError } from '../../api/index.js';
 import type { TimelineItem } from '../../api/index.js';
 
 function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
@@ -86,9 +87,22 @@ describe('Timeline', () => {
     expect(screen.getByText(/SMS · \(404\) 010-0007 · 9:14a/)).toBeInTheDocument();
   });
 
-  it('renders a date divider for the message day', () => {
+  it('renders a cluster label (day · time) for the first message', () => {
     renderTimeline({ items: [MESSAGE_IN] });
-    expect(screen.getByText('Mon Jun 8')).toBeInTheDocument();
+    expect(screen.getByText(/Mon Jun 8 · 9:14a/)).toBeInTheDocument();
+  });
+
+  it('starts a new cluster with a time-only label after a >1h same-day gap', () => {
+    const later: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-late',
+      tsMsgId: 'm-late',
+      at: '2026-06-08T13:30:00', // same day as MESSAGE_IN (9:14a), >1h later
+      body: 'later message',
+    };
+    renderTimeline({ items: [MESSAGE_IN, later] });
+    expect(screen.getByText(/Mon Jun 8 · 9:14a/)).toBeInTheDocument(); // first cluster: day · time
+    expect(screen.getByText('1:30p')).toBeInTheDocument(); // second cluster: time only
   });
 
   it('renders a collapsed call card whose transcript expands on click', () => {
@@ -135,6 +149,51 @@ describe('Timeline', () => {
     await waitFor(() => expect(box).toHaveValue(''));
   });
 
+  it('sends on Enter (desktop) and clears the draft', async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'On my way' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith('On my way');
+    await waitFor(() => expect(box).toHaveValue(''));
+  });
+
+  it('does NOT send on Shift+Enter (newline) — draft is preserved', () => {
+    const onSend = vi.fn();
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'line one' } });
+    fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(box).toHaveValue('line one');
+  });
+
+  it('does NOT send on Enter mid-IME-composition (isComposing)', () => {
+    const onSend = vi.fn();
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'こんにち' } });
+    // A composing Enter (the keyCode-229 / soft-keyboard path) must not send.
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('does NOT send on Enter on a touch device (coarse pointer) — newline + UI Send instead', () => {
+    const onSend = vi.fn();
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true })); // coarse pointer
+    try {
+      renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+      const box = screen.getByRole('textbox', { name: /reply/i });
+      fireEvent.change(box, { target: { value: 'On my way' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+      expect(box).toHaveValue('On my way');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('keeps the draft and surfaces an error when the send fails', async () => {
     const onSend = vi.fn().mockRejectedValue(new Error('network'));
     renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
@@ -144,6 +203,24 @@ describe('Timeline', () => {
     // Failure is surfaced (role=alert) and the draft is NOT lost.
     await screen.findByRole('alert');
     expect(box).toHaveValue('Important reply');
+  });
+
+  it('surfaces a clear Do-Not-Contact reason when the send is refused (opt-out)', async () => {
+    const onSend = vi.fn().mockRejectedValue(new ApiError(409, 'contact_opted_out', 'contact_opted_out'));
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'Hello?' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    const alert = await screen.findByRole('alert');
+    // The specific reason, NOT the generic "please try again".
+    expect(alert).toHaveTextContent(/Do-Not-Contact/i);
+    expect(alert).not.toHaveTextContent(/please try again/i);
+    expect(box).toHaveValue('Hello?'); // draft preserved
+  });
+
+  it('shows a standing Do-Not-Contact note at the composer when the contact is opted out', () => {
+    renderTimeline({ items: [MESSAGE_IN], optedOut: true });
+    expect(screen.getByRole('note')).toHaveTextContent(/Do-Not-Contact/i);
   });
 
   it('shows the reply target number + label', () => {
@@ -172,20 +249,39 @@ describe('Timeline', () => {
     expect(screen.getByText(/No messages yet/i)).toBeInTheDocument();
   });
 
-  it('renders MMS media as a same-origin link without inlining unknown content', () => {
+  it('renders an MMS image inline and a PDF as a viewer link via the authed endpoint', () => {
     const mms: TimelineItem = {
       ...MESSAGE_OUT,
       id: 'mms1',
-      tsMsgId: 'mms1',
+      tsMsgId: '2026-06-08T09:20:00#SM123', // <provider_ts>#<sid>
       type: 'mms',
-      body: 'flyer',
-      media_attachments: [{ s3Key: 'k', contentType: 'application/pdf' }],
+      body: 'see attached',
+      media_attachments: [
+        { s3Key: 'k0', contentType: 'image/jpeg' },
+        { s3Key: 'k1', contentType: 'application/pdf' },
+      ],
     };
     renderTimeline({ items: [mms] });
-    // The body renders as text and the attachment shows as a count chip (we
-    // never inline unknown content as HTML).
-    expect(screen.getByText('flyer')).toBeInTheDocument();
+    // Image → inline <img> pointing at the authed same-origin endpoint.
+    const img = screen.getByRole('img', { name: /Attachment 1/i });
+    expect(img).toHaveAttribute('src', '/api/messages/SM123/media/0');
+    // PDF → a viewer link (new tab), not an <img>.
+    const pdf = screen.getByRole('link', { name: /PDF attachment 2/i });
+    expect(pdf).toHaveAttribute('href', '/api/messages/SM123/media/1');
+    expect(pdf).toHaveAttribute('target', '_blank');
+  });
+
+  it('falls back to a count chip when no provider sid can be derived', () => {
+    const mms: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'mms2',
+      tsMsgId: 'nosid', // no "#" → no derivable sid
+      type: 'mms',
+      media_attachments: [{ s3Key: 'k', contentType: 'image/png' }],
+    };
+    renderTimeline({ items: [mms] });
     expect(screen.getByText(/1 attachment/i)).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 
   it('shows the delivery status on an OUTBOUND bubble', () => {
@@ -212,6 +308,63 @@ describe('Timeline', () => {
     expect(screen.getByText(/Failed · Carrier filtered the message/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides a failed message that a delivered retry superseded (retry_of), keeping only the retry', () => {
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      at: '2026-06-08T09:20:00',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'Retry me',
+    };
+    const retry: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-retry',
+      tsMsgId: 'm-retry',
+      at: '2026-06-08T09:25:00',
+      delivery_status: 'delivered',
+      retry_of: 'm-fail',
+      body: 'Retry me',
+    };
+    const onRetry = vi.fn();
+    renderTimeline({ items: [failed, retry], onRetry });
+
+    // The stale failed bubble + its Retry are gone; the delivered retry remains.
+    expect(screen.queryByText('Failed · Carrier filtered the message')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Retry sending/i })).not.toBeInTheDocument();
+    expect(screen.getByText('Delivered')).toBeInTheDocument();
+    // The body text appears exactly once (one surviving bubble, not two).
+    expect(screen.getAllByText('Retry me')).toHaveLength(1);
+  });
+
+  it('keeps a retry that ALSO failed clickable (the tail of the chain still shows Retry)', () => {
+    const first: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail-1',
+      tsMsgId: 'm-fail-1',
+      at: '2026-06-08T09:20:00',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'Still failing',
+    };
+    const secondFail: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail-2',
+      tsMsgId: 'm-fail-2',
+      at: '2026-06-08T09:25:00',
+      delivery_status: 'failed',
+      error_code: '30007',
+      retry_of: 'm-fail-1',
+      body: 'Still failing',
+    };
+    renderTimeline({ items: [first, secondFail], onRetry: vi.fn() });
+
+    // Only the LATEST attempt is shown, and it's still retryable.
+    expect(screen.getAllByText('Still failing')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /Retry sending/i })).toBeInTheDocument();
   });
 
   it('shows no status chip (and no Retry) when delivery_status is absent — seed/legacy rows', () => {

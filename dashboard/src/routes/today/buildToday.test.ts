@@ -101,7 +101,7 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.tag).toBe('Case · Applied');
   });
 
-  it('treats an untriaged unknown_1to1 conversation as needs_you_now with attention', () => {
+  it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
     const items = buildTodayFromSources(
       [],
       [
@@ -109,20 +109,42 @@ describe('buildTodayFromSources', () => {
           conversationId: 'unk',
           type: 'unknown_1to1',
           participant_phone: '+14040100007',
+          participants: [{ contactId: 'ct-unknown-1', phone: '+14040100007' }],
           unread_count: 1,
           preview: 'hi',
         }),
       ],
       NOW,
     );
-    const unk = items.find((i) => i.refId === 'unk');
-    expect(unk?.group).toBe('needs_you_now');
-    expect(unk?.refType).toBe('conversation');
+    const unk = items.find((i) => i.group === 'needs_you_now');
+    // Links to the unknown CONTACT's detail page — NOT /conversations/:id (dead).
+    expect(unk?.refType).toBe('contact');
+    expect(unk?.refId).toBe('ct-unknown-1');
     expect(unk?.attention).toBe(true);
     expect(unk?.tag).toBe('Contact · Unknown');
     // Falls back to a formatted phone when there's no display name.
     expect(unk?.who).toBe('(404) 010-0007');
     expect(unk?.why).toMatch(/untriaged/i);
+  });
+
+  it('falls back to the Unknown list (by phone) when an untriaged inbound has no resolvable contact id', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({
+          conversationId: 'unk2',
+          type: 'unknown_1to1',
+          participant_phone: '+14040100007',
+          participants: [],
+          unread_count: 1,
+        }),
+      ],
+      NOW,
+    );
+    const unk = items.find((i) => i.group === 'needs_you_now');
+    expect(unk?.refType).toBe('contact');
+    // → /contacts/unknown?phone=%2B14040100007 (mirrors the Inbox; never dead-ends).
+    expect(unk?.refId).toBe('unknown?phone=%2B14040100007');
   });
 
   it('puts a case touring today in tours_today', () => {
@@ -146,13 +168,15 @@ describe('buildTodayFromSources', () => {
     expect(items.find((i) => i.group === 'tours_today')).toBeUndefined();
   });
 
-  it('puts an unread triaged conversation in unreplied with name + preview', () => {
+  it('puts an unread triaged 1:1 in unreplied, linking to the contact page', () => {
     const items = buildTodayFromSources(
       [],
       [
         convOf({
           conversationId: 'unrep',
           type: 'landlord_1to1',
+          participant_phone: '+14042220190',
+          participants: [{ contactId: 'L1', phone: '+14042220190' }],
           unread_count: 2,
           participant_display_name: 'James Porter',
           preview: 'Is the 2BR still open?',
@@ -161,7 +185,8 @@ describe('buildTodayFromSources', () => {
       NOW,
     );
     const u = items.find((i) => i.group === 'unreplied');
-    expect(u?.refId).toBe('unrep');
+    expect(u?.refType).toBe('contact');
+    expect(u?.refId).toBe('L1'); // → /contacts/L1
     expect(u?.who).toBe('James Porter');
     expect(u?.why).toBe('Is the 2BR still open?');
     expect(u?.tag).toBe('Contact · Landlord');

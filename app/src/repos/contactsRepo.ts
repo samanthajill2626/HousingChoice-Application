@@ -74,7 +74,7 @@ export interface ContactItem {
   /**
    * Phone-pointer marker (BE1). A pointer item carries `phone_ref: true`,
    * `phone_ref_owner` (the real contactId), and the indexed scalar `phone`,
-   * but NO type/status/housing_authority — so it is invisible to byTypeStatus /
+   * but NO type/status/housingAuthority — so it is invisible to byTypeStatus /
    * byHousingAuthority (never in lists/triage) yet findable via byPhone. The
    * primary number has NO pointer (it resolves via the owner's own scalar).
    */
@@ -375,14 +375,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     },
 
     async listByHousingAuthority(housingAuthority, opts = {}) {
-      // ONE Query on byHousingAuthority (hash = housing_authority). Sparse +
+      // ONE Query on byHousingAuthority (hash = housingAuthority). Sparse +
       // tenant-only by data convention — only tenant contacts carry the
       // attribute. Pagination via the raw LastEvaluatedKey (route opaque-cursors
       // it). `status`/`type` are not key attrs here, so no expression aliasing.
       const input: QueryCommandInput = {
         TableName: table,
         IndexName: 'byHousingAuthority',
-        KeyConditionExpression: 'housing_authority = :ha',
+        KeyConditionExpression: 'housingAuthority = :ha',
         ExpressionAttributeValues: { ':ha': housingAuthority },
         ...(opts.limit !== undefined && { Limit: opts.limit }),
         ...(opts.exclusiveStartKey !== undefined && {

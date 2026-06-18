@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type {
@@ -176,6 +176,113 @@ describe('useContactTimeline', () => {
       { kinds: 'message,call' },
       expect.anything(),
     );
+  });
+});
+
+describe('useContactTimeline — optimistic send', () => {
+  let api: ReturnType<typeof useContactTimeline> | null = null;
+
+  function OptProbe(): React.JSX.Element {
+    const t = useContactTimeline('k1');
+    api = t;
+    return (
+      <ul>
+        {t.items.map((i) => (
+          <li key={i.id} data-testid="item">
+            {i.kind === 'message' ? `${i.body ?? ''}|${i.delivery_status}` : i.kind}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  const bodies = (): string[] =>
+    screen.getAllByTestId('item').map((el) => el.textContent ?? '');
+
+  afterEach(() => {
+    api = null;
+  });
+
+  it('shows an outbound bubble as "queued" (Sending…) the instant a send starts', async () => {
+    getContactTimeline.mockResolvedValue(SERVER_PAGE);
+    render(<OptProbe />);
+    await waitFor(() => expect(screen.getAllByTestId('item')).toHaveLength(1));
+
+    act(() => {
+      api!.addOptimistic('c1', 'on my way', '+14040100007');
+    });
+
+    // Appears immediately (no await), outbound, status queued → "Sending…".
+    expect(bodies()).toContain('on my way|queued');
+    expect(screen.getAllByTestId('item')).toHaveLength(2);
+  });
+
+  it('stamps the real status on resolve, then de-dupes once the server refetch carries it', async () => {
+    getContactTimeline.mockResolvedValueOnce(SERVER_PAGE);
+    render(<OptProbe />);
+    await waitFor(() => expect(screen.getAllByTestId('item')).toHaveLength(1));
+
+    let tempId = '';
+    act(() => {
+      tempId = api!.addOptimistic('c1', 'hi there');
+    });
+    act(() => {
+      api!.resolveOptimistic(tempId, {
+        conversationId: 'c1',
+        providerSid: 'SM9',
+        tsMsgId: 'srv-9',
+        status: 'sent',
+      });
+    });
+    // Reconciled bubble now reads "sent" — still the optimistic row (one copy).
+    expect(bodies().filter((b) => b.startsWith('hi there'))).toEqual(['hi there|sent']);
+
+    // The SSE refetch brings the SERVER row (same tsMsgId, now delivered) → the
+    // optimistic copy drops out, leaving exactly one "hi there" at the real status.
+    getContactTimeline.mockResolvedValueOnce({
+      nextCursor: null,
+      items: [
+        SERVER_PAGE.items[0]!,
+        {
+          kind: 'message',
+          id: 'srv-9',
+          at: '2026-06-08T09:05:00Z',
+          conversationId: 'c1',
+          tsMsgId: 'srv-9',
+          direction: 'outbound',
+          author: 'teammate',
+          type: 'sms',
+          delivery_status: 'delivered',
+          body: 'hi there',
+        },
+      ],
+    } satisfies ContactTimelinePage);
+    act(() => {
+      lastHandlers.onMessagePersisted?.();
+    });
+
+    await waitFor(() =>
+      expect(bodies().filter((b) => b.startsWith('hi there'))).toEqual(['hi there|delivered']),
+    );
+    expect(screen.getAllByTestId('item')).toHaveLength(2); // s1 + the one reconciled row
+  });
+
+  it('removes the optimistic bubble when the send fails', async () => {
+    getContactTimeline.mockResolvedValue(SERVER_PAGE);
+    render(<OptProbe />);
+    await waitFor(() => expect(screen.getAllByTestId('item')).toHaveLength(1));
+
+    let tempId = '';
+    act(() => {
+      tempId = api!.addOptimistic('c1', 'nope');
+    });
+    expect(screen.getAllByTestId('item')).toHaveLength(2);
+
+    act(() => {
+      api!.failOptimistic(tempId);
+    });
+    expect(screen.getAllByTestId('item')).toHaveLength(1);
+    expect(bodies().some((b) => b.startsWith('nope'))).toBe(false);
   });
 });
 

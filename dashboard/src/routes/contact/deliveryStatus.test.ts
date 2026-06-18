@@ -3,7 +3,7 @@ import { presentDeliveryStatus, deliveryReason } from './deliveryStatus.js';
 
 describe('presentDeliveryStatus', () => {
   it('maps each delivery status to label / tone / isFailure', () => {
-    expect(presentDeliveryStatus('queued')).toEqual({ label: 'Queued', tone: 'neutral', isFailure: false });
+    expect(presentDeliveryStatus('queued')).toEqual({ label: 'Sending…', tone: 'neutral', isFailure: false });
     expect(presentDeliveryStatus('sent')).toEqual({ label: 'Sent', tone: 'info', isFailure: false });
     expect(presentDeliveryStatus('delivered')).toEqual({ label: 'Delivered', tone: 'success', isFailure: false });
     expect(presentDeliveryStatus('undelivered')).toEqual({ label: 'Undelivered', tone: 'danger', isFailure: true });

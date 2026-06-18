@@ -34,9 +34,29 @@ function renderAuthedApp(): void {
   );
 }
 
+// Stub matchMedia so useNavChrome resolves the nav breakpoint. `matches` = "we're
+// below 768px" → drawer mode. Without a stub matchMedia is undefined in jsdom and
+// the hook defaults to desktop (sidebar) — which is what the non-mobile tests want.
+function stubMatchMedia(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 describe('AppFrame', () => {
@@ -81,5 +101,57 @@ describe('AppFrame', () => {
       expect(screen.getByRole('navigation', { name: 'Communications' })).toBeInTheDocument(),
     );
     expect(screen.getByLabelText('4 unread')).toBeInTheDocument();
+  });
+
+  it('desktop: collapses to the rail, persists the choice, and keeps links reachable by name', async () => {
+    renderAuthedApp();
+    const collapse = await screen.findByRole('button', { name: 'Collapse navigation' });
+    expect(collapse).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(collapse);
+
+    // The toggle flips to Expand + pressed, and the choice is persisted.
+    const expand = screen.getByRole('button', { name: 'Expand navigation' });
+    expect(expand).toHaveAttribute('aria-pressed', 'true');
+    expect(window.localStorage.getItem('hc.nav.collapsed')).toBe('1');
+    // Labels are visually hidden in the rail, but the accessible name survives
+    // (aria-label), so navigation stays usable for AT + tests.
+    expect(screen.getByRole('link', { name: 'Today' })).toBeInTheDocument();
+  });
+
+  it('desktop: starts collapsed when the saved preference is collapsed', async () => {
+    window.localStorage.setItem('hc.nav.collapsed', '1');
+    renderAuthedApp();
+    expect(await screen.findByRole('button', { name: 'Expand navigation' })).toBeInTheDocument();
+  });
+
+  it('mobile: hamburger opens the drawer, moves focus in; Escape closes it and restores focus', async () => {
+    stubMatchMedia(true);
+    renderAuthedApp();
+    const hamburger = await screen.findByRole('button', { name: 'Open navigation' });
+    expect(hamburger).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(hamburger);
+    expect(hamburger).toHaveAttribute('aria-expanded', 'true');
+    const drawer = document.getElementById('nav-drawer');
+    expect(drawer).not.toBeNull();
+    expect(drawer).not.toHaveAttribute('aria-hidden');
+    // Focus moved into the drawer.
+    expect(drawer!.contains(document.activeElement)).toBe(true);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(hamburger).toHaveAttribute('aria-expanded', 'false');
+    expect(drawer).toHaveAttribute('aria-hidden', 'true');
+    // Focus restored to the hamburger.
+    expect(document.activeElement).toBe(hamburger);
+  });
+
+  it('mobile: tapping a drawer link closes the drawer', async () => {
+    stubMatchMedia(true);
+    renderAuthedApp();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open navigation' }));
+    const drawer = document.getElementById('nav-drawer')!;
+    fireEvent.click(within(drawer).getByRole('link', { name: 'Inbox' }));
+    expect(drawer).toHaveAttribute('aria-hidden', 'true');
   });
 });

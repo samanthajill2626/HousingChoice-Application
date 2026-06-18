@@ -6,19 +6,34 @@
 // segmented Comms | Profile toggle. The page resolves the reply target (primary
 // / most-recent number) and whether a single conversation is sendable; sending
 // posts to that conversation, else Send is disabled.
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { sendMessage, type TimelineMessage } from '../../api/index.js';
+import {
+  retryMessage,
+  sendMessage,
+  setContactOptOut,
+  updateContact,
+  type ContactType,
+  type TimelineMessage,
+} from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
+import { UnknownFile } from './UnknownFile.js';
+import { ContactActionsMenu } from './ContactActionsMenu.js';
+import { ContactEditForm } from './ContactEditForm.js';
+import { PhoneManager } from './PhoneManager.js';
+import { CallMenu } from './CallMenu.js';
+import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
-import { contactDisplayName, formatPhone } from './format.js';
+import { useMarkContactRead } from './useMarkContactRead.js';
+import { contactDisplayName } from './format.js';
 import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.js';
-import { resolveSingleConversation } from './resolveConversation.js';
+import { buildReplyTargets } from './replyTargets.js';
+import { messageSid } from './media.js';
 import { landlordUnits } from './buildContactFile.js';
 import styles from './ContactDetail.module.css';
 
@@ -27,10 +42,26 @@ type Pane = 'comms' | 'profile';
 export function ContactDetail(): React.JSX.Element {
   const { contactId = '' } = useParams<{ contactId: string }>();
   const [pane, setPane] = useState<Pane>('comms');
+  const [editing, setEditing] = useState(false);
+  const [managingPhones, setManagingPhones] = useState(false);
+  const [optOutBusy, setOptOutBusy] = useState(false);
+  const [triaging, setTriaging] = useState(false);
+  // Which number's thread the reply box sends into (null = use the default). Set
+  // by the reply-target picker for multi-number contacts.
+  const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
 
-  const { status: contactStatus, contact } = useContact(contactId);
+  const { status: contactStatus, contact, setContact } = useContact(contactId);
   const timeline = useContactTimeline(contactId);
   const file = useContactFile(contactId);
+  // Viewing the contact page (while the tab is visible) marks its comms read —
+  // so the Inbox unread badge clears once you've actually seen the messages here.
+  useMarkContactRead(contactId);
+
+  // "Media from comms" is derived from the LIVE timeline (not the one-shot C5
+  // media slice), so it updates as soon as a new attachment message arrives — the
+  // timeline refetches on SSE message.persisted. Memoized on items identity.
+  const media = useMemo(() => commsMedia(timeline.items), [timeline.items]);
+  const mediaLoading = timeline.status === 'loading';
 
   if (contactStatus === 'loading') {
     return (
@@ -50,29 +81,88 @@ export function ContactDetail(): React.JSX.Element {
     );
   }
 
-  const isLandlord = contact.type === 'landlord' || contact.type === 'pm';
+  // Three-way by audience, NOT binary: landlord/pm → landlord, unknown →
+  // untriaged, everything else (tenant + team_member) → tenant. The old binary
+  // `else = tenant` mislabeled untriaged inbounds as tenants and showed them the
+  // tenant file. `pill`/file are chosen from this.
+  const kind: 'tenant' | 'landlord' | 'unknown' =
+    contact.type === 'landlord' || contact.type === 'pm'
+      ? 'landlord'
+      : contact.type === 'unknown'
+        ? 'unknown'
+        : 'tenant';
+  const isLandlord = kind === 'landlord';
+  const pill =
+    kind === 'landlord'
+      ? { label: 'Landlord', cls: styles.pillLandlord }
+      : kind === 'unknown'
+        ? { label: 'Unknown', cls: styles.pillUnknown }
+        : { label: 'Tenant', cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
 
-  // Resolve a single conversation to send into; with the messages-only fallback
-  // this is the common 1:1 case. Multi-thread → no unambiguous target yet.
-  const sendConvId = resolveSingleConversation(timeline.items);
+  // Resolve which thread the reply sends into. Each of the contact's numbers is
+  // its own 1:1 conversation; the picker lets the navigator choose, defaulting to
+  // the primary number's thread. With a single conversation there's nothing to
+  // pick (the picker hides).
+  const { targets: replyTargets, defaultConversationId } = buildReplyTargets(timeline.items, phones);
+  const sendConvId = selectedConvId ?? defaultConversationId;
   const canSend = sendConvId !== null;
-  // Returns the send promise so the Timeline can show an in-flight state and
-  // surface a failure (restore the draft) — a failed manual reply must NOT look
-  // like it sent. The SSE message.persisted refetch reconciles the stream on
-  // success.
+  // The number shown in the reply box = the selected target's number (else the
+  // default reply target).
+  const replyToPhone =
+    replyTargets.find((t) => t.conversationId === sendConvId)?.phone ?? target?.phone;
+  // Optimistic send: show the outbound bubble ("Sending…") IMMEDIATELY, then POST.
+  // On success, stamp the real tsMsgId + status so the SSE refetch reconciles by
+  // id and the bubble advances Sending… → Sent → Delivered. On failure, drop the
+  // optimistic bubble and rethrow so the Timeline restores the draft + shows why.
   const onSend = (body: string): Promise<void> => {
     if (!sendConvId) return Promise.resolve();
-    return sendMessage(sendConvId, { body }).then(() => undefined);
+    const tempId = timeline.addOptimistic(sendConvId, body, replyToPhone);
+    return sendMessage(sendConvId, { body })
+      .then((result) => {
+        timeline.resolveOptimistic(tempId, result);
+      })
+      .catch((err: unknown) => {
+        timeline.failOptimistic(tempId);
+        throw err;
+      });
   };
-  // Retry a failed outbound message: resend its body to its OWN conversation (a new
-  // send, like the legacy retry). The SSE message.persisted refetch reconciles the
-  // stream so the resent message + its fresh status appear.
+  // Retry a failed outbound message. The server re-reads the original by its
+  // provider SID (so body AND media resend correctly) and stamps `retry_of`, so
+  // the SSE message.persisted refetch brings back BOTH the resent message and the
+  // lineage that hides the stale failed bubble. The provider SID is the suffix of
+  // tsMsgId (`<provider_ts>#<sid>`); without it there's nothing to retry.
   const onRetry = (msg: TimelineMessage): void => {
-    if (msg.body === undefined || msg.body.length === 0) return;
-    void sendMessage(msg.conversationId, { body: msg.body });
+    const sid = messageSid(msg);
+    if (sid.length === 0) return;
+    void retryMessage(msg.conversationId, sid);
+  };
+
+  // Header ⋯ menu + UnknownFile triage. Each endpoint RETURNS the updated contact,
+  // so we apply it in place (setContact) — the header, file pane, facts, and reply
+  // target all re-derive instantly with no refetch.
+  const optedOut = contact.sms_opt_out === true;
+  const onToggleOptOut = (): void => {
+    if (optOutBusy) return;
+    setOptOutBusy(true);
+    void setContactOptOut(contact.contactId, !optedOut)
+      .then((updated) => setContact(updated))
+      .catch(() => {
+        /* leave the flag as-is; a transient failure just no-ops the toggle */
+      })
+      .finally(() => setOptOutBusy(false));
+  };
+  const onTriage = (type: ContactType): void => {
+    if (triaging) return;
+    setTriaging(true);
+    void updateContact(contact.contactId, { type })
+      .then((updated) => setContact(updated))
+      .catch(() => {
+        /* stay on the unknown view; the buttons re-enable for a retry */
+      })
+      .finally(() => setTriaging(false));
   };
 
   // Header facts subline: voucher / authority for tenants, company / listing
@@ -86,19 +176,21 @@ export function ContactDetail(): React.JSX.Element {
         <div className={styles.identity}>
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
-            <span className={`${styles.pill} ${isLandlord ? styles.pillLandlord : styles.pillTenant}`}>
-              {isLandlord ? 'Landlord' : 'Tenant'}
-            </span>
+            <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
+            {optedOut ? (
+              <span className={styles.doNotContact}>⛔ Do Not Contact</span>
+            ) : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
         <div className={styles.actions}>
-          <button type="button" className={styles.callBtn} disabled={!target}>
-            📞 Call{target ? ` ${formatPhone(target.phone)} ▾` : ''}
-          </button>
-          <button type="button" className={styles.kebab} aria-label="More actions">
-            ⋯
-          </button>
+          <CallMenu phones={phones} {...(target !== undefined && { defaultPhone: target })} triggerClassName={styles.callBtn} />
+          <ContactActionsMenu
+            onEdit={() => setEditing(true)}
+            optedOut={optedOut}
+            onToggleOptOut={onToggleOptOut}
+            optOutBusy={optOutBusy}
+          />
         </div>
       </header>
 
@@ -128,11 +220,15 @@ export function ContactDetail(): React.JSX.Element {
             status={timeline.status}
             items={timeline.items}
             source={timeline.source}
-            {...(target?.phone !== undefined && { replyToPhone: target.phone })}
+            {...(replyToPhone !== undefined && { replyToPhone })}
             replyToLabel={defaultPhoneLabel(phones)}
+            replyTargets={replyTargets}
+            {...(sendConvId !== null && { selectedConversationId: sendConvId })}
+            onSelectTarget={setSelectedConvId}
             canSend={canSend}
             onSend={onSend}
             onRetry={onRetry}
+            optedOut={optedOut}
           />
         </div>
         <div
@@ -144,8 +240,30 @@ export function ContactDetail(): React.JSX.Element {
             <p role="alert" className={styles.error}>
               We couldn&apos;t load this file.
             </p>
-          ) : isLandlord ? (
-            <LandlordFile contact={contact} phones={phones} cases={file.cases} units={file.units} />
+          ) : kind === 'landlord' ? (
+            <LandlordFile
+              contact={contact}
+              phones={phones}
+              cases={file.cases}
+              units={file.units}
+              media={media}
+              mediaLoading={mediaLoading}
+              onEdit={() => setEditing(true)}
+              onManagePhones={() => setManagingPhones(true)}
+            />
+          ) : kind === 'unknown' ? (
+            <UnknownFile
+              contact={contact}
+              phones={phones}
+              cases={file.cases}
+              units={file.units}
+              media={media}
+              mediaLoading={mediaLoading}
+              onEdit={() => setEditing(true)}
+              onManagePhones={() => setManagingPhones(true)}
+              onTriage={onTriage}
+              triaging={triaging}
+            />
           ) : (
             <TenantFile
               contact={contact}
@@ -153,11 +271,34 @@ export function ContactDetail(): React.JSX.Element {
               cases={file.cases}
               units={file.units}
               listingsSentPending={file.listingsSent.status !== 'ready'}
-              mediaPending={file.media.status !== 'ready'}
+              media={media}
+              mediaLoading={mediaLoading}
+              onEdit={() => setEditing(true)}
+              onManagePhones={() => setManagingPhones(true)}
             />
           )}
         </div>
       </div>
+
+      {editing ? (
+        <ContactEditForm
+          contact={contact}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => {
+            setContact(updated);
+            setEditing(false);
+          }}
+        />
+      ) : null}
+
+      {managingPhones ? (
+        <PhoneManager
+          contact={contact}
+          phones={phones}
+          onClose={() => setManagingPhones(false)}
+          onChanged={(updated) => setContact(updated)}
+        />
+      ) : null}
     </div>
   );
 

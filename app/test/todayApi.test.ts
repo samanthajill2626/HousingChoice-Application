@@ -114,6 +114,7 @@ describe('today action-queue API (BE6/C7)', () => {
       conversationId: 'conv-unreplied',
       participant_phone: '+15550100002',
       participant_display_name: 'Pat Nguyen',
+      participants: [{ contactId: 'ct-pat', phone: '+15550100002' }],
       status: 'open',
       last_activity_at: iso(-120_000),
       type: 'tenant_1to1',
@@ -136,9 +137,10 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const unrep = byGroup('unreplied');
     expect(unrep).toHaveLength(1);
+    // Links to the participant's CONTACT page, not /conversations/:id.
     expect(unrep[0]).toMatchObject({
-      refType: 'conversation',
-      refId: 'conv-unreplied',
+      refType: 'contact',
+      refId: 'ct-pat',
       who: 'Pat Nguyen',
       why: 'Unreplied',
     });
@@ -148,11 +150,13 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(follow[0]).toMatchObject({ refType: 'case', refId: 'case-follow', who: 'Sam Lee', why: 'Follow-up due' });
   });
 
-  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in needs_you_now', async () => {
-    // unknown_1to1 conversation with unread → needs_you_now (refType conversation).
+  it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in needs_you_now, linking to the contact page', async () => {
+    // unknown_1to1 conversation with unread → needs_you_now linking to the
+    // auto-captured contact (its participant roster), NOT /conversations/:id.
     seedConversation({
       conversationId: 'conv-unknown',
       participant_phone: '+15550109999',
+      participants: [{ contactId: 'contact-from-conv', phone: '+15550109999' }],
       status: 'open',
       last_activity_at: iso(-30_000),
       type: 'unknown_1to1',
@@ -160,7 +164,7 @@ describe('today action-queue API (BE6/C7)', () => {
       created_at: iso(-60_000),
       unread_count: 1,
     });
-    // unknown / needs_review contact → needs_you_now (refType contact).
+    // A SEPARATE unknown / needs_review contact (different phone) → its own row.
     world.contacts.push({
       contactId: 'contact-unknown',
       type: 'unknown',
@@ -170,10 +174,12 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const items = await getItems();
     const needs = items.filter((i) => i.group === 'needs_you_now');
-    const conv = needs.find((i) => i.refType === 'conversation');
-    const contact = needs.find((i) => i.refType === 'contact');
-    expect(conv).toMatchObject({ refId: 'conv-unknown', who: '+15550109999', attention: true });
-    expect(contact).toMatchObject({ refId: 'contact-unknown', who: '+15550108888', attention: true });
+    // BOTH untriaged rows link to a contact page (never a dead conversation ref).
+    expect(needs.every((i) => i.refType === 'contact')).toBe(true);
+    const fromConv = needs.find((i) => i.refId === 'contact-from-conv');
+    const fromContact = needs.find((i) => i.refId === 'contact-unknown');
+    expect(fromConv).toMatchObject({ who: '+15550109999', attention: true });
+    expect(fromContact).toMatchObject({ who: '+15550108888', attention: true });
   });
 
   it('only due/overdue deadlines (<= now) enter needs_you_now; a future deadline does not', async () => {
@@ -438,8 +444,11 @@ describe('today action-queue API (BE6/C7)', () => {
   });
 
   // --- FIX C: de-dupe untriaged inbounds by phone (one item per person) ----------
-  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item (the conversation)', async () => {
+  it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item linking to the contact', async () => {
     const phone = '+15550105555';
+    // No participant roster on the conversation (auto-capture race) → the
+    // conversation defers to the contacts triage pass, which emits the contact
+    // row. Still ONE item per person, now linking to the contact page.
     seedConversation({
       conversationId: 'conv-untriaged',
       participant_phone: phone,
@@ -459,11 +468,11 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
     const untriaged = needs.filter(
-      (i) => (i.refType === 'conversation' && i.refId === 'conv-untriaged') ||
-        (i.refType === 'contact' && i.refId === 'contact-untriaged'),
+      (i) => i.refId === 'conv-untriaged' || i.refId === 'contact-untriaged',
     );
     expect(untriaged).toHaveLength(1); // one item per person
-    expect(untriaged[0]).toMatchObject({ refType: 'conversation', refId: 'conv-untriaged' }); // conversation preferred
+    // The contact row wins — never a dead /conversations/:id link.
+    expect(untriaged[0]).toMatchObject({ refType: 'contact', refId: 'contact-untriaged' });
   });
 
   it('a needs_review contact whose phone has no unread unknown conversation still emits its own row', async () => {

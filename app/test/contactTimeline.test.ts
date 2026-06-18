@@ -69,7 +69,12 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     conversationId: string,
     providerTs: string,
     providerSid: string,
-    overrides: { direction?: 'inbound' | 'outbound'; body?: string } = {},
+    overrides: {
+      direction?: 'inbound' | 'outbound';
+      body?: string;
+      deliveryStatus?: 'delivered' | 'failed';
+      retryOf?: string;
+    } = {},
   ): Promise<void> {
     await world.messagesRepo.append({
       conversationId,
@@ -78,8 +83,9 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
       type: 'sms',
       direction: overrides.direction ?? 'inbound',
       author: 'tenant',
-      deliveryStatus: 'delivered',
+      deliveryStatus: overrides.deliveryStatus ?? 'delivered',
       ...(overrides.body !== undefined && { body: overrides.body }),
+      ...(overrides.retryOf !== undefined && { retryOf: overrides.retryOf }),
     });
   }
 
@@ -245,6 +251,31 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     const msg = res.body.items.find((i: { kind: string }) => i.kind === 'message');
     expect(msg.body).toBe(longBody);
     expect(msg.body).toHaveLength(500);
+  });
+
+  it('emits retry_of on a retry message so the client can collapse the superseded bubble', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // A failed outbound, then its retry whose retry_of points at the original's tsMsgId.
+    const failedTs = '2026-06-16T10:00:00.000Z';
+    const failedTsMsgId = `${failedTs}#SM-fail`;
+    await seedMessage('conv-a', failedTs, 'SM-fail', {
+      direction: 'outbound',
+      body: 'retry me',
+      deliveryStatus: 'failed',
+    });
+    await seedMessage('conv-a', '2026-06-16T10:05:00.000Z', 'SM-retry', {
+      direction: 'outbound',
+      body: 'retry me',
+      retryOf: failedTsMsgId,
+    });
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const items = res.body.items as Array<{ tsMsgId: string; retry_of?: string }>;
+    const original = items.find((i) => i.tsMsgId === failedTsMsgId)!;
+    const retry = items.find((i) => i.tsMsgId === '2026-06-16T10:05:00.000Z#SM-retry')!;
+    expect(original.retry_of).toBeUndefined(); // the original carries no lineage
+    expect(retry.retry_of).toBe(failedTsMsgId); // the retry points back at it
   });
 
   it('derives fromPhone/toPhone from the contact own number + our number only', async () => {

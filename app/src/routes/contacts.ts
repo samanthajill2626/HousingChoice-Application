@@ -263,6 +263,41 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['notes'] = v;
     changedFields.push('notes');
   }
+  // Landlord/PM company name (edit form). Free text; empty string clears it.
+  if ('company' in b) {
+    const v = b['company'];
+    if (typeof v !== 'string') return { error: 'company must be a string' };
+    patch['company'] = v;
+    changedFields.push('company');
+  }
+  // Tenant housing authority (edit form). camelCase — it's the byHousingAuthority
+  // GSI hash key, so writing it re-indexes the contact for broadcast targeting.
+  if ('housingAuthority' in b) {
+    const v = b['housingAuthority'];
+    if (typeof v !== 'string') return { error: 'housingAuthority must be a string' };
+    patch['housingAuthority'] = v;
+    changedFields.push('housingAuthority');
+  }
+  // Structured postal address (edit form). Every part optional; we store only the
+  // non-empty parts (a SET-merge replaces the whole address object).
+  if ('address' in b) {
+    const v = b['address'];
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      return { error: 'address must be an object' };
+    }
+    const a = v as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const key of ['line1', 'line2', 'city', 'state', 'zip'] as const) {
+      const part = a[key];
+      if (part !== undefined) {
+        if (typeof part !== 'string') return { error: `address.${key} must be a string` };
+        const trimmed = part.trim();
+        if (trimmed.length > 0) out[key] = trimmed;
+      }
+    }
+    patch['address'] = out;
+    changedFields.push('address');
+  }
 
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
@@ -659,6 +694,48 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     );
 
     res.json({ contact: updated });
+  });
+
+  // POST /api/contacts/:contactId/opt-out { optOut: boolean } → 200 { contact }.
+  // Manually mark a contact Do-Not-Contact (sms_opt_out=true) or clear it. The
+  // contact-level flag is authoritative for send suppression — the send wrapper
+  // refuses on contact.sms_opt_out (sendMessage.ts gate) — so setting it here
+  // stops outbound texts immediately, mirroring an inbound STOP. Clearing it is a
+  // staff override (e.g. the contact re-consented by phone); the audit trail
+  // records who toggled it. (Conversation-level denorm isn't propagated here; the
+  // contact flag governs suppression.)
+  router.post('/:contactId/opt-out', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b['optOut'] !== 'boolean') {
+      res.status(400).json({ error: 'optOut (boolean) is required' });
+      return;
+    }
+    const optOut = b['optOut'];
+
+    // Existence check up front so the 404 is independent of how setFlag signals a
+    // missing row (the real repo throws ConditionalCheckFailedException).
+    const existing = await contacts.getById(contactId);
+    if (!existing) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    if (optOut) {
+      await contacts.setFlag(contactId, 'sms_opt_out');
+    } else {
+      await contacts.clearFlag(contactId, 'sms_opt_out');
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_opt_out_changed', {
+      optOut,
+      actor: req.user?.userId,
+    });
+    log.info({ contactId, optOut, actor: req.user?.userId }, 'contact sms_opt_out toggled');
+    // Reflect the new flag without a second round-trip.
+    res.json({ contact: withPhones({ ...existing, sms_opt_out: optOut }) });
   });
 
   // --- BE1/C1 contact-phones CRUD (manual curation / merge) ------------------

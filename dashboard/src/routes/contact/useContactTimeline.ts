@@ -7,7 +7,7 @@
 // contact's REAL seeded messages today (no milestones until BE2). Subscribes to
 // the SSE stream and refetches (debounced) on message.persisted /
 // conversation.updated so the stream stays live. Mirrors useToday's shape.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   getContactTimeline,
@@ -15,7 +15,9 @@ import {
   getConversations,
   useEventStream,
   type Message,
+  type SendMessageResult,
   type TimelineItem,
+  type TimelineMessage,
 } from '../../api/index.js';
 import { buildTimelineFallback } from './buildTimelineFallback.js';
 
@@ -24,9 +26,23 @@ export type TimelineSource = 'server' | 'fallback';
 
 export interface ContactTimelineState {
   status: TimelineStatus;
+  /** Server items merged with any in-flight OPTIMISTIC sends (deduped by tsMsgId). */
   items: TimelineItem[];
   /** Which path produced `items` — 'server' (/timeline) or 'fallback' (assembled). */
   source: TimelineSource;
+  /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
+   *  temp id to reconcile with. */
+  addOptimistic: (conversationId: string, body: string, toPhone?: string) => string;
+  /** POST succeeded: stamp the real tsMsgId + status so the SSE refetch reconciles
+   *  the bubble by id (then it advances Sending… → Sent → Delivered on its own). */
+  resolveOptimistic: (tempId: string, result: SendMessageResult) => void;
+  /** POST failed: drop the optimistic bubble (the caller restores the draft). */
+  failOptimistic: (tempId: string) => void;
+}
+
+interface PendingSend {
+  tempId: string;
+  item: TimelineMessage;
 }
 
 /** Debounce window (ms) for SSE-triggered refetches — coalesces a burst of
@@ -117,9 +133,65 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     source: 'server',
   });
 
+  // In-flight OPTIMISTIC sends, shown immediately and reconciled against the
+  // server timeline by tsMsgId (dropped once the refetch carries the real row).
+  const [pending, setPending] = useState<PendingSend[]>([]);
+  const tempIdRef = useRef(0);
+
   // Track the in-flight request so a refetch supersedes the previous one and a
   // late response from an aborted request can't clobber fresher state.
   const abortRef = useRef<AbortController | null>(null);
+
+  const addOptimistic = useCallback(
+    (conversationId: string, body: string, toPhone?: string): string => {
+      tempIdRef.current += 1;
+      const tempId = `optimistic:${tempIdRef.current}`;
+      const item: TimelineMessage = {
+        kind: 'message',
+        id: tempId,
+        at: new Date().toISOString(),
+        conversationId,
+        tsMsgId: tempId,
+        direction: 'outbound',
+        author: 'teammate',
+        type: 'sms',
+        body,
+        // 'queued' renders as "Sending…" (deliveryStatus) — the in-progress state.
+        delivery_status: 'queued',
+        ...(toPhone !== undefined && { toPhone }),
+      };
+      setPending((p) => [...p, { tempId, item }]);
+      return tempId;
+    },
+    [],
+  );
+
+  const resolveOptimistic = useCallback((tempId: string, result: SendMessageResult): void => {
+    setPending((p) =>
+      p.map((x) =>
+        x.tempId === tempId
+          ? {
+              ...x,
+              item: {
+                ...x.item,
+                id: result.tsMsgId,
+                tsMsgId: result.tsMsgId,
+                delivery_status: result.status,
+              },
+            }
+          : x,
+      ),
+    );
+  }, []);
+
+  const failOptimistic = useCallback((tempId: string): void => {
+    setPending((p) => p.filter((x) => x.tempId !== tempId));
+  }, []);
+
+  // A new contact resets any leftover optimistic bubbles from the previous one.
+  useEffect(() => {
+    setPending([]);
+  }, [contactId]);
 
   const fetchNow = useCallback(async () => {
     abortRef.current?.abort();
@@ -165,5 +237,24 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     onConversationUpdated: scheduleRefetch,
   });
 
-  return state;
+  // Merge server items with optimistic sends, dropping any optimistic bubble the
+  // server has already caught up to (matched by tsMsgId) so there's no duplicate
+  // once the refetch lands. Optimistic items carry `at = now`, so they sort last
+  // (newest) — appended after the chronological server items.
+  const items = useMemo(() => {
+    if (pending.length === 0) return state.items;
+    const serverIds = new Set<string>();
+    for (const i of state.items) if (i.kind === 'message') serverIds.add(i.tsMsgId);
+    const extra = pending.filter((p) => !serverIds.has(p.item.tsMsgId)).map((p) => p.item);
+    return extra.length === 0 ? state.items : [...state.items, ...extra];
+  }, [state.items, pending]);
+
+  return {
+    status: state.status,
+    items,
+    source: state.source,
+    addOptimistic,
+    resolveOptimistic,
+    failOptimistic,
+  };
 }

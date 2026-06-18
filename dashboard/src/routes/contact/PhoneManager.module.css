@@ -1,0 +1,123 @@
+/* PhoneManager — number rows + an add form. Tokens only. */
+
+.list {
+  list-style: none;
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+.empty {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+  padding: var(--sp-2);
+}
+
+.numCol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.num {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.primaryBadge {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-success);
+}
+
+.label {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-3);
+}
+
+.linkBtn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.linkBtn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.linkBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.linkBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.danger {
+  color: var(--c-danger);
+}
+
+.addForm {
+  margin-top: var(--sp-2);
+}
+
+.addRow {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.labelInput {
+  flex: 0 1 9rem;
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.error {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}

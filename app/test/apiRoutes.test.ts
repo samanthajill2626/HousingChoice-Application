@@ -108,6 +108,106 @@ describe('POST /api/conversations/:conversationId/messages', () => {
   });
 });
 
+// POST /api/conversations/:id/messages/:providerSid/retry — re-send a FAILED
+// outbound message, stamping retry_of so the timeline collapses the stale bubble.
+describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', () => {
+  const FAILED_ORIGINAL = {
+    conversationId: 'conv-1',
+    tsMsgId: '2026-06-12T09:00:00.000Z#SMorig',
+    provider_sid: 'SMorig',
+    direction: 'outbound' as const,
+    author: 'teammate' as const,
+    type: 'sms' as const,
+    body: 'this failed',
+    delivery_status: 'failed' as const,
+  };
+
+  function makeRetryApp(original: unknown) {
+    const calls: SendMessageInput[] = [];
+    const app = buildApp({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        messagesRepo: {
+          async getByProviderSid() {
+            return original;
+          },
+        } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
+        sendMessageService: async (input) => {
+          calls.push(input);
+          return {
+            conversationId: input.conversationId,
+            providerSid: 'SMretry',
+            tsMsgId: '2026-06-12T10:00:00.000Z#SMretry',
+            status: 'queued',
+          };
+        },
+      },
+    });
+    return { app, calls };
+  }
+
+  it('re-sends the original body + carries retry_of, returning 201', async () => {
+    const { app, calls } = makeRetryApp(FAILED_ORIGINAL);
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(res.body.providerSid).toBe('SMretry');
+    expect(calls).toEqual([
+      {
+        conversationId: 'conv-1',
+        body: 'this failed',
+        automated: false,
+        author: 'teammate',
+        retryOf: '2026-06-12T09:00:00.000Z#SMorig',
+      },
+    ]);
+  });
+
+  it('404s when the message is unknown or belongs to another conversation', async () => {
+    for (const original of [undefined, { ...FAILED_ORIGINAL, conversationId: 'other' }]) {
+      const { app, calls } = makeRetryApp(original);
+      const res = await request(app)
+        .post('/api/conversations/conv-1/messages/SMorig/retry')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send();
+      expect(res.status).toBe(404);
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('400s when the original is not outbound', async () => {
+    const { app, calls } = makeRetryApp({ ...FAILED_ORIGINAL, direction: 'inbound' });
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('409s when the original is not in a failure state (no accidental double-send)', async () => {
+    for (const status of ['queued', 'sent', 'delivered'] as const) {
+      const { app, calls } = makeRetryApp({ ...FAILED_ORIGINAL, delivery_status: status });
+      const res = await request(app)
+        .post('/api/conversations/conv-1/messages/SMorig/retry')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send();
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'not_failed' });
+      expect(calls).toHaveLength(0);
+    }
+  });
+});
+
 // GET /api/messages/:providerSid/media/:idx — reads the cohesive media_attachments
 // record (with legacy media_s3_keys compat) and serves inline only for allowlisted
 // types, else as a download. The inline/attachment decision uses the LIVE stored

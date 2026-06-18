@@ -92,7 +92,7 @@ export const TABLES: readonly TableSpec[] = [
       // a time (doc §5), so this is single-attribute and tenant-sparse.
       {
         indexName: 'byHousingAuthority',
-        hashKey: { name: 'housing_authority', type: 'S' },
+        hashKey: { name: 'housingAuthority', type: 'S' },
       },
     ],
   },

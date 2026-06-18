@@ -1,57 +1,27 @@
-// AppFrame — the authenticated shell: a persistent left nav (Workspace +
-// Communications groups, with the Contacts parent ▸ Tenants/Landlords/Unknown
-// children, plus a Settings footer link), the routed <Outlet/>, and a top-right
-// account menu (the user email + Sign out from AuthContext). Accessibility-first:
-// each group is a <nav> with an aria-label and NavLinks render as roled links.
+// AppFrame — the authenticated shell. The left nav is responsive (see
+// useNavChrome): at ≥768px a PERSISTENT sidebar that the operator can collapse to
+// an icon rail (preference persisted); below 768px an OFF-CANVAS drawer behind a
+// top-bar hamburger. The nav body itself (the LOCKED IA) lives in NavContents and
+// is shared verbatim by both, so they can't drift. Around it: the routed
+// <Outlet/> and a top-right account menu. Accessibility-first throughout — the
+// drawer locks scroll, traps focus, closes on Escape/scrim/link, and restores
+// focus to the hamburger.
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { logout } from '../api/index.js';
 import { Button } from '../ui/index.js';
-import { NAV_ICONS } from '../ui/icons.js';
+import { ChevronIcon, CloseIcon, MenuIcon } from '../ui/icons.js';
 import { useAuth } from './AuthContext.js';
-import { NAV_FOOTER, NAV_GROUPS, isNavParent, type NavLeaf } from './nav.js';
-import { useUnread } from './UnreadContext.js';
+import { NavContents } from './NavContents.js';
+import { useNavChrome } from './useNavChrome.js';
 import styles from './AppFrame.module.css';
-
-function linkClass({ isActive }: { isActive: boolean }): string {
-  return `${styles.link} ${isActive ? styles.linkActive : ''}`;
-}
-
-function childLinkClass({ isActive }: { isActive: boolean }): string {
-  return `${styles.link} ${styles.childLink} ${isActive ? styles.linkActive : ''}`;
-}
-
-const DOT_CLASS: Record<NonNullable<NavLeaf['dot']>, string> = {
-  tenant: styles.dotTenant ?? '',
-  landlord: styles.dotLandlord ?? '',
-  unknown: styles.dotUnknown ?? '',
-};
-
-function NavLeafLink({ item }: { item: NavLeaf }): React.JSX.Element {
-  const Icon = item.icon ? NAV_ICONS[item.icon] : undefined;
-  const { unread } = useUnread();
-  const badge = item.badge === 'inbox-unread' && unread !== null && unread > 0 ? unread : null;
-  return (
-    <div className={styles.linkRow}>
-      <NavLink to={item.to} end={item.end ?? false} className={linkClass}>
-        {Icon ? (
-          <span className={styles.icon}>
-            <Icon />
-          </span>
-        ) : null}
-        <span className={styles.linkLabel}>{item.label}</span>
-      </NavLink>
-      {badge !== null ? (
-        <span className={styles.badge} aria-label={`${badge} unread`}>
-          {badge > 99 ? '99+' : badge}
-        </span>
-      ) : null}
-    </div>
-  );
-}
 
 export function AppFrame(): React.JSX.Element {
   const { me, refresh } = useAuth();
+  const { collapsed, toggleCollapsed, drawerOpen, openDrawer, closeDrawer, isMobile } =
+    useNavChrome();
+  const drawerRef = useRef<HTMLElement>(null);
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
 
   async function handleSignOut(): Promise<void> {
     try {
@@ -62,44 +32,127 @@ export function AppFrame(): React.JSX.Element {
     }
   }
 
+  // Drawer a11y, active only while open: lock body scroll, move focus into the
+  // drawer, trap Tab within it, close on Escape, and restore focus to the
+  // hamburger when it closes.
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    const drawer = drawerRef.current;
+    if (!drawer) return undefined;
+
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const focusables = (): HTMLElement[] =>
+      Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+    focusables()[0]?.focus();
+
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (items.length === 0) return;
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = prevOverflow;
+      hamburgerRef.current?.focus();
+    };
+  }, [drawerOpen, closeDrawer]);
+
   return (
     <div className={styles.shell}>
-      <aside className={styles.sidebar}>
-        <NavLink to="/" className={styles.brand} end>
-          HousingChoice
-        </NavLink>
-        <div className={styles.nav}>
-          {NAV_GROUPS.map((group) => (
-            <nav key={group.label} className={styles.group} aria-label={group.label}>
-              <span className={styles.groupLabel}>{group.label}</span>
-              {group.items.map((item) => (
-                <div key={item.to}>
-                  <NavLeafLink item={item} />
-                  {isNavParent(item) && (
-                    <div className={styles.children}>
-                      {item.children.map((child) => (
-                        <NavLink key={child.to} to={child.to} className={childLinkClass}>
-                          {child.dot ? (
-                            <span className={`${styles.dot} ${DOT_CLASS[child.dot]}`} />
-                          ) : null}
-                          <span className={styles.linkLabel}>{child.label}</span>
-                        </NavLink>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </nav>
-          ))}
-          <nav className={styles.footer} aria-label="Settings">
-            <NavLeafLink item={NAV_FOOTER} />
-          </nav>
+      <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ''}`} aria-label="Primary">
+        <div className={styles.brandRow}>
+          <NavLink to="/" className={styles.brand} end aria-label="HousingChoice home">
+            <span className={styles.brandFull}>HousingChoice</span>
+            <span className={styles.brandMark} aria-hidden="true">
+              HC
+            </span>
+          </NavLink>
+          <button
+            type="button"
+            className={styles.collapseToggle}
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-pressed={collapsed}
+            title={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+          >
+            <ChevronIcon dir={collapsed ? 'right' : 'left'} />
+          </button>
         </div>
+        <NavContents />
       </aside>
+
+      {isMobile ? (
+        <>
+          <div
+            className={`${styles.scrim} ${drawerOpen ? styles.scrimOpen : ''}`}
+            onClick={closeDrawer}
+            aria-hidden="true"
+          />
+          <aside
+            id="nav-drawer"
+            ref={drawerRef}
+            className={`${styles.drawer} ${drawerOpen ? styles.drawerOpen : ''}`}
+            aria-label="Primary"
+            {...(!drawerOpen && { 'aria-hidden': true })}
+          >
+            <div className={styles.drawerHead}>
+              <NavLink to="/" className={styles.brand} end onClick={closeDrawer}>
+                HousingChoice
+              </NavLink>
+              <button
+                type="button"
+                className={styles.collapseToggle}
+                onClick={closeDrawer}
+                aria-label="Close navigation"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <NavContents onNavigate={closeDrawer} />
+          </aside>
+        </>
+      ) : null}
 
       <div className={styles.main}>
         <header className={styles.topbar}>
-          <AccountMenu email={me?.email ?? ''} role={me?.role ?? 'va'} onSignOut={handleSignOut} />
+          <button
+            ref={hamburgerRef}
+            type="button"
+            className={styles.hamburger}
+            onClick={openDrawer}
+            aria-label="Open navigation"
+            aria-expanded={drawerOpen}
+            aria-controls="nav-drawer"
+          >
+            <MenuIcon size={22} />
+          </button>
+          <NavLink to="/" className={styles.topbarBrand} end>
+            HousingChoice
+          </NavLink>
+          <div className={styles.topbarRight}>
+            <AccountMenu email={me?.email ?? ''} role={me?.role ?? 'va'} onSignOut={handleSignOut} />
+          </div>
         </header>
         <main className={styles.content}>
           <Outlet />

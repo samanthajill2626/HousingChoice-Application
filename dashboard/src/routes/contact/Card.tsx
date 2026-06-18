@@ -25,6 +25,53 @@ export function Card({ title, aside, children }: CardProps): React.JSX.Element {
   );
 }
 
+/** A clickable Card heading action (e.g. "Edit", "+ Add"), styled like the muted
+ *  `aside` text but interactive. Pass as the Card's `aside`. */
+export function CardAction({
+  children,
+  onClick,
+  label,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  /** Accessible label when the text alone is ambiguous (e.g. "Edit"). */
+  label?: string;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className={styles.asideBtn}
+      onClick={onClick}
+      {...(label !== undefined && { 'aria-label': label })}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** A small inline text-button (e.g. "Manage" next to the phone numbers) — like
+ *  CardAction but without the right-align, for use INSIDE a value. */
+export function CardInlineAction({
+  children,
+  onClick,
+  label,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  label?: string;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className={styles.inlineAction}
+      onClick={onClick}
+      {...(label !== undefined && { 'aria-label': label })}
+    >
+      {children}
+    </button>
+  );
+}
+
 /** A small muted "pending backend" state for panels whose data arrives with a
  *  backend slice that isn't live yet. */
 export function PendingPanel({ note }: { note?: string }): React.JSX.Element {

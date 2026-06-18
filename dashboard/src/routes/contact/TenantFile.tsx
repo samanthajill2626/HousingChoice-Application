@@ -6,7 +6,19 @@
 // Preferences are manual-now (pending until the gleaning slice). Each list row
 // links to its detail route.
 import type { CaseItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
-import { Card, Chips, EmptyRow, KV, PendingPanel, Row, responseClass } from './Card.js';
+import {
+  Card,
+  CardAction,
+  CardInlineAction,
+  Chips,
+  EmptyRow,
+  KV,
+  PendingPanel,
+  Row,
+  responseClass,
+} from './Card.js';
+import { MediaGallery } from './MediaGallery.js';
+import type { CommsMediaItem } from './media.js';
 import { tenantCases, tenantTours } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
 
@@ -17,8 +29,14 @@ export interface TenantFileProps {
   units: UnitItem[];
   /** C4 listings-sent slice status (panel degrades to pending on 404). */
   listingsSentPending: boolean;
-  /** C5 media slice status. */
-  mediaPending: boolean;
+  /** "Media from comms" — derived from the live timeline (updates as messages
+   *  arrive); `mediaLoading` covers the brief window before the timeline lands. */
+  media: CommsMediaItem[];
+  mediaLoading?: boolean;
+  /** Open the edit dialog (Details "Edit" + Preferences "+ Add"). */
+  onEdit?: () => void;
+  /** Open the "Manage numbers" dialog (Phone numbers row). */
+  onManagePhones?: () => void;
 }
 
 /** A unit's address line (or its id as a last resort), for a row label. */
@@ -47,29 +65,68 @@ export function TenantFile({
   cases,
   units,
   listingsSentPending,
-  mediaPending,
+  media,
+  mediaLoading,
+  onEdit,
+  onManagePhones,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myCases = tenantCases(cases, contact.contactId);
   const tours = tenantTours(cases, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
-  const housingAuthority =
-    typeof contact['housingAuthority'] === 'string' ? contact['housingAuthority'] : '—';
-  const currentAddress = formatAddress(contact['address'] as never) || '—';
+  const housingAuthority = contact.housingAuthority ?? '—';
+  const currentAddress = formatAddress(contact.address) || '—';
   const prefs = typeof contact.notes === 'string' && contact.notes.trim() ? [contact.notes.trim()] : [];
 
   return (
     <>
-      <Card title="Details" aside="Edit">
+      <Card
+        title="Details"
+        aside={
+          onEdit ? (
+            <CardAction onClick={onEdit} label="Edit contact details">
+              Edit
+            </CardAction>
+          ) : (
+            'Edit'
+          )
+        }
+      >
         <KV k="Voucher size" v={voucher} />
         <KV k="Housing authority" v={housingAuthority} />
         <KV k="Current address" v={currentAddress} />
-        <KV k="Phone numbers" v={phoneList || '—'} />
+        <KV
+          k="Phone numbers"
+          v={
+            <>
+              {phoneList || '—'}
+              {onManagePhones ? (
+                <>
+                  {' · '}
+                  <CardInlineAction onClick={onManagePhones} label="Manage phone numbers">
+                    Manage
+                  </CardInlineAction>
+                </>
+              ) : null}
+            </>
+          }
+        />
         <KV k="Status" v={contact.status ?? '—'} />
       </Card>
 
-      <Card title="Preferences & notes" aside="+ Add">
+      <Card
+        title="Preferences & notes"
+        aside={
+          onEdit ? (
+            <CardAction onClick={onEdit} label="Add a note">
+              + Add
+            </CardAction>
+          ) : (
+            '+ Add'
+          )
+        }
+      >
         {prefs.length > 0 ? (
           <Chips items={prefs} />
         ) : (
@@ -120,7 +177,7 @@ export function TenantFile({
       </Card>
 
       <Card title="Media from comms">
-        {mediaPending ? <PendingPanel /> : <EmptyRow>No media yet.</EmptyRow>}
+        <MediaGallery media={media} loading={mediaLoading ?? false} />
       </Card>
     </>
   );

@@ -222,6 +222,76 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     });
   });
 
+  it('edits the company field (landlord) via the SET-merge + audits it', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-ll',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100999',
+      firstName: 'Pat',
+      lastName: 'Owner',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-ll')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ company: 'Acme Property Mgmt' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.company).toBe('Acme Property Mgmt');
+    const audit = world.auditEvents.find(
+      (e) => e.event_type === 'contact_updated' && e.entityKey === 'contacts#contact-ll',
+    );
+    expect(audit?.payload?.['fields']).toEqual(['company']);
+  });
+
+  it('edits housingAuthority (the byHousingAuthority GSI key — camelCase)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-t2',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100222',
+      housingAuthority: 'atlanta_housing',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-t2')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ housingAuthority: 'dekalb_housing' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.housingAuthority).toBe('dekalb_housing');
+    expect(world.contacts.find((c) => c.contactId === 'contact-t2')?.['housingAuthority']).toBe(
+      'dekalb_housing',
+    );
+  });
+
+  it('edits a structured address, storing only the non-empty parts', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-t3',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100333',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-t3')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ address: { line1: '123 Main St', line2: '  ', city: 'Atlanta', state: 'GA', zip: '30301' } });
+    expect(res.status).toBe(200);
+    // line2 was whitespace-only → dropped; the rest persists.
+    expect(res.body.contact.address).toEqual({
+      line1: '123 Main St',
+      city: 'Atlanta',
+      state: 'GA',
+      zip: '30301',
+    });
+  });
+
   it('allowlists status — accepts a known lifecycle value, rejects an unknown one (L1)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
@@ -258,6 +328,10 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       { status: 'bogus_status' }, // not an allowlisted lifecycle value (L1)
       { contactName: 'SingleToken - 2 Bed' }, // not "First Last"
       { firstName: 5 }, // wrong type
+      { company: 5 }, // wrong type
+      { housingAuthority: 5 }, // wrong type
+      { address: 'nope' }, // not an object
+      { address: { line1: 5 } }, // address part wrong type
     ]) {
       const res = await request(app)
         .patch('/api/contacts/contact-triage-1')
@@ -275,6 +349,72 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'tenant' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/contacts/:contactId/opt-out — manual Do-Not-Contact toggle', () => {
+  function seedActive(world: ReturnType<typeof createFakeWorld>): void {
+    world.contacts.push({ contactId: 'c-opt', type: 'tenant', status: 'active', phone: '+15550101010' });
+  }
+
+  it('sets sms_opt_out=true, returns the updated contact (with phones), and audits the actor', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedActive(world);
+    const res = await request(app)
+      .post('/api/contacts/c-opt/opt-out')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ optOut: true });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.sms_opt_out).toBe(true);
+    expect(Array.isArray(res.body.contact.phones)).toBe(true); // serialized via withPhones()
+    expect(world.contacts.find((c) => c.contactId === 'c-opt')?.sms_opt_out).toBe(true);
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_opt_out_changed');
+    expect(audit?.entityKey).toBe('contacts#c-opt');
+    expect(audit?.payload).toMatchObject({ optOut: true });
+    expect(audit?.payload?.['actor']).toBe('usr_testva00000000000000000');
+  });
+
+  it('clears sms_opt_out when optOut=false (staff re-enable)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'c-opt',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550101010',
+      sms_opt_out: true,
+    });
+    const res = await request(app)
+      .post('/api/contacts/c-opt/opt-out')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ optOut: false });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.sms_opt_out).toBe(false);
+    expect(world.contacts.find((c) => c.contactId === 'c-opt')?.sms_opt_out).toBe(false);
+  });
+
+  it('400s a missing / non-boolean optOut', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedActive(world);
+    for (const body of [{}, { optOut: 'yes' }, { optOut: 1 }]) {
+      const res = await request(app)
+        .post('/api/contacts/c-opt/opt-out')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+  });
+
+  it('404s an unknown contact', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts/nope/opt-out')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ optOut: true });
     expect(res.status).toBe(404);
   });
 });

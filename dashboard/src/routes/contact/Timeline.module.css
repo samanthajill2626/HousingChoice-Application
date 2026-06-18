@@ -3,6 +3,10 @@
  * filter toggle, and a reply box. All values from ui/tokens.css. */
 
 .comms {
+  /* flex: 1 so the pane GROWS to fill the .left column (it's the only child of a
+   * display:flex column in ContactDetail). Without it the section sizes to its
+   * content and leaves a dead band between comms and the right rail. */
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -63,6 +67,12 @@
 
 .stream {
   flex: 1;
+  /* A floor — NOT a fixed height — on the message list itself (not the panel) so
+   * a few messages stay visible even on a short window; above this it grows to
+   * fill. When the window is too short to fit header + this + reply, the overflow
+   * pushes to the page's content scroll rather than collapsing the list to zero.
+   * In rem (scales with root font) so it isn't a brittle pixel constant. */
+  min-height: 8rem;
   overflow: auto;
   padding: var(--sp-3);
   display: flex;
@@ -112,13 +122,22 @@
 /* --- Message bubbles ------------------------------------------------------ */
 
 .bubble {
-  position: relative;
   max-width: 80%;
   border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-3);
   line-height: 1.34;
   margin-bottom: var(--sp-1);
   cursor: pointer;
+  transition:
+    box-shadow 0.12s ease,
+    filter 0.12s ease;
+}
+
+/* Hover hint on the clickable surface itself: a hand cursor + a subtle lift and
+ * darken, signalling the bubble can be clicked to reveal its exact timestamp. */
+.bubble:hover {
+  filter: brightness(0.97);
+  box-shadow: var(--shadow-sm);
 }
 
 .in {
@@ -146,6 +165,41 @@
   color: var(--c-text-muted);
 }
 
+/* Inline MMS gallery: image thumbnails open full-size in a new tab; PDFs / other
+ * files are links to the authed serve endpoint. */
+.mediaGallery {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+
+.mediaLink {
+  display: inline-block;
+  line-height: 0;
+}
+
+.mediaImg {
+  display: block;
+  max-width: 200px;
+  max-height: 200px;
+  object-fit: cover;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+.mediaFile {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+.mediaFile:hover {
+  text-decoration: underline;
+}
+
 .meta {
   display: flex;
   flex-wrap: wrap;
@@ -156,49 +210,27 @@
   margin-top: var(--sp-1);
 }
 
-/* The transport · number · time line is HIDDEN by default (messaging-app style)
- * and revealed on hover (desktop) or tap (the .revealed toggle, mobile). The day
- * dividers give at-a-glance time context; this is the precise per-message detail.
- * The line never breaks mid-value; the status chip wraps below if a reason makes
- * the row too long. */
+/* The transport · number · time line is HIDDEN by default (messaging-app style);
+ * a click/tap on the bubble reveals it (.revealed). The cluster labels give the
+ * at-a-glance time; this is the precise per-message detail. The line never breaks
+ * mid-value; the status chip wraps below if a reason makes the row too long. */
 .metaText {
   display: none;
   white-space: nowrap;
 }
 
-/* Revealed ONLY on click/tap (.revealed) — NOT on hover, so bubbles don't jump
- * on mouseover (one-word bubbles especially). Hover just shows .metaHint. */
+/* Revealed on click/tap (.revealed). The grouped time labels give the at-a-glance
+ * time; this is the precise per-message detail (number, transport) on demand. */
 .bubble.revealed .metaText {
   display: inline;
 }
 
-/* Hover hint: a faint chevron in the bubble's bottom corner that says "click for
- * details." Absolutely positioned so hover never resizes the bubble; hidden once
- * the meta is revealed. */
-.metaHint {
-  position: absolute;
-  right: 6px;
-  bottom: 2px;
-  font-size: 11px;
-  line-height: 1;
-  color: var(--c-text-subtle);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.1s ease;
-}
-
-.bubble:hover .metaHint {
-  opacity: 0.5;
-}
-
-.bubble.revealed .metaHint {
-  opacity: 0;
-}
-
-/* Delivery-state chip on OUTBOUND bubbles (Sent/Delivered/Failed/…). Sits at the
- * trailing edge of the meta row. Tone classes are distinct from the milestone
- * pin tones to avoid any selector overlap. */
+/* Delivery-state chip on OUTBOUND bubbles (Sending…/Sent/Delivered/Failed/…).
+ * margin-left:auto pins it to the bubble's RIGHT edge — on its own when the meta
+ * is collapsed (the default), and trailing the time line when revealed. Tone
+ * classes are distinct from the milestone pin tones to avoid any selector overlap. */
 .status {
+  margin-left: auto;
   font-weight: var(--fw-medium);
 }
 
@@ -382,15 +414,30 @@ a.pill:focus-visible {
   padding: var(--sp-2) var(--sp-3);
 }
 
+.optOutNote {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-danger-bg, rgba(220, 38, 38, 0.08));
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
 .replyBox {
   width: 100%;
-  min-height: 48px;
+  /* One line by default (rows=1); useAutoGrowTextarea grows it to fit the draft
+   * up to max-height, then it scrolls. resize:vertical stays — a manual drag
+   * overrides the auto-fit (bounded by the same max-height). */
   resize: vertical;
+  max-height: 9.5rem; /* ~6 lines — the auto-grow + manual-resize ceiling */
+  overflow-y: auto;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--radius-sm);
   padding: var(--sp-2);
   font: inherit;
   font-size: var(--fs-sm);
+  line-height: 1.4;
   color: var(--c-text);
 }
 

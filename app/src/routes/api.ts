@@ -455,6 +455,54 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
   });
 
+  // POST /api/conversations/:conversationId/messages/:providerSid/retry
+  // Re-send a FAILED outbound message (the dashboard Retry button). The server
+  // re-reads the original by its provider SID (so the body AND media resend
+  // correctly — the client never holds provider media URLs) and stamps the new
+  // message with `retry_of` so the contact timeline collapses the stale failed
+  // bubble. A manual human send: automated:false (never breaker-metered).
+  router.post('/conversations/:conversationId/messages/:providerSid/retry', async (req, res) => {
+    const { conversationId, providerSid } = req.params;
+    mergeContext({ conversationId });
+
+    const original = await messages.getByProviderSid(providerSid);
+    if (!original || original.conversationId !== conversationId) {
+      res.status(404).json({ error: 'message_not_found' });
+      return;
+    }
+    if (original.direction !== 'outbound') {
+      res.status(400).json({ error: 'not_outbound' });
+      return;
+    }
+    // Only a FAILED/UNDELIVERED send is retryable — refuse re-sending a message
+    // that already went out (idempotency: no accidental double-text on a delivered
+    // or in-flight message).
+    if (original.delivery_status !== 'failed' && original.delivery_status !== 'undelivered') {
+      res.status(409).json({ error: 'not_failed' });
+      return;
+    }
+
+    try {
+      const outcome = await sendMessage({
+        conversationId,
+        ...(original.body !== undefined && { body: original.body }),
+        ...(original.mediaUrls !== undefined && { mediaUrls: original.mediaUrls }),
+        automated: false,
+        // Carry the original author through (a retried AI message stays 'ai').
+        author: original.author === 'ai' ? 'ai' : 'teammate',
+        // Lineage: the new message supersedes the failed one in the timeline.
+        retryOf: original.tsMsgId,
+      });
+      res.status(201).json(outcome);
+    } catch (err) {
+      if (err instanceof SendRefusedError) {
+        res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
+        return;
+      }
+      throw err;
+    }
+  });
+
   /**
    * FIX 2 — team send into a relay group. Persists the outbound message ONCE on
    * the relay thread (author 'teammate'), seeds delivery_recipients to 'queued'

@@ -56,7 +56,7 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
     },
     async listByHousingAuthority(ha, opts = {}) {
       haQueries.push(ha);
-      return page(items.filter((c) => c['housing_authority'] === ha), opts);
+      return page(items.filter((c) => c['housingAuthority'] === ha), opts);
     },
     async findByPhone() {
       return undefined;
@@ -93,9 +93,9 @@ const ALWAYS_EXCLUDE = { excludeOptedOut: true, excludeUnreachable: true } as co
 describe('audience resolution (M1.8a)', () => {
   it('housing_authority set → Queries byHousingAuthority (never byTypeStatus)', async () => {
     const items = [
-      tenant({ contactId: 'c-1', housing_authority: 'HA-A', firstName: 'Ann' }),
-      tenant({ contactId: 'c-2', housing_authority: 'HA-A', firstName: 'Bo' }),
-      tenant({ contactId: 'c-3', housing_authority: 'HA-B' }),
+      tenant({ contactId: 'c-1', housingAuthority: 'HA-A', firstName: 'Ann' }),
+      tenant({ contactId: 'c-2', housingAuthority: 'HA-A', firstName: 'Bo' }),
+      tenant({ contactId: 'c-3', housingAuthority: 'HA-B' }),
     ];
     const contacts = fakeContacts(items);
     const resolve = createAudienceResolutionService({ contactsRepo: contacts, logger });
@@ -153,9 +153,9 @@ describe('audience resolution (M1.8a)', () => {
 
   it('combines housing_authority + bedroomSize', async () => {
     const items = [
-      tenant({ contactId: 'a2', housing_authority: 'HA-A', voucherSize: 2 }),
-      tenant({ contactId: 'a3', housing_authority: 'HA-A', voucherSize: 3 }),
-      tenant({ contactId: 'b2', housing_authority: 'HA-B', voucherSize: 2 }),
+      tenant({ contactId: 'a2', housingAuthority: 'HA-A', voucherSize: 2 }),
+      tenant({ contactId: 'a3', housingAuthority: 'HA-A', voucherSize: 3 }),
+      tenant({ contactId: 'b2', housingAuthority: 'HA-B', voucherSize: 2 }),
     ];
     const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
     const out = await resolve({

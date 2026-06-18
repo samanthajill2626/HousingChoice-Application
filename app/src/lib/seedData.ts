@@ -44,13 +44,13 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       type: 'tenant', // byTypeStatus HASH
       status: 'active', // byTypeStatus RANGE
       phone: '+15550100001', // byPhone
-      housing_authority: 'atlanta_housing', // byHousingAuthority (tenants only)
-      // Name + voucher size are camelCase EVERYWHERE the app reads them
-      // (contactFullName / displayNameOf / audienceResolution.voucherSizeOf);
-      // the flexible-doc repo would silently store snake_case keys the UI then
-      // never finds, so seeded contacts would render as their phone + miss
-      // bedroom-size broadcast targeting. Keep these aligned with the live
-      // intake (routes/public.ts, routes/contacts.ts).
+      housingAuthority: 'atlanta_housing', // byHousingAuthority (tenants only)
+      // Name, voucher size, and housingAuthority are camelCase EVERYWHERE the app
+      // reads them (contactFullName / displayNameOf / audienceResolution.voucherSizeOf;
+      // the byHousingAuthority GSI hash key is `housingAuthority`); the flexible-doc
+      // repo would silently store snake_case keys the UI then never finds, so seeded
+      // contacts would render as their phone + miss bedroom-size broadcast targeting.
+      // Keep these aligned with the live intake (routes/public.ts, routes/contacts.ts).
       firstName: 'Tasha',
       lastName: 'Nguyen',
       voucherSize: 2,
@@ -80,7 +80,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       phone: '+15550100003',
       firstName: 'Renee',
       lastName: 'Carter',
-      housing_authority: 'atlanta_housing',
+      housingAuthority: 'atlanta_housing',
       role_title: 'HCV Program Specialist',
       created_at: T0,
     },

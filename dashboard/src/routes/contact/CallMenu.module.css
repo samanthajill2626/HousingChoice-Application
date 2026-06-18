@@ -1,0 +1,89 @@
+/* CallMenu — trigger + dial popover. Tokens only. */
+
+.wrap {
+  position: relative;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 30;
+  min-width: 15rem;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.dial {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  text-decoration: none;
+  color: var(--c-text);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.dial:hover {
+  background: var(--c-surface-2);
+}
+
+.dial:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.num {
+  font-size: var(--fs-sm);
+  color: var(--c-brand);
+}
+
+.label {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.primary {
+  font-size: var(--fs-xs);
+  color: var(--c-success);
+}
+
+.copy {
+  background: transparent;
+  border: none;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+}
+
+.copy:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.copy:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -1px;
+}
+
+.note {
+  margin: var(--sp-1) var(--sp-2) var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  line-height: 1.4;
+}

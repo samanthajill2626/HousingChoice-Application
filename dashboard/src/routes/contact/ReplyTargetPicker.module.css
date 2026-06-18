@@ -1,0 +1,67 @@
+/* ReplyTargetPicker — the reply-target label + its "change" popover. Tokens only.
+ * The popover opens UPWARD (the picker sits at the bottom of the comms pane). */
+
+.wrap {
+  position: relative;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.changeBtn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--c-brand);
+  font: inherit;
+  cursor: pointer;
+}
+
+.changeBtn:hover {
+  text-decoration: underline;
+}
+
+.changeBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.menu {
+  position: absolute;
+  bottom: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 30;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.item:hover {
+  background: var(--c-surface-2);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}

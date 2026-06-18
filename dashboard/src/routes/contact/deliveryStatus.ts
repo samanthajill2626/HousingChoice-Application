@@ -20,7 +20,10 @@ export interface DeliveryPresentation {
 }
 
 const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
-  queued: { label: 'Queued', tone: 'neutral', isFailure: false },
+  // `queued` = accepted by us / handed to the carrier but not yet carrier-sent —
+  // i.e. the "sending from the app" waypoint. Shown as "Sending…" so the optimistic
+  // bubble reads as in-progress before it advances to Sent → Delivered.
+  queued: { label: 'Sending…', tone: 'neutral', isFailure: false },
   sent: { label: 'Sent', tone: 'info', isFailure: false },
   delivered: { label: 'Delivered', tone: 'success', isFailure: false },
   undelivered: { label: 'Undelivered', tone: 'danger', isFailure: true },

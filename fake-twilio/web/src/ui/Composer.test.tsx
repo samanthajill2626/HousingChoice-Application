@@ -83,6 +83,28 @@ test('the delivery-profile toggle calls onSetDeliveryProfile', async () => {
   expect(onSetDeliveryProfile).toHaveBeenCalledWith({ kind: 'fail' });
 });
 
+test('reverts the delivery profile to Normal when resetSignal changes (one-shot consumed)', async () => {
+  const onSetDeliveryProfile = vi.fn();
+  const { rerender } = render(
+    <Composer onSend={vi.fn()} onSetDeliveryProfile={onSetDeliveryProfile} resetSignal={0} />,
+  );
+  await userEvent.click(screen.getByRole('radio', { name: /fail/i }));
+  expect(screen.getByRole('radio', { name: /fail/i })).toBeChecked();
+
+  // The parent signals the engine consumed the one-shot profile → radio reverts.
+  rerender(<Composer onSend={vi.fn()} onSetDeliveryProfile={onSetDeliveryProfile} resetSignal={1} />);
+  expect(screen.getByRole('radio', { name: /normal/i })).toBeChecked();
+  expect(screen.getByRole('radio', { name: /fail/i })).not.toBeChecked();
+});
+
+test('does not reset the profile on mount (initial resetSignal is ignored)', () => {
+  const onSetDeliveryProfile = vi.fn();
+  render(<Composer onSend={vi.fn()} onSetDeliveryProfile={onSetDeliveryProfile} resetSignal={7} />);
+  // A non-zero initial signal must not clobber the default; Normal stays checked
+  // but only because nothing armed it — the mount run is skipped, not applied.
+  expect(screen.getByRole('radio', { name: /normal/i })).toBeChecked();
+});
+
 test('exposes the three delivery profiles as a radiogroup', () => {
   setup();
   const group = screen.getByRole('radiogroup', { name: /delivery/i });

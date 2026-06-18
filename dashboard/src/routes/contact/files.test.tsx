@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
+import type { CommsMediaItem } from './media.js';
 import type { CaseItem, Contact, UnitItem } from '../../api/index.js';
 
 const UNIT: UnitItem = {
@@ -31,7 +32,7 @@ describe('TenantFile', () => {
     phone: '+14040100007',
   };
 
-  function renderIt(opts: { listingsSentPending?: boolean; mediaPending?: boolean } = {}) {
+  function renderIt(opts: { listingsSentPending?: boolean; media?: CommsMediaItem[] } = {}) {
     return render(
       <MemoryRouter>
         <TenantFile
@@ -40,7 +41,7 @@ describe('TenantFile', () => {
           cases={[TENANT_CASE]}
           units={[UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
-          mediaPending={opts.mediaPending ?? true}
+          media={opts.media ?? []}
         />
       </MemoryRouter>,
     );
@@ -61,9 +62,23 @@ describe('TenantFile', () => {
     expect(screen.getByText('Toured')).toBeInTheDocument();
   });
 
-  it('shows the pending state for listings-sent + media until the backend lands', () => {
-    renderIt({ listingsSentPending: true, mediaPending: true });
-    expect(screen.getAllByText(/Arrives with the backend/i).length).toBeGreaterThanOrEqual(2);
+  it('shows the pending state for listings-sent until the backend lands', () => {
+    renderIt({ listingsSentPending: true });
+    expect(screen.getAllByText(/Arrives with the backend/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows "No media yet" when there is no comms media', () => {
+    renderIt({ media: [] });
+    expect(screen.getByText(/No media yet/i)).toBeInTheDocument();
+  });
+
+  it('renders a media-from-comms thumbnail linking to the authed media URL', () => {
+    renderIt({
+      media: [{ key: 'MM1:0', src: '/api/messages/MM1/media/0', contentType: 'image/png', at: '2026-06-17T10:00:00Z' }],
+    });
+    const img = screen.getByRole('img', { name: /Attachment/i });
+    expect(img).toHaveAttribute('src', '/api/messages/MM1/media/0');
+    expect(screen.queryByText(/No media yet/i)).not.toBeInTheDocument();
   });
 });
 
@@ -84,6 +99,7 @@ describe('LandlordFile', () => {
           phones={[{ phone: '+14042220190', primary: true }]}
           cases={[{ ...TENANT_CASE, unitId: 'u1' }]}
           units={[UNIT, PLACED_UNIT]}
+          media={[]}
         />
       </MemoryRouter>,
     );

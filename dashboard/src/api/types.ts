@@ -312,7 +312,29 @@ export interface Contact {
   created_at?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
+  /** Landlord/PM company name (editable). */
+  company?: string;
+  /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
+  housingAuthority?: string;
+  /** Structured postal address, or a plain string on pre-contract dev records. */
+  address?: Address | string;
   [key: string]: unknown;
+}
+
+/** Editable contact fields (PATCH /api/contacts/:id). Every field is optional —
+ *  only the changed ones are sent; the server SET-merges (absent leaves a value
+ *  untouched; an empty string clears it). `type` doubles as the triage action. */
+export interface ContactPatch {
+  type?: ContactType;
+  firstName?: string;
+  lastName?: string;
+  voucherSize?: number;
+  status?: string;
+  notes?: string;
+  company?: string;
+  housingAuthority?: string;
+  /** Structured address; the server stores only the non-empty parts. */
+  address?: Address;
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the
@@ -465,6 +487,9 @@ export interface TimelineMessage extends TimelineBase {
   media_attachments?: { s3Key: string; contentType: string }[];
   delivery_status: DeliveryStatus; // reuse legacy
   error_code?: string; // Twilio error code on a failure → human-readable reason
+  /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline
+   *  hides the superseded predecessor so a delivered retry replaces it. */
+  retry_of?: string;
   fromPhone?: string;
   toPhone?: string; // which number this used
 }

@@ -101,6 +101,37 @@ export function SettingsIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
+/** Menu (hamburger) — opens the mobile nav drawer. */
+export function MenuIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M3.5 6h17M3.5 12h17M3.5 18h17" />
+    </Svg>
+  );
+}
+
+/** Chevron — points left (« collapse) or right (» expand) via the `dir` prop;
+ *  used by the desktop sidebar's rail toggle. */
+export function ChevronIcon({
+  size,
+  dir = 'left',
+}: IconProps & { dir?: 'left' | 'right' }): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      {dir === 'left' ? <path d="M15 6l-6 6 6 6" /> : <path d="M9 6l6 6-6 6" />}
+    </Svg>
+  );
+}
+
+/** Close (X) — dismisses the mobile nav drawer. */
+export function CloseIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </Svg>
+  );
+}
+
 /** Nav-icon registry — keyed by the `icon` id on a nav item (see app/nav.ts). */
 export const NAV_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   today: TodayIcon,

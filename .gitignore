@@ -31,6 +31,10 @@ logs/
 # Playwright e2e artifacts
 e2e/.artifacts/
 
+# Playwright MCP scratch — screenshots + page-*.yml snapshots. Both MCP servers
+# are pinned to this dir via --output-dir (.mcp.json / settings). See CLAUDE.md.
+.playwright-mcp/
+
 # OS cruft
 .DS_Store
 Thumbs.db

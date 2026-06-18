@@ -43,6 +43,14 @@ harness before claiming the work is done** — and add/extend a spec for new beh
   `Chromium distribution 'chrome' is not found`, a one-time **Administrator**
   `npx playwright install chrome` fixes it (see [e2e/README.md](../e2e/README.md)
   → Setup). The suite and `--headed`/`--ui` runs need no admin.
+- **MCP artifacts go in `.playwright-mcp/` (gitignored).** Screenshots and page
+  snapshots from BOTH Playwright MCP servers are pinned to that dir: the project
+  server via `--output-dir` in [.mcp.json](../.mcp.json), and the plugin server
+  via `PLAYWRIGHT_MCP_OUTPUT_DIR` in [settings.json](settings.json) `env` (which
+  Claude Code passes to every spawned MCP). A bare `filename` on
+  `browser_take_screenshot` resolves *into* that dir — so the repo root stays
+  clean and real images can still live at the root. Don't pass an absolute path
+  or a `../`-escaping name unless you mean to write outside it.
 
 Full workflow, modes, and how to add tests: **[e2e/README.md](../e2e/README.md)**.
 

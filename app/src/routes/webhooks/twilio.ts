@@ -78,7 +78,7 @@ function asParams(body: unknown): WebhookParams {
 /**
  * Conversation typing is as honest as contact typing (operator mandate,
  * 2026-06-12): only a RESOLVED contact type yields a typed thread. No contact
- * yet, or a contact whose type is 'unknown'/'pm'/'team_member', is
+ * yet, or a contact whose type is 'unknown'/'team_member', is
  * `unknown_1to1` — never a guess.
  *
  * When the team sets a contact's real type, the conversation-type propagation

@@ -6,11 +6,12 @@
 // the contact detail page) in the new design language (tokens + CSS Modules).
 // Not the final visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import type { Contact } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
+import { ContactCreateForm } from '../contact/ContactCreateForm.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
 
@@ -65,6 +66,8 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
 export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   const { status, contacts } = useContacts(filter);
   const [query, setQuery] = useState('');
+  const [createOpen, setCreateOpen] = useState(false);
+  const navigate = useNavigate();
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -74,9 +77,24 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
 
   const heading = HEADING[filter];
 
+  function handleCreated(c: Contact): void {
+    setCreateOpen(false);
+    void navigate('/contacts/' + c.contactId);
+  }
+
+  function handleOpenExisting(id: string): void {
+    setCreateOpen(false);
+    void navigate('/contacts/' + id);
+  }
+
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>{heading}</h1>
+      <div className={styles.header}>
+        <h1 className={styles.title}>{heading}</h1>
+        <Button variant="primary" size="sm" type="button" onClick={() => setCreateOpen(true)}>
+          New contact
+        </Button>
+      </div>
       <p className={styles.sub}>
         Showing the first page of records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
       </p>
@@ -121,6 +139,15 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         ) : (
           <p className={styles.noMatches}>No matches for &ldquo;{query.trim()}&rdquo;.</p>
         )
+      ) : null}
+
+      {createOpen ? (
+        <ContactCreateForm
+          candidates={contacts}
+          onClose={() => setCreateOpen(false)}
+          onCreated={handleCreated}
+          onOpenExisting={handleOpenExisting}
+        />
       ) : null}
     </div>
   );

@@ -1,4 +1,5 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Contact, Relationship } from '../../api/index.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
@@ -98,6 +99,77 @@ describe('RelationshipsEditor', () => {
     const values = Array.from(datalist?.querySelectorAll('option') ?? []).map((o) => o.value);
     expect(values).toContain('Spouse');
     expect(values).toContain('Employer');
+  });
+
+  // Fix 2: stable per-row keys — ContactSearchField internal state (activeIndex /
+  // dropdown) must survive a MIDDLE removal and stay with the correct row.
+  //
+  // Setup: 3 rows [R0, R1, R2].  Open the suggestion dropdown in R2's
+  // ContactSearchField by typing "Ali" (matches Alice Smith) then pressing
+  // ArrowDown to move activeIndex to 0.  Remove R0.  After the re-render:
+  //   • R1 is now at position 0, R2 is now at position 1.
+  //   • R2's ContactSearchField MUST still have its dropdown open (the option
+  //     "Alice Smith" visible) and aria-activedescendant pointing at index 0.
+  //   With <li key={i}> React recycles the instance at position 1 from the OLD
+  //   R1 slot — that instance had activeIndex=-1, so the dropdown is gone.
+  //   With stable keys the R2 instance is preserved at its new position.
+  it('ContactSearchField internal dropdown state survives a middle-row removal (stable keys)', () => {
+    const R0: Relationship = { role: 'Sibling', name: 'Bob Jones', contactId: 'c2' };
+    const R1: Relationship = { role: 'Employer', name: 'Charlie', contactId: 'c3' };
+    const R2: Relationship = { role: 'Friend', name: '' };
+
+    const EXTRA_CANDIDATES: Contact[] = [
+      ...CANDIDATES,
+      { contactId: 'c3', type: 'tenant', firstName: 'Charlie', lastName: 'Brown', phone: '+14040100003' },
+    ];
+
+    // Stateful wrapper so the controlled component fully re-renders after remove.
+    function Wrapper(): React.JSX.Element {
+      const [rows, setRows] = useState<Relationship[]>([R0, R1, R2]);
+      return (
+        <RelationshipsEditor
+          rows={rows}
+          onChange={setRows}
+          candidates={EXTRA_CANDIDATES}
+          roleSuggestions={['Sibling', 'Employer', 'Friend']}
+        />
+      );
+    }
+
+    render(<Wrapper />);
+
+    // Type "Ali" in row 3's contact-search to open the dropdown
+    const row3Search = screen.getByLabelText('Contact search 3');
+    act(() => {
+      fireEvent.change(row3Search, { target: { value: 'Ali' } });
+    });
+
+    // The dropdown for row 3 should be visible with Alice Smith
+    expect(screen.getByRole('option', { name: /Alice Smith/i })).toBeInTheDocument();
+
+    // Press ArrowDown to set activeIndex=0 on that ContactSearchField instance
+    act(() => {
+      fireEvent.keyDown(row3Search, { key: 'ArrowDown' });
+    });
+
+    // Confirm aria-selected is set on Alice Smith (activeIndex=0 → aria-selected=true)
+    const aliceOption = screen.getByRole('option', { name: /Alice Smith/i });
+    expect(aliceOption).toHaveAttribute('aria-selected', 'true');
+
+    // Remove row 1 — rows become [R1, R2]; R2 shifts to position 2→1 in the list.
+    const removeRow1Btn = screen.getByRole('button', { name: 'Remove relationship 1' });
+    act(() => {
+      fireEvent.click(removeRow1Btn);
+    });
+
+    // After removal: row at position 2 (now position 1) was R2 — its dropdown
+    // should still be open (same instance → same internal state)
+    // The "Alice Smith" option must STILL be visible in the list
+    expect(screen.getByRole('option', { name: /Alice Smith/i })).toBeInTheDocument();
+
+    // And its activeIndex should still be 0 (aria-selected=true on Alice Smith)
+    const aliceOptionAfter = screen.getByRole('option', { name: /Alice Smith/i });
+    expect(aliceOptionAfter).toHaveAttribute('aria-selected', 'true');
   });
 
   // Fix 4: free-typing after a pick must drop the contactId key entirely

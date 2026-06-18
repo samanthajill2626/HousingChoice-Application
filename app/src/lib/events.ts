@@ -108,6 +108,7 @@ export function toConversationUpdatedEvent(item: ConversationItem): Conversation
  * @deprecated FIX 4 — kept as a thin alias so existing relay emit sites keep
  * compiling; the relay fields now live in toConversationUpdatedEvent itself.
  * Prefer toConversationUpdatedEvent at new call sites.
+ * Removal tracked: docs/issues/remove-dead-relay-roster-alias.md (now zero callers).
  */
 export function toRelayRosterEvent(item: ConversationItem): ConversationUpdatedEvent {
   return toConversationUpdatedEvent(item);

@@ -236,7 +236,8 @@ export interface MessageItem {
    */
   media_attachments?: MediaAttachment[];
   /** @deprecated Legacy parallel key array (pre-`media_attachments`). Read via
-   *  `mediaAttachmentsOf()`, which folds it into the new shape as octet-stream. */
+   *  `mediaAttachmentsOf()`, which folds it into the new shape as octet-stream.
+   *  Removal tracked: docs/issues/remove-media-s3-keys-legacy.md (gated on data migration). */
   media_s3_keys?: string[];
   /** Set on a 30003 retry send: the tsMsgId of the message being retried. */
   retry_of?: string;

@@ -364,6 +364,20 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(audit?.payload?.['fields']).toEqual(expect.arrayContaining(['role', 'relationships', 'customFields']));
   });
 
+  it('clears a role via PATCH {role:""} — the attribute is REMOVED, not stored as ""', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-role', type: 'tenant', status: 'active', phone: '+15550107777', role: 'Case worker' });
+    const res = await request(app).patch('/api/contacts/c-role')
+      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
+      .send({ role: '' });
+    expect(res.status).toBe(200);
+    // The role attribute must be REMOVED, not stored as an empty string.
+    expect('role' in res.body.contact).toBe(false);
+    // changedFields still includes 'role' (the clear is a change).
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated' && e.entityKey === 'contacts#c-role');
+    expect(audit?.payload?.['fields']).toEqual(expect.arrayContaining(['role']));
+  });
+
   it('400s an invalid customField on edit', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({ contactId: 'c-cw', type: 'tenant', status: 'active', phone: '+15550104445' });

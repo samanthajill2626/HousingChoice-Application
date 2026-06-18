@@ -660,7 +660,9 @@ export function createFakeWorld(): FakeWorld {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
       for (const [key, value] of Object.entries(patch)) {
-        if (value !== undefined) contact[key] = value;
+        if (value === undefined) continue;
+        if (value === null) delete contact[key]; // null → REMOVE the attribute
+        else contact[key] = value;
       }
       return contact;
     },

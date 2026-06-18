@@ -143,6 +143,9 @@ function MessageBubble({
       className={`${styles.bubble} ${outbound ? styles.out : styles.in} ${revealed ? styles.revealed ?? '' : ''}`}
       onClick={toggleMeta}
     >
+      {/* Hover hint only (absolutely positioned → no bubble resize); a click
+          reveals the full SMS·number·time below. */}
+      <span className={styles.metaHint} aria-hidden="true">⌄</span>
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
       {attachments.length > 0 ? (
         <div className={styles.media}>

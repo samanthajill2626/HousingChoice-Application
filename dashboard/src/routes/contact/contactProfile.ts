@@ -1,7 +1,10 @@
 // contactProfile.ts — shared display helpers for contact type labels and the
 // role-vs-type badge rule. Single source of truth for the type label map,
 // imported by ContactsList (list badges) and ContactDetail (header pill).
-import type { Contact, ContactType } from '../../api/index.js';
+// Also exports normalizeRelationships / normalizeCustomFields: pure helpers
+// that strip invalid rows before submitting to the API. Both the Create and
+// Edit forms use these to avoid drifting from each other or the backend rules.
+import type { Contact, ContactType, Relationship, CustomField } from '../../api/index.js';
 
 /** A human label for a contact's type badge. `pm` reads as "Property mgr".
  *  VERBATIM from the original TYPE_LABEL in ContactsList — do not change values. */
@@ -23,4 +26,31 @@ export function displayKind(
   typeLabel: (t: ContactType) => string,
 ): string {
   return contact.role?.trim() || typeLabel(contact.type);
+}
+
+/**
+ * Filters relationship rows to keep only those where BOTH `role` AND `name`
+ * are non-empty after trim. For each kept row, `contactId` is included only
+ * when it is a non-empty string — the key is omitted entirely otherwise.
+ * Matches the backend's accept rules so the FE never sends rows the API would
+ * 400/drop.
+ */
+export function normalizeRelationships(rows: Relationship[]): Relationship[] {
+  return rows
+    .filter((r) => r.role.trim() !== '' && r.name.trim() !== '')
+    .map((r) => {
+      const row: Relationship = { role: r.role, name: r.name };
+      if (r.contactId) row.contactId = r.contactId;
+      return row;
+    });
+}
+
+/**
+ * Filters custom-field rows to drop those whose `label` is empty after trim.
+ * The `value` is kept as-is (no trimming — whitespace may be intentional).
+ * Matches the backend's accept rules so the FE never sends rows the API would
+ * 400/drop.
+ */
+export function normalizeCustomFields(rows: CustomField[]): CustomField[] {
+  return rows.filter((f) => f.label.trim() !== '');
 }

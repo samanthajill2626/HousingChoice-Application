@@ -16,6 +16,7 @@ import { KindPicker, type KindPickerValue } from './KindPicker.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
+import { normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
 import { Modal } from './Modal.js';
 import styles from './ContactCreateForm.module.css';
 
@@ -105,21 +106,13 @@ export function ContactCreateForm({
       body['company'] = company.trim();
     }
 
-    // Filter relationships: keep only rows where BOTH role and name are non-empty.
-    const validRelationships = relationships
-      .filter((r) => r.role.trim() !== '' && r.name.trim() !== '')
-      .map((r) => {
-        const row: Relationship = { role: r.role.trim(), name: r.name.trim() };
-        if (r.contactId) row.contactId = r.contactId;
-        return row;
-      });
-
+    // Filter relationships and custom fields via shared helpers (matches backend accept rules).
+    const validRelationships = normalizeRelationships(relationships);
     if (validRelationships.length > 0) {
       body['relationships'] = validRelationships;
     }
 
-    // Filter custom fields: drop rows with empty label.
-    const validCustomFields = customFields.filter((f) => f.label.trim() !== '');
+    const validCustomFields = normalizeCustomFields(customFields);
     if (validCustomFields.length > 0) {
       body['customFields'] = validCustomFields;
     }

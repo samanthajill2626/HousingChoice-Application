@@ -44,6 +44,7 @@ import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
+import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
 import { type CasesRepo } from '../repos/casesRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
@@ -123,6 +124,8 @@ export interface ApiRouterDeps {
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
   settingsRepo?: SettingsRepo;
+  /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
+  contactVocabularyRepo?: ContactVocabularyRepo;
   usersRepo?: UsersRepo;
   pushService?: PushService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
@@ -281,6 +284,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       activityEventsRepo: activityEvents,
       // BE4: serve GET /:id/listings-sent.
       listingSendsRepo: listingSends,
+      // Task 4: vocabulary auto-suggest.
+      ...(deps.contactVocabularyRepo !== undefined && { vocabularyRepo: deps.contactVocabularyRepo }),
       events,
     }),
   );

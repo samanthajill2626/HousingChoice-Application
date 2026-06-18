@@ -65,6 +65,10 @@ import {
   type ListingSendsRepo,
 } from '../../src/repos/listingSendsRepo.js';
 import {
+  type ContactVocabulary,
+  type ContactVocabularyRepo,
+} from '../../src/repos/contactVocabularyRepo.js';
+import {
   type BroadcastItem,
   type BroadcastsRepo,
   type BroadcastStats,
@@ -164,6 +168,10 @@ export interface FakeWorld {
   /** In-memory org-settings (M1.4); starts at DEFAULT_ORG_SETTINGS. */
   settings: OrgSettings;
   settingsRepo: SettingsRepo;
+  /** Every add() call made on the vocabulary repo (Task 4), in order. */
+  vocabularyAdds: Partial<Record<'roles' | 'relationshipRoles' | 'fieldLabels', string[]>>[];
+  /** Fake vocabulary repo (Task 4): in-memory union of all add() tokens. */
+  vocabularyRepo: ContactVocabularyRepo;
   /** Every pushService.sendToUser call (M1.9b pre-ring/missed-call pushes), in order. */
   pushSends: { userId: string; notification: PushNotification }[];
   /** Fake push service the voice router uses — records sends into pushSends. */
@@ -752,6 +760,33 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // Fake vocabulary repo (Task 4): accumulates tokens in three in-memory Sets;
+  // add() records each call onto vocabularyAdds for test assertions.
+  const vocabularyAdds: FakeWorld['vocabularyAdds'] = [];
+  const vocabSets: Record<'roles' | 'relationshipRoles' | 'fieldLabels', Set<string>> = {
+    roles: new Set(),
+    relationshipRoles: new Set(),
+    fieldLabels: new Set(),
+  };
+  const vocabularyRepo: ContactVocabularyRepo = {
+    async add(tokens) {
+      vocabularyAdds.push(tokens);
+      for (const group of ['roles', 'relationshipRoles', 'fieldLabels'] as const) {
+        const arr = tokens[group];
+        if (Array.isArray(arr)) {
+          for (const t of arr) if (typeof t === 'string' && t.length > 0) vocabSets[group].add(t);
+        }
+      }
+    },
+    async get(): Promise<ContactVocabulary> {
+      return {
+        roles: [...vocabSets.roles].sort(),
+        relationshipRoles: [...vocabSets.relationshipRoles].sort(),
+        fieldLabels: [...vocabSets.fieldLabels].sort(),
+      };
+    },
+  };
+
   // Fake push service (M1.9b): records every sendToUser so tests can assert the
   // pre-ring / missed-call pushes (kind + payload — and that NO raw phone leaks
   // into them). Returns a "configured, 1 sent" tally; never touches the network.
@@ -1337,6 +1372,8 @@ export function createFakeWorld(): FakeWorld {
     broadcastsRepo,
     settings,
     settingsRepo,
+    vocabularyAdds,
+    vocabularyRepo,
     pushSends,
     pushService,
     adapter,
@@ -1423,6 +1460,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       auditRepo: world.auditRepo,
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
+      contactVocabularyRepo: world.vocabularyRepo,
       unitsRepo: world.unitsRepo,
       casesRepo: world.casesRepo,
       activityEventsRepo: world.activityEventsRepo,

@@ -7,9 +7,10 @@
 // Not the final visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Contact, ContactType } from '../../api/index.js';
+import type { Contact } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
+import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
 
@@ -23,15 +24,6 @@ const HEADING: Record<ContactsFilter, string> = {
   all: 'Contacts',
   tenant: 'Tenants',
   landlord: 'Landlords',
-  unknown: 'Unknown',
-};
-
-/** A human label for a contact's type badge. `pm` reads as "Property mgr". */
-const TYPE_LABEL: Record<ContactType, string> = {
-  tenant: 'Tenant',
-  landlord: 'Landlord',
-  pm: 'Property mgr',
-  team_member: 'Team',
   unknown: 'Unknown',
 };
 
@@ -62,7 +54,7 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
     <li className={styles.rowItem}>
       <Link to={`/contacts/${contact.contactId}`} className={styles.row}>
         <span className={styles.name}>{name}</span>
-        <span className={styles.badge}>{TYPE_LABEL[contact.type]}</span>
+        <span className={styles.badge}>{displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])}</span>
         <span className={styles.phone}>{phone}</span>
         {status ? <span className={styles.status}>{status}</span> : null}
       </Link>

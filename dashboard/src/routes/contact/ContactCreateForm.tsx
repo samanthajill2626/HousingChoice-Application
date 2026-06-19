@@ -119,6 +119,7 @@ export function ContactCreateForm({
 
     try {
       const contact = await createContact(body as unknown as Parameters<typeof createContact>[0]);
+      setBusy(false);
       onCreated(contact);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {

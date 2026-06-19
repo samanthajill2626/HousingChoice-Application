@@ -8,14 +8,22 @@ import { test, expect, type Page } from '@playwright/test';
 // absolute URL since the suite baseURL is :5173.
 const NEXT = 'http://localhost:5174';
 
-async function devLogin(page: Page): Promise<void> {
+// Log in as the seeded VA, then reset the seeded placement (case-0001) back to
+// `awaiting_inspection` via an AUTHENTICATED request (session-safe, targeted) so
+// the seeded card is in the Inspection column for the "Open" link below —
+// /__dev/reseed would wipe users/sessions and break auth after frame.spec.
+async function devLoginAndReset(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  const res = await page.request.post(`${NEXT}/api/cases/case-0001/transition`, {
+    data: { toStage: 'awaiting_inspection', source: 'manual' },
+  });
+  expect(res.ok()).toBeTruthy();
 }
 
 test('Case detail: shows placement facts + history, and a transition adds a row', async ({ page }) => {
-  await devLogin(page);
+  await devLoginAndReset(page);
 
   // Open the seeded placement from its board card.
   await page.goto(`${NEXT}/cases`);

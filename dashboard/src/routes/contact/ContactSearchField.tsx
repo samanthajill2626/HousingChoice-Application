@@ -46,13 +46,15 @@ export function ContactSearchField({
 }: ContactSearchFieldProps): React.JSX.Element {
   // Fix 3: keyboard navigation state
   const [activeIndex, setActiveIndex] = useState<number>(-1);
+  // Fix 4 (a11y): dismissed flag — Escape collapses the popup; typing clears it
+  const [dismissed, setDismissed] = useState(false);
 
   // Fix 5: stable, instance-unique ids
   const uid = useId();
   const listboxId = `${uid}-listbox`;
 
   const matches = filterCandidates(candidates, value.name);
-  const isListShown = matches.length > 0;
+  const isListShown = !dismissed && matches.length > 0;
 
   // Build a stable option id for aria-activedescendant
   const activeOptionId =
@@ -63,6 +65,7 @@ export function ContactSearchField({
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>): void {
     // Free typing — always clear any prior contactId link; reset keyboard selection
     setActiveIndex(-1);
+    setDismissed(false);
     onChange({ name: e.target.value });
   }
 
@@ -90,15 +93,8 @@ export function ContactSearchField({
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      setDismissed(true);
       setActiveIndex(-1);
-      // Close the list by clearing the name so no matches show,
-      // but keep the current typed text visible — we do this by firing onChange
-      // with the current name, which keeps the value but naturally the list
-      // closes because the parent controls the value. We just reset activeIndex.
-      // (The list visibility is derived from matches; it won't close unless we
-      // change the name. Escape should hide the dropdown — emit a synthetic blur
-      // by clearing the match state. The cleanest approach is to use a local
-      // "dismissed" flag rather than mutating the controlled value.)
     }
   }
 

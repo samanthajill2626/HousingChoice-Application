@@ -3,11 +3,30 @@ id: frontend-status-model-migration
 title: Dashboard frontend still uses the OLD status-model enums — migrate in lockstep
 type: bug
 severity: high
-status: open
+status: resolved
 area: dashboard
 created: 2026-06-19
+resolved: 2026-06-19
 refs: dashboard/src/api/types.ts, dashboard/src/routes/listings/ListingsList.tsx
 ---
+
+**Resolution (2026-06-19).** The dashboard frontend was migrated in lockstep on the
+same branch (`feat/status-model-be-foundation`): F1 (commit 645a410) migrated
+`types.ts` to mirror the backend model (PLACEMENT_STAGES/PHASES + labels,
+LISTING_STATUSES, TENANT_STATUSES, LostReason `{category,text}`,
+TRANSITION_SOURCES, INSPECTION_OUTCOMES), added the transition endpoints
+(`transitionPlacement`/`setTenantStatus`/`setListingStatus`/`getPlacementHistory`),
+made the listing + contact status pickers type-aware (writing through the
+transition routes, never the plain PATCH), and rendered `lost_reason` as an object;
+F2 (commit 5b553b7) added the placement board at `/cases` (@dnd-kit drag→transition),
+the lost-reason modal, case detail + history, and finalRent/inspection-outcome
+prompts. Tenant lifecycle lives on the single `contact.status` (no `tenant_status`).
+Verified: dashboard typecheck + eslint clean, 459 component tests, and the full
+Playwright e2e suite **21/21** (incl. board render, drag-move transition+persist,
+lost-modal gating, case detail+history) in a fresh hermetic run (commit 60b30ee).
+Backend + frontend are now consistent and can merge together. (Also folded in on
+this branch: backend F0 (commit d6efb1c) added `inspection_outcome` and removed the
+RTA-in-hand app gate per product decision.) — the merge gate is cleared.
 
 **Problem.** The backend now uses the new placement-status vocabulary
 (STATUS-MODEL.md §4–§7): the new placement stage ladder, the widened

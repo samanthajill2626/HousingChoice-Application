@@ -82,7 +82,7 @@ export function useContactFile(contactId: string): ContactFileState {
         // exist today. The C4/C5 slices degrade independently.
         const [cases, units, listingsSent, media] = await Promise.all([
           getCases(signal),
-          getUnits(signal),
+          getUnits({}, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
           // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
           // now derives from the live timeline; this fetch can be removed.

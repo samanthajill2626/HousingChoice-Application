@@ -67,6 +67,32 @@ describe('useContacts', () => {
     expect(screen.getByTestId('count')).toHaveTextContent('3');
   });
 
+  it('fans out across audience types with deleted=true for the deleted filter', async () => {
+    getContacts.mockImplementation((params: { type: ContactType; deleted?: boolean }) =>
+      Promise.resolve(page({ contactId: params.type, type: params.type })),
+    );
+    render(<Probe filter="deleted" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(getContacts).toHaveBeenCalledTimes(3);
+    // Every fan-out call asks for ONLY soft-deleted records.
+    for (const call of getContacts.mock.calls) {
+      expect((call[0] as { deleted?: boolean }).deleted).toBe(true);
+    }
+    const types = getContacts.mock.calls.map((c) => (c[0] as { type: ContactType }).type).sort();
+    expect(types).toEqual(['landlord', 'tenant', 'unknown']);
+  });
+
+  it('does NOT request deleted records for the normal (all) filter', async () => {
+    getContacts.mockImplementation((params: { type: ContactType }) =>
+      Promise.resolve(page({ contactId: params.type, type: params.type })),
+    );
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    for (const call of getContacts.mock.calls) {
+      expect((call[0] as { deleted?: boolean }).deleted).toBe(false);
+    }
+  });
+
   it('goes to the error state when a fetch fails', async () => {
     getContacts.mockRejectedValue(new Error('boom'));
     render(<Probe filter="tenant" />);

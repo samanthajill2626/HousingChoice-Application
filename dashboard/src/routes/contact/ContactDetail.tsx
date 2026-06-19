@@ -17,9 +17,11 @@
 // (primary / picker) and whether a conversation is sendable, else Send is disabled.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
 import { useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
+  deleteContact,
+  restoreContact,
   retryMessage,
   sendMessage,
   setContactOptOut,
@@ -27,7 +29,8 @@ import {
   type ContactType,
   type TimelineMessage,
 } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
+import { Modal } from './Modal.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
@@ -56,11 +59,16 @@ type Pane = 'comms' | 'profile';
 
 export function ContactDetail(): React.JSX.Element {
   const { contactId = '' } = useParams<{ contactId: string }>();
+  const navigate = useNavigate();
   const [pane, setPane] = useState<Pane>('comms');
   const [editing, setEditing] = useState(false);
   const [managingPhones, setManagingPhones] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  // The confirm-before-delete dialog (deleting navigates away, so we gate it).
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Which number's thread the reply box sends into (null = use the default). Set
   // by the reply-target picker for multi-number contacts.
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
@@ -204,6 +212,36 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // Soft-delete (reversible). Deleting is confirmed first, then the contact drops
+  // out of the normal views — so on success we navigate back to the Contacts list
+  // (it can be restored from the Deleted tab). Restore stays on the page and
+  // applies the returned contact in place so the Deleted banner clears.
+  const deleted = typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
+  const onConfirmDelete = (): void => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    void deleteContact(contact.contactId)
+      .then(() => {
+        setConfirmingDelete(false);
+        void navigate('/contacts');
+      })
+      .catch(() => {
+        setDeleteError("Couldn't delete — please try again.");
+        setDeleteBusy(false);
+      });
+  };
+  const onRestore = (): void => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    void restoreContact(contact.contactId)
+      .then((updated) => setContact(updated))
+      .catch(() => {
+        /* leave it deleted; the action re-enables for a retry */
+      })
+      .finally(() => setDeleteBusy(false));
+  };
+
   // Header facts subline: voucher / authority for tenants, company / listing
   // count for landlords, plus the number count + status.
   const facts = buildFacts();
@@ -216,6 +254,7 @@ export function ContactDetail(): React.JSX.Element {
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
             <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
+            {deleted ? <span className={styles.deletedBadge}>🗑 Deleted</span> : null}
             {optedOut ? (
               <span className={styles.doNotContact}>⛔ Do Not Contact</span>
             ) : null}
@@ -223,15 +262,41 @@ export function ContactDetail(): React.JSX.Element {
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
         <div className={styles.actions}>
+          {deleted ? (
+            <button
+              type="button"
+              className={styles.callBtn}
+              disabled={deleteBusy}
+              onClick={onRestore}
+            >
+              Restore
+            </button>
+          ) : null}
           <CallMenu phones={phones} {...(target !== undefined && { defaultPhone: target })} triggerClassName={styles.callBtn} />
           <ContactActionsMenu
             onEdit={() => setEditing(true)}
             optedOut={optedOut}
             onToggleOptOut={onToggleOptOut}
             optOutBusy={optOutBusy}
+            deleted={deleted}
+            onDelete={() => setConfirmingDelete(true)}
+            onRestore={onRestore}
+            deleteBusy={deleteBusy}
           />
         </div>
       </header>
+
+      {deleted ? (
+        <div className={styles.deletedBanner} role="status">
+          <span>
+            This contact is <strong>deleted</strong> — hidden from the contact lists,
+            inbox, and today. Its data is retained.
+          </span>
+          <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
+            Restore
+          </Button>
+        </div>
+      ) : null}
 
       {/* Narrow-width segmented toggle (hidden on wide via CSS). */}
       <div className={styles.segMobile} role="group" aria-label="View">
@@ -351,6 +416,44 @@ export function ContactDetail(): React.JSX.Element {
           onClose={() => setManagingPhones(false)}
           onChanged={(updated) => setContact(updated)}
         />
+      ) : null}
+
+      {confirmingDelete ? (
+        <Modal
+          title="Delete contact?"
+          onClose={() => {
+            if (!deleteBusy) {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }
+          }}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleteBusy}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" type="button" onClick={onConfirmDelete} disabled={deleteBusy}>
+                {deleteBusy ? 'Deleting…' : 'Delete'}
+              </Button>
+            </>
+          }
+        >
+          <p>
+            <strong>{name}</strong> will be hidden from the contact lists, inbox, and today.
+            Nothing is erased — you can restore them from the Contacts <em>Deleted</em> view.
+          </p>
+          {deleteError !== null ? (
+            <p role="alert" className={styles.error}>
+              {deleteError}
+            </p>
+          ) : null}
+        </Modal>
       ) : null}
     </div>
   );

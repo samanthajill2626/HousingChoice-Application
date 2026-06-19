@@ -66,6 +66,14 @@ export interface ContactItem {
   phones?: ContactPhone[];
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /**
+   * Soft-delete marker (ISO 8601). PRESENT → the contact is "deleted": hidden
+   * from the normal lists, inbox, today, and broadcast targeting, but the record
+   * and ALL its data are retained so it can be restored (clear the stamp). Phone
+   * routing (findByPhone) deliberately ignores it, so an inbound from a deleted
+   * contact's number still maps to their record rather than spawning a duplicate.
+   */
+  deleted_at?: string;
   /** How the record came to exist (M1.2 auto-capture: 'inbound_sms'). */
   capture_source?: string;
   /** When auto-capture created the stub (ISO 8601). */
@@ -81,6 +89,15 @@ export interface ContactItem {
   phone_ref?: boolean;
   phone_ref_owner?: string;
   [key: string]: unknown;
+}
+
+/**
+ * A contact is soft-deleted when it carries a non-empty `deleted_at` stamp.
+ * Shared by the repo (query filters) and the inbox/today routes (hydration
+ * filters) so "deleted" is defined in exactly one place.
+ */
+export function isDeleted(contact: Pick<ContactItem, 'deleted_at'>): boolean {
+  return typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
 }
 
 /** contactId prefix for a phone-pointer item: `phoneref#<E.164>`. */
@@ -127,6 +144,12 @@ export interface ListContactsOpts {
   status?: string;
   limit?: number;
   exclusiveStartKey?: Record<string, unknown>;
+  /**
+   * Soft-delete scope. Omitted/false → exclude deleted contacts (the default for
+   * every normal list). true → return ONLY soft-deleted contacts (the Contacts
+   * "Deleted" view). Applied as a FilterExpression on `deleted_at`.
+   */
+  deleted?: boolean;
 }
 
 export interface ContactsRepo {
@@ -168,6 +191,14 @@ export interface ContactsRepo {
   setFlag(contactId: string, flag: ContactFlag): Promise<void>;
   /** Clear a flag (START/UNSTOP re-subscribes after a STOP, doc §7.1). */
   clearFlag(contactId: string, flag: ContactFlag): Promise<void>;
+  /**
+   * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the contact is hidden from
+   * lists/inbox/today/broadcasts while every field is retained. ConditionExpression
+   * guards existence (route → 404). Returns the post-update item (ALL_NEW).
+   */
+  softDelete(contactId: string, at: string): Promise<ContactItem>;
+  /** Restore a soft-deleted contact: REMOVE `deleted_at`. ALL_NEW; 404-guarded. */
+  restore(contactId: string): Promise<ContactItem>;
   /**
    * Merge-update a contact (M1.4 triage). Only the supplied fields are
    * written (a SET update, never a full Put) — an absent field is LEFT as
@@ -356,10 +387,17 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         values[':s'] = opts.status;
         keyExpr += ' AND #s = :s';
       }
+      // Soft-delete scope (FilterExpression — byTypeStatus projects ALL attrs, so
+      // deleted_at is filterable). Default HIDES deleted; deleted:true shows ONLY
+      // deleted (the Contacts "Deleted" view).
+      names['#del'] = 'deleted_at';
+      const deletedFilter =
+        opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)';
       const input: QueryCommandInput = {
         TableName: table,
         IndexName: 'byTypeStatus',
         KeyConditionExpression: keyExpr,
+        FilterExpression: deletedFilter,
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
         ...(opts.limit !== undefined && { Limit: opts.limit }),
@@ -383,6 +421,10 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         TableName: table,
         IndexName: 'byHousingAuthority',
         KeyConditionExpression: 'housingAuthority = :ha',
+        // Broadcast targeting must never reach a soft-deleted contact — always
+        // exclude them here (no "deleted" view on this index).
+        FilterExpression: 'attribute_not_exists(#del)',
+        ExpressionAttributeNames: { '#del': 'deleted_at' },
         ExpressionAttributeValues: { ':ha': housingAuthority },
         ...(opts.limit !== undefined && { Limit: opts.limit }),
         ...(opts.exclusiveStartKey !== undefined && {
@@ -461,6 +503,37 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         }),
       );
       log.info({ contactId, flag }, 'contact flag cleared');
+    },
+
+    async softDelete(contactId, at) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { contactId },
+          UpdateExpression: 'SET #del = :at',
+          ConditionExpression: 'attribute_exists(contactId)',
+          ExpressionAttributeNames: { '#del': 'deleted_at' },
+          ExpressionAttributeValues: { ':at': at },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ contactId }, 'contact soft-deleted');
+      return Attributes as ContactItem;
+    },
+
+    async restore(contactId) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { contactId },
+          UpdateExpression: 'REMOVE #del',
+          ConditionExpression: 'attribute_exists(contactId)',
+          ExpressionAttributeNames: { '#del': 'deleted_at' },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ contactId }, 'contact restored');
+      return Attributes as ContactItem;
     },
 
     async update(contactId, patch) {

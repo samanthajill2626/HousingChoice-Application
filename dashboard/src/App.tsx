@@ -51,9 +51,11 @@ export default function App(): React.JSX.Element {
             <Route path="contacts/tenants" element={<ContactsList filter="tenant" />} />
             <Route path="contacts/landlords" element={<ContactsList filter="landlord" />} />
             <Route path="contacts/unknown" element={<ContactsList filter="unknown" />} />
+            <Route path="contacts/deleted" element={<ContactsList filter="deleted" />} />
 
             {/* Listings list view. Static — ranks above listings/:unitId. */}
             <Route path="listings" element={<ListingsList />} />
+            <Route path="listings/deleted" element={<ListingsList deleted />} />
 
             {/* Communications ▸ Inbox (replaces the generated placeholder). */}
             <Route path="inbox" element={<Inbox />} />

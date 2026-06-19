@@ -9,9 +9,9 @@
 import { useEffect, useState } from 'react';
 import { getContacts, type Contact, type ContactType } from '../../api/index.js';
 
-/** The route-driven filter. 'all' = the Contacts parent; the rest are the
- *  Tenants / Landlords / Unknown children. */
-export type ContactsFilter = 'all' | 'tenant' | 'landlord' | 'unknown';
+/** The route-driven filter. 'all' = the Contacts parent; tenant/landlord/unknown
+ *  are the audience children; 'deleted' is the soft-deleted ("Deleted") view. */
+export type ContactsFilter = 'all' | 'tenant' | 'landlord' | 'unknown' | 'deleted';
 
 export type ContactsStatus = 'loading' | 'ready' | 'error';
 
@@ -28,6 +28,9 @@ const TYPES_FOR: Record<ContactsFilter, ContactType[]> = {
   tenant: ['tenant'],
   landlord: ['landlord'],
   unknown: ['unknown'],
+  // The Deleted view fans out across the same audience types, asking for ONLY
+  // soft-deleted records (deleted=true below).
+  deleted: ['tenant', 'landlord', 'unknown'],
 };
 
 export function useContacts(filter: ContactsFilter): ContactsState {
@@ -48,8 +51,9 @@ export function useContacts(filter: ContactsFilter): ContactsState {
 
     (async () => {
       try {
+        const deleted = filter === 'deleted';
         const pages = await Promise.all(
-          TYPES_FOR[filter].map((type) => getContacts({ type }, signal)),
+          TYPES_FOR[filter].map((type) => getContacts({ type, deleted }, signal)),
         );
         if (signal.aborted) return;
         // Merge the per-type pages, de-duping on contactId (a contact only ever

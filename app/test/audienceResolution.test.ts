@@ -72,6 +72,12 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
     },
     async setFlag() {},
     async clearFlag() {},
+    async softDelete(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async restore(contactId) {
+      return { contactId, type: 'tenant' };
+    },
     async update(contactId) {
       return { contactId, type: 'tenant' };
     },

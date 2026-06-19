@@ -343,6 +343,9 @@ export interface Contact {
   notes?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /** Soft-delete marker (ISO 8601). Present → the contact is "deleted": hidden
+   *  from the normal lists/inbox/today but fully retained (restore clears it). */
+  deleted_at?: string;
   capture_source?: string;
   captured_at?: string;
   created_at?: string;
@@ -444,6 +447,9 @@ export interface UnitItem {
   /** Free-text "how to apply" copy (the listing page's process card). */
   application_process?: string;
   primary_voice_contact?: string;
+  /** Soft-delete marker (ISO 8601). Present → the listing is "deleted": hidden
+   *  from the listing lists + landlord card but fully retained (restore clears it). */
+  deleted_at?: string;
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;

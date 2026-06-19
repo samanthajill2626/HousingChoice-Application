@@ -127,6 +127,8 @@ function makeFakes(
     createIfAbsent: async () => true,
     setFlag: async () => {},
     clearFlag: async () => {},
+    softDelete: async () => contact!,
+    restore: async () => contact!,
     update: async () => contact!,
     addPhone: async () => contact!,
     setPhone: async () => contact!,

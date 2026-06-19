@@ -22,6 +22,38 @@
   color: var(--c-text-muted);
 }
 
+/* Active / Deleted view tabs (links to /listings and /listings/deleted) — mirrors
+ * the Contacts list filter tabs. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.tab {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+}
+
+.tabActive,
+.tabActive:hover {
+  background: var(--c-nav-bg);
+  border-color: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
 /* --- Filters (status dropdown + housing-authority multi-select) ----------- */
 
 .controls {

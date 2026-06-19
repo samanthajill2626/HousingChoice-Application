@@ -1,10 +1,22 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
 vi.mock('./useListing.js', () => ({ useListing: (id: string) => useListing(id) }));
+
+const deleteUnit = vi.fn();
+const restoreUnit = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    deleteUnit: (...a: unknown[]) => deleteUnit(...a),
+    restoreUnit: (...a: unknown[]) => restoreUnit(...a),
+  };
+});
 
 import { ListingDetail } from './ListingDetail.js';
 
@@ -149,5 +161,48 @@ describe('ListingDetail', () => {
     renderAt();
     // Still renders the page heading (unitId fallback) without throwing.
     expect(screen.getByRole('heading', { name: /u1/ })).toBeInTheDocument();
+  });
+
+  it('deleting confirms first, then DELETEs and navigates back to the Listings list', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    deleteUnit.mockResolvedValue({ ...READY.unit, deleted_at: '2026-06-19T00:00:00.000Z' });
+
+    render(
+      <MemoryRouter initialEntries={['/listings/u1']}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+          <Route path="/listings" element={<div>LISTINGS LIST</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete listing/i }));
+
+    // A confirm dialog appears — nothing deleted yet.
+    expect(screen.getByRole('dialog', { name: /Delete listing\?/i })).toBeInTheDocument();
+    expect(deleteUnit).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /^Delete$/i }));
+    expect(deleteUnit).toHaveBeenCalledWith('u1');
+    await screen.findByText('LISTINGS LIST');
+  });
+
+  it('shows the Deleted banner + Restore for a deleted listing and restores in place', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    restoreUnit.mockResolvedValue({ ...READY.unit }); // restored (no deleted_at)
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    expect(screen.getByRole('status')).toHaveTextContent(/deleted/i);
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+    await waitFor(() => expect(setUnit).toHaveBeenCalled());
   });
 });

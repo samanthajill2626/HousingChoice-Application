@@ -11,10 +11,14 @@
 // contact); the C4 "Sent to tenants" + C6 "Similar listings" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" (BE2) is
 // pending too. Nothing is fabricated.
-import { useParams } from 'react-router-dom';
-import { Spinner } from '../../ui/index.js';
+import { useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { deleteUnit, restoreUnit } from '../../api/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Modal } from '../contact/Modal.js';
 import { useListing } from './useListing.js';
+import { ListingActionsMenu } from './ListingActionsMenu.js';
 import {
   buildListingFacts,
   formatBedsBaths,
@@ -59,7 +63,11 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
 
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
+  const navigate = useNavigate();
   const state = useListing(unitId);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   if (state.status === 'loading') {
     return (
@@ -79,12 +87,42 @@ export function ListingDetail(): React.JSX.Element {
     );
   }
 
-  const { unit, roster, casesOnUnit, related, recipients, similar } = state;
+  const { unit, roster, casesOnUnit, related, recipients, similar, setUnit } = state;
   const address = shortAddress(unit.address, unit.unitId);
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   const programs = unit.accepted_programs ?? [];
   const media = unit.media ?? [];
+
+  // Soft-delete (reversible). Deleting is confirmed first, then the listing drops
+  // out of the normal views — so on success we navigate back to the Listings list
+  // (it can be restored from the Deleted tab). Restore stays on the page and
+  // applies the returned unit in place so the Deleted banner clears.
+  const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
+  const onConfirmDelete = (): void => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    void deleteUnit(unit.unitId)
+      .then(() => {
+        setConfirmingDelete(false);
+        void navigate('/listings');
+      })
+      .catch(() => {
+        setDeleteError("Couldn't delete — please try again.");
+        setDeleteBusy(false);
+      });
+  };
+  const onRestore = (): void => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    void restoreUnit(unit.unitId)
+      .then((updated) => setUnit(updated))
+      .catch(() => {
+        /* leave it deleted; the action re-enables for a retry */
+      })
+      .finally(() => setDeleteBusy(false));
+  };
 
   return (
     <div className={styles.page}>
@@ -95,21 +133,46 @@ export function ListingDetail(): React.JSX.Element {
             <span className={`${styles.badge} ${STATUS_BADGE[unit.status] ?? ''}`}>
               {statusLabel(unit.status)}
             </span>
+            {deleted ? <span className={styles.deletedBadge}>🗑 Deleted</span> : null}
           </h1>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
         <div className={styles.actions}>
-          <button type="button" className={styles.btn}>
-            📣 Broadcast to tenants
-          </button>
-          <button type="button" className={`${styles.btn} ${styles.btnAlt}`}>
-            ✎ Edit
-          </button>
-          <button type="button" className={styles.kebab} aria-label="More actions">
-            ⋯
-          </button>
+          {deleted ? (
+            <button type="button" className={`${styles.btn} ${styles.btnAlt}`} disabled={deleteBusy} onClick={onRestore}>
+              Restore
+            </button>
+          ) : (
+            <>
+              <button type="button" className={styles.btn}>
+                📣 Broadcast to tenants
+              </button>
+              <button type="button" className={`${styles.btn} ${styles.btnAlt}`}>
+                ✎ Edit
+              </button>
+            </>
+          )}
+          <ListingActionsMenu
+            triggerClassName={styles.kebab ?? ''}
+            deleted={deleted}
+            onDelete={() => setConfirmingDelete(true)}
+            onRestore={onRestore}
+            deleteBusy={deleteBusy}
+          />
         </div>
       </header>
+
+      {deleted ? (
+        <div className={styles.deletedBanner} role="status">
+          <span>
+            This listing is <strong>deleted</strong> — hidden from the listings and the
+            landlord&apos;s file. Its data is retained.
+          </span>
+          <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
+            Restore
+          </Button>
+        </div>
+      ) : null}
 
       <div className={styles.cols}>
         {/* LEFT column */}
@@ -328,6 +391,44 @@ export function ListingDetail(): React.JSX.Element {
           </p>
         ) : null}
       </section>
+
+      {confirmingDelete ? (
+        <Modal
+          title="Delete listing?"
+          onClose={() => {
+            if (!deleteBusy) {
+              setConfirmingDelete(false);
+              setDeleteError(null);
+            }
+          }}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleteBusy}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" type="button" onClick={onConfirmDelete} disabled={deleteBusy}>
+                {deleteBusy ? 'Deleting…' : 'Delete'}
+              </Button>
+            </>
+          }
+        >
+          <p>
+            <strong>{address}</strong> will be hidden from the listings and the landlord&apos;s
+            file. Nothing is erased — you can restore it from the Listings <em>Deleted</em> view.
+          </p>
+          {deleteError !== null ? (
+            <p role="alert" className={styles.error}>
+              {deleteError}
+            </p>
+          ) : null}
+        </Modal>
+      ) : null}
     </div>
   );
 }

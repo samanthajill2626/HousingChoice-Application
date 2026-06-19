@@ -118,9 +118,16 @@ export function retryMessage(
 
 /** GET /api/units — the unit records. The landlord file filters this by
  *  landlordId === contactId to show the landlord's own listings; the listing
- *  page reuses it for "Related listings" (same landlord). */
-export function getUnits(signal?: AbortSignal): Promise<UnitsPage> {
-  return request<UnitsPage>('/api/units', { ...(signal !== undefined && { signal }) });
+ *  page reuses it for "Related listings" (same landlord). `deleted: true` returns
+ *  ONLY soft-deleted listings (the Listings "Deleted" view); omitted = exclude them. */
+export function getUnits(
+  params: { deleted?: boolean } = {},
+  signal?: AbortSignal,
+): Promise<UnitsPage> {
+  return request<UnitsPage>('/api/units', {
+    ...(params.deleted === true && { query: { deleted: 'true' } }),
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/units/:id — a single unit record (the listing detail page header +
@@ -129,6 +136,26 @@ export async function getUnit(unitId: string, signal?: AbortSignal): Promise<Uni
   const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
     ...(signal !== undefined && { signal }),
   });
+  return res.unit;
+}
+
+/** DELETE /api/units/:id — SOFT-delete the listing (stamp deleted_at). The record
+ *  + all data are retained; it's hidden from the lists and can be restored.
+ *  Returns the updated (deleted) unit. */
+export async function deleteUnit(unitId: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
+    method: 'DELETE',
+  });
+  return res.unit;
+}
+
+/** POST /api/units/:id/restore — clear deleted_at, bringing a soft-deleted listing
+ *  back into the normal views. Returns the updated unit. */
+export async function restoreUnit(unitId: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/restore`,
+    { method: 'POST' },
+  );
   return res.unit;
 }
 
@@ -185,11 +212,16 @@ export async function getUnitSimilar(
  *  and merges. First page only (the server pages via nextCursor) — the list
  *  views note this transitional limitation. */
 export function getContacts(
-  params: { type?: ContactType; status?: string } = {},
+  params: { type?: ContactType; status?: string; deleted?: boolean } = {},
   signal?: AbortSignal,
 ): Promise<ContactsPage> {
   return request<ContactsPage>('/api/contacts', {
-    query: { type: params.type, status: params.status },
+    query: {
+      type: params.type,
+      status: params.status,
+      // ?deleted=true → the Deleted view (only soft-deleted); omit otherwise.
+      ...(params.deleted === true && { deleted: 'true' }),
+    },
     ...(signal !== undefined && { signal }),
   });
 }
@@ -321,6 +353,27 @@ export async function setContactOptOut(contactId: string, optOut: boolean): Prom
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}/opt-out`,
     { method: 'POST', body: { optOut } },
+  );
+  return res.contact;
+}
+
+/** DELETE /api/contacts/:id — SOFT-delete the contact (stamp deleted_at). The
+ *  record + all data are retained; it's hidden from lists/inbox/today and can be
+ *  restored. Returns the updated (deleted) contact. */
+export async function deleteContact(contactId: string): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' },
+  );
+  return res.contact;
+}
+
+/** POST /api/contacts/:id/restore — clear deleted_at, bringing a soft-deleted
+ *  contact back into the normal views. Returns the updated contact. */
+export async function restoreContact(contactId: string): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/restore`,
+    { method: 'POST' },
   );
   return res.contact;
 }

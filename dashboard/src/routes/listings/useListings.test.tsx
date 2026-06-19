@@ -14,8 +14,8 @@ vi.mock('../../api/index.js', async () => {
 
 import { useListings } from './useListings.js';
 
-function Probe(): React.JSX.Element {
-  const s = useListings();
+function Probe({ deleted }: { deleted?: boolean } = {}): React.JSX.Element {
+  const s = useListings(deleted);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
@@ -47,5 +47,19 @@ describe('useListings', () => {
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
     expect(screen.getByTestId('count')).toHaveTextContent('0');
+  });
+
+  it('requests only deleted listings in the deleted view', async () => {
+    getUnits.mockResolvedValue(UNITS);
+    render(<Probe deleted />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect((getUnits.mock.calls[0]?.[0] as { deleted?: boolean }).deleted).toBe(true);
+  });
+
+  it('does NOT request deleted listings in the normal view', async () => {
+    getUnits.mockResolvedValue(UNITS);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect((getUnits.mock.calls[0]?.[0] as { deleted?: boolean }).deleted).toBe(false);
   });
 });

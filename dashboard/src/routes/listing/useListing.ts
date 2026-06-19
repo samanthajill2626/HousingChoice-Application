@@ -8,7 +8,7 @@
 //   - related (C3): try the live endpoint; on 404 fall back to the derived
 //     same-landlord list (still 'ready' — it's real data, just our derivation).
 //   - recipients (C4) + similar (C6): degrade to 'pending' on 404.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   getCases,
@@ -88,7 +88,7 @@ async function loadLandlord(
   }
 }
 
-export function useListing(unitId: string): ListingState {
+export function useListing(unitId: string): ListingState & { setUnit: (unit: UnitItem) => void } {
   // `forId` records which unitId the committed state describes. On a unitId
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
@@ -114,7 +114,7 @@ export function useListing(unitId: string): ListingState {
           // same-landlord Related + cases-on-unit derivations — a transitional
           // limitation matching the project-wide pattern; BE3's /related and a
           // unit-scoped cases query supersede it.
-          getUnits(signal),
+          getUnits({}, signal),
           getCases(signal),
           loadSlice((s) => getUnitRelated(unitId, s), signal),
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
@@ -149,7 +149,13 @@ export function useListing(unitId: string): ListingState {
     return () => controller.abort();
   }, [unitId]);
 
+  // Apply an updated unit in place (e.g. after restore) without a refetch — the
+  // roster/panels stay; only the unit record (and its deleted_at) changes.
+  const setUnit = useCallback((unit: UnitItem): void => {
+    setState((prev) => (prev.unit ? { ...prev, unit } : prev));
+  }, []);
+
   // Committed state is for the previous unitId → the new fetch is in flight.
-  if (state.forId !== unitId) return LOADING;
-  return state;
+  if (state.forId !== unitId) return { ...LOADING, setUnit };
+  return { ...state, setUnit };
 }

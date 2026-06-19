@@ -53,8 +53,20 @@ function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
   );
 }
 
-export function ListingsList(): React.JSX.Element {
-  const { status, units } = useListings();
+export interface ListingsListProps {
+  /** The "Deleted" view (soft-deleted listings) vs the normal active list. */
+  deleted?: boolean;
+}
+
+/** Active / Deleted view tabs. Links to the two routes so the URL is the source
+ *  of truth (mirrors the Contacts list's filter tabs). */
+const VIEW_TABS: { deleted: boolean; label: string; to: string }[] = [
+  { deleted: false, label: 'Active', to: '/listings' },
+  { deleted: true, label: 'Deleted', to: '/listings/deleted' },
+];
+
+export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.Element {
+  const { status, units } = useListings(deleted);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   // Multi-select of housing authorities (unit.jurisdiction). EMPTY = no filter →
@@ -98,8 +110,25 @@ export function ListingsList(): React.JSX.Element {
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>Listings</h1>
-      <p className={styles.sub}>Showing the first page of unit records.</p>
+      <h1 className={styles.title}>{deleted ? 'Deleted listings' : 'Listings'}</h1>
+      <p className={styles.sub}>
+        {deleted
+          ? 'Soft-deleted listings. Open one to restore it.'
+          : 'Showing the first page of unit records.'}
+      </p>
+
+      <nav className={styles.tabs} aria-label="Listings view">
+        {VIEW_TABS.map((t) => (
+          <Link
+            key={t.label}
+            to={t.to}
+            className={`${styles.tab} ${t.deleted === deleted ? styles.tabActive : ''}`}
+            {...(t.deleted === deleted && { 'aria-current': 'page' })}
+          >
+            {t.label}
+          </Link>
+        ))}
+      </nav>
 
       {showControls ? (
         <div className={styles.controls}>
@@ -181,8 +210,10 @@ export function ListingsList(): React.JSX.Element {
 
       {status === 'ready' && units.length === 0 ? (
         <div className={styles.empty}>
-          <p className={styles.emptyTitle}>No listings yet</p>
-          <p className={styles.emptyBody}>Nothing here to show right now.</p>
+          <p className={styles.emptyTitle}>{deleted ? 'No deleted listings' : 'No listings yet'}</p>
+          <p className={styles.emptyBody}>
+            {deleted ? 'Deleted listings will appear here.' : 'Nothing here to show right now.'}
+          </p>
         </div>
       ) : null}
 

@@ -1,40 +1,30 @@
-// ContactActionsMenu — the header ⋯ kebab on the contact page. A popover menu
-// (outside-click + Escape close, mirroring the app account menu) with: Edit
-// contact details, Copy link to this contact, a Do-Not-Contact (sms_opt_out)
-// toggle, and a Delete/Restore action. The toggles reflect + flip current state;
-// the parent owns the request + applies the returned contact. Delete asks the
-// parent to confirm first (it opens a confirm dialog).
+// ListingActionsMenu — the header ⋯ kebab on the listing detail page. A popover
+// menu (outside-click + Escape close) mirroring ContactActionsMenu: Copy link to
+// this listing + a Delete/Restore action. Delete asks the parent to confirm first
+// (it opens a confirm dialog); the parent owns the request + applies the result.
 import { useEffect, useRef, useState } from 'react';
-import styles from './ContactActionsMenu.module.css';
+import styles from './ListingActionsMenu.module.css';
 
-export interface ContactActionsMenuProps {
-  onEdit: () => void;
-  /** Current sms_opt_out flag (drives the toggle label + state). */
-  optedOut: boolean;
-  /** Flip the opt-out flag; the parent does the request. */
-  onToggleOptOut: () => void;
-  /** True while the opt-out request is in flight (disables that item). */
-  optOutBusy?: boolean;
+export interface ListingActionsMenuProps {
+  /** Class for the kebab trigger (the header supplies its dark-band style). */
+  triggerClassName: string;
   /** Current soft-delete state (drives Delete vs Restore). */
   deleted: boolean;
   /** Begin deleting — the parent opens a confirm dialog (then DELETEs). */
   onDelete: () => void;
-  /** Restore a soft-deleted contact; the parent does the request. */
+  /** Restore a soft-deleted listing; the parent does the request. */
   onRestore: () => void;
   /** True while a delete/restore request is in flight (disables that item). */
   deleteBusy?: boolean;
 }
 
-export function ContactActionsMenu({
-  onEdit,
-  optedOut,
-  onToggleOptOut,
-  optOutBusy = false,
+export function ListingActionsMenu({
+  triggerClassName,
   deleted,
   onDelete,
   onRestore,
   deleteBusy = false,
-}: ContactActionsMenuProps): React.JSX.Element {
+}: ListingActionsMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -71,7 +61,7 @@ export function ContactActionsMenu({
     <div className={styles.wrap} ref={ref}>
       <button
         type="button"
-        className={styles.kebab}
+        className={triggerClassName}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="More actions"
@@ -85,36 +75,9 @@ export function ContactActionsMenu({
             type="button"
             role="menuitem"
             className={styles.item}
-            onClick={() => {
-              setOpen(false);
-              onEdit();
-            }}
+            onClick={copyLink}
           >
-            Edit contact details
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className={styles.item}
-            onClick={() => {
-              copyLink();
-              // Keep the menu open briefly so the "Copied" confirmation shows.
-            }}
-          >
-            {copied ? 'Copied ✓' : 'Copy link to contact'}
-          </button>
-          <div className={styles.divider} />
-          <button
-            type="button"
-            role="menuitem"
-            className={`${styles.item} ${optedOut ? '' : styles.danger}`}
-            disabled={optOutBusy}
-            onClick={() => {
-              setOpen(false);
-              onToggleOptOut();
-            }}
-          >
-            {optedOut ? 'Allow SMS (clear opt-out)' : 'Mark Do-Not-Contact'}
+            {copied ? 'Copied ✓' : 'Copy link to listing'}
           </button>
           <div className={styles.divider} />
           {deleted ? (
@@ -128,7 +91,7 @@ export function ContactActionsMenu({
                 onRestore();
               }}
             >
-              Restore contact
+              Restore listing
             </button>
           ) : (
             <button
@@ -141,7 +104,7 @@ export function ContactActionsMenu({
                 onDelete();
               }}
             >
-              Delete contact
+              Delete listing
             </button>
           )}
         </div>

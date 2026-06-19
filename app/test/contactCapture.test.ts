@@ -88,6 +88,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     },
     async setFlag() {},
     async clearFlag() {},
+    async softDelete(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async restore(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
     async update(contactId) {
       return contacts.find((c) => c.contactId === contactId)!;
     },

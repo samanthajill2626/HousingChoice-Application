@@ -170,9 +170,25 @@ export interface UnitItem {
    * GSI for the related-units same_property lookup.
    */
   propertyId?: string;
+  /**
+   * Soft-delete marker (ISO 8601). PRESENT → the listing is "deleted": hidden
+   * from the listing lists (and the landlord's listings card, related/similar),
+   * but the record and ALL its data are retained so it can be restored (clear the
+   * stamp). Mirrors the contact soft-delete.
+   */
+  deleted_at?: string;
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
+}
+
+/**
+ * A unit is soft-deleted when it carries a non-empty `deleted_at` stamp. Shared
+ * by the repo (query filters) and any route hydration, so "deleted" is defined in
+ * exactly one place.
+ */
+export function isDeleted(unit: Pick<UnitItem, 'deleted_at'>): boolean {
+  return typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
 }
 
 /**
@@ -200,6 +216,12 @@ export interface UnitsPage {
 export interface ListUnitsOpts {
   limit?: number;
   exclusiveStartKey?: Record<string, unknown>;
+  /**
+   * Soft-delete scope. Omitted/false → exclude deleted listings (every normal
+   * list). true → return ONLY soft-deleted listings (the "Deleted" view). Applied
+   * as a FilterExpression on `deleted_at`.
+   */
+  deleted?: boolean;
 }
 
 /**
@@ -221,6 +243,14 @@ export interface UnitsRepo {
    * ConditionalCheckFailedException for unknown units.
    */
   update(unitId: string, patch: Record<string, unknown>): Promise<UnitItem>;
+  /**
+   * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the listing is hidden from
+   * the lists / landlord card / related / similar while every field is retained.
+   * ConditionExpression guards existence (route → 404). Returns ALL_NEW.
+   */
+  softDelete(unitId: string, at: string): Promise<UnitItem>;
+  /** Restore a soft-deleted listing: REMOVE `deleted_at`. ALL_NEW; 404-guarded. */
+  restore(unitId: string): Promise<UnitItem>;
   /** All units for a landlord via the byLandlord GSI. */
   listByLandlord(landlordId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /** All units in a status via the byStatus GSI. */
@@ -291,7 +321,10 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       TableName: table,
       IndexName: indexName,
       KeyConditionExpression: '#k = :v',
-      ExpressionAttributeNames: { '#k': keyName },
+      // Soft-delete scope (FilterExpression — GSIs project ALL, so deleted_at is
+      // filterable). Default HIDES deleted; deleted:true shows ONLY deleted.
+      FilterExpression: opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)',
+      ExpressionAttributeNames: { '#k': keyName, '#del': 'deleted_at' },
       ExpressionAttributeValues: { ':v': keyValue },
       ...(opts.limit !== undefined && { Limit: opts.limit }),
       ...(opts.exclusiveStartKey !== undefined && {
@@ -377,6 +410,38 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         }),
       );
       log.info({ unitId, fields: sets.length - 1 + removes.length }, 'unit updated');
+      return Attributes as UnitItem;
+    },
+
+    async softDelete(unitId, at) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { unitId },
+          UpdateExpression: 'SET #del = :at, #updatedAt = :at',
+          ConditionExpression: 'attribute_exists(unitId)',
+          ExpressionAttributeNames: { '#del': 'deleted_at', '#updatedAt': 'updated_at' },
+          ExpressionAttributeValues: { ':at': at },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ unitId }, 'unit soft-deleted');
+      return Attributes as UnitItem;
+    },
+
+    async restore(unitId) {
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { unitId },
+          UpdateExpression: 'REMOVE #del SET #updatedAt = :now',
+          ConditionExpression: 'attribute_exists(unitId)',
+          ExpressionAttributeNames: { '#del': 'deleted_at', '#updatedAt': 'updated_at' },
+          ExpressionAttributeValues: { ':now': new Date().toISOString() },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ unitId }, 'unit restored');
       return Attributes as UnitItem;
     },
 
@@ -515,6 +580,9 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       // why a Scan is acceptable at this scale, doc §5.1).
       const input: ScanCommandInput = {
         TableName: table,
+        // Soft-delete scope: default excludes deleted; deleted:true shows only them.
+        FilterExpression: opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)',
+        ExpressionAttributeNames: { '#del': 'deleted_at' },
         ...(opts.limit !== undefined && { Limit: opts.limit }),
         ...(opts.exclusiveStartKey !== undefined && {
           ExclusiveStartKey: opts.exclusiveStartKey as ScanCommandInput['ExclusiveStartKey'],

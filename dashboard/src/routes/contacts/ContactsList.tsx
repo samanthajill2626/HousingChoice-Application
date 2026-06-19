@@ -28,16 +28,19 @@ const HEADING: Record<ContactsFilter, string> = {
   tenant: 'Tenants',
   landlord: 'Landlords',
   unknown: 'Unknown',
+  deleted: 'Deleted',
 };
 
 /** On-page filter tabs. Each is a link to the SAME route the nav uses, so the URL
  *  stays the source of truth: switching here and the nav shortcuts land on the
- *  identical filtered view (and the active tab reflects the current `filter`). */
+ *  identical filtered view (and the active tab reflects the current `filter`).
+ *  'Deleted' surfaces soft-deleted contacts (restore from their detail page). */
 const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
   { filter: 'all', label: 'All', to: '/contacts' },
   { filter: 'tenant', label: 'Tenants', to: '/contacts/tenants' },
   { filter: 'landlord', label: 'Landlords', to: '/contacts/landlords' },
   { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
+  { filter: 'deleted', label: 'Deleted', to: '/contacts/deleted' },
 ];
 
 /** Status label, e.g. 'active' ? "Active"; empty stays empty. */

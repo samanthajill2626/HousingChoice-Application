@@ -14,6 +14,8 @@ const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
 const updateContact = vi.fn();
 const getContacts = vi.fn();
+const deleteContact = vi.fn();
+const restoreContact = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -29,6 +31,8 @@ vi.mock('../../api/index.js', async () => {
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
+    deleteContact: (...a: unknown[]) => deleteContact(...a),
+    restoreContact: (...a: unknown[]) => restoreContact(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -185,6 +189,53 @@ describe('ContactDetail', () => {
     await waitFor(() =>
       expect(screen.getByText(/couldn.t load this contact/i)).toBeInTheDocument(),
     );
+  });
+
+  it('deleting confirms first, then DELETEs and navigates back to the Contacts list', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    deleteContact.mockResolvedValue({ ...TENANT, deleted_at: '2026-06-19T00:00:00.000Z' });
+
+    // Render with a /contacts landing route so we can assert the post-delete nav.
+    render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <Routes>
+          <Route path="/contacts/:contactId" element={<ContactDetail />} />
+          <Route path="/contacts" element={<div>CONTACTS LIST</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+
+    // A confirm dialog appears — nothing deleted yet.
+    expect(screen.getByRole('dialog', { name: /Delete contact\?/i })).toBeInTheDocument();
+    expect(deleteContact).not.toHaveBeenCalled();
+
+    // Confirm → DELETE fires and we land on the Contacts list.
+    await user.click(screen.getByRole('button', { name: /^Delete$/i }));
+    expect(deleteContact).toHaveBeenCalledWith('k1');
+    await waitFor(() => expect(screen.getByText('CONTACTS LIST')).toBeInTheDocument());
+  });
+
+  it('shows the Deleted banner + Restore for a soft-deleted contact, and restores in place', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, deleted_at: '2026-06-19T00:00:00.000Z' });
+    restoreContact.mockResolvedValue(TENANT); // restored (no deleted_at)
+    renderAt('k1');
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    // Deleted treatment: a status banner is shown.
+    expect(screen.getByRole('status')).toHaveTextContent(/deleted/i);
+
+    // Restore (the banner button) → restoreContact called; banner clears in place.
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(restoreContact).toHaveBeenCalledWith('k1');
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
   });
 
   describe('edit dialog relationship candidates (finding #1 + #5)', () => {

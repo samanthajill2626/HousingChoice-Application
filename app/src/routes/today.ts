@@ -43,6 +43,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import {
   createContactsRepo,
+  isDeleted,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
@@ -196,22 +197,32 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     }
     const todayYmd = parsedDay?.day ?? nowIso.slice(0, 10);
 
-    // A best-effort name cache so we resolve each tenant contact at most once
-    // (the same tenant may anchor several cases). A missing contact must never
-    // 500 the endpoint — fall back to the contactId for `who`.
-    const nameCache = new Map<string, string | undefined>();
-    const resolveName = async (contactId: string): Promise<string | undefined> => {
-      if (nameCache.has(contactId)) return nameCache.get(contactId);
-      let name: string | undefined;
+    // A best-effort contact cache so we resolve each contact at most once (the
+    // same tenant may anchor several cases). A missing contact must never 500 the
+    // endpoint — fall back to the contactId for `who`. Drives BOTH name hydration
+    // and the soft-delete check (one getById per contact).
+    const contactCache = new Map<string, ContactItem | undefined>();
+    const getContact = async (contactId: string): Promise<ContactItem | undefined> => {
+      if (contactCache.has(contactId)) return contactCache.get(contactId);
+      let contact: ContactItem | undefined;
       try {
-        name = nameFromContact(await contacts.getById(contactId));
+        contact = await contacts.getById(contactId);
       } catch (err) {
-        // Best-effort hydration: a lookup failure degrades to the id, never a 500.
-        log.warn({ err, contactId }, 'today: tenant name hydration failed (best-effort)');
-        name = undefined;
+        // Best-effort hydration: a lookup failure degrades gracefully, never a 500.
+        log.warn({ err, contactId }, 'today: contact hydration failed (best-effort)');
+        contact = undefined;
       }
-      nameCache.set(contactId, name);
-      return name;
+      contactCache.set(contactId, contact);
+      return contact;
+    };
+    const resolveName = async (contactId: string): Promise<string | undefined> =>
+      nameFromContact(await getContact(contactId));
+    // Soft-deleted contacts are off the boards: an item anchored to a deleted
+    // contact (its own row, or a case whose tenant was deleted) is skipped. A
+    // lookup failure is NOT treated as deleted (best-effort → keep the item).
+    const isDeletedContact = async (contactId: string): Promise<boolean> => {
+      const contact = await getContact(contactId);
+      return contact ? isDeleted(contact) : false;
     };
 
     /** Warn (never silently truncate) when a group's bounded fetch hit the cap. */
@@ -242,6 +253,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue;
         placedCaseIds.add(c.caseId);
+        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
         const item: TodayItem = {
@@ -278,6 +290,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           continue;
         }
         placedCaseIds.add(c.caseId);
+        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const reason =
           typeof (c.attention as { reason?: unknown }).reason === 'string'
@@ -309,6 +322,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now
         placedCaseIds.add(c.caseId);
+        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const item: TodayItem = {
           group: 'tours_today',
@@ -333,6 +347,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         if (TERMINAL_STAGES.has(c.stage)) continue;
         if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now / tours_today
         placedCaseIds.add(c.caseId);
+        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
         const item: TodayItem = {
@@ -371,7 +386,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // triage pass below (it emits the proper contact row) rather than
           // emitting a dead conversation ref — so we never produce a nowhere-link.
           const contactId = oneToOneContactId(conv);
-          if (contactId !== undefined) {
+          if (contactId !== undefined && !(await isDeletedContact(contactId))) {
             if (typeof conv.participant_phone === 'string') {
               emittedUnknownPhones.add(conv.participant_phone);
             }
@@ -395,6 +410,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // (and anything that isn't a known 1:1 type). Link to the contact page;
           // fall back to the conversation ref only if the roster isn't linked yet.
           const contactId = oneToOneContactId(conv);
+          // A deleted contact's thread is off the boards (an unlinked thread —
+          // contactId undefined — has no contact to be deleted, so it stays).
+          if (contactId !== undefined && (await isDeletedContact(contactId))) continue;
           unreplied.push({
             item: {
               group: 'unreplied',

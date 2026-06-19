@@ -21,6 +21,7 @@ import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/
 import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import {
+  isDeleted,
   phoneRefId,
   PrimaryPhoneRemovalError,
   type ContactFlag,
@@ -48,6 +49,7 @@ import {
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemovePrimaryLandlordError,
+  isDeleted as isUnitDeleted,
   unitContacts,
   type UnitContact,
   type UnitItem,
@@ -608,6 +610,8 @@ export function createFakeWorld(): FakeWorld {
         .filter((c) => c.phone_ref !== true)
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
+        // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
+        .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -618,6 +622,8 @@ export function createFakeWorld(): FakeWorld {
       const items = contacts
         .filter((c) => c.phone_ref !== true)
         .filter((c) => c['housingAuthority'] === housingAuthority)
+        // Broadcast targeting never reaches a soft-deleted contact.
+        .filter((c) => !isDeleted(c))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -653,6 +659,16 @@ export function createFakeWorld(): FakeWorld {
       if (!contact) throw new Error(`clearFlag: no contact ${contactId}`);
       contact[flag] = false;
       flagWrites.push({ contactId, flag, value: false });
+    },
+    async softDelete(contactId, at) {
+      const contact = fakeRequireContact(contactId);
+      contact.deleted_at = at;
+      return contact;
+    },
+    async restore(contactId) {
+      const contact = fakeRequireContact(contactId);
+      delete contact.deleted_at;
+      return contact;
     },
     async update(contactId, patch) {
       const contact = contacts.find((c) => c.contactId === contactId);
@@ -834,9 +850,25 @@ export function createFakeWorld(): FakeWorld {
       unit.updated_at = new Date().toISOString();
       return unit;
     },
+    // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
+    async softDelete(unitId, at) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`softDelete: no unit ${unitId}`);
+      unit.deleted_at = at;
+      unit.updated_at = at;
+      return unit;
+    },
+    async restore(unitId) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`restore: no unit ${unitId}`);
+      delete unit.deleted_at;
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
     async listByLandlord(landlordId, opts = {}) {
       const items = [...units.values()]
         .filter((u) => u.landlordId === landlordId)
+        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -845,7 +877,9 @@ export function createFakeWorld(): FakeWorld {
       // after the cursor's unitId, return at most `limit` items, and emit a
       // lastEvaluatedKey only when more remain. When NO limit is passed, return
       // ALL matching units (never a hidden default cap that drops candidates).
-      const all = [...units.values()].filter((u) => u.status === status);
+      const all = [...units.values()]
+        .filter((u) => u.status === status)
+        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)));
       let start = 0;
       const cursorId = opts.exclusiveStartKey?.['unitId'];
       if (typeof cursorId === 'string') {
@@ -868,6 +902,7 @@ export function createFakeWorld(): FakeWorld {
     async listByJurisdiction(jurisdiction, opts = {}) {
       const items = [...units.values()]
         .filter((u) => u.jurisdiction === jurisdiction)
+        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -875,6 +910,7 @@ export function createFakeWorld(): FakeWorld {
       // Mirror the sparse byProperty GSI: only units carrying propertyId index.
       const items = [...units.values()]
         .filter((u) => typeof u.propertyId === 'string' && u.propertyId === propertyId)
+        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -944,7 +980,9 @@ export function createFakeWorld(): FakeWorld {
       return unit;
     },
     async list(opts = {}) {
-      const items = [...units.values()].slice(0, opts.limit ?? 50);
+      const items = [...units.values()]
+        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
+        .slice(0, opts.limit ?? 50);
       return { items };
     },
   };

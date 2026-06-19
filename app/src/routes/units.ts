@@ -233,9 +233,15 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
     }
 
+    // ?deleted=true → the "Deleted" view (ONLY soft-deleted listings); omitted/
+    // anything else → exclude deleted (every normal list path below).
+    const rawDeleted = req.query['deleted'];
+    const deleted = rawDeleted === 'true' || rawDeleted === '1';
+
     const opts: ListUnitsOpts = {
       limit,
       ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      ...(deleted && { deleted: true }),
     };
 
     const landlordId = req.query['landlordId'];
@@ -635,6 +641,47 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       { unitId, fields: Object.keys(validation.fields).length, actor: req.user?.userId },
       'unit updated via api',
     );
+    res.json({ unit });
+  });
+
+  // DELETE /api/units/:unitId → 200 { unit }. SOFT delete: stamps deleted_at so the
+  // record + ALL its data are retained (POST .../restore brings it back), but it's
+  // hidden from the listing lists, the landlord's listings card, and related/similar.
+  // Audited. 404 when the unit doesn't exist.
+  router.delete('/:unitId', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const deletedAt = new Date().toISOString();
+    let unit;
+    try {
+      unit = await units.softDelete(unitId, deletedAt);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      throw err;
+    }
+    await audit.append(`units#${unitId}`, 'unit_deleted', { actor: req.user?.userId, deletedAt });
+    log.info({ unitId, actor: req.user?.userId }, 'unit soft-deleted via api');
+    res.json({ unit });
+  });
+
+  // POST /api/units/:unitId/restore → 200 { unit }. Clear deleted_at, bringing a
+  // soft-deleted listing back into the normal views. Audited; 404 when missing.
+  router.post('/:unitId/restore', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    let unit;
+    try {
+      unit = await units.restore(unitId);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      throw err;
+    }
+    await audit.append(`units#${unitId}`, 'unit_restored', { actor: req.user?.userId });
+    log.info({ unitId, actor: req.user?.userId }, 'unit restored via api');
     res.json({ unit });
   });
 

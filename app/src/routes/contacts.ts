@@ -498,10 +498,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // ?deleted=true → the Contacts "Deleted" view (ONLY soft-deleted contacts);
+    // omitted/anything else → exclude deleted (every normal list).
+    const rawDeleted = req.query['deleted'];
+    const deleted = rawDeleted === 'true' || rawDeleted === '1';
+
     const opts: ListContactsOpts = {
       limit,
       ...(status !== undefined && { status }),
       ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      ...(deleted && { deleted: true }),
     };
     const page = await contacts.listByType(rawType, opts);
     res.json({
@@ -832,6 +838,60 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     log.info({ contactId, optOut, actor: req.user?.userId }, 'contact sms_opt_out toggled');
     // Reflect the new flag without a second round-trip.
     res.json({ contact: withPhones({ ...existing, sms_opt_out: optOut }) });
+  });
+
+  // DELETE /api/contacts/:contactId → 200 { contact }. SOFT delete: stamps
+  // deleted_at so the record + ALL its data are retained (POST .../restore brings
+  // it back), but it's hidden from the contact lists, inbox, today, and broadcast
+  // targeting. Phone routing still resolves the number to this record (no dupes on
+  // re-contact). Audited. 404 when the contact doesn't exist.
+  router.delete('/:contactId', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const deletedAt = new Date().toISOString();
+    let updated;
+    try {
+      updated = await contacts.softDelete(contactId, deletedAt);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_deleted', {
+      actor: req.user?.userId,
+      deletedAt,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');
+    res.json({ contact: withPhones(updated) });
+  });
+
+  // POST /api/contacts/:contactId/restore → 200 { contact }. Clear deleted_at,
+  // bringing a soft-deleted contact back into the normal views. Audited; 404 when
+  // the contact doesn't exist.
+  router.post('/:contactId/restore', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    let updated;
+    try {
+      updated = await contacts.restore(contactId);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_restored', {
+      actor: req.user?.userId,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact restored');
+    res.json({ contact: withPhones(updated) });
   });
 
   // --- BE1/C1 contact-phones CRUD (manual curation / merge) ------------------

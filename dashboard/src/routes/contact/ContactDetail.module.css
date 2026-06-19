@@ -98,6 +98,33 @@
   white-space: nowrap;
 }
 
+/* Soft-deleted header badge — a prominent red so the deleted state reads at a
+ * glance (deletion is reversible, but this should not be easy to miss). */
+.deletedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-danger);
+  color: var(--c-text-inverse);
+}
+
+/* Standing banner under the header when the contact is soft-deleted. */
+.deletedBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
 .actions {
   margin-left: auto;
   display: flex;

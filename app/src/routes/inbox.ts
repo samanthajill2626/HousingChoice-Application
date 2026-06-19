@@ -56,6 +56,7 @@ import {
 import {
   contactPhones,
   createContactsRepo,
+  isDeleted,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
@@ -400,6 +401,10 @@ export async function aggregateInbox(
         needsTriage: true,
       };
     }
+
+    // Soft-deleted contact → hidden from the inbox (record retained; restore
+    // resurfaces it). findByPhone stays unfiltered for routing, so filter here.
+    if (isDeleted(contact)) return undefined;
 
     if (emittedContacts.has(contact.contactId)) return undefined; // one row per page
     const convs = await contactConversations(contact);

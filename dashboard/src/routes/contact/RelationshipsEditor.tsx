@@ -2,7 +2,7 @@
 // Each row has a role input (with datalist suggestions) + a ContactSearchField
 // (bound to name/contactId) + a Remove button. All mutations go via onChange —
 // no local state for the rows.
-import { useId } from 'react';
+import { useId, useRef } from 'react';
 import { type Contact, type Relationship } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { ContactSearchField } from './ContactSearchField.js';
@@ -24,6 +24,22 @@ export function RelationshipsEditor({
   // Fix 5: instance-unique id for the datalist (no module-level constant)
   const uid = useId();
   const datalistId = `${uid}-role-suggestions`;
+
+  // Fix 2: stable per-row ids so removing a middle row does not bleed
+  // ContactSearchField internal state (activeIndex / dropdown query) into the
+  // wrong row. We maintain a parallel id list in lockstep with `rows`.
+  const idsRef = useRef<number[]>([]);
+  const nextId = useRef(0);
+  // Reconcile length at render time (append-only — parent-driven growth or
+  // initial population). Mutating the ref during render is safe here; it causes
+  // no secondary renders and is the canonical pattern for "derived from props"
+  // refs that must be ready before the JSX below.
+  while (idsRef.current.length < rows.length) {
+    idsRef.current.push(nextId.current++);
+  }
+  if (idsRef.current.length > rows.length) {
+    idsRef.current = idsRef.current.slice(0, rows.length);
+  }
 
   const suggestions = roleSuggestions ?? [];
 
@@ -55,10 +71,14 @@ export function RelationshipsEditor({
   }
 
   function onRemove(index: number): void {
+    // Remove the stable id at the same position, keeping ids aligned with rows.
+    idsRef.current = idsRef.current.filter((_, i) => i !== index);
     onChange(rows.filter((_, i) => i !== index));
   }
 
   function onAdd(): void {
+    // Append a new stable id in lockstep with the new row.
+    idsRef.current = [...idsRef.current, nextId.current++];
     onChange([...rows, { role: '', name: '' }]);
   }
 
@@ -77,7 +97,7 @@ export function RelationshipsEditor({
           {rows.map((row, i) => {
             const n = i + 1;
             return (
-              <li key={i} className={styles.row}>
+              <li key={idsRef.current[i] ?? i} className={styles.row}>
                 <input
                   className={styles.roleInput}
                   type="text"

@@ -21,10 +21,10 @@ export interface KindPickerProps {
 
 type PrimarySegment = 'tenant' | 'landlord' | 'pm' | 'other';
 
-/** True when the value is exactly the Property Manager preset (landlord + PM_ROLE)
- *  and the user did NOT explicitly enter Other mode. */
-function isPmPresetValue(value: KindPickerValue, otherSelected: boolean): boolean {
-  return !otherSelected && value.type === 'landlord' && value.role === PM_ROLE;
+/** True when the value is exactly the Property Manager preset (landlord + PM_ROLE),
+ *  regardless of how the user arrived there (preset click OR Other→role→base). */
+function isPmPresetValue(value: KindPickerValue): boolean {
+  return value.type === 'landlord' && value.role === PM_ROLE;
 }
 
 /** Derive which primary segment button should appear "active". */
@@ -32,7 +32,7 @@ function activePrimarySegment(
   value: KindPickerValue,
   otherSelected: boolean,
 ): PrimarySegment | null {
-  if (isPmPresetValue(value, otherSelected)) return 'pm';
+  if (isPmPresetValue(value)) return 'pm';
   const inOtherMode = otherSelected || value.role.trim() !== '';
   if (inOtherMode) return 'other';
   if (value.type === 'tenant') return 'tenant';
@@ -63,8 +63,8 @@ export function KindPicker({
   const roleInputId = `${uid}-role`;
 
   const suggestions = roleSuggestions ?? [];
-  const isPmPreset = isPmPresetValue(value, otherSelected);
-  const inOtherMode = !isPmPreset && (otherSelected || value.role.trim() !== '');
+  const isPmPreset = isPmPresetValue(value);
+  const inOtherMode = otherSelected || (value.role.trim() !== '' && !isPmPreset);
   const active = activePrimarySegment(value, otherSelected);
 
   function handleSegment(seg: PrimarySegment): void {

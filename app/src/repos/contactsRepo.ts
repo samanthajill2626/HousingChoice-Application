@@ -464,23 +464,29 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     },
 
     async update(contactId, patch) {
-      // SET-only merge: each supplied field is written; omitted fields are
-      // untouched (no-overwrite of a name a prior triage set). Names are
+      // SET non-null fields; REMOVE explicit-null fields (the null → REMOVE
+      // convention lets callers clear an attribute, e.g. role: null removes the
+      // role attribute entirely rather than storing ''). Names are
       // expression-aliased so reserved words (`status`, `type`) are legal.
       const sets: string[] = [];
+      const removes: string[] = [];
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         const nameKey = `#k${i}`;
-        const valueKey = `:v${i}`;
         names[nameKey] = key;
-        values[valueKey] = value;
-        sets.push(`${nameKey} = ${valueKey}`);
+        if (value === null) {
+          removes.push(nameKey);
+        } else {
+          const valueKey = `:v${i}`;
+          values[valueKey] = value;
+          sets.push(`${nameKey} = ${valueKey}`);
+        }
         i += 1;
       }
-      if (sets.length === 0) {
+      if (sets.length === 0 && removes.length === 0) {
         // Nothing to change — read the current item back (still 404s if gone).
         const existing = await this.getById(contactId);
         if (!existing) {
@@ -491,18 +497,23 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         }
         return existing;
       }
+      const clauses: string[] = [];
+      if (sets.length > 0) clauses.push(`SET ${sets.join(', ')}`);
+      if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { contactId },
-          UpdateExpression: `SET ${sets.join(', ')}`,
+          UpdateExpression: clauses.join(' '),
           ConditionExpression: 'attribute_exists(contactId)',
           ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
+          // Omit ExpressionAttributeValues entirely when empty (REMOVE-only
+          // update) — DynamoDB rejects an empty values map.
+          ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
           ReturnValues: 'ALL_NEW',
         }),
       );
-      log.info({ contactId, fields: Object.keys(values).length }, 'contact updated');
+      log.info({ contactId, setFields: sets.length, removedFields: removes.length }, 'contact updated');
       return Attributes as ContactItem;
     },
 

@@ -3,7 +3,7 @@
 // Renders one labelled row per entry (label input + value input + Remove button),
 // plus an "+ Add custom field" button. All mutations are propagated via onChange —
 // this component holds NO local state for the rows.
-import { useId } from 'react';
+import { useId, useRef } from 'react';
 import { type CustomField } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import styles from './CustomFieldsEditor.module.css';
@@ -23,6 +23,18 @@ export function CustomFieldsEditor({
   const uid = useId();
   const datalistId = `${uid}-label-suggestions`;
 
+  // Fix 2: stable per-row ids so removing a middle row does not cause React to
+  // recycle the wrong DOM instance (and bleed input state) for shifted-up rows.
+  const idsRef = useRef<number[]>([]);
+  const nextId = useRef(0);
+  // Reconcile length at render time (append-only for parent-driven growth).
+  while (idsRef.current.length < rows.length) {
+    idsRef.current.push(nextId.current++);
+  }
+  if (idsRef.current.length > rows.length) {
+    idsRef.current = idsRef.current.slice(0, rows.length);
+  }
+
   const suggestions = labelSuggestions ?? [];
 
   function onLabelChange(index: number, newLabel: string): void {
@@ -36,10 +48,14 @@ export function CustomFieldsEditor({
   }
 
   function onRemove(index: number): void {
+    // Remove the stable id at the same position, keeping ids aligned with rows.
+    idsRef.current = idsRef.current.filter((_, i) => i !== index);
     onChange(rows.filter((_, i) => i !== index));
   }
 
   function onAdd(): void {
+    // Append a new stable id in lockstep with the new row.
+    idsRef.current = [...idsRef.current, nextId.current++];
     onChange([...rows, { label: '', value: '' }]);
   }
 
@@ -58,7 +74,7 @@ export function CustomFieldsEditor({
           {rows.map((row, i) => {
             const n = i + 1;
             return (
-              <li key={i} className={styles.row}>
+              <li key={idsRef.current[i] ?? i} className={styles.row}>
                 <input
                   className={styles.input}
                   type="text"

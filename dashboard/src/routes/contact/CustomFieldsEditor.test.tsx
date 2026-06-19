@@ -1,4 +1,5 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { type CustomField } from '../../api/index.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
@@ -67,6 +68,39 @@ describe('CustomFieldsEditor', () => {
     fireEvent.change(valueInput, { target: { value: 'NewValue' } });
 
     expect(onChange).toHaveBeenCalledWith([{ label: 'Agency', value: 'NewValue' }]);
+  });
+
+  // Fix 2: stable per-row keys guard — after removing the first of 3 rows,
+  // the remaining rows must show the correct label/value content.
+  // NOTE: CustomFieldsEditor inputs are fully CONTROLLED so this test will
+  // pass even with index keys (values re-derive from props). It is included as
+  // a basic guard; the RelationshipsEditor test is the meaningful regression.
+  it('removing the first of 3 rows leaves the remaining 2 rows with correct data (stable keys guard)', () => {
+    const rows3: CustomField[] = [
+      { label: 'Field A', value: 'Val A' },
+      { label: 'Field B', value: 'Val B' },
+      { label: 'Field C', value: 'Val C' },
+    ];
+
+    function Wrapper(): React.JSX.Element {
+      const [rows, setRows] = useState<CustomField[]>(rows3);
+      return <CustomFieldsEditor rows={rows} onChange={setRows} />;
+    }
+
+    render(<Wrapper />);
+
+    // Remove row 1
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove custom field 1' }));
+    });
+
+    // Now only 2 rows remain: Field B and Field C
+    expect(screen.getByLabelText('Field label 1')).toHaveValue('Field B');
+    expect(screen.getByLabelText('Field value 1')).toHaveValue('Val B');
+    expect(screen.getByLabelText('Field label 2')).toHaveValue('Field C');
+    expect(screen.getByLabelText('Field value 2')).toHaveValue('Val C');
+    // Row 3 should no longer exist
+    expect(screen.queryByLabelText('Field label 3')).not.toBeInTheDocument();
   });
 
   it('renders one row per entry with correct accessible labels', () => {

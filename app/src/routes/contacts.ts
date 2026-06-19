@@ -269,7 +269,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['notes'] = v;
     changedFields.push('notes');
   }
-  // Landlord/PM company name (edit form). Free text; empty string clears it.
+  // Landlord company name (edit form). Free text; empty string clears it.
   if ('company' in b) {
     const v = b['company'];
     if (typeof v !== 'string') return { error: 'company must be a string' };
@@ -308,7 +308,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   if ('role' in b) {
     const r = parseRole(b['role']);
     if (typeof r !== 'string') return r;
-    patch['role'] = r;                  // may be '' to clear
+    patch['role'] = r.length > 0 ? r : null;  // null → REMOVE the attribute (clear the role)
     changedFields.push('role');
   }
   if ('relationships' in b) {

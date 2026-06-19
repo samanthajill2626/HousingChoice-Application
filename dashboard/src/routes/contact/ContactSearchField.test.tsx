@@ -1,4 +1,5 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Contact } from '../../api/index.js';
 import { ContactSearchField } from './ContactSearchField.js';
@@ -93,6 +94,43 @@ describe('ContactSearchField', () => {
     const option = screen.getByRole('option', { name: /Alice Smith/i });
     expect(option).toBeInTheDocument();
     expect(option.innerHTML).not.toContain('<script');
+  });
+
+  // Fix 4 (a11y): Escape collapses the suggestion list; typing reopens it
+  it('Escape hides the listbox; typing a character reopens it', () => {
+    // Stateful wrapper so the controlled value updates on type
+    function Wrapper(): React.JSX.Element {
+      const [value, setValue] = useState({ name: 'Bob' });
+      return (
+        <ContactSearchField value={value} onChange={setValue} candidates={CANDIDATES} />
+      );
+    }
+    render(<Wrapper />);
+
+    const input = screen.getByRole('combobox');
+
+    // Typing "Bob" matches Bob Jones — listbox should be visible
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Bob Jones/i })).toBeInTheDocument();
+    expect(input).toHaveAttribute('aria-expanded', 'true');
+
+    // Press Escape — listbox must disappear and aria-expanded must be false
+    act(() => {
+      fireEvent.keyDown(input, { key: 'Escape' });
+    });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+
+    // Typing another character reopens the list
+    act(() => {
+      fireEvent.change(input, { target: { value: 'Bobc' } });
+    });
+    // "Bobc" has no match — type something that still matches (Bob)
+    // Revert to matching value via change event
+    act(() => {
+      fireEvent.change(input, { target: { value: 'Bob' } });
+    });
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
   });
 
   // Fix 3: keyboard navigation — ArrowDown then Enter selects the active candidate

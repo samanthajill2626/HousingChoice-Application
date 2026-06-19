@@ -18,6 +18,7 @@
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { useContacts } from '../contacts/useContacts.js';
 import {
   retryMessage,
   sendMessage,
@@ -70,6 +71,16 @@ export function ContactDetail(): React.JSX.Element {
   // Viewing the contact page (while the tab is visible) marks its comms read —
   // so the Inbox unread badge clears once you've actually seen the messages here.
   useMarkContactRead(contactId);
+
+  // Load the full contact roster so the edit dialog can link relationships to
+  // existing contacts (finding #1). Called unconditionally (hooks rules); the
+  // 'all' filter fans out across tenant/landlord/unknown. The current contact is
+  // filtered out to prevent self-links (finding #5).
+  const { contacts: allContacts } = useContacts('all');
+  const editCandidates = useMemo(
+    () => allContacts.filter((c) => c.contactId !== contactId),
+    [allContacts, contactId],
+  );
 
   // "Media from comms" is derived from the LIVE timeline (not the one-shot C5
   // media slice), so it updates as soon as a new attachment message arrives — the
@@ -329,6 +340,7 @@ export function ContactDetail(): React.JSX.Element {
             setContact(updated);
             setEditing(false);
           }}
+          candidates={editCandidates}
         />
       ) : null}
 

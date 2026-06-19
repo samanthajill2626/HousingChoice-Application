@@ -75,7 +75,7 @@ export interface TableSpec {
  */
 export const TABLES: readonly TableSpec[] = [
   {
-    // Every external person: tenant | landlord | pm | team_member.
+    // Every external person: tenant | landlord | team_member.
     baseName: 'contacts',
     hashKey: { name: 'contactId', type: 'S' },
     gsis: [

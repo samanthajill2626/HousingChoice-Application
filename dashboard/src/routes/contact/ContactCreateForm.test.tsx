@@ -213,6 +213,26 @@ describe('ContactCreateForm', () => {
     expect('relationships' in body).toBe(false);
   });
 
+  // ── Test 7: busy flag resets on success (no stuck "Creating…" lock)
+  it('Create button re-enables after a successful create when caller does NOT unmount', async () => {
+    const user = userEvent.setup();
+    const newContact: Contact = { contactId: 'new-7', type: 'tenant', firstName: 'Dave' };
+    createContact.mockResolvedValue(newContact);
+
+    // onCreated does NOT unmount — it's a plain vi.fn() that does nothing.
+    setup({ onCreated: vi.fn() });
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Dave');
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    // After the promise settles the button must be enabled again (not "Creating…").
+    await waitFor(() => {
+      const btn = screen.getByRole('button', { name: /^Create$/i });
+      expect(btn).not.toBeDisabled();
+    });
+  });
+
   it('empty relationship row and empty-label custom field are dropped from the body', async () => {
     const user = userEvent.setup();
     const newContact: Contact = { contactId: 'new-6', type: 'tenant' };

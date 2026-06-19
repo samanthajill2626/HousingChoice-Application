@@ -9,6 +9,10 @@ system — hears a consistent, accurate term for the same thing.
 same change. If you find drift (a synonym creeping in for an entity that already
 has a blessed word), fix it toward this table.
 
+**See also:** [STATUS-MODEL.md](STATUS-MODEL.md) — the living reference for how the
+three core entities (tenant, **placement**, listing/`unit`) move through the process:
+their phases, stages, and how they derive from one another.
+
 ---
 
 ## The unit / home / listing entity

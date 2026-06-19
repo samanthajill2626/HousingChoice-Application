@@ -161,6 +161,38 @@ describe('KindPicker', () => {
     expect(roleInput).toHaveValue('Property Manager');
   });
 
+  // Fix 7: Other → type "Property Manager" → pick base Landlord → PM segment lights up
+  it('building PM shape via Other path lights the Property Manager preset segment and keeps panel open', () => {
+    setup();
+
+    // Step 1: click Other
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    const roleInput = screen.getByLabelText(/^role$/i);
+    expect(roleInput).toBeInTheDocument();
+
+    // Step 2: type "Property Manager" into the role input
+    act(() => {
+      fireEvent.change(roleInput, { target: { value: 'Property Manager' } });
+    });
+
+    // Step 3: click the base-type Landlord button inside the "Base contact type" group
+    const baseGroup = screen.getByRole('group', { name: 'Base contact type' });
+    const baseLandlordBtn = Array.from(baseGroup.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Landlord',
+    )!;
+    fireEvent.click(baseLandlordBtn);
+
+    // The PRIMARY Property Manager segment should now be aria-pressed=true
+    const primaryGroup = screen.getByRole('group', { name: 'Contact kind' });
+    const pmButton = Array.from(primaryGroup.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Property Manager',
+    )!;
+    expect(pmButton).toHaveAttribute('aria-pressed', 'true');
+
+    // The Other panel must remain open (no jarring close) — role input still visible
+    expect(screen.getByLabelText(/^role$/i)).toBeInTheDocument();
+  });
+
   // Fix 2: re-clicking Other when already in Other mode must NOT wipe the base type
   it('clicking Other when already in Other mode keeps type and role unchanged', () => {
     const onChange = vi.fn();

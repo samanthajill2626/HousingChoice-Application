@@ -152,4 +152,51 @@ test.describe('Extensible contact creation', () => {
     await page.goto(`${NEXT}/contacts/landlords`);
     await expect(page.getByText(fullName)).toBeVisible();
   });
+
+  test('editing a contact can LINK an existing contact as a relationship (not just free text)', async ({
+    page,
+  }) => {
+    const stamp = Date.now();
+    const lastName = `EditLink ${stamp}`;
+
+    await devLogin(page);
+
+    // Self-contained: create a fresh contact to edit (don't mutate seeded data).
+    await page.goto(`${NEXT}/contacts`);
+    await page.getByRole('button', { name: 'New contact' }).click();
+    const createDialog = page.getByRole('dialog', { name: /New contact/i });
+    await createDialog
+      .getByRole('group', { name: 'Contact kind' })
+      .getByRole('button', { name: 'Tenant' })
+      .click();
+    await createDialog.getByLabel('First name').fill('Edie');
+    await createDialog.getByLabel('Last name').fill(lastName);
+    await createDialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(createDialog).toHaveCount(0);
+    await expect(page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/);
+
+    // Edit it → add a relationship LINKED to the seeded landlord "Marcus Bell".
+    // This exercises the fix: the EDIT dialog now receives a candidate roster, so the
+    // relationship search can link an existing contact (not only accept free text).
+    await page.getByRole('button', { name: 'Edit contact details' }).click();
+    const editDialog = page.getByRole('dialog', { name: /Edit contact/i });
+    await expect(editDialog).toBeVisible();
+    await editDialog.getByRole('button', { name: '+ Add relationship' }).click();
+    await editDialog.getByLabel('Relationship role 1').fill('Caseworker');
+    await editDialog.getByLabel('Contact search 1').fill('Marcus');
+    await editDialog.getByRole('option', { name: /Marcus Bell/i }).click();
+    await editDialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(editDialog).toHaveCount(0);
+
+    // The relationship renders as a LINK to the linked contact (contact-landlord-0001),
+    // not plain text — proving the link (contactId) was captured in the edit dialog.
+    const relLink = page.getByRole('link', { name: 'Marcus Bell' });
+    await expect(relLink).toBeVisible();
+    await expect(relLink).toHaveAttribute('href', /\/contacts\/contact-landlord-0001$/);
+    await expect(page.getByText('Caseworker')).toBeVisible();
+
+    // Persists across a reload.
+    await page.reload();
+    await expect(page.getByRole('link', { name: 'Marcus Bell' })).toBeVisible();
+  });
 });

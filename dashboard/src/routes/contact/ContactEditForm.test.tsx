@@ -136,11 +136,16 @@ describe('ContactEditForm', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t save/i));
   });
 
-  it('editing the Role input → PATCH includes {role} and unchanged sections are NOT in the patch', async () => {
+  it('giving the contact a role via Change type → Other → PATCH includes {role}', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...TENANT, role: 'Case worker' });
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // Role now lives in the (collapsed) KindPicker — open it, go to Other, type
+    // the role, then keep the Tenant base shape.
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Other' }));
     await user.type(screen.getByLabelText(/^Role$/i), 'Case worker');
+    await user.click(screen.getByRole('radio', { name: /Tenant/i }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() =>
       expect(updateContact).toHaveBeenCalledWith('k1', { role: 'Case worker' }),
@@ -193,7 +198,9 @@ describe('ContactEditForm', () => {
     expect(screen.getByLabelText(/Voucher size/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/^Company$/i)).toBeNull();
 
-    await user.selectOptions(screen.getByLabelText(/^Type$/i), 'landlord');
+    // Open the collapsed Type control and pick Landlord in the KindPicker.
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
 
     // Fields swap immediately on the type change (no save needed).
     expect(screen.queryByLabelText(/Voucher size/i)).toBeNull();

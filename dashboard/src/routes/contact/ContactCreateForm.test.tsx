@@ -97,9 +97,9 @@ describe('ContactCreateForm', () => {
     // Fill the role input (shown by KindPicker in Other mode)
     await user.type(screen.getByLabelText(/^Role$/i), 'Case worker');
 
-    // Pick Tenant as the base type (second "Tenant" button = the sub-choice one)
-    const tenantButtons = screen.getAllByRole('button', { name: 'Tenant' });
-    await user.click(tenantButtons[tenantButtons.length - 1]!);
+    // Pick the Tenant base-record-shape option (a radio in the Other panel,
+    // distinct from the segment-bar Tenant button).
+    await user.click(screen.getByRole('radio', { name: /Tenant/i }));
 
     // Fill name fields
     await user.type(screen.getByLabelText(/First name/i), 'Bob');

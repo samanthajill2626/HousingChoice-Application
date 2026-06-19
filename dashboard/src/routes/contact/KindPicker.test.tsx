@@ -78,21 +78,21 @@ describe('KindPicker', () => {
     expect(screen.queryByLabelText(/role/i)).toBeNull();
   });
 
-  it('clicking Other reveals a role input and base-type sub-choices', () => {
+  it('clicking Other reveals a role input and the base-record-shape options', () => {
     setup();
 
     fireEvent.click(screen.getByRole('button', { name: 'Other' }));
 
-    // Role input should be visible
+    // Role input should be visible.
     expect(screen.getByLabelText(/role/i)).toBeInTheDocument();
-    // Base-type sub-choices appear; Tenant/Landlord are shared with the segment bar
-    // (length 2). Property Manager is a primary segment only (no base sub-choice).
-    expect(screen.getAllByRole('button', { name: 'Tenant' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Landlord' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Property Manager' })).toHaveLength(1);
+    // The base-record-shape choice is an explained radiogroup with Tenant/Landlord
+    // options (the segment-bar Tenant/Landlord remain BUTTONS — distinct roles).
+    expect(screen.getByRole('radiogroup', { name: /which record type/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Tenant/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Landlord/i })).toBeInTheDocument();
   });
 
-  it('in Other mode, typing a role then clicking base Tenant calls onChange with both', () => {
+  it('in Other mode, typing a role then picking the base Tenant shape calls onChange with both', () => {
     const { onChange } = setup();
 
     // Enter Other mode
@@ -104,11 +104,9 @@ describe('KindPicker', () => {
       fireEvent.change(roleInput, { target: { value: 'Case worker' } });
     });
 
-    // Find and click the base-type Tenant button — it's the second "Tenant" button
-    // (first is in the segment bar, second is in the sub-choice panel).
-    const tenantButtons = screen.getAllByRole('button', { name: 'Tenant' });
-    const subTenant = tenantButtons[tenantButtons.length - 1];
-    fireEvent.click(subTenant!);
+    // Pick the Tenant base-record-shape option (a radio, distinct from the
+    // segment-bar Tenant button).
+    fireEvent.click(screen.getByRole('radio', { name: /Tenant/i }));
 
     // The final call (after picking base type) must carry both type and role
     const calls = onChange.mock.calls;
@@ -175,12 +173,8 @@ describe('KindPicker', () => {
       fireEvent.change(roleInput, { target: { value: 'Property Manager' } });
     });
 
-    // Step 3: click the base-type Landlord button inside the "Base contact type" group
-    const baseGroup = screen.getByRole('group', { name: 'Base contact type' });
-    const baseLandlordBtn = Array.from(baseGroup.querySelectorAll('button')).find(
-      (b) => b.textContent === 'Landlord',
-    )!;
-    fireEvent.click(baseLandlordBtn);
+    // Step 3: pick the Landlord base-record-shape option (in the radiogroup)
+    fireEvent.click(screen.getByRole('radio', { name: /Landlord/i }));
 
     // The PRIMARY Property Manager segment should now be aria-pressed=true
     const primaryGroup = screen.getByRole('group', { name: 'Contact kind' });

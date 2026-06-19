@@ -88,11 +88,79 @@
   color: var(--c-text-subtle);
 }
 
-/* --- Base-type sub-choice -------------------------------------------------- */
+/* --- Base-record-shape choice ---------------------------------------------- */
 
-.subSegmentBar {
+.baseGroup {
   display: flex;
-  border: 1px solid var(--c-border);
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.baseLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.baseHelp {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+  line-height: 1.4;
+}
+
+/* Each base record-shape as an explained option card (radio semantics). */
+.baseOption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border-strong);
   border-radius: var(--radius-sm);
-  overflow: hidden;
+  background: var(--c-surface);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.baseOption:hover:not(.baseOptionActive) {
+  background: var(--c-surface-2);
+}
+
+.baseOption:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.baseOptionActive {
+  border-color: var(--c-brand);
+  background: var(--c-brand-soft);
+}
+
+.baseOptionMain {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.baseOptionTitle {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.baseOptionActive .baseOptionTitle {
+  color: var(--c-brand);
+}
+
+.baseOptionDesc {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+  line-height: 1.4;
+}
+
+.check {
+  color: var(--c-brand);
+  font-weight: var(--fw-bold);
 }

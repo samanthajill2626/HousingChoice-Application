@@ -21,6 +21,22 @@ export interface KindPickerProps {
 
 type PrimarySegment = 'tenant' | 'landlord' | 'pm' | 'other';
 
+/** The two record shapes a custom kind can be based on. The description spells
+ *  out the data shape (fields + behaviour) the new kind inherits, so picking one
+ *  is an informed choice, not a mystery toggle. */
+const BASE_OPTIONS: { type: 'tenant' | 'landlord'; title: string; desc: string }[] = [
+  {
+    type: 'tenant',
+    title: 'Tenant',
+    desc: 'Someone seeking housing — voucher size, housing authority, current address, and listings sent.',
+  },
+  {
+    type: 'landlord',
+    title: 'Landlord',
+    desc: 'Someone offering housing — their company and their listings.',
+  },
+];
+
 /** True when the value is exactly the Property Manager preset (landlord + PM_ROLE),
  *  regardless of how the user arrived there (preset click OR Other→role→base). */
 function isPmPresetValue(value: KindPickerValue): boolean {
@@ -64,6 +80,7 @@ export function KindPicker({
   const uid = useId();
   const datalistId = `${uid}-role-suggestions`;
   const roleInputId = `${uid}-role`;
+  const baseLabelId = `${uid}-base-label`;
 
   const suggestions = roleSuggestions ?? [];
   const isPmPreset = isPmPresetValue(value);
@@ -152,28 +169,42 @@ export function KindPicker({
             list={suggestions.length > 0 ? datalistId : undefined}
           />
 
-          {/* Base-type sub-choice */}
-          <div
-            className={styles.subSegmentBar}
-            role="group"
-            aria-label="Base contact type"
-          >
-            {(
-              [
-                ['tenant', 'Tenant'],
-                ['landlord', 'Landlord'],
-              ] as [ContactType, string][]
-            ).map(([t, label]) => (
-              <button
-                key={t}
-                type="button"
-                className={`${styles.segment} ${value.type === t ? styles.segmentActive : ''}`}
-                onClick={() => handleBaseType(t)}
-                aria-pressed={value.type === t}
-              >
-                {label}
-              </button>
-            ))}
+          {/* Base-record-shape choice — explained, not a mystery toggle. */}
+          <div className={styles.baseGroup} role="radiogroup" aria-labelledby={baseLabelId}>
+            <span className={styles.baseLabel} id={baseLabelId}>
+              Which record type should it use?
+            </span>
+            <p className={styles.baseHelp}>
+              A custom kind reuses an existing record shape — this sets which fields and
+              behaviour{' '}
+              {value.role.trim() !== '' ? <strong>“{value.role.trim()}”</strong> : 'this contact'} gets.
+            </p>
+            {BASE_OPTIONS.map((o) => {
+              const selected = value.type === o.type;
+              return (
+                <button
+                  key={o.type}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-describedby={`${uid}-${o.type}-desc`}
+                  className={`${styles.baseOption} ${selected ? styles.baseOptionActive : ''}`}
+                  onClick={() => handleBaseType(o.type)}
+                >
+                  <span className={styles.baseOptionMain}>
+                    <span className={styles.baseOptionTitle}>{o.title}</span>
+                    {selected ? (
+                      <span className={styles.check} aria-hidden="true">
+                        ✓
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className={styles.baseOptionDesc} id={`${uid}-${o.type}-desc`}>
+                    {o.desc}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

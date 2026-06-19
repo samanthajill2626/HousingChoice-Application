@@ -5,7 +5,15 @@
 // Listings-sent + Media render a "pending backend" state until BE4/BE5 land;
 // Preferences are manual-now (pending until the gleaning slice). Each list row
 // links to its detail route.
-import type { CaseItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
+import {
+  STAGE_LABELS,
+  TENANT_STATUS_LABELS,
+  type CaseItem,
+  type Contact,
+  type ContactPhone,
+  type TenantStatus,
+  type UnitItem,
+} from '../../api/index.js';
 import {
   Card,
   CardAction,
@@ -20,7 +28,7 @@ import {
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantCases, tenantTours } from './buildContactFile.js';
-import { formatAddress, formatPhone } from './format.js';
+import { formatAddress, formatPhone, humanize } from './format.js';
 
 export interface TenantFileProps {
   contact: Contact;
@@ -46,18 +54,13 @@ function unitLabel(units: Map<string, UnitItem>, unitId: string): string {
   return addr || unitId;
 }
 
-const STAGE_LABEL: Record<string, string> = {
-  interested: 'Interested',
-  porting: 'Porting',
-  touring: 'Touring',
-  applied: 'Applied',
-  rta_submitted: 'RTA submitted',
-  inspection: 'Inspection',
-  rent_determined: 'Rent determined',
-  lease: 'Lease',
-  moved_in: 'Moved in',
-  lost: 'Lost',
-};
+/** A tenant-status display label. Prefers the tenant-status label map; an
+ *  off-list/legacy value falls back to a humanized form (underscores → spaces,
+ *  capitalized) so it reads cleanly and never renders blank. */
+function tenantStatusLabel(status: string | undefined): string {
+  if (!status) return '—';
+  return TENANT_STATUS_LABELS[status as TenantStatus] ?? humanize(status);
+}
 
 export function TenantFile({
   contact,
@@ -112,7 +115,17 @@ export function TenantFile({
             </>
           }
         />
-        <KV k="Status" v={contact.status ?? '—'} />
+        <KV
+          k="Status"
+          v={
+            <>
+              {tenantStatusLabel(contact.status)}
+              {contact.porting === true ? (
+                <span className={responseClass.muted}> · Porting</span>
+              ) : null}
+            </>
+          }
+        />
       </Card>
 
       <Card
@@ -166,7 +179,7 @@ export function TenantFile({
               key={c.caseId}
               to={`/cases/${c.caseId}`}
               label={unitLabel(unitMap, c.unitId)}
-              right={STAGE_LABEL[c.stage] ?? c.stage}
+              right={STAGE_LABELS[c.stage] ?? c.stage}
             />
           ))
         )}

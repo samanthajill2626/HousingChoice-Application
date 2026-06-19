@@ -13,13 +13,13 @@ const UNIT: UnitItem = {
   beds: 2,
   address: { line1: '1450 Joseph Blvd', city: 'Atlanta', state: 'GA' },
 };
-const PLACED_UNIT: UnitItem = { unitId: 'u2', landlordId: 'L1', status: 'placed', beds: 1, address: '88 Lindbergh' };
+const PLACED_UNIT: UnitItem = { unitId: 'u2', landlordId: 'L1', status: 'occupied', beds: 1, address: '88 Lindbergh' };
 
 const TENANT_CASE: CaseItem = {
   caseId: 'k1',
   tenantId: 'T1',
   unitId: 'u1',
-  stage: 'touring',
+  stage: 'schedule_inspection',
   tours: [{ date: '2026-06-13', outcome: 'Toured' }],
 };
 
@@ -110,7 +110,7 @@ describe('LandlordFile', () => {
     const link = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA · 2BR/ });
     expect(link).toHaveAttribute('href', '/listings/u1');
     expect(screen.getByText('● Available')).toBeInTheDocument();
-    expect(screen.getByText('● Placed')).toBeInTheDocument();
+    expect(screen.getByText('● Occupied')).toBeInTheDocument();
   });
 
   it('renders company + role in Details', () => {
@@ -121,7 +121,7 @@ describe('LandlordFile', () => {
 
   it('renders cases on their units linking to the case route', () => {
     renderIt();
-    const caseLink = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA touring/i });
+    const caseLink = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA Schedule inspection/i });
     expect(caseLink).toHaveAttribute('href', '/cases/k1');
   });
 });

@@ -9,9 +9,13 @@
 // 2026-06-18-extensible-contact-creation-design.md.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { Contact } from '../../api/index.js';
+import {
+  TENANT_STATUS_LABELS,
+  type Contact,
+  type TenantStatus,
+} from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { contactDisplayName, formatPhone } from '../contact/format.js';
+import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
@@ -40,10 +44,17 @@ const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
   { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
 ];
 
-/** Status label, e.g. 'active' ? "Active"; empty stays empty. */
-function statusLabel(status: string | undefined): string {
+/** Type-aware status label. For a tenant, look up the tenant-status label map
+ *  (so 'needs_review' → "Needs review", 'on_hold' → "On hold"); otherwise a
+ *  naive capitalize for the coarse needs_review|active lifecycle. Empty stays
+ *  empty. */
+function statusLabel(status: string | undefined, type: Contact['type']): string {
   if (!status) return '';
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  if (type === 'tenant') {
+    const label = TENANT_STATUS_LABELS[status as TenantStatus];
+    if (label !== undefined) return label;
+  }
+  return humanize(status);
 }
 
 /** The lowercased haystack a row is searched against (name + phone). */
@@ -62,7 +73,7 @@ function searchKey(contact: Contact): string {
 function Row({ contact }: { contact: Contact }): React.JSX.Element {
   const name = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   const phone = formatPhone(contact.phone);
-  const status = statusLabel(contact.status);
+  const status = statusLabel(contact.status, contact.type);
   return (
     <li className={styles.rowItem}>
       <Link to={`/contacts/${contact.contactId}`} className={styles.row}>

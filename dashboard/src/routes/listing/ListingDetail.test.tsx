@@ -1,10 +1,17 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
 vi.mock('./useListing.js', () => ({ useListing: (id: string) => useListing(id) }));
+
+const setListingStatus = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return { ...actual, setListingStatus: (...a: unknown[]) => setListingStatus(...a) };
+});
 
 import { ListingDetail } from './ListingDetail.js';
 
@@ -20,6 +27,7 @@ function renderAt(unitId = 'u1'): void {
 
 const READY: ListingState = {
   status: 'ready',
+  setUnit: vi.fn(),
   unit: {
     unitId: 'u1',
     landlordId: 'll1',
@@ -51,10 +59,10 @@ const READY: ListingState = {
       fallback: true,
     },
   ],
-  casesOnUnit: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'applied' }],
+  casesOnUnit: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
   related: {
     status: 'ready',
-    rows: [{ unitId: 'u2', status: 'placed', relation: 'same_landlord', label: 'Same landlord' }],
+    rows: [{ unitId: 'u2', status: 'occupied', relation: 'same_landlord', label: 'Same landlord' }],
   },
   recipients: { status: 'pending' },
   similar: { status: 'pending' },
@@ -81,8 +89,11 @@ describe('ListingDetail', () => {
       unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
     });
     renderAt();
-    expect(screen.getByRole('heading', { name: /1450 Joseph Blvd NW/ })).toBeInTheDocument();
-    expect(screen.getByText('Available')).toBeInTheDocument();
+    const heading = screen.getByRole('heading', { name: /1450 Joseph Blvd NW/ });
+    expect(heading).toBeInTheDocument();
+    // The status badge lives inside the heading (the select option also reads
+    // "Available", so scope to the heading to disambiguate).
+    expect(within(heading).getByText('Available')).toBeInTheDocument();
     expect(screen.getByText(/2 BR · 1 BA · \$1,400–1,600\/mo/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Broadcast to tenants/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Edit/ })).toBeInTheDocument();
@@ -115,7 +126,7 @@ describe('ListingDetail', () => {
       'href',
       '/contacts/ll1',
     );
-    expect(screen.getByRole('link', { name: /Applied/ })).toHaveAttribute('href', '/cases/c1');
+    expect(screen.getByRole('link', { name: /Awaiting approval/ })).toHaveAttribute('href', '/cases/c1');
   });
 
   it('links related listings to their listing page', () => {
@@ -137,6 +148,55 @@ describe('ListingDetail', () => {
     const imgs = screen.getAllByRole('img');
     expect(imgs.some((i) => i.getAttribute('src') === 'https://example.com/photo-1.jpg')).toBe(true);
     expect(screen.getByText(/Add/)).toBeInTheDocument();
+  });
+
+  it('the status select calls setListingStatus and applies the returned unit (badge updates)', async () => {
+    const user = userEvent.setup();
+    // Drive useListing from a mutable state so setUnit (called by the component on
+    // a successful write) re-renders with the new status, like the real hook.
+    let current = { ...READY };
+    const setUnit = vi.fn((unit) => {
+      current = { ...current, unit };
+    });
+    useListing.mockImplementation(() => ({ ...current, setUnit }));
+    setListingStatus.mockResolvedValue({ ...READY.unit!, status: 'off_market' });
+
+    renderAt();
+    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'off_market');
+
+    await waitFor(() =>
+      expect(setListingStatus).toHaveBeenCalledWith('u1', {
+        toStatus: 'off_market',
+        source: 'manual',
+      }),
+    );
+    await waitFor(() =>
+      expect(setUnit).toHaveBeenCalledWith(expect.objectContaining({ status: 'off_market' })),
+    );
+  });
+
+  it('surfaces an inline error when setListingStatus rejects, and clears it on a later success', async () => {
+    const user = userEvent.setup();
+    let current = { ...READY };
+    const setUnit = vi.fn((unit) => {
+      current = { ...current, unit };
+    });
+    useListing.mockImplementation(() => ({ ...current, setUnit }));
+
+    // First change FAILS → an inline error appears (no silent swallow).
+    setListingStatus.mockRejectedValueOnce(new Error('boom'));
+    renderAt();
+    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'off_market');
+    await waitFor(() =>
+      expect(screen.getByText(/Couldn.t update the listing status/i)).toBeInTheDocument(),
+    );
+
+    // A subsequent SUCCESSFUL change clears the error.
+    setListingStatus.mockResolvedValueOnce({ ...READY.unit!, status: 'on_hold' });
+    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'on_hold');
+    await waitFor(() =>
+      expect(screen.queryByText(/Couldn.t update the listing status/i)).not.toBeInTheDocument(),
+    );
   });
 
   it('falls back gracefully when optional fields are missing', () => {

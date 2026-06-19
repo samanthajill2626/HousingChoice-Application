@@ -65,9 +65,9 @@ describe('listingRoster', () => {
 
 describe('casesOnUnit', () => {
   const cases: CaseItem[] = [
-    { caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'applied' },
-    { caseId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'touring' },
-    { caseId: 'c3', tenantId: 't3', unitId: 'u1', stage: 'lease' },
+    { caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' },
+    { caseId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'schedule_inspection' },
+    { caseId: 'c3', tenantId: 't3', unitId: 'u1', stage: 'awaiting_hap_contract' },
   ];
 
   it('keeps only cases on this unit', () => {
@@ -82,8 +82,8 @@ describe('casesOnUnit', () => {
 describe('relatedByLandlord', () => {
   const units: UnitItem[] = [
     unit({ unitId: 'u1', landlordId: 'll1' }),
-    unit({ unitId: 'u2', landlordId: 'll1', status: 'placed' }),
-    unit({ unitId: 'u3', landlordId: 'll1', status: 'inactive' }),
+    unit({ unitId: 'u2', landlordId: 'll1', status: 'occupied' }),
+    unit({ unitId: 'u3', landlordId: 'll1', status: 'off_market' }),
     unit({ unitId: 'u4', landlordId: 'llX' }),
   ];
 
@@ -92,7 +92,7 @@ describe('relatedByLandlord', () => {
     expect(rows.map((r) => r.unitId)).toEqual(['u2', 'u3']);
     expect(rows.every((r) => r.relation === 'same_landlord')).toBe(true);
     expect(rows[0]?.label).toBe('Same landlord');
-    expect(rows[0]?.status).toBe('placed');
+    expect(rows[0]?.status).toBe('occupied');
   });
 
   it('returns [] when the unit has no landlordId', () => {

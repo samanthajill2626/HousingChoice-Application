@@ -1,7 +1,7 @@
 // listingFormat — small pure presentation helpers for the listing detail page.
 // Tested in isolation so the component stays declarative.
-import type { UnitItem } from '../../api/index.js';
-import { formatAddress } from '../contact/format.js';
+import { LISTING_STATUS_LABELS, type ListingStatus, type UnitItem } from '../../api/index.js';
+import { formatAddress, humanize } from '../contact/format.js';
 
 /** A whole-dollar money label, e.g. 1550 → "$1,550". Undefined → "". */
 export function formatMoney(amount: number | undefined): string {
@@ -28,9 +28,11 @@ export function formatBedsBaths(beds: number | undefined, baths: number | undefi
   return `${b} / ${ba}`;
 }
 
-/** The header status badge label, e.g. 'available' → "Available". */
+/** The header status badge label, e.g. 'under_application' → "Under application".
+ *  Uses the listing-status label map; an unknown status falls back to a humanized
+ *  form (underscores → spaces, capitalized) so the badge never renders blank. */
 export function statusLabel(status: string): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  return LISTING_STATUS_LABELS[status as ListingStatus] ?? humanize(status);
 }
 
 /** The header facts subline: "2 BR · 1 BA · $1,400–1,600/mo · West End, Atlanta

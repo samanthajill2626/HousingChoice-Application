@@ -47,11 +47,11 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
 const UNIT: UnitItem = { unitId: 'u1', landlordId: 'll1', status: 'available' };
 const UNITS: UnitsPage = {
   nextCursor: null,
-  units: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'placed' }],
+  units: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }],
 };
 const CASES: CasesPage = {
   nextCursor: null,
-  cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'applied' }],
+  cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
 };
 const LANDLORD: Contact = { contactId: 'll1', type: 'landlord', firstName: 'James' } as Contact;
 

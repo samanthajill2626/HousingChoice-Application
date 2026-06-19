@@ -45,9 +45,13 @@ describe('formatBedsBaths', () => {
 });
 
 describe('statusLabel', () => {
-  it('capitalizes', () => {
+  it('uses the listing-status label map (multi-word statuses do not break)', () => {
     expect(statusLabel('available')).toBe('Available');
-    expect(statusLabel('placed')).toBe('Placed');
+    expect(statusLabel('under_application')).toBe('Under application');
+    expect(statusLabel('off_market')).toBe('Off market');
+  });
+  it('falls back to a naive capitalize for an unknown status', () => {
+    expect(statusLabel('mystery')).toBe('Mystery');
   });
 });
 

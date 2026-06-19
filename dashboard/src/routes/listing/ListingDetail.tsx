@@ -11,7 +11,15 @@
 // contact); the C4 "Sent to tenants" + C6 "Similar listings" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" (BE2) is
 // pending too. Nothing is fabricated.
+import { useState } from 'react';
 import { useParams } from 'react-router-dom';
+import {
+  LISTING_STATUSES,
+  LISTING_STATUS_LABELS,
+  STAGE_LABELS,
+  setListingStatus,
+  type ListingStatus,
+} from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { useListing } from './useListing.js';
@@ -26,29 +34,28 @@ import {
 } from './listingFormat.js';
 import styles from './ListingDetail.module.css';
 
-const STAGE_LABEL: Record<string, string> = {
-  interested: 'Interested',
-  porting: 'Porting',
-  touring: 'Touring',
-  applied: 'Applied',
-  rta_submitted: 'RTA submitted',
-  inspection: 'Inspection',
-  rent_determined: 'Rent determined',
-  lease: 'Lease',
-  moved_in: 'Moved in',
-  lost: 'Lost',
-};
-
-const STATUS_BADGE: Record<string, string> = {
+// Listing-status → header badge class. `available` is the one publicly-shareable
+// status (green); occupied/off_market read as a settled/closed badge; the rest
+// fall back to the neutral badge.
+const STATUS_BADGE: Record<ListingStatus, string> = {
+  setup: styles.badgeInactive ?? '',
   available: styles.badgeAvailable ?? '',
-  placed: styles.badgePlaced ?? '',
-  inactive: styles.badgeInactive ?? '',
+  under_application: styles.badgePlaced ?? '',
+  finalizing: styles.badgePlaced ?? '',
+  occupied: styles.badgePlaced ?? '',
+  on_hold: styles.badgeInactive ?? '',
+  off_market: styles.badgeInactive ?? '',
 };
 
-const STATUS_DOT: Record<string, string> = {
+// Listing-status → status-dot colour for the related-listings rows.
+const STATUS_DOT: Record<ListingStatus, string> = {
+  setup: responseClass.muted,
   available: responseClass.available,
-  placed: responseClass.placed,
-  inactive: responseClass.inactive,
+  under_application: responseClass.placed,
+  finalizing: responseClass.placed,
+  occupied: responseClass.placed,
+  on_hold: responseClass.muted,
+  off_market: responseClass.inactive,
 };
 
 const RESPONSE_META: Record<string, { label: string; cls: string }> = {
@@ -60,6 +67,28 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const state = useListing(unitId);
+  const { setUnit } = state;
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  // Listing-status write — goes through the transition service (status is NOT
+  // writable via a plain unit PATCH). On success apply the returned unit in
+  // place (no refetch) and clear any prior error. On failure surface an inline
+  // error (the select reverts to the unit's stored status, so without feedback a
+  // failed change would silently vanish). Manual source; no reason needed.
+  function onChangeStatus(toStatus: ListingStatus): void {
+    if (statusBusy || !state.unit || toStatus === state.unit.status) return;
+    setStatusBusy(true);
+    void setListingStatus(state.unit.unitId, { toStatus, source: 'manual' })
+      .then((updated) => {
+        setUnit(updated);
+        setStatusError(null);
+      })
+      .catch(() => {
+        setStatusError("Couldn't update the listing status — please try again.");
+      })
+      .finally(() => setStatusBusy(false));
+  }
 
   if (state.status === 'loading') {
     return (
@@ -99,6 +128,26 @@ export function ListingDetail(): React.JSX.Element {
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
         <div className={styles.actions}>
+          <label className={styles.statusSelect}>
+            <span className={styles.srLabel}>Listing status</span>
+            <select
+              aria-label="Listing status"
+              value={unit.status}
+              disabled={statusBusy}
+              onChange={(e) => onChangeStatus(e.target.value as ListingStatus)}
+            >
+              {LISTING_STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {LISTING_STATUS_LABELS[s]}
+                </option>
+              ))}
+            </select>
+            {statusError !== null ? (
+              <span role="alert" className={styles.statusError}>
+                {statusError}
+              </span>
+            ) : null}
+          </label>
           <button type="button" className={styles.btn}>
             📣 Broadcast to tenants
           </button>
@@ -238,7 +287,7 @@ export function ListingDetail(): React.JSX.Element {
                   key={c.caseId}
                   to={`/cases/${c.caseId}`}
                   label={c.tenantId}
-                  right={STAGE_LABEL[c.stage] ?? c.stage}
+                  right={STAGE_LABELS[c.stage] ?? c.stage}
                 />
               ))
             )}

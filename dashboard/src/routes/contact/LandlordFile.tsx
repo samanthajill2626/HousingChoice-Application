@@ -3,7 +3,15 @@
 // Preferences · Listings (their units, with status) · Cases on their units ·
 // Group texts · Media. Listings + Cases are REAL (from /api/units + /api/cases);
 // Preferences + Group texts + Media are pending until their backend slices land.
-import type { CaseItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
+import {
+  LISTING_STATUS_LABELS,
+  STAGE_LABELS,
+  type CaseItem,
+  type Contact,
+  type ContactPhone,
+  type ListingStatus,
+  type UnitItem,
+} from '../../api/index.js';
 import {
   Card,
   CardAction,
@@ -34,10 +42,15 @@ export interface LandlordFileProps {
   onManagePhones?: () => void;
 }
 
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  available: { label: '● Available', cls: responseClass.available },
-  placed: { label: '● Placed', cls: responseClass.placed },
-  inactive: { label: '● Inactive', cls: responseClass.inactive },
+// Listing-status → a coloured "● Label" chip for a landlord's listing rows.
+const STATUS_DOT: Record<ListingStatus, string> = {
+  setup: responseClass.muted,
+  available: responseClass.available,
+  under_application: responseClass.placed,
+  finalizing: responseClass.placed,
+  occupied: responseClass.placed,
+  on_hold: responseClass.muted,
+  off_market: responseClass.inactive,
 };
 
 /** A unit row label: "address · NBR" when both are known. */
@@ -118,13 +131,14 @@ export function LandlordFile({
           <EmptyRow>No listings yet.</EmptyRow>
         ) : (
           myUnits.map((u) => {
-            const meta = STATUS_META[u.status] ?? { label: u.status, cls: responseClass.muted };
+            const cls = STATUS_DOT[u.status] ?? responseClass.muted;
+            const label = LISTING_STATUS_LABELS[u.status] ?? u.status;
             return (
               <Row
                 key={u.unitId}
                 to={`/listings/${u.unitId}`}
                 label={unitRowLabel(u)}
-                right={<span className={meta.cls}>{meta.label}</span>}
+                right={<span className={cls}>{`● ${label}`}</span>}
               />
             );
           })
@@ -138,7 +152,14 @@ export function LandlordFile({
           myCases.map((c) => {
             const unit = unitMap.get(c.unitId);
             const addr = unit ? formatAddress(unit.address) || c.unitId : c.unitId;
-            return <Row key={c.caseId} to={`/cases/${c.caseId}`} label={addr} right={c.stage} />;
+            return (
+              <Row
+                key={c.caseId}
+                to={`/cases/${c.caseId}`}
+                label={addr}
+                right={STAGE_LABELS[c.stage] ?? c.stage}
+              />
+            );
           })
         )}
       </Card>

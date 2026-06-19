@@ -21,6 +21,13 @@
   gap: var(--sp-1);
 }
 
+.checkboxField {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);

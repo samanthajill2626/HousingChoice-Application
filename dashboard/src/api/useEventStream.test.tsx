@@ -91,7 +91,7 @@ describe('useEventStream', () => {
       caseId: 'k1',
       tenantId: 't1',
       unitId: 'u1',
-      stage: 'touring',
+      stage: 'schedule_inspection',
       tour_date: null,
       next_deadline_type: null,
       next_deadline_at: null,

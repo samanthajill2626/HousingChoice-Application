@@ -3,7 +3,9 @@
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { request } from './client.js';
 import type {
+  CaseItem,
   CasesPage,
+  CaseStage,
   Contact,
   ContactCreate,
   ContactMediaItem,
@@ -14,15 +16,21 @@ import type {
   ContactVocabulary,
   ConversationsPage,
   DevLoginResult,
+  HistoryRow,
   InboxFilter,
   InboxPage,
+  InspectionOutcome,
   ListingSendRow,
+  ListingStatus,
+  LostReason,
   Me,
   Message,
   RelatedUnit,
   SendMessageResult,
   SimilarUnit,
+  TenantStatus,
   TodayResponse,
+  TransitionSource,
   UnitItem,
   UnitsPage,
 } from './types.js';
@@ -65,6 +73,133 @@ export function getToday(day?: string, signal?: AbortSignal): Promise<TodayRespo
  *  source). The server pages; the Today fallback reads the first page. */
 export function getCases(signal?: AbortSignal): Promise<CasesPage> {
   return request<CasesPage>('/api/cases', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/cases/:caseId — a single case record (the case detail page + the
+ *  history view). Wrapped under { case } on the wire; unwrapped here. */
+export async function getCase(caseId: string, signal?: AbortSignal): Promise<CaseItem> {
+  const res = await request<{ case: CaseItem }>(`/api/cases/${encodeURIComponent(caseId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.case;
+}
+
+// --- Status-model transitions (the ONE transition surface) ------------------
+// The four routes over the backend status-transition service. Stage/tenant/
+// listing writes MUST go through these (NOT a plain PATCH) so provenance +
+// derivation are applied server-side.
+
+/** Input to a placement (case) stage transition. */
+export interface TransitionInput {
+  toStage: CaseStage;
+  source: TransitionSource;
+  reason?: string;
+  lostReason?: LostReason;
+  /** Written only on the move OUT of awaiting_rent_acceptance (>0). */
+  finalRent?: number;
+  /** Written only on the move OUT of awaiting_inspection. */
+  inspectionOutcome?: InspectionOutcome;
+}
+
+/** True when a lost reason is acceptable to the backend: a category OR non-empty
+ *  trimmed free text (else the server returns 400). Client-side fast-fail so a
+ *  lost move never round-trips just to bounce. */
+export function validateLostReason(lr: LostReason | undefined): boolean {
+  if (lr === undefined) return false;
+  if (lr.category !== undefined) return true;
+  return typeof lr.text === 'string' && lr.text.trim().length > 0;
+}
+
+/** Build the transition request body, OMITTING undefined fields (so finalRent /
+ *  inspectionOutcome / lostReason / reason only appear when actually set). Pure. */
+export function buildTransitionBody(input: TransitionInput): Record<string, unknown> {
+  return {
+    toStage: input.toStage,
+    source: input.source,
+    ...(input.reason !== undefined && { reason: input.reason }),
+    ...(input.lostReason !== undefined && { lostReason: input.lostReason }),
+    ...(input.finalRent !== undefined && { finalRent: input.finalRent }),
+    ...(input.inspectionOutcome !== undefined && { inspectionOutcome: input.inspectionOutcome }),
+  };
+}
+
+/** POST /api/cases/:caseId/transition — move a placement to a new stage through
+ *  the transition service. A `lost` move requires lostReason.category OR
+ *  non-empty text (validated client-side, then server-side). Returns the updated
+ *  case (unwrapped from { case }). */
+export async function transitionPlacement(
+  caseId: string,
+  input: TransitionInput,
+): Promise<CaseItem> {
+  if (input.toStage === 'lost' && !validateLostReason(input.lostReason)) {
+    throw new Error('A lost move requires a reason: pick a category or write a note.');
+  }
+  const res = await request<{ case: CaseItem }>(
+    `/api/cases/${encodeURIComponent(caseId)}/transition`,
+    { method: 'POST', body: buildTransitionBody(input) },
+  );
+  return res.case;
+}
+
+/** GET /api/cases/:caseId/history — the placement's provenance trail (newest
+ *  first). Unwrapped from { history }. */
+export async function getPlacementHistory(
+  caseId: string,
+  opts: { limit?: number; before?: string } = {},
+  signal?: AbortSignal,
+): Promise<HistoryRow[]> {
+  const res = await request<{ history: HistoryRow[] }>(
+    `/api/cases/${encodeURIComponent(caseId)}/history`,
+    {
+      query: { limit: opts.limit, before: opts.before },
+      ...(signal !== undefined && { signal }),
+    },
+  );
+  return res.history;
+}
+
+/** PATCH /api/contacts/:contactId/tenant-status — set a tenant's lifecycle
+ *  status through the transition service (applies provenance/derivation —
+ *  NEVER use a plain contact PATCH for tenant lifecycle). Returns the updated
+ *  contact (unwrapped from { contact }). */
+export async function setTenantStatus(
+  contactId: string,
+  input: { toStatus: TenantStatus; source: TransitionSource; reason?: string; porting?: boolean },
+): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/tenant-status`,
+    {
+      method: 'PATCH',
+      body: {
+        toStatus: input.toStatus,
+        source: input.source,
+        ...(input.reason !== undefined && { reason: input.reason }),
+        ...(input.porting !== undefined && { porting: input.porting }),
+      },
+    },
+  );
+  return res.contact;
+}
+
+/** PATCH /api/units/:unitId/listing-status — set a listing's lifecycle status
+ *  through the transition service (status is NOT writable via a plain unit
+ *  PATCH). Returns the updated unit (unwrapped from { unit }). */
+export async function setListingStatus(
+  unitId: string,
+  input: { toStatus: ListingStatus; source: TransitionSource; reason?: string },
+): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/listing-status`,
+    {
+      method: 'PATCH',
+      body: {
+        toStatus: input.toStatus,
+        source: input.source,
+        ...(input.reason !== undefined && { reason: input.reason }),
+      },
+    },
+  );
+  return res.unit;
 }
 
 /** GET /api/conversations — the inbox rows (the Today fallback's unread +

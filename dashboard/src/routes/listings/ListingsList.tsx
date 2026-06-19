@@ -6,7 +6,12 @@
 // visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { UnitItem, UnitStatus } from '../../api/index.js';
+import {
+  LISTING_STATUSES,
+  LISTING_STATUS_LABELS,
+  type UnitItem,
+  type UnitStatus,
+} from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import {
   formatBedsBaths,
@@ -21,9 +26,7 @@ type StatusFilter = UnitStatus | 'all';
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   { value: 'all', label: 'All statuses' },
-  { value: 'available', label: 'Available' },
-  { value: 'placed', label: 'Placed' },
-  { value: 'inactive', label: 'Inactive' },
+  ...LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] })),
 ];
 
 /** Humanize a jurisdiction slug for the filter chips: tokens ≤3 chars become

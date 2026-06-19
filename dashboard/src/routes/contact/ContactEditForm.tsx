@@ -8,6 +8,9 @@
 // success the parent applies the returned contact in place (no refetch).
 import { useState } from 'react';
 import {
+  TENANT_STATUSES,
+  TENANT_STATUS_LABELS,
+  setTenantStatus,
   updateContact,
   type Address,
   type Contact,
@@ -15,7 +18,38 @@ import {
   type ContactType,
   type Relationship,
   type CustomField,
+  type TenantStatus,
 } from '../../api/index.js';
+
+// The valid status values, per contact type. Tenants use the 7-value tenant
+// lifecycle; everyone else uses the coarse needs_review|active lifecycle.
+const NON_TENANT_STATUS_VALUES = ['needs_review', 'active'] as const;
+type NonTenantStatus = (typeof NON_TENANT_STATUS_VALUES)[number];
+
+function isTenantStatus(v: string): v is TenantStatus {
+  return (TENANT_STATUSES as readonly string[]).includes(v);
+}
+
+function isNonTenantStatus(v: string): v is NonTenantStatus {
+  return (NON_TENANT_STATUS_VALUES as readonly string[]).includes(v);
+}
+
+/** The set of valid status values for a given type. */
+function validStatusesForType(type: ContactType): readonly string[] {
+  return type === 'tenant' ? TENANT_STATUSES : NON_TENANT_STATUS_VALUES;
+}
+
+/** The status to start with (and to reset to) for a type, given the contact's
+ *  stored status. Keeps the selection VALID for the type: a stored value that's
+ *  off-list for the type falls back to that type's front door — tenant →
+ *  'needs_review'; non-tenant → keep 'active' if that's what was stored, else
+ *  'needs_review'. Never surfaces an off-list value as a selectable option. */
+function defaultStatusForType(type: ContactType, storedStatus: string): string {
+  if (type === 'tenant') {
+    return isTenantStatus(storedStatus) ? storedStatus : 'needs_review';
+  }
+  return isNonTenantStatus(storedStatus) ? storedStatus : 'needs_review';
+}
 import { Button } from '../../ui/index.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
@@ -35,10 +69,22 @@ export interface ContactEditFormProps {
   candidates?: Contact[];
 }
 
-const STATUSES: { value: string; label: string }[] = [
+// Non-tenant contacts use the coarse needs_review|active lifecycle.
+const NON_TENANT_STATUSES: { value: string; label: string }[] = [
   { value: 'needs_review', label: 'Needs review' },
   { value: 'active', label: 'Active' },
 ];
+
+/** The selectable status options for a type (no off-list value ever prepended). */
+function statusOptionsForType(type: ContactType): { value: string; label: string }[] {
+  return type === 'tenant' ? TENANT_STATUS_OPTIONS : NON_TENANT_STATUSES;
+}
+
+// Tenants use the 7-value tenant lifecycle (the status model).
+const TENANT_STATUS_OPTIONS: { value: string; label: string }[] = TENANT_STATUSES.map((s) => ({
+  value: s,
+  label: TENANT_STATUS_LABELS[s],
+}));
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -56,7 +102,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
   const [firstName, setFirstName] = useState(str(contact.firstName));
   const [lastName, setLastName] = useState(str(contact.lastName));
-  const [status, setStatus] = useState(str(contact.status) || 'needs_review');
+  // The status selection is ALWAYS valid for the current type. Seed it from the
+  // stored status, defaulting off-list values to the type's front door (so a
+  // legacy tenant stored as 'active' starts on 'needs_review', never on the
+  // off-list 'active'). A type change re-derives it (see the effect below).
+  const [status, setStatus] = useState(() =>
+    defaultStatusForType(contact.type, str(contact.status)),
+  );
+  const [porting, setPorting] = useState(contact.porting === true);
   const [notes, setNotes] = useState(str(contact.notes));
   const [voucher, setVoucher] = useState(
     typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '',
@@ -74,6 +127,17 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [showCustomFields, setShowCustomFields] = useState(
     (contact.customFields ?? []).length > 0,
   );
+
+  // Changing the type re-scopes the valid status set. If the current selection
+  // isn't valid for the new type, reset it to that type's default (tenant →
+  // 'needs_review'; non-tenant → keep 'active' if stored else 'needs_review') so
+  // we never carry a type-invalid status (e.g. landlord 'active' → tenant).
+  function handleTypeChange(nextType: ContactType): void {
+    setType(nextType);
+    if (!validStatusesForType(nextType).includes(status)) {
+      setStatus(defaultStatusForType(nextType, str(contact.status)));
+    }
+  }
 
   function handleShowRelationships(): void {
     setShowRelationships(true);
@@ -108,7 +172,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     if (type !== contact.type) patch.type = type;
     if (firstName !== str(contact.firstName)) patch.firstName = firstName;
     if (lastName !== str(contact.lastName)) patch.lastName = lastName;
-    if (status !== (str(contact.status) || 'needs_review')) patch.status = status;
+    // For TENANTS the status (and porting) is written via setTenantStatus (which
+    // applies provenance/derivation) — NOT this plain PATCH, which would bypass
+    // it. Non-tenant status may ride the plain PATCH. Compare against the initial
+    // VALID selection (the stored value normalized to the type's valid set), so
+    // an off-list stored value doesn't masquerade as a no-op change.
+    if (!isTenant && status !== defaultStatusForType(type, str(contact.status))) {
+      patch.status = status;
+    }
     if (notes !== str(contact.notes)) patch.notes = notes;
     if (isLandlord && company !== str(contact['company'])) patch.company = company;
 
@@ -164,20 +235,51 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       setError(result.error);
       return;
     }
-    if (Object.keys(result).length === 0) {
+    // For a tenant, a status OR porting change is a SEPARATE write through the
+    // transition service (NOT the plain PATCH). Detect either, comparing status
+    // against the initial VALID tenant selection (a legacy off-list value was
+    // normalized to 'needs_review' on load).
+    const initialStatus = defaultStatusForType(type, str(contact.status));
+    const tenantStatusChanged =
+      isTenant && (status !== initialStatus || porting !== (contact.porting === true));
+
+    if (Object.keys(result).length === 0 && !tenantStatusChanged) {
       onClose(); // nothing changed
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      const updated = await updateContact(contact.contactId, result);
+      // Field edits (name, notes, voucher, address, …) ride the plain PATCH.
+      let updated: Contact = contact;
+      if (Object.keys(result).length > 0) {
+        updated = await updateContact(contact.contactId, result);
+      }
+      // Tenant lifecycle status + porting go through setTenantStatus so
+      // provenance/derivation apply. The returned contact supersedes the PATCH's.
+      // toStatus is GUARANTEED valid here (the selection is kept in the tenant
+      // set), but narrow defensively — never cast an unchecked value, and fall
+      // back to the front door if somehow off-list.
+      if (tenantStatusChanged) {
+        const toStatus: TenantStatus = isTenantStatus(status) ? status : 'needs_review';
+        updated = await setTenantStatus(contact.contactId, {
+          toStatus,
+          source: 'manual',
+          porting,
+        });
+      }
       onSaved(updated);
     } catch {
       setError("Couldn't save — please try again.");
       setSaving(false);
     }
   }
+
+  // Status options for the live type — ALWAYS just that type's valid set (no
+  // off-list value is ever prepended). The selected `status` is guaranteed to be
+  // a member (seeded valid; re-derived on type change), so the select never shows
+  // nor submits an off-list/type-invalid value.
+  const statusOptions = statusOptionsForType(type);
 
   // Selectable types: the three the org assigns. If the contact is currently an
   // off-list type (e.g. an untriaged 'unknown'), prepend it so its value still
@@ -229,7 +331,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           <select
             className={styles.input}
             value={type}
-            onChange={(e) => setType(e.target.value as ContactType)}
+            onChange={(e) => handleTypeChange(e.target.value as ContactType)}
             aria-label="Type"
           >
             {typeOptions.map((t) => (
@@ -342,13 +444,24 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         <label className={styles.field}>
           <span className={styles.label}>Status</span>
           <select className={styles.input} value={status} onChange={(e) => setStatus(e.target.value)}>
-            {STATUSES.map((s) => (
+            {statusOptions.map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
               </option>
             ))}
           </select>
         </label>
+
+        {isTenant ? (
+          <label className={styles.checkboxField}>
+            <input
+              type="checkbox"
+              checked={porting}
+              onChange={(e) => setPorting(e.target.checked)}
+            />
+            <span className={styles.label}>Porting in from another jurisdiction</span>
+          </label>
+        ) : null}
 
         <label className={styles.field}>
           <span className={styles.label}>Notes</span>

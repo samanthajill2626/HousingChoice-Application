@@ -3,7 +3,7 @@ import { landlordCases, landlordUnits, tenantCases, tenantTours } from './buildC
 import type { CaseItem, UnitItem } from '../../api/index.js';
 
 function caseOf(p: Partial<CaseItem> & Pick<CaseItem, 'caseId'>): CaseItem {
-  return { tenantId: 't', unitId: 'u', stage: 'touring', ...p };
+  return { tenantId: 't', unitId: 'u', stage: 'schedule_inspection', ...p };
 }
 function unitOf(p: Partial<UnitItem> & Pick<UnitItem, 'unitId'>): UnitItem {
   return { landlordId: 'l', status: 'available', ...p };

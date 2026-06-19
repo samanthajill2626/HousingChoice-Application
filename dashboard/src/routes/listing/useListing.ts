@@ -8,7 +8,7 @@
 //   - related (C3): try the live endpoint; on 404 fall back to the derived
 //     same-landlord list (still 'ready' — it's real data, just our derivation).
 //   - recipients (C4) + similar (C6): degrade to 'pending' on 404.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
   getCases,
@@ -36,6 +36,10 @@ export type Slice<T> =
 export interface ListingState {
   status: 'loading' | 'ready' | 'error';
   unit: UnitItem | null;
+  /** Replace the in-memory unit after a mutation (e.g. a listing-status write
+   *  RETURNS the updated unit) — applied directly, no refetch. Mirrors
+   *  useContact.setContact. */
+  setUnit: (unit: UnitItem) => void;
   /** The resolved landlord contact (for the roster fallback), or null. */
   landlord: Contact | null;
   roster: RosterRow[];
@@ -48,7 +52,7 @@ export interface ListingState {
   similar: Slice<SimilarUnit>;
 }
 
-const LOADING: ListingState = {
+const LOADING: Omit<ListingState, 'setUnit'> = {
   status: 'loading',
   unit: null,
   landlord: null,
@@ -93,10 +97,19 @@ export function useListing(unitId: string): ListingState {
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
   // Compiler flags as a cascading render — set-state-in-effect).
-  const [state, setState] = useState<ListingState & { forId: string }>({
+  const [state, setState] = useState<Omit<ListingState, 'setUnit'> & { forId: string }>({
     ...LOADING,
     forId: unitId,
   });
+
+  // Replace the in-memory unit in place (a mutation returned the updated unit).
+  // Keeps the rest of the committed state; no refetch.
+  const setUnit = useCallback(
+    (unit: UnitItem) => {
+      setState((prev) => ({ ...prev, status: 'ready', unit, forId: unitId }));
+    },
+    [unitId],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -150,6 +163,6 @@ export function useListing(unitId: string): ListingState {
   }, [unitId]);
 
   // Committed state is for the previous unitId → the new fetch is in flight.
-  if (state.forId !== unitId) return LOADING;
-  return state;
+  if (state.forId !== unitId) return { ...LOADING, setUnit };
+  return { ...state, setUnit };
 }

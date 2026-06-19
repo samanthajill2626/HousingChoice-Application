@@ -28,7 +28,7 @@ const UNITS: UnitItem[] = [
   {
     unitId: 'u2',
     landlordId: 'l2',
-    status: 'placed',
+    status: 'occupied',
     jurisdiction: 'ga_dca',
     address: { line1: '88 Oak Ave', city: 'Decatur', state: 'GA' },
     beds: 3,
@@ -106,7 +106,7 @@ describe('ListingsList', () => {
     renderList();
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
 
-    await userEvent.selectOptions(screen.getByLabelText('Status'), 'placed');
+    await userEvent.selectOptions(screen.getByLabelText('Status'), 'occupied');
     const rows = screen.getAllByRole('listitem');
     expect(rows).toHaveLength(1);
     expect(within(rows[0]!).getByText(/88 Oak Ave/)).toBeInTheDocument();

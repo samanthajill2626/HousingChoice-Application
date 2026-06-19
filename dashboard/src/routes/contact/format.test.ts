@@ -6,7 +6,19 @@ import {
   formatDuration,
   formatPhone,
   formatTime,
+  humanize,
 } from './format.js';
+
+describe('humanize', () => {
+  it('turns a snake_case value into a capitalized space-separated label', () => {
+    expect(humanize('some_unknown_value')).toBe('Some unknown value');
+    expect(humanize('on_hold')).toBe('On hold');
+  });
+  it('capitalizes a single word and leaves empty empty', () => {
+    expect(humanize('active')).toBe('Active');
+    expect(humanize('')).toBe('');
+  });
+});
 
 describe('formatPhone', () => {
   it('formats a US E.164 number', () => {

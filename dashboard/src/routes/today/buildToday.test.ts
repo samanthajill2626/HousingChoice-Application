@@ -9,7 +9,7 @@ function caseOf(partial: Partial<CaseItem> & Pick<CaseItem, 'caseId'>): CaseItem
   return {
     tenantId: `t-${partial.caseId}`,
     unitId: `u-${partial.caseId}`,
-    stage: 'touring',
+    stage: 'schedule_inspection',
     ...partial,
   };
 }
@@ -41,7 +41,7 @@ const DAY = 24 * HOUR;
 describe('buildTodayFromSources', () => {
   it('puts a case with an upcoming deadline in needs_you_now with humanized urgency + tag', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'k1', stage: 'touring', next_deadline_type: 'rta_window', next_deadline_at: at(2 * HOUR) })],
+      [caseOf({ caseId: 'k1', stage: 'schedule_inspection', next_deadline_type: 'rta_window', next_deadline_at: at(2 * HOUR) })],
       [],
       NOW,
     );
@@ -51,7 +51,7 @@ describe('buildTodayFromSources', () => {
     expect(item?.refType).toBe('case');
     expect(item?.refId).toBe('k1');
     expect(item?.urgency).toBe('2h left');
-    expect(item?.tag).toBe('Case · Touring');
+    expect(item?.tag).toBe('Case · Schedule inspection');
     expect(item?.why).toMatch(/RTA/i);
   });
 
@@ -87,7 +87,7 @@ describe('buildTodayFromSources', () => {
       [
         caseOf({
           caseId: 'att',
-          stage: 'applied',
+          stage: 'awaiting_approval',
           attention: { reason: 'Send failed — needs a call', at: NOW.toISOString() },
         }),
       ],
@@ -98,7 +98,7 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.group).toBe('needs_you_now');
     expect(items[0]?.attention).toBe(true);
     expect(items[0]?.why).toMatch(/Send failed/);
-    expect(items[0]?.tag).toBe('Case · Applied');
+    expect(items[0]?.tag).toBe('Case · Awaiting approval');
   });
 
   it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
@@ -149,14 +149,14 @@ describe('buildTodayFromSources', () => {
 
   it('puts a case touring today in tours_today', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'tour', stage: 'touring', tour_date: '2026-06-16' })],
+      [caseOf({ caseId: 'tour', stage: 'schedule_inspection', tour_date: '2026-06-16' })],
       [],
       NOW,
     );
     const tour = items.find((i) => i.group === 'tours_today');
     expect(tour?.refId).toBe('tour');
     expect(tour?.why).toMatch(/Tour/);
-    expect(tour?.tag).toBe('Case · Touring');
+    expect(tour?.tag).toBe('Case · Schedule inspection');
   });
 
   it('does not put a tour on a different day in tours_today', () => {
@@ -206,7 +206,7 @@ describe('buildTodayFromSources', () => {
       [
         caseOf({
           caseId: 'fu',
-          stage: 'applied',
+          stage: 'awaiting_approval',
           next_deadline_type: 'follow_up',
           next_deadline_at: at(2 * HOUR),
         }),
@@ -216,12 +216,12 @@ describe('buildTodayFromSources', () => {
     );
     expect(items).toHaveLength(1);
     expect(items[0]?.group).toBe('follow_ups');
-    expect(items[0]?.tag).toBe('Case · Applied');
+    expect(items[0]?.tag).toBe('Case · Awaiting approval');
   });
 
   it('puts a stuck_case in follow_ups', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'stuck', stage: 'applied', next_deadline_type: 'stuck_case', next_deadline_at: at(-DAY) })],
+      [caseOf({ caseId: 'stuck', stage: 'awaiting_approval', next_deadline_type: 'stuck_case', next_deadline_at: at(-DAY) })],
       [],
       NOW,
     );
@@ -233,7 +233,7 @@ describe('buildTodayFromSources', () => {
   it('returns groups in canonical order regardless of input order', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({ caseId: 'fu', stage: 'applied', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
+        caseOf({ caseId: 'fu', stage: 'awaiting_approval', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
         caseOf({ caseId: 'tour', tour_date: '2026-06-16' }),
         caseOf({ caseId: 'need', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
       ],
@@ -253,7 +253,7 @@ describe('buildTodayFromSources', () => {
       [
         caseOf({
           caseId: 'esc',
-          stage: 'applied',
+          stage: 'awaiting_approval',
           next_deadline_type: 'follow_up',
           next_deadline_at: at(DAY),
           attention: { reason: 'Send failed — needs a call', at: NOW.toISOString() },

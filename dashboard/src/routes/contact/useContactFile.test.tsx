@@ -36,7 +36,7 @@ function Probe({ contactId }: { contactId: string }): React.JSX.Element {
 
 const CASES: CasesPage = {
   nextCursor: null,
-  cases: [{ caseId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'touring' }],
+  cases: [{ caseId: 'a', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
 };
 const UNITS: UnitsPage = {
   nextCursor: null,

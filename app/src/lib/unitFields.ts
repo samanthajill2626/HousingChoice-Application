@@ -8,7 +8,7 @@
 // caller can never inject `tour_process` through an unexpected key or set a GSI
 // key (status/jurisdiction) to a non-string that would poison the index.
 import { validateAddress } from './address.js';
-import { UNIT_STATUSES, type UnitItem } from '../repos/unitsRepo.js';
+import { type UnitItem } from '../repos/unitsRepo.js';
 
 /** Result of validating a units request body. */
 export type UnitValidation =
@@ -18,14 +18,21 @@ export type UnitValidation =
 type FieldKind = 'string' | 'number' | 'string[]' | 'pets' | 'address';
 
 /**
- * The writable unit fields and their kinds. `status` and `jurisdiction` are the
- * GSI partition keys — validated as strings here and (status) allowlisted to
- * UNIT_STATUSES separately. `landlordId` is required on create only (checked by
- * the caller). NOTE: unitId/created_at/updated_at are NOT writable (repo-owned).
+ * The writable unit fields and their kinds. `jurisdiction` is a GSI partition
+ * key (validated as a string here). `landlordId` is required on create only
+ * (checked by the caller). NOTE: unitId/created_at/updated_at are NOT writable
+ * (repo-owned).
+ *
+ * `status` is DELIBERATELY not here (§8: every listing-status change routes
+ * through the ONE transition service so status_source provenance is stamped —
+ * use PATCH /api/units/:unitId/listing-status). `final_rent` is NOT writable
+ * either: it is written ONLY by the transition service on rent acceptance (§4),
+ * never set arbitrarily through CRUD. The unit-CREATE path stamps the initial
+ * `status` + `status_source` separately (routes/units.ts), since create is not
+ * a transition but still needs the denormalized provenance initialized.
  */
 const WRITABLE_FIELDS: Record<string, FieldKind> = {
   landlordId: 'string',
-  status: 'string',
   jurisdiction: 'string',
   address: 'address',
   accepted_programs: 'string[]',
@@ -109,11 +116,6 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
       }
     }
     fields[key] = value;
-  }
-
-  // status, when present, must be one of the lifecycle values (GSI partition).
-  if ('status' in fields && !(UNIT_STATUSES as readonly string[]).includes(fields['status'] as string)) {
-    return { ok: false, error: `status must be one of: ${UNIT_STATUSES.join(', ')}` };
   }
 
   if (mode === 'create') {

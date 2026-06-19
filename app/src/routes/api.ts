@@ -72,6 +72,7 @@ import { createInboxRouter } from './inbox.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
+import { createStatusTransitionRouter } from './statusTransition.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 
@@ -373,6 +374,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit case_opened/case_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
+      events,
+    }),
+  );
+  // Status-model transitions (requireAuth via the /api mount). Mounted at '/' so
+  // it owns the distinct sub-paths /cases/:id/transition, /cases/:id/history,
+  // /contacts/:id/tenant-status, /units/:id/listing-status — all distinct
+  // segments from the cases/contacts/units CRUD routers above, so no collision.
+  // EVERY status/stage write routes through the ONE transition service here.
+  router.use(
+    '/',
+    createStatusTransitionRouter({
+      logger: deps.logger,
+      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      auditRepo: audit,
       events,
     }),
   );

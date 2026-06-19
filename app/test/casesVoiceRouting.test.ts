@@ -48,7 +48,7 @@ function seedCaseRelay(
       caseId: 'case-vr',
       tenantId: 'c-tenant',
       unitId: 'unit-vr',
-      stage: 'applied',
+      stage: 'awaiting_approval',
     });
   }
   const now = new Date().toISOString();

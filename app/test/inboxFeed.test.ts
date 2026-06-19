@@ -265,11 +265,11 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       conversations: [
         conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', caseId: 'case-9' }),
       ],
-      cases: { 'case-9': { stage: 'touring' } },
+      cases: { 'case-9': { stage: 'awaiting_inspection' } },
     });
 
     const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
-    expect(page.rows[0]!.caseContext).toEqual({ caseId: 'case-9', label: 'Touring' });
+    expect(page.rows[0]!.caseContext).toEqual({ caseId: 'case-9', label: 'Awaiting inspection' });
   });
 
   it('assignment resolves {userId,name} from the users repo when assigned; omitted when unassigned', async () => {

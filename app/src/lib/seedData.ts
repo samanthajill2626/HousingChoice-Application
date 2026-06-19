@@ -59,6 +59,18 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       rta_expiration_date: '2026-08-15',
       caseworker: 'D. Okafor',
       preferences_notes: 'Ground floor preferred; near MARTA.',
+      // Status-model (§5): the coarse tenant lifecycle. SEPARATE from `status`
+      // (the byTypeStatus GSI range key / triage queue) — never overloaded.
+      // She has rta_in_hand:true and porting:false. She is the tenant on the
+      // seeded placement case-0001 (Inspection phase: awaiting_inspection), so
+      // by §7 derivation she reads `placing`, not `searching` — and the source
+      // is 'derived' (NOT 'manual') so the denormalized value agrees with what
+      // derivation produces and a future placement transition can still drive
+      // it. (A 'manual' pin here would both disagree with §7 and block
+      // derivation — the regression this seed must not reintroduce.)
+      tenant_status: 'placing',
+      tenant_status_source: 'derived',
+      porting: false,
       created_at: T0,
     },
     {
@@ -89,13 +101,20 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     {
       unitId: IDS.unitA,
       landlordId: IDS.landlord, // byLandlord
-      // status MUST be a UNIT_STATUSES value (available|placed|inactive) — it's
-      // the byStatus GSI key AND gates the public flyer (only 'available' is
-      // shareable). beds / rent_min / rent_max / pets are the canonical field
+      // status MUST be a LISTING_STATUSES value (setup|available|under_application
+      // |finalizing|occupied|on_hold|off_market) — it's the byStatus GSI key AND
+      // gates the public flyer (only 'available' is shareable, §6). beds /
+      // rent_min / rent_max / pets are the canonical field
       // names the app reads (unitFields WRITABLE_FIELDS + toUnitFlyer + the
       // dashboard UnitItem); the flexible-doc repo would silently store
       // bedrooms / rent / pets_allowed and the UI would never find them.
-      status: 'available', // byStatus
+      // unitA is the unit on the seeded placement case-0001 (Inspection phase:
+      // awaiting_inspection), so by §7 derivation the listing reads
+      // 'under_application', source 'derived' (NOT 'manual') — the denormalized
+      // value matches what derivation produces and stays drivable. (Stamping
+      // 'manual' here would disagree with §7 AND block the first derived write.)
+      status: 'under_application', // byStatus
+      status_source: 'derived', // §8 provenance — derivation-permitting
       jurisdiction: 'atlanta_housing', // byJurisdiction
       address: '1450 Joseph E. Boone Blvd NW, Atlanta, GA 30314',
       beds: 2,
@@ -109,7 +128,16 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     {
       unitId: IDS.unitB,
       landlordId: IDS.landlord,
-      status: 'placed',
+      // Status-model (§6): the placed unit is now `occupied` (replaced legacy
+      // 'placed'); legacy 'inactive' would map to 'off_market'. final_rent is
+      // the accepted rent written at rent-acceptance (used for billing, §4).
+      // DELIBERATE manual override: unitB is NOT the unit on the active seeded
+      // placement (case-0001 → unitA), so there is no placement to derive it;
+      // 'manual' here is an intentional demo pin of a previously-placed unit,
+      // not the regression (which was pinning a freshly-derivable listing).
+      status: 'occupied',
+      status_source: 'manual',
+      final_rent: 1975,
       jurisdiction: 'ga_dca',
       address: '88 Sycamore St, Decatur, GA 30030',
       beds: 3,
@@ -179,7 +207,11 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       caseId: IDS.case,
       tenantId: IDS.tenant, // byTenant
       unitId: IDS.unitA, // byUnit
-      stage: 'touring', // byStage
+      // status-model (§4): a valid PLACEMENT_STAGES value (legacy 'touring' is
+      // gone — `searching` absorbs touring on the tenant now). Mid-ladder here.
+      stage: 'awaiting_inspection', // byStage
+      stage_entered_at: T2, // §8 time-in-stage basis
+      stage_source: 'manual', // §8 provenance
       tour_date: '2026-06-13', // byTourDate (sparse — present because scheduled)
       next_deadline_type: 'tour_reminder', // byNextDeadline HASH (sparse)
       next_deadline_at: '2026-06-13T13:00:00.000Z', // byNextDeadline RANGE
@@ -227,8 +259,8 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       entityKey: `cases#${IDS.case}`,
       ts: T2, // table SK + byActor RANGE
       actorId: IDS.founder, // byActor HASH
-      event_type: 'case.stage_changed',
-      payload: { actor: IDS.founder, from: 'interested', to: 'touring' },
+      event_type: 'case_stage_changed',
+      payload: { actor: IDS.founder, from: 'send_rta_to_landlord', to: 'awaiting_inspection', source: 'manual' },
     },
     {
       entityKey: `contacts#${IDS.tenant}`,

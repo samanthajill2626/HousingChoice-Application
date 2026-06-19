@@ -40,6 +40,7 @@ import {
   type EventBus,
 } from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
+import { STAGE_LABELS } from '../lib/statusModel.js';
 import {
   createAuditRepo,
   type AuditRepo,
@@ -167,8 +168,14 @@ function decodeCursor(cursor: string): Record<string, unknown> {
 
 // --- Pure helpers (no I/O) ---------------------------------------------------
 
-/** Title-case a stage value for a case label, e.g. touring → "Touring". */
-function titleCase(value: string): string {
+/**
+ * The human label for a placement stage — the centralized STAGE_LABELS map
+ * (single source of display copy). Falls back to a title-cased key for any
+ * non-stage value.
+ */
+function stageLabel(value: string): string {
+  const label = (STAGE_LABELS as Record<string, string>)[value];
+  if (label !== undefined) return label;
   return value
     .split('_')
     .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
@@ -313,7 +320,7 @@ export async function aggregateInbox(
     let label: string | undefined;
     try {
       const c = await cases.getById(caseId);
-      if (c && typeof c.stage === 'string') label = titleCase(c.stage);
+      if (c && typeof c.stage === 'string') label = stageLabel(c.stage);
     } catch (err) {
       log.warn({ err, caseId }, 'inbox: case label hydration failed (best-effort)');
     }

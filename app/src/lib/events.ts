@@ -154,6 +154,12 @@ export interface CaseUpdatedEvent {
   group_thread: string | null;
   /** True when the case carries an escalation attention flag (doc §7.1). */
   attention: boolean;
+  /**
+   * The lost-reason CATEGORY only (STATUS-MODEL.md §7). lost_reason is stored as
+   * a structured `{ category, text }` object; only the bounded category enum is
+   * carried on the wire — the free `text` may contain PII and is deliberately
+   * NOT emitted (doc §9).
+   */
   lost_reason: string | null;
   updated_at: string | null;
 }
@@ -173,7 +179,12 @@ export function toCaseUpdatedEvent(item: CaseItem): CaseUpdatedEvent {
     // boolean is load-bearing: the boards flip a case's attention badge live
     // when the M1.10c escalation seam raises it.
     attention: item.attention != null,
-    lost_reason: item.lost_reason ?? null,
+    // Category only — never the free `text` (potential PII). lost_reason is the
+    // structured { category, text } object (§7).
+    lost_reason:
+      item.lost_reason && typeof item.lost_reason === 'object'
+        ? (item.lost_reason.category ?? null)
+        : null,
     updated_at: item.updated_at ?? null,
   };
 }

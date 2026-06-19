@@ -41,7 +41,7 @@ describe('cases API (M1.10b)', () => {
     expect([401, 403]).toContain(res.status);
   });
 
-  it('POST /api/cases opens a case (default stage interested), emits case.updated, audits — no PII on the wire', async () => {
+  it('POST /api/cases opens a case (default stage send_application), emits case.updated, audits — no PII on the wire', async () => {
     const res = await authedPost('/api/cases', {
       tenantId: 'c-tenant',
       unitId: 'unit-1',
@@ -49,9 +49,15 @@ describe('cases API (M1.10b)', () => {
     });
     expect(res.status).toBe(201);
     expect(res.body.case.caseId).toMatch(/^case-/);
-    expect(res.body.case.stage).toBe('interested');
+    expect(res.body.case.stage).toBe('send_application');
     expect(res.body.case.tenantId).toBe('c-tenant');
     expect(res.body.case.placement_tag).toBe('Keisha @ 123 Main');
+    // Coverage (#6): create initializes the INITIAL-stage provenance fields so
+    // time-in-stage is computable from t0 and a later derived write respects
+    // precedence (§8). stage is operator-set ⇒ source 'manual' (stage is NOT
+    // precedence-gated, so 'manual' here is correct and intended).
+    expect(typeof res.body.case.stage_entered_at).toBe('string');
+    expect(res.body.case.stage_source).toBe('manual');
     expect(world.cases.size).toBe(1);
 
     const evt = world.emitted.find((e) => e.event === 'case.updated');
@@ -69,20 +75,20 @@ describe('cases API (M1.10b)', () => {
   });
 
   it('GET /api/cases/:caseId returns the case; 404 for unknown', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'c-1', unitId: 'u-1', stage: 'touring' });
+    const c = await world.casesRepo.create({ tenantId: 'c-1', unitId: 'u-1', stage: 'awaiting_inspection' });
     const res = await authedGet(`/api/cases/${c.caseId}`);
     expect(res.status).toBe(200);
-    expect(res.body.case.stage).toBe('touring');
+    expect(res.body.case.stage).toBe('awaiting_inspection');
     expect((await authedGet('/api/cases/case-ghost')).status).toBe(404);
   });
 
   it('GET /api/cases filters by stage / tenant / unit / tourDate, lists all with no filter, 400s a bad allowlist value', async () => {
-    await world.casesRepo.create({ tenantId: 't-1', unitId: 'u-1', stage: 'applied' });
-    await world.casesRepo.create({ tenantId: 't-1', unitId: 'u-2', stage: 'touring', tour_date: '2026-07-01' });
-    await world.casesRepo.create({ tenantId: 't-2', unitId: 'u-1', stage: 'applied' });
+    await world.casesRepo.create({ tenantId: 't-1', unitId: 'u-1', stage: 'awaiting_approval' });
+    await world.casesRepo.create({ tenantId: 't-1', unitId: 'u-2', stage: 'awaiting_inspection', tour_date: '2026-07-01' });
+    await world.casesRepo.create({ tenantId: 't-2', unitId: 'u-1', stage: 'awaiting_approval' });
 
     expect((await authedGet('/api/cases')).body.cases).toHaveLength(3);
-    expect((await authedGet('/api/cases?stage=applied')).body.cases).toHaveLength(2);
+    expect((await authedGet('/api/cases?stage=awaiting_approval')).body.cases).toHaveLength(2);
     expect((await authedGet('/api/cases?tenantId=t-1')).body.cases).toHaveLength(2);
     expect((await authedGet('/api/cases?unitId=u-1')).body.cases).toHaveLength(2);
     expect((await authedGet('/api/cases?tourDate=2026-07-01')).body.cases).toHaveLength(1);
@@ -95,9 +101,9 @@ describe('cases API (M1.10b)', () => {
   });
 
   it('GET /api/cases?deadlineType=&before= bounds the due-by window (canonicalized) and 400s a bad before', async () => {
-    const due = await world.casesRepo.create({ tenantId: 't', unitId: 'u-due', stage: 'rta_submitted' });
+    const due = await world.casesRepo.create({ tenantId: 't', unitId: 'u-due', stage: 'awaiting_authority_approval' });
     await world.casesRepo.setNextDeadline(due.caseId, { type: 'rta_window', at: '2026-06-16T08:00:00.000Z' });
-    const later = await world.casesRepo.create({ tenantId: 't', unitId: 'u-later', stage: 'rta_submitted' });
+    const later = await world.casesRepo.create({ tenantId: 't', unitId: 'u-later', stage: 'awaiting_authority_approval' });
     await world.casesRepo.setNextDeadline(later.caseId, { type: 'rta_window', at: '2026-06-20T00:00:00.000Z' });
 
     // Cutoff between the two → only the earlier (due) case is returned.
@@ -110,36 +116,44 @@ describe('cases API (M1.10b)', () => {
     expect((await authedGet('/api/cases?deadlineType=rta_window&before=not-a-date')).status).toBe(400);
   });
 
-  it('PATCH /api/cases/:caseId advances the stage, clears tour_date with null, and emits', async () => {
+  it('PATCH /api/cases/:caseId clears tour_date with null and emits (stage is NOT writable here)', async () => {
     const c = await world.casesRepo.create({
       tenantId: 't',
       unitId: 'u',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       tour_date: '2026-07-02',
     });
-    const res = await authedPatch(`/api/cases/${c.caseId}`, { stage: 'applied', tour_date: null });
+    const res = await authedPatch(`/api/cases/${c.caseId}`, { tour_date: null });
     expect(res.status).toBe(200);
-    expect(res.body.case.stage).toBe('applied');
     expect(res.body.case.tour_date).toBeUndefined();
     expect(world.emitted.some((e) => e.event === 'case.updated')).toBe(true);
     expect(world.auditEvents.some((a) => a.event_type === 'case_updated')).toBe(true);
   });
 
-  it('PATCH rejects a bad stage, the next_deadline_* keys, an immutable/unknown field, an attention SET, and 404s unknown', async () => {
-    const c = await world.casesRepo.create({ tenantId: 't', unitId: 'u', stage: 'interested' });
+  it('PATCH REFUSES a stage write (§8: stage moves go through the transition route)', async () => {
+    const c = await world.casesRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
+    // Even a VALID stage is rejected via legacy CRUD — the ONLY way to change a
+    // placement stage is POST /api/cases/:caseId/transition.
+    expect((await authedPatch(`/api/cases/${c.caseId}`, { stage: 'awaiting_approval' })).status).toBe(400);
     expect((await authedPatch(`/api/cases/${c.caseId}`, { stage: 'bogus' })).status).toBe(400);
+    // The case stage is untouched.
+    expect((await world.casesRepo.getById(c.caseId))!.stage).toBe('send_application');
+  });
+
+  it('PATCH rejects the next_deadline_* keys, an immutable/unknown field, an attention SET, and 404s unknown', async () => {
+    const c = await world.casesRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
     expect((await authedPatch(`/api/cases/${c.caseId}`, { next_deadline_at: '2026-07-01T00:00:00.000Z' })).status).toBe(400);
     expect((await authedPatch(`/api/cases/${c.caseId}`, { caseId: 'x' })).status).toBe(400); // immutable key
     expect((await authedPatch(`/api/cases/${c.caseId}`, { attention: { reason: 'x' } })).status).toBe(400); // set not allowed
     expect((await authedPatch(`/api/cases/${c.caseId}`, {})).status).toBe(400); // empty patch
-    expect((await authedPatch('/api/cases/case-ghost', { stage: 'lost' })).status).toBe(404);
+    expect((await authedPatch('/api/cases/case-ghost', { notes: 'x' })).status).toBe(404);
   });
 
   it('PATCH can CLEAR the attention flag with null (operator acknowledges an escalation)', async () => {
     const c = await world.casesRepo.create({
       tenantId: 't',
       unitId: 'u',
-      stage: 'applied',
+      stage: 'awaiting_approval',
       attention: { reason: 'send_failed', at: '2026-06-14T00:00:00.000Z' },
     });
     const res = await authedPatch(`/api/cases/${c.caseId}`, { attention: null });
@@ -151,7 +165,7 @@ describe('cases API (M1.10b)', () => {
   });
 
   it('POST /api/cases/:caseId/deadline sets then clears the composite deadline, with validation + 404', async () => {
-    const c = await world.casesRepo.create({ tenantId: 't', unitId: 'u', stage: 'rta_submitted' });
+    const c = await world.casesRepo.create({ tenantId: 't', unitId: 'u', stage: 'awaiting_authority_approval' });
 
     const set = await authedPost(`/api/cases/${c.caseId}/deadline`, {
       type: 'rta_window',
@@ -204,31 +218,18 @@ describe('cases API — BE2/C2 activity milestones', () => {
     expect(ev[0]).toMatchObject({ type: 'case_opened', refType: 'case', refId: caseId });
   });
 
-  it('a real stage change emits stage_changed (and NONE when the stage is unchanged)', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'interested' });
-    await authedPatch(`/api/cases/${c.caseId}`, { stage: 'touring' });
-    let ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
-    expect(ev).toHaveLength(1);
-    expect(ev[0]!.label).toBe('Stage → Touring');
-
-    // Re-PATCH a non-stage field → no new stage_changed milestone.
-    await authedPatch(`/api/cases/${c.caseId}`, { notes: 'hi' });
-    ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
-    expect(ev).toHaveLength(1); // unchanged
-  });
-
-  it('moving to a terminal stage emits case_closed (lost includes the lost_reason)', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'applied' });
-    await authedPatch(`/api/cases/${c.caseId}`, { stage: 'lost', lost_reason: 'changed_mind' });
-    const ev = world.activityEvents.filter((e) => e.type === 'case_closed');
-    expect(ev).toHaveLength(1);
-    expect(ev[0]!.label).toContain('changed_mind');
-    // No spurious stage_changed for a terminal move.
-    expect(world.activityEvents.filter((e) => e.type === 'stage_changed')).toHaveLength(0);
-  });
+  // NOTE: stage moves no longer go through the legacy CRUD PATCH (§8 — they
+  // route through POST /api/cases/:caseId/transition, which records a
+  // case_stage_changed AUDIT row, not an activity milestone). So the
+  // stage-driven `stage_changed` / `case_closed` activity milestones that the
+  // cases-router PATCH used to emit are no longer produced for stage moves (the
+  // PATCH path can no longer change stage). Their tests are removed here; the
+  // case_closed milestone LABEL's category-only / no-PII discipline (fix #8)
+  // still lives in routes/cases.ts for any future caller. Tour milestones below
+  // still fire on tour_date / tours PATCHes, which remain CRUD-writable.
 
   it('newly setting tour_date emits tour_scheduled', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'touring' });
+    const c = await world.casesRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'awaiting_inspection' });
     await authedPatch(`/api/cases/${c.caseId}`, { tour_date: '2026-07-02' });
     const ev = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
     expect(ev).toHaveLength(1);
@@ -239,7 +240,7 @@ describe('cases API — BE2/C2 activity milestones', () => {
     const c = await world.casesRepo.create({
       tenantId: 'c-t',
       unitId: 'u',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       tours: [{ date: '2026-07-02' }],
     });
     // PATCH a tour WITHOUT an outcome yet → no tour_took_place.
@@ -256,7 +257,7 @@ describe('cases API — BE2/C2 activity milestones', () => {
 
 describe('toCaseUpdatedEvent (M1.10b live-update payload)', () => {
   it('maps attention to a boolean (both states) and never carries PII', () => {
-    const base = { caseId: 'c', tenantId: 't', unitId: 'u', stage: 'applied' } as CaseItem;
+    const base = { caseId: 'c', tenantId: 't', unitId: 'u', stage: 'awaiting_approval' } as CaseItem;
     const withAttn = toCaseUpdatedEvent({
       ...base,
       attention: { reason: 'send_failed', at: '2026-06-14T00:00:00.000Z' },

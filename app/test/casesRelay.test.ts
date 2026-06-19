@@ -113,7 +113,7 @@ async function seedCase(
   const c = await world.casesRepo.create({
     tenantId: 'c-tenant',
     unitId: 'unit-1',
-    stage: 'applied',
+    stage: 'awaiting_approval',
     placement_tag: 'Keisha @ 123 Main',
   });
   return c.caseId;
@@ -267,7 +267,7 @@ describe('case-scoped relay provisioning (M1.10c)', () => {
 
   it('a failed relay leg on an ACTIVE case raises the attention flag + emits case.updated', async () => {
     const { app } = makeWebhookHarness({ world });
-    const caseId = await seedRelayLeg('applied');
+    const caseId = await seedRelayLeg('awaiting_approval');
     world.emitted.length = 0;
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: 'SMleg-bob', MessageStatus: 'failed', ErrorCode: '30007' }));
@@ -290,7 +290,7 @@ describe('case-scoped relay provisioning (M1.10c)', () => {
 
   it('a DELIVERED relay leg never escalates', async () => {
     const { app } = makeWebhookHarness({ world });
-    const caseId = await seedRelayLeg('applied');
+    const caseId = await seedRelayLeg('awaiting_approval');
 
     await signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: 'SMleg-bob', MessageStatus: 'delivered' }));
 
@@ -299,7 +299,7 @@ describe('case-scoped relay provisioning (M1.10c)', () => {
 
   it('a REDELIVERED failed relay leg does not re-escalate (exactly once; forward-only guard)', async () => {
     const { app } = makeWebhookHarness({ world });
-    const caseId = await seedRelayLeg('applied');
+    const caseId = await seedRelayLeg('awaiting_approval');
     world.emitted.length = 0;
 
     await signedTwilioPost(app, '/webhooks/twilio/status', statusParams({ MessageSid: 'SMleg-bob', MessageStatus: 'failed', ErrorCode: '30007' }));
@@ -335,7 +335,7 @@ describe('case-scoped relay provisioning (M1.10c)', () => {
 
   it('escalation is best-effort: a casesRepo.update failure never 5xxs the webhook', async () => {
     const { app } = makeWebhookHarness({ world });
-    await seedRelayLeg('applied');
+    await seedRelayLeg('awaiting_approval');
     // A DynamoDB blip on the attention write must be swallowed (Twilio must not
     // be told to redeliver a delivery callback over a side-effect failure).
     world.casesRepo.update = async () => {

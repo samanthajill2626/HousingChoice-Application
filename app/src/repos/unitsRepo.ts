@@ -28,21 +28,27 @@ import type { Address } from '../lib/address.js';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import {
+  LISTING_STATUSES,
+  SHAREABLE,
+  type ListingStatus,
+  type TransitionSource,
+} from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
- * Unit lifecycle status (byStatus GSI hash; also gates the public flyer). The
- * doc gives examples, not a closed enum (units are flexible documents), but the
- * codebase WRITES exactly these — the route allowlists them so the GSI
- * partition key never takes an arbitrary value. 'available' is the only
- * publicly shareable status (see SHAREABLE_STATUSES).
+ * Listing (unit) lifecycle status (byStatus GSI hash; also gates the public
+ * flyer). The full enum lives in lib/statusModel.ts (LISTING_STATUSES, §6); the
+ * route allowlists these so the GSI partition key never takes an arbitrary
+ * value. `available` is the only publicly shareable status (SHAREABLE_STATUSES).
+ * Most non-`setup`/`available` values are DERIVED from the committed placement.
  */
-export type UnitStatus = 'available' | 'placed' | 'inactive';
+export type UnitStatus = ListingStatus;
 
-export const UNIT_STATUSES: readonly UnitStatus[] = ['available', 'placed', 'inactive'] as const;
+export const UNIT_STATUSES: readonly UnitStatus[] = LISTING_STATUSES;
 
-/** Statuses whose unit may be exposed by the public flyer endpoint. */
-export const SHAREABLE_STATUSES: ReadonlySet<string> = new Set<UnitStatus>(['available']);
+/** Statuses whose unit may be exposed by the public flyer endpoint (§6: only `available`). */
+export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
 
 /**
  * One contact on a unit's roster (BE3/C3 — contract verbatim; the frontend
@@ -131,6 +137,15 @@ export interface UnitItem {
   deposit?: number;
   /** Landlord incentive fee (LIF). */
   lif?: number;
+  /**
+   * Status-model (§4): the accepted rent, written onto the listing when
+   * `Awaiting rent acceptance` clears (the landlord accepts the determined
+   * rent) — used for billing. Finite, non-negative. Set by the transition
+   * service on the rent-acceptance move.
+   */
+  final_rent?: number;
+  /** Status-model (§8): the source of the current `status` write (provenance/precedence). */
+  status_source?: TransitionSource;
   /** Utilities arrangement — free-form (string). */
   utilities?: string;
   /** Accessibility notes — free-form. */

@@ -202,12 +202,12 @@ describe('GET /api/inbox (C8)', () => {
       caseId: 'case-1',
       tenantId: 'c-1',
       unitId: 'unit-1',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
     });
 
     const res = await auth(request(app).get('/api/inbox'));
     expect(res.status).toBe(200);
-    expect(res.body.rows[0].caseContext).toEqual({ caseId: 'case-1', label: 'Touring' });
+    expect(res.body.rows[0].caseContext).toEqual({ caseId: 'case-1', label: 'Awaiting inspection' });
   });
 
   it('400 on an invalid filter value (NOT 500)', async () => {

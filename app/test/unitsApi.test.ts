@@ -68,6 +68,25 @@ describe('POST /api/units — create', () => {
     );
   });
 
+  // Coverage (#6): a freshly-created listing must NOT be pinned with a
+  // non-derived source on its precedence-gated status field. The initial
+  // 'available' is a DERIVED status (§6/§7), so it is stamped source 'derived'
+  // (a derivation-permitting value) — never 'manual', which would block the
+  // first placement from ever driving the listing forward (§7/§8).
+  it('stamps status_source to a derivation-PERMITTING value (derived, not manual)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-1' });
+    expect(res.status).toBe(201);
+    expect(res.body.unit.status).toBe('available');
+    expect(res.body.unit.status_source).toBe('derived');
+    // And the stored item agrees (not just the response).
+    expect(world.units.get(res.body.unit.unitId)!.status_source).toBe('derived');
+  });
+
   it('rejects a missing landlordId, unknown fields, bad numbers, and bad status', async () => {
     const { app, world } = makeWebhookHarness();
     const bodies = [
@@ -76,7 +95,7 @@ describe('POST /api/units — create', () => {
       { landlordId: 'c', nope: 'x' }, // unknown field
       { landlordId: 'c', beds: 'three' }, // beds not a number
       { landlordId: 'c', rent_min: -5 }, // negative
-      { landlordId: 'c', status: 'sold' }, // not an allowed status
+      { landlordId: 'c', status: 'sold' }, // status is NOT CRUD-writable (§8) → unknown field 400
       { landlordId: 'c', accepted_programs: [1, 2] }, // not string[]
       { landlordId: 'c', address: 'just a string' }, // address must be an object now
       { landlordId: 'c', address: { line1: '1 Main', country: 'US' } }, // unknown address key
@@ -168,7 +187,7 @@ describe('GET /api/units — list/filter', () => {
   it('filters by landlordId, status, and jurisdiction, else lists all', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { landlordId: 'll-A', status: 'available', jurisdiction: 'DCA' });
-    seedUnit(world, 'unit-2', { landlordId: 'll-A', status: 'placed', jurisdiction: 'Fulton' });
+    seedUnit(world, 'unit-2', { landlordId: 'll-A', status: 'occupied', jurisdiction: 'Fulton' });
     seedUnit(world, 'unit-3', { landlordId: 'll-B', status: 'available', jurisdiction: 'DCA' });
 
     const byLandlord = await request(app)
@@ -259,12 +278,12 @@ describe('PATCH /api/units/:unitId', () => {
       .patch('/api/units/unit-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ status: 'placed', rent_max: 1900 });
+      .send({ rent_max: 1900, area: 'East Point' });
 
     expect(res.status).toBe(200);
     expect(res.body.unit).toMatchObject({
-      status: 'placed',
       rent_max: 1900,
+      area: 'East Point',
       beds: 2, // untouched
       rent_min: 1400, // untouched
       tour_process: 'keep me', // untouched
@@ -274,13 +293,31 @@ describe('PATCH /api/units/:unitId', () => {
     );
   });
 
+  it('REFUSES status and final_rent via CRUD PATCH (§8: status routes through listing-status; final_rent is service-only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { status: 'available' });
+    // status is not CRUD-writable — listing-status changes go through
+    // PATCH /api/units/:unitId/listing-status; final_rent is written only by the
+    // transition service on rent acceptance.
+    for (const body of [{ status: 'occupied' }, { final_rent: 1800 }]) {
+      const res = await request(app)
+        .patch('/api/units/unit-1')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    // The status is untouched.
+    expect(world.units.get('unit-1')!.status).toBe('available');
+  });
+
   it('404s an unknown unit and writes no audit event', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .patch('/api/units/nope')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ status: 'placed' });
+      .send({ rent_max: 1900 });
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'unit_not_found' });
     expect(world.auditEvents).toHaveLength(0);
@@ -297,6 +334,66 @@ describe('PATCH /api/units/:unitId', () => {
         .send(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
     }
+  });
+});
+
+// REGRESSION (§7): a unit created via the ROUTE must remain DERIVATION-DRIVABLE.
+// A prior fix stamped unit-create with status_source 'manual', which made
+// canOverwrite('derived','manual') === false and PERMANENTLY blocked the first
+// placement from driving the listing forward — the listing stayed 'available'
+// (publicly shareable) while a placement actively progressed. The existing
+// derivation tests missed this because they create units via the REPO (which
+// doesn't stamp status_source); this one drives the full ROUTE create + a real
+// placement transition. On the old 'manual' stamp this test FAILS (status stays
+// 'available'); with status_source 'derived' it passes.
+describe('REGRESSION: route-created unit derives forward on a placement transition', () => {
+  it('unit created via POST /api/units derives to under_application (tenant → placing) when a placement enters Application', async () => {
+    const { app, world } = makeWebhookHarness();
+    const authedPost = (path: string, body: object) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+    // 1) Create the unit via the ROUTE (this is the code path that stamps
+    //    status_source — the thing under test). Starts 'available'.
+    const unitRes = await authedPost('/api/units', { landlordId: 'contact-ll-reg' });
+    expect(unitRes.status).toBe(201);
+    const unitId = unitRes.body.unit.unitId as string;
+    expect(unitRes.body.unit.status).toBe('available');
+
+    // 2) Create the tenant via the ROUTE.
+    const tenantRes = await authedPost('/api/contacts', { type: 'tenant', firstName: 'Reg', lastName: 'Tester' });
+    expect(tenantRes.status).toBe(201);
+    const tenantId = tenantRes.body.contact.contactId as string;
+
+    // 3) Open a placement on (tenant, unit) via the ROUTE, at the first stage.
+    const caseRes = await authedPost('/api/cases', { tenantId, unitId, stage: 'send_application' });
+    expect(caseRes.status).toBe(201);
+    const caseId = caseRes.body.case.caseId as string;
+
+    // Precondition: the listing has NOT yet derived (still 'available').
+    expect(world.units.get(unitId)!.status).toBe('available');
+
+    // 4) Transition the placement into the Application phase via the transition
+    //    ROUTE. Per §7 this derives tenant → placing, listing → under_application
+    //    — but ONLY if the create-time status_source did not pin it.
+    const txRes = await authedPost(`/api/cases/${caseId}/transition`, {
+      toStage: 'awaiting_approval',
+      source: 'manual',
+    });
+    expect(txRes.status).toBe(200);
+
+    // 5) The derivation actually happened (the create-time source did NOT block it).
+    const unit = await request(app)
+      .get(`/api/units/${unitId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(unit.body.unit.status).toBe('under_application'); // would be 'available' on the old 'manual' stamp
+    expect(unit.body.unit.status_source).toBe('derived');
+
+    const tenant = await request(app)
+      .get(`/api/contacts/${tenantId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(tenant.body.contact.tenant_status).toBe('placing');
   });
 });
 

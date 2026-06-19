@@ -38,7 +38,7 @@ function seedCase(
     caseId,
     tenantId,
     unitId,
-    stage: 'touring',
+    stage: 'awaiting_inspection',
     created_at: '2026-06-12T09:00:00.000Z',
     updated_at: '2026-06-12T09:00:00.000Z',
   } as CaseItem);
@@ -72,7 +72,7 @@ describe('GET /api/units/:id/cases (FIX 3 — Cases on this listing)', () => {
     expect(byId.get('case-1')?.tenantName).toBe('Tina One');
     expect(byId.get('case-2')?.tenantName).toBe('Tom Two');
     // Case fields survive alongside the enrichment.
-    expect(byId.get('case-1')).toMatchObject({ tenantId: 'c-tenant-1', unitId: 'u-cases', stage: 'touring' });
+    expect(byId.get('case-1')).toMatchObject({ tenantId: 'c-tenant-1', unitId: 'u-cases', stage: 'awaiting_inspection' });
   });
 
   it('tenantName is null when the tenant has no contact (never 500)', async () => {

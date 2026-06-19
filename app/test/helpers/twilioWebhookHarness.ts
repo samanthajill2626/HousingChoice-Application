@@ -736,12 +736,35 @@ export function createFakeWorld(): FakeWorld {
       // exercise the actual attributes production writes — not a fake alias.
       const actor = payload?.['actor'];
       const actorId = typeof actor === 'string' ? actor : undefined;
-      auditEvents.push({
+      // Keep the recorded shape EXACTLY as the real repo's asserted item (no
+      // extra keys — many tests do `toEqual` on world.auditEvents): entityKey,
+      // event_type, optional actorId, optional payload. A monotonic `ts` is
+      // attached on a non-enumerable key so listByEntity can order newest-first
+      // without polluting the asserted object shape.
+      const rec: FakeWorld['auditEvents'][number] = {
         entityKey,
         event_type: eventType,
         ...(actorId !== undefined && { actorId }),
         ...(payload !== undefined && { payload }),
-      });
+      };
+      Object.defineProperty(rec, '__seq', { value: auditEvents.length, enumerable: false });
+      auditEvents.push(rec);
+    },
+    async listByEntity(entityKey, opts = {}) {
+      // Mirror the real repo: NEWEST-FIRST. The fake uses insertion order (the
+      // hidden __seq) as the clock; `before` is an exclusive __seq bound when a
+      // test pages (none currently do). limit defaults to 50.
+      const seqOf = (e: object): number =>
+        typeof (e as { __seq?: number }).__seq === 'number' ? (e as { __seq: number }).__seq : 0;
+      const beforeSeq = typeof opts.before === 'string' ? Number(opts.before) : undefined;
+      const items = auditEvents
+        .filter((e) => e.entityKey === entityKey)
+        .filter((e) => (beforeSeq === undefined || Number.isNaN(beforeSeq) ? true : seqOf(e) < beforeSeq))
+        .slice()
+        .sort((a, b) => seqOf(b) - seqOf(a)) // newest-first
+        .slice(0, opts.limit ?? 50)
+        .map((e) => ({ ...e }));
+      return items as import('../../src/repos/auditRepo.js').AuditEvent[];
     },
   };
 

@@ -267,12 +267,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
-    // status defaults to 'available' when the caller omits it (a new listing is
-    // available unless told otherwise); landlordId is guaranteed by validation.
+    // status is NOT a writable CRUD field (§8: listing-status changes route
+    // through PATCH /api/units/:unitId/listing-status). Create is not a
+    // transition, but the denormalized provenance must be initialized: a new
+    // listing starts 'available' (the prior default), stamped status_source
+    // 'derived' — NOT 'manual'. The initial value of a DERIVED status (§6/§7)
+    // is not an explicit user pin, so derivation must be free to drive it: the
+    // first placement that progresses must be able to move the listing to
+    // under_application/finalizing/occupied. Stamping 'manual' here would make
+    // canOverwrite('derived','manual') === false and permanently block the
+    // first derived write, stranding the listing in 'available' (publicly
+    // shareable) while a placement is actively progressing (§7). An explicit
+    // PATCH /api/units/:unitId/listing-status (source 'manual') can still pin
+    // it later. landlordId is guaranteed by validation.
     const fields = validation.fields;
     const unit = await units.create({
       landlordId: fields['landlordId'] as string,
-      status: typeof fields['status'] === 'string' ? (fields['status'] as string) : 'available',
+      status: 'available',
+      status_source: 'derived',
       ...fields,
     });
     mergeContext({});

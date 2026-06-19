@@ -15,6 +15,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import type { TenantStatus, TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
@@ -56,6 +57,23 @@ export interface ContactItem {
   contactId: string;
   type: ContactType;
   status?: string;
+  /**
+   * Status-model (§5): the tenant lifecycle status (TENANT_STATUSES) —
+   * needs_review/onboarding/searching/placing/placed/on_hold/inactive.
+   * DELIBERATELY SEPARATE from `status` above: `status` is the byTypeStatus GSI
+   * range key AND the triage queue (overloading it would break Today/triage).
+   * Only meaningful on tenant contacts. Written via the transition service.
+   */
+  tenant_status?: TenantStatus;
+  /** Status-model (§8): the source of the current `tenant_status` write (provenance/precedence). */
+  tenant_status_source?: TransitionSource;
+  /**
+   * Status-model (§5): the porting flag — the voucher/RTA is being moved
+   * between jurisdictions ("not ready"), which holds the tenant out of
+   * `searching` (the RTA-in-hand gate). Porting lives on the TENANT, never as a
+   * placement stage.
+   */
+  porting?: boolean;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */
   phone?: string;
   /**

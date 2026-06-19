@@ -157,6 +157,7 @@ function makeFakes(
     append: async (entityKey, eventType, payload) => {
       fakes.auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
     },
+    listByEntity: async () => [],
   };
   const adapter: MessagingAdapter = {
     sendMessage: async (params) => {

@@ -3,11 +3,18 @@ id: status-pin-vs-terminal-derivation
 title: Should a terminal placement outcome override a stale non-terminal manual pin?
 type: decision
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-06-19
+resolved: 2026-06-19
 refs: documentation/STATUS-MODEL.md, app/src/services/statusTransition.ts
 ---
+
+**Resolution.** Only override/exit states pin (listing on_hold/off_market,
+tenant on_hold/inactive); baseline progression states stay derivation-eligible
+regardless of source. Implemented in statusModel.ts (override-state sets) +
+statusTransition.ts applyDerivation (state-gated).
+
 
 **Problem.** Per STATUS-MODEL.md §8, a non-`derived` status write (`manual` /
 `ai` / `automation` / `import`) **pins** the value and permanently blocks future

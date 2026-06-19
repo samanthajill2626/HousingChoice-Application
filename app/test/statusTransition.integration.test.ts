@@ -5,7 +5,9 @@
 //     onto units, and a real audit_events row.
 //   • auditRepo.listByEntity reads the provenance back NEWEST-FIRST.
 //   • the stuck_case next-deadline round-trips through the byNextDeadline GSI.
-//   • a prior MANUAL tenant pin is NOT overwritten by a later DERIVED transition.
+//   • an OVERRIDE state (manual on_hold) pins against a later DERIVED transition,
+//     while a manually-set BASELINE state is overwritten by derivation
+//     (2026-06-19 state-based gating decision).
 //
 // Self-skipping like casesRepo.integration.test.ts: when nothing answers at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green without
@@ -122,21 +124,41 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     expect(page.items.some((x) => x.caseId === c.caseId)).toBe(true);
   });
 
-  it('a prior MANUAL tenant pin is NOT overwritten by a later DERIVED transition', async () => {
+  it('an OVERRIDE state (manual on_hold) pins against a later DERIVED transition', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
 
-    // Pin the tenant status manually (e.g. on_hold).
+    // Manually move the tenant into the OVERRIDE state on_hold.
     await svc.setTenantStatus(tenantId, { toStatus: 'on_hold', source: 'manual' });
 
-    // A placement transition would DERIVE tenant→placing, but the manual pin wins.
+    // A placement transition would DERIVE tenant→placing, but on_hold pins (the
+    // current STATE is an override — 2026-06-19 state-based gating).
     const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
 
     const contact = await contacts.getById(tenantId);
-    expect(contact!.status).toBe('on_hold'); // manual pin preserved
+    expect(contact!.status).toBe('on_hold'); // override preserved
     expect(contact!.status_source).toBe('manual');
+  });
+
+  it('a manually-set BASELINE state IS overwritten by a later DERIVED transition', async () => {
+    const tenantId = `contact-${randomUUID().slice(0, 8)}`;
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+    await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
+    await units.create({ unitId, landlordId: 'll-1', status: 'available' });
+
+    // Manually pin a BASELINE tenant status (searching) — under the OLD source
+    // rule this blocked derivation; under the new STATE-based rule baseline
+    // states stay derivation-eligible, so the placement drives it forward.
+    await svc.setTenantStatus(tenantId, { toStatus: 'searching', source: 'manual' });
+
+    const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+
+    const contact = await contacts.getById(tenantId);
+    expect(contact!.status).toBe('placing'); // derived forward over the manual baseline
+    expect(contact!.status_source).toBe('derived');
   });
 });

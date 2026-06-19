@@ -183,10 +183,13 @@ export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
 export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
 
 // --- Transition sources + precedence (§8) -----------------------------------
-// `derived` (from the placement) is the LOWEST precedence; an explicit
-// manual/ai/automation/import write pins and wins (last-writer-wins among the
-// non-derived sources). A `derived` write applies ONLY when the stored source
-// is `derived` or unset.
+// `*_source` is recorded for PROVENANCE/audit on every status write (who/what
+// last wrote the value). It NO LONGER gates derivation: per the 2026-06-19
+// decision (docs/issues/status-pin-vs-terminal-derivation.md) derivation is
+// gated on the entity's current STATE, not its source — only OVERRIDE/exit
+// states pin against derivation (see the override-state sets below), while
+// baseline progression states stay derivation-eligible regardless of who last
+// wrote them. The source enum + precedence rank are kept purely for audit.
 export const TRANSITION_SOURCES = ['derived', 'import', 'automation', 'ai', 'manual'] as const;
 
 export type TransitionSource = (typeof TRANSITION_SOURCES)[number];
@@ -194,10 +197,12 @@ export type TransitionSource = (typeof TRANSITION_SOURCES)[number];
 const TRANSITION_SOURCE_SET: ReadonlySet<string> = new Set(TRANSITION_SOURCES);
 
 /**
- * Source precedence rank. `derived` is strictly lowest (0); ALL non-derived
- * sources are equal-rank (1) — last-writer-wins among them. A new `derived`
- * write may overwrite a stored value ONLY when the stored value is `derived` or
- * unset (see services/statusTransition.ts `applyDerivation`).
+ * Source precedence rank, kept for PROVENANCE/audit only (NOT a derivation
+ * gate). `derived` is lowest (0); ALL non-derived sources are equal-rank (1).
+ * Derivation gating is now STATE-based (see {@link isListingOverrideStatus} /
+ * {@link isTenantOverrideStatus}), so this rank no longer decides whether a
+ * derived write applies — it is retained so the source ordering stays
+ * inspectable for audit/provenance.
  */
 export const SOURCE_PRECEDENCE: Readonly<Record<TransitionSource, number>> = {
   derived: 0,
@@ -207,19 +212,38 @@ export const SOURCE_PRECEDENCE: Readonly<Record<TransitionSource, number>> = {
   manual: 1,
 };
 
-/**
- * Whether a write FROM `incoming` may overwrite a value last written by
- * `stored` (undefined stored source = unset, treated as lowest). A non-derived
- * incoming always wins (last-writer-wins); a derived incoming wins ONLY over an
- * unset/derived stored source.
- */
-export function canOverwrite(
-  incoming: TransitionSource,
-  stored: TransitionSource | undefined,
-): boolean {
-  if (incoming !== 'derived') return true; // explicit write always pins/wins
-  // derived: applies only when nothing has pinned the value yet.
-  return stored === undefined || stored === 'derived';
+// --- Override/exit states that PIN against derivation (§5/§6) ---------------
+// The 2026-06-19 decision: derivation is gated on the entity's current STATE,
+// not its source. A `derived` write (from placement→tenant/listing derivation)
+// MAY overwrite the entity's current status UNLESS the current status is one of
+// these OVERRIDE/exit states, in which case the derived write is BLOCKED (the
+// state is "pinned"). All BASELINE progression states (listing: setup,
+// available, under_application, finalizing, occupied; tenant: needs_review,
+// onboarding, searching, placing, placed) stay derivation-eligible regardless
+// of who last wrote them. Override/exit states are only ever produced by
+// EXPLICIT writes — derivation never outputs them (see deriveStatuses /
+// PLACEMENT_DERIVATION, asserted in the model test).
+//
+// Listing overrides/exit (§6: "ovr: On hold", "term: Off market").
+export const LISTING_OVERRIDE_STATES: ReadonlySet<ListingStatus> = new Set<ListingStatus>([
+  'on_hold',
+  'off_market',
+]);
+
+// Tenant overrides/exit (§5: "overrides: On hold", "terminal: Inactive").
+export const TENANT_OVERRIDE_STATES: ReadonlySet<TenantStatus> = new Set<TenantStatus>([
+  'on_hold',
+  'inactive',
+]);
+
+/** True when a listing status PINS against derivation (an override/exit state). */
+export function isListingOverrideStatus(s: ListingStatus | undefined): boolean {
+  return s !== undefined && LISTING_OVERRIDE_STATES.has(s);
+}
+
+/** True when a tenant status PINS against derivation (an override/exit state). */
+export function isTenantOverrideStatus(s: TenantStatus | undefined): boolean {
+  return s !== undefined && TENANT_OVERRIDE_STATES.has(s);
 }
 
 // --- Lost reason categories (§7: pick OR free-write) ------------------------

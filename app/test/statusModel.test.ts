@@ -4,13 +4,15 @@
 // internally consistent — the invariants every transition relies on.
 import { describe, expect, it } from 'vitest';
 import {
-  canOverwrite,
   deriveStatuses,
+  isListingOverrideStatus,
   isListingStatus,
   isLostReasonCategory,
   isPlacementStage,
+  isTenantOverrideStatus,
   isTenantStatus,
   isTransitionSource,
+  LISTING_OVERRIDE_STATES,
   LISTING_STATUSES,
   LOST_REASON_CATEGORIES,
   phaseForStage,
@@ -21,6 +23,7 @@ import {
   STAGE_LABELS,
   STAGE_PHASE,
   STAGE_STUCK_THRESHOLDS,
+  TENANT_OVERRIDE_STATES,
   TENANT_STATUSES,
   TERMINAL_STAGES,
   TRANSITION_SOURCES,
@@ -100,6 +103,17 @@ describe('statusModel — derivation (§7)', () => {
     expect(deriveStatuses('moved_in')).toEqual({ tenantStatus: 'placed', listingStatus: 'occupied' });
     expect(deriveStatuses('lost')).toEqual({ tenantStatus: 'searching', listingStatus: 'available' });
   });
+
+  it('NO derivation output is an OVERRIDE/exit state (derivation never pins; 2026-06-19 decision)', () => {
+    // Override/exit states (listing on_hold/off_market, tenant on_hold/inactive)
+    // are produced ONLY by explicit writes — derivation must never yield one, or
+    // a placement progression could silently push an entity into an override.
+    for (const stage of PLACEMENT_STAGES) {
+      const d = PLACEMENT_DERIVATION[stage];
+      expect(isListingOverrideStatus(d.listingStatus), `${stage} → listing`).toBe(false);
+      expect(isTenantOverrideStatus(d.tenantStatus), `${stage} → tenant`).toBe(false);
+    }
+  });
 });
 
 describe('statusModel — guards reject junk', () => {
@@ -129,25 +143,41 @@ describe('statusModel — guards reject junk', () => {
   });
 });
 
-describe('statusModel — source precedence (§8)', () => {
+describe('statusModel — source precedence (audit/provenance only, §8)', () => {
   it('derived is strictly lowest; all non-derived are equal rank', () => {
+    // SOURCE_PRECEDENCE is now PROVENANCE/audit metadata only — it no longer
+    // gates derivation (that is STATE-based; see the override-state tests below).
     expect(SOURCE_PRECEDENCE.derived).toBe(0);
     for (const s of TRANSITION_SOURCES.filter((x) => x !== 'derived')) {
       expect(SOURCE_PRECEDENCE[s]).toBe(1);
     }
   });
+});
 
-  it('canOverwrite: derived applies only over unset/derived; non-derived always wins', () => {
-    // A derived write is a NO-OP when something non-derived has pinned the value.
-    expect(canOverwrite('derived', undefined)).toBe(true);
-    expect(canOverwrite('derived', 'derived')).toBe(true);
-    expect(canOverwrite('derived', 'manual')).toBe(false);
-    expect(canOverwrite('derived', 'ai')).toBe(false);
-    // An explicit (non-derived) write always pins/wins (last-writer-wins).
-    expect(canOverwrite('manual', 'derived')).toBe(true);
-    expect(canOverwrite('manual', 'manual')).toBe(true);
-    expect(canOverwrite('ai', 'manual')).toBe(true);
-    expect(canOverwrite('import', undefined)).toBe(true);
+describe('statusModel — override/exit states pin against derivation (2026-06-19 decision)', () => {
+  it('the override-state sets are exactly the §5/§6 overrides + exits', () => {
+    expect([...LISTING_OVERRIDE_STATES].sort()).toEqual(['off_market', 'on_hold']);
+    expect([...TENANT_OVERRIDE_STATES].sort()).toEqual(['inactive', 'on_hold']);
+  });
+
+  it('isListingOverrideStatus: only on_hold/off_market pin; baseline states do not', () => {
+    for (const s of ['on_hold', 'off_market'] as const) {
+      expect(isListingOverrideStatus(s)).toBe(true);
+    }
+    for (const s of ['setup', 'available', 'under_application', 'finalizing', 'occupied'] as const) {
+      expect(isListingOverrideStatus(s)).toBe(false);
+    }
+    expect(isListingOverrideStatus(undefined)).toBe(false);
+  });
+
+  it('isTenantOverrideStatus: only on_hold/inactive pin; baseline states do not', () => {
+    for (const s of ['on_hold', 'inactive'] as const) {
+      expect(isTenantOverrideStatus(s)).toBe(true);
+    }
+    for (const s of ['needs_review', 'onboarding', 'searching', 'placing', 'placed'] as const) {
+      expect(isTenantOverrideStatus(s)).toBe(false);
+    }
+    expect(isTenantOverrideStatus(undefined)).toBe(false);
   });
 });
 

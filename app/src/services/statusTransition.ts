@@ -14,10 +14,11 @@ import { mergeContext } from '../lib/context.js';
 import { toCaseUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
-  canOverwrite,
   deriveStatuses,
+  isListingOverrideStatus,
   isLostReasonCategory,
   isPlacementStage,
+  isTenantOverrideStatus,
   STAGE_STUCK_THRESHOLDS,
   TERMINAL_STAGES,
   type ListingStatus,
@@ -120,45 +121,46 @@ export function createStatusTransitionService(
   const log = deps.logger ?? defaultLogger;
 
   /**
-   * Apply a DERIVED status write to a tenant + a unit, respecting precedence
-   * (§8): a `derived` write applies ONLY when the stored source is `derived` or
-   * unset. A prior manual/ai/automation/import PIN WINS and is left untouched —
-   * which means a stale manual pin will BLOCK future derived writes until the
-   * next explicit (non-derived) write replaces it. This is INTENDED (§8:
-   * "an explicit write pins and wins"). Best-effort per entity: a failure to
-   * derive one side never blocks the placement transition itself.
+   * Apply a DERIVED status write to a tenant + a unit, gated on the entity's
+   * current STATE (the 2026-06-19 decision —
+   * docs/issues/status-pin-vs-terminal-derivation.md): a `derived` write
+   * overwrites the current status UNLESS the current status is an OVERRIDE/exit
+   * state (listing: on_hold/off_market; tenant: on_hold/inactive), in which case
+   * it is PINNED and left untouched. The write is NO LONGER gated on the stored
+   * `*_source` — baseline progression states stay derivation-eligible no matter
+   * who last wrote them (this fixes staff manually publishing a listing
+   * setup→available, source 'manual', which used to PIN it and block the
+   * placement from ever deriving it forward). We still stamp `*_source:
+   * 'derived'` for provenance/audit. Best-effort per entity: a failure to derive
+   * one side never blocks the placement transition itself.
    */
   async function applyDerivation(
     tenantId: string,
     unitId: string,
     derived: { tenantStatus: TenantStatus; listingStatus: ListingStatus },
   ): Promise<void> {
-    // Tenant side (derived) — only if no non-derived pin blocks it.
+    // Tenant side (derived) — blocked ONLY when the CURRENT status is an
+    // override/exit state (on_hold/inactive); baseline states are overwritten.
     try {
       const contact = await contactsRepo.getById(tenantId);
-      if (contact) {
-        const stored = contact.status_source as TransitionSource | undefined;
-        if (canOverwrite('derived', stored)) {
-          await contactsRepo.update(tenantId, {
-            status: derived.tenantStatus,
-            status_source: 'derived',
-          });
-        }
+      if (contact && !isTenantOverrideStatus(contact.status as TenantStatus | undefined)) {
+        await contactsRepo.update(tenantId, {
+          status: derived.tenantStatus,
+          status_source: 'derived',
+        });
       }
     } catch (err) {
       log.error({ err, tenantId }, 'derivation: tenant status write failed (best-effort)');
     }
-    // Listing side (derived) — same precedence rule on status_source.
+    // Listing side (derived) — blocked ONLY when the CURRENT status is an
+    // override/exit state (on_hold/off_market); baseline states are overwritten.
     try {
       const unit = await unitsRepo.getById(unitId);
-      if (unit) {
-        const stored = unit.status_source as TransitionSource | undefined;
-        if (canOverwrite('derived', stored)) {
-          await unitsRepo.update(unitId, {
-            status: derived.listingStatus,
-            status_source: 'derived',
-          });
-        }
+      if (unit && !isListingOverrideStatus(unit.status as ListingStatus | undefined)) {
+        await unitsRepo.update(unitId, {
+          status: derived.listingStatus,
+          status_source: 'derived',
+        });
       }
     } catch (err) {
       log.error({ err, unitId }, 'derivation: listing status write failed (best-effort)');
@@ -272,11 +274,15 @@ export function createStatusTransitionService(
         const tenantClear = await noOtherActivePlacement(existing.tenantId, caseId, 'tenant');
         const unitClear = await noOtherActivePlacement(existing.unitId, caseId, 'unit');
         const derived = deriveStatuses('lost'); // searching / available
-        // Only clear the side that has no other active placement.
+        // The lost-bounce is a DERIVED write: it too is gated on the CURRENT
+        // STATE (2026-06-19 decision), so a manually On-hold/Inactive tenant or
+        // an On-hold/Off-market listing STAYS pinned through a lost placement.
+        // Only clear the side that (a) has no other active placement AND (b) is
+        // not currently in an override/exit state.
         if (tenantClear) {
           try {
             const contact = await contactsRepo.getById(existing.tenantId);
-            if (contact && canOverwrite('derived', contact.status_source as TransitionSource | undefined)) {
+            if (contact && !isTenantOverrideStatus(contact.status as TenantStatus | undefined)) {
               await contactsRepo.update(existing.tenantId, {
                 status: derived.tenantStatus,
                 status_source: 'derived',
@@ -289,7 +295,7 @@ export function createStatusTransitionService(
         if (unitClear) {
           try {
             const unit = await unitsRepo.getById(existing.unitId);
-            if (unit && canOverwrite('derived', unit.status_source as TransitionSource | undefined)) {
+            if (unit && !isListingOverrideStatus(unit.status as ListingStatus | undefined)) {
               await unitsRepo.update(existing.unitId, {
                 status: derived.listingStatus,
                 status_source: 'derived',

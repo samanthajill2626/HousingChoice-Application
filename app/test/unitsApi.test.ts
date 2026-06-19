@@ -338,14 +338,15 @@ describe('PATCH /api/units/:unitId', () => {
 });
 
 // REGRESSION (§7): a unit created via the ROUTE must remain DERIVATION-DRIVABLE.
-// A prior fix stamped unit-create with status_source 'manual', which made
-// canOverwrite('derived','manual') === false and PERMANENTLY blocked the first
-// placement from driving the listing forward — the listing stayed 'available'
-// (publicly shareable) while a placement actively progressed. The existing
-// derivation tests missed this because they create units via the REPO (which
-// doesn't stamp status_source); this one drives the full ROUTE create + a real
-// placement transition. On the old 'manual' stamp this test FAILS (status stays
-// at its create value); with status_source 'derived' it passes.
+// A prior fix stamped unit-create with status_source 'manual', which under the
+// OLD source-precedence rule PERMANENTLY blocked the first placement from
+// driving the listing forward — the listing stayed 'available'/'setup'
+// (publicly shareable) while a placement actively progressed. Derivation gating
+// is now STATE-based (2026-06-19 decision), so the source stamp no longer
+// matters here — what matters is that 'setup' is a BASELINE state and thus
+// derivation-eligible. The existing derivation tests create units via the REPO;
+// this one drives the full ROUTE create + a real placement transition to prove
+// the route-created listing derives forward (to under_application).
 describe('REGRESSION: route-created unit derives forward on a placement transition', () => {
   it('unit created via POST /api/units derives to under_application (tenant → placing) when a placement enters Application', async () => {
     const { app, world } = makeWebhookHarness();

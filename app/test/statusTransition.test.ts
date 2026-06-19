@@ -97,7 +97,11 @@ describe('statusTransition — derivation (§7)', () => {
   });
 });
 
-describe('statusTransition — source precedence (§8)', () => {
+// Derivation gating is STATE-based (2026-06-19 decision,
+// docs/issues/status-pin-vs-terminal-derivation.md): only OVERRIDE/exit states
+// pin against derivation; BASELINE progression states stay derivation-eligible
+// regardless of who last wrote them. Explicit writes always apply.
+describe('statusTransition — state-based derivation gating (2026-06-19 decision)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;
 
@@ -108,26 +112,92 @@ describe('statusTransition — source precedence (§8)', () => {
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('a derived write does NOT overwrite a prior MANUAL pin (manual wins, left alone)', async () => {
-    // Pin the listing status manually first.
-    await svc.setListingStatus('unit-1', { toStatus: 'on_hold', source: 'manual' });
+  it('derivation OVERWRITES a manually-set BASELINE listing status (the previously-broken case)', async () => {
+    // Staff publish the listing by manually moving it to `available` (source
+    // 'manual') — a BASELINE state. The OLD source-precedence rule pinned it and
+    // blocked the placement from ever deriving it forward, so the listing stayed
+    // publicly shareable while under application. New rule: baseline states are
+    // derivation-eligible, so the placement drives it to under_application.
+    await svc.setListingStatus('unit-1', { toStatus: 'available', source: 'manual' });
     const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    // A placement transition derives listing→under_application, but the manual
-    // pin must survive (the stale pin blocks the derived write — intended §8).
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
     const unit = await world.unitsRepo.getById('unit-1');
-    expect(unit!.status).toBe('on_hold'); // manual pin preserved
-    expect(unit!.status_source).toBe('manual');
+    expect(unit!.status).toBe('under_application'); // derived forward despite the manual 'available'
+    expect(unit!.status_source).toBe('derived');
   });
 
-  it('a manual write DOES overwrite a derived value', async () => {
+  it('derivation OVERWRITES a manually-set BASELINE tenant status (searching → placing)', async () => {
+    await svc.setTenantStatus('tenant-1', { toStatus: 'searching', source: 'manual' });
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const contact = await world.contactsRepo.getById('tenant-1');
+    expect(contact!.status).toBe('placing'); // derived forward despite the manual 'searching'
+    expect(contact!.status_source).toBe('derived');
+  });
+
+  it('derivation does NOT overwrite an OVERRIDE listing status (on_hold / off_market stay pinned)', async () => {
+    for (const override of ['on_hold', 'off_market'] as const) {
+      const world2 = createFakeWorld();
+      const svc2 = makeService(world2);
+      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+      await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+      await svc2.setListingStatus('unit-1', { toStatus: override, source: 'manual' });
+      const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await svc2.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+      const unit = await world2.unitsRepo.getById('unit-1');
+      expect(unit!.status, override).toBe(override); // override preserved
+      expect(unit!.status_source, override).toBe('manual');
+    }
+  });
+
+  it('derivation does NOT overwrite an OVERRIDE tenant status (on_hold / inactive stay pinned)', async () => {
+    for (const override of ['on_hold', 'inactive'] as const) {
+      const world2 = createFakeWorld();
+      const svc2 = makeService(world2);
+      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+      await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+      await svc2.setTenantStatus('tenant-1', { toStatus: override, source: 'manual' });
+      const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await svc2.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+      const contact = await world2.contactsRepo.getById('tenant-1');
+      expect(contact!.status, override).toBe(override); // override preserved
+      expect(contact!.status_source, override).toBe('manual');
+    }
+  });
+
+  it('moving a listing OUT of an override (on_hold → available) re-enables derivation', async () => {
+    await svc.setListingStatus('unit-1', { toStatus: 'on_hold', source: 'manual' });
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    // While on_hold, the placement transition does NOT derive it forward.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('on_hold');
+    // A human moves it back OUT of the override (explicit write always applies).
+    await svc.setListingStatus('unit-1', { toStatus: 'available', source: 'manual' });
+    // A subsequent placement transition now derives it forward.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    const unit = await world.unitsRepo.getById('unit-1');
+    expect(unit!.status).toBe('finalizing');
+    expect(unit!.status_source).toBe('derived');
+  });
+
+  it('a manually on_hold tenant on a moved_in placement STAYS on_hold (derivation skipped)', async () => {
+    await svc.setTenantStatus('tenant-1', { toStatus: 'on_hold', source: 'manual' });
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_move_in' });
+    // moved_in would derive tenant→placed / listing→occupied, but on_hold pins.
+    await svc.transitionPlacement(c.caseId, { toStage: 'moved_in', source: 'manual' });
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('on_hold'); // pinned
+    // The (baseline 'available') listing is NOT pinned, so it derives to occupied.
+    expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('occupied');
+  });
+
+  it('an explicit (non-derived) write always applies — moving INTO an override over a derived value', async () => {
     const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application'); // derived
 
     await svc.setListingStatus('unit-1', { toStatus: 'on_hold', source: 'manual' });
     const unit = await world.unitsRepo.getById('unit-1');
-    expect(unit!.status).toBe('on_hold'); // explicit write pins/wins
+    expect(unit!.status).toBe('on_hold'); // explicit write applies unconditionally
     expect(unit!.status_source).toBe('manual');
   });
 });
@@ -243,6 +313,17 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     expect(updated.lost_reason).toEqual({ category: 'landlord_lost_inspection', text: 'failed twice' });
     // No other active placement → bounce back.
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('searching');
+    expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('available');
+  });
+
+  it('does NOT bounce an OVERRIDE-pinned tenant on a lost placement (manual on_hold survives)', async () => {
+    // A manually On-hold tenant must STAY On hold through a lost placement —
+    // the lost-bounce is a derived write, gated on the current override state.
+    await svc.setTenantStatus('tenant-1', { toStatus: 'on_hold', source: 'manual' });
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    await svc.transitionPlacement(c.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('on_hold'); // pinned, no bounce
+    // The listing (baseline 'available') is not pinned, so it bounces to available.
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('available');
   });
 

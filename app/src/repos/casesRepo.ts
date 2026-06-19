@@ -43,6 +43,7 @@ import {
   isPlacementStage,
   PLACEMENT_STAGES,
   TERMINAL_STAGES,
+  type InspectionOutcome,
   type LostReason,
   type PlacementStage,
   type TransitionSource,
@@ -146,6 +147,14 @@ export interface CaseItem {
   application?: Record<string, unknown>;
   /** RTA/approval data: inspection, rent_determined + tenant_portion, LIF, denial. */
   rta?: Record<string, unknown>;
+  /**
+   * Status-model (§4): the inspection's first-class pass/fail OUTCOME, written
+   * by the transition service on the inspection-complete move (OUT of
+   * `awaiting_inspection`). A flexible-doc attribute (snake_case), NOT a GSI key
+   * — no migration. The model is not a strict state machine: a `fail` does NOT
+   * force a next stage (the admin routes the card).
+   */
+  inspection_outcome?: InspectionOutcome;
   /**
    * Status-model (§8): when the placement ENTERED its current `stage` (ISO
    * 8601) — drives time-in-stage + the "stuck too long" nudge. Stamped by the

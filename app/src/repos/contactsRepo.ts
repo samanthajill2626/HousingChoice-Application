@@ -81,9 +81,10 @@ export interface ContactItem {
   status_source?: TransitionSource;
   /**
    * Status-model (§5): the porting flag — the voucher/RTA is being moved
-   * between jurisdictions ("not ready"), which holds the tenant out of
-   * `searching` (the RTA-in-hand gate). Porting lives on the TENANT, never as a
-   * placement stage.
+   * between jurisdictions ("not ready"). INFORMATIONAL only: as of the
+   * 2026-06-19 product decision it gates NOTHING (the RTA-in-hand→`searching`
+   * gate was removed — the admin advances the tenant when the prerequisite is
+   * satisfied). Porting lives on the TENANT, never as a placement stage.
    */
   porting?: boolean;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */

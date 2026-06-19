@@ -158,9 +158,14 @@ Needs review → Onboarding → Searching → Placing → Placed
 
 - **`Needs review`** — the single front door. Every new contact lands here; there is
   no separate triage state and no `new` status.
-- **`Onboarding` → `Searching`** is **gated by RTA in hand.** The **`porting` flag**
-  (voucher/RTA being moved between jurisdictions = "not ready") holds the tenant out of
-  `Searching` until it clears. **Porting lives on the tenant, never as a placement
+- **`Onboarding` → `Searching`** — RTA-in-hand is a **business** prerequisite to move
+  forward, but it is **not an app-enforced gate** (2026-06-19 decision). The app does not
+  track an `rta_in_hand` boolean and does not block the transition; the **admin advances**
+  the tenant to `Searching` when RTA is in hand (we assume everyone has it unless we know
+  otherwise) and moves them to **`On hold`** when they don't. The **`porting` flag**
+  (voucher/RTA being moved between jurisdictions = "not ready") is an **informational**
+  signal on the tenant — it does **not** hard-block `Searching` (a porting tenant is
+  typically parked via `On hold`). **Porting lives on the tenant, never as a placement
   stage.**
 - **`Searching`** absorbs interest **and** touring — all the pre-placement activity.
 - **`Placing`** — one coarse "we are actively placing this tenant" state. It does
@@ -262,9 +267,12 @@ This model **will** be tweaked and extended. It is designed so most changes are 
 ## 10. Status — what's settled vs. open
 
 **Settled:** the three lifecycles, all stage/phase labels above, the verb/`Awaiting`
-framing, no owner field, porting as a tenant flag, the RTA-in-hand gate, `final_rent` on
-rent acceptance, `Finalizing` anchored at Contract, `Lost` bouncing the tenant to
-`Searching`, manual tenant drop-out.
+framing, no owner field, porting as an informational tenant flag, RTA-in-hand as a
+**manual** prerequisite (admin-advanced, **not** an app-enforced gate — 2026-06-19),
+`final_rent` on rent acceptance, `inspection_outcome` (pass/fail) captured on the
+inspection-complete move, state-based derivation gating (only override/exit states pin —
+see §8), `Finalizing` anchored at Contract, `Lost` bouncing the tenant to `Searching`,
+manual tenant drop-out.
 
 **Open / future:**
 - Backend rename `case`/`cases` → `placement` (code still uses the legacy term).

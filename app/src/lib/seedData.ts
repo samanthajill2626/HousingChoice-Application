@@ -65,12 +65,12 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       lastName: 'Nguyen',
       voucherSize: 2,
       voucher_program: 'HCV',
-      rta_in_hand: true,
       rta_expiration_date: '2026-08-15',
       caseworker: 'D. Okafor',
       preferences_notes: 'Ground floor preferred; near MARTA.',
-      // §5 porting flag (a flag, not a status): she has rta_in_hand:true and is
-      // not porting, so the RTA-in-hand gate would permit her into `searching`.
+      // §5 porting flag (a flag, not a status): informational only — the
+      // 2026-06-19 product decision REMOVED the RTA-in-hand→searching gate, so
+      // `porting` no longer blocks any transition (the admin advances tenants).
       porting: false,
       created_at: T0,
     },

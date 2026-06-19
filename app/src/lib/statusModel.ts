@@ -122,6 +122,18 @@ export const TERMINAL_STAGES: ReadonlySet<PlacementStage> = new Set<PlacementSta
   'lost',
 ]);
 
+// --- Inspection outcome (§4: the Inspection phase carries a pass/fail) -------
+// A first-class pass/fail result recorded on the placement when the inspection
+// completes (the move OUT of `awaiting_inspection`). The model is NOT a strict
+// state machine — a `fail` does NOT force a particular next stage; the admin
+// routes the card (reschedule, → lost, etc.). Stored on the case as the
+// snake_case flexible-doc attribute `inspection_outcome`.
+export const INSPECTION_OUTCOMES = ['pass', 'fail'] as const;
+
+export type InspectionOutcome = (typeof INSPECTION_OUTCOMES)[number];
+
+const INSPECTION_OUTCOME_SET: ReadonlySet<string> = new Set(INSPECTION_OUTCOMES);
+
 // --- Tenant lifecycle (coarse; §5) ------------------------------------------
 // These are the values a TENANT contact's single `status` field holds (the one
 // type-scoped lifecycle, NOT a second field — see contactsRepo.ContactItem.status
@@ -346,6 +358,10 @@ export function isListingStatus(x: unknown): x is ListingStatus {
 
 export function isLostReasonCategory(x: unknown): x is LostReasonCategory {
   return typeof x === 'string' && LOST_REASON_CATEGORY_SET.has(x);
+}
+
+export function isInspectionOutcome(x: unknown): x is InspectionOutcome {
+  return typeof x === 'string' && INSPECTION_OUTCOME_SET.has(x);
 }
 
 export function isTransitionSource(x: unknown): x is TransitionSource {

@@ -84,7 +84,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   it('a transition denormalizes the stage + derives tenant/listing statuses + writes a real audit row; history reads back newest-first', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
-    await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
+    await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
     const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
 
@@ -131,7 +131,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   it('the stuck_case next-deadline round-trips through the byNextDeadline GSI', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
-    await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
+    await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
     const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
 
@@ -147,7 +147,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   it('an OVERRIDE state (manual on_hold) pins against a later DERIVED transition', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
-    await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
+    await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
 
     // Manually move the tenant into the OVERRIDE state on_hold.
@@ -166,7 +166,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   it('a manually-set BASELINE state IS overwritten by a later DERIVED transition', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
-    await contacts.create({ contactId: tenantId, type: 'tenant', rta_in_hand: true });
+    await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
 
     // Manually pin a BASELINE tenant status (searching) — under the OLD source

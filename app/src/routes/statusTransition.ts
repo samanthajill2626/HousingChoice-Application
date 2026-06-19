@@ -2,7 +2,7 @@
 // transition service (services/statusTransition.ts). requireAuth only (matches
 // the cases/units/contacts authz posture; the /api mount supplies the gate).
 //
-//   POST  /api/cases/:caseId/transition  { toStage, source, reason?, lostReason?, finalRent? } → { case }
+//   POST  /api/cases/:caseId/transition  { toStage, source, reason?, lostReason?, finalRent?, inspectionOutcome? } → { case }
 //   PATCH /api/contacts/:contactId/tenant-status { toStatus, source, reason?, porting? }        → { contact }
 //   PATCH /api/units/:unitId/listing-status      { toStatus, source, reason? }                  → { unit }
 //   GET   /api/cases/:caseId/history                                                            → { history }
@@ -17,6 +17,7 @@ import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import {
+  isInspectionOutcome,
   isListingStatus,
   isLostReasonCategory,
   isPlacementStage,
@@ -123,6 +124,17 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       }
       finalRent = b['finalRent'];
     }
+    // inspectionOutcome (when supplied) must be a valid pass/fail (§4). The
+    // service writes it only on the inspection-complete move (OUT of
+    // awaiting_inspection); we validate the shape here regardless of stage.
+    let inspectionOutcome: import('../lib/statusModel.js').InspectionOutcome | undefined;
+    if (b['inspectionOutcome'] !== undefined) {
+      if (!isInspectionOutcome(b['inspectionOutcome'])) {
+        res.status(400).json({ error: 'inspectionOutcome must be pass or fail' });
+        return;
+      }
+      inspectionOutcome = b['inspectionOutcome'];
+    }
 
     // A `lost` move always captures a reason (§7 "pick OR write — always
     // available"): require at least a valid category OR non-empty free text.
@@ -142,6 +154,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
         ...(typeof b['reason'] === 'string' && { reason: b['reason'] }),
         ...(lostReason !== undefined && { lostReason }),
         ...(finalRent !== undefined && { finalRent }),
+        ...(inspectionOutcome !== undefined && { inspectionOutcome }),
         ...(req.user?.userId !== undefined && { actor: req.user.userId }),
       });
       log.info({ caseId, toStage: b['toStage'], source: b['source'], actor: req.user?.userId }, 'placement transition via api');
@@ -246,15 +259,17 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
   return router;
 }
 
-/** Map a transition error to its HTTP status (404 unknown, 409 gate, else rethrow). */
+/** Map a transition error to its HTTP status (404 unknown, 400 refused, else rethrow). */
 function handleTransitionError(err: unknown, res: import('express').Response): void {
   if (err instanceof EntityNotFoundError) {
     res.status(404).json({ error: `${err.entity}_not_found` });
     return;
   }
   if (err instanceof TransitionRefusedError) {
-    // The RTA-in-hand gate (and similar business-rule refusals) → 409 Conflict.
-    res.status(err.code === 'rta_gate' ? 409 : 400).json({ error: err.code });
+    // Business-rule refusals (bad stage / bad final_rent / bad inspection
+    // outcome) → 400. (The 2026-06-19 product decision removed the RTA-in-hand
+    // gate, so there is no longer a 409 `rta_gate` refusal.)
+    res.status(400).json({ error: err.code });
     return;
   }
   throw err; // Express 5 forwards async throws to the error handler.

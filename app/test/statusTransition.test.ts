@@ -1,7 +1,8 @@
 // Unit tests for THE one transition service (services/statusTransition.ts),
 // driven on the in-memory fakes (no DynamoDB). Covers: stage stamping +
 // provenance audit; §7 derivation; §8 source precedence (derived never
-// overwrites a manual pin; manual overwrites derived); the §5 RTA-in-hand gate;
+// overwrites a manual pin; manual overwrites derived); tenant-status writes
+// (the RTA-in-hand gate was REMOVED 2026-06-19 — → searching always applies);
 // porting as a tenant flag (never a stage); final_rent on rent acceptance; Lost
 // from any stage (structured reason + the bounce-back guard); and the §8
 // time-in-stage stuck nudge (incl. NOT clobbering a hard-clock deadline,
@@ -36,7 +37,7 @@ describe('statusTransition — placement stage moves', () => {
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -69,7 +70,7 @@ describe('statusTransition — derivation (§7)', () => {
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -108,7 +109,7 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -139,7 +140,7 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
     for (const override of ['on_hold', 'off_market'] as const) {
       const world2 = createFakeWorld();
       const svc2 = makeService(world2);
-      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
       await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
       await svc2.setListingStatus('unit-1', { toStatus: override, source: 'manual' });
       const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
@@ -154,7 +155,7 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
     for (const override of ['on_hold', 'inactive'] as const) {
       const world2 = createFakeWorld();
       const svc2 = makeService(world2);
-      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+      await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
       await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
       await svc2.setTenantStatus('tenant-1', { toStatus: override, source: 'manual' });
       const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
@@ -214,7 +215,7 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -310,7 +311,12 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
   });
 });
 
-describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
+// The RTA-in-hand→searching gate was REMOVED (product decision 2026-06-19):
+// RTA-in-hand is a manual business prerequisite — the admin advances the tenant
+// when it's satisfied, or holds them in `on_hold` if not — so setTenantStatus
+// always applies (subject only to the entity existing). `porting` stays as an
+// informational flag and gates nothing.
+describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-19)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;
 
@@ -319,35 +325,33 @@ describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
     svc = makeService(world);
   });
 
-  it('→searching is REFUSED when rta_in_hand !== true', async () => {
-    await world.contactsRepo.create({ contactId: 't-no-rta', type: 'tenant', rta_in_hand: false });
-    await expect(
-      svc.setTenantStatus('t-no-rta', { toStatus: 'searching', source: 'manual' }),
-    ).rejects.toMatchObject({ code: 'rta_gate' });
+  it('→searching SUCCEEDS regardless of rta_in_hand / porting (gate removed); audits {from,to,source}', async () => {
+    // A tenant with NO rta_in_hand AND porting:true — the old gate would have
+    // refused this with a 409 rta_gate. It must now succeed.
+    await world.contactsRepo.create({
+      contactId: 't-gateless',
+      type: 'tenant',
+      status: 'onboarding',
+      porting: true,
+    });
+    const updated = await svc.setTenantStatus('t-gateless', { toStatus: 'searching', source: 'manual' });
+    expect(updated.status).toBe('searching');
+    expect(updated.status_source).toBe('manual');
+    // porting stays informational — untouched when not supplied, never a gate.
+    expect(updated.porting).toBe(true);
+    const audit = world.auditEvents.find((a) => a.event_type === 'tenant_status_changed');
+    expect(audit!.payload).toMatchObject({ from: 'onboarding', to: 'searching', source: 'manual' });
   });
 
-  it('→searching is REFUSED when porting === true (even with rta_in_hand)', async () => {
-    await world.contactsRepo.create({ contactId: 't-port', type: 'tenant', rta_in_hand: true, porting: true });
-    await expect(
-      svc.setTenantStatus('t-port', { toStatus: 'searching', source: 'manual' }),
-    ).rejects.toMatchObject({ code: 'rta_gate' });
-    // Clearing porting in the SAME call lets it through.
+  it('→searching also succeeds when porting is updated in the same write (porting is just a flag)', async () => {
+    await world.contactsRepo.create({ contactId: 't-port', type: 'tenant', porting: true });
     const ok = await svc.setTenantStatus('t-port', { toStatus: 'searching', source: 'manual', porting: false });
     expect(ok.status).toBe('searching');
     expect(ok.porting).toBe(false);
   });
 
-  it('→searching is ALLOWED when rta_in_hand && !porting; audits {from,to,source}', async () => {
-    await world.contactsRepo.create({ contactId: 't-ok', type: 'tenant', rta_in_hand: true, status: 'onboarding' });
-    const updated = await svc.setTenantStatus('t-ok', { toStatus: 'searching', source: 'manual' });
-    expect(updated.status).toBe('searching');
-    expect(updated.status_source).toBe('manual');
-    const audit = world.auditEvents.find((a) => a.event_type === 'tenant_status_changed');
-    expect(audit!.payload).toMatchObject({ from: 'onboarding', to: 'searching', source: 'manual' });
-  });
-
   it('manual drop-out to inactive is allowed (no gate); porting is a flag, never a stage', async () => {
-    await world.contactsRepo.create({ contactId: 't-drop', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 't-drop', type: 'tenant' });
     const updated = await svc.setTenantStatus('t-drop', { toStatus: 'inactive', source: 'manual' });
     expect(updated.status).toBe('inactive');
     // porting lives on the contact, never appears as a case stage.
@@ -355,11 +359,72 @@ describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
   });
 });
 
+describe('statusTransition — inspection_outcome on the inspection-complete move (§4)', () => {
+  let world: FakeWorld;
+  let svc: StatusTransitionService;
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    svc = makeService(world);
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it("writes inspection_outcome:'pass' on awaiting_inspection → determine_rent", async () => {
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const updated = await svc.transitionPlacement(c.caseId, {
+      toStage: 'determine_rent',
+      source: 'manual',
+      inspectionOutcome: 'pass',
+    });
+    expect(updated.inspection_outcome).toBe('pass');
+  });
+
+  it("stores a 'fail' too — including on awaiting_inspection → lost and → schedule_inspection", async () => {
+    const toLost = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const lost = await svc.transitionPlacement(toLost.caseId, {
+      toStage: 'lost',
+      source: 'manual',
+      inspectionOutcome: 'fail',
+      lostReason: { category: 'landlord_lost_inspection' },
+    });
+    expect(lost.inspection_outcome).toBe('fail');
+
+    const reschedule = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const back = await svc.transitionPlacement(reschedule.caseId, {
+      toStage: 'schedule_inspection',
+      source: 'manual',
+      inspectionOutcome: 'fail',
+    });
+    expect(back.inspection_outcome).toBe('fail');
+  });
+
+  it('does NOT write inspection_outcome on a move that is NOT from awaiting_inspection', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'schedule_inspection' });
+    const updated = await svc.transitionPlacement(c.caseId, {
+      toStage: 'awaiting_inspection',
+      source: 'manual',
+      // A stray outcome on a non-inspection-complete move is ignored (gated on
+      // `from === 'awaiting_inspection'`, mirroring finalRent's gate).
+      inspectionOutcome: 'pass',
+    });
+    expect(updated.inspection_outcome).toBeUndefined();
+  });
+
+  it('rejects an invalid inspectionOutcome defensively at the service', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    await expect(
+      // @ts-expect-error — exercising the defensive runtime guard with a junk value.
+      svc.transitionPlacement(c.caseId, { toStage: 'determine_rent', source: 'manual', inspectionOutcome: 'maybe' }),
+    ).rejects.toBeInstanceOf(TransitionRefusedError);
+  });
+});
+
 describe('statusTransition — final_rent on rent acceptance (§4)', () => {
   it('does NOT write final_rent when ENTERING awaiting_rent_acceptance', async () => {
     const world = createFakeWorld();
     const svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'determine_rent' });
     // Entering awaiting_rent_acceptance is the "still awaiting acceptance" state —
@@ -371,7 +436,7 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
   it('writes final_rent onto the unit when LEAVING awaiting_rent_acceptance (the accept move)', async () => {
     const world = createFakeWorld();
     const svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
     // The landlord accepts → move OUT of awaiting_rent_acceptance, carrying the
@@ -383,7 +448,7 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
   it('does NOT write final_rent when LEAVING awaiting_rent_acceptance for the TERMINAL `lost` (a dying deal is not an acceptance)', async () => {
     const world = createFakeWorld();
     const svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
     // awaiting_rent_acceptance → lost is the deal dying, NOT a rent acceptance,
@@ -406,7 +471,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -519,7 +584,7 @@ describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
   beforeEach(async () => {
     world = createFakeWorld();
     svc = makeService(world);
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 

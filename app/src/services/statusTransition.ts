@@ -1,8 +1,9 @@
 // THE one status-transition service (STATUS-MODEL.md §8/§9): EVERY status/stage
 // transition routes through here so denormalization, provenance, derivation,
-// source-precedence, the RTA-in-hand gate, final_rent, the Lost bounce-back, and
-// the time-in-stage nudge all live in ONE place. All stage/status knowledge is
-// read from lib/statusModel.ts (no duplicated lists).
+// source-precedence, final_rent, the Lost bounce-back, and the time-in-stage
+// nudge all live in ONE place. (RTA-in-hand is NOT gated — 2026-06-19 product
+// decision: it's a manual prerequisite, the admin advances the tenant.) All
+// stage/status knowledge is read from lib/statusModel.ts (no duplicated lists).
 //
 // The workflow record is the `case` entity in code/data (casesRepo/caseId);
 // "placement" is the domain label only (the case→placement rename is out of
@@ -15,12 +16,14 @@ import { toCaseUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   deriveStatuses,
+  isInspectionOutcome,
   isListingOverrideStatus,
   isLostReasonCategory,
   isPlacementStage,
   isTenantOverrideStatus,
   STAGE_STUCK_THRESHOLDS,
   TERMINAL_STAGES,
+  type InspectionOutcome,
   type ListingStatus,
   type LostReason,
   type PlacementStage,
@@ -61,6 +64,14 @@ export interface TransitionPlacementInput {
    * other move.
    */
   finalRent?: number;
+  /**
+   * The inspection's pass/fail OUTCOME (§4). Supplied on the inspection-complete
+   * move — the transition OUT of `awaiting_inspection` — and written onto the
+   * case as `inspection_outcome`. Ignored on any other move. A `fail` does NOT
+   * force a particular next stage (not a strict state machine); the admin routes
+   * the card.
+   */
+  inspectionOutcome?: InspectionOutcome;
   /** The acting user (userId) — indexed onto the audit row's byActor GSI (§8). */
   actor?: string;
 }
@@ -69,7 +80,7 @@ export interface SetTenantStatusInput {
   toStatus: TenantStatus;
   source: TransitionSource;
   reason?: string;
-  /** Update the porting flag in the same write (the §5 gate input). */
+  /** Update the porting flag in the same write (an informational §5 flag — never a gate). */
   porting?: boolean;
   /** The acting user (userId) — indexed onto the audit row's byActor GSI (§8). */
   actor?: string;
@@ -83,7 +94,7 @@ export interface SetListingStatusInput {
   actor?: string;
 }
 
-/** A transition was rejected by a business rule (e.g. the RTA-in-hand gate). */
+/** A transition was rejected by a business rule (e.g. an unknown stage). */
 export class TransitionRefusedError extends Error {
   constructor(
     readonly code: string,
@@ -108,7 +119,7 @@ export class EntityNotFoundError extends Error {
 export interface StatusTransitionService {
   /** Move a placement to `toStage` (denormalize + provenance + derivation + nudge). */
   transitionPlacement(caseId: string, input: TransitionPlacementInput): Promise<CaseItem>;
-  /** Explicit tenant-status write (incl. manual drop-out + the RTA-in-hand gate). */
+  /** Explicit tenant-status write (incl. manual drop-out; no RTA-in-hand gate — 2026-06-19). */
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
   /** Explicit listing-status write. */
   setListingStatus(unitId: string, input: SetListingStatusInput): Promise<UnitItem>;
@@ -219,7 +230,7 @@ export function createStatusTransitionService(
 
   return {
     async transitionPlacement(caseId, input) {
-      const { toStage, source, reason, lostReason, finalRent, actor } = input;
+      const { toStage, source, reason, lostReason, finalRent, inspectionOutcome, actor } = input;
       if (!isPlacementStage(toStage)) {
         throw new TransitionRefusedError('bad_stage', `unknown placement stage: ${String(toStage)}`);
       }
@@ -245,6 +256,20 @@ export function createStatusTransitionService(
           lr.text = lostReason.text;
         }
         patch.lost_reason = lr;
+      }
+
+      // 2b) inspection_outcome (§4): the inspection's pass/fail is recorded on
+      // the inspection-complete move — the transition OUT of
+      // `awaiting_inspection` — when an outcome is supplied (mirrors how
+      // finalRent is gated on `from === 'awaiting_rent_acceptance'`). Validate
+      // defensively (the route validates too). It does NOT gate routing: a
+      // `fail` does not force a particular next stage (not a strict state
+      // machine) — the admin routes the card; we only persist the result.
+      if (from === 'awaiting_inspection' && inspectionOutcome !== undefined) {
+        if (!isInspectionOutcome(inspectionOutcome)) {
+          throw new TransitionRefusedError('bad_inspection_outcome', 'inspectionOutcome must be pass or fail');
+        }
+        patch.inspection_outcome = inspectionOutcome;
       }
 
       const updated = await casesRepo.update(caseId, patch);
@@ -318,20 +343,11 @@ export function createStatusTransitionService(
       // The tenant lifecycle lives on the unified `status` field (§5).
       const from = contact.status;
 
-      // The RTA-IN-HAND gate (§5): → searching is allowed ONLY when the tenant
-      // has RTA in hand AND is not porting. Use the porting value from this call
-      // when supplied, else the stored flag.
-      if (toStatus === 'searching') {
-        const effectivePorting = porting !== undefined ? porting === true : contact.porting === true;
-        const rtaInHand = contact.rta_in_hand === true;
-        if (!rtaInHand || effectivePorting) {
-          throw new TransitionRefusedError(
-            'rta_gate',
-            'tenant cannot move to searching: requires rta_in_hand === true and porting !== true',
-          );
-        }
-      }
-
+      // RTA-in-hand is NOT gated here (product decision 2026-06-19): it is a
+      // manual business prerequisite — the admin advances the tenant to
+      // `searching` once it's satisfied, or moves them to `on_hold` if not. So
+      // `setTenantStatus` always applies (subject only to the entity existing);
+      // `porting` is an informational flag set in the same write, never a gate.
       const patch: Record<string, unknown> = {
         status: toStatus,
         status_source: source,

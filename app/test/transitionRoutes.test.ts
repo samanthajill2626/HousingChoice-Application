@@ -1,4 +1,4 @@
-// Status-model transition ROUTES (supertest) — happy paths + 400/404/409 + 401
+// Status-model transition ROUTES (supertest) — happy paths + 400/404 + 401
 // unauthenticated + no-PII-on-the-wire, on the shared in-memory world via the
 // harness (authed by the real sealed session cookie next to the origin secret).
 // Mirrors casesApi.test.ts's auth/harness conventions.
@@ -16,7 +16,7 @@ describe('status-model transition routes', () => {
     const h = makeWebhookHarness();
     app = h.app;
     world = h.world;
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true, firstName: 'Tasha', lastName: 'Nguyen' });
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', firstName: 'Tasha', lastName: 'Nguyen' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
@@ -83,6 +83,28 @@ describe('status-model transition routes', () => {
       expect((await authedPost('/api/cases/case-ghost/transition', { toStage: 'collect_rta', source: 'manual' })).status).toBe(404);
     });
 
+    it("writes inspection_outcome on the inspection-complete move (awaiting_inspection → determine_rent)", async () => {
+      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
+        toStage: 'determine_rent',
+        source: 'manual',
+        inspectionOutcome: 'pass',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.case.inspection_outcome).toBe('pass');
+    });
+
+    it('400s an invalid inspectionOutcome at the route', async () => {
+      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
+        toStage: 'determine_rent',
+        source: 'manual',
+        inspectionOutcome: 'maybe',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('inspectionOutcome must be pass or fail');
+    });
+
     it('records a lost transition with the structured reason; emits case.updated WITHOUT the free text (no PII)', async () => {
       const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
       const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
@@ -102,16 +124,17 @@ describe('status-model transition routes', () => {
   });
 
   describe('PATCH /api/contacts/:contactId/tenant-status', () => {
-    it('sets the tenant status (happy path) and 409s the RTA gate', async () => {
-      // rta_in_hand:true → searching allowed.
+    it('sets the tenant status (happy path); → searching has NO RTA gate (2026-06-19)', async () => {
       const ok = await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'searching', source: 'manual' });
       expect(ok.status).toBe(200);
       expect(ok.body.contact.status).toBe('searching');
 
-      // A tenant without rta_in_hand → 409.
-      await world.contactsRepo.create({ contactId: 't-no-rta', type: 'tenant', rta_in_hand: false });
-      const blocked = await authedPatch('/api/contacts/t-no-rta/tenant-status', { toStatus: 'searching', source: 'manual' });
-      expect(blocked.status).toBe(409);
+      // The RTA-in-hand gate was removed: a tenant with NO rta_in_hand (and even
+      // porting:true) is no longer refused — → searching succeeds (200, never 409).
+      await world.contactsRepo.create({ contactId: 't-no-rta', type: 'tenant', porting: true });
+      const allowed = await authedPatch('/api/contacts/t-no-rta/tenant-status', { toStatus: 'searching', source: 'manual' });
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.contact.status).toBe('searching');
     });
 
     it('400s a bad status/source; 404s an unknown contact', async () => {

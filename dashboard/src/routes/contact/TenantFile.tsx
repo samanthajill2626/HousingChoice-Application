@@ -7,13 +7,12 @@
 // links to its detail route.
 import {
   STAGE_LABELS,
-  TENANT_STATUS_LABELS,
   type CaseItem,
   type Contact,
   type ContactPhone,
-  type TenantStatus,
   type UnitItem,
 } from '../../api/index.js';
+import { StatusBadge } from '../../ui/index.js';
 import {
   Card,
   CardAction,
@@ -28,7 +27,7 @@ import {
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantCases, tenantTours } from './buildContactFile.js';
-import { formatAddress, formatPhone, humanize } from './format.js';
+import { formatAddress, formatPhone } from './format.js';
 
 export interface TenantFileProps {
   contact: Contact;
@@ -52,14 +51,6 @@ function unitLabel(units: Map<string, UnitItem>, unitId: string): string {
   const unit = units.get(unitId);
   const addr = unit ? formatAddress(unit.address) : '';
   return addr || unitId;
-}
-
-/** A tenant-status display label. Prefers the tenant-status label map; an
- *  off-list/legacy value falls back to a humanized form (underscores → spaces,
- *  capitalized) so it reads cleanly and never renders blank. */
-function tenantStatusLabel(status: string | undefined): string {
-  if (!status) return '—';
-  return TENANT_STATUS_LABELS[status as TenantStatus] ?? humanize(status);
 }
 
 export function TenantFile({
@@ -119,7 +110,7 @@ export function TenantFile({
           k="Status"
           v={
             <>
-              {tenantStatusLabel(contact.status)}
+              {contact.status ? <StatusBadge kind="tenant" status={contact.status} /> : '—'}
               {contact.porting === true ? (
                 <span className={responseClass.muted}> · Porting</span>
               ) : null}

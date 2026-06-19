@@ -4,14 +4,13 @@
 // Group texts · Media. Listings + Cases are REAL (from /api/units + /api/cases);
 // Preferences + Group texts + Media are pending until their backend slices land.
 import {
-  LISTING_STATUS_LABELS,
   STAGE_LABELS,
   type CaseItem,
   type Contact,
   type ContactPhone,
-  type ListingStatus,
   type UnitItem,
 } from '../../api/index.js';
+import { StatusBadge } from '../../ui/index.js';
 import {
   Card,
   CardAction,
@@ -20,7 +19,6 @@ import {
   KV,
   PendingPanel,
   Row,
-  responseClass,
 } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
@@ -41,17 +39,6 @@ export interface LandlordFileProps {
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
 }
-
-// Listing-status → a coloured "● Label" chip for a landlord's listing rows.
-const STATUS_DOT: Record<ListingStatus, string> = {
-  setup: responseClass.muted,
-  available: responseClass.available,
-  under_application: responseClass.placed,
-  finalizing: responseClass.placed,
-  occupied: responseClass.placed,
-  on_hold: responseClass.muted,
-  off_market: responseClass.inactive,
-};
 
 /** A unit row label: "address · NBR" when both are known. */
 function unitRowLabel(unit: UnitItem): string {
@@ -130,18 +117,14 @@ export function LandlordFile({
         {myUnits.length === 0 ? (
           <EmptyRow>No listings yet.</EmptyRow>
         ) : (
-          myUnits.map((u) => {
-            const cls = STATUS_DOT[u.status] ?? responseClass.muted;
-            const label = LISTING_STATUS_LABELS[u.status] ?? u.status;
-            return (
-              <Row
-                key={u.unitId}
-                to={`/listings/${u.unitId}`}
-                label={unitRowLabel(u)}
-                right={<span className={cls}>{`● ${label}`}</span>}
-              />
-            );
-          })
+          myUnits.map((u) => (
+            <Row
+              key={u.unitId}
+              to={`/listings/${u.unitId}`}
+              label={unitRowLabel(u)}
+              right={<StatusBadge kind="listing" status={u.status} />}
+            />
+          ))
         )}
       </Card>
 

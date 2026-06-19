@@ -9,12 +9,8 @@
 // 2026-06-18-extensible-contact-creation-design.md.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import {
-  TENANT_STATUS_LABELS,
-  type Contact,
-  type TenantStatus,
-} from '../../api/index.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { type Contact } from '../../api/index.js';
+import { Button, Spinner, StatusBadge } from '../../ui/index.js';
 import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
@@ -44,16 +40,10 @@ const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
   { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
 ];
 
-/** Type-aware status label. For a tenant, look up the tenant-status label map
- *  (so 'needs_review' → "Needs review", 'on_hold' → "On hold"); otherwise a
- *  naive capitalize for the coarse needs_review|active lifecycle. Empty stays
- *  empty. */
-function statusLabel(status: string | undefined, type: Contact['type']): string {
+/** Non-tenant status label (the coarse needs_review|active lifecycle): a naive
+ *  capitalize. Tenants render a StatusBadge instead (the F1 tenant-status map). */
+function statusLabel(status: string | undefined): string {
   if (!status) return '';
-  if (type === 'tenant') {
-    const label = TENANT_STATUS_LABELS[status as TenantStatus];
-    if (label !== undefined) return label;
-  }
   return humanize(status);
 }
 
@@ -73,14 +63,17 @@ function searchKey(contact: Contact): string {
 function Row({ contact }: { contact: Contact }): React.JSX.Element {
   const name = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   const phone = formatPhone(contact.phone);
-  const status = statusLabel(contact.status, contact.type);
   return (
     <li className={styles.rowItem}>
       <Link to={`/contacts/${contact.contactId}`} className={styles.row}>
         <span className={styles.name}>{name}</span>
         <span className={styles.badge}>{displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])}</span>
         <span className={styles.phone}>{phone}</span>
-        {status ? <span className={styles.status}>{status}</span> : null}
+        {contact.type === 'tenant' && contact.status ? (
+          <StatusBadge kind="tenant" status={contact.status} />
+        ) : statusLabel(contact.status) ? (
+          <span className={styles.status}>{statusLabel(contact.status)}</span>
+        ) : null}
       </Link>
     </li>
   );

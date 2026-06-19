@@ -109,8 +109,8 @@ describe('LandlordFile', () => {
     renderIt();
     const link = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA · 2BR/ });
     expect(link).toHaveAttribute('href', '/listings/u1');
-    expect(screen.getByText('● Available')).toBeInTheDocument();
-    expect(screen.getByText('● Occupied')).toBeInTheDocument();
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.getByText('Occupied')).toBeInTheDocument();
   });
 
   it('renders company + role in Details', () => {

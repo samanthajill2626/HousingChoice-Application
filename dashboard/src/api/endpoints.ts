@@ -70,9 +70,14 @@ export function getToday(day?: string, signal?: AbortSignal): Promise<TodayRespo
 }
 
 /** GET /api/cases — the case board (the Today fallback's deadline/tour/attention
- *  source). The server pages; the Today fallback reads the first page. */
-export function getCases(signal?: AbortSignal): Promise<CasesPage> {
-  return request<CasesPage>('/api/cases', { ...(signal !== undefined && { signal }) });
+ *  source). The server pages; pass `cursor` to fetch the next page (the
+ *  placement board pages through ALL of them — see useCases). Other callers
+ *  (Today / listing / contact-file) read only the first page (no cursor). */
+export function getCases(signal?: AbortSignal, cursor?: string): Promise<CasesPage> {
+  return request<CasesPage>('/api/cases', {
+    query: { cursor },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/cases/:caseId — a single case record (the case detail page + the
@@ -254,8 +259,11 @@ export function retryMessage(
 /** GET /api/units — the unit records. The landlord file filters this by
  *  landlordId === contactId to show the landlord's own listings; the listing
  *  page reuses it for "Related listings" (same landlord). */
-export function getUnits(signal?: AbortSignal): Promise<UnitsPage> {
-  return request<UnitsPage>('/api/units', { ...(signal !== undefined && { signal }) });
+export function getUnits(signal?: AbortSignal, cursor?: string): Promise<UnitsPage> {
+  return request<UnitsPage>('/api/units', {
+    query: { cursor },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/units/:id — a single unit record (the listing detail page header +
@@ -320,11 +328,11 @@ export async function getUnitSimilar(
  *  and merges. First page only (the server pages via nextCursor) — the list
  *  views note this transitional limitation. */
 export function getContacts(
-  params: { type?: ContactType; status?: string } = {},
+  params: { type?: ContactType; status?: string; cursor?: string } = {},
   signal?: AbortSignal,
 ): Promise<ContactsPage> {
   return request<ContactsPage>('/api/contacts', {
-    query: { type: params.type, status: params.status },
+    query: { type: params.type, status: params.status, cursor: params.cursor },
     ...(signal !== undefined && { signal }),
   });
 }

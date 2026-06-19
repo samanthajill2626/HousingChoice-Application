@@ -42,7 +42,10 @@ function seedTenant(world: FakeWorld, overrides: Partial<ContactItem>): ContactI
   const c: ContactItem = {
     contactId: `c-${world.contacts.length + 1}`,
     type: 'tenant',
-    status: 'active',
+    // A tenant's `status` is its §5 lifecycle (status-model unification — one
+    // field). 'searching' is a valid lifecycle value; audience resolution does
+    // NOT filter on status (services/audienceResolution.ts), so any value works.
+    status: 'searching',
     phone: `+1555010${String(world.contacts.length + 1).padStart(4, '0')}`,
     ...overrides,
   };

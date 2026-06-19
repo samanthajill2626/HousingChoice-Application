@@ -70,8 +70,10 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.contact).toMatchObject({ type: 'tenant', firstName: 'Keisha', lastName: 'Jones', voucherSize: 2 });
-    // AUTO-ADVANCE (Cluster A): resolving identity clears needs_review.
-    expect(res.body.contact.status).toBe('active');
+    // AUTO-ADVANCE (Cluster A): resolving identity clears the needs_review front
+    // door. A TENANT lands on its §5 lifecycle start 'onboarding' (status-model
+    // unification — one `status` field), NOT the non-tenant 'active'.
+    expect(res.body.contact.status).toBe('onboarding');
     // PROPAGATION: the linked thread's type flips.
     expect(world.conversations.get('conv-triage-1')?.type).toBe('tenant_1to1');
     // DENORMALIZE (Cluster D): the resolved "First Last" lands on the thread.
@@ -185,6 +187,30 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.emitted).toHaveLength(0);
   });
 
+  it('re-typing a tenant (with a lifecycle status) to team_member normalizes the now-invalid status', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A tenant mid-lifecycle (status='placing' is a §5 tenant value, invalid for
+    // a team_member). Re-type to team_member WITHOUT supplying a status.
+    world.contacts.push({
+      contactId: 'contact-retype-1',
+      type: 'tenant',
+      status: 'placing',
+      phone: '+15550100999',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-retype-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'team_member' });
+    expect(res.status).toBe(200);
+    // The stale tenant-lifecycle value must NOT persist on a non-tenant; it is
+    // normalized to the new type's default rather than leaving (team_member, placing).
+    expect(res.body.contact.type).toBe('team_member');
+    expect(res.body.contact.status).toBe('active');
+    expect(world.contacts.find((c) => c.contactId === 'contact-retype-1')!.status).toBe('active');
+  });
+
   it('a partial patch (only status) leaves an already-set name untouched', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({
@@ -200,9 +226,11 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .patch('/api/contacts/contact-named')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ status: 'active' });
+      // A tenant's status is its §5 lifecycle (status-model unification — one
+      // field); 'onboarding' is a valid tenant value ('active' is non-tenant).
+      .send({ status: 'onboarding' });
     expect(res.status).toBe(200);
-    expect(res.body.contact).toMatchObject({ firstName: 'Existing', lastName: 'Name', status: 'active' });
+    expect(res.body.contact).toMatchObject({ firstName: 'Existing', lastName: 'Name', status: 'onboarding' });
   });
 
   it('accepts a raw "First Last - N Bed" string via contactName', async () => {

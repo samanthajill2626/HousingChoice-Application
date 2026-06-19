@@ -15,7 +15,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
-import type { TenantStatus, TransitionSource } from '../lib/statusModel.js';
+import type { TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
@@ -56,17 +56,29 @@ export interface ContactPhone {
 export interface ContactItem {
   contactId: string;
   type: ContactType;
+  /**
+   * The contact's SINGLE lifecycle status — type-scoped (STATUS-MODEL.md §5):
+   *   - tenant: the §5 lifecycle (TENANT_STATUSES) —
+   *     needs_review/onboarding/searching/placing/placed/on_hold/inactive.
+   *   - non-tenant (landlord/team_member/unknown): needs_review | active
+   *     (they have no lifecycle).
+   * A tenant has ONE status, not two — the lifecycle lives HERE, on the same
+   * field that is the byTypeStatus GSI range key (partition=type, range=status).
+   * That is safe: tenants live in the type='tenant' partition, so tenant
+   * lifecycle values can never pollute the triage queue (type='unknown',
+   * status='needs_review'). The GSI re-indexes on every status write (it is the
+   * range key). Written directly (manual create / triage) or via the transition
+   * service (statusTransition.ts) for the tenant lifecycle.
+   */
   status?: string;
   /**
-   * Status-model (§5): the tenant lifecycle status (TENANT_STATUSES) —
-   * needs_review/onboarding/searching/placing/placed/on_hold/inactive.
-   * DELIBERATELY SEPARATE from `status` above: `status` is the byTypeStatus GSI
-   * range key AND the triage queue (overloading it would break Today/triage).
-   * Only meaningful on tenant contacts. Written via the transition service.
+   * Status-model (§8): the source of the current `status` write
+   * (provenance/precedence — TransitionSource). `derived` is lowest precedence;
+   * a non-derived (manual/ai/automation/import) write pins and wins. Drives the
+   * tenant lifecycle's derive-vs-override behavior; unset on plain non-tenant
+   * contacts (whose status is set directly without provenance tracking).
    */
-  tenant_status?: TenantStatus;
-  /** Status-model (§8): the source of the current `tenant_status` write (provenance/precedence). */
-  tenant_status_source?: TransitionSource;
+  status_source?: TransitionSource;
   /**
    * Status-model (§5): the porting flag — the voucher/RTA is being moved
    * between jurisdictions ("not ready"), which holds the tenant out of

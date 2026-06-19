@@ -42,7 +42,17 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     {
       contactId: IDS.tenant,
       type: 'tenant', // byTypeStatus HASH
-      status: 'active', // byTypeStatus RANGE
+      // byTypeStatus RANGE — and the tenant's SINGLE §5 lifecycle status (one
+      // field, not two). She is the tenant on the seeded placement case-0001
+      // (Inspection phase: awaiting_inspection), so by §7 derivation she reads
+      // `placing`; source 'derived' so the denormalized value agrees with what
+      // derivation produces and a future placement transition can still drive it
+      // (a 'manual' pin would both disagree with §7 and block derivation — the
+      // regression this seed must not reintroduce). Tenant lifecycle values live
+      // in the type='tenant' partition, so they never pollute the triage queue
+      // (type='unknown', status='needs_review').
+      status: 'placing', // byTypeStatus RANGE = §5 tenant lifecycle
+      status_source: 'derived', // §8 provenance — derivation-permitting
       phone: '+15550100001', // byPhone
       housingAuthority: 'atlanta_housing', // byHousingAuthority (tenants only)
       // Name, voucher size, and housingAuthority are camelCase EVERYWHERE the app
@@ -59,17 +69,8 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       rta_expiration_date: '2026-08-15',
       caseworker: 'D. Okafor',
       preferences_notes: 'Ground floor preferred; near MARTA.',
-      // Status-model (§5): the coarse tenant lifecycle. SEPARATE from `status`
-      // (the byTypeStatus GSI range key / triage queue) — never overloaded.
-      // She has rta_in_hand:true and porting:false. She is the tenant on the
-      // seeded placement case-0001 (Inspection phase: awaiting_inspection), so
-      // by §7 derivation she reads `placing`, not `searching` — and the source
-      // is 'derived' (NOT 'manual') so the denormalized value agrees with what
-      // derivation produces and a future placement transition can still drive
-      // it. (A 'manual' pin here would both disagree with §7 and block
-      // derivation — the regression this seed must not reintroduce.)
-      tenant_status: 'placing',
-      tenant_status_source: 'derived',
+      // §5 porting flag (a flag, not a status): she has rta_in_hand:true and is
+      // not porting, so the RTA-in-hand gate would permit her into `searching`.
       porting: false,
       created_at: T0,
     },

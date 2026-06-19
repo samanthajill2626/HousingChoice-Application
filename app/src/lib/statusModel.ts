@@ -123,6 +123,9 @@ export const TERMINAL_STAGES: ReadonlySet<PlacementStage> = new Set<PlacementSta
 ]);
 
 // --- Tenant lifecycle (coarse; §5) ------------------------------------------
+// These are the values a TENANT contact's single `status` field holds (the one
+// type-scoped lifecycle, NOT a second field — see contactsRepo.ContactItem.status
+// and STATUS-MODEL.md §5). Non-tenant contacts use needs_review|active instead.
 // `porting` is a SEPARATE boolean flag on the tenant, never a status value.
 export const TENANT_STATUSES = [
   'needs_review',

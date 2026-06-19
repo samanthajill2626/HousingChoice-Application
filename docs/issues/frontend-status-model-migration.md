@@ -42,6 +42,25 @@ migrated in lockstep the dashboard will:
   `PATCH /api/contacts/:id/tenant-status` and `PATCH /api/units/:id/listing-status`.
 - Any UI rendering `lost_reason` — read `{ category, text }`.
 
+**Tenant status is ONE field — `contact.status` (no separate `tenant_status`).**
+The status-model work briefly added a SECOND status field (`tenant_status` +
+`tenant_status_source`) on contacts. That has been REMOVED: a contact has a
+SINGLE, type-scoped lifecycle that lives on the EXISTING `contact.status` field
+(the one the dashboard already reads, and the `byTypeStatus` GSI range key):
+- **Tenant** (`type === 'tenant'`): `contact.status` ∈ the §5 lifecycle
+  (`needs_review` / `onboarding` / `searching` / `placing` / `placed` /
+  `on_hold` / `inactive`). Provenance is `contact.status_source`
+  (a `TransitionSource`); the `porting` boolean flag stays.
+- **Non-tenant** (landlord / team_member / unknown): `contact.status` ∈
+  `needs_review` | `active` (unchanged — they have no lifecycle).
+
+So the frontend should render/drive `contact.status` for ALL contacts, but with
+the TENANT lifecycle vocabulary (and labels — `TENANT_STATUS_LABELS`) when
+`type === 'tenant'`. There is NO `tenant_status` field to read or write.
+Tenant-status writes go through `PATCH /api/contacts/:id/tenant-status`
+(`{ toStatus, source, reason?, porting? }`), which validates `toStatus` against
+the tenant lifecycle and persists onto the unified `contact.status`.
+
 **Suggested fix.** Migrate the frontend in the SAME change set as this backend.
 **This backend MUST NOT be merged to main until the frontend is migrated in
 lockstep (or the backend is gated)** — otherwise the live dashboard breaks on

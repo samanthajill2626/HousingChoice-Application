@@ -78,21 +78,21 @@ describe('statusTransition — derivation (§7)', () => {
   it('Application phase ⇒ tenant placing / listing under_application', async () => {
     const c = await seed();
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
-    expect((await world.contactsRepo.getById('tenant-1'))!.tenant_status).toBe('placing');
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
   });
 
   it('Contract phase ⇒ listing finalizing (tenant still placing)', async () => {
     const c = await seed();
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
-    expect((await world.contactsRepo.getById('tenant-1'))!.tenant_status).toBe('placing');
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('finalizing');
   });
 
   it('moved_in ⇒ tenant placed / listing occupied', async () => {
     const c = await seed();
     await svc.transitionPlacement(c.caseId, { toStage: 'moved_in', source: 'manual' });
-    expect((await world.contactsRepo.getById('tenant-1'))!.tenant_status).toBe('placed');
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placed');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('occupied');
   });
 });
@@ -155,15 +155,15 @@ describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
     ).rejects.toMatchObject({ code: 'rta_gate' });
     // Clearing porting in the SAME call lets it through.
     const ok = await svc.setTenantStatus('t-port', { toStatus: 'searching', source: 'manual', porting: false });
-    expect(ok.tenant_status).toBe('searching');
+    expect(ok.status).toBe('searching');
     expect(ok.porting).toBe(false);
   });
 
   it('→searching is ALLOWED when rta_in_hand && !porting; audits {from,to,source}', async () => {
-    await world.contactsRepo.create({ contactId: 't-ok', type: 'tenant', rta_in_hand: true, tenant_status: 'onboarding' });
+    await world.contactsRepo.create({ contactId: 't-ok', type: 'tenant', rta_in_hand: true, status: 'onboarding' });
     const updated = await svc.setTenantStatus('t-ok', { toStatus: 'searching', source: 'manual' });
-    expect(updated.tenant_status).toBe('searching');
-    expect(updated.tenant_status_source).toBe('manual');
+    expect(updated.status).toBe('searching');
+    expect(updated.status_source).toBe('manual');
     const audit = world.auditEvents.find((a) => a.event_type === 'tenant_status_changed');
     expect(audit!.payload).toMatchObject({ from: 'onboarding', to: 'searching', source: 'manual' });
   });
@@ -171,7 +171,7 @@ describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
   it('manual drop-out to inactive is allowed (no gate); porting is a flag, never a stage', async () => {
     await world.contactsRepo.create({ contactId: 't-drop', type: 'tenant', rta_in_hand: true });
     const updated = await svc.setTenantStatus('t-drop', { toStatus: 'inactive', source: 'manual' });
-    expect(updated.tenant_status).toBe('inactive');
+    expect(updated.status).toBe('inactive');
     // porting lives on the contact, never appears as a case stage.
     expect(updated).not.toHaveProperty('stage');
   });
@@ -242,7 +242,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     expect(updated.stage).toBe('lost');
     expect(updated.lost_reason).toEqual({ category: 'landlord_lost_inspection', text: 'failed twice' });
     // No other active placement → bounce back.
-    expect((await world.contactsRepo.getById('tenant-1'))!.tenant_status).toBe('searching');
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('searching');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('available');
   });
 
@@ -254,7 +254,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     const losing = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
     await svc.transitionPlacement(losing.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
     // The OTHER placement is still active → no bounce-back.
-    expect((await world.contactsRepo.getById('tenant-1'))!.tenant_status).toBe('placing');
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
   });
 });

@@ -77,15 +77,18 @@ describe('seed data field casing', () => {
     }
   });
 
-  it('the seeded tenant carries a valid status-model tenant_status + porting flag (NOT overloading status)', () => {
+  it('the seeded tenant carries its single §5 lifecycle on `status` (one field, not two) + porting flag', () => {
     const tenant = contacts.find((c) => c['type'] === 'tenant');
     expect(tenant).toBeDefined();
-    // tenant_status is the §5 lifecycle; it must be a TENANT_STATUSES value and
-    // must NOT collide with the byTypeStatus `status` (still 'active' / triage).
-    expect(TENANT_STATUSES as readonly string[]).toContain(tenant!['tenant_status']);
+    // Status-model unification: the tenant lifecycle lives on the SINGLE `status`
+    // field (also the byTypeStatus GSI range key). It must be a TENANT_STATUSES
+    // value, snake_case status_source, boolean porting — and there must be NO
+    // separate tenant_status / tenant_status_source field anymore.
+    expect(TENANT_STATUSES as readonly string[]).toContain(tenant!['status']);
+    expect(tenant!['status_source']).toBe('derived');
     expect(typeof tenant!['porting']).toBe('boolean');
-    // `status` (the GSI range key / triage queue) is untouched.
-    expect(tenant!['status']).toBe('active');
+    expect(tenant!).not.toHaveProperty('tenant_status');
+    expect(tenant!).not.toHaveProperty('tenant_status_source');
   });
 
   it('every seed case stage is a snake_case PLACEMENT_STAGES value', () => {
@@ -115,12 +118,12 @@ describe('seed data field casing', () => {
 
   it('the seed is INTERNALLY CONSISTENT with §7 derivation AND keeps derived statuses drivable (regression guard)', () => {
     // The seeded placement links a tenant + unit; by §7 the denormalized
-    // tenant_status / listing status on THOSE entities must equal what
-    // derivation produces for the placement's stage — otherwise the demo data
-    // silently contradicts the model. AND a precedence-GATED derived status must
-    // be stamped source 'derived' (not 'manual'), or the very regression this
-    // change fixes (a create-time 'manual' pin blocking the first derived write)
-    // is reintroduced via the seed.
+    // tenant status (the unified `status` field) / listing status on THOSE
+    // entities must equal what derivation produces for the placement's stage —
+    // otherwise the demo data silently contradicts the model. AND a
+    // precedence-GATED derived status must be stamped source 'derived' (not
+    // 'manual'), or the very regression this change fixes (a create-time
+    // 'manual' pin blocking the first derived write) is reintroduced via the seed.
     const placement = cases[0]!;
     const stage = placement['stage'] as PlacementStage;
     const derived = deriveStatuses(stage);
@@ -130,14 +133,15 @@ describe('seed data field casing', () => {
     expect(linkedTenant, 'seeded placement must link a seeded tenant').toBeDefined();
     expect(linkedUnit, 'seeded placement must link a seeded unit').toBeDefined();
 
-    // Statuses match §7 derivation for the placement's stage.
-    expect(linkedTenant!['tenant_status']).toBe(derived.tenantStatus);
+    // Statuses match §7 derivation for the placement's stage. The tenant
+    // lifecycle is the unified `status` field (one field, not two).
+    expect(linkedTenant!['status']).toBe(derived.tenantStatus);
     expect(linkedUnit!['status']).toBe(derived.listingStatus);
 
     // …and they remain drivable: the linked entities' derived statuses are NOT
     // pinned with a non-derived source. (Unset is also acceptable; if present it
     // must be 'derived'.)
-    const tSrc = linkedTenant!['tenant_status_source'];
+    const tSrc = linkedTenant!['status_source'];
     const uSrc = linkedUnit!['status_source'];
     expect(tSrc === undefined || tSrc === 'derived').toBe(true);
     expect(uSrc === undefined || uSrc === 'derived').toBe(true);

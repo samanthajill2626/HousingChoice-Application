@@ -137,11 +137,11 @@ export function createStatusTransitionService(
     try {
       const contact = await contactsRepo.getById(tenantId);
       if (contact) {
-        const stored = contact.tenant_status_source as TransitionSource | undefined;
+        const stored = contact.status_source as TransitionSource | undefined;
         if (canOverwrite('derived', stored)) {
           await contactsRepo.update(tenantId, {
-            tenant_status: derived.tenantStatus,
-            tenant_status_source: 'derived',
+            status: derived.tenantStatus,
+            status_source: 'derived',
           });
         }
       }
@@ -276,10 +276,10 @@ export function createStatusTransitionService(
         if (tenantClear) {
           try {
             const contact = await contactsRepo.getById(existing.tenantId);
-            if (contact && canOverwrite('derived', contact.tenant_status_source as TransitionSource | undefined)) {
+            if (contact && canOverwrite('derived', contact.status_source as TransitionSource | undefined)) {
               await contactsRepo.update(existing.tenantId, {
-                tenant_status: derived.tenantStatus,
-                tenant_status_source: 'derived',
+                status: derived.tenantStatus,
+                status_source: 'derived',
               });
             }
           } catch (err) {
@@ -318,7 +318,8 @@ export function createStatusTransitionService(
       const { toStatus, source, reason, porting, actor } = input;
       const contact = await contactsRepo.getById(contactId);
       if (!contact) throw new EntityNotFoundError('contact', contactId);
-      const from = contact.tenant_status;
+      // The tenant lifecycle lives on the unified `status` field (§5).
+      const from = contact.status;
 
       // The RTA-IN-HAND gate (§5): → searching is allowed ONLY when the tenant
       // has RTA in hand AND is not porting. Use the porting value from this call
@@ -335,8 +336,8 @@ export function createStatusTransitionService(
       }
 
       const patch: Record<string, unknown> = {
-        tenant_status: toStatus,
-        tenant_status_source: source,
+        status: toStatus,
+        status_source: source,
       };
       if (porting !== undefined) patch.porting = porting === true;
       const updated = await contactsRepo.update(contactId, patch);

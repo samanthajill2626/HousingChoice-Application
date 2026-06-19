@@ -35,7 +35,7 @@ function seedUnit(
 }
 
 describe('POST /api/units — create', () => {
-  it('creates a unit, defaults status to available, returns 201 + audits unit_created', async () => {
+  it('creates a unit, defaults status to setup, returns 201 + audits unit_created', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/units')
@@ -52,7 +52,7 @@ describe('POST /api/units — create', () => {
     expect(res.status).toBe(201);
     expect(res.body.unit).toMatchObject({
       landlordId: 'contact-ll-9',
-      status: 'available',
+      status: 'setup',
       jurisdiction: 'Fulton',
       beds: 3,
       rent_min: 1700,
@@ -70,9 +70,9 @@ describe('POST /api/units — create', () => {
 
   // Coverage (#6): a freshly-created listing must NOT be pinned with a
   // non-derived source on its precedence-gated status field. The initial
-  // 'available' is a DERIVED status (§6/§7), so it is stamped source 'derived'
-  // (a derivation-permitting value) — never 'manual', which would block the
-  // first placement from ever driving the listing forward (§7/§8).
+  // 'setup' is a baseline DERIVED status (§6/§7), so it is stamped source
+  // 'derived' (a derivation-permitting value) — never 'manual', which would
+  // block the first placement from ever driving the listing forward (§7/§8).
   it('stamps status_source to a derivation-PERMITTING value (derived, not manual)', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
@@ -81,7 +81,7 @@ describe('POST /api/units — create', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ landlordId: 'contact-ll-1' });
     expect(res.status).toBe(201);
-    expect(res.body.unit.status).toBe('available');
+    expect(res.body.unit.status).toBe('setup');
     expect(res.body.unit.status_source).toBe('derived');
     // And the stored item agrees (not just the response).
     expect(world.units.get(res.body.unit.unitId)!.status_source).toBe('derived');
@@ -345,7 +345,7 @@ describe('PATCH /api/units/:unitId', () => {
 // derivation tests missed this because they create units via the REPO (which
 // doesn't stamp status_source); this one drives the full ROUTE create + a real
 // placement transition. On the old 'manual' stamp this test FAILS (status stays
-// 'available'); with status_source 'derived' it passes.
+// at its create value); with status_source 'derived' it passes.
 describe('REGRESSION: route-created unit derives forward on a placement transition', () => {
   it('unit created via POST /api/units derives to under_application (tenant → placing) when a placement enters Application', async () => {
     const { app, world } = makeWebhookHarness();
@@ -353,11 +353,11 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
       request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
 
     // 1) Create the unit via the ROUTE (this is the code path that stamps
-    //    status_source — the thing under test). Starts 'available'.
+    //    status_source — the thing under test). Starts 'setup'.
     const unitRes = await authedPost('/api/units', { landlordId: 'contact-ll-reg' });
     expect(unitRes.status).toBe(201);
     const unitId = unitRes.body.unit.unitId as string;
-    expect(unitRes.body.unit.status).toBe('available');
+    expect(unitRes.body.unit.status).toBe('setup');
 
     // 2) Create the tenant via the ROUTE.
     const tenantRes = await authedPost('/api/contacts', { type: 'tenant', firstName: 'Reg', lastName: 'Tester' });
@@ -369,8 +369,8 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
     expect(caseRes.status).toBe(201);
     const caseId = caseRes.body.case.caseId as string;
 
-    // Precondition: the listing has NOT yet derived (still 'available').
-    expect(world.units.get(unitId)!.status).toBe('available');
+    // Precondition: the listing has NOT yet derived (still 'setup').
+    expect(world.units.get(unitId)!.status).toBe('setup');
 
     // 4) Transition the placement into the Application phase via the transition
     //    ROUTE. Per §7 this derives tenant → placing, listing → under_application
@@ -386,14 +386,14 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
       .get(`/api/units/${unitId}`)
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(unit.body.unit.status).toBe('under_application'); // would be 'available' on the old 'manual' stamp
+    expect(unit.body.unit.status).toBe('under_application'); // would stay at the create value on the old 'manual' stamp
     expect(unit.body.unit.status_source).toBe('derived');
 
     const tenant = await request(app)
       .get(`/api/contacts/${tenantId}`)
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(tenant.body.contact.tenant_status).toBe('placing');
+    expect(tenant.body.contact.status).toBe('placing');
   });
 });
 

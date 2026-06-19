@@ -1,8 +1,8 @@
 // Status-model transition INTEGRATION tests against DynamoDB Local — the real
 // cross-repo writes the in-memory fakes can't fully validate:
-//   • a transition writes the denormalized stage onto cases, the DERIVED
-//     tenant_status onto contacts, the DERIVED listing status onto units, and a
-//     real audit_events row.
+//   • a transition writes the denormalized stage onto cases, the DERIVED tenant
+//     lifecycle onto the contact's unified `status`, the DERIVED listing status
+//     onto units, and a real audit_events row.
 //   • auditRepo.listByEntity reads the provenance back NEWEST-FIRST.
 //   • the stuck_case next-deadline round-trips through the byNextDeadline GSI.
 //   • a prior MANUAL tenant pin is NOT overwritten by a later DERIVED transition.
@@ -95,7 +95,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     expect(typeof storedCase!.stage_entered_at).toBe('string');
 
     // Derived tenant status on the contact (Contract phase ⇒ placing).
-    expect((await contacts.getById(tenantId))!.tenant_status).toBe('placing');
+    expect((await contacts.getById(tenantId))!.status).toBe('placing');
     // Derived listing status on the unit (Contract phase ⇒ finalizing).
     expect((await units.getById(unitId))!.status).toBe('finalizing');
 
@@ -136,7 +136,7 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
 
     const contact = await contacts.getById(tenantId);
-    expect(contact!.tenant_status).toBe('on_hold'); // manual pin preserved
-    expect(contact!.tenant_status_source).toBe('manual');
+    expect(contact!.status).toBe('on_hold'); // manual pin preserved
+    expect(contact!.status_source).toBe('manual');
   });
 });

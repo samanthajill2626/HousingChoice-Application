@@ -19,6 +19,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
+import { TENANT_STATUSES } from '../lib/statusModel.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -108,13 +109,23 @@ function isContactType(value: unknown): value is ContactType {
 }
 
 /**
- * Allowed contact lifecycle statuses (L1). Triage previously accepted ANY
- * string, which polluted the byTypeStatus GSI (the human-triage queue keys on
- * (type, status)) with arbitrary values. These are the lifecycle values the
- * codebase actually writes: 'needs_review' (auto-capture stub) → 'active'
- * (resolved). An unknown status is a 400.
+ * Allowed `status` values for a NON-TENANT contact (landlord/team_member/
+ * unknown — they have no lifecycle): 'needs_review' (auto-capture stub) →
+ * 'active' (resolved). Triage previously accepted ANY string, which polluted
+ * the byTypeStatus GSI (the human-triage queue keys on (type, status)). An
+ * unknown status is a 400.
  */
-const CONTACT_STATUSES: readonly string[] = ['needs_review', 'active'] as const;
+const NON_TENANT_STATUSES: readonly string[] = ['needs_review', 'active'] as const;
+
+/**
+ * Type-aware status allowlist (status-model unification): a TENANT carries its
+ * single §5 lifecycle on `status` (TENANT_STATUSES); every other type carries
+ * the simple needs_review|active. Tenant lifecycle values live in the
+ * type='tenant' partition, so they never reach the triage queue.
+ */
+function statusAllowlistFor(type: ContactType | undefined): readonly string[] {
+  return type === 'tenant' ? (TENANT_STATUSES as readonly string[]) : NON_TENANT_STATUSES;
+}
 
 // --- M1.5 list pagination + cursor -----------------------------------------
 const DEFAULT_PAGE_LIMIT = 50;
@@ -257,8 +268,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   }
   if ('status' in b) {
     const v = b['status'];
-    if (typeof v !== 'string' || !CONTACT_STATUSES.includes(v)) {
-      return { error: `status must be one of: ${CONTACT_STATUSES.join(', ')}` };
+    // Type-aware allowlist (status-model unification). When this triage sets
+    // `type` too, validate against THAT type's allowlist now. When it doesn't,
+    // the effective type is the STORED one (unknown here) — accept any known
+    // status value and let the route re-validate against the stored type.
+    const patchType = patch['type'];
+    const allow = isContactType(patchType)
+      ? statusAllowlistFor(patchType)
+      : ([...TENANT_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
+    if (typeof v !== 'string' || !allow.includes(v)) {
+      return { error: `status must be one of: ${allow.join(', ')}` };
     }
     patch['status'] = v;
     changedFields.push('status');
@@ -391,8 +410,9 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   }
   if ('status' in b) {
     const v = b['status'];
-    if (typeof v !== 'string' || !CONTACT_STATUSES.includes(v)) {
-      return { error: `status must be one of: ${CONTACT_STATUSES.join(', ')}` };
+    const allow = statusAllowlistFor(item.type);
+    if (typeof v !== 'string' || !allow.includes(v)) {
+      return { error: `status must be one of: ${allow.join(', ')}` };
     }
     item.status = v;
   }
@@ -428,8 +448,22 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     item.customFields = cf;
   }
 
-  // A manual create asserts identity — default to active (not needs_review).
-  if (item.status === undefined) item.status = 'active';
+  // A manual create asserts identity (past the front door, not needs_review).
+  // The default is type-scoped (status-model unification — one `status` field):
+  //   - tenant → 'onboarding': the §5 lifecycle starts here once identity is
+  //     asserted (the operator is making this person; they are no longer at the
+  //     'needs_review' front door).
+  //   - non-tenant → 'active' (unchanged: they have no lifecycle).
+  // We deliberately DO NOT stamp status_source here. The prior tenant_status
+  // behavior left provenance UNSET on create, so the first placement transition
+  // could still DERIVE the lifecycle forward (Onboarding → Placing). Stamping
+  // 'manual' would pin it and block that derived write — exactly the create-pin
+  // regression this work must not (re)introduce
+  // (docs/issues/status-pin-vs-terminal-derivation.md). An explicit lifecycle
+  // pin is the transition service's job (PATCH …/tenant-status), not create.
+  if (item.status === undefined) {
+    item.status = item.type === 'tenant' ? 'onboarding' : 'active';
+  }
 
   return { item, ...(phone !== undefined && { phone }) };
 }
@@ -481,8 +515,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const rawStatus = req.query['status'];
     let status: string | undefined;
     if (typeof rawStatus === 'string' && rawStatus.length > 0) {
-      if (!CONTACT_STATUSES.includes(rawStatus)) {
-        res.status(400).json({ error: `status must be one of: ${CONTACT_STATUSES.join(', ')}` });
+      // Type-scoped allowlist (status-model unification): a tenant-typed filter
+      // accepts the §5 lifecycle values; other types accept needs_review|active.
+      const allow = statusAllowlistFor(rawType);
+      if (!allow.includes(rawStatus)) {
+        res.status(400).json({ error: `status must be one of: ${allow.join(', ')}` });
         return;
       }
       status = rawStatus;
@@ -704,15 +741,56 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const newType = parsed.patch['type'];
     const convType = isContactType(newType) ? conversationTypeFor(newType) : undefined;
 
+    // Type-scoped re-validation (status-model unification): when this triage
+    // sets `status` but NOT `type`, parseTriageBody accepted any known status
+    // value (it can't see the stored type). Re-check it against the STORED
+    // contact's effective type so a tenant lifecycle value can't be written onto
+    // a non-tenant (and vice-versa). 404 unknown contacts as the update would.
+    if ('status' in parsed.patch && !('type' in parsed.patch)) {
+      const stored = await contacts.getById(contactId);
+      if (!stored) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      const allow = statusAllowlistFor(stored.type);
+      if (!allow.includes(String(parsed.patch['status']))) {
+        res.status(400).json({ error: `status must be one of: ${allow.join(', ')}` });
+        return;
+      }
+    }
+
     // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord moves the
-    // contact off the needs_review triage queue at the moment the identity is
-    // known — but only when the caller didn't set status itself (an explicit
-    // status always wins). 'active' is allowlisted in CONTACT_STATUSES. We
-    // never auto-advance for unknown/team_member (they don't resolve a 1:1
-    // identity) — and we never fabricate a name to do it.
+    // contact off the needs_review triage front door at the moment the identity
+    // is known — but only when the caller didn't set status itself (an explicit
+    // status always wins). Type-scoped (status-model unification — one `status`
+    // field): tenant → 'onboarding' (the §5 lifecycle starts past the front
+    // door); landlord → 'active' (unchanged). We do NOT stamp status_source —
+    // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
+    // placement transition (a 'manual' pin would block it: the create-pin
+    // regression — docs/issues/status-pin-vs-terminal-derivation.md). We never
+    // auto-advance for unknown/team_member (no 1:1 identity) — and never
+    // fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
-      parsed.patch['status'] = 'active';
+      parsed.patch['status'] = newType === 'tenant' ? 'onboarding' : 'active';
       parsed.changedFields.push('status');
+    }
+
+    // Re-typing to a type with no 1:1 auto-advance (team_member/unknown) and no
+    // explicit status: if the STORED status isn't valid for the new type (e.g. a
+    // tenant lifecycle value like 'placing' lingering after a tenant is re-typed
+    // to team_member), normalize it to the new type's default so we never persist
+    // an invalid (type, status) pair. tenant/landlord are handled by the
+    // auto-advance above; unknown returns to the 'needs_review' front door.
+    if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
+      const stored = await contacts.getById(contactId);
+      if (!stored) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      if (!statusAllowlistFor(newType).includes(stored.status ?? '')) {
+        parsed.patch['status'] = newType === 'unknown' ? 'needs_review' : 'active';
+        parsed.changedFields.push('status');
+      }
     }
 
     let updated;

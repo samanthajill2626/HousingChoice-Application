@@ -106,7 +106,7 @@ describe('status-model transition routes', () => {
       // rta_in_hand:true → searching allowed.
       const ok = await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'searching', source: 'manual' });
       expect(ok.status).toBe(200);
-      expect(ok.body.contact.tenant_status).toBe('searching');
+      expect(ok.body.contact.status).toBe('searching');
 
       // A tenant without rta_in_hand → 409.
       await world.contactsRepo.create({ contactId: 't-no-rta', type: 'tenant', rta_in_hand: false });

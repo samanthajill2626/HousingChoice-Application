@@ -19,6 +19,7 @@ import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact
 import { Modal } from '../contact/Modal.js';
 import { useListing } from './useListing.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
+import { ListingEditForm } from './ListingEditForm.js';
 import {
   buildListingFacts,
   formatBedsBaths,
@@ -68,6 +69,7 @@ export function ListingDetail(): React.JSX.Element {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
   if (state.status === 'loading') {
     return (
@@ -143,17 +145,13 @@ export function ListingDetail(): React.JSX.Element {
               Restore
             </button>
           ) : (
-            <>
-              <button type="button" className={styles.btn}>
-                📣 Broadcast to tenants
-              </button>
-              <button type="button" className={`${styles.btn} ${styles.btnAlt}`}>
-                ✎ Edit
-              </button>
-            </>
+            <button type="button" className={styles.btn}>
+              📣 Broadcast to tenants
+            </button>
           )}
           <ListingActionsMenu
             triggerClassName={styles.kebab ?? ''}
+            {...(!deleted && { onEdit: () => setEditing(true) })}
             deleted={deleted}
             onDelete={() => setConfirmingDelete(true)}
             onRestore={onRestore}
@@ -391,6 +389,17 @@ export function ListingDetail(): React.JSX.Element {
           </p>
         ) : null}
       </section>
+
+      {editing ? (
+        <ListingEditForm
+          unit={unit}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => {
+            setUnit(updated);
+            setEditing(false);
+          }}
+        />
+      ) : null}
 
       {confirmingDelete ? (
         <Modal

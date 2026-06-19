@@ -6,16 +6,18 @@ import { ListingActionsMenu } from './ListingActionsMenu.js';
 function setup(props: Partial<React.ComponentProps<typeof ListingActionsMenu>> = {}) {
   const onDelete = props.onDelete ?? vi.fn();
   const onRestore = props.onRestore ?? vi.fn();
+  const onEdit = props.onEdit ?? vi.fn();
   render(
     <ListingActionsMenu
       triggerClassName="kebab"
       deleted={props.deleted ?? false}
       onDelete={onDelete}
       onRestore={onRestore}
+      {...('onEdit' in props ? { onEdit: props.onEdit } : { onEdit })}
       {...(props.deleteBusy !== undefined && { deleteBusy: props.deleteBusy })}
     />,
   );
-  return { onDelete, onRestore };
+  return { onDelete, onRestore, onEdit };
 }
 
 describe('ListingActionsMenu', () => {
@@ -35,6 +37,21 @@ describe('ListingActionsMenu', () => {
     expect(screen.queryByRole('menuitem', { name: /Delete listing/i })).toBeNull();
     await user.click(screen.getByRole('menuitem', { name: /Restore listing/i }));
     expect(onRestore).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows Edit listing and fires onEdit (when onEdit is provided)', async () => {
+    const user = userEvent.setup();
+    const { onEdit } = setup();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Edit listing/i }));
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits Edit listing when onEdit is not provided (e.g. a deleted listing)', async () => {
+    const user = userEvent.setup();
+    setup({ onEdit: undefined, deleted: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(screen.queryByRole('menuitem', { name: /Edit listing/i })).toBeNull();
   });
 
   it('disables the delete/restore item while a request is in flight', async () => {

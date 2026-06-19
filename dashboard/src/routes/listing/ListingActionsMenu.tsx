@@ -8,6 +8,8 @@ import styles from './ListingActionsMenu.module.css';
 export interface ListingActionsMenuProps {
   /** Class for the kebab trigger (the header supplies its dark-band style). */
   triggerClassName: string;
+  /** Open the edit dialog. Omitted (e.g. on a deleted listing) → no Edit item. */
+  onEdit?: () => void;
   /** Current soft-delete state (drives Delete vs Restore). */
   deleted: boolean;
   /** Begin deleting — the parent opens a confirm dialog (then DELETEs). */
@@ -20,6 +22,7 @@ export interface ListingActionsMenuProps {
 
 export function ListingActionsMenu({
   triggerClassName,
+  onEdit,
   deleted,
   onDelete,
   onRestore,
@@ -71,6 +74,19 @@ export function ListingActionsMenu({
       </button>
       {open ? (
         <div className={styles.menu} role="menu">
+          {onEdit ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              onClick={() => {
+                setOpen(false);
+                onEdit();
+              }}
+            >
+              Edit listing
+            </button>
+          ) : null}
           <button
             type="button"
             role="menuitem"

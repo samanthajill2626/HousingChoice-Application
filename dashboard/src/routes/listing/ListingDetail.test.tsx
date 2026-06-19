@@ -9,12 +9,14 @@ vi.mock('./useListing.js', () => ({ useListing: (id: string) => useListing(id) }
 
 const deleteUnit = vi.fn();
 const restoreUnit = vi.fn();
+const updateUnit = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     deleteUnit: (...a: unknown[]) => deleteUnit(...a),
     restoreUnit: (...a: unknown[]) => restoreUnit(...a),
+    updateUnit: (...a: unknown[]) => updateUnit(...a),
   };
 });
 
@@ -97,8 +99,30 @@ describe('ListingDetail', () => {
     expect(screen.getByText('Available')).toBeInTheDocument();
     expect(screen.getByText(/2 BR · 1 BA · \$1,400–1,600\/mo/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Broadcast to tenants/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Edit/ })).toBeInTheDocument();
+    // Edit now lives under the ⋯ menu, not as a header button.
+    expect(screen.queryByRole('button', { name: /^✎? ?Edit$/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
+  });
+
+  it('opens the edit dialog from the ⋯ menu and PATCHes only the changed fields', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    updateUnit.mockResolvedValue({ ...READY.unit });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Edit listing/i }));
+
+    // The edit dialog is open with the current values prefilled.
+    const dialog = screen.getByRole('dialog', { name: /Edit listing/i });
+    const utilities = within(dialog).getByLabelText(/Utilities/i);
+    expect(utilities).toHaveValue('Tenant-paid');
+
+    await user.clear(utilities);
+    await user.type(utilities, 'Owner-paid');
+    await user.click(within(dialog).getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Owner-paid' });
   });
 
   it('shows an honest pending note for the flyer (no misleading JSON link)', () => {

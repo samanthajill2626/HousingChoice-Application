@@ -139,6 +139,20 @@ export async function getUnit(unitId: string, signal?: AbortSignal): Promise<Uni
   return res.unit;
 }
 
+/** PATCH /api/units/:id — partial update (SET-merge; only changed fields sent).
+ *  The server validates against a strict field allowlist + types. Returns the
+ *  updated unit (wrapped under { unit }). */
+export async function updateUnit(
+  unitId: string,
+  patch: Record<string, unknown>,
+): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
+    method: 'PATCH',
+    body: patch,
+  });
+  return res.unit;
+}
+
 /** DELETE /api/units/:id — SOFT-delete the listing (stamp deleted_at). The record
  *  + all data are retained; it's hidden from the lists and can be restored.
  *  Returns the updated (deleted) unit. */

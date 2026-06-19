@@ -1,6 +1,7 @@
 import { render } from '@testing-library/react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventStreamProvider } from './EventStreamProvider.js';
 import { useEventStream, type EventStreamHandlers } from './useEventStream.js';
 import type { CaseUpdatedEvent, ConversationUpdatedEvent } from './types.js';
 
@@ -44,7 +45,8 @@ class FakeEventSource {
   }
 }
 
-function Harness(props: EventStreamHandlers): null {
+/** A subscriber component — registers handlers with the shared provider. */
+function Sub(props: EventStreamHandlers): null {
   useEventStream(props);
   return null;
 }
@@ -59,23 +61,62 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('useEventStream', () => {
-  it('opens an EventSource on /api/events with credentials', () => {
-    render(<Harness />);
+describe('EventStreamProvider + useEventStream', () => {
+  it('opens a SINGLE EventSource on /api/events with credentials', () => {
+    render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(FakeEventSource.instances[0]?.url).toBe('/api/events');
     expect(FakeEventSource.instances[0]?.withCredentials).toBe(true);
   });
 
-  it('does not connect when disabled', () => {
-    render(<Harness enabled={false} />);
-    expect(FakeEventSource.instances).toHaveLength(0);
+  it('shares ONE connection across many subscribers', () => {
+    render(
+      <EventStreamProvider>
+        <Sub />
+        <Sub />
+        <Sub />
+      </EventStreamProvider>,
+    );
+    // The whole point of the consolidation: 3 consumers, 1 connection.
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('fans an event out to every subscriber', () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    render(
+      <EventStreamProvider>
+        <Sub onConversationUpdated={a} />
+        <Sub onConversationUpdated={b} />
+      </EventStreamProvider>,
+    );
+    const conv: ConversationUpdatedEvent = {
+      conversationId: 'c1',
+      last_activity_at: '2026-06-16T00:00:00Z',
+      unread_count: 2,
+      type: 'tenant_1to1',
+      assignment: null,
+      participant_display_name: 'Tasha',
+    };
+    act(() => {
+      FakeEventSource.instances[0]?.emit('conversation.updated', conv);
+    });
+    expect(a).toHaveBeenCalledWith(conv);
+    expect(b).toHaveBeenCalledWith(conv);
   });
 
   it('dispatches conversation.updated + case.updated to typed handlers', () => {
     const onConversationUpdated = vi.fn();
     const onCaseUpdated = vi.fn();
-    render(<Harness onConversationUpdated={onConversationUpdated} onCaseUpdated={onCaseUpdated} />);
+    render(
+      <EventStreamProvider>
+        <Sub onConversationUpdated={onConversationUpdated} onCaseUpdated={onCaseUpdated} />
+      </EventStreamProvider>,
+    );
     const src = FakeEventSource.instances[0];
     if (!src) throw new Error('no source');
 
@@ -108,19 +149,86 @@ describe('useEventStream', () => {
     expect(onCaseUpdated).toHaveBeenCalledWith(kase);
   });
 
+  it('skips a subscriber opted out with enabled:false', () => {
+    const on = vi.fn();
+    const off = vi.fn();
+    render(
+      <EventStreamProvider>
+        <Sub onConversationUpdated={on} />
+        <Sub onConversationUpdated={off} enabled={false} />
+      </EventStreamProvider>,
+    );
+    const conv: ConversationUpdatedEvent = {
+      conversationId: 'c1',
+      last_activity_at: '2026-06-16T00:00:00Z',
+      unread_count: 0,
+      type: 'tenant_1to1',
+      assignment: null,
+      participant_display_name: 'Tasha',
+    };
+    act(() => {
+      FakeEventSource.instances[0]?.emit('conversation.updated', conv);
+    });
+    expect(on).toHaveBeenCalledWith(conv);
+    expect(off).not.toHaveBeenCalled();
+  });
+
   it('ignores malformed event JSON', () => {
     const onCaseUpdated = vi.fn();
-    render(<Harness onCaseUpdated={onCaseUpdated} />);
+    render(
+      <EventStreamProvider>
+        <Sub onCaseUpdated={onCaseUpdated} />
+      </EventStreamProvider>,
+    );
     act(() => {
       FakeEventSource.instances[0]?.emitRaw('case.updated', '{not json');
     });
     expect(onCaseUpdated).not.toHaveBeenCalled();
   });
 
-  it('closes the source on unmount', () => {
-    const { unmount } = render(<Harness />);
+  it('closes the source when the provider unmounts', () => {
+    const { unmount } = render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
     const src = FakeEventSource.instances[0];
     unmount();
     expect(src?.closed).toBe(true);
+  });
+
+  it('stops delivering to a subscriber after it unmounts', () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    function Toggle({ showB }: { showB: boolean }): React.JSX.Element {
+      return (
+        <EventStreamProvider>
+          <Sub onConversationUpdated={a} />
+          {showB ? <Sub onConversationUpdated={b} /> : null}
+        </EventStreamProvider>
+      );
+    }
+    const { rerender } = render(<Toggle showB />);
+    rerender(<Toggle showB={false} />);
+    const conv: ConversationUpdatedEvent = {
+      conversationId: 'c1',
+      last_activity_at: '2026-06-16T00:00:00Z',
+      unread_count: 0,
+      type: 'tenant_1to1',
+      assignment: null,
+      participant_display_name: 'Tasha',
+    };
+    act(() => {
+      FakeEventSource.instances[0]?.emit('conversation.updated', conv);
+    });
+    expect(a).toHaveBeenCalledWith(conv);
+    expect(b).not.toHaveBeenCalled();
+  });
+
+  it('degrades to a no-op (no connection) when no provider is mounted', () => {
+    // A consumer outside the provider must not crash and must open no connection —
+    // it simply receives no live updates (matches the old EventSource-absent path).
+    expect(() => render(<Sub onConversationUpdated={vi.fn()} />)).not.toThrow();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 });

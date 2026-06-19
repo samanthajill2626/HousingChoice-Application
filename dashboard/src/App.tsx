@@ -9,6 +9,7 @@ import { AuthProvider } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
 import { UnreadProvider } from './app/UnreadContext.js';
+import { EventStreamProvider } from './api/index.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
 import { ContactsList } from './routes/contacts/ContactsList.js';
@@ -34,7 +35,11 @@ export default function App(): React.JSX.Element {
   return (
     <AuthProvider>
       <AuthGate>
-        <Routes>
+        {/* One shared /api/events connection for every live-update consumer
+            below (badge, timeline, mark-read, …). Inside the gate so it only
+            runs when authenticated. */}
+        <EventStreamProvider>
+          <Routes>
           <Route
             element={
               <UnreadProvider>
@@ -76,7 +81,8 @@ export default function App(): React.JSX.Element {
 
             <Route path="*" element={<Placeholder title="Not found" />} />
           </Route>
-        </Routes>
+          </Routes>
+        </EventStreamProvider>
       </AuthGate>
     </AuthProvider>
   );

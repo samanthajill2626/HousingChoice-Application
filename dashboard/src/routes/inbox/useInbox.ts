@@ -104,8 +104,12 @@ export function useInbox(filter: InboxFilter): InboxState {
     }
   }, [filter]);
 
-  // Initial load + full reload whenever the filter changes.
+  // Initial load + full reload whenever the filter changes. The synchronous
+  // reset clears four independent state atoms (status/base/cursor/pending) on a
+  // filter change; folding them into one derived state would obscure this hook's
+  // gen-ref race handling, so this reset-on-key-change is suppressed deliberately.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     setBase([]);
     setCursor(null);

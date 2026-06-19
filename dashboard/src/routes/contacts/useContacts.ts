@@ -31,12 +31,20 @@ const TYPES_FOR: Record<ContactsFilter, ContactType[]> = {
 };
 
 export function useContacts(filter: ContactsFilter): ContactsState {
-  const [state, setState] = useState<ContactsState>({ status: 'loading', contacts: [] });
+  // `forFilter` records which filter the committed state describes. On a filter
+  // change we DERIVE "loading" during render until the new fetch commits, rather
+  // than resetting to loading with a synchronous setState in the effect (which
+  // the React Compiler flags as a cascading render — set-state-in-effect). Same
+  // observed UX: the previous list is hidden and the spinner shows immediately.
+  const [state, setState] = useState<ContactsState & { forFilter: ContactsFilter }>({
+    status: 'loading',
+    contacts: [],
+    forFilter: filter,
+  });
 
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    setState({ status: 'loading', contacts: [] });
 
     (async () => {
       try {
@@ -50,15 +58,17 @@ export function useContacts(filter: ContactsFilter): ContactsState {
         for (const page of pages) {
           for (const contact of page.contacts) byId.set(contact.contactId, contact);
         }
-        setState({ status: 'ready', contacts: [...byId.values()] });
+        setState({ status: 'ready', contacts: [...byId.values()], forFilter: filter });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState({ status: 'error', contacts: [] });
+        setState({ status: 'error', contacts: [], forFilter: filter });
       }
     })();
 
     return () => controller.abort();
   }, [filter]);
 
-  return state;
+  // Committed state is for the previous filter → the new fetch is in flight.
+  if (state.forFilter !== filter) return { status: 'loading', contacts: [] };
+  return { status: state.status, contacts: state.contacts };
 }

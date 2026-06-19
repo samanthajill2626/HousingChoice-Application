@@ -194,7 +194,10 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   }, []);
 
   // A new contact resets any leftover optimistic bubbles from the previous one.
+  // An intentional reset-on-key-change (the bubbles are appended by several
+  // handlers, so deriving them isn't practical) — not a cascading-render smell.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([]);
   }, [contactId]);
 
@@ -215,6 +218,9 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   }, [contactId, kinds]);
 
   useEffect(() => {
+    // fetchNow sets state only AFTER an await (never synchronously) — a
+    // fetch-on-mount/refetch, not the cascading-render case the rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);

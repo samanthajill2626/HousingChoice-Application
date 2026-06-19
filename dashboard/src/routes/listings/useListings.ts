@@ -18,7 +18,9 @@ export function useListings(): ListingsState {
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    setState({ status: 'loading', units: [] });
+    // No synchronous loading reset here: this effect runs once on mount and the
+    // initial state is already 'loading' (resetting it would be a redundant
+    // cascading render — react-hooks/set-state-in-effect).
 
     (async () => {
       try {

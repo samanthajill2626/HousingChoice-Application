@@ -41,6 +41,9 @@ export function AuthProvider({ children }: { children: ReactNode }): React.JSX.E
   }, []);
 
   useEffect(() => {
+    // refresh sets state only AFTER an await (the /me probe) — a bootstrap
+    // fetch-on-mount, not the synchronous cascading-render case the rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 

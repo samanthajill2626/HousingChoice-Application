@@ -51,8 +51,11 @@ export function KindPicker({
 
   // Fix 1: Clear otherSelected when the parent rehydrates to a resolved standard kind
   // (non-null type with empty role = plain Tenant/Landlord/PM selection).
+  // Adjusts a local UI flag to an EXTERNAL prop change (controlled rehydration) —
+  // a legitimate effect, not the cascading-render smell the rule targets.
   useEffect(() => {
     if (value.type !== null && value.role.trim() === '') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setOtherSelected(false);
     }
   }, [value.type, value.role]);

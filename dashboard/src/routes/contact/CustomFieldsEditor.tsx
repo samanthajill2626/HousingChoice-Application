@@ -3,7 +3,7 @@
 // Renders one labelled row per entry (label input + value input + Remove button),
 // plus an "+ Add custom field" button. All mutations are propagated via onChange —
 // this component holds NO local state for the rows.
-import { useId, useRef } from 'react';
+import { useId, useRef, useState } from 'react';
 import { type CustomField } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import styles from './CustomFieldsEditor.module.css';
@@ -25,15 +25,12 @@ export function CustomFieldsEditor({
 
   // Fix 2: stable per-row ids so removing a middle row does not cause React to
   // recycle the wrong DOM instance (and bleed input state) for shifted-up rows.
-  const idsRef = useRef<number[]>([]);
-  const nextId = useRef(0);
-  // Reconcile length at render time (append-only for parent-driven growth).
-  while (idsRef.current.length < rows.length) {
-    idsRef.current.push(nextId.current++);
-  }
-  if (idsRef.current.length > rows.length) {
-    idsRef.current = idsRef.current.slice(0, rows.length);
-  }
+  // Ids live in state (seeded once from the initial rows) and are maintained in
+  // the add/remove handlers — the only ops that change length; label/value edits
+  // preserve positions, so ids stay aligned with `rows`. (State, not a
+  // render-mutated ref — see react-hooks/refs.)
+  const nextId = useRef(rows.length);
+  const [ids, setIds] = useState<number[]>(() => rows.map((_, i) => i));
 
   const suggestions = labelSuggestions ?? [];
 
@@ -49,13 +46,13 @@ export function CustomFieldsEditor({
 
   function onRemove(index: number): void {
     // Remove the stable id at the same position, keeping ids aligned with rows.
-    idsRef.current = idsRef.current.filter((_, i) => i !== index);
+    setIds((prev) => prev.filter((_, i) => i !== index));
     onChange(rows.filter((_, i) => i !== index));
   }
 
   function onAdd(): void {
     // Append a new stable id in lockstep with the new row.
-    idsRef.current = [...idsRef.current, nextId.current++];
+    setIds((prev) => [...prev, nextId.current++]);
     onChange([...rows, { label: '', value: '' }]);
   }
 
@@ -74,7 +71,7 @@ export function CustomFieldsEditor({
           {rows.map((row, i) => {
             const n = i + 1;
             return (
-              <li key={idsRef.current[i] ?? i} className={styles.row}>
+              <li key={ids[i] ?? i} className={styles.row}>
                 <input
                   className={styles.input}
                   type="text"

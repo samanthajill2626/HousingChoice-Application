@@ -40,6 +40,11 @@ export function AppFrame(): React.JSX.Element {
     const drawer = drawerRef.current;
     if (!drawer) return undefined;
 
+    // Capture the hamburger node now so the cleanup restores focus to the node
+    // that existed while the drawer was open (the button is stable, but reading
+    // the ref in cleanup trips react-hooks/exhaustive-deps).
+    const hamburger = hamburgerRef.current;
+
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
 
@@ -74,7 +79,7 @@ export function AppFrame(): React.JSX.Element {
     return () => {
       document.removeEventListener('keydown', onKeyDown);
       document.body.style.overflow = prevOverflow;
-      hamburgerRef.current?.focus();
+      hamburger?.focus();
     };
   }, [drawerOpen, closeDrawer]);
 

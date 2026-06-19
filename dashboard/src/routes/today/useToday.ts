@@ -79,6 +79,9 @@ export function useToday(): TodayState {
   }, []);
 
   useEffect(() => {
+    // fetchNow sets state only AFTER an await (never synchronously), so this is
+    // not the cascading-render case the rule targets — it's a fetch-on-mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);

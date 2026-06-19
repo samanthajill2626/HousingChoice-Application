@@ -36,9 +36,14 @@ const RECONNECT_MAX_MS = 30_000;
 export function useEventStream(handlers: EventStreamHandlers): void {
   const { enabled = true } = handlers;
   // Keep the latest handlers in a ref so the effect doesn't re-subscribe on
-  // every render (handlers are typically inline functions).
+  // every render (handlers are typically inline functions). Write the ref in a
+  // passive effect rather than during render — the subscription only reads
+  // handlersRef.current from event callbacks that fire after commit, so the
+  // one-render-late update is invisible (and refs must not be mutated in render).
   const handlersRef = useRef(handlers);
-  handlersRef.current = handlers;
+  useEffect(() => {
+    handlersRef.current = handlers;
+  });
 
   useEffect(() => {
     if (!enabled) return;

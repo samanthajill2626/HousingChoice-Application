@@ -2,7 +2,7 @@
 // Each row has a role input (with datalist suggestions) + a ContactSearchField
 // (bound to name/contactId) + a Remove button. All mutations go via onChange —
 // no local state for the rows.
-import { useId, useRef } from 'react';
+import { useId, useRef, useState } from 'react';
 import { type Contact, type Relationship } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { ContactSearchField } from './ContactSearchField.js';
@@ -27,19 +27,12 @@ export function RelationshipsEditor({
 
   // Fix 2: stable per-row ids so removing a middle row does not bleed
   // ContactSearchField internal state (activeIndex / dropdown query) into the
-  // wrong row. We maintain a parallel id list in lockstep with `rows`.
-  const idsRef = useRef<number[]>([]);
-  const nextId = useRef(0);
-  // Reconcile length at render time (append-only — parent-driven growth or
-  // initial population). Mutating the ref during render is safe here; it causes
-  // no secondary renders and is the canonical pattern for "derived from props"
-  // refs that must be ready before the JSX below.
-  while (idsRef.current.length < rows.length) {
-    idsRef.current.push(nextId.current++);
-  }
-  if (idsRef.current.length > rows.length) {
-    idsRef.current = idsRef.current.slice(0, rows.length);
-  }
+  // wrong row. The ids live in state (seeded once from the initial rows) and are
+  // maintained in the add/remove handlers — the only ops that change length;
+  // role/contact edits preserve positions, so ids stay aligned with `rows`.
+  // (State, not a render-mutated ref — see react-hooks/refs.)
+  const nextId = useRef(rows.length);
+  const [ids, setIds] = useState<number[]>(() => rows.map((_, i) => i));
 
   const suggestions = roleSuggestions ?? [];
 
@@ -72,13 +65,13 @@ export function RelationshipsEditor({
 
   function onRemove(index: number): void {
     // Remove the stable id at the same position, keeping ids aligned with rows.
-    idsRef.current = idsRef.current.filter((_, i) => i !== index);
+    setIds((prev) => prev.filter((_, i) => i !== index));
     onChange(rows.filter((_, i) => i !== index));
   }
 
   function onAdd(): void {
     // Append a new stable id in lockstep with the new row.
-    idsRef.current = [...idsRef.current, nextId.current++];
+    setIds((prev) => [...prev, nextId.current++]);
     onChange([...rows, { role: '', name: '' }]);
   }
 
@@ -97,7 +90,7 @@ export function RelationshipsEditor({
           {rows.map((row, i) => {
             const n = i + 1;
             return (
-              <li key={idsRef.current[i] ?? i} className={styles.row}>
+              <li key={ids[i] ?? i} className={styles.row}>
                 <input
                   className={styles.roleInput}
                   type="text"

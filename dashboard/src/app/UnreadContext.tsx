@@ -38,6 +38,9 @@ export function UnreadProvider({ children }: { children: React.ReactNode }): Rea
   }, []);
 
   useEffect(() => {
+    // fetchCount sets state only AFTER an await — a badge fetch-on-mount, not the
+    // synchronous cascading-render case the rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchCount();
     return () => abortRef.current?.abort();
   }, [fetchCount]);

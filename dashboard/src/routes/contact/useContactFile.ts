@@ -52,25 +52,29 @@ async function loadSlice<T>(
   }
 }
 
+/** The "nothing loaded yet" state, reused for the initial value and the
+ *  derived loading state shown while a new contactId's fetch is in flight. */
+const FILE_LOADING: ContactFileState = {
+  status: 'loading',
+  cases: [],
+  units: [],
+  listingsSent: { status: 'loading' },
+  media: { status: 'loading' },
+};
+
 export function useContactFile(contactId: string): ContactFileState {
-  const [state, setState] = useState<ContactFileState>({
-    status: 'loading',
-    cases: [],
-    units: [],
-    listingsSent: { status: 'loading' },
-    media: { status: 'loading' },
+  // `forId` records which contactId the committed state describes. On an id
+  // change we DERIVE loading during render until the new fetch commits, rather
+  // than resetting with a synchronous setState in the effect (which the React
+  // Compiler flags as a cascading render — set-state-in-effect).
+  const [state, setState] = useState<ContactFileState & { forId: string }>({
+    ...FILE_LOADING,
+    forId: contactId,
   });
 
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    setState({
-      status: 'loading',
-      cases: [],
-      units: [],
-      listingsSent: { status: 'loading' },
-      media: { status: 'loading' },
-    });
 
     (async () => {
       try {
@@ -91,15 +95,18 @@ export function useContactFile(contactId: string): ContactFileState {
           units: units.units,
           listingsSent,
           media,
+          forId: contactId,
         });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState((prev) => ({ ...prev, status: 'error' }));
+        setState((prev) => ({ ...prev, status: 'error', forId: contactId }));
       }
     })();
 
     return () => controller.abort();
   }, [contactId]);
 
+  // Committed state is for the previous contactId → the new fetch is in flight.
+  if (state.forId !== contactId) return FILE_LOADING;
   return state;
 }

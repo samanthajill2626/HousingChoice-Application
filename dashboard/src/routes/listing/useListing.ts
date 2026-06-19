@@ -89,12 +89,18 @@ async function loadLandlord(
 }
 
 export function useListing(unitId: string): ListingState {
-  const [state, setState] = useState<ListingState>(LOADING);
+  // `forId` records which unitId the committed state describes. On a unitId
+  // change we DERIVE loading during render until the new fetch commits, rather
+  // than resetting with a synchronous setState in the effect (which the React
+  // Compiler flags as a cascading render — set-state-in-effect).
+  const [state, setState] = useState<ListingState & { forId: string }>({
+    ...LOADING,
+    forId: unitId,
+  });
 
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    setState(LOADING);
 
     (async () => {
       try {
@@ -132,15 +138,18 @@ export function useListing(unitId: string): ListingState {
           related,
           recipients,
           similar,
+          forId: unitId,
         });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState({ ...LOADING, status: 'error' });
+        setState({ ...LOADING, status: 'error', forId: unitId });
       }
     })();
 
     return () => controller.abort();
   }, [unitId]);
 
+  // Committed state is for the previous unitId → the new fetch is in flight.
+  if (state.forId !== unitId) return LOADING;
   return state;
 }

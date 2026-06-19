@@ -106,6 +106,26 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     const transitions = history.filter((e) => e.event_type === 'case_stage_changed');
     expect(transitions.length).toBeGreaterThanOrEqual(2);
     expect((transitions[0]!.payload as { to: string }).to).toBe('awaiting_hap_contract');
+
+    // The DERIVED writes now also append provenance rows on the contact/unit
+    // entities (source:'derived', NO actor). The unit changed available→
+    // under_application→finalizing, so its trail carries ≥1 derived row whose
+    // newest `to` is `finalizing`.
+    const unitHistory = await audit.listByEntity(`units#${unitId}`);
+    const unitDerived = unitHistory.filter(
+      (e) => e.event_type === 'listing_status_changed' && (e.payload as { source?: string }).source === 'derived',
+    );
+    expect(unitDerived.length).toBeGreaterThanOrEqual(1);
+    expect((unitDerived[0]!.payload as { to: string }).to).toBe('finalizing');
+    expect(unitDerived[0]!.actorId).toBeUndefined();
+    // The tenant changed undefined→placing exactly once across these two moves
+    // (Contract phase keeps placing → the second move is a no-op, no extra row).
+    const tenantHistory = await audit.listByEntity(`contacts#${tenantId}`);
+    const tenantDerived = tenantHistory.filter(
+      (e) => e.event_type === 'tenant_status_changed' && (e.payload as { source?: string }).source === 'derived',
+    );
+    expect(tenantDerived).toHaveLength(1);
+    expect((tenantDerived[0]!.payload as { to: string }).to).toBe('placing');
   });
 
   it('the stuck_case next-deadline round-trips through the byNextDeadline GSI', async () => {

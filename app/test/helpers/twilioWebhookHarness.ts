@@ -979,6 +979,34 @@ export function createFakeWorld(): FakeWorld {
   // casesRepo.integration.test.ts; this fake slices by limit only.)
   const cases = new Map<string, CaseItem>();
   let caseCounter = 0;
+  // Mirror the byTenant/byUnit GSI's keyset pagination (parity with the real
+  // repo, BE-foundation): resume after the cursor's caseId, take `limit`, and
+  // emit a lastEvaluatedKey ONLY when a limit was passed AND more items remain.
+  // With NO limit the whole result returns in one page (no lastEvaluatedKey) —
+  // so existing single-page callers are unaffected. The sibling-placement scan
+  // passes a limit to force ≥2 pages and exercise the follow-the-cursor loop.
+  const casePage = (
+    all: CaseItem[],
+    opts: { limit?: number; exclusiveStartKey?: Record<string, unknown> },
+  ): { items: CaseItem[]; lastEvaluatedKey?: Record<string, unknown> } => {
+    let start = 0;
+    const cursorId = opts.exclusiveStartKey?.['caseId'];
+    if (typeof cursorId === 'string') {
+      const idx = all.findIndex((c) => c.caseId === cursorId);
+      if (idx >= 0) start = idx + 1;
+    }
+    const window = opts.limit === undefined ? all.slice(start) : all.slice(start, start + opts.limit);
+    const items = window.map((c) => ({ ...c }));
+    const last = window[window.length - 1];
+    const hasMore = opts.limit !== undefined && start + opts.limit < all.length;
+    return {
+      items,
+      ...(hasMore &&
+        last !== undefined && {
+          lastEvaluatedKey: { caseId: last.caseId } as Record<string, unknown>,
+        }),
+    };
+  };
   const casesRepo: CasesRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -1023,12 +1051,12 @@ export function createFakeWorld(): FakeWorld {
       return { ...c };
     },
     async listByTenant(tenantId, opts = {}) {
-      const items = [...cases.values()].filter((c) => c.tenantId === tenantId).slice(0, opts.limit ?? 50);
-      return { items: items.map((c) => ({ ...c })) };
+      const all = [...cases.values()].filter((c) => c.tenantId === tenantId);
+      return casePage(all, opts);
     },
     async listByUnit(unitId, opts = {}) {
-      const items = [...cases.values()].filter((c) => c.unitId === unitId).slice(0, opts.limit ?? 50);
-      return { items: items.map((c) => ({ ...c })) };
+      const all = [...cases.values()].filter((c) => c.unitId === unitId);
+      return casePage(all, opts);
     },
     async listByStage(stage, opts = {}) {
       const items = [...cases.values()].filter((c) => c.stage === stage).slice(0, opts.limit ?? 50);

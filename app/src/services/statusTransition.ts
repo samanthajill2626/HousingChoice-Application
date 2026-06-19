@@ -121,50 +121,65 @@ export function createStatusTransitionService(
   const log = deps.logger ?? defaultLogger;
 
   /**
-   * Apply a DERIVED status write to a tenant + a unit, gated on the entity's
-   * current STATE (the 2026-06-19 decision —
-   * docs/issues/status-pin-vs-terminal-derivation.md): a `derived` write
-   * overwrites the current status UNLESS the current status is an OVERRIDE/exit
-   * state (listing: on_hold/off_market; tenant: on_hold/inactive), in which case
-   * it is PINNED and left untouched. The write is NO LONGER gated on the stored
-   * `*_source` — baseline progression states stay derivation-eligible no matter
-   * who last wrote them (this fixes staff manually publishing a listing
-   * setup→available, source 'manual', which used to PIN it and block the
-   * placement from ever deriving it forward). We still stamp `*_source:
-   * 'derived'` for provenance/audit. Best-effort per entity: a failure to derive
-   * one side never blocks the placement transition itself.
+   * Derived TENANT-status write (load → override-gate → no-op-gate →
+   * update+audit). Best-effort: a failure NEVER throws out of the placement
+   * transition. The write is skipped entirely (no update, no audit) when EITHER
+   * the current status is an override/exit state (on_hold/inactive — PINNED) OR
+   * the derived value already equals the current status (idempotent: a
+   * mid-pipeline advance whose coarse status is unchanged must not rewrite
+   * provenance or spam history). Only a genuine CHANGE stamps `status_source:
+   * 'derived'` and appends a `tenant_status_changed` audit row (NO actor —
+   * derived is system; payload {from,to,source:'derived'}, matching the explicit
+   * setter's event-type/shape).
    */
+  async function deriveTenantStatus(tenantId: string, toStatus: TenantStatus): Promise<void> {
+    try {
+      const contact = await contactsRepo.getById(tenantId);
+      if (!contact) return;
+      const current = contact.status as TenantStatus | undefined;
+      if (isTenantOverrideStatus(current)) return; // override-pinned → no write/no audit
+      if (current === toStatus) return; // no-op → idempotent, no provenance rewrite
+      await contactsRepo.update(tenantId, { status: toStatus, status_source: 'derived' });
+      await auditRepo.append(`contacts#${tenantId}`, 'tenant_status_changed', {
+        ...(current !== undefined && { from: current }),
+        to: toStatus,
+        source: 'derived',
+      });
+    } catch (err) {
+      log.error({ err, tenantId }, 'derivation: tenant status write failed (best-effort)');
+    }
+  }
+
+  /**
+   * Derived LISTING-status write — symmetric to deriveTenantStatus (override set
+   * is on_hold/off_market). Same load → override-gate → no-op-gate →
+   * update+audit, best-effort, NO actor, event-type `listing_status_changed`.
+   */
+  async function deriveListingStatus(unitId: string, toStatus: ListingStatus): Promise<void> {
+    try {
+      const unit = await unitsRepo.getById(unitId);
+      if (!unit) return;
+      const current = unit.status as ListingStatus | undefined;
+      if (isListingOverrideStatus(current)) return; // override-pinned → no write/no audit
+      if (current === toStatus) return; // no-op → idempotent, no provenance rewrite
+      await unitsRepo.update(unitId, { status: toStatus, status_source: 'derived' });
+      await auditRepo.append(`units#${unitId}`, 'listing_status_changed', {
+        ...(current !== undefined && { from: current }),
+        to: toStatus,
+        source: 'derived',
+      });
+    } catch (err) {
+      log.error({ err, unitId }, 'derivation: listing status write failed (best-effort)');
+    }
+  }
+
   async function applyDerivation(
     tenantId: string,
     unitId: string,
     derived: { tenantStatus: TenantStatus; listingStatus: ListingStatus },
   ): Promise<void> {
-    // Tenant side (derived) — blocked ONLY when the CURRENT status is an
-    // override/exit state (on_hold/inactive); baseline states are overwritten.
-    try {
-      const contact = await contactsRepo.getById(tenantId);
-      if (contact && !isTenantOverrideStatus(contact.status as TenantStatus | undefined)) {
-        await contactsRepo.update(tenantId, {
-          status: derived.tenantStatus,
-          status_source: 'derived',
-        });
-      }
-    } catch (err) {
-      log.error({ err, tenantId }, 'derivation: tenant status write failed (best-effort)');
-    }
-    // Listing side (derived) — blocked ONLY when the CURRENT status is an
-    // override/exit state (on_hold/off_market); baseline states are overwritten.
-    try {
-      const unit = await unitsRepo.getById(unitId);
-      if (unit && !isListingOverrideStatus(unit.status as ListingStatus | undefined)) {
-        await unitsRepo.update(unitId, {
-          status: derived.listingStatus,
-          status_source: 'derived',
-        });
-      }
-    } catch (err) {
-      log.error({ err, unitId }, 'derivation: listing status write failed (best-effort)');
-    }
+    await deriveTenantStatus(tenantId, derived.tenantStatus);
+    await deriveListingStatus(unitId, derived.listingStatus);
   }
 
   /**
@@ -274,37 +289,13 @@ export function createStatusTransitionService(
         const tenantClear = await noOtherActivePlacement(existing.tenantId, caseId, 'tenant');
         const unitClear = await noOtherActivePlacement(existing.unitId, caseId, 'unit');
         const derived = deriveStatuses('lost'); // searching / available
-        // The lost-bounce is a DERIVED write: it too is gated on the CURRENT
-        // STATE (2026-06-19 decision), so a manually On-hold/Inactive tenant or
-        // an On-hold/Off-market listing STAYS pinned through a lost placement.
-        // Only clear the side that (a) has no other active placement AND (b) is
-        // not currently in an override/exit state.
-        if (tenantClear) {
-          try {
-            const contact = await contactsRepo.getById(existing.tenantId);
-            if (contact && !isTenantOverrideStatus(contact.status as TenantStatus | undefined)) {
-              await contactsRepo.update(existing.tenantId, {
-                status: derived.tenantStatus,
-                status_source: 'derived',
-              });
-            }
-          } catch (err) {
-            log.error({ err, tenantId: existing.tenantId }, 'lost bounce: tenant write failed (best-effort)');
-          }
-        }
-        if (unitClear) {
-          try {
-            const unit = await unitsRepo.getById(existing.unitId);
-            if (unit && !isListingOverrideStatus(unit.status as ListingStatus | undefined)) {
-              await unitsRepo.update(existing.unitId, {
-                status: derived.listingStatus,
-                status_source: 'derived',
-              });
-            }
-          } catch (err) {
-            log.error({ err, unitId: existing.unitId }, 'lost bounce: listing write failed (best-effort)');
-          }
-        }
+        // The lost-bounce is a DERIVED write: it goes through the SAME shared
+        // helpers as applyDerivation, so it inherits the identical override-gate
+        // (a manually On-hold/Inactive tenant or On-hold/Off-market listing STAYS
+        // pinned), the no-op guard, and the {from,to,source:'derived'} audit.
+        // Only clear the side that has no OTHER active placement.
+        if (tenantClear) await deriveTenantStatus(existing.tenantId, derived.tenantStatus);
+        if (unitClear) await deriveListingStatus(existing.unitId, derived.listingStatus);
       } else {
         await applyDerivation(existing.tenantId, existing.unitId, deriveStatuses(toStage));
       }
@@ -392,14 +383,24 @@ export function createStatusTransitionService(
     excludeCaseId: string,
     side: 'tenant' | 'unit',
   ): Promise<boolean> {
-    // TODO(status-model): paginate sibling-placement scan; assumes <=100
-    // placements per tenant/unit (§8 converges to one).
-    const page =
-      side === 'tenant'
-        ? await casesRepo.listByTenant(id, { limit: 100 })
-        : await casesRepo.listByUnit(id, { limit: 100 });
-    return !page.items.some(
-      (c) => c.caseId !== excludeCaseId && !TERMINAL_STAGES.has(c.stage),
-    );
+    // PAGINATE the byTenant/byUnit GSI: a single Query returns at most 1MB of
+    // items, so a tenant/unit with many historical placements could span pages.
+    // Stop early the moment an active OTHER placement is found; otherwise follow
+    // lastEvaluatedKey until it is undefined — never decide "no other active
+    // placement" off a partial page (a false negative would wrongly bounce a
+    // still-active tenant/unit back to searching/available).
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const opts = { ...(exclusiveStartKey !== undefined && { exclusiveStartKey }) };
+      const page =
+        side === 'tenant'
+          ? await casesRepo.listByTenant(id, opts)
+          : await casesRepo.listByUnit(id, opts);
+      if (page.items.some((c) => c.caseId !== excludeCaseId && !TERMINAL_STAGES.has(c.stage))) {
+        return false; // there IS another active placement → do NOT bounce
+      }
+      exclusiveStartKey = page.lastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+    return true;
   }
 }

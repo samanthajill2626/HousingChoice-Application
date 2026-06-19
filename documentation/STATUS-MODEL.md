@@ -215,10 +215,21 @@ not auto-dropping tenants yet.
 
 - **Cardinality — mostly one.** Early interest can be many units, but a tenant
   converges to **one primary placement** by the Application phase.
-- **Source of truth — hybrid derive + override.** Derived (from the placement) is
-  lowest precedence; an explicit `manual` / `ai` / `automation` / `import` write pins
-  and wins (last-writer-wins). The future AI/automation layer is just more `source`
-  values driving the same transitions — no rework needed.
+- **Source of truth — derive + state-based override.** The coarse tenant/listing
+  status is normally **derived** from the committed placement (§7). Whether a derived
+  write may move an entity is gated on its **current state**, not on who last wrote it:
+  derivation freely drives the **baseline progression** states forward — listing
+  `Setup → Available → Under application → Finalizing → Occupied`, tenant
+  `Needs review → Onboarding → Searching → Placing → Placed` — *regardless of source*,
+  but it is **blocked (pinned)** when the entity currently sits in an **override / exit
+  state**: listing **`On hold`** / **`Off market`**, tenant **`On hold`** / **`Inactive`**.
+  Those override states are reached only by an explicit (`manual` / `ai` / `automation` /
+  `import`) write and stick until a human/automation explicitly moves the entity back out
+  — then derivation resumes on the baseline. Explicit writes always apply (last-writer
+  wins among them); the future AI/automation layer is just more `source` values driving
+  the same transitions. The `source` is retained for **provenance/audit** only — it no
+  longer decides whether a baseline status can be overwritten. (Rationale and the prior
+  source-precedence design this replaced: `docs/issues/status-pin-vs-terminal-derivation.md`.)
 - **Provenance.** Every status/stage transition records `{ from, to, source, reason? }`.
   The **current** value is denormalized on the entity (so "what state now?" is a cheap
   read, never a scan); **history** is an append-only per-entity log queried by entity.

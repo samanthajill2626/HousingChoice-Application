@@ -202,6 +202,114 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
   });
 });
 
+// Change 2 + 3: derived status writes must (2) audit a {from,to,source:'derived'}
+// row with NO actor when the coarse status genuinely CHANGES, and (3) be a true
+// no-op (no update, no audit) when the derived value already equals the current
+// status — an idempotent mid-pipeline advance must not rewrite provenance or
+// spam history. Covers both applyDerivation and the lost-bounce (shared helper).
+describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3)', () => {
+  let world: FakeWorld;
+  let svc: StatusTransitionService;
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    svc = makeService(world);
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', rta_in_hand: true });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  const seed = (stage: string) =>
+    world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: stage as never });
+
+  it('Change 2: a CHANGE on both sides appends derived {from,to,source} audit rows with NO actor', async () => {
+    const c = await seed('send_application');
+    // Application phase derives tenant: undefined→placing, listing: available→under_application.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual', actor: 'usr_va' });
+
+    const tenantAudit = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed');
+    const listingAudit = world.auditEvents.filter((a) => a.event_type === 'listing_status_changed');
+    expect(tenantAudit).toHaveLength(1);
+    expect(listingAudit).toHaveLength(1);
+    // Derived is SYSTEM — no actor (even though the placement move carried one).
+    expect(tenantAudit[0]!.actorId).toBeUndefined();
+    expect(tenantAudit[0]!.payload).not.toHaveProperty('actor');
+    expect(tenantAudit[0]!.payload).toMatchObject({ to: 'placing', source: 'derived' });
+    expect(tenantAudit[0]!.entityKey).toBe('contacts#tenant-1');
+    expect(listingAudit[0]!.payload).toMatchObject({ from: 'available', to: 'under_application', source: 'derived' });
+    expect(listingAudit[0]!.entityKey).toBe('units#unit-1');
+  });
+
+  it('Change 3: a mid-pipeline advance where the TENANT status is unchanged writes NO tenant update/audit', async () => {
+    const c = await seed('send_application');
+    // First move → tenant placing (a change, audited once).
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
+    const tenantAuditAfterFirst = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
+    expect(tenantAuditAfterFirst).toBe(1);
+
+    // Spy: count contactsRepo.update calls during the SECOND advance.
+    let tenantUpdates = 0;
+    const realUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch) => {
+      tenantUpdates += 1;
+      return realUpdate(id, patch);
+    };
+
+    // Contract phase: tenant STAYS placing (unchanged) while listing changes
+    // under_application→finalizing. The tenant side must be a pure no-op.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+
+    expect(tenantUpdates).toBe(0); // no write for the unchanged tenant
+    const tenantAuditAfterSecond = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
+    expect(tenantAuditAfterSecond).toBe(1); // no new tenant audit row
+    // The listing side DID change → it gets a fresh audit row.
+    const listingChanges = world.auditEvents.filter(
+      (a) => a.event_type === 'listing_status_changed' && (a.payload as { to?: string }).to === 'finalizing',
+    );
+    expect(listingChanges).toHaveLength(1);
+    expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('finalizing');
+  });
+
+  it('Change 3: re-applying the SAME stage (both sides unchanged) writes no derived update/audit at all', async () => {
+    const c = await seed('send_application');
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    // Re-derive the same coarse statuses (tenant placing, listing under_application).
+    let tenantUpdates = 0;
+    let listingUpdates = 0;
+    const realTenantUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    const realUnitUpdate = world.unitsRepo.update.bind(world.unitsRepo);
+    world.contactsRepo.update = async (id, patch) => { tenantUpdates += 1; return realTenantUpdate(id, patch); };
+    world.unitsRepo.update = async (id, patch) => { listingUpdates += 1; return realUnitUpdate(id, patch); };
+    const auditBefore = world.auditEvents.length;
+
+    // A no-op pipeline re-entry (e.g. a redelivered stage advance to the same
+    // derived coarse statuses). case_stage_changed still audits; derived sides don't.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+
+    expect(tenantUpdates).toBe(0);
+    expect(listingUpdates).toBe(0);
+    const newRows = world.auditEvents.slice(auditBefore);
+    expect(newRows.some((a) => a.event_type === 'tenant_status_changed')).toBe(false);
+    expect(newRows.some((a) => a.event_type === 'listing_status_changed')).toBe(false);
+  });
+
+  it('lost-bounce goes through the SAME derived audit path (audits a derived bounce row, no actor)', async () => {
+    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    // Drive tenant→placing / listing→under_application first so the bounce is a real change.
+    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const tenantRowsBefore = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
+
+    await svc.transitionPlacement(c.caseId, { toStage: 'lost', source: 'manual', actor: 'usr_va', lostReason: { category: 'stalled' } });
+
+    // The bounce derived tenant placing→searching: a NEW derived audit row, no actor.
+    const tenantRows = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed');
+    expect(tenantRows.length).toBe(tenantRowsBefore + 1);
+    const bounce = tenantRows[tenantRows.length - 1]!;
+    expect(bounce.payload).toMatchObject({ from: 'placing', to: 'searching', source: 'derived' });
+    expect(bounce.actorId).toBeUndefined();
+  });
+});
+
 describe('statusTransition — tenant status + RTA-in-hand gate (§5)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;
@@ -335,6 +443,70 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     const losing = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
     await svc.transitionPlacement(losing.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
     // The OTHER placement is still active → no bounce-back.
+    expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
+    expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
+  });
+
+  it('does NOT bounce when the active sibling is on the SECOND page (paginated sibling scan)', async () => {
+    // Change 1: the sibling-placement scan must follow lastEvaluatedKey, not
+    // decide off the first page. We wrap the fake casesRepo so listByTenant /
+    // listByUnit ALWAYS return two pages: page 1 = only the losing/terminal case
+    // (no active sibling), page 2 (returned only when exclusiveStartKey is set)
+    // contains the ACTIVE sibling. If the scan reads page 1 only it would wrongly
+    // bounce; following the cursor finds the sibling and suppresses the bounce.
+    const active = await world.casesRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'awaiting_approval',
+    });
+    // Make tenant=placing / listing=under_application via the active placement.
+    await svc.transitionPlacement(active.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const losing = await world.casesRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'awaiting_inspection',
+    });
+
+    const PAGE_CURSOR = { caseId: '__page2__' };
+    const twoPageScan = (all: typeof active[]) => (opts: { exclusiveStartKey?: Record<string, unknown> }) => {
+      // Page 2 (cursor present): the active sibling only.
+      if (opts.exclusiveStartKey !== undefined) {
+        return { items: all.filter((c) => c.caseId === active.caseId).map((c) => ({ ...c })) };
+      }
+      // Page 1 (no cursor): the losing case only, with a lastEvaluatedKey so the
+      // service must follow the cursor to page 2.
+      return {
+        items: all.filter((c) => c.caseId === losing.caseId).map((c) => ({ ...c })),
+        lastEvaluatedKey: PAGE_CURSOR,
+      };
+    };
+
+    const pagedRepo = {
+      ...world.casesRepo,
+      async listByTenant(tenantId: string, opts: { exclusiveStartKey?: Record<string, unknown> } = {}) {
+        const all = (await world.casesRepo.listByTenant(tenantId)).items;
+        return twoPageScan(all)(opts);
+      },
+      async listByUnit(unitId: string, opts: { exclusiveStartKey?: Record<string, unknown> } = {}) {
+        const all = (await world.casesRepo.listByUnit(unitId)).items;
+        return twoPageScan(all)(opts);
+      },
+    };
+    const pagedSvc = createStatusTransitionService({
+      casesRepo: pagedRepo as typeof world.casesRepo,
+      unitsRepo: world.unitsRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+      events: world.events,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+
+    await pagedSvc.transitionPlacement(losing.caseId, {
+      toStage: 'lost',
+      source: 'manual',
+      lostReason: { category: 'stalled' },
+    });
+    // The active sibling was on page 2 → detected → NO bounce-back.
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
   });

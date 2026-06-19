@@ -184,6 +184,38 @@ describe('ContactEditForm', () => {
     );
   });
 
+  it('changing the Type swaps the type-specific fields and PATCHes { type }', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, type: 'landlord' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    // Starts as a tenant: voucher shown, company hidden.
+    expect(screen.getByLabelText(/Voucher size/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Company$/i)).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText(/^Type$/i), 'landlord');
+
+    // Fields swap immediately on the type change (no save needed).
+    expect(screen.queryByLabelText(/Voucher size/i)).toBeNull();
+    expect(screen.getByLabelText(/^Company$/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('k1', { type: 'landlord' });
+  });
+
+  it('does not send { type } when the type is left unchanged', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, firstName: 'Natasha' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const first = screen.getByLabelText(/First name/i);
+    await user.clear(first);
+    await user.type(first, 'Natasha');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('type' in patch).toBe(false);
+  });
+
   it('only changing the name does NOT include role/relationships/customFields in the patch', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...TENANT, firstName: 'Natasha' });

@@ -1,15 +1,18 @@
-// ContactEditForm — the edit dialog for a contact's details. Type-aware fields:
-// name + status + notes for everyone, voucher size for tenants, company for
-// landlords/PMs. Also: Role (datalist), Relationships, and Custom fields sections.
-// Dirty-tracked: only the changed fields are PATCHed (the server SET-merges, so
-// an untouched field is never blanked). On success the parent applies the returned
-// contact in place (no refetch).
+// ContactEditForm — the edit dialog for a contact's details. The Type selector is
+// editable (fix a mis-triaged contact, e.g. tenant → landlord) and drives the
+// type-aware fields: name + status + notes for everyone, voucher size for tenants,
+// company for landlords/PMs. Also: Role (datalist), Relationships, and Custom
+// fields sections. Dirty-tracked: only the changed fields are PATCHed (the server
+// SET-merges, so an untouched field is never blanked) — switching type leaves the
+// other type's old fields on the record (harmless; they just stop showing). On
+// success the parent applies the returned contact in place (no refetch).
 import { useState } from 'react';
 import {
   updateContact,
   type Address,
   type Contact,
   type ContactPatch,
+  type ContactType,
   type Relationship,
   type CustomField,
 } from '../../api/index.js';
@@ -17,7 +20,11 @@ import { Button } from '../../ui/index.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
-import { normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
+import {
+  CONTACT_TYPE_LABEL,
+  normalizeRelationships,
+  normalizeCustomFields,
+} from './contactProfile.js';
 import { Modal } from './Modal.js';
 import styles from './ContactEditForm.module.css';
 
@@ -38,9 +45,14 @@ function str(v: unknown): string {
 }
 
 export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
-  const isLandlord = contact.type === 'landlord';
-  const isTenant = contact.type === 'tenant';
   const vocab = useContactVocabulary();
+
+  // Editable type — the selector drives which type-specific fields render, and a
+  // change is PATCHed as { type }. isTenant/isLandlord derive from the live state
+  // (not the prop) so the fields swap as soon as the type changes.
+  const [type, setType] = useState<ContactType>(contact.type);
+  const isLandlord = type === 'landlord';
+  const isTenant = type === 'tenant';
 
   const [firstName, setFirstName] = useState(str(contact.firstName));
   const [lastName, setLastName] = useState(str(contact.lastName));
@@ -93,6 +105,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   // Build the PATCH from only the fields the user actually changed.
   function buildPatch(): ContactPatch | { error: string } {
     const patch: ContactPatch = {};
+    if (type !== contact.type) patch.type = type;
     if (firstName !== str(contact.firstName)) patch.firstName = firstName;
     if (lastName !== str(contact.lastName)) patch.lastName = lastName;
     if (status !== (str(contact.status) || 'needs_review')) patch.status = status;
@@ -166,6 +179,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     }
   }
 
+  // Selectable types: the three the org assigns. If the contact is currently an
+  // off-list type (e.g. an untriaged 'unknown'), prepend it so its value still
+  // shows and isn't silently changed on save.
+  const TYPE_CHOICES: ContactType[] = ['tenant', 'landlord', 'team_member'];
+  const typeOptions = TYPE_CHOICES.includes(contact.type)
+    ? TYPE_CHOICES
+    : [contact.type, ...TYPE_CHOICES];
+
   return (
     <Modal
       title="Edit contact"
@@ -202,6 +223,22 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
             />
           </label>
         </div>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Type</span>
+          <select
+            className={styles.input}
+            value={type}
+            onChange={(e) => setType(e.target.value as ContactType)}
+            aria-label="Type"
+          >
+            {typeOptions.map((t) => (
+              <option key={t} value={t}>
+                {CONTACT_TYPE_LABEL[t]}
+              </option>
+            ))}
+          </select>
+        </label>
 
         {isTenant ? (
           <label className={styles.field}>

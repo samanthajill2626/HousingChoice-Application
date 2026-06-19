@@ -40,6 +40,7 @@ import { useContact } from './useContact.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
+import { useScrollOverflow } from './useScrollOverflow.js';
 import { contactDisplayName } from './format.js';
 import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.js';
 import { buildReplyTargets } from './replyTargets.js';
@@ -75,6 +76,21 @@ export function ContactDetail(): React.JSX.Element {
   // timeline refetches on SSE message.persisted. Memoized on items identity.
   const media = useMemo(() => commsMedia(timeline.items), [timeline.items]);
   const mediaLoading = timeline.status === 'loading';
+
+  // The file pane gets gutter padding-right ONLY when it's actually scrolling —
+  // the scrollbar then needs the breathing room; without one the padding is just
+  // dead space (cards should reach the edge). Re-measure when the pane's content
+  // height could change (file/timeline data, pane toggle).
+  const { ref: rightRef, overflowing: rightScrolls } = useScrollOverflow<HTMLDivElement>([
+    contactStatus,
+    file.status,
+    file.units,
+    file.cases,
+    timeline.items,
+    media,
+    pane,
+    contact,
+  ]);
 
   if (contactStatus === 'loading') {
     return (
@@ -244,7 +260,8 @@ export function ContactDetail(): React.JSX.Element {
           />
         </div>
         <div
-          className={`${styles.right} ${pane === 'profile' ? styles.paneActive : styles.paneHidden}`}
+          ref={rightRef}
+          className={`${styles.right} ${rightScrolls ? styles.rightScrolled : ''} ${pane === 'profile' ? styles.paneActive : styles.paneHidden}`}
         >
           {file.status === 'loading' ? (
             <Spinner center />

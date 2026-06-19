@@ -4,7 +4,8 @@
  * values from ui/tokens.css (never hard-coded). */
 
 .page {
-  max-width: 880px;
+  /* Full-width: the queue fills the AppFrame content area (which already pads the
+   * gutters). No max-width cap — this nav page spans the whole window. */
 }
 
 .title {

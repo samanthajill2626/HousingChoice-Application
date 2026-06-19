@@ -124,7 +124,15 @@ The existing **Edit dialog** (`ContactEditForm`) gains three sections — **Role
 editable; converting a standard contact to a custom kind = giving it a role), **Relationships**,
 **Custom fields** — built from the **same** `RelationshipsEditor` / `CustomFieldsEditor`
 components the create dialog uses. One editing surface; create and edit are symmetric.
-Changing the **base type** remains a triage action (unchanged), not part of this dialog.
+
+**Base type is editable here too** (added 2026-06-18, superseding the original "triage-only"
+note): a **Type** selector (Tenant / Landlord / Team; an off-list current value like `unknown`
+is prepended so it isn't silently changed). It drives which type-specific fields render and
+PATCHes `{ type }` when changed — so a mis-triaged contact (e.g. someone set up as a Tenant who
+is really a Landlord) can be fixed without re-triaging from the Unknown view. Switching type is
+non-destructive: the other type's fields stay on the record (dirty-tracked PATCH never blanks
+them) and reappear if you switch back. The Unknown-file triage CTA remains as the fast path for
+untriaged contacts.
 
 ## 5. Rich auto-suggest (server-maintained vocabulary)
 

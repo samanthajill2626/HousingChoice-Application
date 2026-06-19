@@ -155,10 +155,19 @@
   min-width: 0;
   overflow: auto;
   background: var(--c-bg);
-  padding: var(--sp-3);
+  /* No padding-right by default: when the pane DOESN'T scroll, the page already
+   * floats inside the AppFrame content padding, so extra pane padding on the
+   * right is just dead gutter and the cards should reach the edge. When it DOES
+   * scroll (.rightScrolled, set by useScrollOverflow) the padding comes back so
+   * the bordered cards aren't crammed against the scrollbar. */
+  padding: var(--sp-3) 0 var(--sp-3) var(--sp-3);
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+}
+
+.rightScrolled {
+  padding-right: var(--sp-3);
 }
 
 /* --- Narrow-width segmented toggle --------------------------------------- */

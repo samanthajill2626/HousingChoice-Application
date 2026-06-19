@@ -75,7 +75,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
     },
     {
       contactId: IDS.haStaffer,
-      type: 'housing_authority_staff',
+      type: 'team_member',
       status: 'active',
       phone: '+15550100003',
       firstName: 'Renee',

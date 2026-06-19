@@ -269,7 +269,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['notes'] = v;
     changedFields.push('notes');
   }
-  // Landlord/PM company name (edit form). Free text; empty string clears it.
+  // Landlord company name (edit form). Free text; empty string clears it.
   if ('company' in b) {
     const v = b['company'];
     if (typeof v !== 'string') return { error: 'company must be a string' };

@@ -11,9 +11,9 @@ import { afterEach } from 'vitest';
 configure({ asyncUtilTimeout: 5000 });
 
 // jsdom has no ResizeObserver, but components that observe element size construct
-// one on mount (useScrollOverflow, useAutoGrowTextarea). A no-op stub lets them
-// render in tests. Tests that need to DRIVE the callback override this locally
-// with vi.stubGlobal (e.g. useAutoGrowTextarea.test).
+// one on mount (useAutoGrowTextarea). A no-op stub lets them render in tests.
+// Tests that need to DRIVE the callback override this locally with vi.stubGlobal
+// (e.g. useAutoGrowTextarea.test).
 if (typeof globalThis.ResizeObserver === 'undefined') {
   globalThis.ResizeObserver = class {
     observe(): void {}

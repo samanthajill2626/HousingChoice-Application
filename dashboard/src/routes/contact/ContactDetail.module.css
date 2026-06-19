@@ -182,19 +182,20 @@
   min-width: 0;
   overflow: auto;
   background: var(--c-bg);
-  /* No padding-right by default: when the pane DOESN'T scroll, the page already
-   * floats inside the AppFrame content padding, so extra pane padding on the
-   * right is just dead gutter and the cards should reach the edge. When it DOES
-   * scroll (.rightScrolled, set by useScrollOverflow) the padding comes back so
-   * the bordered cards aren't crammed against the scrollbar. */
-  padding: var(--sp-3) 0 var(--sp-3) var(--sp-3);
+  /* Bleed the scroller into the AppFrame content's RIGHT padding (var(--sp-5)) so
+   * its native scrollbar sits out in that edge gutter instead of flush against the
+   * cards. The cards keep their position via .rightInner's padding below. */
+  margin-right: calc(-1 * var(--sp-5));
+}
+
+/* The actual card column. Its right padding is the gutter between the cards and
+ * the bled scrollbar; the left padding separates them from the comms pane (it's
+ * dropped on narrow widths where there's no comms pane beside it). */
+.rightInner {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-}
-
-.rightScrolled {
-  padding-right: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5) var(--sp-3) var(--sp-3);
 }
 
 /* --- Narrow-width segmented toggle --------------------------------------- */
@@ -270,6 +271,11 @@
      * top of the stream's own scroll (double scrollbar). min-height:0 lets the
      * pane shrink to the bounded body height so the stream scrolls internally. */
     min-height: 0;
+  }
+  /* Single column: there's no comms pane beside the file pane, so drop its left
+   * inset — the AppFrame content padding (24px) is the only gutter the cards need. */
+  .rightInner {
+    padding-left: 0;
   }
   .paneHidden {
     display: none;

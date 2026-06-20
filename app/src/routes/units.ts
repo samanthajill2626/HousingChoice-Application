@@ -273,12 +273,20 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
-    // status defaults to 'available' when the caller omits it (a new listing is
-    // available unless told otherwise); landlordId is guaranteed by validation.
+    // status is NOT a writable CRUD field (§8: listing-status changes route
+    // through PATCH /api/units/:unitId/listing-status). Create is not a
+    // transition, but the denormalized provenance must be initialized: a new
+    // listing starts in 'setup' (§6: being prepped, NOT yet shareable — only
+    // 'available' is shareable), stamped status_source 'derived' (NOT 'manual')
+    // so it stays a derivation-permitting baseline. Staff move setup → available
+    // (the publish/ready action) via PATCH /api/units/:unitId/listing-status,
+    // and a committed placement then derives it onward to under_application/
+    // finalizing/occupied (§7). landlordId is guaranteed by validation.
     const fields = validation.fields;
     const unit = await units.create({
       landlordId: fields['landlordId'] as string,
-      status: typeof fields['status'] === 'string' ? (fields['status'] as string) : 'available',
+      status: 'setup',
+      status_source: 'derived',
       ...fields,
     });
     mergeContext({});

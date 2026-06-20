@@ -36,6 +36,7 @@ import {
   type CasesRepo,
   TERMINAL_STAGES,
 } from '../repos/casesRepo.js';
+import { PLACEMENT_STAGES, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -110,9 +111,14 @@ const DEADLINE_WHY: Record<CaseDeadlineType, string> = {
   follow_up: 'Follow-up due',
 };
 
-/** Title-case a stage/value for a tag, e.g. touring → "Touring". */
-function titleCase(value: string): string {
-  return value
+/**
+ * The human label for a stage — the centralized STAGE_LABELS map (single source
+ * of display copy). Falls back to a title-cased key for any non-stage value.
+ */
+function stageLabel(stage: string): string {
+  const label = (STAGE_LABELS as Record<string, string>)[stage];
+  if (label !== undefined) return label;
+  return stage
     .split('_')
     .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
     .join(' ');
@@ -263,7 +269,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           who,
           why: DEADLINE_WHY[type],
           urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Case · ${titleCase(c.stage)}`,
+          tag: `Case · ${stageLabel(c.stage)}`,
         };
         needsYouNow.push({ item, at: Number.isNaN(at) ? now : at });
       }
@@ -275,8 +281,10 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // over the non-terminal stages (a bounded Query per stage, never a Scan) and
     // filter to those carrying `attention`. A case already placed by a deadline
     // above is left there (de-dupe) but PROMOTED to attention:true.
-    const ATTENTION_STAGES = (
-      ['interested', 'porting', 'touring', 'applied', 'rta_submitted', 'inspection', 'rent_determined', 'lease'] as const
+    // Derive the non-terminal stages from the central model (never a hardcoded
+    // copy of the ladder — it must track PLACEMENT_STAGES automatically).
+    const ATTENTION_STAGES: readonly PlacementStage[] = PLACEMENT_STAGES.filter(
+      (s) => !TERMINAL_STAGES.has(s),
     );
     for (const stage of ATTENTION_STAGES) {
       const page = await cases.listByStage(stage, { limit: GROUP_FETCH_LIMIT });
@@ -303,7 +311,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           who,
           why: reason,
           urgency: 'Escalated',
-          tag: `Case · ${titleCase(c.stage)}`,
+          tag: `Case · ${stageLabel(c.stage)}`,
           attention: true,
         };
         // Attention-only (no deadline) is treated as "now" so it sorts among the
@@ -330,7 +338,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           refId: c.caseId,
           who,
           why: 'Tour today',
-          tag: titleCase(c.stage),
+          tag: stageLabel(c.stage),
         };
         // Tours all share "today" — order them by tenant name then refId (stable).
         toursToday.push({ item, at: now });
@@ -357,7 +365,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           who,
           why: 'Follow-up due',
           urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Case · ${titleCase(c.stage)}`,
+          tag: `Case · ${stageLabel(c.stage)}`,
         };
         followUps.push({ item, at: Number.isNaN(at) ? now : at });
       }

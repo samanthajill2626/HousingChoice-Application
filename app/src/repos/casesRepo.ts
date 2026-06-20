@@ -39,42 +39,32 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import {
+  isPlacementStage,
+  PLACEMENT_STAGES,
+  TERMINAL_STAGES,
+  type InspectionOutcome,
+  type LostReason,
+  type PlacementStage,
+  type TransitionSource,
+} from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
- * The stage ladder (doc §5): one deal from tour-interest to move-in. `porting`
- * is the branch opened only when a match is MATCH_WITH_PORTABILITY_REQUIRED;
- * `moved_in` is the happy terminal and `lost` the negative one (reachable from
- * any stage). Phase 1 is MANUAL — the operator sets the stage; the route
- * allowlists these values so the byStage GSI partition key never takes an
- * arbitrary string. This is an ordered list, not a strict state machine: the
- * porting branch and an any-stage `lost` make a hard transition graph the wrong
- * model for hand-touched parity work.
+ * The placement stage ladder (STATUS-MODEL.md §4) — the ONE ordered list lives
+ * in lib/statusModel.ts (PLACEMENT_STAGES); this repo re-exports it under the
+ * legacy names so existing importers (routes/cases.ts, routes/today.ts) keep
+ * resolving. `moved_in`/`lost` are the terminals (`lost` reachable from ANY
+ * stage). Phase 1 is MANUAL — the operator/transition-service sets the stage;
+ * the route allowlists these values so the byStage GSI partition key never
+ * takes an arbitrary string. NOT a strict state machine (stages can be jumped).
+ *
+ * NAME NOTE: the entity is still `case`/`cases`/`caseId` in code/data (the
+ * `case`→`placement` rename is out of scope); `CaseStage` IS a placement stage.
  */
-export const CASE_STAGES = [
-  'interested',
-  'porting',
-  'touring',
-  'applied',
-  'rta_submitted',
-  'inspection',
-  'rent_determined',
-  'lease',
-  'moved_in',
-  'lost',
-] as const;
+export { PLACEMENT_STAGES as CASE_STAGES, TERMINAL_STAGES, isPlacementStage as isCaseStage };
 
-export type CaseStage = (typeof CASE_STAGES)[number];
-
-const CASE_STAGE_SET: ReadonlySet<string> = new Set(CASE_STAGES);
-
-/** Type guard: is `x` a known case stage (route allowlist for the byStage key)? */
-export function isCaseStage(x: unknown): x is CaseStage {
-  return typeof x === 'string' && CASE_STAGE_SET.has(x);
-}
-
-/** Terminal stages — a case here is no longer "active" on the boards. */
-export const TERMINAL_STAGES: ReadonlySet<CaseStage> = new Set<CaseStage>(['moved_in', 'lost']);
+export type CaseStage = PlacementStage;
 
 /**
  * The business-clock deadline types (doc §5: "voucher expiration, the RTA
@@ -157,8 +147,30 @@ export interface CaseItem {
   application?: Record<string, unknown>;
   /** RTA/approval data: inspection, rent_determined + tenant_portion, LIF, denial. */
   rta?: Record<string, unknown>;
-  /** Why a `lost` case was lost (e.g. 'changed_mind') — powers the placement calendar. */
-  lost_reason?: string;
+  /**
+   * Status-model (§4): the inspection's first-class pass/fail OUTCOME, written
+   * by the transition service on the inspection-complete move (OUT of
+   * `awaiting_inspection`). A flexible-doc attribute (snake_case), NOT a GSI key
+   * — no migration. The model is not a strict state machine: a `fail` does NOT
+   * force a next stage (the admin routes the card).
+   */
+  inspection_outcome?: InspectionOutcome;
+  /**
+   * Status-model (§8): when the placement ENTERED its current `stage` (ISO
+   * 8601) — drives time-in-stage + the "stuck too long" nudge. Stamped by the
+   * transition service on every stage move.
+   */
+  stage_entered_at?: string;
+  /** Status-model (§8): the source of the current `stage` write (provenance/precedence). */
+  stage_source?: TransitionSource;
+  /**
+   * Why a `lost` placement was lost (STATUS-MODEL.md §7) — STRUCTURED:
+   * `{ category, text }` (pick a category AND/OR free-write text). NOTE: the
+   * legacy `lost_reason` was a free string; it is now this object (all readers
+   * /seed/tests updated). Powers the placement calendar + surfaces on the
+   * tenant.
+   */
+  lost_reason?: LostReason;
   lease_date?: string;
   move_in_date?: string;
   /** Free-text case-level note the operator keeps on the board. */

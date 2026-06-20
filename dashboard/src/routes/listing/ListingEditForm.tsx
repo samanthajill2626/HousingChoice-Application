@@ -4,7 +4,7 @@
 // success the parent applies the returned unit in place (no refetch). The field
 // set + types match the backend allowlist (app/src/lib/unitFields.ts).
 import { useState } from 'react';
-import { updateUnit, type Address, type UnitItem, type UnitStatus } from '../../api/index.js';
+import { updateUnit, type Address, type UnitItem } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import styles from './ListingEditForm.module.css';
@@ -14,12 +14,6 @@ export interface ListingEditFormProps {
   onClose: () => void;
   onSaved: (updated: UnitItem) => void;
 }
-
-const STATUSES: { value: UnitStatus; label: string }[] = [
-  { value: 'available', label: 'Available' },
-  { value: 'placed', label: 'Placed' },
-  { value: 'inactive', label: 'Inactive' },
-];
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -31,9 +25,6 @@ function numStr(v: unknown): string {
 }
 
 export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps): React.JSX.Element {
-  const [status, setStatus] = useState<UnitStatus>(
-    (STATUSES.find((s) => s.value === unit.status)?.value ?? 'available'),
-  );
   const [jurisdiction, setJurisdiction] = useState(str(unit.jurisdiction));
   const [beds, setBeds] = useState(numStr(unit.beds));
   const [baths, setBaths] = useState(numStr(unit.baths));
@@ -100,7 +91,6 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
 
   function buildPatch(): Record<string, unknown> | null {
     const patch: Record<string, unknown> = {};
-    if (status !== unit.status) patch['status'] = status;
     if (jurisdiction !== str(unit.jurisdiction)) patch['jurisdiction'] = jurisdiction;
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
     if (accessibility !== str(unit.accessibility)) patch['accessibility'] = accessibility;
@@ -193,20 +183,6 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     >
       <form id="listing-edit-form" className={styles.form} onSubmit={(e) => void onSubmit(e)}>
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Status</span>
-            <select
-              className={styles.input}
-              value={status}
-              onChange={(e) => setStatus(e.target.value as UnitStatus)}
-            >
-              {STATUSES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </label>
           <label className={styles.field}>
             <span className={styles.label}>Housing authority</span>
             <input

@@ -158,9 +158,14 @@ Needs review → Onboarding → Searching → Placing → Placed
 
 - **`Needs review`** — the single front door. Every new contact lands here; there is
   no separate triage state and no `new` status.
-- **`Onboarding` → `Searching`** is **gated by RTA in hand.** The **`porting` flag**
-  (voucher/RTA being moved between jurisdictions = "not ready") holds the tenant out of
-  `Searching` until it clears. **Porting lives on the tenant, never as a placement
+- **`Onboarding` → `Searching`** — RTA-in-hand is a **business** prerequisite to move
+  forward, but it is **not an app-enforced gate** (2026-06-19 decision). The app does not
+  track an `rta_in_hand` boolean and does not block the transition; the **admin advances**
+  the tenant to `Searching` when RTA is in hand (we assume everyone has it unless we know
+  otherwise) and moves them to **`On hold`** when they don't. The **`porting` flag**
+  (voucher/RTA being moved between jurisdictions = "not ready") is an **informational**
+  signal on the tenant — it does **not** hard-block `Searching` (a porting tenant is
+  typically parked via `On hold`). **Porting lives on the tenant, never as a placement
   stage.**
 - **`Searching`** absorbs interest **and** touring — all the pre-placement activity.
 - **`Placing`** — one coarse "we are actively placing this tenant" state. It does
@@ -215,10 +220,21 @@ not auto-dropping tenants yet.
 
 - **Cardinality — mostly one.** Early interest can be many units, but a tenant
   converges to **one primary placement** by the Application phase.
-- **Source of truth — hybrid derive + override.** Derived (from the placement) is
-  lowest precedence; an explicit `manual` / `ai` / `automation` / `import` write pins
-  and wins (last-writer-wins). The future AI/automation layer is just more `source`
-  values driving the same transitions — no rework needed.
+- **Source of truth — derive + state-based override.** The coarse tenant/listing
+  status is normally **derived** from the committed placement (§7). Whether a derived
+  write may move an entity is gated on its **current state**, not on who last wrote it:
+  derivation freely drives the **baseline progression** states forward — listing
+  `Setup → Available → Under application → Finalizing → Occupied`, tenant
+  `Needs review → Onboarding → Searching → Placing → Placed` — *regardless of source*,
+  but it is **blocked (pinned)** when the entity currently sits in an **override / exit
+  state**: listing **`On hold`** / **`Off market`**, tenant **`On hold`** / **`Inactive`**.
+  Those override states are reached only by an explicit (`manual` / `ai` / `automation` /
+  `import`) write and stick until a human/automation explicitly moves the entity back out
+  — then derivation resumes on the baseline. Explicit writes always apply (last-writer
+  wins among them); the future AI/automation layer is just more `source` values driving
+  the same transitions. The `source` is retained for **provenance/audit** only — it no
+  longer decides whether a baseline status can be overwritten. (Rationale and the prior
+  source-precedence design this replaced: `docs/issues/status-pin-vs-terminal-derivation.md`.)
 - **Provenance.** Every status/stage transition records `{ from, to, source, reason? }`.
   The **current** value is denormalized on the entity (so "what state now?" is a cheap
   read, never a scan); **history** is an append-only per-entity log queried by entity.
@@ -251,9 +267,12 @@ This model **will** be tweaked and extended. It is designed so most changes are 
 ## 10. Status — what's settled vs. open
 
 **Settled:** the three lifecycles, all stage/phase labels above, the verb/`Awaiting`
-framing, no owner field, porting as a tenant flag, the RTA-in-hand gate, `final_rent` on
-rent acceptance, `Finalizing` anchored at Contract, `Lost` bouncing the tenant to
-`Searching`, manual tenant drop-out.
+framing, no owner field, porting as an informational tenant flag, RTA-in-hand as a
+**manual** prerequisite (admin-advanced, **not** an app-enforced gate — 2026-06-19),
+`final_rent` on rent acceptance, `inspection_outcome` (pass/fail) captured on the
+inspection-complete move, state-based derivation gating (only override/exit states pin —
+see §8), `Finalizing` anchored at Contract, `Lost` bouncing the tenant to `Searching`,
+manual tenant drop-out.
 
 **Open / future:**
 - Backend rename `case`/`cases` → `placement` (code still uses the legacy term).

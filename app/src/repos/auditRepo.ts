@@ -7,11 +7,31 @@
 // events from colliding while preserving chronological string sort (the same
 // trick as the messages `ts#msgId` SK).
 import { randomUUID } from 'node:crypto';
-import { PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, QueryCommand, type QueryCommandInput } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
+
+/** One stored audit event (the base-table item shape; payload lives in Dynamo, never logs). */
+export interface AuditEvent {
+  entityKey: string;
+  /** SK: `<ISO ts>#<random suffix>` — chronological string sort, collision-safe. */
+  ts: string;
+  event_type: string;
+  /** byActor GSI hash (hoisted from payload.actor); absent for system actions. */
+  actorId?: string;
+  payload?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Options for the per-entity history read. */
+export interface ListByEntityOpts {
+  /** Page size (Dynamo Limit). */
+  limit?: number;
+  /** Exclusive upper bound on the SK (`ts`) — page backward through history. */
+  before?: string;
+}
 
 export interface AuditRepo {
   /**
@@ -21,6 +41,14 @@ export interface AuditRepo {
    * so one partition reads back every event for an entity unambiguously.
    */
   append(entityKey: string, eventType: string, payload?: Record<string, unknown>): Promise<void>;
+  /**
+   * Read an entity's provenance trail NEWEST-FIRST — one bounded Query on the
+   * base-table PK (entityKey), descending by the `ts` SK. `before` is an
+   * exclusive SK upper bound (page backward). No table/schema change: it reads
+   * the same items `append` writes. entityKey follows the `<table>#<id>`
+   * convention (e.g. `cases#case-…`).
+   */
+  listByEntity(entityKey: string, opts?: ListByEntityOpts): Promise<AuditEvent[]>;
 }
 
 export function createAuditRepo(deps: RepoDeps = {}): AuditRepo {
@@ -55,6 +83,27 @@ export function createAuditRepo(deps: RepoDeps = {}): AuditRepo {
       );
       // IDs only — audit payloads may reference messages but never log bodies.
       log.info({ entityKey, eventType }, 'audit event appended');
+    },
+
+    async listByEntity(entityKey, opts = {}) {
+      const hasBefore = typeof opts.before === 'string' && opts.before.length > 0;
+      const input: QueryCommandInput = {
+        TableName: table,
+        KeyConditionExpression: hasBefore ? '#e = :e AND #ts < :before' : '#e = :e',
+        ExpressionAttributeNames: hasBefore
+          ? { '#e': 'entityKey', '#ts': 'ts' }
+          : { '#e': 'entityKey' },
+        ExpressionAttributeValues: hasBefore
+          ? { ':e': entityKey, ':before': opts.before }
+          : { ':e': entityKey },
+        // Newest-first: descending by the `ts` SK.
+        ScanIndexForward: false,
+        ...(opts.limit !== undefined && { Limit: opts.limit }),
+      };
+      const { Items } = await doc.send(new QueryCommand(input));
+      // IDs/count only — never the payloads.
+      log.info({ entityKey, count: Items?.length ?? 0 }, 'audit history read');
+      return (Items ?? []) as AuditEvent[];
     },
   };
 }

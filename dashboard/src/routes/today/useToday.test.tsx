@@ -51,7 +51,7 @@ const CASES: CasesPage = {
       caseId: 'k9',
       tenantId: 'Fallback Tenant',
       unitId: 'u9',
-      stage: 'touring',
+      stage: 'schedule_inspection',
       next_deadline_type: 'rta_window',
       next_deadline_at: '2999-01-01T00:00:00Z',
     },

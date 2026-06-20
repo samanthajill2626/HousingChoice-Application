@@ -64,6 +64,16 @@ export function formatAddress(address: Address | string | undefined): string {
   return parts.join(', ');
 }
 
+/** Humanize a snake_case enum value for display when no proper label map covers
+ *  it: replace underscores with spaces and capitalize the first letter, e.g.
+ *  'on_hold' → "On hold", 'some_unknown_value' → "Some unknown value". Only a
+ *  FALLBACK — prefer a real label map first. Empty stays empty. */
+export function humanize(value: string): string {
+  if (!value) return '';
+  const spaced = value.replace(/_/g, ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 /** The display name for a contact, falling back to the phone, then "Unknown". */
 export function contactDisplayName(
   firstName: string | undefined,

@@ -109,6 +109,53 @@
   flex: 0 0 auto;
 }
 
+.statusSelect select {
+  background: var(--c-header-kebab-bg);
+  color: var(--c-text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.statusSelect select:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Inline status-write error — sits below the select. The select label is a
+ * column so the message stacks under the control without disturbing the row. */
+.statusSelect {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+}
+
+.statusError {
+  color: var(--c-danger);
+  background: var(--c-surface);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--sp-2);
+  font-size: var(--fs-xs);
+  max-width: 16rem;
+  text-align: right;
+}
+
+.srLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .btn {
   background: var(--c-header-btn-bg);
   color: var(--c-text-inverse);

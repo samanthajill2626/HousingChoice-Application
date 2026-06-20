@@ -154,6 +154,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async append(entityKey, eventType, payload) {
       auditEvents.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
     },
+    async listByEntity() {
+      return [];
+    },
   };
 
   const capture = createContactCapture({

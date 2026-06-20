@@ -61,6 +61,7 @@ import {
   type CaseItem,
   type CaseTour,
 } from '../repos/casesRepo.js';
+import { STAGE_LABELS } from '../lib/statusModel.js';
 
 export interface CasesRouterDeps {
   config?: AppConfig;
@@ -77,8 +78,13 @@ export interface CasesRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
 }
 
-/** Title-case a stage value for milestone labels, e.g. touring → "Touring". */
+/**
+ * Human label for a stage value — the centralized STAGE_LABELS map (the single
+ * source of display copy). Falls back to a title-cased key for any non-stage
+ * value (e.g. a tour outcome reused by this helper).
+ */
 function stageLabel(stage: string): string {
+  if (isCaseStage(stage)) return STAGE_LABELS[stage];
   return stage
     .split('_')
     .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
@@ -182,7 +188,7 @@ function validateCaseCreate(
   }
   // stage defaults to the ladder's first rung; if supplied it must be allowlisted
   // (it's the byStage GSI partition key).
-  let stage = 'interested';
+  let stage = 'send_application';
   if (b['stage'] !== undefined) {
     if (!isCaseStage(b['stage'])) {
       return { ok: false, error: `stage must be one of the case stages` };
@@ -210,7 +216,10 @@ function validateCaseCreate(
  * `null` clears a field (REMOVE in the repo) — the only way to clear tour_date
  * (a sparse key) or the attention flag.
  */
-const STRING_FIELDS = ['placement_tag', 'lost_reason', 'lease_date', 'move_in_date', 'notes'] as const;
+// NOTE: `lost_reason` is NOT here — it is the STRUCTURED `{category, text}`
+// object written by the transition service (POST /api/cases/:id/transition on a
+// `lost` move), never a free string set through this legacy CRUD PATCH.
+const STRING_FIELDS = ['placement_tag', 'lease_date', 'move_in_date', 'notes'] as const;
 const OBJECT_FIELDS = ['application', 'rta'] as const;
 
 /** Validate PATCH /cases/:caseId. Allowlist + per-field type checks. */
@@ -224,10 +233,12 @@ function validateCaseUpdate(body: unknown): Validation<Record<string, unknown>> 
     if (key === 'next_deadline_type' || key === 'next_deadline_at') {
       return { ok: false, error: 'set the deadline via POST /cases/:caseId/deadline' };
     }
+    // `stage` is DELIBERATELY not writable here (§8: every placement-stage
+    // transition routes through the ONE transition service so stage_entered_at/
+    // stage_source/derivation/nudges are stamped). Use
+    // POST /api/cases/:caseId/transition instead.
     if (key === 'stage') {
-      if (!isCaseStage(value)) return { ok: false, error: 'stage must be one of the case stages' };
-      fields['stage'] = value;
-      continue;
+      return { ok: false, error: 'change the stage via POST /cases/:caseId/transition' };
     }
     if (key === 'tour_date') {
       if (value === null) {
@@ -413,10 +424,16 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
+    // Create is NOT a transition, but the denormalized provenance fields for the
+    // INITIAL stage must be initialized (stage_entered_at + stage_source) so a
+    // later `derived` write respects precedence (§8) and time-in-stage is
+    // computable from the start. The initial stage is operator-set ⇒ 'manual'.
     const created = await cases.create({
       tenantId: validation.fields.tenantId,
       unitId: validation.fields.unitId,
       stage: validation.fields.stage as Parameters<CasesRepo['create']>[0]['stage'],
+      stage_entered_at: new Date().toISOString(),
+      stage_source: 'manual',
       ...(validation.fields.placement_tag !== undefined && {
         placement_tag: validation.fields.placement_tag,
       }),
@@ -488,10 +505,21 @@ export function createCasesRouter(deps: CasesRouterDeps = {}): Router {
       // lost_reason on lost) else stage_changed.
       if (item.stage !== before.stage) {
         if (TERMINAL_STAGES.has(item.stage)) {
-          const reason =
-            item.stage === 'lost' && typeof item.lost_reason === 'string' && item.lost_reason.length > 0
-              ? ` · ${item.lost_reason}`
+          // lost_reason is the structured { category, text } object (§7).
+          // CATEGORY-ONLY discipline (same as the event wire): fold ONLY the
+          // category into the milestone label — never the free text, which is
+          // PII and must not be materialized into a stored label. When only free
+          // text exists (no category), use a static "reason on file" marker.
+          const lr = item.stage === 'lost' ? item.lost_reason : undefined;
+          const reasonText =
+            lr && typeof lr === 'object'
+              ? (typeof lr.category === 'string' && lr.category.length > 0
+                  ? lr.category
+                  : typeof lr.text === 'string' && lr.text.length > 0
+                    ? 'reason on file'
+                    : '')
               : '';
+          const reason = reasonText.length > 0 ? ` · ${reasonText}` : '';
           await recordCaseMilestone(
             tenantId,
             'case_closed',

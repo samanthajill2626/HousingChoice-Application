@@ -39,7 +39,7 @@ describe('today action-queue API (BE6/C7)', () => {
   };
   const seedCase = (c: Partial<CaseItem> & { caseId: string; tenantId: string }): CaseItem => {
     const item: CaseItem = {
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       unitId: 'unit-1',
       ...c,
     } as CaseItem;
@@ -95,17 +95,17 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-needs',
       tenantId: 't-1',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // 1h overdue
     });
     // tours_today: a case touring TODAY.
-    seedCase({ caseId: 'case-tour', tenantId: 't-2', stage: 'touring', tour_date: todayYmd() });
+    seedCase({ caseId: 'case-tour', tenantId: 't-2', stage: 'awaiting_inspection', tour_date: todayYmd() });
     // follow_ups: a due follow_up deadline.
     seedCase({
       caseId: 'case-follow',
       tenantId: 't-3',
-      stage: 'applied',
+      stage: 'awaiting_approval',
       next_deadline_type: 'follow_up',
       next_deadline_at: iso(-60_000),
     });
@@ -189,14 +189,14 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-future',
       tenantId: 't-future',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       next_deadline_type: 'tour_reminder',
       next_deadline_at: iso(2 * 3_600_000), // 2h out → not due yet
     });
     seedCase({
       caseId: 'case-over',
       tenantId: 't-over',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // overdue
     });
@@ -212,14 +212,14 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-1h',
       tenantId: 't-1h',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // 1h overdue
     });
     seedCase({
       caseId: 'case-3h',
       tenantId: 't-3h',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3 * 3_600_000), // 3h overdue (more urgent → earlier instant)
     });
@@ -234,7 +234,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-attn',
       tenantId: 't-esc',
-      stage: 'applied',
+      stage: 'awaiting_approval',
       attention: { reason: 'Failed send — call the landlord', at: iso(-10_000) },
     });
 
@@ -250,7 +250,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-both',
       tenantId: 't-both',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000),
       attention: { reason: 'Escalated', at: iso(-5_000) },
@@ -267,8 +267,8 @@ describe('today action-queue API (BE6/C7)', () => {
   it('tours_today uses the UTC "today" date basis (today appears, tomorrow does not)', async () => {
     seedTenant('t-today', 'To', 'Day');
     seedTenant('t-tom', 'To', 'Morrow');
-    seedCase({ caseId: 'case-today', tenantId: 't-today', stage: 'touring', tour_date: todayYmd() });
-    seedCase({ caseId: 'case-tomorrow', tenantId: 't-tom', stage: 'touring', tour_date: tomorrowYmd() });
+    seedCase({ caseId: 'case-today', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    seedCase({ caseId: 'case-tomorrow', tenantId: 't-tom', stage: 'awaiting_inspection', tour_date: tomorrowYmd() });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
     expect(tours.map((i) => i.refId)).toEqual(['case-today']);
@@ -278,8 +278,8 @@ describe('today action-queue API (BE6/C7)', () => {
     // Two tours on distinct FAR-FUTURE days so neither collides with UTC-today.
     seedTenant('t-d2', 'Day', 'Two');
     seedTenant('t-d3', 'Day', 'Three');
-    seedCase({ caseId: 'case-d2', tenantId: 't-d2', stage: 'touring', tour_date: '2030-01-02' });
-    seedCase({ caseId: 'case-d3', tenantId: 't-d3', stage: 'touring', tour_date: '2030-01-03' });
+    seedCase({ caseId: 'case-d2', tenantId: 't-d2', stage: 'awaiting_inspection', tour_date: '2030-01-02' });
+    seedCase({ caseId: 'case-d3', tenantId: 't-d3', stage: 'awaiting_inspection', tour_date: '2030-01-03' });
 
     // Without ?day=, UTC-today is used → neither far-future tour appears.
     const noneByDefault = (await getItems()).filter((i) => i.group === 'tours_today');
@@ -311,7 +311,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-dl',
       tenantId: 't-dl',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-1000),
     });
@@ -326,7 +326,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-missing-who',
       tenantId: 't-missing',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       next_deadline_type: 'tour_reminder',
       next_deadline_at: iso(-1000),
     });
@@ -340,8 +340,8 @@ describe('today action-queue API (BE6/C7)', () => {
     // Two attention-only cases (same urgency "now") + tie-break by refId.
     seedTenant('t-a', 'Aa', 'Aa');
     seedTenant('t-b', 'Bb', 'Bb');
-    seedCase({ caseId: 'case-bbb', tenantId: 't-b', stage: 'applied', attention: { reason: 'x', at: iso(-1) } });
-    seedCase({ caseId: 'case-aaa', tenantId: 't-a', stage: 'applied', attention: { reason: 'x', at: iso(-1) } });
+    seedCase({ caseId: 'case-bbb', tenantId: 't-b', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
+    seedCase({ caseId: 'case-aaa', tenantId: 't-a', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
 
     const first = (await getItems()).filter((i) => i.group === 'needs_you_now').map((i) => i.refId);
     const second = (await getItems()).filter((i) => i.group === 'needs_you_now').map((i) => i.refId);
@@ -363,7 +363,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-live-deadline',
       tenantId: 't-live',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // same overdue deadline, but active
     });
@@ -378,7 +378,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedTenant('t-movedin', 'Moved', 'In');
     seedTenant('t-touring', 'Still', 'Touring');
     seedCase({ caseId: 'case-movedin-tour', tenantId: 't-movedin', stage: 'moved_in', tour_date: todayYmd() });
-    seedCase({ caseId: 'case-touring-tour', tenantId: 't-touring', stage: 'touring', tour_date: todayYmd() });
+    seedCase({ caseId: 'case-touring-tour', tenantId: 't-touring', stage: 'awaiting_inspection', tour_date: todayYmd() });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
     const ids = tours.map((i) => i.refId);
@@ -399,7 +399,7 @@ describe('today action-queue API (BE6/C7)', () => {
     seedCase({
       caseId: 'case-live-fu',
       tenantId: 't-livefu',
-      stage: 'applied',
+      stage: 'awaiting_approval',
       next_deadline_type: 'follow_up',
       next_deadline_at: iso(-60_000),
     });
@@ -490,7 +490,7 @@ describe('today action-queue API (BE6/C7)', () => {
 
   it('the envelope is { items, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
-    seedCase({ caseId: 'case-env', tenantId: 't-env', stage: 'touring', tour_date: todayYmd() });
+    seedCase({ caseId: 'case-env', tenantId: 't-env', stage: 'awaiting_inspection', tour_date: todayYmd() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items']);

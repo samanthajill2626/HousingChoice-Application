@@ -1,0 +1,46 @@
+/* StatusBadge — a small status pill. Tokens only; one tone class per colour
+ * family. Mirrors the listing/contacts list `.badge` shape so statuses read
+ * consistently wherever the badge is used. */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.neutral {
+  /* the base look (inherits the .badge neutral surface) */
+}
+
+.positive {
+  background: var(--c-match-bg);
+  border-color: var(--c-match-border);
+  color: var(--c-match-text);
+}
+
+.progress {
+  background: var(--c-brand-soft);
+  border-color: var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+
+.muted {
+  background: var(--c-surface-2);
+  border-color: var(--c-border);
+  color: var(--c-text-subtle);
+}
+
+.warn {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}

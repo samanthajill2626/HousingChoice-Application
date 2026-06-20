@@ -42,8 +42,8 @@ test.describe('Extensible contact creation', () => {
     await dialog.getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Other' }).click();
     await dialog.getByLabel('Role').fill(role);
     await dialog
-      .getByRole('group', { name: 'Base contact type' })
-      .getByRole('button', { name: 'Tenant' })
+      .getByRole('radiogroup', { name: /Which record type/i })
+      .getByRole('radio', { name: /^Tenant/ })
       .click();
 
     // Standard fields (phone left blank — optional, avoids any seeded collision).

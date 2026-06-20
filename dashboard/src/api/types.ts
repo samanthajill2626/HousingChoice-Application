@@ -101,37 +101,226 @@ export interface ConversationsPage {
 // reads `stage`, `tour_date`, `next_deadline_type`, `next_deadline_at`,
 // `attention`, `tenantId`, `unitId`.
 
-/**
- * The stage ladder (doc §5), one deal from tour-interest to move-in. `porting`
- * is the portability branch; `moved_in` is the happy terminal and `lost` the
- * negative one (reachable from any stage). An ordered list, not a strict state
- * machine — Phase 1 is manual (the operator sets the stage).
- */
-export type CaseStage =
-  | 'interested'
-  | 'porting'
-  | 'touring'
-  | 'applied'
-  | 'rta_submitted'
-  | 'inspection'
-  | 'rent_determined'
-  | 'lease'
-  | 'moved_in'
-  | 'lost';
+// ============================================================================
+// MIRRORS app/src/lib/statusModel.ts — keep in sync.
+// The dashboard is a separate package and cannot import from app/src, so the
+// status-model constants/labels/enums are DUPLICATED here. When the source of
+// truth (app/src/lib/statusModel.ts) changes, mirror the change here too.
+// ============================================================================
 
-/** The ordered case stages, for the kanban columns + the stage <select>. */
-export const CASE_STAGES: readonly CaseStage[] = [
-  'interested',
-  'porting',
-  'touring',
-  'applied',
-  'rta_submitted',
-  'inspection',
-  'rent_determined',
-  'lease',
+// --- Placement phases (board columns; Title Case display) -------------------
+export const PLACEMENT_PHASES = [
+  'Application',
+  'RTA',
+  'Inspection',
+  'Rent Determination',
+  'Contract',
+  'Administrative',
+  'Closure',
+] as const;
+
+export type PlacementPhase = (typeof PLACEMENT_PHASES)[number];
+
+// --- Placement stages (THE ordered stage list; snake_case stored keys) ------
+// One flat ordered ladder. NOT a strict state machine — stages can be
+// skipped/jumped, and `lost` is reachable from ANY stage. The two terminals
+// (`moved_in`, `lost`) sit at the end.
+export const PLACEMENT_STAGES = [
+  // Application
+  'send_application',
+  'awaiting_receipt',
+  'awaiting_completion',
+  'awaiting_approval',
+  // RTA
+  'collect_rta',
+  'review_rta',
+  'send_rta_to_landlord',
+  'awaiting_landlord_submission',
+  'awaiting_authority_approval',
+  // Inspection
+  'schedule_inspection',
+  'awaiting_inspection',
+  // Rent Determination
+  'determine_rent',
+  'awaiting_rent_acceptance',
+  // Contract
+  'awaiting_hap_contract',
+  // Administrative
+  'complete_paperwork',
+  // Closure
+  'awaiting_move_in',
+  'moved_in', // ✓ terminal
+  'lost', // ✕ terminal (reachable from any stage)
+] as const;
+
+export type PlacementStage = (typeof PLACEMENT_STAGES)[number];
+
+/**
+ * The exported `CaseStage` name is kept as an ALIAS of `PlacementStage` so
+ * existing importers don't all churn. `case` is the code/data entity;
+ * "placement" is its domain label.
+ */
+export type CaseStage = PlacementStage;
+
+/** The ordered case stages (the 18-stage ladder), for columns + a stage picker. */
+export const CASE_STAGES: readonly CaseStage[] = PLACEMENT_STAGES;
+
+/** stage → its phase (the board column it belongs to). */
+export const STAGE_PHASE: Readonly<Record<PlacementStage, PlacementPhase>> = {
+  send_application: 'Application',
+  awaiting_receipt: 'Application',
+  awaiting_completion: 'Application',
+  awaiting_approval: 'Application',
+  collect_rta: 'RTA',
+  review_rta: 'RTA',
+  send_rta_to_landlord: 'RTA',
+  awaiting_landlord_submission: 'RTA',
+  awaiting_authority_approval: 'RTA',
+  schedule_inspection: 'Inspection',
+  awaiting_inspection: 'Inspection',
+  determine_rent: 'Rent Determination',
+  awaiting_rent_acceptance: 'Rent Determination',
+  awaiting_hap_contract: 'Contract',
+  complete_paperwork: 'Administrative',
+  awaiting_move_in: 'Closure',
+  moved_in: 'Closure',
+  lost: 'Closure',
+};
+
+/** stage → sentence-case display label. Only `RTA`/`HAP` stay all-caps. */
+export const STAGE_LABELS: Readonly<Record<PlacementStage, string>> = {
+  send_application: 'Send application',
+  awaiting_receipt: 'Awaiting receipt',
+  awaiting_completion: 'Awaiting completion',
+  awaiting_approval: 'Awaiting approval',
+  collect_rta: 'Collect RTA',
+  review_rta: 'Review RTA',
+  send_rta_to_landlord: 'Send RTA to landlord',
+  awaiting_landlord_submission: 'Awaiting landlord submission',
+  awaiting_authority_approval: 'Awaiting authority approval',
+  schedule_inspection: 'Schedule inspection',
+  awaiting_inspection: 'Awaiting inspection',
+  determine_rent: 'Determine rent',
+  awaiting_rent_acceptance: 'Awaiting rent acceptance',
+  awaiting_hap_contract: 'Awaiting HAP contract',
+  complete_paperwork: 'Complete paperwork',
+  awaiting_move_in: 'Awaiting move-in',
+  moved_in: 'Moved in',
+  lost: 'Lost',
+};
+
+/** Terminal stages — a placement here is no longer active on the boards. */
+export const TERMINAL_STAGES: ReadonlySet<PlacementStage> = new Set<PlacementStage>([
   'moved_in',
   'lost',
-];
+]);
+
+// --- Inspection outcome (the Inspection phase carries a pass/fail) ----------
+export const INSPECTION_OUTCOMES = ['pass', 'fail'] as const;
+export type InspectionOutcome = (typeof INSPECTION_OUTCOMES)[number];
+
+// --- Tenant lifecycle (coarse) ----------------------------------------------
+// The values a TENANT contact's single `status` field holds. Non-tenant
+// contacts use needs_review|active instead. `porting` is a SEPARATE boolean
+// flag on the tenant, never a status value.
+export const TENANT_STATUSES = [
+  'needs_review',
+  'onboarding',
+  'searching',
+  'placing',
+  'placed',
+  'on_hold',
+  'inactive',
+] as const;
+
+export type TenantStatus = (typeof TENANT_STATUSES)[number];
+
+export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
+  needs_review: 'Needs review',
+  onboarding: 'Onboarding',
+  searching: 'Searching',
+  placing: 'Placing',
+  placed: 'Placed',
+  on_hold: 'On hold',
+  inactive: 'Inactive',
+};
+
+// --- Listing lifecycle (coarse, mostly derived) -----------------------------
+export const LISTING_STATUSES = [
+  'setup',
+  'available',
+  'under_application',
+  'finalizing',
+  'occupied',
+  'on_hold',
+  'off_market',
+] as const;
+
+export type ListingStatus = (typeof LISTING_STATUSES)[number];
+
+export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
+  setup: 'Setup',
+  available: 'Available',
+  under_application: 'Under application',
+  finalizing: 'Finalizing',
+  occupied: 'Occupied',
+  on_hold: 'On hold',
+  off_market: 'Off market',
+};
+
+/** The ONLY publicly-shareable listing status (`available` gates the public flyer). */
+export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
+
+// --- Transition sources -----------------------------------------------------
+export const TRANSITION_SOURCES = ['derived', 'import', 'automation', 'ai', 'manual'] as const;
+export type TransitionSource = (typeof TRANSITION_SOURCES)[number];
+
+// --- Lost reason categories (pick OR free-write) ----------------------------
+export const LOST_REASON_CATEGORIES = [
+  'stalled',
+  'no_contact',
+  'landlord_lost_rent',
+  'landlord_lost_inspection',
+  'tenant_withdrew',
+  'voucher_expired',
+  'other',
+] as const;
+
+export type LostReasonCategory = (typeof LOST_REASON_CATEGORIES)[number];
+
+/**
+ * DASHBOARD-ONLY readable phrasings for the lost-reason categories (the source
+ * model carries only the enum, no display map — these are the UI's wording).
+ */
+export const LOST_REASON_CATEGORY_LABELS: Readonly<Record<LostReasonCategory, string>> = {
+  stalled: 'Stalled out',
+  no_contact: 'Lost contact',
+  landlord_lost_rent: "Landlord couldn't get rent",
+  landlord_lost_inspection: 'Failed inspection',
+  tenant_withdrew: 'Tenant withdrew',
+  voucher_expired: 'Voucher expired',
+  other: 'Other',
+};
+
+/** Structured Lost reason: a category pick AND/OR free text. */
+export interface LostReason {
+  category?: LostReasonCategory;
+  text?: string;
+}
+
+/**
+ * A human-readable label for a structured lost reason: the category's readable
+ * phrasing, the free text, or both joined ("Category — free text"). Empty when
+ * the reason carries neither. Render `lost_reason` through this (it is an object
+ * now, never a bare string).
+ */
+export function formatLostReason(lr: LostReason | undefined): string {
+  if (lr === undefined) return '';
+  const cat = lr.category !== undefined ? LOST_REASON_CATEGORY_LABELS[lr.category] : '';
+  const text = typeof lr.text === 'string' ? lr.text.trim() : '';
+  if (cat && text) return `${cat} — ${text}`;
+  return cat || text;
+}
 
 /** The business-clock deadline types (doc §5): the single most-urgent pending
  *  clock a case carries. */
@@ -168,6 +357,12 @@ export interface CaseItem {
   unitId: string;
   /** The stage ladder position (the kanban column). */
   stage: CaseStage;
+  /** When the case last entered its current stage (ISO 8601). */
+  stage_entered_at?: string;
+  /** Provenance of the last stage write. */
+  stage_source?: TransitionSource;
+  /** Inspection pass/fail recorded on the move OUT of awaiting_inspection. */
+  inspection_outcome?: InspectionOutcome;
   /** The CURRENT scheduled tour date, YYYY-MM-DD (absent when none scheduled). */
   tour_date?: string;
   /** The next-deadline composite (set/cleared together via the deadline route). */
@@ -184,8 +379,8 @@ export interface CaseItem {
   application?: Record<string, unknown>;
   /** RTA/approval data — free-form object. */
   rta?: Record<string, unknown>;
-  /** Why a `lost` case was lost. */
-  lost_reason?: string;
+  /** Why a `lost` case was lost — a structured { category?, text? } object. */
+  lost_reason?: LostReason;
   lease_date?: string;
   move_in_date?: string;
   /** Free-text case-level note the operator keeps on the board. */
@@ -195,6 +390,16 @@ export interface CaseItem {
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
+}
+
+/** One provenance/audit row from GET /api/cases/:caseId/history
+ *  (auditRepo.listByEntity). `payload` is the recorded transition detail. */
+export interface HistoryRow {
+  entityKey: string;
+  event_type: string;
+  ts: string;
+  actorId?: string;
+  payload?: Record<string, unknown>;
 }
 
 /** GET /api/cases page. */
@@ -277,7 +482,10 @@ export interface CaseUpdatedEvent {
   group_thread: string | null;
   /** True when the case carries an escalation attention flag. */
   attention: boolean;
-  lost_reason: string | null;
+  /** The lost-reason CATEGORY only — the SSE emitter sends the bounded category
+   *  string (the free `text` is withheld as potential PII; see
+   *  app/src/lib/events.ts). NOT the full LostReason object. */
+  lost_reason: LostReasonCategory | null;
   updated_at: string | null;
 }
 
@@ -336,6 +544,8 @@ export interface Contact {
   contactId: string;
   type: ContactType;
   status?: string;
+  /** Tenant portability flag (a SEPARATE boolean, never a status value). */
+  porting?: boolean;
   phone?: string;
   firstName?: string;
   lastName?: string;
@@ -409,8 +619,9 @@ export interface Address {
   zip?: string;
 }
 
-/** A unit's lifecycle status. */
-export type UnitStatus = 'available' | 'placed' | 'inactive';
+/** A unit's lifecycle status. Kept as an ALIAS of the 7-value `ListingStatus`
+ *  so existing importers don't churn. */
+export type UnitStatus = ListingStatus;
 
 /** A unit record (GET /api/units → { units }, GET /api/units/:id → { unit }).
  *  Flexible document; the landlord file reads landlordId/status/address/beds. */
@@ -418,6 +629,10 @@ export interface UnitItem {
   unitId: string;
   landlordId: string;
   status: UnitStatus;
+  /** Provenance of the last listing-status write. */
+  status_source?: TransitionSource;
+  /** The accepted contract rent, written on the move OUT of awaiting_rent_acceptance. */
+  final_rent?: number;
   jurisdiction?: string;
   /** Structured street address, or a plain string on pre-contract dev records. */
   address?: Address | string;

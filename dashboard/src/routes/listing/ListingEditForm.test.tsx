@@ -66,15 +66,6 @@ describe('ListingEditForm', () => {
     });
   });
 
-  it('changing the status PATCHes { status }', async () => {
-    const user = userEvent.setup();
-    updateUnit.mockResolvedValue({ ...UNIT, status: 'placed' });
-    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.selectOptions(screen.getByLabelText(/^Status$/i), 'placed');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(updateUnit).toHaveBeenCalledWith('u1', { status: 'placed' });
-  });
-
   it('does not call the API when nothing changed — just closes', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

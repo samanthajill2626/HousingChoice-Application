@@ -388,7 +388,7 @@ describe('GET /api/units/:id/related (BE3/C3)', () => {
       .post('/api/units')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ landlordId: 'c-ll-prop', status: 'available', propertyId: 'prop-API' });
+      .send({ landlordId: 'c-ll-prop', propertyId: 'prop-API' });
     expect(createA.status).toBe(201);
     const targetId = createA.body.unit.unitId as string;
     expect(createA.body.unit.propertyId).toBe('prop-API');
@@ -399,7 +399,7 @@ describe('GET /api/units/:id/related (BE3/C3)', () => {
       .post('/api/units')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ landlordId: 'c-ll-other', status: 'available' });
+      .send({ landlordId: 'c-ll-other' });
     expect(createB.status).toBe(201);
     const siblingId = createB.body.unit.unitId as string;
 

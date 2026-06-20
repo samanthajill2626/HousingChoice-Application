@@ -73,7 +73,9 @@ test.describe('Contact detail — header actions + edit', () => {
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${TENANT}`);
     // The seeded housingAuthority now DISPLAYS (was blank under the camel/snake split).
-    await expect(page.getByText('atlanta_housing')).toBeVisible();
+    // It appears in BOTH the header subtitle and the Details panel, so scope to the
+    // first match (intent: the value displays at all).
+    await expect(page.getByText('atlanta_housing').first()).toBeVisible();
 
     // Edit the housing authority + fill a structured address.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
@@ -87,8 +89,8 @@ test.describe('Contact detail — header actions + edit', () => {
 
     // Persisted across a reload (housingAuthority re-indexes; address is structured).
     await page.reload();
-    await expect(page.getByText('dekalb_housing')).toBeVisible();
-    await expect(page.getByText(/123 Peachtree St/)).toBeVisible();
+    await expect(page.getByText('dekalb_housing').first()).toBeVisible();
+    await expect(page.getByText(/123 Peachtree St/).first()).toBeVisible();
 
     // Cleanup — restore the seeded authority + clear the address.
     await page.getByRole('button', { name: 'Edit contact details' }).click();

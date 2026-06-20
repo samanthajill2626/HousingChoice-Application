@@ -18,13 +18,13 @@
 // computable from CaseItem here, so stuck cases are detected via
 // next_deadline_type === 'stuck_case' only (the design's "stuck 6 days" copy is
 // a server-side enrichment for the real /api/today).
-import type {
-  CaseDeadlineType,
-  CaseItem,
-  CaseStage,
-  ConversationSummary,
-  ConversationType,
-  TodayItem,
+import {
+  STAGE_LABELS,
+  type CaseDeadlineType,
+  type CaseItem,
+  type ConversationSummary,
+  type ConversationType,
+  type TodayItem,
 } from '../../api/index.js';
 
 // --- Group ordering ---------------------------------------------------------
@@ -43,19 +43,6 @@ const FOLLOW_UP_DEADLINES: ReadonlySet<CaseDeadlineType> = new Set<CaseDeadlineT
 ]);
 
 // --- Humanizers -------------------------------------------------------------
-
-const STAGE_LABELS: Record<CaseStage, string> = {
-  interested: 'Interested',
-  porting: 'Porting',
-  touring: 'Touring',
-  applied: 'Applied',
-  rta_submitted: 'RTA submitted',
-  inspection: 'Inspection',
-  rent_determined: 'Rent determined',
-  lease: 'Lease',
-  moved_in: 'Moved in',
-  lost: 'Lost',
-};
 
 const DEADLINE_WHY: Record<CaseDeadlineType, string> = {
   tour_reminder: 'Tour reminder',

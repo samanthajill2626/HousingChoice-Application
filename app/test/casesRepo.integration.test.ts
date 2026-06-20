@@ -61,7 +61,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
     const c = await cases.create({
       tenantId: 'contact-tenant-1',
       unitId: 'unit-1',
-      stage: 'interested',
+      stage: 'send_application',
       placement_tag: 'Keisha @ 123 Main',
     });
     expect(c.caseId).toMatch(/^case-/);
@@ -73,7 +73,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
       caseId: c.caseId,
       tenantId: 'contact-tenant-1',
       unitId: 'unit-1',
-      stage: 'interested',
+      stage: 'send_application',
       placement_tag: 'Keisha @ 123 Main',
     });
   });
@@ -82,16 +82,16 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
     const c = await cases.create({
       tenantId: 'contact-tenant-2',
       unitId: 'unit-2',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       application: { rung1: 'submitted' },
     });
     const before = c.updated_at;
 
     const updated = await cases.update(c.caseId, {
-      stage: 'applied',
+      stage: 'awaiting_approval',
       group_thread: 'conv-relay-9',
     });
-    expect(updated.stage).toBe('applied');
+    expect(updated.stage).toBe('awaiting_approval');
     expect(updated.group_thread).toBe('conv-relay-9');
     // Untouched fields survive the merge.
     expect(updated.application).toEqual({ rung1: 'submitted' });
@@ -115,7 +115,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
     const c = await cases.create({
       tenantId: 'contact-tenant-3',
       unitId: 'unit-3',
-      stage: 'touring',
+      stage: 'awaiting_inspection',
       tour_date: date,
     });
     // Present in byTourDate while the sparse key exists.
@@ -138,7 +138,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
     const c = await cases.create({
       tenantId: 'contact-tenant-4',
       unitId: 'unit-4',
-      stage: 'rta_submitted',
+      stage: 'awaiting_authority_approval',
     });
     // Not in byNextDeadline until a deadline is set.
     const beforeSet = await cases.listByNextDeadline(type);
@@ -166,8 +166,8 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
   it('lists via each single-key GSI and the unfiltered Scan', async () => {
     const tenantId = `contact-tenant-gsi-${randomUUID().slice(0, 6)}`;
     const unitId = `unit-gsi-${randomUUID().slice(0, 6)}`;
-    await cases.create({ tenantId, unitId, stage: 'interested' });
-    await cases.create({ tenantId, unitId, stage: 'interested' });
+    await cases.create({ tenantId, unitId, stage: 'send_application' });
+    await cases.create({ tenantId, unitId, stage: 'send_application' });
 
     const byTenant = await cases.listByTenant(tenantId);
     expect(byTenant.items).toHaveLength(2);
@@ -178,7 +178,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
     expect(byUnit.items.every((x) => x.unitId === unitId)).toBe(true);
 
     // A unique stage partition isolates this assertion from sibling tests.
-    const stage = 'inspection' as const;
+    const stage = 'schedule_inspection' as const;
     const isoTenant = `contact-tenant-stage-${randomUUID().slice(0, 6)}`;
     await cases.create({ tenantId: isoTenant, unitId: 'unit-x', stage });
     const byStage = await cases.listByStage(stage);
@@ -198,7 +198,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
   it('paginates a GSI query via LastEvaluatedKey', async () => {
     const tenantId = `contact-tenant-page-${randomUUID().slice(0, 6)}`;
     for (let i = 0; i < 3; i++) {
-      await cases.create({ tenantId, unitId: `unit-p${i}`, stage: 'interested' });
+      await cases.create({ tenantId, unitId: `unit-p${i}`, stage: 'send_application' });
     }
     const collected: string[] = [];
     let cursor: Record<string, unknown> | undefined;
@@ -226,7 +226,7 @@ describe.skipIf(!reachable)('casesRepo against DynamoDB Local (throwaway prefix)
       const c = await cases.create({
         tenantId: `contact-vt-${randomUUID().slice(0, 6)}`,
         unitId: `unit-vt-${i}`,
-        stage: 'applied',
+        stage: 'awaiting_approval',
       });
       await cases.setNextDeadline(c.caseId, { type, at: `2026-09-0${i + 1}T00:00:00.000Z` });
       ids.push(c.caseId);

@@ -119,6 +119,9 @@ function makeAuthApp(opts: AuthAppOptions = {}) {
         async append(entityKey, eventType, payload) {
           audits.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
         },
+        async listByEntity() {
+          return [];
+        },
       },
     },
   });
@@ -357,6 +360,9 @@ describe('GET /auth/callback — happy path + invite activation', () => {
         async append(entityKey: string, eventType: string, payload?: Record<string, unknown>) {
           audits.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
         },
+        async listByEntity() {
+          return [];
+        },
       },
     };
     const [a, b] = await Promise.all([
@@ -373,7 +379,7 @@ describe('GET /auth/callback — happy path + invite activation', () => {
     const { fakeUsers } = makeAuthApp(); // empty users table — nobody invited
     const deps = {
       usersRepo: fakeUsers.repo,
-      auditRepo: { async append() {} },
+      auditRepo: { async append() {}, async listByEntity() { return []; } },
     };
     await expect(resolveInvitedUser(deps, VA_IDENTITY)).rejects.toBeInstanceOf(AccessDeniedError);
     expect(fakeUsers.creates).toEqual([]);
@@ -967,6 +973,9 @@ describe('resolveInvitedUser — name forwarding from identity', () => {
         async append(entityKey: string, eventType: string, payload?: Record<string, unknown>) {
           audits.push({ entityKey, eventType, ...(payload !== undefined && { payload }) });
         },
+        async listByEntity() {
+          return [];
+        },
       },
     };
     return { fakeUsers, audits, deps };
@@ -1061,7 +1070,7 @@ describe('resolveInvitedUser — name forwarding from identity', () => {
       invitedUserItem({ userId: userId1, email: 'log-invited@housingchoice.org', role: 'va' }),
     ]);
     await resolveInvitedUser(
-      { usersRepo: fakeUsers1.repo, auditRepo: { async append() {} }, logger: log },
+      { usersRepo: fakeUsers1.repo, auditRepo: { async append() {}, async listByEntity() { return []; } }, logger: log },
       { sub: 'sub-1', email: 'log-invited@housingchoice.org', emailVerified: true, name: 'Grace Hopper' },
     );
 
@@ -1078,7 +1087,7 @@ describe('resolveInvitedUser — name forwarding from identity', () => {
       },
     ]);
     await resolveInvitedUser(
-      { usersRepo: fakeUsers2.repo, auditRepo: { async append() {} }, logger: log },
+      { usersRepo: fakeUsers2.repo, auditRepo: { async append() {}, async listByEntity() { return []; } }, logger: log },
       { sub: 'sub-2', email: 'log-active@housingchoice.org', emailVerified: true, name: 'Grace Hopper' },
     );
 

@@ -1,0 +1,61 @@
+/* MovePromptModal — finalRent / inspectionOutcome prompts. Tokens only. */
+
+.label {
+  display: block;
+  margin-bottom: var(--sp-2);
+  padding: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.rentRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.dollar {
+  font-size: var(--fs-md);
+  color: var(--c-text-muted);
+}
+
+.input {
+  flex: 1 1 auto;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-color: var(--c-border-strong);
+}
+
+.fieldset {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.error {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}

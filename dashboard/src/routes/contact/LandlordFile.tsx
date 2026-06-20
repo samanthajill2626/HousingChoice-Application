@@ -3,7 +3,14 @@
 // Preferences · Listings (their units, with status) · Cases on their units ·
 // Group texts · Media. Listings + Cases are REAL (from /api/units + /api/cases);
 // Preferences + Group texts + Media are pending until their backend slices land.
-import type { CaseItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
+import {
+  STAGE_LABELS,
+  type CaseItem,
+  type Contact,
+  type ContactPhone,
+  type UnitItem,
+} from '../../api/index.js';
+import { StatusBadge } from '../../ui/index.js';
 import {
   Card,
   CardAction,
@@ -12,7 +19,6 @@ import {
   KV,
   PendingPanel,
   Row,
-  responseClass,
 } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
@@ -33,12 +39,6 @@ export interface LandlordFileProps {
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
 }
-
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  available: { label: '● Available', cls: responseClass.available },
-  placed: { label: '● Placed', cls: responseClass.placed },
-  inactive: { label: '● Inactive', cls: responseClass.inactive },
-};
 
 /** A unit row label: "address · NBR" when both are known. */
 function unitRowLabel(unit: UnitItem): string {
@@ -117,17 +117,14 @@ export function LandlordFile({
         {myUnits.length === 0 ? (
           <EmptyRow>No listings yet.</EmptyRow>
         ) : (
-          myUnits.map((u) => {
-            const meta = STATUS_META[u.status] ?? { label: u.status, cls: responseClass.muted };
-            return (
-              <Row
-                key={u.unitId}
-                to={`/listings/${u.unitId}`}
-                label={unitRowLabel(u)}
-                right={<span className={meta.cls}>{meta.label}</span>}
-              />
-            );
-          })
+          myUnits.map((u) => (
+            <Row
+              key={u.unitId}
+              to={`/listings/${u.unitId}`}
+              label={unitRowLabel(u)}
+              right={<StatusBadge kind="listing" status={u.status} />}
+            />
+          ))
         )}
       </Card>
 
@@ -138,7 +135,14 @@ export function LandlordFile({
           myCases.map((c) => {
             const unit = unitMap.get(c.unitId);
             const addr = unit ? formatAddress(unit.address) || c.unitId : c.unitId;
-            return <Row key={c.caseId} to={`/cases/${c.caseId}`} label={addr} right={c.stage} />;
+            return (
+              <Row
+                key={c.caseId}
+                to={`/cases/${c.caseId}`}
+                label={addr}
+                right={STAGE_LABELS[c.stage] ?? c.stage}
+              />
+            );
           })
         )}
       </Card>

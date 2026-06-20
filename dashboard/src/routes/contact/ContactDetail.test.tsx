@@ -81,7 +81,7 @@ const UNKNOWN: Contact = {
 
 const CASES: CasesPage = {
   nextCursor: null,
-  cases: [{ caseId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'touring' }],
+  cases: [{ caseId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
 };
 const UNITS: UnitsPage = {
   nextCursor: null,

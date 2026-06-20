@@ -20,19 +20,21 @@ describe('case stage + deadline allowlists', () => {
   it('isCaseStage accepts every ladder stage and rejects strays', () => {
     for (const s of CASE_STAGES) expect(isCaseStage(s)).toBe(true);
     expect(isCaseStage('property')).toBe(false); // terminology guard, just in case
-    expect(isCaseStage('placed')).toBe(false); // a unit status, NOT a case stage
+    expect(isCaseStage('placed')).toBe(false); // a tenant status, NOT a case stage
+    expect(isCaseStage('touring')).toBe(false); // legacy stage gone
     expect(isCaseStage('')).toBe(false);
     expect(isCaseStage(undefined)).toBe(false);
     expect(isCaseStage(42)).toBe(false);
   });
 
-  it('the ladder runs interested → … → moved_in | lost, with porting as a branch', () => {
-    expect(CASE_STAGES[0]).toBe('interested');
-    expect(CASE_STAGES).toContain('porting');
-    expect(CASE_STAGES).toContain('rta_submitted');
+  it('the placement ladder runs send_application → … → moved_in | lost', () => {
+    // CASE_STAGES is the re-exported PLACEMENT_STAGES (status-model §4).
+    expect(CASE_STAGES[0]).toBe('send_application');
+    expect(CASE_STAGES).toContain('awaiting_authority_approval');
+    expect(CASE_STAGES).toContain('awaiting_hap_contract');
     expect(TERMINAL_STAGES.has('moved_in')).toBe(true);
     expect(TERMINAL_STAGES.has('lost')).toBe(true);
-    expect(TERMINAL_STAGES.has('interested')).toBe(false);
+    expect(TERMINAL_STAGES.has('send_application')).toBe(false);
   });
 
   it('isCaseDeadlineType gates the byNextDeadline partition key', () => {
@@ -69,7 +71,7 @@ describe('casesRepo.update — SET non-null, REMOVE null, skip undefined', () =>
   it('builds a combined SET … REMOVE … expression and always bumps updated_at', async () => {
     const { doc, last } = captureDoc();
     await repoWith(doc).update('case-1', {
-      stage: 'applied', // SET
+      stage: 'awaiting_approval', // SET
       tour_date: null, // REMOVE (clear the sparse byTourDate key)
       attention: null, // REMOVE the escalation flag
       lost_reason: undefined, // skipped entirely
@@ -87,13 +89,13 @@ describe('casesRepo.update — SET non-null, REMOVE null, skip undefined', () =>
     expect(Object.values(names)).not.toContain('lost_reason');
     // Only the SET fields (stage + updated_at) carry values; nulls do not.
     const values = cmd.input.ExpressionAttributeValues!;
-    expect(Object.values(values)).toContain('applied');
+    expect(Object.values(values)).toContain('awaiting_approval');
     expect(Object.values(values)).not.toContain(null);
   });
 
   it('a patch with no removes emits a plain SET (no dangling REMOVE)', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).update('case-1', { stage: 'touring' });
+    await repoWith(doc).update('case-1', { stage: 'awaiting_inspection' });
     expect(last()!.input.UpdateExpression).not.toContain('REMOVE');
   });
 

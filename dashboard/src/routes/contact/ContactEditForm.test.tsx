@@ -1,12 +1,17 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { Contact } from '../../api/index.js';
 
 const updateContact = vi.fn();
+const setTenantStatus = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
-  return { ...actual, updateContact: (...a: unknown[]) => updateContact(...a) };
+  return {
+    ...actual,
+    updateContact: (...a: unknown[]) => updateContact(...a),
+    setTenantStatus: (...a: unknown[]) => setTenantStatus(...a),
+  };
 });
 
 vi.mock('./useContactVocabulary.js', () => ({
@@ -191,8 +196,11 @@ describe('ContactEditForm', () => {
 
   it('changing the Type swaps the type-specific fields and PATCHes { type }', async () => {
     const user = userEvent.setup();
-    updateContact.mockResolvedValue({ ...TENANT, type: 'landlord' });
-    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // A tenant on 'needs_review' resolves to the SAME default for a landlord, so
+    // the type switch sends only { type } (no incidental status delta).
+    const stable = { ...TENANT, status: 'needs_review' };
+    updateContact.mockResolvedValue({ ...stable, type: 'landlord' });
+    render(<ContactEditForm contact={stable} onClose={vi.fn()} onSaved={vi.fn()} />);
 
     // Starts as a tenant: voucher shown, company hidden.
     expect(screen.getByLabelText(/Voucher size/i)).toBeInTheDocument();
@@ -221,6 +229,141 @@ describe('ContactEditForm', () => {
     await waitFor(() => expect(updateContact).toHaveBeenCalled());
     const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
     expect('type' in patch).toBe(false);
+  });
+
+  it('offers the 7 tenant statuses for a tenant and 2 for a non-tenant', () => {
+    // A tenant already on a valid tenant status → exactly the 7 tenant options.
+    render(
+      <ContactEditForm contact={{ ...TENANT, status: 'searching' }} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    const tenantSelect = screen.getByRole('combobox', { name: /Status/i });
+    expect(within(tenantSelect).getAllByRole('option')).toHaveLength(7);
+    expect(within(tenantSelect).getByRole('option', { name: 'Searching' })).toBeInTheDocument();
+    expect(within(tenantSelect).getByRole('option', { name: 'On hold' })).toBeInTheDocument();
+
+    // A landlord → the coarse needs_review|active lifecycle (2 options).
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const landlordSelect = screen.getAllByRole('combobox', { name: /Status/i }).at(-1)!;
+    expect(within(landlordSelect).getAllByRole('option')).toHaveLength(2);
+  });
+
+  it('shows a porting checkbox for a tenant only', () => {
+    const { unmount } = render(
+      <ContactEditForm contact={{ ...TENANT, status: 'searching' }} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    expect(screen.getByRole('checkbox', { name: /Porting/i })).toBeInTheDocument();
+    unmount();
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByRole('checkbox', { name: /Porting/i })).toBeNull();
+  });
+
+  it('saving a tenant status change calls setTenantStatus (NOT updateContact)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const updated = { ...TENANT, status: 'placing' };
+    setTenantStatus.mockResolvedValue(updated);
+    render(
+      <ContactEditForm contact={{ ...TENANT, status: 'searching' }} onClose={vi.fn()} onSaved={onSaved} />,
+    );
+    await user.selectOptions(screen.getByRole('combobox', { name: /Status/i }), 'placing');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(setTenantStatus).toHaveBeenCalledWith('k1', {
+        toStatus: 'placing',
+        source: 'manual',
+        porting: false,
+      }),
+    );
+    expect(updateContact).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(updated));
+  });
+
+  it('toggling porting round-trips through setTenantStatus (porting:true)', async () => {
+    const user = userEvent.setup();
+    setTenantStatus.mockResolvedValue({ ...TENANT, porting: true });
+    render(
+      <ContactEditForm contact={{ ...TENANT, status: 'searching' }} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    await user.click(screen.getByRole('checkbox', { name: /Porting/i }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(setTenantStatus).toHaveBeenCalledWith('k1', {
+        toStatus: 'searching',
+        source: 'manual',
+        porting: true,
+      }),
+    );
+  });
+
+  it('a non-tenant status change rides updateContact (plain PATCH)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD, status: 'active' });
+    render(
+      <ContactEditForm contact={{ ...LANDLORD, status: 'needs_review' }} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    await user.selectOptions(screen.getByRole('combobox', { name: /Status/i }), 'active');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { status: 'active' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
+  });
+
+  // --- Off-list tenant status (the adversarial-review gap) -------------------
+  // The TENANT fixture is stored on the legacy non-tenant 'active' status — an
+  // off-list value for a tenant. The form must NEVER surface or submit it.
+
+  it('a tenant stored on off-list "active" renders a VALID tenant status (not "active") and offers the 7 tenant statuses', () => {
+    // TENANT.status === 'active' (off-list for a tenant).
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const select = screen.getByRole('combobox', { name: /Status/i }) as HTMLSelectElement;
+    // Exactly the 7 tenant statuses — no off-list 'active' prepended.
+    const options = within(select).getAllByRole('option');
+    expect(options).toHaveLength(7);
+    expect(options.map((o) => (o as HTMLOptionElement).value)).not.toContain('active');
+    // The effective selection defaults to the front door (a valid tenant value).
+    expect(select.value).toBe('needs_review');
+  });
+
+  it('toggling porting on an off-list tenant saves via setTenantStatus with a VALID toStatus (NOT "active")', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const updated = { ...TENANT, status: 'needs_review', porting: true };
+    setTenantStatus.mockResolvedValue(updated);
+    // TENANT.status === 'active'; only toggle porting (don't touch the status select).
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.click(screen.getByRole('checkbox', { name: /Porting/i }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(setTenantStatus).toHaveBeenCalled());
+    const arg = setTenantStatus.mock.calls[0]?.[1] as { toStatus: string; porting: boolean };
+    expect(arg.toStatus).toBe('needs_review'); // a valid TenantStatus, NOT 'active'
+    expect(arg.porting).toBe(true);
+    expect(arg.toStatus).not.toBe('active');
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(updated));
+  });
+
+  it('changing type landlord→tenant resets the status to a valid tenant value (never submits "active" as a tenant status)', async () => {
+    const user = userEvent.setup();
+    // LANDLORD.status === 'active' (valid for a non-tenant). Switching to tenant
+    // must reset the selection to a valid tenant status.
+    setTenantStatus.mockResolvedValue({ ...LANDLORD, type: 'tenant', status: 'needs_review' });
+    updateContact.mockResolvedValue({ ...LANDLORD, type: 'tenant' });
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+
+    // The status select now offers tenant statuses and the selection is valid.
+    const select = screen.getByRole('combobox', { name: /Status/i }) as HTMLSelectElement;
+    expect(within(select).getAllByRole('option')).toHaveLength(7);
+    expect(select.value).toBe('needs_review');
+    expect((within(select).queryAllByRole('option') as HTMLOptionElement[]).map((o) => o.value)).not.toContain(
+      'active',
+    );
+
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    // A tenant status write (if any) never carries 'active'.
+    for (const call of setTenantStatus.mock.calls) {
+      expect((call[1] as { toStatus: string }).toStatus).not.toBe('active');
+    }
   });
 
   it('only changing the name does NOT include role/relationships/customFields in the patch', async () => {

@@ -90,6 +90,35 @@ npm run deploy:prod -- --list     # same for prod
 
 The currently-released tag is marked `<== DEPLOYED`.
 
+### Wipe dev data (clean slate)
+
+Empty the **deployed `dev`** data stores back to nothing — DATA only, never infra or
+secrets. Use when you want the dev environment to start fresh.
+
+```powershell
+npm run wipe:dev            # DRY RUN (default): lists exactly what WOULD be deleted, counts only
+npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
+```
+
+- **Wipes:** every item in the 14 `hc-dev-*` DynamoDB tables; every object + version +
+  delete-marker in the `hc-dev-media-<account>` S3 bucket; the `hc-dev-jobs` queue + its
+  DLQ (purge); and the log STREAMS in `/hc/dev/app` + `/hc/dev/worker`.
+- **Never touches:** SSM Parameter Store (`/hc/dev/app/*` — all Twilio/Google/VAPID/session
+  secrets **and** the Terraform-managed config), and every Terraform-managed resource
+  *definition* (the tables, bucket, queues, log groups themselves stay). It deletes
+  CONTENTS, not resources.
+- **No fixture re-seed** — the env is left EMPTY of demo data. The ONE exception: it
+  **auto-re-invites the operator** (`cameron@abt-industries.com`, admin) so login still
+  works (auth is invite-gated and the wipe empties the users table) — identical to
+  `npm run user:invite -- dev cameron@abt-industries.com admin` (idempotent; activates on
+  first Google sign-in). Invite anyone else with `npm run user:invite`.
+- **Guards:** hard-pinned to `dev` (no prod path); runs `assertHousingChoiceAccount()` first
+  (named `housingchoice` profile must resolve to the pinned account, else it refuses); only
+  the 14 known app tables are targeted (never "all `hc-dev-*`", so the TF state/lock can't be
+  caught); missing resources are skipped, not fatal. Always do a dry run first.
+- Tables keep `deletion_protection` (we clear rows, not tables), so a wipe needs no Terraform
+  change and the next deploy is unaffected. Script: `scripts/wipe-dev-data.mjs`.
+
 ### Secrets
 
 Operator-managed secrets (Twilio etc.) live in the gitignored `.env.dev` / `.env.prod` at the repo

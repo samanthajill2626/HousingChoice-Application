@@ -44,6 +44,7 @@
     "secrets:push": "node scripts/secrets.mjs push",
     "secrets:check": "node scripts/secrets.mjs check",
     "secrets:sync": "node scripts/secretsSync.mjs",
+    "wipe:dev": "node scripts/wipe-dev-data.mjs",
     "user:invite": "node scripts/userInvite.mjs",
     "user:role": "node scripts/userRole.mjs",
     "vapid:keys": "node scripts/vapidKeys.mjs",
@@ -52,7 +53,10 @@
     "drift": "node scripts/tf.mjs drift"
   },
   "devDependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
     "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-sqs": "^3.0.0",
     "@aws-sdk/client-sts": "^3.0.0",
     "@aws-sdk/credential-providers": "^3.0.0",
     "@types/node": "^24.0.0",

@@ -61,21 +61,29 @@ export function createContactVocabularyRepo(deps: RepoDeps = {}): ContactVocabul
       // Build the ADD expression dynamically from only the non-empty groups.
       // DynamoDB rejects an ADD with an empty string set — guard each group.
       const addClauses: string[] = [];
+      const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
+      const written: VocabGroup[] = [];
 
-      const groups: [VocabGroup, string][] = [
-        ['roles', ':roles'],
-        ['relationshipRoles', ':rr'],
-        ['fieldLabels', ':fl'],
+      // Attribute names are aliased via ExpressionAttributeNames because `roles`
+      // is a DynamoDB RESERVED keyword — a bare name in the UpdateExpression is a
+      // ValidationException ("Attribute name is a reserved keyword; reserved
+      // keyword: roles"). Aliasing every group name is uniformly safe.
+      const groups: [VocabGroup, string, string][] = [
+        ['roles', '#roles', ':roles'],
+        ['relationshipRoles', '#rr', ':rr'],
+        ['fieldLabels', '#fl', ':fl'],
       ];
 
-      for (const [group, placeholder] of groups) {
+      for (const [group, nameRef, valueRef] of groups) {
         const raw = tokens[group];
         if (!Array.isArray(raw) || raw.length === 0) continue;
         const deduped = [...new Set(raw.filter((t) => typeof t === 'string' && t.length > 0))];
         if (deduped.length === 0) continue;
-        addClauses.push(`${group} ${placeholder}`);
-        values[placeholder] = new Set(deduped);
+        addClauses.push(`${nameRef} ${valueRef}`);
+        names[nameRef] = group;
+        values[valueRef] = new Set(deduped);
+        written.push(group);
       }
 
       if (addClauses.length === 0) {
@@ -88,10 +96,11 @@ export function createContactVocabularyRepo(deps: RepoDeps = {}): ContactVocabul
           TableName: table,
           Key: { settingId: VOCAB_ID },
           UpdateExpression: `ADD ${addClauses.join(', ')}`,
+          ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
         }),
       );
-      log.info({ groups: addClauses.map((c) => c.split(' ')[0]) }, 'contact vocabulary updated');
+      log.info({ groups: written }, 'contact vocabulary updated');
     },
 
     async get() {

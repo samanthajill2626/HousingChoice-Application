@@ -4,10 +4,10 @@
 //   LEFT  � a small hero image � a flyer line (View flyer ? + Copy public link)
 //           � Listing details (with Accepted vouchers as a BULLETED list) � Tour
 //           & application process � Activity.
-//   RIGHT � Contacts roster � Sent to tenants � Cases on this listing � Related
+//   RIGHT � Contacts roster � Sent to tenants � Placements on this listing � Related
 //           listings � Similar listings.
 //   BOTTOM (full width) � Photos.
-// Real panels come from existing endpoints (unit, cases, units, the landlord
+// Real panels come from existing endpoints (unit, placements, units, the landlord
 // contact); the C4 "Sent to tenants" + C6 "Similar listings" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" (BE2) is
 // pending too. Nothing is fabricated.
@@ -117,7 +117,7 @@ export function ListingDetail(): React.JSX.Element {
     );
   }
 
-  const { unit, roster, casesOnUnit, related, recipients, similar } = state;
+  const { unit, roster, placementsOnUnit, related, recipients, similar } = state;
   const address = shortAddress(unit.address, unit.unitId);
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
@@ -336,16 +336,16 @@ export function ListingDetail(): React.JSX.Element {
           </Card>
 
           <Card
-            title="Cases on this listing"
-            aside={casesOnUnit.length > 0 ? String(casesOnUnit.length) : undefined}
+            title="Placements on this listing"
+            aside={placementsOnUnit.length > 0 ? String(placementsOnUnit.length) : undefined}
           >
-            {casesOnUnit.length === 0 ? (
-              <EmptyRow>No cases on this listing yet.</EmptyRow>
+            {placementsOnUnit.length === 0 ? (
+              <EmptyRow>No placements on this listing yet.</EmptyRow>
             ) : (
-              casesOnUnit.map((c) => (
+              placementsOnUnit.map((c) => (
                 <Row
-                  key={c.caseId}
-                  to={`/cases/${c.caseId}`}
+                  key={c.placementId}
+                  to={`/placements/${c.placementId}`}
                   label={c.tenantId}
                   right={STAGE_LABELS[c.stage] ?? c.stage}
                 />

@@ -64,9 +64,9 @@ const MILESTONE: TimelineItem = {
   kind: 'milestone',
   id: 'ms1',
   at: '2026-06-08T08:00:00',
-  type: 'case_opened',
-  label: 'Case opened · 1450 Joseph Blvd',
-  refType: 'case',
+  type: 'placement_opened',
+  label: 'Placement opened · 1450 Joseph Blvd',
+  refType: 'placement',
   refId: 'k1',
 };
 
@@ -118,15 +118,15 @@ describe('Timeline', () => {
 
   it('renders a milestone pin that links out via refType/refId', () => {
     renderTimeline({ items: [MILESTONE] });
-    const link = screen.getByRole('link', { name: /Case opened/ });
-    expect(link).toHaveAttribute('href', '/cases/k1');
+    const link = screen.getByRole('link', { name: /Placement opened/ });
+    expect(link).toHaveAttribute('href', '/placements/k1');
   });
 
   it('hides milestones when "Comms only" is toggled', () => {
     renderTimeline({ items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED] });
-    expect(screen.getByText(/Case opened/)).toBeInTheDocument();
+    expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Comms only/i }));
-    expect(screen.queryByText(/Case opened/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Placement opened/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Now also texting/)).not.toBeInTheDocument();
     // Messages survive the toggle.
     expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();

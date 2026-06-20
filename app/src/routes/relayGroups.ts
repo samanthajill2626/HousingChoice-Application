@@ -133,8 +133,8 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     }
 
     // Provision via the shared primitive (provision pool → create relay → assign
-    // → audit → intro → emit). A standalone (no-case) relay — the test scaffold;
-    // the product path is POST /api/cases/:caseId/relay. Typed refusals map to
+    // → audit → intro → emit). A standalone (no-placement) relay — the test scaffold;
+    // the product path is POST /api/placements/:placementId/relay. Typed refusals map to
     // 503 here with the create-reason refusal audit.
     let conversation;
     try {

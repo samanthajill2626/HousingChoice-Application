@@ -3,7 +3,7 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventStreamProvider } from './EventStreamProvider.js';
 import { useEventStream, type EventStreamHandlers } from './useEventStream.js';
-import type { CaseUpdatedEvent, ConversationUpdatedEvent } from './types.js';
+import type { PlacementUpdatedEvent, ConversationUpdatedEvent } from './types.js';
 
 // A minimal in-memory EventSource double: records the URL it was opened with,
 // lets a test dispatch named events, and tracks close(). One live instance at a
@@ -109,12 +109,12 @@ describe('EventStreamProvider + useEventStream', () => {
     expect(b).toHaveBeenCalledWith(conv);
   });
 
-  it('dispatches conversation.updated + case.updated to typed handlers', () => {
+  it('dispatches conversation.updated + placement.updated to typed handlers', () => {
     const onConversationUpdated = vi.fn();
-    const onCaseUpdated = vi.fn();
+    const onPlacementUpdated = vi.fn();
     render(
       <EventStreamProvider>
-        <Sub onConversationUpdated={onConversationUpdated} onCaseUpdated={onCaseUpdated} />
+        <Sub onConversationUpdated={onConversationUpdated} onPlacementUpdated={onPlacementUpdated} />
       </EventStreamProvider>,
     );
     const src = FakeEventSource.instances[0];
@@ -128,8 +128,8 @@ describe('EventStreamProvider + useEventStream', () => {
       assignment: null,
       participant_display_name: 'Tasha',
     };
-    const kase: CaseUpdatedEvent = {
-      caseId: 'k1',
+    const kase: PlacementUpdatedEvent = {
+      placementId: 'k1',
       tenantId: 't1',
       unitId: 'u1',
       stage: 'schedule_inspection',
@@ -143,10 +143,10 @@ describe('EventStreamProvider + useEventStream', () => {
     };
     act(() => {
       src.emit('conversation.updated', conv);
-      src.emit('case.updated', kase);
+      src.emit('placement.updated', kase);
     });
     expect(onConversationUpdated).toHaveBeenCalledWith(conv);
-    expect(onCaseUpdated).toHaveBeenCalledWith(kase);
+    expect(onPlacementUpdated).toHaveBeenCalledWith(kase);
   });
 
   it('skips a subscriber opted out with enabled:false', () => {
@@ -174,16 +174,16 @@ describe('EventStreamProvider + useEventStream', () => {
   });
 
   it('ignores malformed event JSON', () => {
-    const onCaseUpdated = vi.fn();
+    const onPlacementUpdated = vi.fn();
     render(
       <EventStreamProvider>
-        <Sub onCaseUpdated={onCaseUpdated} />
+        <Sub onPlacementUpdated={onPlacementUpdated} />
       </EventStreamProvider>,
     );
     act(() => {
-      FakeEventSource.instances[0]?.emitRaw('case.updated', '{not json');
+      FakeEventSource.instances[0]?.emitRaw('placement.updated', '{not json');
     });
-    expect(onCaseUpdated).not.toHaveBeenCalled();
+    expect(onPlacementUpdated).not.toHaveBeenCalled();
   });
 
   it('closes the source when the provider unmounts', () => {

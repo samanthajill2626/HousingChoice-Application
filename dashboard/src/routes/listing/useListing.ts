@@ -4,14 +4,14 @@
 //   - unit (GET /api/units/:id) is REQUIRED → status 'error' on failure.
 //   - landlord contact (GET /api/contacts/:landlordId) backs the roster
 //     fallback; a 404/error there is non-fatal (the roster degrades id-only).
-//   - units + cases (existing) back relatedByLandlord + casesOnUnit (REAL).
+//   - units + placements (existing) back relatedByLandlord + placementsOnUnit (REAL).
 //   - related (C3): try the live endpoint; on 404 fall back to the derived
 //     same-landlord list (still 'ready' — it's real data, just our derivation).
 //   - recipients (C4) + similar (C6): degrade to 'pending' on 404.
 import { useCallback, useEffect, useState } from 'react';
 import {
   ApiError,
-  getCases,
+  getPlacements,
   getContact,
   getUnit,
   getUnitRecipients,
@@ -24,7 +24,7 @@ import {
   type SimilarUnit,
   type UnitItem,
 } from '../../api/index.js';
-import { casesOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
+import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
 
 /** A slice that may not be live yet: 'loading' → 'pending' (404) | rows (ready). */
 export type Slice<T> =
@@ -43,7 +43,7 @@ export interface ListingState {
   /** The resolved landlord contact (for the roster fallback), or null. */
   landlord: Contact | null;
   roster: RosterRow[];
-  casesOnUnit: ReturnType<typeof casesOnUnit>;
+  placementsOnUnit: ReturnType<typeof placementsOnUnit>;
   /** Related listings: the live C3 endpoint, else the same-landlord fallback. */
   related: Slice<RelatedUnit>;
   /** Sent-to-tenants (C4) — 'pending' until BE4. */
@@ -57,7 +57,7 @@ const LOADING: Omit<ListingState, 'setUnit'> = {
   unit: null,
   landlord: null,
   roster: [],
-  casesOnUnit: [],
+  placementsOnUnit: [],
   related: { status: 'loading' },
   recipients: { status: 'loading' },
   similar: { status: 'loading' },
@@ -121,14 +121,14 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         const unit = await getUnit(unitId, signal);
         if (signal.aborted) return;
 
-        const [landlord, units, cases, relatedSlice, recipients, similar] = await Promise.all([
+        const [landlord, units, placements, relatedSlice, recipients, similar] = await Promise.all([
           loadLandlord(unit.landlordId, signal),
           // NOTE: first inbox page only (nextCursor not paged) for the
-          // same-landlord Related + cases-on-unit derivations — a transitional
+          // same-landlord Related + placements-on-unit derivations — a transitional
           // limitation matching the project-wide pattern; BE3's /related and a
-          // unit-scoped cases query supersede it.
+          // unit-scoped placements query supersede it.
           getUnits({}, signal),
-          getCases(signal),
+          getPlacements(signal),
           loadSlice((s) => getUnitRelated(unitId, s), signal),
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
           loadSlice((s) => getUnitSimilar(unitId, s), signal),
@@ -147,7 +147,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           unit,
           landlord,
           roster: listingRoster(unit, landlord),
-          casesOnUnit: casesOnUnit(cases.cases, unitId),
+          placementsOnUnit: placementsOnUnit(placements.placements, unitId),
           related,
           recipients,
           similar,

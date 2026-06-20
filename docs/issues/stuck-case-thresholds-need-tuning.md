@@ -1,6 +1,6 @@
 ---
 id: stuck-case-thresholds-need-tuning
-title: Per-stage stuck-case thresholds are engineering defaults; founder should tune them
+title: Per-stage stuck-placement thresholds are engineering defaults; founder should tune them
 type: decision
 severity: low
 status: open

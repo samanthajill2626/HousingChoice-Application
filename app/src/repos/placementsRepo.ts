@@ -1,10 +1,10 @@
-// cases repo (M1.10) — "one deal, tour-interest → move-in" (doc §5). A case is
-// the spine the boards hang off and the anchor a placement's relay group links
-// back to (group_thread ↔ conversationId).
+// placements repo (M1.10) — "one deal, tour-interest → move-in" (doc §5). A
+// placement is the spine the boards hang off and the anchor a placement's relay
+// group links back to (group_thread ↔ conversationId).
 //
-// Items stay FLEXIBLE documents — only the key (caseId) and the GSI key
+// Items stay FLEXIBLE documents — only the key (placementId) and the GSI key
 // attributes are contractual (lib/tables.ts):
-//   PK caseId
+//   PK placementId
 //   byTenant       (tenantId)
 //   byUnit         (unitId)
 //   byStage        (stage)               — the kanban column
@@ -23,7 +23,7 @@
 // (clears tour_date → drops from byTourDate), and the next_deadline pair only
 // moves through `setNextDeadline`, which writes or removes both atomically.
 //
-// PII (doc §9): NEVER log names/phones/bodies — caseId/tenantId/unitId/stage/
+// PII (doc §9): NEVER log names/phones/bodies — placementId/tenantId/unitId/stage/
 // counts only.
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
@@ -40,8 +40,6 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import {
-  isPlacementStage,
-  PLACEMENT_STAGES,
   TERMINAL_STAGES,
   type InspectionOutcome,
   type LostReason,
@@ -50,49 +48,35 @@ import {
 } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-/**
- * The placement stage ladder (STATUS-MODEL.md §4) — the ONE ordered list lives
- * in lib/statusModel.ts (PLACEMENT_STAGES); this repo re-exports it under the
- * legacy names so existing importers (routes/cases.ts, routes/today.ts) keep
- * resolving. `moved_in`/`lost` are the terminals (`lost` reachable from ANY
- * stage). Phase 1 is MANUAL — the operator/transition-service sets the stage;
- * the route allowlists these values so the byStage GSI partition key never
- * takes an arbitrary string. NOT a strict state machine (stages can be jumped).
- *
- * NAME NOTE: the entity is still `case`/`cases`/`caseId` in code/data (the
- * `case`→`placement` rename is out of scope); `CaseStage` IS a placement stage.
- */
-export { PLACEMENT_STAGES as CASE_STAGES, TERMINAL_STAGES, isPlacementStage as isCaseStage };
-
-export type CaseStage = PlacementStage;
+export { TERMINAL_STAGES };
 
 /**
  * The business-clock deadline types (doc §5: "voucher expiration, the RTA
- * 48-hour window, stuck-case alerts, tour reminders"). A case carries at most
- * ONE next_deadline — the single most-urgent pending clock — so the
+ * 48-hour window, stuck-placement alerts, tour reminders"). A placement carries
+ * at most ONE next_deadline — the single most-urgent pending clock — so the
  * byNextDeadline GSI answers "what needs attention right now?" in one query per
  * type. Bounded so the GSI partition key stays queryable. (Escalation from a
- * failed send is a separate `attention` flag, not a deadline — see CaseItem.)
+ * failed send is a separate `attention` flag, not a deadline — see PlacementItem.)
  */
-export const CASE_DEADLINE_TYPES = [
+export const PLACEMENT_DEADLINE_TYPES = [
   'tour_reminder',
   'rta_window',
   'voucher_expiration',
-  'stuck_case',
+  'stuck_placement',
   'follow_up',
 ] as const;
 
-export type CaseDeadlineType = (typeof CASE_DEADLINE_TYPES)[number];
+export type PlacementDeadlineType = (typeof PLACEMENT_DEADLINE_TYPES)[number];
 
-const CASE_DEADLINE_TYPE_SET: ReadonlySet<string> = new Set(CASE_DEADLINE_TYPES);
+const PLACEMENT_DEADLINE_TYPE_SET: ReadonlySet<string> = new Set(PLACEMENT_DEADLINE_TYPES);
 
 /** Type guard: is `x` a known deadline type (route allowlist for the GSI key)? */
-export function isCaseDeadlineType(x: unknown): x is CaseDeadlineType {
-  return typeof x === 'string' && CASE_DEADLINE_TYPE_SET.has(x);
+export function isPlacementDeadlineType(x: unknown): x is PlacementDeadlineType {
+  return typeof x === 'string' && PLACEMENT_DEADLINE_TYPE_SET.has(x);
 }
 
 /** A scheduled tour, current or historical. */
-export interface CaseTour {
+export interface PlacementTour {
   /** YYYY-MM-DD (the byTourDate key shape when this is the current tour). */
   date: string;
   /** Free-form outcome once the tour happens (e.g. 'attended', 'no_show'). */
@@ -100,41 +84,41 @@ export interface CaseTour {
   notes?: string;
 }
 
-/** Escalation flag (doc §7.1): a failed send on an ACTIVE case → a human calls. */
-export interface CaseAttention {
+/** Escalation flag (doc §7.1): a failed send on an ACTIVE placement → a human calls. */
+export interface PlacementAttention {
   reason: string;
   /** ISO 8601 — when the flag was raised. */
   at: string;
 }
 
 /** The next business-clock deadline (the byNextDeadline composite key pair). */
-export interface CaseDeadline {
-  type: CaseDeadlineType;
+export interface PlacementDeadline {
+  type: PlacementDeadlineType;
   /** ISO 8601. */
   at: string;
 }
 
 /**
  * The contractual + commonly-read attributes; items stay flexible documents
- * (only caseId + the GSI keys are contractual). tenantId/unitId/stage are
+ * (only placementId + the GSI keys are contractual). tenantId/unitId/stage are
  * required (the deal's parties + its board column); everything else is optional
- * and may be filled in over the life of the case.
+ * and may be filled in over the life of the placement.
  */
-export interface CaseItem {
-  caseId: string;
+export interface PlacementItem {
+  placementId: string;
   /** byTenant GSI: the tenant contact this deal is for. */
   tenantId: string;
   /** byUnit GSI: the unit this deal is on. */
   unitId: string;
-  /** byStage GSI: the stage ladder position (CASE_STAGES). */
-  stage: CaseStage;
+  /** byStage GSI: the stage ladder position (PLACEMENT_STAGES). */
+  stage: PlacementStage;
   /**
    * byTourDate GSI (SPARSE): the CURRENT scheduled tour date, YYYY-MM-DD. Absent
    * when no tour is scheduled (cleared via update({ tour_date: null })).
    */
   tour_date?: string;
   /** byNextDeadline GSI (SPARSE composite hash): set/cleared via setNextDeadline. */
-  next_deadline_type?: CaseDeadlineType;
+  next_deadline_type?: PlacementDeadlineType;
   /** byNextDeadline GSI (SPARSE composite range), ISO 8601: set via setNextDeadline. */
   next_deadline_at?: string;
   /** The placement's relay group conversationId (set when the relay is set up). */
@@ -142,7 +126,7 @@ export interface CaseItem {
   /** Operator label, mirrored onto the relay pool number (poolNumbers tag). */
   placement_tag?: string;
   /** Tour history (the current tour is also reflected in tour_date). */
-  tours?: CaseTour[];
+  tours?: PlacementTour[];
   /** The four-rung application ladder — free-form object (doc §5). */
   application?: Record<string, unknown>;
   /** RTA/approval data: inspection, rent_determined + tenant_portion, LIF, denial. */
@@ -173,28 +157,28 @@ export interface CaseItem {
   lost_reason?: LostReason;
   lease_date?: string;
   move_in_date?: string;
-  /** Free-text case-level note the operator keeps on the board. */
+  /** Free-text placement-level note the operator keeps on the board. */
   notes?: string;
   /** Escalation flag (doc §7.1) — surfaced on the boards; cleared via update({ attention: null }). */
-  attention?: CaseAttention;
+  attention?: PlacementAttention;
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
 }
 
 /** One page of a list query (opaque cursor handled at the route). */
-export interface CasesPage {
-  items: CaseItem[];
+export interface PlacementsPage {
+  items: PlacementItem[];
   lastEvaluatedKey?: Record<string, unknown>;
 }
 
-export interface ListCasesOpts {
+export interface ListPlacementsOpts {
   limit?: number;
   exclusiveStartKey?: Record<string, unknown>;
 }
 
 /** byNextDeadline query options: bound the range to "due by" a cutoff. */
-export interface ListByNextDeadlineOpts extends ListCasesOpts {
+export interface ListByNextDeadlineOpts extends ListPlacementsOpts {
   /** Only deadlines AT or BEFORE this ISO 8601 instant (the "due now" window). */
   beforeAt?: string;
   /** Sort by next_deadline_at; default ascending (soonest first). */
@@ -203,26 +187,26 @@ export interface ListByNextDeadlineOpts extends ListCasesOpts {
 
 /**
  * Create input: tenantId + unitId + stage are required; everything else flows
- * through as a flexible-document attribute. caseId/created_at are repo-generated
- * unless supplied (tests pass fixed ids).
+ * through as a flexible-document attribute. placementId/created_at are
+ * repo-generated unless supplied (tests pass fixed ids).
  */
-export type CreateCaseInput = Partial<CaseItem> & {
+export type CreatePlacementInput = Partial<PlacementItem> & {
   tenantId: string;
   unitId: string;
-  stage: CaseStage;
+  stage: PlacementStage;
 };
 
-export interface CasesRepo {
-  /** Create a case (generates caseId); returns the stored item. */
-  create(input: CreateCaseInput): Promise<CaseItem>;
-  getById(caseId: string): Promise<CaseItem | undefined>;
+export interface PlacementsRepo {
+  /** Create a placement (generates placementId); returns the stored item. */
+  create(input: CreatePlacementInput): Promise<PlacementItem>;
+  getById(placementId: string): Promise<PlacementItem | undefined>;
   /**
    * SET-merge update: supplied fields are written, omitted fields LEFT as stored
    * (no-overwrite, same contract as units/contacts). An explicit `null` value
    * REMOVEs that attribute — the only safe way to clear a SPARSE GSI key
    * (tour_date) or the attention flag, since a key attribute must be ABSENT, not
    * null, to drop from its index. updated_at is always bumped. Returns ALL_NEW.
-   * Throws ConditionalCheckFailedException for unknown cases.
+   * Throws ConditionalCheckFailedException for unknown placements.
    *
    * THROWS if `patch` contains next_deadline_type/next_deadline_at: the
    * byNextDeadline COMPOSITE key must move both-or-neither, so it only goes
@@ -230,46 +214,48 @@ export interface CasesRepo {
    * (a deadline clock that never fires) — so this is a hard guard, not a
    * convention. (The route still owns the stage/key allowlist, like unitsRepo.)
    */
-  update(caseId: string, patch: Record<string, unknown>): Promise<CaseItem>;
+  update(placementId: string, patch: Record<string, unknown>): Promise<PlacementItem>;
   /**
    * Set or clear the next-deadline composite key atomically (both attributes or
-   * neither). Passing `null` REMOVEs both (drops the case from byNextDeadline).
-   * Returns ALL_NEW. Throws ConditionalCheckFailedException for unknown cases.
+   * neither). Passing `null` REMOVEs both (drops the placement from
+   * byNextDeadline). Returns ALL_NEW. Throws ConditionalCheckFailedException for
+   * unknown placements.
    */
-  setNextDeadline(caseId: string, deadline: CaseDeadline | null): Promise<CaseItem>;
-  /** All cases for a tenant via the byTenant GSI. */
-  listByTenant(tenantId: string, opts?: ListCasesOpts): Promise<CasesPage>;
-  /** All cases on a unit via the byUnit GSI. */
-  listByUnit(unitId: string, opts?: ListCasesOpts): Promise<CasesPage>;
-  /** All cases in a stage via the byStage GSI (one kanban column / RTA board). */
-  listByStage(stage: CaseStage, opts?: ListCasesOpts): Promise<CasesPage>;
-  /** All cases whose CURRENT tour is on a given date via the byTourDate GSI. */
-  listByTourDate(tourDate: string, opts?: ListCasesOpts): Promise<CasesPage>;
+  setNextDeadline(placementId: string, deadline: PlacementDeadline | null): Promise<PlacementItem>;
+  /** All placements for a tenant via the byTenant GSI. */
+  listByTenant(tenantId: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
+  /** All placements on a unit via the byUnit GSI. */
+  listByUnit(unitId: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
+  /** All placements in a stage via the byStage GSI (one kanban column / RTA board). */
+  listByStage(stage: PlacementStage, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
+  /** All placements whose CURRENT tour is on a given date via the byTourDate GSI. */
+  listByTourDate(tourDate: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
   /**
-   * Cases with a pending deadline of a given type, soonest-first, via the
+   * Placements with a pending deadline of a given type, soonest-first, via the
    * byNextDeadline GSI — "what needs attention right now?" (doc §5). Optionally
    * bounded to those due AT or BEFORE a cutoff (opts.beforeAt).
    */
   listByNextDeadline(
-    type: CaseDeadlineType,
+    type: PlacementDeadlineType,
     opts?: ListByNextDeadlineOpts,
-  ): Promise<CasesPage>;
+  ): Promise<PlacementsPage>;
   /**
-   * Unfiltered paginated Scan — the board's "all cases" fallback. ACCEPTED at
-   * this scale (doc §5.1: the working set is hundreds of small items). Targeted
-   * views use the GSIs (a Query) instead; this Scan is the no-filter fallback.
+   * Unfiltered paginated Scan — the board's "all placements" fallback. ACCEPTED
+   * at this scale (doc §5.1: the working set is hundreds of small items).
+   * Targeted views use the GSIs (a Query) instead; this Scan is the no-filter
+   * fallback.
    */
-  list(opts?: ListCasesOpts): Promise<CasesPage>;
+  list(opts?: ListPlacementsOpts): Promise<PlacementsPage>;
 }
 
-export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
+export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
   const doc = deps.doc ?? getDocumentClient();
-  const table = tableName('cases', deps.env);
+  const table = tableName('placements', deps.env);
   const log = deps.logger ?? defaultLogger;
 
-  async function getById(caseId: string): Promise<CaseItem | undefined> {
-    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { caseId } }));
-    return Item as CaseItem | undefined;
+  async function getById(placementId: string): Promise<PlacementItem | undefined> {
+    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { placementId } }));
+    return Item as PlacementItem | undefined;
   }
 
   /** Shared single-key GSI query (one partition, optional pagination). */
@@ -277,8 +263,8 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
     indexName: string,
     keyName: string,
     keyValue: string,
-    opts: ListCasesOpts,
-  ): Promise<CasesPage> {
+    opts: ListPlacementsOpts,
+  ): Promise<PlacementsPage> {
     const input: QueryCommandInput = {
       TableName: table,
       IndexName: indexName,
@@ -292,7 +278,7 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
     };
     const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
     return {
-      items: (Items ?? []) as CaseItem[],
+      items: (Items ?? []) as PlacementItem[],
       ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
     };
   }
@@ -301,9 +287,9 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
     async create(input) {
       const now = new Date().toISOString();
       const createdAt = typeof input.created_at === 'string' ? input.created_at : now;
-      const item: CaseItem = {
+      const item: PlacementItem = {
         ...input,
-        caseId: input.caseId ?? `case-${randomUUID()}`,
+        placementId: input.placementId ?? `placement-${randomUUID()}`,
         created_at: createdAt,
         updated_at: now,
       };
@@ -311,20 +297,20 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
         new PutCommand({
           TableName: table,
           Item: item,
-          // Defensive: never silently overwrite an existing case on create.
-          ConditionExpression: 'attribute_not_exists(caseId)',
+          // Defensive: never silently overwrite an existing placement on create.
+          ConditionExpression: 'attribute_not_exists(placementId)',
         }),
       );
       log.info(
-        { caseId: item.caseId, tenantId: item.tenantId, unitId: item.unitId, stage: item.stage },
-        'case created',
+        { placementId: item.placementId, tenantId: item.tenantId, unitId: item.unitId, stage: item.stage },
+        'placement created',
       );
       return item;
     },
 
     getById,
 
-    async update(caseId, patch) {
+    async update(placementId, patch) {
       // SET each supplied non-null field; REMOVE each explicit-null field (the
       // only way to clear a sparse GSI key / the attention flag — a key
       // attribute must be ABSENT, not null, to drop from its index). Names are
@@ -341,7 +327,7 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
           // Both-or-neither composite key — never a half-set (silently
           // unqueryable) index row. Fail fast; callers use setNextDeadline.
           throw new Error(
-            'casesRepo.update: set next_deadline via setNextDeadline (composite key must move both-or-neither)',
+            'placementsRepo.update: set next_deadline via setNextDeadline (composite key must move both-or-neither)',
           );
         }
         const nameKey = `#k${i}`;
@@ -365,19 +351,19 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
-          Key: { caseId },
+          Key: { placementId },
           UpdateExpression: clauses.join(' '),
-          ConditionExpression: 'attribute_exists(caseId)',
+          ConditionExpression: 'attribute_exists(placementId)',
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: 'ALL_NEW',
         }),
       );
-      log.info({ caseId, setFields: sets.length - 1, removedFields: removes.length }, 'case updated');
-      return Attributes as CaseItem;
+      log.info({ placementId, setFields: sets.length - 1, removedFields: removes.length }, 'placement updated');
+      return Attributes as PlacementItem;
     },
 
-    async setNextDeadline(caseId, deadline) {
+    async setNextDeadline(placementId, deadline) {
       // Both-or-neither: SET both composite-key attributes together, or REMOVE
       // both — never a half-set key (which would be an unqueryable index row).
       const names: Record<string, string> = {
@@ -397,19 +383,19 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
-          Key: { caseId },
+          Key: { placementId },
           UpdateExpression: updateExpression,
-          ConditionExpression: 'attribute_exists(caseId)',
+          ConditionExpression: 'attribute_exists(placementId)',
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: 'ALL_NEW',
         }),
       );
       log.info(
-        { caseId, deadlineType: deadline?.type ?? null },
-        deadline === null ? 'case next-deadline cleared' : 'case next-deadline set',
+        { placementId, deadlineType: deadline?.type ?? null },
+        deadline === null ? 'placement next-deadline cleared' : 'placement next-deadline set',
       );
-      return Attributes as CaseItem;
+      return Attributes as PlacementItem;
     },
 
     async listByTenant(tenantId, opts = {}) {
@@ -451,7 +437,7 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
       };
       const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
       return {
-        items: (Items ?? []) as CaseItem[],
+        items: (Items ?? []) as PlacementItem[],
         ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
       };
     },
@@ -468,7 +454,7 @@ export function createCasesRepo(deps: RepoDeps = {}): CasesRepo {
       };
       const { Items, LastEvaluatedKey } = await doc.send(new ScanCommand(input));
       return {
-        items: (Items ?? []) as CaseItem[],
+        items: (Items ?? []) as PlacementItem[],
         ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
       };
     },

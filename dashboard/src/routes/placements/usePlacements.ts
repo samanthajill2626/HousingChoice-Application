@@ -1,24 +1,24 @@
-// useCases — the placement board's data hook. Abort-safe fetch of the cases
-// board (GET /api/cases) plus the contacts + units it needs to label cards
+// usePlacements — the placement board's data hook. Abort-safe fetch of the placements
+// board (GET /api/placements) plus the contacts + units it needs to label cards
 // (tenant NAME / listing ADDRESS / porting chip). Mirrors useListings' single
 // abort-safe useState/useEffect pattern (NO react-query). Exposes:
-//   - applyCase(case): replace/insert a case in place after a transition returns
-//     the updated CaseItem — the board re-positions it with NO refetch.
-//   - an SSE `case.updated` subscription that live-repositions a card (it carries
-//     the new stage; we patch the in-memory case's stage/attention/tour/deadline).
+//   - applyPlacement(placement): replace/insert a placement in place after a transition returns
+//     the updated PlacementItem — the board re-positions it with NO refetch.
+//   - an SSE `placement.updated` subscription that live-repositions a card (it carries
+//     the new stage; we patch the in-memory placement's stage/attention/tour/deadline).
 //
 // Name/address resolution: contacts + units back small lookup maps so a card can
 // show the tenant's name (home) and the listing's address. A contact/unit we
 // don't have falls back to the id (honest — never fabricated).
 import { useCallback, useEffect, useState } from 'react';
 import {
-  getCases,
+  getPlacements,
   getContacts,
   getUnits,
   useEventStream,
-  type CaseAttention,
-  type CaseItem,
-  type CaseUpdatedEvent,
+  type PlacementAttention,
+  type PlacementItem,
+  type PlacementUpdatedEvent,
   type Contact,
   type PlacementStage,
   type UnitItem,
@@ -29,36 +29,36 @@ import {
  *  far above any realistic page count. */
 const MAX_PAGES = 50;
 
-export type CasesStatus = 'loading' | 'ready' | 'error';
+export type PlacementsStatus = 'loading' | 'ready' | 'error';
 
-export interface CasesState {
-  status: CasesStatus;
-  cases: CaseItem[];
+export interface PlacementsState {
+  status: PlacementsStatus;
+  placements: PlacementItem[];
   /** contactId → contact (tenant names + porting flag). */
   contacts: Map<string, Contact>;
   /** unitId → unit (listing addresses). */
   units: Map<string, UnitItem>;
-  /** Replace/insert a case in place after a transition (no refetch). */
-  applyCase: (next: CaseItem) => void;
+  /** Replace/insert a placement in place after a transition (no refetch). */
+  applyPlacement: (next: PlacementItem) => void;
 }
 
-/** Load ALL pages of the cases board by following nextCursor. A placement board
+/** Load ALL pages of the placements board by following nextCursor. A placement board
  *  must show the WHOLE pipeline, so we page until the server stops handing back a
  *  cursor (capped by MAX_PAGES so a never-null cursor can't loop unbounded — a
  *  hit is logged with counts only, never PII). Re-throws AbortError so the
  *  effect's catch can bail cleanly. */
-async function loadAllCases(signal: AbortSignal): Promise<CaseItem[]> {
-  const all: CaseItem[] = [];
+async function loadAllPlacements(signal: AbortSignal): Promise<PlacementItem[]> {
+  const all: PlacementItem[] = [];
   let cursor: string | undefined;
   let pages = 0;
   do {
-    const page = await getCases(signal, cursor);
-    all.push(...page.cases);
+    const page = await getPlacements(signal, cursor);
+    all.push(...page.placements);
     cursor = page.nextCursor ?? undefined;
     pages += 1;
     if (pages >= MAX_PAGES && cursor !== undefined) {
-      // Counts only — never log case/tenant ids or any PII.
-      console.warn(`useCases: getCases hit the ${MAX_PAGES}-page cap (${all.length} cases loaded); truncating.`);
+      // Counts only — never log placement/tenant ids or any PII.
+      console.warn(`usePlacements: getPlacements hit the ${MAX_PAGES}-page cap (${all.length} placements loaded); truncating.`);
       break;
     }
   } while (cursor !== undefined);
@@ -80,7 +80,7 @@ async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
       cursor = page.nextCursor ?? undefined;
       pages += 1;
       if (pages >= MAX_PAGES && cursor !== undefined) {
-        console.warn(`useCases: getContacts hit the ${MAX_PAGES}-page cap (${all.length} contacts loaded); truncating.`);
+        console.warn(`usePlacements: getContacts hit the ${MAX_PAGES}-page cap (${all.length} contacts loaded); truncating.`);
         break;
       }
     } while (cursor !== undefined);
@@ -105,7 +105,7 @@ async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {
       cursor = page.nextCursor ?? undefined;
       pages += 1;
       if (pages >= MAX_PAGES && cursor !== undefined) {
-        console.warn(`useCases: getUnits hit the ${MAX_PAGES}-page cap (${all.length} units loaded); truncating.`);
+        console.warn(`usePlacements: getUnits hit the ${MAX_PAGES}-page cap (${all.length} units loaded); truncating.`);
         break;
       }
     } while (cursor !== undefined);
@@ -117,70 +117,70 @@ async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {
 }
 
 interface CommittedState {
-  status: CasesStatus;
-  cases: CaseItem[];
+  status: PlacementsStatus;
+  placements: PlacementItem[];
   contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
 }
 
 const EMPTY: CommittedState = {
   status: 'loading',
-  cases: [],
+  placements: [],
   contacts: new Map(),
   units: new Map(),
 };
 
-export function useCases(): CasesState {
+export function usePlacements(): PlacementsState {
   const [state, setState] = useState<CommittedState>(EMPTY);
 
-  // Replace a case by id in place (or insert if new), preserving the rest of the
+  // Replace a placement by id in place (or insert if new), preserving the rest of the
   // committed state. Used by a transition success AND the SSE handler.
-  const applyCase = useCallback((next: CaseItem) => {
+  const applyPlacement = useCallback((next: PlacementItem) => {
     setState((prev) => {
-      const idx = prev.cases.findIndex((c) => c.caseId === next.caseId);
-      const cases =
+      const idx = prev.placements.findIndex((c) => c.placementId === next.placementId);
+      const placements =
         idx === -1
-          ? [...prev.cases, next]
-          : prev.cases.map((c) => (c.caseId === next.caseId ? next : c));
-      return { ...prev, cases };
+          ? [...prev.placements, next]
+          : prev.placements.map((c) => (c.placementId === next.placementId ? next : c));
+      return { ...prev, placements };
     });
   }, []);
 
   // Patch only the board-relevant projection an SSE event carries onto the
-  // in-memory case (it is NOT a full CaseItem — keep the rest of the record). A
-  // case we don't have yet is ignored (the next board load will include it).
+  // in-memory placement (it is NOT a full PlacementItem — keep the rest of the record). A
+  // placement we don't have yet is ignored (the next board load will include it).
   //
   // Field reconciliation:
-  //  - attention: the EVENT carries a plain BOOLEAN, but the CaseItem (and the
-  //    card, which reads `case_.attention` for truthiness) carries a CaseAttention
-  //    OBJECT. We map true → a minimal CaseAttention so the dot lights up, and
+  //  - attention: the EVENT carries a plain BOOLEAN, but the PlacementItem (and the
+  //    card, which reads `placement.attention` for truthiness) carries a PlacementAttention
+  //    OBJECT. We map true → a minimal PlacementAttention so the dot lights up, and
   //    false → undefined so it clears. We never receive the object's reason over
   //    SSE (it'd be PII-adjacent), and the next full board load refreshes detail.
   //  - tour_date / next_deadline_*: the event sends `null` to CLEAR a value. We
   //    distinguish null (clear → set the field to undefined) from a real string
   //    (set it). Skipping null (the old bug) left a cleared tour/deadline showing.
-  const applyEvent = useCallback((ev: CaseUpdatedEvent) => {
+  const applyEvent = useCallback((ev: PlacementUpdatedEvent) => {
     setState((prev) => {
-      const idx = prev.cases.findIndex((c) => c.caseId === ev.caseId);
+      const idx = prev.placements.findIndex((c) => c.placementId === ev.placementId);
       if (idx === -1) return prev;
-      const attention: CaseAttention | undefined = ev.attention
+      const attention: PlacementAttention | undefined = ev.attention
         ? { reason: 'flagged', at: ev.updated_at ?? new Date().toISOString() }
         : undefined;
-      const cases = prev.cases.map((c) =>
-        c.caseId === ev.caseId
+      const placements = prev.placements.map((c) =>
+        c.placementId === ev.placementId
           ? {
               ...c,
               stage: ev.stage as PlacementStage,
               // null → clear (undefined); string → set.
               tour_date: ev.tour_date ?? undefined,
-              next_deadline_type: (ev.next_deadline_type ?? undefined) as CaseItem['next_deadline_type'],
+              next_deadline_type: (ev.next_deadline_type ?? undefined) as PlacementItem['next_deadline_type'],
               next_deadline_at: ev.next_deadline_at ?? undefined,
-              // boolean → CaseAttention object | undefined (drives the card's dot).
+              // boolean → PlacementAttention object | undefined (drives the card's dot).
               attention,
             }
           : c,
       );
-      return { ...prev, cases };
+      return { ...prev, placements };
     });
   }, []);
 
@@ -190,15 +190,15 @@ export function useCases(): CasesState {
 
     (async () => {
       try {
-        const [cases, contacts, units] = await Promise.all([
-          loadAllCases(signal),
+        const [placements, contacts, units] = await Promise.all([
+          loadAllPlacements(signal),
           loadContacts(signal),
           loadUnits(signal),
         ]);
         if (signal.aborted) return;
         setState({
           status: 'ready',
-          cases,
+          placements,
           contacts: new Map(contacts.map((c) => [c.contactId, c])),
           units: new Map(units.map((u) => [u.unitId, u])),
         });
@@ -211,10 +211,10 @@ export function useCases(): CasesState {
     return () => controller.abort();
   }, []);
 
-  // Live re-positioning: a case.updated SSE event patches the matching card's
+  // Live re-positioning: a placement.updated SSE event patches the matching card's
   // stage (and tour/deadline) so it moves columns without a refetch. applyEvent
   // is a stable useCallback; useEventStream keeps the handler ref-stable itself.
-  useEventStream({ onCaseUpdated: applyEvent });
+  useEventStream({ onPlacementUpdated: applyEvent });
 
-  return { ...state, applyCase };
+  return { ...state, applyPlacement };
 }

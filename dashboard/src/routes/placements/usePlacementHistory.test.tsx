@@ -1,9 +1,9 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CaseUpdatedEvent, EventStreamHandlers, HistoryRow } from '../../api/index.js';
+import type { PlacementUpdatedEvent, EventStreamHandlers, HistoryRow } from '../../api/index.js';
 
 const getPlacementHistory = vi.fn();
-// Capture the handlers useCaseHistory registers so a test can fire case.updated.
+// Capture the handlers usePlacementHistory registers so a test can fire placement.updated.
 let streamHandlers: EventStreamHandlers | null = null;
 
 vi.mock('../../api/index.js', async () => {
@@ -17,14 +17,14 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useCaseHistory } from './useCaseHistory.js';
+import { usePlacementHistory } from './usePlacementHistory.js';
 
 function row(over: Partial<HistoryRow>): HistoryRow {
-  return { entityKey: 'case#c1', event_type: 'stage_changed', ts: '2026-06-18T13:00:00Z', ...over };
+  return { entityKey: 'placement#c1', event_type: 'stage_changed', ts: '2026-06-18T13:00:00Z', ...over };
 }
 
-function Probe({ caseId }: { caseId: string }): React.JSX.Element {
-  const s = useCaseHistory(caseId);
+function Probe({ placementId }: { placementId: string }): React.JSX.Element {
+  const s = usePlacementHistory(placementId);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
@@ -34,8 +34,8 @@ function Probe({ caseId }: { caseId: string }): React.JSX.Element {
   );
 }
 
-const evt = (caseId: string): CaseUpdatedEvent => ({
-  caseId,
+const evt = (placementId: string): PlacementUpdatedEvent => ({
+  placementId,
   tenantId: 't1',
   unitId: 'u1',
   stage: 'schedule_inspection',
@@ -54,18 +54,18 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('useCaseHistory', () => {
+describe('usePlacementHistory', () => {
   it('loads the initial newest page', async () => {
     getPlacementHistory.mockResolvedValue([row({ event_type: 'created' })]);
-    render(<Probe caseId="c1" />);
+    render(<Probe placementId="c1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(getPlacementHistory).toHaveBeenCalledTimes(1);
   });
 
-  it('refetches the newest page when a case.updated event for this case arrives', async () => {
+  it('refetches the newest page when a placement.updated event for this placement arrives', async () => {
     getPlacementHistory.mockResolvedValueOnce([row({ event_type: 'created' })]);
-    render(<Probe caseId="c1" />);
+    render(<Probe placementId="c1" />);
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
 
     // A transition lands → the SSE event fires → the panel refetches, now showing
@@ -74,20 +74,20 @@ describe('useCaseHistory', () => {
       row({ event_type: 'stage_changed' }),
       row({ event_type: 'created' }),
     ]);
-    act(() => streamHandlers?.onCaseUpdated?.(evt('c1')));
+    act(() => streamHandlers?.onPlacementUpdated?.(evt('c1')));
 
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('2'));
     expect(screen.getByTestId('types')).toHaveTextContent('stage_changed,created');
     expect(getPlacementHistory).toHaveBeenCalledTimes(2);
   });
 
-  it('ignores a case.updated event for a different case', async () => {
+  it('ignores a placement.updated event for a different placement', async () => {
     getPlacementHistory.mockResolvedValue([row({ event_type: 'created' })]);
-    render(<Probe caseId="c1" />);
+    render(<Probe placementId="c1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
 
-    act(() => streamHandlers?.onCaseUpdated?.(evt('other-case')));
-    // No refetch for an unrelated case.
+    act(() => streamHandlers?.onPlacementUpdated?.(evt('other-placement')));
+    // No refetch for an unrelated placement.
     expect(getPlacementHistory).toHaveBeenCalledTimes(1);
   });
 });

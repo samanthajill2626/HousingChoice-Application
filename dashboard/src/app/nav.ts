@@ -10,7 +10,7 @@
 /** Icon id → resolved to a component via `ui/icons.tsx` NAV_ICONS. */
 export type NavIconName =
   | 'today'
-  | 'cases'
+  | 'placements'
   | 'contacts'
   | 'listings'
   | 'inbox'
@@ -52,7 +52,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Workspace',
     items: [
       { to: '/', label: 'Today', end: true, icon: 'today' },
-      { to: '/cases', label: 'Cases', icon: 'cases' },
+      { to: '/placements', label: 'Placements', icon: 'placements' },
       {
         to: '/contacts',
         label: 'Contacts',

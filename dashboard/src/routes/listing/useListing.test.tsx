@@ -1,11 +1,11 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { CasesPage, Contact, UnitItem, UnitsPage } from '../../api/index.js';
+import type { PlacementsPage, Contact, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getUnits = vi.fn();
-const getCases = vi.fn();
+const getPlacements = vi.fn();
 const getContact = vi.fn();
 const getUnitRelated = vi.fn();
 const getUnitRecipients = vi.fn();
@@ -17,7 +17,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getUnit: (...a: unknown[]) => getUnit(...a),
     getUnits: (...a: unknown[]) => getUnits(...a),
-    getCases: (...a: unknown[]) => getCases(...a),
+    getPlacements: (...a: unknown[]) => getPlacements(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     getUnitRelated: (...a: unknown[]) => getUnitRelated(...a),
     getUnitRecipients: (...a: unknown[]) => getUnitRecipients(...a),
@@ -33,7 +33,7 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
     <div>
       <span data-testid="status">{s.status}</span>
       <span data-testid="roster">{s.roster.length}</span>
-      <span data-testid="cases">{s.casesOnUnit.length}</span>
+      <span data-testid="placements">{s.placementsOnUnit.length}</span>
       <span data-testid="related-status">{s.related.status}</span>
       <span data-testid="related-rows">
         {s.related.status === 'ready' ? s.related.rows.length : -1}
@@ -49,16 +49,16 @@ const UNITS: UnitsPage = {
   nextCursor: null,
   units: [UNIT, { unitId: 'u2', landlordId: 'll1', status: 'occupied' }],
 };
-const CASES: CasesPage = {
+const CASES: PlacementsPage = {
   nextCursor: null,
-  cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
+  placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
 };
 const LANDLORD: Contact = { contactId: 'll1', type: 'landlord', firstName: 'James' } as Contact;
 
 beforeEach(() => {
   getUnit.mockReset();
   getUnits.mockReset();
-  getCases.mockReset();
+  getPlacements.mockReset();
   getContact.mockReset();
   getUnitRelated.mockReset();
   getUnitRecipients.mockReset();
@@ -70,7 +70,7 @@ describe('useListing', () => {
   it('assembles real panels and degrades C4/C6 to pending; related falls back', async () => {
     getUnit.mockResolvedValue(UNIT);
     getUnits.mockResolvedValue(UNITS);
-    getCases.mockResolvedValue(CASES);
+    getPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -81,7 +81,7 @@ describe('useListing', () => {
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     // single landlord fallback row
     expect(screen.getByTestId('roster').textContent).toBe('1');
-    expect(screen.getByTestId('cases').textContent).toBe('1');
+    expect(screen.getByTestId('placements').textContent).toBe('1');
     // related fell back to same-landlord (u2), ready not pending
     expect(screen.getByTestId('related-status').textContent).toBe('ready');
     expect(screen.getByTestId('related-rows').textContent).toBe('1');
@@ -93,7 +93,7 @@ describe('useListing', () => {
   it('uses the live /related endpoint when it answers', async () => {
     getUnit.mockResolvedValue(UNIT);
     getUnits.mockResolvedValue(UNITS);
-    getCases.mockResolvedValue(CASES);
+    getPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockResolvedValue([
       { unitId: 'u9', status: 'available', relation: 'same_property', label: 'Duplex' },
@@ -113,7 +113,7 @@ describe('useListing', () => {
   it('errors when the unit itself fails to load', async () => {
     getUnit.mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getUnits.mockResolvedValue(UNITS);
-    getCases.mockResolvedValue(CASES);
+    getPlacements.mockResolvedValue(CASES);
     getContact.mockResolvedValue(LANDLORD);
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
@@ -127,7 +127,7 @@ describe('useListing', () => {
   it('tolerates a 404 on the landlord contact (roster still falls back id-only)', async () => {
     getUnit.mockResolvedValue(UNIT);
     getUnits.mockResolvedValue(UNITS);
-    getCases.mockResolvedValue(CASES);
+    getPlacements.mockResolvedValue(CASES);
     getContact.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));

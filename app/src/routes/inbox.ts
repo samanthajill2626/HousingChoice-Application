@@ -1,8 +1,8 @@
 // C8 / "BE7" — Inbox feed. A READ-ONLY aggregation over the conversations,
-// contacts, messages, cases, and users repos (no new table) that assembles the
-// dashboard's secondary comms lens: ONE row per contact (or one untriaged
+// contacts, messages, placements, and users repos (no new table) that assembles
+// the dashboard's secondary comms lens: ONE row per contact (or one untriaged
 // unknown number), newest-activity-first, with cross-number unread, the latest
-// item's channel/direction/preview, an optional case context, and the assigned
+// item's channel/direction/preview, an optional placement context, and the assigned
 // team member. Mounted at /api/inbox (behind requireAuth via the /api mount in
 // app.ts).
 //
@@ -23,11 +23,11 @@
 // relay_group conversations are EXCLUDED — C8 has no group row kind (the group
 // text lives in its own surface; the Inbox is a per-contact lens).
 //
-// Hydration (name / role / caseContext / assignment / channel / direction /
+// Hydration (name / role / placementContext / assignment / channel / direction /
 // preview) is BEST-EFFORT and bounded to the page: every external lookup is
 // wrapped so a missing/failed read degrades to the id (or omits the field) and
 // NEVER throws a 500 — exactly the posture today.ts takes. Per-request caches
-// keep each contact/case/user resolved at most once.
+// keep each contact/placement/user resolved at most once.
 //
 // PII (doc §9): responses carry names/previews to the authed client; LOG LINES
 // are counts/IDs only.
@@ -46,9 +46,9 @@ import {
   type AuditRepo,
 } from '../repos/auditRepo.js';
 import {
-  createCasesRepo,
-  type CasesRepo,
-} from '../repos/casesRepo.js';
+  createPlacementsRepo,
+  type PlacementsRepo,
+} from '../repos/placementsRepo.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -76,7 +76,7 @@ export interface InboxRow {
   phone?: string; // E.164; the number (esp. for unknown rows)
   name: string; // contact name, or formatted number when unknown
   role?: 'tenant' | 'landlord' | 'unknown';
-  caseContext?: { caseId: string; label: string }; // e.g. "Touring" — optional
+  placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers
   preview: string; // latest item's text as a preview (UI shows one line, ellipsized)
   channel: InboxChannel; // channel of the latest item
@@ -98,7 +98,7 @@ export interface InboxRouterDeps {
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
   messagesRepo?: MessagesRepo;
-  casesRepo?: CasesRepo;
+  placementsRepo?: PlacementsRepo;
   usersRepo?: UsersRepo;
   auditRepo?: AuditRepo;
   events?: EventBus;
@@ -269,15 +269,15 @@ export async function aggregateInbox(
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
-  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
 
   const { filter, limit, cursor, userId } = opts;
   const startKey = cursor !== undefined ? decodeCursor(cursor) : undefined;
 
-  // Per-request memoization (each contact/case/user resolved at most once).
+  // Per-request memoization (each contact/placement/user resolved at most once).
   const contactConvsCache = new Map<string, ConversationItem[]>();
-  const caseLabelCache = new Map<string, string | undefined>();
+  const placementLabelCache = new Map<string, string | undefined>();
   const userNameCache = new Map<string, string>();
   // Contacts already emitted in THIS page (the newest-conversation guard so a
   // multi-number contact never yields two rows on one page).
@@ -315,17 +315,17 @@ export async function aggregateInbox(
     return best;
   };
 
-  /** Resolve a case's label (stage title-cased); cached + best-effort. */
-  const caseLabel = async (caseId: string): Promise<string | undefined> => {
-    if (caseLabelCache.has(caseId)) return caseLabelCache.get(caseId);
+  /** Resolve a placement's label (stage title-cased); cached + best-effort. */
+  const placementLabel = async (placementId: string): Promise<string | undefined> => {
+    if (placementLabelCache.has(placementId)) return placementLabelCache.get(placementId);
     let label: string | undefined;
     try {
-      const c = await cases.getById(caseId);
+      const c = await placements.getById(placementId);
       if (c && typeof c.stage === 'string') label = stageLabel(c.stage);
     } catch (err) {
-      log.warn({ err, caseId }, 'inbox: case label hydration failed (best-effort)');
+      log.warn({ err, placementId }, 'inbox: placement label hydration failed (best-effort)');
     }
-    caseLabelCache.set(caseId, label);
+    placementLabelCache.set(placementId, label);
     return label;
   };
 
@@ -425,10 +425,10 @@ export async function aggregateInbox(
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
     const { channel, direction, preview } = await latestMessageOf(maxConv.conversationId, maxConv);
 
-    let caseContext: { caseId: string; label: string } | undefined;
-    if (typeof maxConv.caseId === 'string' && maxConv.caseId.length > 0) {
-      const label = await caseLabel(maxConv.caseId);
-      if (label !== undefined) caseContext = { caseId: maxConv.caseId, label };
+    let placementContext: { placementId: string; label: string } | undefined;
+    if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
+      const label = await placementLabel(maxConv.placementId);
+      if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
     }
 
     let assignment: { userId: string; name: string } | undefined;
@@ -444,7 +444,7 @@ export async function aggregateInbox(
       phone: maxConv.participant_phone,
       name: nameFromContact(contact) ?? formatPhoneForDisplay(phone) ?? phone,
       role: roleFromContact(contact),
-      ...(caseContext !== undefined && { caseContext }),
+      ...(placementContext !== undefined && { placementContext }),
       unreadCount: unreadSum,
       preview,
       channel,

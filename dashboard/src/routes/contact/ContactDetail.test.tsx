@@ -2,13 +2,13 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { CasesPage, Contact, UnitsPage } from '../../api/index.js';
+import type { PlacementsPage, Contact, UnitsPage } from '../../api/index.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
 const getConversations = vi.fn();
 const getConversationMessages = vi.fn();
-const getCases = vi.fn();
+const getPlacements = vi.fn();
 const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
@@ -25,7 +25,7 @@ vi.mock('../../api/index.js', async () => {
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     getConversations: (...a: unknown[]) => getConversations(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
-    getCases: (...a: unknown[]) => getCases(...a),
+    getPlacements: (...a: unknown[]) => getPlacements(...a),
     getUnits: (...a: unknown[]) => getUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
@@ -79,9 +79,9 @@ const UNKNOWN: Contact = {
   phone: '+15550100001',
 };
 
-const CASES: CasesPage = {
+const CASES: PlacementsPage = {
   nextCursor: null,
-  cases: [{ caseId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
+  placements: [{ placementId: 'c1', tenantId: 'k1', unitId: 'u1', stage: 'schedule_inspection' }],
 };
 const UNITS: UnitsPage = {
   nextCursor: null,
@@ -102,12 +102,12 @@ beforeEach(() => {
   getContactTimeline.mockReset();
   getConversations.mockReset();
   getConversationMessages.mockReset();
-  getCases.mockReset();
+  getPlacements.mockReset();
   getUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
   getContacts.mockReset();
-  getCases.mockResolvedValue(CASES);
+  getPlacements.mockResolvedValue(CASES);
   getUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
   getConversations.mockResolvedValue({ nextCursor: null, conversations: [] });

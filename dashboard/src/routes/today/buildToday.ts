@@ -1,27 +1,27 @@
 // buildTodayFromSources — the CLIENT-SIDE FALLBACK assembly for the Today action
 // queue (§API Contract C7). When GET /api/today 404s (backend slice not live),
-// useToday assembles the SAME TodayItem[] shape from the existing /api/cases +
+// useToday assembles the SAME TodayItem[] shape from the existing /api/placements +
 // /api/conversations payloads. Pure + deterministic (takes `now` so it's
 // testable): no fetching, no Date.now(), no side effects.
 //
 // Grouping (from the build plan §B1):
-//   needs_you_now — a case with a pending business-clock deadline (any type
-//     except follow_up/stuck_case, which are follow-ups) OR an `attention` flag,
+//   needs_you_now — a placement with a pending business-clock deadline (any type
+//     except follow_up/stuck_placement, which are follow-ups) OR an `attention` flag,
 //     PLUS untriaged inbounds (unknown_1to1 conversations). Ordered most-urgent
 //     first (overdue/soonest deadline, then attention rows, then untriaged).
-//   tours_today  — a case whose tour_date is today (local).
+//   tours_today  — a placement whose tour_date is today (local).
 //   unreplied    — a conversation with unread_count > 0 (excluding the untriaged
 //     unknowns, which surface in needs_you_now).
-//   follow_ups   — a case whose next_deadline_type is follow_up or stuck_case.
+//   follow_ups   — a placement whose next_deadline_type is follow_up or stuck_placement.
 //
 // We invent NO fields the wire doesn't carry: "stuck N days" age is not
-// computable from CaseItem here, so stuck cases are detected via
-// next_deadline_type === 'stuck_case' only (the design's "stuck 6 days" copy is
+// computable from PlacementItem here, so stuck placements are detected via
+// next_deadline_type === 'stuck_placement' only (the design's "stuck 6 days" copy is
 // a server-side enrichment for the real /api/today).
 import {
   STAGE_LABELS,
-  type CaseDeadlineType,
-  type CaseItem,
+  type PlacementDeadlineType,
+  type PlacementItem,
   type ConversationSummary,
   type ConversationType,
   type TodayItem,
@@ -37,18 +37,18 @@ const GROUP_ORDER: Record<TodayItem['group'], number> = {
 };
 
 /** Deadline types that route to follow_ups rather than needs_you_now. */
-const FOLLOW_UP_DEADLINES: ReadonlySet<CaseDeadlineType> = new Set<CaseDeadlineType>([
+const FOLLOW_UP_DEADLINES: ReadonlySet<PlacementDeadlineType> = new Set<PlacementDeadlineType>([
   'follow_up',
-  'stuck_case',
+  'stuck_placement',
 ]);
 
 // --- Humanizers -------------------------------------------------------------
 
-const DEADLINE_WHY: Record<CaseDeadlineType, string> = {
+const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
   tour_reminder: 'Tour reminder',
   rta_window: 'RTA window closing',
   voucher_expiration: 'Voucher expiring',
-  stuck_case: 'Stuck — needs a nudge',
+  stuck_placement: 'Stuck — needs a nudge',
   follow_up: 'Follow-up due',
 };
 
@@ -139,7 +139,7 @@ interface NeedsRow {
 }
 
 export function buildTodayFromSources(
-  cases: CaseItem[],
+  placements: PlacementItem[],
   conversations: ConversationSummary[],
   now: Date,
 ): TodayItem[] {
@@ -150,22 +150,22 @@ export function buildTodayFromSources(
   const followUps: TodayItem[] = [];
   const unreplied: TodayItem[] = [];
 
-  for (const c of cases) {
-    // `?? c.stage` guards an unknown stage (CaseItem is a flexible server doc) so
-    // the tag never renders "Case · undefined".
-    const tag = `Case · ${STAGE_LABELS[c.stage] ?? c.stage}`;
+  for (const c of placements) {
+    // `?? c.stage` guards an unknown stage (PlacementItem is a flexible server doc) so
+    // the tag never renders "Placement · undefined".
+    const tag = `Placement · ${STAGE_LABELS[c.stage] ?? c.stage}`;
     const deadlineType = c.next_deadline_type;
     const isFollowUp = deadlineType !== undefined && FOLLOW_UP_DEADLINES.has(deadlineType);
 
-    // follow_ups: follow-up / stuck deadlines — UNLESS the case also carries an
+    // follow_ups: follow-up / stuck deadlines — UNLESS the placement also carries an
     // `attention` escalation, which takes precedence and routes it to
-    // needs_you_now instead (a case appears in exactly one of the two groups).
+    // needs_you_now instead (a placement appears in exactly one of the two groups).
     if (isFollowUp && deadlineType !== undefined && !c.attention) {
       followUps.push({
         group: 'follow_ups',
-        refType: 'case',
-        refId: c.caseId,
-        // who = tenantId: a KNOWN fallback-only cosmetic gap. CaseItem carries no
+        refType: 'placement',
+        refId: c.placementId,
+        // who = tenantId: a KNOWN fallback-only cosmetic gap. PlacementItem carries no
         // tenant name on the wire; the real /api/today resolves it server-side.
         who: c.tenantId,
         why: DEADLINE_WHY[deadlineType] ?? 'Deadline',
@@ -179,8 +179,8 @@ export function buildTodayFromSources(
       needs.push({
         item: {
           group: 'needs_you_now',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who: c.tenantId,
           why: DEADLINE_WHY[deadlineType] ?? 'Deadline',
           urgency: humanizeUrgency(c.next_deadline_at, now),
@@ -191,12 +191,12 @@ export function buildTodayFromSources(
       });
     } else if (c.attention) {
       // needs_you_now: an escalation flag (only when not already added via a
-      // deadline — a case shows once in the group).
+      // deadline — a placement shows once in the group).
       needs.push({
         item: {
           group: 'needs_you_now',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who: c.tenantId,
           why: c.attention.reason,
           tag,
@@ -210,8 +210,8 @@ export function buildTodayFromSources(
     if (c.tour_date === today) {
       tours.push({
         group: 'tours_today',
-        refType: 'case',
-        refId: c.caseId,
+        refType: 'placement',
+        refId: c.placementId,
         who: c.tenantId,
         why: 'Tour today',
         tag,

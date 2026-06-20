@@ -1,18 +1,18 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CaseUpdatedEvent, EventStreamHandlers } from '../../api/index.js';
+import type { PlacementUpdatedEvent, EventStreamHandlers } from '../../api/index.js';
 
-const getCases = vi.fn();
+const getPlacements = vi.fn();
 const getContacts = vi.fn();
 const getUnits = vi.fn();
-// Capture the handlers useCases registers so a test can fire a case.updated event.
+// Capture the handlers usePlacements registers so a test can fire a placement.updated event.
 let streamHandlers: EventStreamHandlers | null = null;
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getCases: (...a: unknown[]) => getCases(...a),
+    getPlacements: (...a: unknown[]) => getPlacements(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
     getUnits: (...a: unknown[]) => getUnits(...a),
     useEventStream: (h: EventStreamHandlers) => {
@@ -21,17 +21,17 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useCases } from './useCases.js';
+import { usePlacements } from './usePlacements.js';
 
 function Probe(): React.JSX.Element {
-  const s = useCases();
-  const c1 = s.cases.find((c) => c.caseId === 'c1');
+  const s = usePlacements();
+  const c1 = s.placements.find((c) => c.placementId === 'c1');
   return (
     <div>
       <span data-testid="status">{s.status}</span>
-      <span data-testid="count">{s.cases.length}</span>
-      <span data-testid="stage">{s.cases[0]?.stage ?? '-'}</span>
-      <span data-testid="ids">{s.cases.map((c) => c.caseId).join(',')}</span>
+      <span data-testid="count">{s.placements.length}</span>
+      <span data-testid="stage">{s.placements[0]?.stage ?? '-'}</span>
+      <span data-testid="ids">{s.placements.map((c) => c.placementId).join(',')}</span>
       <span data-testid="attention">{c1?.attention ? 'yes' : 'no'}</span>
       <span data-testid="deadline">{c1?.next_deadline_at ?? '-'}</span>
     </div>
@@ -39,7 +39,7 @@ function Probe(): React.JSX.Element {
 }
 
 beforeEach(() => {
-  getCases.mockReset();
+  getPlacements.mockReset();
   getContacts.mockReset();
   getUnits.mockReset();
   streamHandlers = null;
@@ -48,10 +48,10 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('useCases', () => {
-  it('loads cases into a ready state', async () => {
-    getCases.mockResolvedValue({
-      cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
+describe('usePlacements', () => {
+  it('loads placements into a ready state', async () => {
+    getPlacements.mockResolvedValue({
+      placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
       nextCursor: null,
     });
     render(<Probe />);
@@ -60,22 +60,22 @@ describe('useCases', () => {
     expect(screen.getByTestId('stage')).toHaveTextContent('collect_rta');
   });
 
-  it('goes to error when the cases fetch fails', async () => {
-    getCases.mockRejectedValue(new Error('boom'));
+  it('goes to error when the placements fetch fails', async () => {
+    getPlacements.mockRejectedValue(new Error('boom'));
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
   });
 
-  it('repositions a card on a case.updated SSE event (patches the stage in place)', async () => {
-    getCases.mockResolvedValue({
-      cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
+  it('repositions a card on a placement.updated SSE event (patches the stage in place)', async () => {
+    getPlacements.mockResolvedValue({
+      placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
       nextCursor: null,
     });
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('stage')).toHaveTextContent('collect_rta'));
 
-    const ev: CaseUpdatedEvent = {
-      caseId: 'c1',
+    const ev: PlacementUpdatedEvent = {
+      placementId: 'c1',
       tenantId: 't1',
       unitId: 'u1',
       stage: 'awaiting_inspection',
@@ -87,15 +87,15 @@ describe('useCases', () => {
       lost_reason: null,
       updated_at: '2026-06-19T00:00:00Z',
     };
-    act(() => streamHandlers?.onCaseUpdated?.(ev));
+    act(() => streamHandlers?.onPlacementUpdated?.(ev));
     await waitFor(() => expect(screen.getByTestId('stage')).toHaveTextContent('awaiting_inspection'));
   });
 
   it('M2: an SSE event flips attention on and clears a deadline (null)', async () => {
-    getCases.mockResolvedValue({
-      cases: [
+    getPlacements.mockResolvedValue({
+      placements: [
         {
-          caseId: 'c1',
+          placementId: 'c1',
           tenantId: 't1',
           unitId: 'u1',
           stage: 'collect_rta',
@@ -111,8 +111,8 @@ describe('useCases', () => {
     expect(screen.getByTestId('attention')).toHaveTextContent('no');
     expect(screen.getByTestId('deadline')).toHaveTextContent('2026-06-25T00:00:00Z');
 
-    const ev: CaseUpdatedEvent = {
-      caseId: 'c1',
+    const ev: PlacementUpdatedEvent = {
+      placementId: 'c1',
       tenantId: 't1',
       unitId: 'u1',
       stage: 'collect_rta',
@@ -124,32 +124,32 @@ describe('useCases', () => {
       lost_reason: null,
       updated_at: '2026-06-19T00:00:00Z',
     };
-    act(() => streamHandlers?.onCaseUpdated?.(ev));
+    act(() => streamHandlers?.onPlacementUpdated?.(ev));
 
     // Attention dot lights up; the cleared deadline is removed (not kept).
     await waitFor(() => expect(screen.getByTestId('attention')).toHaveTextContent('yes'));
     expect(screen.getByTestId('deadline')).toHaveTextContent('-');
   });
 
-  it('M3: pages through ALL cases (page-2 cases appear on the board)', async () => {
-    getCases.mockImplementation((_signal: unknown, cursor?: string) =>
+  it('M3: pages through ALL placements (page-2 placements appear on the board)', async () => {
+    getPlacements.mockImplementation((_signal: unknown, cursor?: string) =>
       cursor === undefined
         ? Promise.resolve({
-            cases: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
+            placements: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'collect_rta' }],
             nextCursor: 'CUR2',
           })
         : Promise.resolve({
-            cases: [{ caseId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'determine_rent' }],
+            placements: [{ placementId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'determine_rent' }],
             nextCursor: null,
           }),
     );
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    // Both the page-1 AND the page-2 case are present.
+    // Both the page-1 AND the page-2 placement are present.
     expect(screen.getByTestId('count')).toHaveTextContent('2');
     expect(screen.getByTestId('ids')).toHaveTextContent('c1,c2');
     // The second call followed the cursor.
-    expect(getCases).toHaveBeenCalledTimes(2);
-    expect(getCases).toHaveBeenLastCalledWith(expect.anything(), 'CUR2');
+    expect(getPlacements).toHaveBeenCalledTimes(2);
+    expect(getPlacements).toHaveBeenLastCalledWith(expect.anything(), 'CUR2');
   });
 });

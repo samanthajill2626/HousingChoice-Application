@@ -1,11 +1,11 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) ·
-// Preferences · Listings (their units, with status) · Cases on their units ·
-// Group texts · Media. Listings + Cases are REAL (from /api/units + /api/cases);
+// Preferences · Listings (their units, with status) · Placements on their units ·
+// Group texts · Media. Listings + Placements are REAL (from /api/units + /api/placements);
 // Preferences + Group texts + Media are pending until their backend slices land.
 import {
   STAGE_LABELS,
-  type CaseItem,
+  type PlacementItem,
   type Contact,
   type ContactPhone,
   type UnitItem,
@@ -22,14 +22,14 @@ import {
 } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
-import { landlordCases, landlordUnits } from './buildContactFile.js';
+import { landlordPlacements, landlordUnits } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 
 export interface LandlordFileProps {
   contact: Contact;
   phones: ContactPhone[];
-  cases: CaseItem[];
+  placements: PlacementItem[];
   units: UnitItem[];
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
@@ -50,7 +50,7 @@ function unitRowLabel(unit: UnitItem): string {
 export function LandlordFile({
   contact,
   phones,
-  cases,
+  placements,
   units,
   media,
   mediaLoading,
@@ -59,7 +59,7 @@ export function LandlordFile({
 }: LandlordFileProps): React.JSX.Element {
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
-  const myCases = landlordCases(cases, units, contact.contactId);
+  const myPlacements = landlordPlacements(placements, units, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
   const company = typeof contact['company'] === 'string' ? contact['company'] : '—';
 
@@ -128,17 +128,17 @@ export function LandlordFile({
         )}
       </Card>
 
-      <Card title="Cases on their units" aside={myCases.length > 0 ? String(myCases.length) : undefined}>
-        {myCases.length === 0 ? (
-          <EmptyRow>No cases on these units yet.</EmptyRow>
+      <Card title="Placements on their units" aside={myPlacements.length > 0 ? String(myPlacements.length) : undefined}>
+        {myPlacements.length === 0 ? (
+          <EmptyRow>No placements on these units yet.</EmptyRow>
         ) : (
-          myCases.map((c) => {
+          myPlacements.map((c) => {
             const unit = unitMap.get(c.unitId);
             const addr = unit ? formatAddress(unit.address) || c.unitId : c.unitId;
             return (
               <Row
-                key={c.caseId}
-                to={`/cases/${c.caseId}`}
+                key={c.placementId}
+                to={`/placements/${c.placementId}`}
                 label={addr}
                 right={STAGE_LABELS[c.stage] ?? c.stage}
               />

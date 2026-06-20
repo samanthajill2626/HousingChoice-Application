@@ -1,0 +1,271 @@
+// Placements + boards API (M1.10b) — CRUD, the board list filters (by stage /
+// tenant / unit / tourDate / deadlineType), stage advance + tour clear via
+// PATCH, and the composite next-deadline endpoint. Runs on the shared in-memory
+// world (the harness placementsRepo fake), authed via the real sealed session cookie
+// next to the origin secret.
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { Express } from 'express';
+import request from 'supertest';
+import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { toPlacementUpdatedEvent } from '../src/lib/events.js';
+import type { PlacementItem } from '../src/repos/placementsRepo.js';
+
+describe('placements API (M1.10b)', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+  });
+
+  const authedGet = (path: string) =>
+    request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+  const authedPost = (path: string, body: object) =>
+    request(app)
+      .post(path)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  const authedPatch = (path: string, body: object) =>
+    request(app)
+      .patch(path)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+
+  it('rejects an unauthenticated request', async () => {
+    const res = await request(app).get('/api/placements').set('x-origin-verify', ORIGIN_SECRET);
+    expect([401, 403]).toContain(res.status);
+  });
+
+  it('POST /api/placements opens a placement (default stage send_application), emits placement.updated, audits — no PII on the wire', async () => {
+    const res = await authedPost('/api/placements', {
+      tenantId: 'c-tenant',
+      unitId: 'unit-1',
+      placement_tag: 'Keisha @ 123 Main',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.placement.placementId).toMatch(/^placement-/);
+    expect(res.body.placement.stage).toBe('send_application');
+    expect(res.body.placement.tenantId).toBe('c-tenant');
+    expect(res.body.placement.placement_tag).toBe('Keisha @ 123 Main');
+    // Coverage (#6): create initializes the INITIAL-stage provenance fields so
+    // time-in-stage is computable from t0 and a later derived write respects
+    // precedence (§8). stage is operator-set ⇒ source 'manual' (stage is NOT
+    // precedence-gated, so 'manual' here is correct and intended).
+    expect(typeof res.body.placement.stage_entered_at).toBe('string');
+    expect(res.body.placement.stage_source).toBe('manual');
+    expect(world.placements.size).toBe(1);
+
+    const evt = world.emitted.find((e) => e.event === 'placement.updated');
+    expect(evt).toBeDefined();
+    // The compact event carries IDs/stage only — NEVER the placement_tag (a name).
+    expect(JSON.stringify(evt!.payload)).not.toContain('Keisha');
+
+    expect(world.auditEvents.some((a) => a.event_type === 'placement_created')).toBe(true);
+  });
+
+  it('POST /api/placements rejects missing tenantId/unitId and a bad stage', async () => {
+    expect((await authedPost('/api/placements', { unitId: 'unit-1' })).status).toBe(400);
+    expect((await authedPost('/api/placements', { tenantId: 'c-1' })).status).toBe(400);
+    expect((await authedPost('/api/placements', { tenantId: 'c-1', unitId: 'u-1', stage: 'bogus' })).status).toBe(400);
+  });
+
+  it('GET /api/placements/:placementId returns the placement; 404 for unknown', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 'c-1', unitId: 'u-1', stage: 'awaiting_inspection' });
+    const res = await authedGet(`/api/placements/${c.placementId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.placement.stage).toBe('awaiting_inspection');
+    expect((await authedGet('/api/placements/placement-ghost')).status).toBe(404);
+  });
+
+  it('GET /api/placements filters by stage / tenant / unit / tourDate, lists all with no filter, 400s a bad allowlist value', async () => {
+    await world.placementsRepo.create({ tenantId: 't-1', unitId: 'u-1', stage: 'awaiting_approval' });
+    await world.placementsRepo.create({ tenantId: 't-1', unitId: 'u-2', stage: 'awaiting_inspection', tour_date: '2026-07-01' });
+    await world.placementsRepo.create({ tenantId: 't-2', unitId: 'u-1', stage: 'awaiting_approval' });
+
+    expect((await authedGet('/api/placements')).body.placements).toHaveLength(3);
+    expect((await authedGet('/api/placements?stage=awaiting_approval')).body.placements).toHaveLength(2);
+    expect((await authedGet('/api/placements?tenantId=t-1')).body.placements).toHaveLength(2);
+    expect((await authedGet('/api/placements?unitId=u-1')).body.placements).toHaveLength(2);
+    expect((await authedGet('/api/placements?tourDate=2026-07-01')).body.placements).toHaveLength(1);
+
+    expect((await authedGet('/api/placements?stage=bogus')).status).toBe(400);
+    expect((await authedGet('/api/placements?deadlineType=whenever')).status).toBe(400);
+    expect((await authedGet('/api/placements?tourDate=2026-13-45')).status).toBe(400); // impossible date
+    expect((await authedGet('/api/placements?limit=0')).status).toBe(400);
+    expect((await authedGet('/api/placements?cursor=not-base64-json')).status).toBe(400);
+  });
+
+  it('GET /api/placements?deadlineType=&before= bounds the due-by window (canonicalized) and 400s a bad before', async () => {
+    const due = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-due', stage: 'awaiting_authority_approval' });
+    await world.placementsRepo.setNextDeadline(due.placementId, { type: 'rta_window', at: '2026-06-16T08:00:00.000Z' });
+    const later = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-later', stage: 'awaiting_authority_approval' });
+    await world.placementsRepo.setNextDeadline(later.placementId, { type: 'rta_window', at: '2026-06-20T00:00:00.000Z' });
+
+    // Cutoff between the two → only the earlier (due) placement is returned.
+    const res = await authedGet('/api/placements?deadlineType=rta_window&before=2026-06-17T00:00:00.000Z');
+    expect(res.status).toBe(200);
+    expect(res.body.placements).toHaveLength(1);
+    expect(res.body.placements[0].placementId).toBe(due.placementId);
+
+    // A bad before → 400 (never a silently-wrong window).
+    expect((await authedGet('/api/placements?deadlineType=rta_window&before=not-a-date')).status).toBe(400);
+  });
+
+  it('PATCH /api/placements/:placementId clears tour_date with null and emits (stage is NOT writable here)', async () => {
+    const c = await world.placementsRepo.create({
+      tenantId: 't',
+      unitId: 'u',
+      stage: 'awaiting_inspection',
+      tour_date: '2026-07-02',
+    });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, { tour_date: null });
+    expect(res.status).toBe(200);
+    expect(res.body.placement.tour_date).toBeUndefined();
+    expect(world.emitted.some((e) => e.event === 'placement.updated')).toBe(true);
+    expect(world.auditEvents.some((a) => a.event_type === 'placement_updated')).toBe(true);
+  });
+
+  it('PATCH REFUSES a stage write (§8: stage moves go through the transition route)', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
+    // Even a VALID stage is rejected via legacy CRUD — the ONLY way to change a
+    // placement stage is POST /api/placements/:placementId/transition.
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { stage: 'awaiting_approval' })).status).toBe(400);
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { stage: 'bogus' })).status).toBe(400);
+    // The placement stage is untouched.
+    expect((await world.placementsRepo.getById(c.placementId))!.stage).toBe('send_application');
+  });
+
+  it('PATCH rejects the next_deadline_* keys, an immutable/unknown field, an attention SET, and 404s unknown', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { next_deadline_at: '2026-07-01T00:00:00.000Z' })).status).toBe(400);
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { placementId: 'x' })).status).toBe(400); // immutable key
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { attention: { reason: 'x' } })).status).toBe(400); // set not allowed
+    expect((await authedPatch(`/api/placements/${c.placementId}`, {})).status).toBe(400); // empty patch
+    expect((await authedPatch('/api/placements/placement-ghost', { notes: 'x' })).status).toBe(404);
+  });
+
+  it('PATCH can CLEAR the attention flag with null (operator acknowledges an escalation)', async () => {
+    const c = await world.placementsRepo.create({
+      tenantId: 't',
+      unitId: 'u',
+      stage: 'awaiting_approval',
+      attention: { reason: 'send_failed', at: '2026-06-14T00:00:00.000Z' },
+    });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, { attention: null });
+    expect(res.status).toBe(200);
+    expect(res.body.placement.attention).toBeUndefined();
+    // The live event reflects the cleared flag → the boards drop the badge.
+    const evt = world.emitted.filter((e) => e.event === 'placement.updated').at(-1);
+    expect((evt!.payload as { attention: boolean }).attention).toBe(false);
+  });
+
+  it('POST /api/placements/:placementId/deadline sets then clears the composite deadline, with validation + 404', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'awaiting_authority_approval' });
+
+    const set = await authedPost(`/api/placements/${c.placementId}/deadline`, {
+      type: 'rta_window',
+      at: '2026-06-16T12:00:00.000Z',
+    });
+    expect(set.status).toBe(200);
+    expect(set.body.placement.next_deadline_type).toBe('rta_window');
+    expect(set.body.placement.next_deadline_at).toBe('2026-06-16T12:00:00.000Z');
+    // Now queryable via the deadline board filter.
+    expect((await authedGet('/api/placements?deadlineType=rta_window')).body.placements).toHaveLength(1);
+
+    const clear = await authedPost(`/api/placements/${c.placementId}/deadline`, { clear: true });
+    expect(clear.status).toBe(200);
+    expect(clear.body.placement.next_deadline_type).toBeUndefined();
+    expect(clear.body.placement.next_deadline_at).toBeUndefined();
+
+    // Validation: bad type / bad timestamp.
+    expect(
+      (await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'whenever', at: '2026-06-16T12:00:00.000Z' })).status,
+    ).toBe(400);
+    expect((await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'rta_window', at: 'not-a-date' })).status).toBe(400);
+    // 404 unknown placement.
+    expect((await authedPost('/api/placements/placement-ghost/deadline', { clear: true })).status).toBe(404);
+  });
+});
+
+describe('placements API — BE2/C2 activity milestones', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+  });
+
+  const authedPost = (path: string, body: object) =>
+    request(app).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+  const authedPatch = (path: string, body: object) =>
+    request(app).patch(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+  const milestonesFor = (tenantId: string) =>
+    world.activityEvents.filter((e) => e.contactId === tenantId);
+
+  it('placement create emits placement_opened against the tenant (refType placement)', async () => {
+    const res = await authedPost('/api/placements', { tenantId: 'c-keisha', unitId: 'unit-1' });
+    const placementId = res.body.placement.placementId;
+    const ev = milestonesFor('c-keisha');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ type: 'placement_opened', refType: 'placement', refId: placementId });
+  });
+
+  // NOTE: stage moves no longer go through the legacy CRUD PATCH (§8 — they
+  // route through POST /api/placements/:placementId/transition, which records a
+  // placement_stage_changed AUDIT row, not an activity milestone). So the
+  // stage-driven `stage_changed` / `placement_closed` activity milestones that the
+  // placements-router PATCH used to emit are no longer produced for stage moves (the
+  // PATCH path can no longer change stage). Their tests are removed here; the
+  // placement_closed milestone LABEL's category-only / no-PII discipline (fix #8)
+  // still lives in routes/placements.ts for any future caller. Tour milestones below
+  // still fire on tour_date / tours PATCHes, which remain CRUD-writable.
+
+  it('newly setting tour_date emits tour_scheduled', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'awaiting_inspection' });
+    await authedPatch(`/api/placements/${c.placementId}`, { tour_date: '2026-07-02' });
+    const ev = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toContain('2026-07-02');
+  });
+
+  it('a tour gaining an outcome emits tour_took_place (and NOT before the outcome lands)', async () => {
+    const c = await world.placementsRepo.create({
+      tenantId: 'c-t',
+      unitId: 'u',
+      stage: 'awaiting_inspection',
+      tours: [{ date: '2026-07-02' }],
+    });
+    // PATCH a tour WITHOUT an outcome yet → no tour_took_place.
+    await authedPatch(`/api/placements/${c.placementId}`, { tours: [{ date: '2026-07-02' }] });
+    expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(0);
+
+    // Now the tour gains an outcome → tour_took_place.
+    await authedPatch(`/api/placements/${c.placementId}`, { tours: [{ date: '2026-07-02', outcome: 'attended' }] });
+    const ev = world.activityEvents.filter((e) => e.type === 'tour_took_place');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.label).toContain('Attended');
+  });
+});
+
+describe('toPlacementUpdatedEvent (M1.10b live-update payload)', () => {
+  it('maps attention to a boolean (both states) and never carries PII', () => {
+    const base = { placementId: 'c', tenantId: 't', unitId: 'u', stage: 'awaiting_approval' } as PlacementItem;
+    const withAttn = toPlacementUpdatedEvent({
+      ...base,
+      attention: { reason: 'send_failed', at: '2026-06-14T00:00:00.000Z' },
+      placement_tag: 'Keisha @ 123 Main',
+    });
+    expect(withAttn.attention).toBe(true); // load-bearing: M1.10c flips the board badge live
+    // placement_tag (a name) is deliberately omitted from the wire payload (doc §9).
+    expect(JSON.stringify(withAttn)).not.toContain('Keisha');
+    expect(toPlacementUpdatedEvent(base).attention).toBe(false);
+  });
+});

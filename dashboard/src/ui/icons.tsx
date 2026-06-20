@@ -36,8 +36,8 @@ export function TodayIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
-/** Cases — a board with columns (kanban). */
-export function CasesIcon({ size }: IconProps): React.JSX.Element {
+/** Placements — a board with columns (kanban). */
+export function PlacementsIcon({ size }: IconProps): React.JSX.Element {
   return (
     <Svg size={size}>
       <rect x="3" y="4" width="18" height="16" rx="2" />
@@ -135,7 +135,7 @@ export function CloseIcon({ size }: IconProps): React.JSX.Element {
 /** Nav-icon registry — keyed by the `icon` id on a nav item (see app/nav.ts). */
 export const NAV_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   today: TodayIcon,
-  cases: CasesIcon,
+  placements: PlacementsIcon,
   contacts: ContactsIcon,
   listings: ListingsIcon,
   inbox: InboxIcon,

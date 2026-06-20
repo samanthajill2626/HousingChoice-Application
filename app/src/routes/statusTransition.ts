@@ -1,11 +1,11 @@
 // Status-model transition routes (NO UI) — the API surface over the ONE
 // transition service (services/statusTransition.ts). requireAuth only (matches
-// the cases/units/contacts authz posture; the /api mount supplies the gate).
+// the placements/units/contacts authz posture; the /api mount supplies the gate).
 //
-//   POST  /api/cases/:caseId/transition  { toStage, source, reason?, lostReason?, finalRent?, inspectionOutcome? } → { case }
+//   POST  /api/placements/:placementId/transition  { toStage, source, reason?, lostReason?, finalRent?, inspectionOutcome? } → { placement }
 //   PATCH /api/contacts/:contactId/tenant-status { toStatus, source, reason?, porting? }        → { contact }
 //   PATCH /api/units/:unitId/listing-status      { toStatus, source, reason? }                  → { unit }
-//   GET   /api/cases/:caseId/history                                                            → { history }
+//   GET   /api/placements/:placementId/history                                                  → { history }
 //
 // Inputs validated with the existing per-route allowlist style. The history
 // read returns the entity's provenance trail (auditRepo.listByEntity).
@@ -25,7 +25,7 @@ import {
   isTransitionSource,
 } from '../lib/statusModel.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createCasesRepo, type CasesRepo } from '../repos/casesRepo.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -38,7 +38,7 @@ import { appEvents, type EventBus } from '../lib/events.js';
 
 export interface StatusTransitionRouterDeps {
   logger?: Logger;
-  casesRepo?: CasesRepo;
+  placementsRepo?: PlacementsRepo;
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
@@ -52,7 +52,7 @@ const DEFAULT_HISTORY_LIMIT = 50;
 
 export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
-  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
@@ -60,7 +60,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
   const service =
     deps.service ??
     createStatusTransitionService({
-      casesRepo: cases,
+      placementsRepo: placements,
       unitsRepo: units,
       contactsRepo: contacts,
       auditRepo: audit,
@@ -70,10 +70,10 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
 
   const router = Router();
 
-  // POST /api/cases/:caseId/transition
-  router.post('/cases/:caseId/transition', async (req: AuthedRequest, res) => {
-    const caseId = String(req.params['caseId'] ?? '');
-    mergeContext({ caseId });
+  // POST /api/placements/:placementId/transition
+  router.post('/placements/:placementId/transition', async (req: AuthedRequest, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
     const b = (req.body ?? {}) as Record<string, unknown>;
 
     if (!isPlacementStage(b['toStage'])) {
@@ -148,7 +148,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
     }
 
     try {
-      const updated = await service.transitionPlacement(caseId, {
+      const updated = await service.transitionPlacement(placementId, {
         toStage: b['toStage'],
         source: b['source'],
         ...(typeof b['reason'] === 'string' && { reason: b['reason'] }),
@@ -157,17 +157,17 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
         ...(inspectionOutcome !== undefined && { inspectionOutcome }),
         ...(req.user?.userId !== undefined && { actor: req.user.userId }),
       });
-      log.info({ caseId, toStage: b['toStage'], source: b['source'], actor: req.user?.userId }, 'placement transition via api');
-      res.json({ case: updated });
+      log.info({ placementId, toStage: b['toStage'], source: b['source'], actor: req.user?.userId }, 'placement transition via api');
+      res.json({ placement: updated });
     } catch (err) {
       handleTransitionError(err, res);
     }
   });
 
-  // GET /api/cases/:caseId/history — the placement's provenance trail.
-  router.get('/cases/:caseId/history', async (req, res) => {
-    const caseId = String(req.params['caseId'] ?? '');
-    mergeContext({ caseId });
+  // GET /api/placements/:placementId/history — the placement's provenance trail.
+  router.get('/placements/:placementId/history', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
     const rawLimit = req.query['limit'];
     let limit = DEFAULT_HISTORY_LIMIT;
     if (rawLimit !== undefined) {
@@ -179,7 +179,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       limit = n;
     }
     const before = typeof req.query['before'] === 'string' ? req.query['before'] : undefined;
-    const history = await audit.listByEntity(`cases#${caseId}`, {
+    const history = await audit.listByEntity(`placements#${placementId}`, {
       limit,
       ...(before !== undefined && { before }),
     });

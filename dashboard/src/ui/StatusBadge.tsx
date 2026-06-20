@@ -1,6 +1,6 @@
 // StatusBadge — a small pill for a tenant or listing lifecycle status (the F1
 // status model). One shared primitive so the same status reads identically on a
-// CaseCard, a TenantFile/LandlordFile Details row, a ListingDetail header, and a
+// PlacementCard, a TenantFile/LandlordFile Details row, a ListingDetail header, and a
 // ContactsList row. Labels come from the F1 maps (TENANT_STATUS_LABELS /
 // LISTING_STATUS_LABELS); an off-list/legacy value falls back to a humanized
 // form so the badge never renders blank. A `tone` drives the colour family

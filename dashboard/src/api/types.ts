@@ -23,18 +23,18 @@ export interface DevLoginResult {
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at
 // GET /api/today (TodayResponse); the B1 frontend assembles the SAME shape
-// client-side from /api/cases + /api/conversations when that endpoint 404s (see
+// client-side from /api/placements + /api/conversations when that endpoint 404s (see
 // routes/today/buildToday.ts). Copied verbatim from the build plan §C7.
 
 export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow_ups';
 export interface TodayItem {
   group: TodayGroup;
-  refType: 'case' | 'contact' | 'conversation';
+  refType: 'placement' | 'contact' | 'conversation';
   refId: string;
   who: string; // display name / phone
   why: string; // "RTA window closing"
   urgency?: string; // "2h left"
-  tag?: string; // "Case · Touring"
+  tag?: string; // "Placement · Touring"
   attention?: boolean;
 }
 export interface TodayResponse {
@@ -96,7 +96,7 @@ export interface ConversationsPage {
   nextCursor: string | null;
 }
 
-// --- Cases / boards (M1.10) (legacy reuse — verbatim) -----------------------
+// --- Placements / boards (M1.10) (legacy reuse — verbatim) ------------------
 // Copied unchanged from dashboard-legacy/src/api/types.ts. The Today fallback
 // reads `stage`, `tour_date`, `next_deadline_type`, `next_deadline_at`,
 // `attention`, `tenantId`, `unitId`.
@@ -154,16 +154,6 @@ export const PLACEMENT_STAGES = [
 ] as const;
 
 export type PlacementStage = (typeof PLACEMENT_STAGES)[number];
-
-/**
- * The exported `CaseStage` name is kept as an ALIAS of `PlacementStage` so
- * existing importers don't all churn. `case` is the code/data entity;
- * "placement" is its domain label.
- */
-export type CaseStage = PlacementStage;
-
-/** The ordered case stages (the 18-stage ladder), for columns + a stage picker. */
-export const CASE_STAGES: readonly CaseStage[] = PLACEMENT_STAGES;
 
 /** stage → its phase (the board column it belongs to). */
 export const STAGE_PHASE: Readonly<Record<PlacementStage, PlacementPhase>> = {
@@ -323,41 +313,41 @@ export function formatLostReason(lr: LostReason | undefined): string {
 }
 
 /** The business-clock deadline types (doc §5): the single most-urgent pending
- *  clock a case carries. */
-export type CaseDeadlineType =
+ *  clock a placement carries. */
+export type PlacementDeadlineType =
   | 'tour_reminder'
   | 'rta_window'
   | 'voucher_expiration'
-  | 'stuck_case'
+  | 'stuck_placement'
   | 'follow_up';
 
-/** A scheduled tour on a case, current or historical. */
-export interface CaseTour {
+/** A scheduled tour on a placement, current or historical. */
+export interface PlacementTour {
   /** YYYY-MM-DD. */
   date: string;
   outcome?: string;
   notes?: string;
 }
 
-/** Escalation flag (doc §7.1): a failed send on an active case → a human calls. */
-export interface CaseAttention {
+/** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
+export interface PlacementAttention {
   reason: string;
   /** ISO 8601 — when the flag was raised. */
   at: string;
 }
 
-/** A case record (GET /api/cases → { cases }, GET /api/cases/:caseId →
- *  { case }). Flexible document on the server; the contractual fields are typed
+/** A placement record (GET /api/placements → { placements }, GET /api/placements/:placementId →
+ *  { placement }). Flexible document on the server; the contractual fields are typed
  *  and the index signature carries anything extra. */
-export interface CaseItem {
-  caseId: string;
+export interface PlacementItem {
+  placementId: string;
   /** The tenant contact this deal is for. */
   tenantId: string;
   /** The unit this deal is on. */
   unitId: string;
   /** The stage ladder position (the kanban column). */
-  stage: CaseStage;
-  /** When the case last entered its current stage (ISO 8601). */
+  stage: PlacementStage;
+  /** When the placement last entered its current stage (ISO 8601). */
   stage_entered_at?: string;
   /** Provenance of the last stage write. */
   stage_source?: TransitionSource;
@@ -366,7 +356,7 @@ export interface CaseItem {
   /** The CURRENT scheduled tour date, YYYY-MM-DD (absent when none scheduled). */
   tour_date?: string;
   /** The next-deadline composite (set/cleared together via the deadline route). */
-  next_deadline_type?: CaseDeadlineType;
+  next_deadline_type?: PlacementDeadlineType;
   /** The next-deadline instant, ISO 8601. */
   next_deadline_at?: string;
   /** The placement's relay-group conversationId (set when the relay is set up). */
@@ -374,25 +364,25 @@ export interface CaseItem {
   /** Operator label, mirrored onto the relay pool number. */
   placement_tag?: string;
   /** Tour history (the current tour is also reflected in tour_date). */
-  tours?: CaseTour[];
+  tours?: PlacementTour[];
   /** The four-rung application ladder — free-form object. */
   application?: Record<string, unknown>;
   /** RTA/approval data — free-form object. */
   rta?: Record<string, unknown>;
-  /** Why a `lost` case was lost — a structured { category?, text? } object. */
+  /** Why a `lost` placement was lost — a structured { category?, text? } object. */
   lost_reason?: LostReason;
   lease_date?: string;
   move_in_date?: string;
-  /** Free-text case-level note the operator keeps on the board. */
+  /** Free-text placement-level note the operator keeps on the board. */
   notes?: string;
-  /** Escalation flag (doc §7.1) — cleared via updateCase({ attention: null }). */
-  attention?: CaseAttention;
+  /** Escalation flag (doc §7.1) — cleared via updatePlacement({ attention: null }). */
+  attention?: PlacementAttention;
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
 }
 
-/** One provenance/audit row from GET /api/cases/:caseId/history
+/** One provenance/audit row from GET /api/placements/:placementId/history
  *  (auditRepo.listByEntity). `payload` is the recorded transition detail. */
 export interface HistoryRow {
   entityKey: string;
@@ -402,16 +392,16 @@ export interface HistoryRow {
   payload?: Record<string, unknown>;
 }
 
-/** GET /api/cases page. */
-export interface CasesPage {
-  cases: CaseItem[];
+/** GET /api/placements page. */
+export interface PlacementsPage {
+  placements: PlacementItem[];
   /** Opaque cursor to fetch the next page, or null when exhausted. */
   nextCursor: string | null;
 }
 
 // --- SSE (legacy reuse — verbatim) ------------------------------------------
 // Copied unchanged from dashboard-legacy/src/api/types.ts. useEventStream
-// dispatches these; useToday refetches on case.updated + conversation.updated.
+// dispatches these; useToday refetches on placement.updated + conversation.updated.
 
 /** Message direction relative to the platform. */
 export type MessageDirection = 'inbound' | 'outbound';
@@ -465,13 +455,13 @@ export interface ConversationUpdatedEvent {
   members?: ConversationParticipant[] | null;
 }
 
-/** GET /api/events 'case.updated' payload (M1.10). Carries the board-relevant
+/** GET /api/events 'placement.updated' payload (M1.10). Carries the board-relevant
  *  projection so a kanban card can move stage / flip its attention dot / refresh
  *  its tour + deadline live, without a refetch. `attention` is a BOOLEAN here
- *  (the full CaseItem carries the CaseAttention object). NO PII — never logged.
- *  `stage` is the wire string (one of CASE_STAGES). */
-export interface CaseUpdatedEvent {
-  caseId: string;
+ *  (the full PlacementItem carries the PlacementAttention object). NO PII — never logged.
+ *  `stage` is the wire string (one of PLACEMENT_STAGES). */
+export interface PlacementUpdatedEvent {
+  placementId: string;
   tenantId: string;
   unitId: string;
   stage: string;
@@ -480,7 +470,7 @@ export interface CaseUpdatedEvent {
   next_deadline_at: string | null;
   /** The linked relay-group conversationId, or null. */
   group_thread: string | null;
-  /** True when the case carries an escalation attention flag. */
+  /** True when the placement carries an escalation attention flag. */
   attention: boolean;
   /** The lost-reason CATEGORY only — the SSE emitter sends the bounded category
    *  string (the free `text` is withheld as potential PII; see
@@ -729,8 +719,8 @@ export interface ContactPhone {
 // detail page renders: message bubbles + collapsed call cards + milestone pins.
 
 export type TimelineMilestoneType =
-  | 'case_opened'
-  | 'case_closed'
+  | 'placement_opened'
+  | 'placement_closed'
   | 'listing_sent'
   | 'listing_reviewed'
   | 'tour_scheduled'
@@ -775,7 +765,7 @@ export interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
   type: TimelineMilestoneType;
   label: string; // human text, e.g. "Tour took place · Toured"
-  refType?: 'case' | 'unit' | 'conversation' | 'broadcast';
+  refType?: 'placement' | 'unit' | 'conversation' | 'broadcast';
   refId?: string; // deep-link target (links out, no inline content)
 }
 export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
@@ -865,7 +855,7 @@ export interface InboxRow {
   phone?: string; // E.164; the number (esp. for unknown rows)
   name: string; // contact name, or formatted number when unknown
   role?: 'tenant' | 'landlord' | 'unknown';
-  caseContext?: { caseId: string; label: string }; // e.g. "Touring" — optional
+  placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers
   preview: string; // latest item's text as a preview (UI shows one line, ellipsized)
   channel: InboxChannel; // channel of the latest item

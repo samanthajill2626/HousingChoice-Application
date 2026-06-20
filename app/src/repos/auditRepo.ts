@@ -46,7 +46,7 @@ export interface AuditRepo {
    * base-table PK (entityKey), descending by the `ts` SK. `before` is an
    * exclusive SK upper bound (page backward). No table/schema change: it reads
    * the same items `append` writes. entityKey follows the `<table>#<id>`
-   * convention (e.g. `cases#case-…`).
+   * convention (e.g. `placements#placement-…`).
    */
   listByEntity(entityKey: string, opts?: ListByEntityOpts): Promise<AuditEvent[]>;
 }

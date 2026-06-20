@@ -12,11 +12,9 @@
 // already snake_case, e.g. `rta_submitted`). Human labels live ONLY in the
 // label maps below — never re-derive a label from a key at a call site.
 //
-// SCOPE NOTE: the workflow record is the `case` entity in code/data (CaseItem,
-// casesRepo, caseId). "Placement" is the DOMAIN label for that record (per the
-// glossary/STATUS-MODEL.md); the future `case`→`placement` rename is OUT OF
-// SCOPE — "placement" appears here only in human-facing names, never as a code
-// identifier that touches the data layer.
+// NAMING: the workflow record is the `placement` entity in code/data
+// (PlacementItem, placementsRepo, placementId), matching the glossary/
+// STATUS-MODEL.md domain label.
 
 // --- Placement phases (board columns; Title Case display) -------------------
 // Ordered glance-level columns (§4). `RTA` is an acronym and stays all-caps.
@@ -126,7 +124,7 @@ export const TERMINAL_STAGES: ReadonlySet<PlacementStage> = new Set<PlacementSta
 // A first-class pass/fail result recorded on the placement when the inspection
 // completes (the move OUT of `awaiting_inspection`). The model is NOT a strict
 // state machine — a `fail` does NOT force a particular next stage; the admin
-// routes the card (reschedule, → lost, etc.). Stored on the case as the
+// routes the card (reschedule, → lost, etc.). Stored on the placement as the
 // snake_case flexible-doc attribute `inspection_outcome`.
 export const INSPECTION_OUTCOMES = ['pass', 'fail'] as const;
 

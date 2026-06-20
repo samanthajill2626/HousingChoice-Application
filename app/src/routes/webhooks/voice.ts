@@ -56,7 +56,7 @@ import {
   type ConversationsRepo,
   type ConversationType,
 } from '../../repos/conversationsRepo.js';
-import { createCasesRepo, type CasesRepo } from '../../repos/casesRepo.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../../repos/placementsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../../repos/unitsRepo.js';
 import {
   createMessagesRepo,
@@ -290,8 +290,8 @@ export interface TwilioVoiceWebhookDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
-  /** M1.10d masked-call landlord-leg routing (case -> unit.primary_voice_contact). */
-  casesRepo?: CasesRepo;
+  /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_voice_contact). */
+  placementsRepo?: PlacementsRepo;
   unitsRepo?: UnitsRepo;
   /** Founder-editable templates (M1.9b: missed-call quick-replies); real repo by default. */
   settingsRepo?: SettingsRepo;
@@ -313,7 +313,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
-  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
@@ -810,22 +810,22 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');
     }
 
-    // M1.10d: for a tenant->landlord masked call on a CASE-linked relay, the
+    // M1.10d: for a tenant->landlord masked call on a PLACEMENT-linked relay, the
     // landlord LEG dials the unit's primary_voice_contact (the per-property
     // voice contact, §7.1) instead of the roster SMS number — resolved at CALL
     // TIME (so a changed per-unit voice contact takes effect without
     // re-rostering), with the roster number as the fallback. It substitutes ONLY
-    // when the CALLER is the case's tenant (destination = the landlord side);
+    // when the CALLER is the placement's tenant (destination = the landlord side);
     // texts are unaffected (relay fan-out always uses the roster SMS numbers).
     // Best-effort: any lookup hiccup falls back to the roster number — the
     // bridge must never crash on routing resolution.
     let landlordVoiceOverride: { landlordContactId: string; dialPhone: string } | undefined;
     try {
-      const caseId = typeof relay.caseId === 'string' && relay.caseId.length > 0 ? relay.caseId : undefined;
-      if (caseId !== undefined && caller.contactId) {
-        const linkedCase = await cases.getById(caseId);
-        if (linkedCase && caller.contactId === linkedCase.tenantId) {
-          const unit = await units.getById(linkedCase.unitId);
+      const placementId = typeof relay.placementId === 'string' && relay.placementId.length > 0 ? relay.placementId : undefined;
+      if (placementId !== undefined && caller.contactId) {
+        const linkedPlacement = await placements.getById(placementId);
+        if (linkedPlacement && caller.contactId === linkedPlacement.tenantId) {
+          const unit = await units.getById(linkedPlacement.unitId);
           const voiceContactId =
             typeof unit?.primary_voice_contact === 'string' && unit.primary_voice_contact.length > 0
               ? unit.primary_voice_contact

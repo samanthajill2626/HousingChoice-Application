@@ -12,7 +12,7 @@ export interface JobEnvelope {
   payload: unknown;
   /**
    * Correlation context captured at enqueue time (requestId, conversationId,
-   * tenantId, caseId — NOT jobRunId; dispatch generates a fresh jobRunId).
+   * tenantId, placementId — NOT jobRunId; dispatch generates a fresh jobRunId).
    */
   correlationContext: CorrelationContext;
   /** W3C traceparent propagated across the hop. */

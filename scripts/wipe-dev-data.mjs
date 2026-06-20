@@ -85,7 +85,7 @@ const APP_TABLE_BASENAMES = [
   'conversations',
   'messages',
   'matches',
-  'cases',
+  'placements',
   'invoices',
   'users',
   'audit_events',

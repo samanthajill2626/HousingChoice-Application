@@ -8,15 +8,15 @@ import { test, expect, type Page } from '@playwright/test';
 // legacy (:5173); targeted by absolute URL since the suite baseURL is :5173.
 const NEXT = 'http://localhost:5174';
 
-// Log in as the seeded VA, then reset the seeded placement (case-0001) back to
+// Log in as the seeded VA, then reset the seeded placement (placement-0001) back to
 // `awaiting_inspection` via an AUTHENTICATED request (session-safe, targeted —
-// this spec moves the case to `lost`, so it must not bleed into other specs;
+// this spec moves the placement to `lost`, so it must not bleed into other specs;
 // /__dev/reseed would wipe users/sessions and break auth after frame.spec).
 async function devLoginAndReset(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
-  const res = await page.request.post(`${NEXT}/api/cases/case-0001/transition`, {
+  const res = await page.request.post(`${NEXT}/api/placements/placement-0001/transition`, {
     data: { toStage: 'awaiting_inspection', source: 'manual' },
   });
   expect(res.ok()).toBeTruthy();
@@ -24,7 +24,7 @@ async function devLoginAndReset(page: Page): Promise<void> {
 
 test('Lost modal: blocks until a reason is given, then closes the placement', async ({ page }) => {
   await devLoginAndReset(page);
-  await page.goto(`${NEXT}/cases`);
+  await page.goto(`${NEXT}/placements`);
 
   await expect(page.getByRole('listitem', { name: 'Inspection' }).getByText('Tasha Nguyen', { exact: true })).toBeVisible();
 

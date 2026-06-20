@@ -56,12 +56,12 @@ describe('Today', () => {
       items: [
         {
           group: 'needs_you_now',
-          refType: 'case',
+          refType: 'placement',
           refId: 'k1',
           who: 'Tasha Williams',
           why: 'RTA window closing',
           urgency: '2h left',
-          tag: 'Case · Touring',
+          tag: 'Placement · Touring',
         },
         {
           group: 'needs_you_now',
@@ -90,12 +90,12 @@ describe('Today', () => {
     expect(screen.queryByRole('heading', { name: /Tours today/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Follow-ups/i })).not.toBeInTheDocument();
 
-    // A case row links to /cases/:id and shows who / why / urgency / tag.
-    const caseLink = screen.getByRole('link', { name: /Tasha Williams/ });
-    expect(caseLink).toHaveAttribute('href', '/cases/k1');
-    expect(within(caseLink).getByText('RTA window closing')).toBeInTheDocument();
-    expect(within(caseLink).getByText('2h left')).toBeInTheDocument();
-    expect(within(caseLink).getByText('Case · Touring')).toBeInTheDocument();
+    // A placement row links to /placements/:id and shows who / why / urgency / tag.
+    const placementLink = screen.getByRole('link', { name: /Tasha Williams/ });
+    expect(placementLink).toHaveAttribute('href', '/placements/k1');
+    expect(within(placementLink).getByText('RTA window closing')).toBeInTheDocument();
+    expect(within(placementLink).getByText('2h left')).toBeInTheDocument();
+    expect(within(placementLink).getByText('Placement · Touring')).toBeInTheDocument();
 
     // refType drives the link target: conversation → /conversations/:id.
     expect(screen.getByRole('link', { name: /\(404\) 010-0007/ })).toHaveAttribute(
@@ -114,8 +114,8 @@ describe('Today', () => {
       status: 'ready',
       source: 'server',
       items: [
-        { group: 'tours_today', refType: 'case', refId: 'k1', who: 'A', why: 'Tour today' },
-        { group: 'tours_today', refType: 'case', refId: 'k2', who: 'B', why: 'Tour today' },
+        { group: 'tours_today', refType: 'placement', refId: 'k1', who: 'A', why: 'Tour today' },
+        { group: 'tours_today', refType: 'placement', refId: 'k2', who: 'B', why: 'Tour today' },
       ],
     };
     renderToday();

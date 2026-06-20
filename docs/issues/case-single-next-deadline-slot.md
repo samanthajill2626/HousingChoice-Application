@@ -1,27 +1,27 @@
 ---
 id: case-single-next-deadline-slot
-title: A case has one next_deadline slot, so stuck_case nudges yield to hard-clock deadlines
+title: A placement has one next_deadline slot, so stuck_placement nudges yield to hard-clock deadlines
 type: debt
 severity: med
 status: open
 area: app
 created: 2026-06-19
-refs: app/src/repos/casesRepo.ts, app/src/services/statusTransition.ts:scheduleStuckNudge
+refs: app/src/repos/placementsRepo.ts, app/src/services/statusTransition.ts:scheduleStuckNudge
 ---
 
-**Problem.** A case carries exactly ONE `next_deadline` slot (the
+**Problem.** A placement carries exactly ONE `next_deadline` slot (the
 `byNextDeadline` composite GSI key — `next_deadline_type` +
-`next_deadline_at`, set/cleared both-or-neither via `casesRepo.setNextDeadline`).
+`next_deadline_at`, set/cleared both-or-neither via `placementsRepo.setNextDeadline`).
 The status model uses that same slot for two purposes:
 
 - **Hard-clock deadlines** — `rta_window`, `voucher_expiration`, `tour_reminder`
   (real external clocks; surfaced in Today's `needs_you_now`).
-- **Soft stuck-case nudges** — `stuck_case` (time-in-stage; STATUS-MODEL.md §8;
+- **Soft stuck-placement nudges** — `stuck_placement` (time-in-stage; STATUS-MODEL.md §8;
   surfaced in Today's `follow_ups`).
 
 Because there is only one slot, the transition service
 (`statusTransition.ts` → `scheduleStuckNudge`) deliberately **defers** scheduling
-a `stuck_case` nudge whenever a hard-clock deadline is already pending — it must
+a `stuck_placement` nudge whenever a hard-clock deadline is already pending — it must
 not clobber an `rta_window`/`voucher_expiration`/`tour_reminder` clock (that
 would silently drop a real deadline). The consequence: a placement that is both
 on a hard clock AND going stale will **not** get its stuck nudge until the
@@ -30,7 +30,7 @@ not a bug — but it means a stuck placement sitting behind a hard clock can be
 under-nudged.
 
 **Suggested fix.** If under-nudging proves to matter operationally, model
-**multiple concurrent deadlines** per case — e.g. a `deadlines` map (type →
+**multiple concurrent deadlines** per placement — e.g. a `deadlines` map (type →
 instant) with a derived "soonest pending" projected onto the existing
 `byNextDeadline` key for query compatibility, or a separate per-type deadline
 GSI. Both are larger changes (schema + Today aggregation + the pull-based

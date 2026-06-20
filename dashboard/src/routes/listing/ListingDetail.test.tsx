@@ -68,7 +68,7 @@ const READY: ListingState = {
       fallback: true,
     },
   ],
-  casesOnUnit: [{ caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
+  placementsOnUnit: [{ placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' }],
   related: {
     status: 'ready',
     rows: [{ unitId: 'u2', status: 'occupied', relation: 'same_landlord', label: 'Same landlord' }],
@@ -150,14 +150,14 @@ describe('ListingDetail', () => {
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
   });
 
-  it('links roster rows to the contact page and cases to the case page', () => {
+  it('links roster rows to the contact page and placements to the placement page', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByRole('link', { name: /James Porter/ })).toHaveAttribute(
       'href',
       '/contacts/ll1',
     );
-    expect(screen.getByRole('link', { name: /Awaiting approval/ })).toHaveAttribute('href', '/cases/c1');
+    expect(screen.getByRole('link', { name: /Awaiting approval/ })).toHaveAttribute('href', '/placements/c1');
   });
 
   it('links related listings to their listing page', () => {
@@ -234,7 +234,7 @@ describe('ListingDetail', () => {
     useListing.mockReturnValue({
       ...READY,
       unit: { unitId: 'u1', landlordId: 'll1', status: 'available' },
-      casesOnUnit: [],
+      placementsOnUnit: [],
       related: { status: 'ready', rows: [] },
     });
     renderAt();

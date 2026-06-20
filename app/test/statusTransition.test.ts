@@ -21,7 +21,7 @@ import { STAGE_STUCK_THRESHOLDS } from '../src/lib/statusModel.js';
 
 function makeService(world: FakeWorld): StatusTransitionService {
   return createStatusTransitionService({
-    casesRepo: world.casesRepo,
+    placementsRepo: world.placementsRepo,
     unitsRepo: world.unitsRepo,
     contactsRepo: world.contactsRepo,
     auditRepo: world.auditRepo,
@@ -42,24 +42,24 @@ describe('statusTransition — placement stage moves', () => {
   });
 
   it('stamps stage + stage_entered_at + stage_source and writes a {actor,from,to,source} audit', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    const updated = await svc.transitionPlacement(c.caseId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    const updated = await svc.transitionPlacement(c.placementId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
     expect(updated.stage).toBe('collect_rta');
     expect(typeof updated.stage_entered_at).toBe('string');
     expect(updated.stage_source).toBe('manual');
 
-    const audit = world.auditEvents.find((a) => a.event_type === 'case_stage_changed');
+    const audit = world.auditEvents.find((a) => a.event_type === 'placement_stage_changed');
     expect(audit).toBeDefined();
     // The actor (userId) is carried so the byActor GSI indexes status changes (§8).
     expect(audit!.payload).toMatchObject({ actor: 'usr_va', from: 'send_application', to: 'collect_rta', source: 'manual' });
-    expect(audit!.entityKey).toBe(`cases#${c.caseId}`);
+    expect(audit!.entityKey).toBe(`placements#${c.placementId}`);
   });
 
-  it('404s an unknown case and rejects a bad stage', async () => {
-    await expect(svc.transitionPlacement('case-ghost', { toStage: 'collect_rta', source: 'manual' })).rejects.toBeInstanceOf(EntityNotFoundError);
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+  it('404s an unknown placement and rejects a bad stage', async () => {
+    await expect(svc.transitionPlacement('placement-ghost', { toStage: 'collect_rta', source: 'manual' })).rejects.toBeInstanceOf(EntityNotFoundError);
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     // @ts-expect-error — exercising the runtime guard with a junk stage.
-    await expect(svc.transitionPlacement(c.caseId, { toStage: 'bogus', source: 'manual' })).rejects.toBeInstanceOf(TransitionRefusedError);
+    await expect(svc.transitionPlacement(c.placementId, { toStage: 'bogus', source: 'manual' })).rejects.toBeInstanceOf(TransitionRefusedError);
   });
 });
 
@@ -74,25 +74,25 @@ describe('statusTransition — derivation (§7)', () => {
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  const seed = () => world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+  const seed = () => world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
 
   it('Application phase ⇒ tenant placing / listing under_application', async () => {
     const c = await seed();
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
   });
 
   it('Contract phase ⇒ listing finalizing (tenant still placing)', async () => {
     const c = await seed();
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('finalizing');
   });
 
   it('moved_in ⇒ tenant placed / listing occupied', async () => {
     const c = await seed();
-    await svc.transitionPlacement(c.caseId, { toStage: 'moved_in', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'moved_in', source: 'manual' });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placed');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('occupied');
   });
@@ -113,15 +113,15 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('derivation OVERWRITES a manually-set BASELINE listing status (the previously-broken case)', async () => {
+  it('derivation OVERWRITES a manually-set BASELINE listing status (the previously-broken placement)', async () => {
     // Staff publish the listing by manually moving it to `available` (source
     // 'manual') — a BASELINE state. The OLD source-precedence rule pinned it and
     // blocked the placement from ever deriving it forward, so the listing stayed
     // publicly shareable while under application. New rule: baseline states are
     // derivation-eligible, so the placement drives it to under_application.
     await svc.setListingStatus('unit-1', { toStatus: 'available', source: 'manual' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     const unit = await world.unitsRepo.getById('unit-1');
     expect(unit!.status).toBe('under_application'); // derived forward despite the manual 'available'
     expect(unit!.status_source).toBe('derived');
@@ -129,8 +129,8 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
 
   it('derivation OVERWRITES a manually-set BASELINE tenant status (searching → placing)', async () => {
     await svc.setTenantStatus('tenant-1', { toStatus: 'searching', source: 'manual' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     const contact = await world.contactsRepo.getById('tenant-1');
     expect(contact!.status).toBe('placing'); // derived forward despite the manual 'searching'
     expect(contact!.status_source).toBe('derived');
@@ -143,8 +143,8 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
       await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
       await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
       await svc2.setListingStatus('unit-1', { toStatus: override, source: 'manual' });
-      const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      await svc2.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+      const c = await world2.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await svc2.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
       const unit = await world2.unitsRepo.getById('unit-1');
       expect(unit!.status, override).toBe(override); // override preserved
       expect(unit!.status_source, override).toBe('manual');
@@ -158,8 +158,8 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
       await world2.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
       await world2.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
       await svc2.setTenantStatus('tenant-1', { toStatus: override, source: 'manual' });
-      const c = await world2.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      await svc2.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+      const c = await world2.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await svc2.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
       const contact = await world2.contactsRepo.getById('tenant-1');
       expect(contact!.status, override).toBe(override); // override preserved
       expect(contact!.status_source, override).toBe('manual');
@@ -168,14 +168,14 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
 
   it('moving a listing OUT of an override (on_hold → available) re-enables derivation', async () => {
     await svc.setListingStatus('unit-1', { toStatus: 'on_hold', source: 'manual' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     // While on_hold, the placement transition does NOT derive it forward.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('on_hold');
     // A human moves it back OUT of the override (explicit write always applies).
     await svc.setListingStatus('unit-1', { toStatus: 'available', source: 'manual' });
     // A subsequent placement transition now derives it forward.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
     const unit = await world.unitsRepo.getById('unit-1');
     expect(unit!.status).toBe('finalizing');
     expect(unit!.status_source).toBe('derived');
@@ -183,17 +183,17 @@ describe('statusTransition — state-based derivation gating (2026-06-19 decisio
 
   it('a manually on_hold tenant on a moved_in placement STAYS on_hold (derivation skipped)', async () => {
     await svc.setTenantStatus('tenant-1', { toStatus: 'on_hold', source: 'manual' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_move_in' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_move_in' });
     // moved_in would derive tenant→placed / listing→occupied, but on_hold pins.
-    await svc.transitionPlacement(c.caseId, { toStage: 'moved_in', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'moved_in', source: 'manual' });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('on_hold'); // pinned
     // The (baseline 'available') listing is NOT pinned, so it derives to occupied.
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('occupied');
   });
 
   it('an explicit (non-derived) write always applies — moving INTO an override over a derived value', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application'); // derived
 
     await svc.setListingStatus('unit-1', { toStatus: 'on_hold', source: 'manual' });
@@ -220,12 +220,12 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
   });
 
   const seed = (stage: string) =>
-    world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: stage as never });
+    world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: stage as never });
 
   it('Change 2: a CHANGE on both sides appends derived {from,to,source} audit rows with NO actor', async () => {
     const c = await seed('send_application');
     // Application phase derives tenant: undefined→placing, listing: available→under_application.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual', actor: 'usr_va' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual', actor: 'usr_va' });
 
     const tenantAudit = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed');
     const listingAudit = world.auditEvents.filter((a) => a.event_type === 'listing_status_changed');
@@ -243,7 +243,7 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
   it('Change 3: a mid-pipeline advance where the TENANT status is unchanged writes NO tenant update/audit', async () => {
     const c = await seed('send_application');
     // First move → tenant placing (a change, audited once).
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     const tenantAuditAfterFirst = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
     expect(tenantAuditAfterFirst).toBe(1);
@@ -258,7 +258,7 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
 
     // Contract phase: tenant STAYS placing (unchanged) while listing changes
     // under_application→finalizing. The tenant side must be a pure no-op.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
 
     expect(tenantUpdates).toBe(0); // no write for the unchanged tenant
     const tenantAuditAfterSecond = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
@@ -273,7 +273,7 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
 
   it('Change 3: re-applying the SAME stage (both sides unchanged) writes no derived update/audit at all', async () => {
     const c = await seed('send_application');
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     // Re-derive the same coarse statuses (tenant placing, listing under_application).
     let tenantUpdates = 0;
     let listingUpdates = 0;
@@ -284,8 +284,8 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
     const auditBefore = world.auditEvents.length;
 
     // A no-op pipeline re-entry (e.g. a redelivered stage advance to the same
-    // derived coarse statuses). case_stage_changed still audits; derived sides don't.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    // derived coarse statuses). placement_stage_changed still audits; derived sides don't.
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
 
     expect(tenantUpdates).toBe(0);
     expect(listingUpdates).toBe(0);
@@ -295,12 +295,12 @@ describe('statusTransition — derived status audit + no-op guard (Changes 2 & 3
   });
 
   it('lost-bounce goes through the SAME derived audit path (audits a derived bounce row, no actor)', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
     // Drive tenant→placing / listing→under_application first so the bounce is a real change.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
     const tenantRowsBefore = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed').length;
 
-    await svc.transitionPlacement(c.caseId, { toStage: 'lost', source: 'manual', actor: 'usr_va', lostReason: { category: 'stalled' } });
+    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', actor: 'usr_va', lostReason: { category: 'stalled' } });
 
     // The bounce derived tenant placing→searching: a NEW derived audit row, no actor.
     const tenantRows = world.auditEvents.filter((a) => a.event_type === 'tenant_status_changed');
@@ -354,7 +354,7 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
     await world.contactsRepo.create({ contactId: 't-drop', type: 'tenant' });
     const updated = await svc.setTenantStatus('t-drop', { toStatus: 'inactive', source: 'manual' });
     expect(updated.status).toBe('inactive');
-    // porting lives on the contact, never appears as a case stage.
+    // porting lives on the contact, never appears as a placement stage.
     expect(updated).not.toHaveProperty('stage');
   });
 });
@@ -371,8 +371,8 @@ describe('statusTransition — inspection_outcome on the inspection-complete mov
   });
 
   it("writes inspection_outcome:'pass' on awaiting_inspection → determine_rent", async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    const updated = await svc.transitionPlacement(c.caseId, {
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const updated = await svc.transitionPlacement(c.placementId, {
       toStage: 'determine_rent',
       source: 'manual',
       inspectionOutcome: 'pass',
@@ -381,8 +381,8 @@ describe('statusTransition — inspection_outcome on the inspection-complete mov
   });
 
   it("stores a 'fail' too — including on awaiting_inspection → lost and → schedule_inspection", async () => {
-    const toLost = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    const lost = await svc.transitionPlacement(toLost.caseId, {
+    const toLost = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const lost = await svc.transitionPlacement(toLost.placementId, {
       toStage: 'lost',
       source: 'manual',
       inspectionOutcome: 'fail',
@@ -390,8 +390,8 @@ describe('statusTransition — inspection_outcome on the inspection-complete mov
     });
     expect(lost.inspection_outcome).toBe('fail');
 
-    const reschedule = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    const back = await svc.transitionPlacement(reschedule.caseId, {
+    const reschedule = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const back = await svc.transitionPlacement(reschedule.placementId, {
       toStage: 'schedule_inspection',
       source: 'manual',
       inspectionOutcome: 'fail',
@@ -400,8 +400,8 @@ describe('statusTransition — inspection_outcome on the inspection-complete mov
   });
 
   it('does NOT write inspection_outcome on a move that is NOT from awaiting_inspection', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'schedule_inspection' });
-    const updated = await svc.transitionPlacement(c.caseId, {
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'schedule_inspection' });
+    const updated = await svc.transitionPlacement(c.placementId, {
       toStage: 'awaiting_inspection',
       source: 'manual',
       // A stray outcome on a non-inspection-complete move is ignored (gated on
@@ -412,10 +412,10 @@ describe('statusTransition — inspection_outcome on the inspection-complete mov
   });
 
   it('rejects an invalid inspectionOutcome defensively at the service', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
     await expect(
       // @ts-expect-error — exercising the defensive runtime guard with a junk value.
-      svc.transitionPlacement(c.caseId, { toStage: 'determine_rent', source: 'manual', inspectionOutcome: 'maybe' }),
+      svc.transitionPlacement(c.placementId, { toStage: 'determine_rent', source: 'manual', inspectionOutcome: 'maybe' }),
     ).rejects.toBeInstanceOf(TransitionRefusedError);
   });
 });
@@ -426,10 +426,10 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
     const svc = makeService(world);
     await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'determine_rent' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'determine_rent' });
     // Entering awaiting_rent_acceptance is the "still awaiting acceptance" state —
     // the rent is not yet accepted, so nothing is written even if finalRent leaks in.
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: 1825 });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: 1825 });
     expect((await world.unitsRepo.getById('unit-1'))!.final_rent).toBeUndefined();
   });
 
@@ -438,10 +438,10 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
     const svc = makeService(world);
     await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
     // The landlord accepts → move OUT of awaiting_rent_acceptance, carrying the
     // accepted amount → final_rent lands on the unit (§4).
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual', finalRent: 1825 });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual', finalRent: 1825 });
     expect((await world.unitsRepo.getById('unit-1'))!.final_rent).toBe(1825);
   });
 
@@ -450,11 +450,11 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
     const svc = makeService(world);
     await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_rent_acceptance' });
     // awaiting_rent_acceptance → lost is the deal dying, NOT a rent acceptance,
     // so final_rent must never be stamped onto the unit even if a stray
     // finalRent rides along on the move (edge guard #5).
-    await svc.transitionPlacement(c.caseId, {
+    await svc.transitionPlacement(c.placementId, {
       toStage: 'lost',
       source: 'manual',
       finalRent: 1825,
@@ -476,8 +476,8 @@ describe('statusTransition — Lost from any stage (§7)', () => {
   });
 
   it('stores the structured {category,text} reason and bounces tenant→searching / listing→available when no other active placement', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    const updated = await svc.transitionPlacement(c.caseId, {
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    const updated = await svc.transitionPlacement(c.placementId, {
       toStage: 'lost',
       source: 'manual',
       lostReason: { category: 'landlord_lost_inspection', text: 'failed twice' },
@@ -493,8 +493,8 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     // A manually On-hold tenant must STAY On hold through a lost placement —
     // the lost-bounce is a derived write, gated on the current override state.
     await svc.setTenantStatus('tenant-1', { toStatus: 'on_hold', source: 'manual' });
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('on_hold'); // pinned, no bounce
     // The listing (baseline 'available') is not pinned, so it bounces to available.
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('available');
@@ -502,11 +502,11 @@ describe('statusTransition — Lost from any stage (§7)', () => {
 
   it('does NOT bounce when ANOTHER active placement exists on the tenant/unit', async () => {
     // Two placements for the same tenant on the same unit; one stays active.
-    const active = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_approval' });
+    const active = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_approval' });
     // Drive the active one's derivation so tenant=placing / listing=under_application.
-    await svc.transitionPlacement(active.caseId, { toStage: 'awaiting_approval', source: 'manual' });
-    const losing = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-    await svc.transitionPlacement(losing.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
+    await svc.transitionPlacement(active.placementId, { toStage: 'awaiting_approval', source: 'manual' });
+    const losing = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+    await svc.transitionPlacement(losing.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
     // The OTHER placement is still active → no bounce-back.
     expect((await world.contactsRepo.getById('tenant-1'))!.status).toBe('placing');
     expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
@@ -514,51 +514,51 @@ describe('statusTransition — Lost from any stage (§7)', () => {
 
   it('does NOT bounce when the active sibling is on the SECOND page (paginated sibling scan)', async () => {
     // Change 1: the sibling-placement scan must follow lastEvaluatedKey, not
-    // decide off the first page. We wrap the fake casesRepo so listByTenant /
-    // listByUnit ALWAYS return two pages: page 1 = only the losing/terminal case
+    // decide off the first page. We wrap the fake placementsRepo so listByTenant /
+    // listByUnit ALWAYS return two pages: page 1 = only the losing/terminal placement
     // (no active sibling), page 2 (returned only when exclusiveStartKey is set)
     // contains the ACTIVE sibling. If the scan reads page 1 only it would wrongly
     // bounce; following the cursor finds the sibling and suppresses the bounce.
-    const active = await world.casesRepo.create({
+    const active = await world.placementsRepo.create({
       tenantId: 'tenant-1',
       unitId: 'unit-1',
       stage: 'awaiting_approval',
     });
     // Make tenant=placing / listing=under_application via the active placement.
-    await svc.transitionPlacement(active.caseId, { toStage: 'awaiting_approval', source: 'manual' });
-    const losing = await world.casesRepo.create({
+    await svc.transitionPlacement(active.placementId, { toStage: 'awaiting_approval', source: 'manual' });
+    const losing = await world.placementsRepo.create({
       tenantId: 'tenant-1',
       unitId: 'unit-1',
       stage: 'awaiting_inspection',
     });
 
-    const PAGE_CURSOR = { caseId: '__page2__' };
+    const PAGE_CURSOR = { placementId: '__page2__' };
     const twoPageScan = (all: typeof active[]) => (opts: { exclusiveStartKey?: Record<string, unknown> }) => {
       // Page 2 (cursor present): the active sibling only.
       if (opts.exclusiveStartKey !== undefined) {
-        return { items: all.filter((c) => c.caseId === active.caseId).map((c) => ({ ...c })) };
+        return { items: all.filter((c) => c.placementId === active.placementId).map((c) => ({ ...c })) };
       }
-      // Page 1 (no cursor): the losing case only, with a lastEvaluatedKey so the
+      // Page 1 (no cursor): the losing placement only, with a lastEvaluatedKey so the
       // service must follow the cursor to page 2.
       return {
-        items: all.filter((c) => c.caseId === losing.caseId).map((c) => ({ ...c })),
+        items: all.filter((c) => c.placementId === losing.placementId).map((c) => ({ ...c })),
         lastEvaluatedKey: PAGE_CURSOR,
       };
     };
 
     const pagedRepo = {
-      ...world.casesRepo,
+      ...world.placementsRepo,
       async listByTenant(tenantId: string, opts: { exclusiveStartKey?: Record<string, unknown> } = {}) {
-        const all = (await world.casesRepo.listByTenant(tenantId)).items;
+        const all = (await world.placementsRepo.listByTenant(tenantId)).items;
         return twoPageScan(all)(opts);
       },
       async listByUnit(unitId: string, opts: { exclusiveStartKey?: Record<string, unknown> } = {}) {
-        const all = (await world.casesRepo.listByUnit(unitId)).items;
+        const all = (await world.placementsRepo.listByUnit(unitId)).items;
         return twoPageScan(all)(opts);
       },
     };
     const pagedSvc = createStatusTransitionService({
-      casesRepo: pagedRepo as typeof world.casesRepo,
+      placementsRepo: pagedRepo as typeof world.placementsRepo,
       unitsRepo: world.unitsRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
@@ -566,7 +566,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
       logger: createLogger({ destination: createLogCapture().stream }),
     });
 
-    await pagedSvc.transitionPlacement(losing.caseId, {
+    await pagedSvc.transitionPlacement(losing.placementId, {
       toStage: 'lost',
       source: 'manual',
       lostReason: { category: 'stalled' },
@@ -588,11 +588,11 @@ describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('sets a stuck_case next-deadline at ~now + the stage threshold', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+  it('sets a stuck_placement next-deadline at ~now + the stage threshold', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     const before = Date.now();
-    const updated = await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
-    expect(updated.next_deadline_type).toBe('stuck_case');
+    const updated = await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    expect(updated.next_deadline_type).toBe('stuck_placement');
     const at = Date.parse(updated.next_deadline_at!);
     const expected = before + STAGE_STUCK_THRESHOLDS.awaiting_hap_contract!;
     // Within a generous window (scheduling computes now+threshold).
@@ -601,31 +601,31 @@ describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
   });
 
   it('does NOT clobber a pending HARD-CLOCK deadline (rta_window) with a stuck nudge', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
-    await world.casesRepo.setNextDeadline(c.caseId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'review_rta', source: 'manual' });
-    const after = await world.casesRepo.getById(c.caseId);
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
+    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'review_rta', source: 'manual' });
+    const after = await world.placementsRepo.getById(c.placementId);
     expect(after!.next_deadline_type).toBe('rta_window'); // untouched
     expect(after!.next_deadline_at).toBe('2026-09-01T00:00:00.000Z');
   });
 
   it('a terminal stage clears a pending stuck nudge', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
-    expect((await world.casesRepo.getById(c.caseId))!.next_deadline_type).toBe('stuck_case');
-    await svc.transitionPlacement(c.caseId, { toStage: 'lost', source: 'manual', lostReason: { category: 'no_contact' } });
-    const after = await world.casesRepo.getById(c.caseId);
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
+    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('stuck_placement');
+    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'no_contact' } });
+    const after = await world.placementsRepo.getById(c.placementId);
     expect(after!.next_deadline_type).toBeUndefined();
     expect(after!.next_deadline_at).toBeUndefined();
   });
 
   it('a terminal stage clears a pending HARD-CLOCK deadline too (closed placement → slot moot)', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
     // A hard-clock rta_window deadline holds the single slot.
-    await world.casesRepo.setNextDeadline(c.caseId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
+    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
     // Going terminal must clear it — a closed deal never fires a deadline nudge.
-    await svc.transitionPlacement(c.caseId, { toStage: 'moved_in', source: 'manual' });
-    const after = await world.casesRepo.getById(c.caseId);
+    await svc.transitionPlacement(c.placementId, { toStage: 'moved_in', source: 'manual' });
+    const after = await world.placementsRepo.getById(c.placementId);
     expect(after!.next_deadline_type).toBeUndefined();
     expect(after!.next_deadline_at).toBeUndefined();
   });

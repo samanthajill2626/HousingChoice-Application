@@ -113,8 +113,8 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
       contactId: TENANT,
       type: 'stage_changed',
       label: 'Stage → Touring',
-      refType: 'case',
-      refId: 'case-1',
+      refType: 'placement',
+      refId: 'placement-1',
       at: '2026-06-16T12:00:00.000Z',
     });
     await seedMessage('conv-a', '2026-06-16T13:00:00.000Z', 'SM-a2', { body: 'latest on A' });
@@ -145,8 +145,8 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     // `at` must be sourced from its tsEventId prefix).
     await world.activityEventsRepo.record({
       contactId: TENANT,
-      type: 'case_opened',
-      label: 'Case opened',
+      type: 'placement_opened',
+      label: 'Placement opened',
       at: '2026-06-16T11:00:00.000Z',
     });
 
@@ -199,8 +199,8 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     });
     await world.activityEventsRepo.record({
       contactId: TENANT,
-      type: 'case_opened',
-      label: 'Case opened',
+      type: 'placement_opened',
+      label: 'Placement opened',
       at: '2026-06-16T12:00:00.000Z',
     });
 
@@ -402,7 +402,7 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     await seedMessage('conv-b', '2026-06-16T14:00:00.000Z', 'SM-b2', { body: 'b2' });
     await world.activityEventsRepo.record({
       contactId: TENANT,
-      type: 'case_opened',
+      type: 'placement_opened',
       label: 'M2',
       at: '2026-06-16T15:00:00.000Z',
     });

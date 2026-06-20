@@ -1,21 +1,21 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { CasesPage, ConversationsPage, TodayResponse } from '../../api/index.js';
+import type { PlacementsPage, ConversationsPage, TodayResponse } from '../../api/index.js';
 
 // Mock the api barrel: stub the three fetchers + capture the SSE handlers so the
 // test can drive a live event. ApiError is re-exported real.
 const getToday = vi.fn();
-const getCases = vi.fn();
+const getPlacements = vi.fn();
 const getConversations = vi.fn();
-let lastHandlers: { onCaseUpdated?: () => void; onConversationUpdated?: () => void } = {};
+let lastHandlers: { onPlacementUpdated?: () => void; onConversationUpdated?: () => void } = {};
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getToday: (...a: unknown[]) => getToday(...a),
-    getCases: (...a: unknown[]) => getCases(...a),
+    getPlacements: (...a: unknown[]) => getPlacements(...a),
     getConversations: (...a: unknown[]) => getConversations(...a),
     useEventStream: (handlers: typeof lastHandlers) => {
       lastHandlers = handlers;
@@ -40,15 +40,15 @@ function Probe(): React.JSX.Element {
 const TODAY: TodayResponse = {
   generatedAt: '2026-06-16T12:00:00Z',
   items: [
-    { group: 'needs_you_now', refType: 'case', refId: 'k1', who: 'Server Tasha', why: 'RTA' },
+    { group: 'needs_you_now', refType: 'placement', refId: 'k1', who: 'Server Tasha', why: 'RTA' },
   ],
 };
 
-const CASES: CasesPage = {
+const CASES: PlacementsPage = {
   nextCursor: null,
-  cases: [
+  placements: [
     {
-      caseId: 'k9',
+      placementId: 'k9',
       tenantId: 'Fallback Tenant',
       unitId: 'u9',
       stage: 'schedule_inspection',
@@ -61,7 +61,7 @@ const CONVERSATIONS: ConversationsPage = { nextCursor: null, conversations: [] }
 
 beforeEach(() => {
   getToday.mockReset();
-  getCases.mockReset();
+  getPlacements.mockReset();
   getConversations.mockReset();
   lastHandlers = {};
 });
@@ -77,7 +77,7 @@ describe('useToday', () => {
     expect(screen.getByTestId('source')).toHaveTextContent('server');
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
-    expect(getCases).not.toHaveBeenCalled();
+    expect(getPlacements).not.toHaveBeenCalled();
     // The browser owns "today": the server call carries the operator's LOCAL
     // calendar day (YYYY-MM-DD), not a UTC toISOString() date.
     expect(getToday).toHaveBeenCalledWith(
@@ -86,9 +86,9 @@ describe('useToday', () => {
     );
   });
 
-  it('falls back to cases+conversations on a 404', async () => {
+  it('falls back to placements+conversations on a 404', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getCases.mockResolvedValue(CASES);
+    getPlacements.mockResolvedValue(CASES);
     getConversations.mockResolvedValue(CONVERSATIONS);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -99,7 +99,7 @@ describe('useToday', () => {
 
   it('surfaces error status when the fallback itself fails', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
-    getCases.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
+    getPlacements.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
     getConversations.mockResolvedValue(CONVERSATIONS);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
@@ -109,10 +109,10 @@ describe('useToday', () => {
     getToday.mockRejectedValue(new ApiError(500, 'boom', 'server error'));
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('error'));
-    expect(getCases).not.toHaveBeenCalled();
+    expect(getPlacements).not.toHaveBeenCalled();
   });
 
-  it('refetches when a case.updated event arrives', async () => {
+  it('refetches when a placement.updated event arrives', async () => {
     getToday.mockResolvedValue(TODAY);
     render(<Probe />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
@@ -120,9 +120,9 @@ describe('useToday', () => {
 
     getToday.mockResolvedValue({
       ...TODAY,
-      items: [{ group: 'needs_you_now', refType: 'case', refId: 'k2', who: 'Updated', why: 'x' }],
+      items: [{ group: 'needs_you_now', refType: 'placement', refId: 'k2', who: 'Updated', why: 'x' }],
     });
-    lastHandlers.onCaseUpdated?.();
+    lastHandlers.onPlacementUpdated?.();
     await waitFor(() => expect(screen.getByTestId('first')).toHaveTextContent('Updated'));
     expect(getToday).toHaveBeenCalledTimes(2);
   });

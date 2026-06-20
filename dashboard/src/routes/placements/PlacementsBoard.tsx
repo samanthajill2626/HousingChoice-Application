@@ -1,4 +1,4 @@
-// CasesBoard — the placement board at /cases (F2.1). One column per
+// PlacementsBoard — the placement board at /placements (F2.1). One column per
 // PLACEMENT_PHASE; cards grouped by STAGE_PHASE. Drag a card to another phase's
 // column to transition it to that phase's FIRST stage (firstStageOfPhase).
 // Terminal placements (moved_in / lost) live in a collapsed "Closed" area below
@@ -19,8 +19,8 @@
 //        - 'none'             → fire immediately.
 //   2. OPTIMISTIC: the card is shown in the target column right away (pendingMove
 //      overrides its stage for grouping) and dimmed.
-//   3. transitionPlacement(caseId, { toStage, source:'manual', … }) runs.
-//        - success → applyCase(returned CaseItem) (authoritative), clear pending.
+//   3. transitionPlacement(placementId, { toStage, source:'manual', … }) runs.
+//        - success → applyPlacement(returned PlacementItem) (authoritative), clear pending.
 //        - error   → clear pending (rolls the card back to its original column)
 //                    and show a non-blocking inline error banner.
 //
@@ -45,27 +45,27 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { buildBoard, isNoOpMove } from './board.js';
-import { listingAddress, tenantName } from './casesFormat.js';
+import { listingAddress, tenantName } from './placementsFormat.js';
 import { gateFor, type TransitionGate } from './transitionGate.js';
 import { Column } from './Column.js';
 import { ClosedArea } from './ClosedArea.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
-import { useCases } from './useCases.js';
-import styles from './CasesBoard.module.css';
+import { usePlacements } from './usePlacements.js';
+import styles from './PlacementsBoard.module.css';
 
 /** A move awaiting its prompt and/or its in-flight transition. */
 interface PendingMove {
-  caseId: string;
+  placementId: string;
   fromStage: PlacementStage;
   toStage: PlacementStage;
   gate: TransitionGate;
 }
 
-export function CasesBoard(): React.JSX.Element {
-  const { status, cases, contacts, units, applyCase } = useCases();
+export function PlacementsBoard(): React.JSX.Element {
+  const { status, placements, contacts, units, applyPlacement } = usePlacements();
   const [pending, setPending] = useState<PendingMove | null>(null);
-  // caseIds whose optimistic move is in flight → dim + group in the target column.
+  // placementIds whose optimistic move is in flight → dim + group in the target column.
   const [optimistic, setOptimistic] = useState<Map<string, PlacementStage>>(new Map());
   const [error, setError] = useState<string | null>(null);
 
@@ -80,17 +80,17 @@ export function CasesBoard(): React.JSX.Element {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // Apply optimistic overrides on top of the loaded cases before grouping, so a
+  // Apply optimistic overrides on top of the loaded placements before grouping, so a
   // card visually sits in its target column while the transition is in flight.
   const board = useMemo(() => {
     const effective =
       optimistic.size === 0
-        ? cases
-        : cases.map((c) =>
-            optimistic.has(c.caseId) ? { ...c, stage: optimistic.get(c.caseId)! } : c,
+        ? placements
+        : placements.map((c) =>
+            optimistic.has(c.placementId) ? { ...c, stage: optimistic.get(c.placementId)! } : c,
           );
     return buildBoard(effective);
-  }, [cases, optimistic]);
+  }, [placements, optimistic]);
 
   /** Run the actual transition (after any gate is satisfied), with optimistic
    *  move + rollback. `extra` carries lostReason / finalRent / inspectionOutcome. */
@@ -99,8 +99,8 @@ export function CasesBoard(): React.JSX.Element {
     extra: { lostReason?: LostReason } & MovePromptResult,
   ): void {
     setError(null);
-    setOptimistic((prev) => new Map(prev).set(move.caseId, move.toStage));
-    void transitionPlacement(move.caseId, {
+    setOptimistic((prev) => new Map(prev).set(move.placementId, move.toStage));
+    void transitionPlacement(move.placementId, {
       toStage: move.toStage,
       source: 'manual',
       ...(extra.lostReason !== undefined && { lostReason: extra.lostReason }),
@@ -108,7 +108,7 @@ export function CasesBoard(): React.JSX.Element {
       ...(extra.inspectionOutcome !== undefined && { inspectionOutcome: extra.inspectionOutcome }),
     })
       .then((updated) => {
-        applyCase(updated); // authoritative stage from the server
+        applyPlacement(updated); // authoritative stage from the server
       })
       .catch(() => {
         setError('That move was rejected. The card was returned to its column.');
@@ -116,7 +116,7 @@ export function CasesBoard(): React.JSX.Element {
       .finally(() => {
         setOptimistic((prev) => {
           const next = new Map(prev);
-          next.delete(move.caseId);
+          next.delete(move.placementId);
           return next;
         });
         setPending(null);
@@ -132,12 +132,12 @@ export function CasesBoard(): React.JSX.Element {
    *      prompt). A within-phase move is meaningless on a phase board, so we
    *      no-op it. (The per-card "Move to…" select already filters the current
    *      phase, so this only bites the DROP path — but we guard centrally.) */
-  function requestMove(caseId: string, fromStage: PlacementStage, toStage: PlacementStage): void {
+  function requestMove(placementId: string, fromStage: PlacementStage, toStage: PlacementStage): void {
     // No-op guard (isNoOpMove): same stage OR same phase → no transition, no
-    // prompt, no optimistic move. (Computed via phaseOfCase under the hood.)
+    // prompt, no optimistic move. (Computed via phaseOfPlacement under the hood.)
     if (isNoOpMove(fromStage, toStage)) return;
     const gate = gateFor(fromStage, toStage);
-    const move: PendingMove = { caseId, fromStage, toStage, gate };
+    const move: PendingMove = { placementId, fromStage, toStage, gate };
     if (gate === 'none') {
       runTransition(move, {});
       return;
@@ -158,7 +158,7 @@ export function CasesBoard(): React.JSX.Element {
   if (status === 'loading') {
     return (
       <div className={styles.page}>
-        <h1 className={styles.title}>Cases</h1>
+        <h1 className={styles.title}>Placements</h1>
         <Spinner center />
       </div>
     );
@@ -167,7 +167,7 @@ export function CasesBoard(): React.JSX.Element {
   if (status === 'error') {
     return (
       <div className={styles.page}>
-        <h1 className={styles.title}>Cases</h1>
+        <h1 className={styles.title}>Placements</h1>
         <p role="alert" className={styles.error}>
           We couldn&apos;t load the placement board. Please try again.
         </p>
@@ -179,7 +179,7 @@ export function CasesBoard(): React.JSX.Element {
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>Cases</h1>
+      <h1 className={styles.title}>Placements</h1>
       <p className={styles.sub}>
         Placements by phase. Drag a card to a column to move it; terminal placements collapse below.
       </p>
@@ -197,7 +197,7 @@ export function CasesBoard(): React.JSX.Element {
               key={col.phase}
               phase={col.phase}
               targetStage={col.targetStage}
-              cases={col.cases}
+              placements={col.placements}
               contacts={contacts}
               units={units}
               optimistic={optimistic}
@@ -208,17 +208,17 @@ export function CasesBoard(): React.JSX.Element {
       </DndContext>
 
       <ClosedArea
-        cases={board.closed}
+        placements={board.closed}
         tenantName={(id) => tenantName(contacts, id)}
         listingAddress={(id) => listingAddress(units, id)}
       />
 
       {pending !== null && pending.gate === 'lost' ? (
         <LostReasonModal
-          subject={tenantName(contacts, cases.find((c) => c.caseId === pending.caseId)?.tenantId ?? '')}
+          subject={tenantName(contacts, placements.find((c) => c.placementId === pending.placementId)?.tenantId ?? '')}
           onClose={() => setPending(null)}
           onConfirm={(reason) => runTransition(pending, { lostReason: reason })}
-          busy={optimistic.has(pending.caseId)}
+          busy={optimistic.has(pending.placementId)}
         />
       ) : null}
 
@@ -227,7 +227,7 @@ export function CasesBoard(): React.JSX.Element {
           mode={pending.gate === 'finalRent' ? 'finalRent' : 'inspectionOutcome'}
           onClose={() => setPending(null)}
           onConfirm={(result) => runTransition(pending, result)}
-          busy={optimistic.has(pending.caseId)}
+          busy={optimistic.has(pending.placementId)}
         />
       ) : null}
     </div>

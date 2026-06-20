@@ -167,7 +167,7 @@ export interface UnitItem {
    * landlord-side person a masked tenant→landlord call routes to. Stored as a
    * contactId. PENDING FOUNDER CONFIRMATION — may move to per-placement (CO1
    * notes routing comes "from the per-unit process" today; a later change
-   * order may relocate this onto the case/placement). INTERNAL — never exposed
+   * order may relocate this onto the placement). INTERNAL — never exposed
    * by the public flyer.
    */
   primary_voice_contact?: string;

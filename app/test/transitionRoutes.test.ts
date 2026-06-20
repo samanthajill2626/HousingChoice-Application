@@ -1,7 +1,7 @@
 // Status-model transition ROUTES (supertest) — happy paths + 400/404 + 401
 // unauthenticated + no-PII-on-the-wire, on the shared in-memory world via the
 // harness (authed by the real sealed session cookie next to the origin secret).
-// Mirrors casesApi.test.ts's auth/harness conventions.
+// Mirrors placementsApi.test.ts's auth/harness conventions.
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
@@ -28,75 +28,75 @@ describe('status-model transition routes', () => {
     request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
 
   it('rejects unauthenticated requests (401/403)', async () => {
-    const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     const res = await request(app)
-      .post(`/api/cases/${c.caseId}/transition`)
+      .post(`/api/placements/${c.placementId}/transition`)
       .set('x-origin-verify', ORIGIN_SECRET)
       .send({ toStage: 'collect_rta', source: 'manual' });
     expect([401, 403]).toContain(res.status);
   });
 
-  describe('POST /api/cases/:caseId/transition', () => {
-    it('transitions the placement and returns the case; derivation flows to the world', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      const res = await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'awaiting_approval', source: 'manual' });
+  describe('POST /api/placements/:placementId/transition', () => {
+    it('transitions the placement and returns the placement; derivation flows to the world', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_approval', source: 'manual' });
       expect(res.status).toBe(200);
-      expect(res.body.case.stage).toBe('awaiting_approval');
-      expect(res.body.case.stage_source).toBe('manual');
+      expect(res.body.placement.stage).toBe('awaiting_approval');
+      expect(res.body.placement.stage_source).toBe('manual');
       expect((await world.unitsRepo.getById('unit-1'))!.status).toBe('under_application');
     });
 
     it('400s a bad stage / bad source / bad lostReason category / non-positive finalRent', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'bogus', source: 'manual' })).status).toBe(400);
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'collect_rta', source: 'robot' })).status).toBe(400);
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { category: 'nope' } })).status).toBe(400);
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: -1 })).status).toBe(400);
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'bogus', source: 'manual' })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'collect_rta', source: 'robot' })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { category: 'nope' } })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: -1 })).status).toBe(400);
       // Fix #5: a $0 accepted rent is invalid for billing → 400.
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: 0 })).status).toBe(400);
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: Number.NaN })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: 0 })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', finalRent: Number.NaN })).status).toBe(400);
     });
 
     it('400s a lost move with no reason (§7: pick OR write — a reason is always captured)', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
       // No lostReason at all.
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'lost', source: 'manual' })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'lost', source: 'manual' })).status).toBe(400);
       // Empty object.
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'lost', source: 'manual', lostReason: {} })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'lost', source: 'manual', lostReason: {} })).status).toBe(400);
       // Whitespace-only text (no category) is not a real reason.
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { text: '   ' } })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { text: '   ' } })).status).toBe(400);
       // A category alone is fine.
-      expect((await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } })).status).toBe(200);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } })).status).toBe(200);
     });
 
-    it('records the actor (userId) on the case_stage_changed audit row (byActor GSI)', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'collect_rta', source: 'manual' });
-      const audit = world.auditEvents.find((a) => a.event_type === 'case_stage_changed');
+    it('records the actor (userId) on the placement_stage_changed audit row (byActor GSI)', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'collect_rta', source: 'manual' });
+      const audit = world.auditEvents.find((a) => a.event_type === 'placement_stage_changed');
       expect(audit).toBeDefined();
       // The seeded session is the VA user; the route forwards req.user.userId.
       expect(typeof (audit!.payload as { actor?: unknown }).actor).toBe('string');
       expect((audit!.payload as { actor: string }).actor.length).toBeGreaterThan(0);
     });
 
-    it('404s an unknown case', async () => {
-      expect((await authedPost('/api/cases/case-ghost/transition', { toStage: 'collect_rta', source: 'manual' })).status).toBe(404);
+    it('404s an unknown placement', async () => {
+      expect((await authedPost('/api/placements/placement-ghost/transition', { toStage: 'collect_rta', source: 'manual' })).status).toBe(404);
     });
 
     it("writes inspection_outcome on the inspection-complete move (awaiting_inspection → determine_rent)", async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-      const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
         toStage: 'determine_rent',
         source: 'manual',
         inspectionOutcome: 'pass',
       });
       expect(res.status).toBe(200);
-      expect(res.body.case.inspection_outcome).toBe('pass');
+      expect(res.body.placement.inspection_outcome).toBe('pass');
     });
 
     it('400s an invalid inspectionOutcome at the route', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-      const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
         toStage: 'determine_rent',
         source: 'manual',
         inspectionOutcome: 'maybe',
@@ -105,16 +105,16 @@ describe('status-model transition routes', () => {
       expect(res.body.error).toBe('inspectionOutcome must be pass or fail');
     });
 
-    it('records a lost transition with the structured reason; emits case.updated WITHOUT the free text (no PII)', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
-      const res = await authedPost(`/api/cases/${c.caseId}/transition`, {
+    it('records a lost transition with the structured reason; emits placement.updated WITHOUT the free text (no PII)', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
         toStage: 'lost',
         source: 'manual',
         lostReason: { category: 'tenant_withdrew', text: 'moved out of state — secret note' },
       });
       expect(res.status).toBe(200);
-      expect(res.body.case.lost_reason).toEqual({ category: 'tenant_withdrew', text: 'moved out of state — secret note' });
-      const evt = world.emitted.filter((e) => e.event === 'case.updated').at(-1);
+      expect(res.body.placement.lost_reason).toEqual({ category: 'tenant_withdrew', text: 'moved out of state — secret note' });
+      const evt = world.emitted.filter((e) => e.event === 'placement.updated').at(-1);
       expect(evt).toBeDefined();
       // The wire payload carries the bounded category only — never the free text.
       const json = JSON.stringify(evt!.payload);
@@ -155,12 +155,12 @@ describe('status-model transition routes', () => {
     });
   });
 
-  describe('GET /api/cases/:caseId/history', () => {
+  describe('GET /api/placements/:placementId/history', () => {
     it('returns the placement provenance trail newest-first', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'collect_rta', source: 'manual' });
-      await authedPost(`/api/cases/${c.caseId}/transition`, { toStage: 'review_rta', source: 'manual' });
-      const res = await authedGet(`/api/cases/${c.caseId}/history`);
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'collect_rta', source: 'manual' });
+      await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'review_rta', source: 'manual' });
+      const res = await authedGet(`/api/placements/${c.placementId}/history`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body.history)).toBe(true);
       expect(res.body.history.length).toBeGreaterThanOrEqual(2);
@@ -169,8 +169,8 @@ describe('status-model transition routes', () => {
     });
 
     it('401s unauthenticated', async () => {
-      const c = await world.casesRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-      const res = await request(app).get(`/api/cases/${c.caseId}/history`).set('x-origin-verify', ORIGIN_SECRET);
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      const res = await request(app).get(`/api/placements/${c.placementId}/history`).set('x-origin-verify', ORIGIN_SECRET);
       expect([401, 403]).toContain(res.status);
     });
   });

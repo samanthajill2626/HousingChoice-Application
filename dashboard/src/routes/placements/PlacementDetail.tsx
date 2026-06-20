@@ -1,11 +1,11 @@
-// CaseDetail — a single placement's detail page (F2.3) at /cases/:caseId. Shows
+// PlacementDetail — a single placement's detail page (F2.3) at /placements/:placementId. Shows
 // the stage label + phase, tenant (home) + listing links, time-in-stage
 // (stage_entered_at), the lost reason (via formatLostReason), and
 // inspection_outcome + final_rent (the latter read off the linked unit) where
 // present. A full "Move to…" stage picker drives transitions through the SAME
 // gated pipeline as the board (lost → LostReasonModal; OUT of
 // awaiting_rent_acceptance → finalRent; OUT of awaiting_inspection →
-// inspectionOutcome). A history panel (useCaseHistory) renders the audit rows
+// inspectionOutcome). A history panel (usePlacementHistory) renders the audit rows
 // newest-first with "load more".
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -14,13 +14,13 @@ import {
   STAGE_LABELS,
   STAGE_PHASE,
   formatLostReason,
-  getCase,
+  getPlacement,
   getContact,
   getUnit,
   transitionPlacement,
   useEventStream,
-  type CaseItem,
-  type CaseUpdatedEvent,
+  type PlacementItem,
+  type PlacementUpdatedEvent,
   type Contact,
   type LostReason,
   type PlacementStage,
@@ -30,49 +30,49 @@ import { Button, Spinner } from '../../ui/index.js';
 import { Card, EmptyRow, KV } from '../contact/Card.js';
 import { formatMoney } from '../listing/listingFormat.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { dateTime, historyTitle, shortDate, summarizeHistory } from './casesFormat.js';
+import { dateTime, historyTitle, shortDate, summarizeHistory } from './placementsFormat.js';
 import { gateFor, type TransitionGate } from './transitionGate.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
-import { useCaseHistory } from './useCaseHistory.js';
-import styles from './CaseDetail.module.css';
+import { usePlacementHistory } from './usePlacementHistory.js';
+import styles from './PlacementDetail.module.css';
 
 interface PendingMove {
   toStage: PlacementStage;
   gate: TransitionGate;
 }
 
-export function CaseDetail(): React.JSX.Element {
-  const { caseId = '' } = useParams<{ caseId: string }>();
+export function PlacementDetail(): React.JSX.Element {
+  const { placementId = '' } = useParams<{ placementId: string }>();
   // Consolidated load state keyed by forId — loading is DERIVED during render
-  // when caseId changes (no synchronous setState in the effect → no cascading
+  // when placementId changes (no synchronous setState in the effect → no cascading
   // render), mirroring useListing.
   const [loaded, setLoaded] = useState<{
     status: 'loading' | 'ready' | 'error';
-    case_: CaseItem | null;
+    placement: PlacementItem | null;
     unit: UnitItem | null;
     tenant: Contact | null;
     forId: string;
-  }>({ status: 'loading', case_: null, unit: null, tenant: null, forId: caseId });
+  }>({ status: 'loading', placement: null, unit: null, tenant: null, forId: placementId });
   const [pending, setPending] = useState<PendingMove | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Track the in-flight load so a refetch (SSE-driven or caseId change)
+  // Track the in-flight load so a refetch (SSE-driven or placementId change)
   // supersedes the previous one and a late response can't clobber fresher state.
   const abortRef = useRef<AbortController | null>(null);
 
-  // Apply an updated case in place (after a transition returns it), keeping the
-  // resolved unit — instant feedback before the case.updated refetch reconciles.
-  const setCase = useCallback(
-    (next: CaseItem) => {
-      setLoaded((prev) => ({ ...prev, status: 'ready', case_: next, forId: caseId }));
+  // Apply an updated placement in place (after a transition returns it), keeping the
+  // resolved unit — instant feedback before the placement.updated refetch reconciles.
+  const setPlacement = useCallback(
+    (next: PlacementItem) => {
+      setLoaded((prev) => ({ ...prev, status: 'ready', placement: next, forId: placementId }));
     },
-    [caseId],
+    [placementId],
   );
 
-  // Fetch (or refetch) the full case bundle. No synchronous loading reset — on a
-  // caseId change loading is DERIVED during render (forId mismatch); a live
+  // Fetch (or refetch) the full placement bundle. No synchronous loading reset — on a
+  // placementId change loading is DERIVED during render (forId mismatch); a live
   // refetch updates in place (the unit carries final_rent, which a transition can
   // change, so we refetch it too rather than patch from the SSE event).
   const load = useCallback(async () => {
@@ -81,23 +81,23 @@ export function CaseDetail(): React.JSX.Element {
     abortRef.current = controller;
     const { signal } = controller;
     try {
-      const c = await getCase(caseId, signal);
+      const c = await getPlacement(placementId, signal);
       if (signal.aborted) return;
       // The unit (for final_rent + a readable address) AND the tenant contact
       // (so staff see the person by NAME, not the raw id — GLOSSARY) are both
       // best-effort: a failure on either is non-fatal — the page still renders
-      // from the case, degrading that field to the id.
+      // from the placement, degrading that field to the id.
       const [u, t] = await Promise.all([
         getUnit(c.unitId, signal).catch(() => null),
         getContact(c.tenantId, signal).catch(() => null),
       ]);
       if (signal.aborted) return;
-      setLoaded({ status: 'ready', case_: c, unit: u, tenant: t, forId: caseId });
+      setLoaded({ status: 'ready', placement: c, unit: u, tenant: t, forId: placementId });
     } catch (err) {
       if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-      setLoaded({ status: 'error', case_: null, unit: null, tenant: null, forId: caseId });
+      setLoaded({ status: 'error', placement: null, unit: null, tenant: null, forId: placementId });
     }
-  }, [caseId]);
+  }, [placementId]);
 
   useEffect(() => {
     // load sets state only after an await (never synchronously) — a fetch-on-mount.
@@ -106,23 +106,23 @@ export function CaseDetail(): React.JSX.Element {
     return () => abortRef.current?.abort();
   }, [load]);
 
-  // Live: a transition on THIS case (here, another tab, or another user) emits
-  // case.updated — refetch so every field reflects it, not just the History panel.
-  const onCaseUpdated = useCallback(
-    (ev: CaseUpdatedEvent) => {
-      if (ev.caseId === caseId) void load();
+  // Live: a transition on THIS placement (here, another tab, or another user) emits
+  // placement.updated — refetch so every field reflects it, not just the History panel.
+  const onPlacementUpdated = useCallback(
+    (ev: PlacementUpdatedEvent) => {
+      if (ev.placementId === placementId) void load();
     },
-    [caseId, load],
+    [placementId, load],
   );
-  useEventStream({ onCaseUpdated });
+  useEventStream({ onPlacementUpdated });
 
-  // Committed state is for a previous caseId → still loading the new one.
+  // Committed state is for a previous placementId → still loading the new one.
   const fresh =
-    loaded.forId === caseId
+    loaded.forId === placementId
       ? loaded
-      : { status: 'loading' as const, case_: null, unit: null, tenant: null };
+      : { status: 'loading' as const, placement: null, unit: null, tenant: null };
   const status = fresh.status;
-  const case_ = fresh.case_;
+  const placement = fresh.placement;
   const unit = fresh.unit;
   const tenant = fresh.tenant;
 
@@ -130,29 +130,29 @@ export function CaseDetail(): React.JSX.Element {
     (toStage: PlacementStage, extra: { lostReason?: LostReason } & MovePromptResult) => {
       setBusy(true);
       setError(null);
-      void transitionPlacement(caseId, {
+      void transitionPlacement(placementId, {
         toStage,
         source: 'manual',
         ...(extra.lostReason !== undefined && { lostReason: extra.lostReason }),
         ...(extra.finalRent !== undefined && { finalRent: extra.finalRent }),
         ...(extra.inspectionOutcome !== undefined && { inspectionOutcome: extra.inspectionOutcome }),
       })
-        .then((updated) => setCase(updated))
+        .then((updated) => setPlacement(updated))
         .catch(() => setError('That move was rejected — please try again.'))
         .finally(() => {
           setBusy(false);
           setPending(null);
         });
     },
-    [caseId, setCase],
+    [placementId, setPlacement],
   );
 
-  // NOTE: this per-stage picker intentionally allows moving a TERMINAL case
+  // NOTE: this per-stage picker intentionally allows moving a TERMINAL placement
   // (moved_in / lost) back to an active stage — treated as an allowed "re-open".
   // We deliberately do NOT block it here.
   function requestMove(toStage: PlacementStage): void {
-    if (!case_ || toStage === case_.stage) return;
-    const gate = gateFor(case_.stage, toStage);
+    if (!placement || toStage === placement.stage) return;
+    const gate = gateFor(placement.stage, toStage);
     if (gate === 'none') {
       runTransition(toStage, {});
       return;
@@ -168,23 +168,23 @@ export function CaseDetail(): React.JSX.Element {
     );
   }
 
-  if (status === 'error' || !case_) {
+  if (status === 'error' || !placement) {
     return (
       <div className={styles.center}>
         <p role="alert" className={styles.error}>
-          We couldn&apos;t load this case.
+          We couldn&apos;t load this placement.
         </p>
       </div>
     );
   }
 
-  const stageLabel = STAGE_LABELS[case_.stage] ?? case_.stage;
-  const phase = STAGE_PHASE[case_.stage];
+  const stageLabel = STAGE_LABELS[placement.stage] ?? placement.stage;
+  const phase = STAGE_PHASE[placement.stage];
   // Staff see the person by NAME (GLOSSARY); degrade to the raw id only when the
   // tenant contact truly can't be loaded.
-  const tenantLabel = tenant ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone) : case_.tenantId;
-  const listing = unit ? formatAddress(unit.address) || case_.unitId : case_.unitId;
-  const lostReason = formatLostReason(case_.lost_reason);
+  const tenantLabel = tenant ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone) : placement.tenantId;
+  const listing = unit ? formatAddress(unit.address) || placement.unitId : placement.unitId;
+  const lostReason = formatLostReason(placement.lost_reason);
   const finalRent = formatMoney(unit?.final_rent);
 
   return (
@@ -208,7 +208,7 @@ export function CaseDetail(): React.JSX.Element {
               }}
             >
               <option value="">Move to…</option>
-              {PLACEMENT_STAGES.filter((s) => s !== case_.stage).map((s) => (
+              {PLACEMENT_STAGES.filter((s) => s !== placement.stage).map((s) => (
                 <option key={s} value={s}>
                   {STAGE_LABELS[s]}
                 </option>
@@ -229,24 +229,24 @@ export function CaseDetail(): React.JSX.Element {
           <Card title="Placement">
             <KV
               k="Tenant"
-              v={<Link to={`/contacts/${case_.tenantId}`}>{tenantLabel}</Link>}
+              v={<Link to={`/contacts/${placement.tenantId}`}>{tenantLabel}</Link>}
             />
-            <KV k="Listing" v={<Link to={`/listings/${case_.unitId}`}>{listing}</Link>} />
+            <KV k="Listing" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
             <KV k="Stage" v={stageLabel} />
             <KV k="Phase" v={phase} />
             <KV
               k="In stage since"
-              v={case_.stage_entered_at ? dateTime(case_.stage_entered_at) : '—'}
+              v={placement.stage_entered_at ? dateTime(placement.stage_entered_at) : '—'}
             />
-            {case_.tour_date ? <KV k="Tour date" v={shortDate(case_.tour_date)} /> : null}
-            {case_.inspection_outcome ? (
-              <KV k="Inspection" v={case_.inspection_outcome === 'pass' ? 'Pass' : 'Fail'} />
+            {placement.tour_date ? <KV k="Tour date" v={shortDate(placement.tour_date)} /> : null}
+            {placement.inspection_outcome ? (
+              <KV k="Inspection" v={placement.inspection_outcome === 'pass' ? 'Pass' : 'Fail'} />
             ) : null}
             {finalRent ? <KV k="Final rent" v={`${finalRent}/mo`} /> : null}
             {lostReason ? <KV k="Lost reason" v={lostReason} /> : null}
           </Card>
 
-          <HistoryPanel caseId={caseId} />
+          <HistoryPanel placementId={placementId} />
         </div>
       </div>
 
@@ -271,8 +271,8 @@ export function CaseDetail(): React.JSX.Element {
   );
 }
 
-function HistoryPanel({ caseId }: { caseId: string }): React.JSX.Element {
-  const { status, rows, hasMore, loadingMore, loadMore } = useCaseHistory(caseId);
+function HistoryPanel({ placementId }: { placementId: string }): React.JSX.Element {
+  const { status, rows, hasMore, loadingMore, loadMore } = usePlacementHistory(placementId);
   return (
     <Card title="History" aside={rows.length > 0 ? String(rows.length) : undefined}>
       {status === 'loading' ? (

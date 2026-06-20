@@ -1,17 +1,17 @@
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import type { CaseItem } from '../../api/index.js';
+import type { PlacementItem } from '../../api/index.js';
 import { ClosedArea } from './ClosedArea.js';
 
-function mkCase(over: Partial<CaseItem> & Pick<CaseItem, 'caseId' | 'stage'>): CaseItem {
-  return { tenantId: 't1', unitId: 'u1', ...over } as CaseItem;
+function mkPlacement(over: Partial<PlacementItem> & Pick<PlacementItem, 'placementId' | 'stage'>): PlacementItem {
+  return { tenantId: 't1', unitId: 'u1', ...over } as PlacementItem;
 }
 
-function renderClosed(cases: CaseItem[]): void {
+function renderClosed(placements: PlacementItem[]): void {
   render(
     <MemoryRouter>
-      <ClosedArea cases={cases} tenantName={() => 'Tasha Nguyen'} listingAddress={() => '12 Oak St'} />
+      <ClosedArea placements={placements} tenantName={() => 'Tasha Nguyen'} listingAddress={() => '12 Oak St'} />
     </MemoryRouter>,
   );
 }
@@ -19,8 +19,8 @@ function renderClosed(cases: CaseItem[]): void {
 describe('ClosedArea (M5 — category only, never free text)', () => {
   it('shows the lost-reason CATEGORY label and NEVER the free text (PII)', () => {
     renderClosed([
-      mkCase({
-        caseId: 'cl',
+      mkPlacement({
+        placementId: 'cl',
         stage: 'lost',
         lost_reason: { category: 'tenant_withdrew', text: 'moved to live with her sister Jane Doe' },
       }),
@@ -35,7 +35,7 @@ describe('ClosedArea (M5 — category only, never free text)', () => {
 
   it('shows the terminal stage label with no reason when there is no category', () => {
     renderClosed([
-      mkCase({ caseId: 'cl', stage: 'lost', lost_reason: { text: 'free text only secret note' } }),
+      mkPlacement({ placementId: 'cl', stage: 'lost', lost_reason: { text: 'free text only secret note' } }),
     ]);
     const list = screen.getByRole('list', { name: /Closed placements/i });
     expect(within(list).getByText('Lost')).toBeInTheDocument();

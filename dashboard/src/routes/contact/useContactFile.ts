@@ -1,17 +1,17 @@
 // useContactFile — fetches the data the contact detail right pane needs from
-// EXISTING endpoints (/api/cases, /api/units) plus the C4/C5 slices that may not
-// be live yet (listings-sent, media). Cases/units always load; the C4/C5 calls
+// EXISTING endpoints (/api/placements, /api/units) plus the C4/C5 slices that may not
+// be live yet (listings-sent, media). Placements/units always load; the C4/C5 calls
 // resolve to a 'pending' marker on a 404 so their panels render an honest
 // "arrives with the backend" state rather than an error. The page derives the
 // per-pane lists with buildContactFile's pure helpers.
 import { useEffect, useState } from 'react';
 import {
   ApiError,
-  getCases,
+  getPlacements,
   getContactListingsSent,
   getContactMedia,
   getUnits,
-  type CaseItem,
+  type PlacementItem,
   type ContactMediaItem,
   type ListingSendRow,
   type UnitItem,
@@ -26,7 +26,7 @@ export type Slice<T> =
 
 export interface ContactFileState {
   status: 'loading' | 'ready' | 'error';
-  cases: CaseItem[];
+  placements: PlacementItem[];
   units: UnitItem[];
   listingsSent: Slice<ListingSendRow>;
   // TODO(contact-file-dead-media-slice): `media` is no longer read by any consumer. The contact
@@ -56,7 +56,7 @@ async function loadSlice<T>(
  *  derived loading state shown while a new contactId's fetch is in flight. */
 const FILE_LOADING: ContactFileState = {
   status: 'loading',
-  cases: [],
+  placements: [],
   units: [],
   listingsSent: { status: 'loading' },
   media: { status: 'loading' },
@@ -78,10 +78,10 @@ export function useContactFile(contactId: string): ContactFileState {
 
     (async () => {
       try {
-        // Cases + units back the REAL panels (Cases / Tours / Listings); both
+        // Placements + units back the REAL panels (Placements / Tours / Listings); both
         // exist today. The C4/C5 slices degrade independently.
-        const [cases, units, listingsSent, media] = await Promise.all([
-          getCases(signal),
+        const [placements, units, listingsSent, media] = await Promise.all([
+          getPlacements(signal),
           getUnits({}, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
           // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
@@ -91,7 +91,7 @@ export function useContactFile(contactId: string): ContactFileState {
         if (signal.aborted) return;
         setState({
           status: 'ready',
-          cases: cases.cases,
+          placements: placements.placements,
           units: units.units,
           listingsSent,
           media,

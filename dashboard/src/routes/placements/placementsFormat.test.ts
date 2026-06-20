@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { historyTitle, humanizeToken, summarizeHistory } from './casesFormat.js';
+import { historyTitle, humanizeToken, summarizeHistory } from './placementsFormat.js';
 
 describe('summarizeHistory (M6 — human labels, never raw snake_case)', () => {
-  it('labels a case_stage_changed from→to via STAGE_LABELS', () => {
-    const summary = summarizeHistory('case_stage_changed', {
+  it('labels a placement_stage_changed from→to via STAGE_LABELS', () => {
+    const summary = summarizeHistory('placement_stage_changed', {
       from: 'awaiting_inspection',
       to: 'determine_rent',
       source: 'manual',
@@ -30,25 +30,25 @@ describe('summarizeHistory (M6 — human labels, never raw snake_case)', () => {
   });
 
   it('falls back to a humanized event_type when there is no from/to', () => {
-    expect(summarizeHistory('case_reopened', undefined)).toBe('Case reopened');
+    expect(summarizeHistory('placement_reopened', undefined)).toBe('Placement reopened');
   });
 });
 
 describe('historyTitle (readable event title)', () => {
   it('maps known event types to readable titles', () => {
-    expect(historyTitle('case_stage_changed')).toBe('Stage changed');
+    expect(historyTitle('placement_stage_changed')).toBe('Stage changed');
     expect(historyTitle('tenant_status_changed')).toBe('Tenant status changed');
     expect(historyTitle('listing_status_changed')).toBe('Listing status changed');
   });
 
   it('humanizes an unknown event type', () => {
-    expect(historyTitle('case_note_added')).toBe('Case note added');
+    expect(historyTitle('placement_note_added')).toBe('Placement note added');
   });
 });
 
 describe('humanizeToken', () => {
-  it('sentence-cases a snake_case token', () => {
-    expect(humanizeToken('case_stage_changed')).toBe('Case stage changed');
+  it('sentence-placements a snake_case token', () => {
+    expect(humanizeToken('placement_stage_changed')).toBe('Placement stage changed');
     expect(humanizeToken('')).toBe('');
   });
 });

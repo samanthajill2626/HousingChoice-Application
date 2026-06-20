@@ -1,13 +1,13 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
-// status) · Preferences & notes · Listings sent (C4) · Tours · Cases · Group
-// texts · Media (C5). Cases + Tours are REAL (derived from /api/cases);
+// status) · Preferences & notes · Listings sent (C4) · Tours · Placements · Group
+// texts · Media (C5). Placements + Tours are REAL (derived from /api/placements);
 // Listings-sent + Media render a "pending backend" state until BE4/BE5 land;
 // Preferences are manual-now (pending until the gleaning slice). Each list row
 // links to its detail route.
 import {
   STAGE_LABELS,
-  type CaseItem,
+  type PlacementItem,
   type Contact,
   type ContactPhone,
   type UnitItem,
@@ -26,13 +26,13 @@ import {
 } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
-import { tenantCases, tenantTours } from './buildContactFile.js';
+import { tenantPlacements, tenantTours } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
 
 export interface TenantFileProps {
   contact: Contact;
   phones: ContactPhone[];
-  cases: CaseItem[];
+  placements: PlacementItem[];
   units: UnitItem[];
   /** C4 listings-sent slice status (panel degrades to pending on 404). */
   listingsSentPending: boolean;
@@ -56,7 +56,7 @@ function unitLabel(units: Map<string, UnitItem>, unitId: string): string {
 export function TenantFile({
   contact,
   phones,
-  cases,
+  placements,
   units,
   listingsSentPending,
   media,
@@ -65,8 +65,8 @@ export function TenantFile({
   onManagePhones,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
-  const myCases = tenantCases(cases, contact.contactId);
-  const tours = tenantTours(cases, contact.contactId);
+  const myPlacements = tenantPlacements(placements, contact.contactId);
+  const tours = tenantTours(placements, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
   const housingAuthority = contact.housingAuthority ?? '—';
@@ -152,8 +152,8 @@ export function TenantFile({
         ) : (
           tours.map((t) => (
             <Row
-              key={`${t.caseId}:${t.date}`}
-              to={`/cases/${t.caseId}`}
+              key={`${t.placementId}:${t.date}`}
+              to={`/placements/${t.placementId}`}
               label={`${unitLabel(unitMap, t.unitId)} · ${t.date}`}
               right={<span className={responseClass.muted}>{t.outcome ?? 'Scheduled'}</span>}
             />
@@ -161,14 +161,14 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Cases" aside={myCases.length > 0 ? String(myCases.length) : undefined}>
-        {myCases.length === 0 ? (
-          <EmptyRow>No cases yet.</EmptyRow>
+      <Card title="Placements" aside={myPlacements.length > 0 ? String(myPlacements.length) : undefined}>
+        {myPlacements.length === 0 ? (
+          <EmptyRow>No placements yet.</EmptyRow>
         ) : (
-          myCases.map((c) => (
+          myPlacements.map((c) => (
             <Row
-              key={c.caseId}
-              to={`/cases/${c.caseId}`}
+              key={c.placementId}
+              to={`/placements/${c.placementId}`}
               label={unitLabel(unitMap, c.unitId)}
               right={STAGE_LABELS[c.stage] ?? c.stage}
             />

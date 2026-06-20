@@ -28,7 +28,7 @@ export interface CorrelationContext {
   /** Contact under triage (M1.4 contact-triage route). */
   contactId?: string;
   tenantId?: string;
-  caseId?: string;
+  placementId?: string;
   /** Authenticated session user (M1.3) — stamped by the session middleware. */
   userId?: string;
   /** Job-chain depth; incremented per enqueue hop (runaway-loop guard). */

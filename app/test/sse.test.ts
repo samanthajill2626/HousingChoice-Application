@@ -157,12 +157,12 @@ describe('GET /api/events — stream mechanics', () => {
 
     const client = await connectSse(port);
     await client.waitFor(': connected');
-    // Every forwarded event registers a listener — including case.updated and
+    // Every forwarded event registers a listener — including placement.updated and
     // broadcast.updated (a missing off() for either leaks one per disconnect).
     expect(world.events.listenerCount('conversation.updated')).toBe(baseline + 1);
     expect(world.events.listenerCount('message.persisted')).toBe(baseline + 1);
     expect(world.events.listenerCount('broadcast.updated')).toBe(baseline + 1);
-    expect(world.events.listenerCount('case.updated')).toBe(baseline + 1);
+    expect(world.events.listenerCount('placement.updated')).toBe(baseline + 1);
 
     client.abort();
     const deadline = Date.now() + 3_000;
@@ -173,7 +173,7 @@ describe('GET /api/events — stream mechanics', () => {
     expect(world.events.listenerCount('conversation.updated')).toBe(baseline);
     expect(world.events.listenerCount('message.persisted')).toBe(baseline);
     expect(world.events.listenerCount('broadcast.updated')).toBe(baseline);
-    expect(world.events.listenerCount('case.updated')).toBe(baseline);
+    expect(world.events.listenerCount('placement.updated')).toBe(baseline);
   });
 });
 
@@ -261,19 +261,19 @@ describe('GET /api/events — full loop (webhook in → SSE frame out)', () => {
     expect(client.received()).toContain('"unread_count":1');
   });
 
-  it('a case mutation reaches a connected SSE client as a case.updated frame (no PII on the wire)', async () => {
+  it('a placement mutation reaches a connected SSE client as a placement.updated frame (no PII on the wire)', async () => {
     const { app } = makeWebhookHarness();
     const port = await startServer(app);
     const client = await connectSse(port);
     await client.waitFor(': connected');
 
     await request(app)
-      .post('/api/cases')
+      .post('/api/placements')
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ tenantId: 't-sse', unitId: 'u-sse', placement_tag: 'Keisha @ 123 Main' });
 
-    await client.waitFor('event: case.updated');
+    await client.waitFor('event: placement.updated');
     expect(client.received()).toContain('"tenantId":"t-sse"');
     // The placement_tag (a name) must never cross the wire (doc §9).
     expect(client.received()).not.toContain('Keisha');

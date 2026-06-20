@@ -3,7 +3,7 @@
 // 2026-06-12: CO2's founder-editable templates need a DB home).
 //
 // CONTRACTUAL (architecture doc v2.12 §5, p.11–12): table base names, key
-// schemas (PK/SK), GSI names, stream settings (messages, cases), and the
+// schemas (PK/SK), GSI names, stream settings (messages, placements), and the
 // matches TTL. Everything else about items is a flexible document — only keys
 // and GSI key attributes are contractual; schema churn needs no migrations.
 //
@@ -167,13 +167,13 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // One deal, tour-interest -> move-in (stage ladder).
-    baseName: 'cases',
-    hashKey: { name: 'caseId', type: 'S' },
+    baseName: 'placements',
+    hashKey: { name: 'placementId', type: 'S' },
     gsis: [
       { indexName: 'byTenant', hashKey: { name: 'tenantId', type: 'S' } },
       { indexName: 'byUnit', hashKey: { name: 'unitId', type: 'S' } },
       { indexName: 'byStage', hashKey: { name: 'stage', type: 'S' } },
-      // Sparse: only cases with a scheduled tour carry tour_date (YYYY-MM-DD).
+      // Sparse: only placements with a scheduled tour carry tour_date (YYYY-MM-DD).
       {
         indexName: 'byTourDate',
         hashKey: { name: 'tour_date', type: 'S' },

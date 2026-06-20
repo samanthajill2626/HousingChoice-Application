@@ -366,9 +366,9 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
     const tenantId = tenantRes.body.contact.contactId as string;
 
     // 3) Open a placement on (tenant, unit) via the ROUTE, at the first stage.
-    const caseRes = await authedPost('/api/cases', { tenantId, unitId, stage: 'send_application' });
-    expect(caseRes.status).toBe(201);
-    const caseId = caseRes.body.case.caseId as string;
+    const placementRes = await authedPost('/api/placements', { tenantId, unitId, stage: 'send_application' });
+    expect(placementRes.status).toBe(201);
+    const placementId = placementRes.body.placement.placementId as string;
 
     // Precondition: the listing has NOT yet derived (still 'setup').
     expect(world.units.get(unitId)!.status).toBe('setup');
@@ -376,7 +376,7 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
     // 4) Transition the placement into the Application phase via the transition
     //    ROUTE. Per §7 this derives tenant → placing, listing → under_application
     //    — but ONLY if the create-time status_source did not pin it.
-    const txRes = await authedPost(`/api/cases/${caseId}/transition`, {
+    const txRes = await authedPost(`/api/placements/${placementId}/transition`, {
       toStage: 'awaiting_approval',
       source: 'manual',
     });

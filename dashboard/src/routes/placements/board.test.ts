@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { CaseItem, PlacementStage } from '../../api/index.js';
+import type { PlacementItem, PlacementStage } from '../../api/index.js';
 import {
   FIRST_STAGE_OF_PHASE,
   buildBoard,
   firstStageOfPhase,
   isNoOpMove,
   isTerminal,
-  phaseOfCase,
+  phaseOfPlacement,
 } from './board.js';
 
-function mkCase(caseId: string, stage: PlacementStage): CaseItem {
-  return { caseId, tenantId: `t-${caseId}`, unitId: `u-${caseId}`, stage };
+function mkPlacement(placementId: string, stage: PlacementStage): PlacementItem {
+  return { placementId, tenantId: `t-${placementId}`, unitId: `u-${placementId}`, stage };
 }
 
 describe('casesBoard helpers', () => {
@@ -34,16 +34,16 @@ describe('casesBoard helpers', () => {
     expect(isTerminal('awaiting_move_in')).toBe(false);
   });
 
-  it('groups active cases into their phase columns', () => {
-    const cases = [
-      mkCase('a', 'send_application'), // Application
-      mkCase('b', 'review_rta'), // RTA
-      mkCase('c', 'awaiting_inspection'), // Inspection
-      mkCase('d', 'awaiting_move_in'), // Closure (active)
+  it('groups active placements into their phase columns', () => {
+    const placements = [
+      mkPlacement('a', 'send_application'), // Application
+      mkPlacement('b', 'review_rta'), // RTA
+      mkPlacement('c', 'awaiting_inspection'), // Inspection
+      mkPlacement('d', 'awaiting_move_in'), // Closure (active)
     ];
-    const board = buildBoard(cases);
+    const board = buildBoard(placements);
     expect(board.columns).toHaveLength(7);
-    const byPhase = Object.fromEntries(board.columns.map((col) => [col.phase, col.cases.map((c) => c.caseId)]));
+    const byPhase = Object.fromEntries(board.columns.map((col) => [col.phase, col.placements.map((c) => c.placementId)]));
     expect(byPhase['Application']).toEqual(['a']);
     expect(byPhase['RTA']).toEqual(['b']);
     expect(byPhase['Inspection']).toEqual(['c']);
@@ -51,16 +51,16 @@ describe('casesBoard helpers', () => {
     expect(board.closed).toEqual([]);
   });
 
-  it('routes terminal cases to the closed bucket, not the Closure column', () => {
-    const cases = [
-      mkCase('a', 'awaiting_move_in'), // active Closure
-      mkCase('m', 'moved_in'), // terminal
-      mkCase('l', 'lost'), // terminal
+  it('routes terminal placements to the closed bucket, not the Closure column', () => {
+    const placements = [
+      mkPlacement('a', 'awaiting_move_in'), // active Closure
+      mkPlacement('m', 'moved_in'), // terminal
+      mkPlacement('l', 'lost'), // terminal
     ];
-    const board = buildBoard(cases);
+    const board = buildBoard(placements);
     const closure = board.columns.find((col) => col.phase === 'Closure');
-    expect(closure?.cases.map((c) => c.caseId)).toEqual(['a']);
-    expect(board.closed.map((c) => c.caseId)).toEqual(['m', 'l']);
+    expect(closure?.placements.map((c) => c.placementId)).toEqual(['a']);
+    expect(board.closed.map((c) => c.placementId)).toEqual(['m', 'l']);
   });
 
   it('exposes the drop-target (first) stage per column', () => {
@@ -70,9 +70,9 @@ describe('casesBoard helpers', () => {
     expect(targets['Closure']).toBe('awaiting_move_in');
   });
 
-  it('phaseOfCase returns the phase for active cases and null for terminal', () => {
-    expect(phaseOfCase(mkCase('a', 'collect_rta'))).toBe('RTA');
-    expect(phaseOfCase(mkCase('m', 'moved_in'))).toBeNull();
+  it('phaseOfPlacement returns the phase for active placements and null for terminal', () => {
+    expect(phaseOfPlacement(mkPlacement('a', 'collect_rta'))).toBe('RTA');
+    expect(phaseOfPlacement(mkPlacement('m', 'moved_in'))).toBeNull();
   });
 
   it('M1: isNoOpMove is true for same-stage and same-phase moves, false cross-phase', () => {
@@ -87,16 +87,16 @@ describe('casesBoard helpers', () => {
   });
 
   it('m8: keeps an unknown/legacy stage visible (Closed bucket), never drops it', () => {
-    const cases = [
-      mkCase('ok', 'collect_rta'),
-      mkCase('legacy', 'a_removed_stage' as PlacementStage),
+    const placements = [
+      mkPlacement('ok', 'collect_rta'),
+      mkPlacement('legacy', 'a_removed_stage' as PlacementStage),
     ];
-    const board = buildBoard(cases);
+    const board = buildBoard(placements);
     // Not in any active column...
-    const inColumns = board.columns.flatMap((col) => col.cases.map((c) => c.caseId));
+    const inColumns = board.columns.flatMap((col) => col.placements.map((c) => c.placementId));
     expect(inColumns).toContain('ok');
     expect(inColumns).not.toContain('legacy');
     // ...but still present in the Closed area (visible + openable), not dropped.
-    expect(board.closed.map((c) => c.caseId)).toContain('legacy');
+    expect(board.closed.map((c) => c.placementId)).toContain('legacy');
   });
 });

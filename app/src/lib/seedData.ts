@@ -28,7 +28,7 @@ const IDS = {
   unitA: 'unit-0001',
   unitB: 'unit-0002',
   conversation: 'conv-0001',
-  case: 'case-0001',
+  placement: 'placement-0001',
   invoice: 'invoice-0001',
   founder: 'user-0001',
   va: 'user-0002',
@@ -43,7 +43,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       contactId: IDS.tenant,
       type: 'tenant', // byTypeStatus HASH
       // byTypeStatus RANGE — and the tenant's SINGLE §5 lifecycle status (one
-      // field, not two). She is the tenant on the seeded placement case-0001
+      // field, not two). She is the tenant on the seeded placement placement-0001
       // (Inspection phase: awaiting_inspection), so by §7 derivation she reads
       // `placing`; source 'derived' so the denormalized value agrees with what
       // derivation produces and a future placement transition can still drive it
@@ -109,7 +109,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // names the app reads (unitFields WRITABLE_FIELDS + toUnitFlyer + the
       // dashboard UnitItem); the flexible-doc repo would silently store
       // bedrooms / rent / pets_allowed and the UI would never find them.
-      // unitA is the unit on the seeded placement case-0001 (Inspection phase:
+      // unitA is the unit on the seeded placement placement-0001 (Inspection phase:
       // awaiting_inspection), so by §7 derivation the listing reads
       // 'under_application', source 'derived' (NOT 'manual') — the denormalized
       // value matches what derivation produces and stays drivable. (Stamping
@@ -133,7 +133,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // 'placed'); legacy 'inactive' would map to 'off_market'. final_rent is
       // the accepted rent written at rent-acceptance (used for billing, §4).
       // DELIBERATE manual override: unitB is NOT the unit on the active seeded
-      // placement (case-0001 → unitA), so there is no placement to derive it;
+      // placement (placement-0001 → unitA), so there is no placement to derive it;
       // 'manual' here is an intentional demo pin of a previously-placed unit,
       // not the regression (which was pinning a freshly-derivable listing).
       status: 'occupied',
@@ -203,9 +203,9 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       generated_at: T0,
     },
   ],
-  cases: [
+  placements: [
     {
-      caseId: IDS.case,
+      placementId: IDS.placement,
       tenantId: IDS.tenant, // byTenant
       unitId: IDS.unitA, // byUnit
       // status-model (§4): a valid PLACEMENT_STAGES value (legacy 'touring' is
@@ -227,7 +227,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       landlordId: IDS.landlord, // byLandlord
       status: 'sent', // byStatus
       amount_cents: 165000, // one month's determined rent
-      caseId: IDS.case,
+      placementId: IDS.placement,
       due_at: '2026-07-01',
       sent_at: T2,
     },
@@ -257,10 +257,10 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
   // `action`/`detail` would be silently stored and never read back.
   audit_events: [
     {
-      entityKey: `cases#${IDS.case}`,
+      entityKey: `placements#${IDS.placement}`,
       ts: T2, // table SK + byActor RANGE
       actorId: IDS.founder, // byActor HASH
-      event_type: 'case_stage_changed',
+      event_type: 'placement_stage_changed',
       payload: { actor: IDS.founder, from: 'send_rta_to_landlord', to: 'awaiting_inspection', source: 'manual' },
     },
     {

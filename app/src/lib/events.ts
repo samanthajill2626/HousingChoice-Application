@@ -24,7 +24,7 @@ import type {
 } from '../repos/conversationsRepo.js';
 import type { DeliveryStatus, MessageDirection } from '../repos/messagesRepo.js';
 import type { BroadcastStats, BroadcastStatus } from '../repos/broadcastsRepo.js';
-import type { CaseItem } from '../repos/casesRepo.js';
+import type { PlacementItem } from '../repos/placementsRepo.js';
 
 /** An inbox row changed — re-sort/re-render one conversation summary. */
 export interface ConversationUpdatedEvent {
@@ -135,15 +135,15 @@ export interface BroadcastUpdatedEvent {
 }
 
 /**
- * A case (M1.10) was created or changed — the boards re-render the card live
- * (move it between stage columns, refresh its tour/deadline/attention/relay
+ * A placement (M1.10) was created or changed — the boards re-render the card
+ * live (move it between stage columns, refresh its tour/deadline/attention/relay
  * state). A compact, ID-only payload: the boards already render names from the
  * tenant/unit they hydrate, so a card move needs only the keys + state, never
  * PII. NO names/phones/bodies (the placement_tag — a name — is deliberately
  * NOT carried).
  */
-export interface CaseUpdatedEvent {
-  caseId: string;
+export interface PlacementUpdatedEvent {
+  placementId: string;
   tenantId: string;
   unitId: string;
   stage: string;
@@ -152,7 +152,7 @@ export interface CaseUpdatedEvent {
   next_deadline_at: string | null;
   /** The linked relay-group conversationId, or null (set in M1.10c). */
   group_thread: string | null;
-  /** True when the case carries an escalation attention flag (doc §7.1). */
+  /** True when the placement carries an escalation attention flag (doc §7.1). */
   attention: boolean;
   /**
    * The lost-reason CATEGORY only (STATUS-MODEL.md §7). lost_reason is stored as
@@ -164,10 +164,10 @@ export interface CaseUpdatedEvent {
   updated_at: string | null;
 }
 
-/** THE one case.updated payload builder — every emit site uses it (no drift). */
-export function toCaseUpdatedEvent(item: CaseItem): CaseUpdatedEvent {
+/** THE one placement.updated payload builder — every emit site uses it (no drift). */
+export function toPlacementUpdatedEvent(item: PlacementItem): PlacementUpdatedEvent {
   return {
-    caseId: item.caseId,
+    placementId: item.placementId,
     tenantId: item.tenantId,
     unitId: item.unitId,
     stage: item.stage,
@@ -176,7 +176,7 @@ export function toCaseUpdatedEvent(item: CaseItem): CaseUpdatedEvent {
     next_deadline_at: item.next_deadline_at ?? null,
     group_thread: item.group_thread ?? null,
     // != null covers both absent (cleared → REMOVE) and a stray null. This
-    // boolean is load-bearing: the boards flip a case's attention badge live
+    // boolean is load-bearing: the boards flip a placement's attention badge live
     // when the M1.10c escalation seam raises it.
     attention: item.attention != null,
     // Category only — never the free `text` (potential PII). lost_reason is the
@@ -193,7 +193,7 @@ export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
   'broadcast.updated': BroadcastUpdatedEvent;
-  'case.updated': CaseUpdatedEvent;
+  'placement.updated': PlacementUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

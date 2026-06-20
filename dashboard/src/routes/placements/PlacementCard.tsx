@@ -1,4 +1,4 @@
-// CaseCard — one placement on the board. Shows the tenant NAME (home), the
+// PlacementCard — one placement on the board. Shows the tenant NAME (home), the
 // listing ADDRESS, the stage label, a tour date / next deadline when present, an
 // attention dot, and a "Porting" chip when the tenant is porting.
 //
@@ -10,13 +10,13 @@
 // name (getByText / link name) for e2e.
 import { useDraggable } from '@dnd-kit/core';
 import { Link } from 'react-router-dom';
-import { STAGE_LABELS, type CaseItem } from '../../api/index.js';
+import { STAGE_LABELS, type PlacementItem } from '../../api/index.js';
 import { StatusBadge } from '../../ui/index.js';
-import { shortDate } from './casesFormat.js';
-import styles from './CaseCard.module.css';
+import { shortDate } from './placementsFormat.js';
+import styles from './PlacementCard.module.css';
 
-export interface CaseCardProps {
-  case_: CaseItem;
+export interface PlacementCardProps {
+  placement: PlacementItem;
   tenant: string;
   listing: string;
   porting: boolean;
@@ -26,23 +26,23 @@ export interface CaseCardProps {
   pending?: boolean;
 }
 
-export function CaseCard({
-  case_,
+export function PlacementCard({
+  placement,
   tenant,
   listing,
   porting,
   tenantStatus,
   pending = false,
-}: CaseCardProps): React.JSX.Element {
+}: PlacementCardProps): React.JSX.Element {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: case_.caseId,
-    data: { fromStage: case_.stage, tenantId: case_.tenantId },
+    id: placement.placementId,
+    data: { fromStage: placement.stage, tenantId: placement.tenantId },
   });
 
-  const stageLabel = STAGE_LABELS[case_.stage] ?? case_.stage;
-  const tourDate = shortDate(case_.tour_date);
+  const stageLabel = STAGE_LABELS[placement.stage] ?? placement.stage;
+  const tourDate = shortDate(placement.tour_date);
   const deadline =
-    case_.next_deadline_at !== undefined ? shortDate(case_.next_deadline_at) : '';
+    placement.next_deadline_at !== undefined ? shortDate(placement.next_deadline_at) : '';
 
   return (
     <article
@@ -69,7 +69,7 @@ export function CaseCard({
             Porting
           </span>
         ) : null}
-        {case_.attention ? (
+        {placement.attention ? (
           <span className={styles.dot} aria-label="Needs attention" role="img" />
         ) : null}
       </div>
@@ -85,7 +85,7 @@ export function CaseCard({
         {tenantStatus ? <StatusBadge kind="tenant" status={tenantStatus} /> : null}
       </div>
 
-      <Link to={`/cases/${case_.caseId}`} className={styles.open} onClick={(e) => e.stopPropagation()}>
+      <Link to={`/placements/${placement.placementId}`} className={styles.open} onClick={(e) => e.stopPropagation()}>
         Open
       </Link>
     </article>

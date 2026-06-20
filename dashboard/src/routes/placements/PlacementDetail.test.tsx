@@ -2,22 +2,22 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { CaseItem, CaseUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem } from '../../api/index.js';
+import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem } from '../../api/index.js';
 
-const getCase = vi.fn();
+const getPlacement = vi.fn();
 const getUnit = vi.fn();
 const getContact = vi.fn();
 const transitionPlacement = vi.fn();
 const getPlacementHistory = vi.fn();
 // Capture the SSE handlers the page (and its History panel) register so a test
-// can fire a case.updated event.
+// can fire a placement.updated event.
 let streamHandlers: EventStreamHandlers[] = [];
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
-    getCase: (...a: unknown[]) => getCase(...a),
+    getPlacement: (...a: unknown[]) => getPlacement(...a),
     getUnit: (...a: unknown[]) => getUnit(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
@@ -28,10 +28,10 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { CaseDetail } from './CaseDetail.js';
+import { PlacementDetail } from './PlacementDetail.js';
 
-const CASE: CaseItem = {
-  caseId: 'c1',
+const CASE: PlacementItem = {
+  placementId: 'c1',
   tenantId: 't1',
   unitId: 'u1',
   stage: 'awaiting_inspection',
@@ -47,21 +47,21 @@ const UNIT: UnitItem = {
 };
 
 function row(over: Partial<HistoryRow>): HistoryRow {
-  return { entityKey: 'case#c1', event_type: 'stage_changed', ts: '2026-06-18T13:02:00Z', ...over };
+  return { entityKey: 'placement#c1', event_type: 'stage_changed', ts: '2026-06-18T13:02:00Z', ...over };
 }
 
 function renderAt(): void {
   render(
-    <MemoryRouter initialEntries={['/cases/c1']}>
+    <MemoryRouter initialEntries={['/placements/c1']}>
       <Routes>
-        <Route path="/cases/:caseId" element={<CaseDetail />} />
+        <Route path="/placements/:placementId" element={<PlacementDetail />} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
 beforeEach(() => {
-  getCase.mockReset().mockResolvedValue(CASE);
+  getPlacement.mockReset().mockResolvedValue(CASE);
   getUnit.mockReset().mockResolvedValue(UNIT);
   getContact
     .mockReset()
@@ -72,12 +72,12 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-/** Fire a case.updated event at each DISTINCT subscriber the page registered.
- *  The mock collects a handlers object per render; onCaseUpdated is a stable
+/** Fire a placement.updated event at each DISTINCT subscriber the page registered.
+ *  The mock collects a handlers object per render; onPlacementUpdated is a stable
  *  useCallback per consumer, so dedupe by its identity to fire each consumer
  *  (the page + its History panel) exactly once — as the real provider would. */
-function emitCaseUpdated(over: Partial<CaseUpdatedEvent> & { caseId: string }): void {
-  const ev: CaseUpdatedEvent = {
+function emitCaseUpdated(over: Partial<PlacementUpdatedEvent> & { placementId: string }): void {
+  const ev: PlacementUpdatedEvent = {
     tenantId: 't1',
     unitId: 'u1',
     stage: 'awaiting_inspection',
@@ -90,18 +90,18 @@ function emitCaseUpdated(over: Partial<CaseUpdatedEvent> & { caseId: string }): 
     updated_at: null,
     ...over,
   };
-  const seen = new Set<NonNullable<EventStreamHandlers['onCaseUpdated']>>();
+  const seen = new Set<NonNullable<EventStreamHandlers['onPlacementUpdated']>>();
   for (const h of streamHandlers) {
-    if (h.onCaseUpdated && !seen.has(h.onCaseUpdated)) {
-      seen.add(h.onCaseUpdated);
-      h.onCaseUpdated(ev);
+    if (h.onPlacementUpdated && !seen.has(h.onPlacementUpdated)) {
+      seen.add(h.onPlacementUpdated);
+      h.onPlacementUpdated(ev);
     }
   }
 }
 
-describe('CaseDetail', () => {
+describe('PlacementDetail', () => {
   it('renders the stage, phase, links, time-in-stage, inspection + final rent', async () => {
-    getCase.mockResolvedValue({ ...CASE, inspection_outcome: 'pass' });
+    getPlacement.mockResolvedValue({ ...CASE, inspection_outcome: 'pass' });
     renderAt();
     const heading = await screen.findByRole('heading', { name: /Awaiting inspection/ });
     // The phase chip "Inspection" lives inside the heading.
@@ -123,7 +123,7 @@ describe('CaseDetail', () => {
   it('renders history rows newest-first and loads more with the before cursor', async () => {
     const first = Array.from({ length: 20 }, (_, i) =>
       row({
-        event_type: 'case_stage_changed',
+        event_type: 'placement_stage_changed',
         ts: `2026-06-18T13:${String(20 - i).padStart(2, '0')}:00Z`,
         payload: { from: 'collect_rta', to: i === 0 ? 'review_rta' : `stage-${i}`, source: 'manual' },
       }),
@@ -131,7 +131,7 @@ describe('CaseDetail', () => {
     getPlacementHistory.mockResolvedValueOnce(first);
     getPlacementHistory.mockResolvedValueOnce([
       row({
-        event_type: 'case_stage_changed',
+        event_type: 'placement_stage_changed',
         ts: '2026-06-10T00:00:00Z',
         payload: { from: 'send_application', to: 'collect_rta', source: 'import' },
       }),
@@ -176,7 +176,7 @@ describe('CaseDetail', () => {
 
   it('the finalRent prompt rejects ≤0', async () => {
     const user = userEvent.setup();
-    getCase.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
     renderAt();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Awaiting rent acceptance/ })).toBeInTheDocument());
 
@@ -188,35 +188,35 @@ describe('CaseDetail', () => {
     expect(transitionPlacement).not.toHaveBeenCalled();
   });
 
-  it('live-updates the page fields when a case.updated event for this case arrives', async () => {
+  it('live-updates the page fields when a placement.updated event for this placement arrives', async () => {
     renderAt();
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /Awaiting inspection/ })).toBeInTheDocument(),
     );
-    expect(getCase).toHaveBeenCalledTimes(1);
+    expect(getPlacement).toHaveBeenCalledTimes(1);
 
-    // Another tab/user (or our own transition) moved the case → case.updated.
+    // Another tab/user (or our own transition) moved the placement → placement.updated.
     // The refetch returns the new stage; the page reflects it without a reload.
-    getCase.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
     await act(async () => {
-      emitCaseUpdated({ caseId: 'c1', stage: 'determine_rent' });
+      emitCaseUpdated({ placementId: 'c1', stage: 'determine_rent' });
     });
 
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /Determine rent/ })).toBeInTheDocument(),
     );
-    expect(getCase).toHaveBeenCalledTimes(2);
+    expect(getPlacement).toHaveBeenCalledTimes(2);
   });
 
-  it('ignores a case.updated event for a different case', async () => {
+  it('ignores a placement.updated event for a different placement', async () => {
     renderAt();
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /Awaiting inspection/ })).toBeInTheDocument(),
     );
     await act(async () => {
-      emitCaseUpdated({ caseId: 'some-other-case', stage: 'moved_in' });
+      emitCaseUpdated({ placementId: 'some-other-placement', stage: 'moved_in' });
     });
-    // No refetch for an unrelated case.
-    expect(getCase).toHaveBeenCalledTimes(1);
+    // No refetch for an unrelated placement.
+    expect(getPlacement).toHaveBeenCalledTimes(1);
   });
 });

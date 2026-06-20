@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import type { CommsMediaItem } from './media.js';
-import type { CaseItem, Contact, UnitItem } from '../../api/index.js';
+import type { PlacementItem, Contact, UnitItem } from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -15,8 +15,8 @@ const UNIT: UnitItem = {
 };
 const PLACED_UNIT: UnitItem = { unitId: 'u2', landlordId: 'L1', status: 'occupied', beds: 1, address: '88 Lindbergh' };
 
-const TENANT_CASE: CaseItem = {
-  caseId: 'k1',
+const TENANT_CASE: PlacementItem = {
+  placementId: 'k1',
   tenantId: 'T1',
   unitId: 'u1',
   stage: 'schedule_inspection',
@@ -38,7 +38,7 @@ describe('TenantFile', () => {
         <TenantFile
           contact={contact}
           phones={[{ phone: '+14040100007', primary: true }]}
-          cases={[TENANT_CASE]}
+          placements={[TENANT_CASE]}
           units={[UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
           media={opts.media ?? []}
@@ -54,11 +54,11 @@ describe('TenantFile', () => {
     expect(screen.getByText('Active')).toBeInTheDocument();
   });
 
-  it('renders REAL cases + tours linking to the case route', () => {
+  it('renders REAL placements + tours linking to the placement route', () => {
     renderIt();
-    const caseLinks = screen.getAllByRole('link', { name: /1450 Joseph Blvd/ });
-    expect(caseLinks.length).toBeGreaterThan(0);
-    expect(caseLinks[0]).toHaveAttribute('href', '/cases/k1');
+    const placementLinks = screen.getAllByRole('link', { name: /1450 Joseph Blvd/ });
+    expect(placementLinks.length).toBeGreaterThan(0);
+    expect(placementLinks[0]).toHaveAttribute('href', '/placements/k1');
     expect(screen.getByText('Toured')).toBeInTheDocument();
   });
 
@@ -97,7 +97,7 @@ describe('LandlordFile', () => {
         <LandlordFile
           contact={contact}
           phones={[{ phone: '+14042220190', primary: true }]}
-          cases={[{ ...TENANT_CASE, unitId: 'u1' }]}
+          placements={[{ ...TENANT_CASE, unitId: 'u1' }]}
           units={[UNIT, PLACED_UNIT]}
           media={[]}
         />
@@ -119,9 +119,9 @@ describe('LandlordFile', () => {
     expect(screen.getByText('Landlord')).toBeInTheDocument();
   });
 
-  it('renders cases on their units linking to the case route', () => {
+  it('renders placements on their units linking to the placement route', () => {
     renderIt();
-    const caseLink = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA Schedule inspection/i });
-    expect(caseLink).toHaveAttribute('href', '/cases/k1');
+    const placementLink = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA Schedule inspection/i });
+    expect(placementLink).toHaveAttribute('href', '/placements/k1');
   });
 });

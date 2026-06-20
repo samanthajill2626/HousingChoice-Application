@@ -1,7 +1,7 @@
 // Today — the home action queue (§B1). Renders the prioritized, entity-anchored
 // queue from useToday() as grouped sections of white row cards (who · why · an
-// optional red urgency chip · a "Case · Touring"-style tag · an amber attention
-// dot), each row a link to its case/contact/conversation. Empty groups are
+// optional red urgency chip · a "Placement · Touring"-style tag · an amber attention
+// dot), each row a link to its placement/contact/conversation. Empty groups are
 // skipped; loading shows a Spinner, error an inline message, all-empty a
 // friendly "all caught up" state. Matches the locked mockup structure in the new
 // design language (tokens + CSS Modules).
@@ -23,8 +23,8 @@ const GROUP_META: { group: TodayGroup; label: string }[] = [
  *  conversation routes are placeholders for now (B2+) — that's expected. */
 function hrefFor(item: TodayItem): string {
   switch (item.refType) {
-    case 'case':
-      return `/cases/${item.refId}`;
+    case 'placement':
+      return `/placements/${item.refId}`;
     case 'contact':
       return `/contacts/${item.refId}`;
     case 'conversation':
@@ -52,7 +52,7 @@ export function Today(): React.JSX.Element {
   return (
     <div className={styles.page}>
       <h1 className={styles.title}>Today</h1>
-      <p className={styles.sub}>What needs you, across every case and contact.</p>
+      <p className={styles.sub}>What needs you, across every placement and contact.</p>
 
       {status === 'loading' ? <Spinner center /> : null}
 

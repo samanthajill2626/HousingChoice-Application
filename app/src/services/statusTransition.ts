@@ -5,14 +5,14 @@
 // decision: it's a manual prerequisite, the admin advances the tenant.) All
 // stage/status knowledge is read from lib/statusModel.ts (no duplicated lists).
 //
-// The workflow record is the `case` entity in code/data (casesRepo/caseId);
-// "placement" is the domain label only (the case→placement rename is out of
-// scope). DI like the other services (createStatusTransitionService({...})).
+// The workflow record is the `placement` entity in code/data
+// (placementsRepo/placementId). DI like the other services
+// (createStatusTransitionService({...})).
 //
 // PII (doc §9): logs are IDs/sources/counts only — never names/phones/bodies,
 // never the lost-reason free text.
 import { mergeContext } from '../lib/context.js';
-import { toCaseUpdatedEvent, type EventBus } from '../lib/events.js';
+import { toPlacementUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   deriveStatuses,
@@ -31,7 +31,7 @@ import {
   type TransitionSource,
 } from '../lib/statusModel.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
-import { type CaseItem, type CasesRepo } from '../repos/casesRepo.js';
+import { type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 
@@ -43,7 +43,7 @@ const HARD_CLOCK_DEADLINE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 export interface StatusTransitionDeps {
-  casesRepo: CasesRepo;
+  placementsRepo: PlacementsRepo;
   unitsRepo: UnitsRepo;
   contactsRepo: ContactsRepo;
   auditRepo: AuditRepo;
@@ -67,7 +67,7 @@ export interface TransitionPlacementInput {
   /**
    * The inspection's pass/fail OUTCOME (§4). Supplied on the inspection-complete
    * move — the transition OUT of `awaiting_inspection` — and written onto the
-   * case as `inspection_outcome`. Ignored on any other move. A `fail` does NOT
+   * placement as `inspection_outcome`. Ignored on any other move. A `fail` does NOT
    * force a particular next stage (not a strict state machine); the admin routes
    * the card.
    */
@@ -105,10 +105,10 @@ export class TransitionRefusedError extends Error {
   }
 }
 
-/** A referenced entity (case/contact/unit) does not exist. */
+/** A referenced entity (placement/contact/unit) does not exist. */
 export class EntityNotFoundError extends Error {
   constructor(
-    readonly entity: 'case' | 'contact' | 'unit',
+    readonly entity: 'placement' | 'contact' | 'unit',
     readonly id: string,
   ) {
     super(`${entity} ${id} not found`);
@@ -118,7 +118,7 @@ export class EntityNotFoundError extends Error {
 
 export interface StatusTransitionService {
   /** Move a placement to `toStage` (denormalize + provenance + derivation + nudge). */
-  transitionPlacement(caseId: string, input: TransitionPlacementInput): Promise<CaseItem>;
+  transitionPlacement(placementId: string, input: TransitionPlacementInput): Promise<PlacementItem>;
   /** Explicit tenant-status write (incl. manual drop-out; no RTA-in-hand gate — 2026-06-19). */
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
   /** Explicit listing-status write. */
@@ -128,7 +128,7 @@ export interface StatusTransitionService {
 export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
-  const { casesRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
+  const { placementsRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
   const log = deps.logger ?? defaultLogger;
 
   /**
@@ -195,22 +195,22 @@ export function createStatusTransitionService(
 
   /**
    * Schedule (or clear) the time-in-stage "stuck" nudge for a placement (§8).
-   * A case has only ONE next_deadline slot, so we NEVER clobber a pending
+   * A placement has only ONE next_deadline slot, so we NEVER clobber a pending
    * HARD-CLOCK deadline (rta_window/voucher_expiration/tour_reminder) — the
    * stuck nudge is set only when no hard-clock deadline is currently pending.
    * Terminal stages clear any pending stuck nudge. (See
    * docs/issues/case-single-next-deadline-slot.md.)
    */
-  async function scheduleStuckNudge(stored: CaseItem, toStage: PlacementStage): Promise<void> {
+  async function scheduleStuckNudge(stored: PlacementItem, toStage: PlacementStage): Promise<void> {
     const pendingType = stored.next_deadline_type;
     if (TERMINAL_STAGES.has(toStage)) {
-      // Closure: the case is closed (moved_in/lost) — ANY pending deadline is
-      // now moot (a stuck nudge OR a hard-clock rta_window/voucher_expiration/
+      // Closure: the placement is closed (moved_in/lost) — ANY pending deadline
+      // is now moot (a stuck nudge OR a hard-clock rta_window/voucher_expiration/
       // tour_reminder), so clear the single next_deadline slot unconditionally.
       // Leaving a stale hard-clock deadline on a closed placement would fire a
       // nudge for a deal that no longer exists.
       if (pendingType !== undefined) {
-        await casesRepo.setNextDeadline(stored.caseId, null);
+        await placementsRepo.setNextDeadline(stored.placementId, null);
       }
       return;
     }
@@ -219,27 +219,27 @@ export function createStatusTransitionService(
     // A hard-clock deadline owns the single slot — never overwrite it.
     if (typeof pendingType === 'string' && HARD_CLOCK_DEADLINE_TYPES.has(pendingType)) {
       log.info(
-        { caseId: stored.caseId, pendingType },
+        { placementId: stored.placementId, pendingType },
         'stuck nudge deferred: a hard-clock deadline holds the next_deadline slot',
       );
       return;
     }
     const at = new Date(Date.now() + threshold).toISOString();
-    await casesRepo.setNextDeadline(stored.caseId, { type: 'stuck_case', at });
+    await placementsRepo.setNextDeadline(stored.placementId, { type: 'stuck_placement', at });
   }
 
   return {
-    async transitionPlacement(caseId, input) {
+    async transitionPlacement(placementId, input) {
       const { toStage, source, reason, lostReason, finalRent, inspectionOutcome, actor } = input;
       if (!isPlacementStage(toStage)) {
         throw new TransitionRefusedError('bad_stage', `unknown placement stage: ${String(toStage)}`);
       }
-      const existing = await casesRepo.getById(caseId);
-      if (!existing) throw new EntityNotFoundError('case', caseId);
+      const existing = await placementsRepo.getById(placementId);
+      if (!existing) throw new EntityNotFoundError('placement', placementId);
       const from = existing.stage;
       const now = new Date().toISOString();
 
-      // 1) Denormalize the stage + provenance onto the case.
+      // 1) Denormalize the stage + provenance onto the placement.
       const patch: Record<string, unknown> = {
         stage: toStage,
         stage_entered_at: now,
@@ -272,12 +272,12 @@ export function createStatusTransitionService(
         patch.inspection_outcome = inspectionOutcome;
       }
 
-      const updated = await casesRepo.update(caseId, patch);
+      const updated = await placementsRepo.update(placementId, patch);
 
       // 3) Provenance trail (IDs/source/actor only — never the lost-reason text).
       // `actor` (userId) is hoisted to the byActor GSI by auditRepo.append, so a
       // status change is queryable by who made it (§8).
-      await auditRepo.append(`cases#${caseId}`, 'case_stage_changed', {
+      await auditRepo.append(`placements#${placementId}`, 'placement_stage_changed', {
         ...(actor !== undefined && { actor }),
         from,
         to: toStage,
@@ -311,8 +311,8 @@ export function createStatusTransitionService(
       //    available ONLY when no OTHER active (non-terminal) placement exists
       //    on that tenant/unit; otherwise the existing derivation stands.
       if (toStage === 'lost') {
-        const tenantClear = await noOtherActivePlacement(existing.tenantId, caseId, 'tenant');
-        const unitClear = await noOtherActivePlacement(existing.unitId, caseId, 'unit');
+        const tenantClear = await noOtherActivePlacement(existing.tenantId, placementId, 'tenant');
+        const unitClear = await noOtherActivePlacement(existing.unitId, placementId, 'unit');
         const derived = deriveStatuses('lost'); // searching / available
         // The lost-bounce is a DERIVED write: it goes through the SAME shared
         // helpers as applyDerivation, so it inherits the identical override-gate
@@ -328,11 +328,11 @@ export function createStatusTransitionService(
       // 6) Time-in-stage nudge (uses the FRESH item so next_deadline_type is current).
       await scheduleStuckNudge(updated, toStage);
 
-      // Emit + log (the legacy CRUD path emits case.updated; mirror it, no PII).
-      mergeContext({ caseId });
-      const final = (await casesRepo.getById(caseId)) ?? updated;
-      events.emit('case.updated', toCaseUpdatedEvent(final));
-      log.info({ caseId, from, to: toStage, source, ...(actor !== undefined && { actor }) }, 'placement stage transitioned');
+      // Emit + log (the legacy CRUD path emits placement.updated; mirror it, no PII).
+      mergeContext({ placementId });
+      const final = (await placementsRepo.getById(placementId)) ?? updated;
+      events.emit('placement.updated', toPlacementUpdatedEvent(final));
+      log.info({ placementId, from, to: toStage, source, ...(actor !== undefined && { actor }) }, 'placement stage transitioned');
       return final;
     },
 
@@ -390,13 +390,14 @@ export function createStatusTransitionService(
   };
 
   /**
-   * True when NO placement OTHER than `excludeCaseId` is active (non-terminal)
-   * on the given tenant/unit — i.e. it is safe to bounce the coarse status back
-   * to searching/available. A bounded GSI Query (listByTenant/listByUnit).
+   * True when NO placement OTHER than `excludePlacementId` is active
+   * (non-terminal) on the given tenant/unit — i.e. it is safe to bounce the
+   * coarse status back to searching/available. A bounded GSI Query
+   * (listByTenant/listByUnit).
    */
   async function noOtherActivePlacement(
     id: string,
-    excludeCaseId: string,
+    excludePlacementId: string,
     side: 'tenant' | 'unit',
   ): Promise<boolean> {
     // PAGINATE the byTenant/byUnit GSI: a single Query returns at most 1MB of
@@ -410,9 +411,9 @@ export function createStatusTransitionService(
       const opts = { ...(exclusiveStartKey !== undefined && { exclusiveStartKey }) };
       const page =
         side === 'tenant'
-          ? await casesRepo.listByTenant(id, opts)
-          : await casesRepo.listByUnit(id, opts);
-      if (page.items.some((c) => c.caseId !== excludeCaseId && !TERMINAL_STAGES.has(c.stage))) {
+          ? await placementsRepo.listByTenant(id, opts)
+          : await placementsRepo.listByUnit(id, opts);
+      if (page.items.some((c) => c.placementId !== excludePlacementId && !TERMINAL_STAGES.has(c.stage))) {
         return false; // there IS another active placement → do NOT bounce
       }
       exclusiveStartKey = page.lastEvaluatedKey;

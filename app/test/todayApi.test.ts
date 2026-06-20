@@ -1,10 +1,10 @@
 // BE6/C7 — Today action-queue endpoint (GET /api/today → TodayResponse).
-// Runs on the shared in-memory world (the harness cases/conversations/contacts
+// Runs on the shared in-memory world (the harness placements/conversations/contacts
 // fakes), authed via the real sealed session cookie next to the origin secret.
 //
 // Coverage: the four groups (needs_you_now / tours_today / unreplied /
 // follow_ups), urgency thresholds + most-urgent-first ordering, attention →
-// needs_you_now with attention:true, de-dupe across groups (a case both
+// needs_you_now with attention:true, de-dupe across groups (a placement both
 // attention AND due appears once), the UTC "today" date basis for tours_today,
 // who/why hydration (incl. a missing contact degrading to the id, not a 500),
 // a deterministic total order (same seed → same order), and the empty envelope.
@@ -13,7 +13,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
-import type { CaseItem } from '../src/repos/casesRepo.js';
+import type { PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { urgencyOf, type TodayItem, type TodayResponse } from '../src/routes/today.js';
@@ -37,13 +37,13 @@ describe('today action-queue API (BE6/C7)', () => {
     world.contacts.push(item);
     return item;
   };
-  const seedCase = (c: Partial<CaseItem> & { caseId: string; tenantId: string }): CaseItem => {
-    const item: CaseItem = {
+  const seedPlacement = (c: Partial<PlacementItem> & { placementId: string; tenantId: string }): PlacementItem => {
+    const item: PlacementItem = {
       stage: 'awaiting_inspection',
       unitId: 'unit-1',
       ...c,
-    } as CaseItem;
-    world.cases.set(item.caseId, item);
+    } as PlacementItem;
+    world.placements.set(item.placementId, item);
     return item;
   };
   const seedConversation = (conv: ConversationItem): ConversationItem => {
@@ -92,18 +92,18 @@ describe('today action-queue API (BE6/C7)', () => {
     seedTenant('t-4', 'Pat', 'Nguyen');
 
     // needs_you_now: a due hard-clock deadline (rta_window, overdue).
-    seedCase({
-      caseId: 'case-needs',
+    seedPlacement({
+      placementId: 'placement-needs',
       tenantId: 't-1',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // 1h overdue
     });
-    // tours_today: a case touring TODAY.
-    seedCase({ caseId: 'case-tour', tenantId: 't-2', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    // tours_today: a placement touring TODAY.
+    seedPlacement({ placementId: 'placement-tour', tenantId: 't-2', stage: 'awaiting_inspection', tour_date: todayYmd() });
     // follow_ups: a due follow_up deadline.
-    seedCase({
-      caseId: 'case-follow',
+    seedPlacement({
+      placementId: 'placement-follow',
       tenantId: 't-3',
       stage: 'awaiting_approval',
       next_deadline_type: 'follow_up',
@@ -128,12 +128,12 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const needs = byGroup('needs_you_now');
     expect(needs).toHaveLength(1);
-    expect(needs[0]).toMatchObject({ refType: 'case', refId: 'case-needs', who: 'Keisha Brown' });
+    expect(needs[0]).toMatchObject({ refType: 'placement', refId: 'placement-needs', who: 'Keisha Brown' });
     expect(needs[0]!.why).toBe('RTA window closing');
 
     const tours = byGroup('tours_today');
     expect(tours).toHaveLength(1);
-    expect(tours[0]).toMatchObject({ refType: 'case', refId: 'case-tour', who: 'Maria Lopez', why: 'Tour today' });
+    expect(tours[0]).toMatchObject({ refType: 'placement', refId: 'placement-tour', who: 'Maria Lopez', why: 'Tour today' });
 
     const unrep = byGroup('unreplied');
     expect(unrep).toHaveLength(1);
@@ -147,7 +147,7 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const follow = byGroup('follow_ups');
     expect(follow).toHaveLength(1);
-    expect(follow[0]).toMatchObject({ refType: 'case', refId: 'case-follow', who: 'Sam Lee', why: 'Follow-up due' });
+    expect(follow[0]).toMatchObject({ refType: 'placement', refId: 'placement-follow', who: 'Sam Lee', why: 'Follow-up due' });
   });
 
   it('untriaged inbounds (unknown_1to1 unread + unknown/needs_review contact) land in needs_you_now, linking to the contact page', async () => {
@@ -186,15 +186,15 @@ describe('today action-queue API (BE6/C7)', () => {
     seedTenant('t-future', 'Fut', 'Ure');
     seedTenant('t-over', 'Over', 'Due');
     // A future (not-yet-due) deadline must NOT appear (spec: <= now).
-    seedCase({
-      caseId: 'case-future',
+    seedPlacement({
+      placementId: 'placement-future',
       tenantId: 't-future',
       stage: 'awaiting_inspection',
       next_deadline_type: 'tour_reminder',
       next_deadline_at: iso(2 * 3_600_000), // 2h out → not due yet
     });
-    seedCase({
-      caseId: 'case-over',
+    seedPlacement({
+      placementId: 'placement-over',
       tenantId: 't-over',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
@@ -202,22 +202,22 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
-    expect(needs.map((i) => i.refId)).toEqual(['case-over']); // only the overdue one
+    expect(needs.map((i) => i.refId)).toEqual(['placement-over']); // only the overdue one
     expect(needs[0]!.urgency).toBe('overdue');
   });
 
   it('most-urgent-first ordering: the more-overdue deadline sorts before the less-overdue', async () => {
     seedTenant('t-1h', 'One', 'Hour');
     seedTenant('t-3h', 'Three', 'Hour');
-    seedCase({
-      caseId: 'case-1h',
+    seedPlacement({
+      placementId: 'placement-1h',
       tenantId: 't-1h',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // 1h overdue
     });
-    seedCase({
-      caseId: 'case-3h',
+    seedPlacement({
+      placementId: 'placement-3h',
       tenantId: 't-3h',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
@@ -225,30 +225,30 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
-    expect(needs.map((i) => i.refId)).toEqual(['case-3h', 'case-1h']); // earliest deadline first
+    expect(needs.map((i) => i.refId)).toEqual(['placement-3h', 'placement-1h']); // earliest deadline first
     expect(needs.every((i) => i.urgency === 'overdue')).toBe(true);
   });
 
-  it('attention case sorts into needs_you_now with attention:true', async () => {
+  it('attention placement sorts into needs_you_now with attention:true', async () => {
     seedTenant('t-esc', 'Esc', 'Alated');
-    seedCase({
-      caseId: 'case-attn',
+    seedPlacement({
+      placementId: 'placement-attn',
       tenantId: 't-esc',
       stage: 'awaiting_approval',
       attention: { reason: 'Failed send — call the landlord', at: iso(-10_000) },
     });
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
-    const attn = needs.find((i) => i.refId === 'case-attn');
+    const attn = needs.find((i) => i.refId === 'placement-attn');
     expect(attn).toBeDefined();
     expect(attn!.attention).toBe(true);
     expect(attn!.why).toBe('Failed send — call the landlord');
   });
 
-  it('de-dupe: a case that is BOTH attention AND has a due deadline appears once (with attention:true)', async () => {
+  it('de-dupe: a placement that is BOTH attention AND has a due deadline appears once (with attention:true)', async () => {
     seedTenant('t-both', 'Both', 'Flags');
-    seedCase({
-      caseId: 'case-both',
+    seedPlacement({
+      placementId: 'placement-both',
       tenantId: 't-both',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
@@ -257,7 +257,7 @@ describe('today action-queue API (BE6/C7)', () => {
     });
 
     const items = await getItems();
-    const matches = items.filter((i) => i.refId === 'case-both');
+    const matches = items.filter((i) => i.refId === 'placement-both');
     expect(matches).toHaveLength(1);
     expect(matches[0]).toMatchObject({ group: 'needs_you_now', attention: true });
     // It kept the deadline `why` (the deadline placed it first), not blanked.
@@ -267,19 +267,19 @@ describe('today action-queue API (BE6/C7)', () => {
   it('tours_today uses the UTC "today" date basis (today appears, tomorrow does not)', async () => {
     seedTenant('t-today', 'To', 'Day');
     seedTenant('t-tom', 'To', 'Morrow');
-    seedCase({ caseId: 'case-today', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
-    seedCase({ caseId: 'case-tomorrow', tenantId: 't-tom', stage: 'awaiting_inspection', tour_date: tomorrowYmd() });
+    seedPlacement({ placementId: 'placement-today', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    seedPlacement({ placementId: 'placement-tomorrow', tenantId: 't-tom', stage: 'awaiting_inspection', tour_date: tomorrowYmd() });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
-    expect(tours.map((i) => i.refId)).toEqual(['case-today']);
+    expect(tours.map((i) => i.refId)).toEqual(['placement-today']);
   });
 
   it('?day= scopes tours_today to the caller\'s day (backend tz-agnostic; browser passes its local date)', async () => {
     // Two tours on distinct FAR-FUTURE days so neither collides with UTC-today.
     seedTenant('t-d2', 'Day', 'Two');
     seedTenant('t-d3', 'Day', 'Three');
-    seedCase({ caseId: 'case-d2', tenantId: 't-d2', stage: 'awaiting_inspection', tour_date: '2030-01-02' });
-    seedCase({ caseId: 'case-d3', tenantId: 't-d3', stage: 'awaiting_inspection', tour_date: '2030-01-03' });
+    seedPlacement({ placementId: 'placement-d2', tenantId: 't-d2', stage: 'awaiting_inspection', tour_date: '2030-01-02' });
+    seedPlacement({ placementId: 'placement-d3', tenantId: 't-d3', stage: 'awaiting_inspection', tour_date: '2030-01-03' });
 
     // Without ?day=, UTC-today is used → neither far-future tour appears.
     const noneByDefault = (await getItems()).filter((i) => i.group === 'tours_today');
@@ -290,12 +290,12 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(d2.status).toBe(200);
     expect(
       (d2.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
-    ).toEqual(['case-d2']);
+    ).toEqual(['placement-d2']);
 
     const d3 = await authedGet('/api/today?day=2030-01-03');
     expect(
       (d3.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
-    ).toEqual(['case-d3']);
+    ).toEqual(['placement-d3']);
   });
 
   it('a malformed ?day= is a 400 (not a 500, not silently ignored)', async () => {
@@ -308,8 +308,8 @@ describe('today action-queue API (BE6/C7)', () => {
   it('?day= scopes ONLY tours_today — the now-relative groups are unaffected', async () => {
     // A due deadline (needs_you_now) is "as of now" regardless of ?day=.
     seedTenant('t-dl', 'Dead', 'Line');
-    seedCase({
-      caseId: 'case-dl',
+    seedPlacement({
+      placementId: 'placement-dl',
       tenantId: 't-dl',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
@@ -318,50 +318,50 @@ describe('today action-queue API (BE6/C7)', () => {
     const res = await authedGet('/api/today?day=2030-01-02');
     expect(res.status).toBe(200);
     const needs = (res.body as TodayResponse).items.filter((i) => i.group === 'needs_you_now');
-    expect(needs.map((i) => i.refId)).toContain('case-dl');
+    expect(needs.map((i) => i.refId)).toContain('placement-dl');
   });
 
   it('best-effort hydration: a missing tenant contact degrades who to the id, never a 500', async () => {
     // No contact seeded for t-missing.
-    seedCase({
-      caseId: 'case-missing-who',
+    seedPlacement({
+      placementId: 'placement-missing-who',
       tenantId: 't-missing',
       stage: 'awaiting_inspection',
       next_deadline_type: 'tour_reminder',
       next_deadline_at: iso(-1000),
     });
     const items = await getItems();
-    const item = items.find((i) => i.refId === 'case-missing-who');
+    const item = items.find((i) => i.refId === 'placement-missing-who');
     expect(item).toBeDefined();
     expect(item!.who).toBe('t-missing');
   });
 
   it('deterministic total order: same seed → same order (tie-break by refId)', async () => {
-    // Two attention-only cases (same urgency "now") + tie-break by refId.
+    // Two attention-only placements (same urgency "now") + tie-break by refId.
     seedTenant('t-a', 'Aa', 'Aa');
     seedTenant('t-b', 'Bb', 'Bb');
-    seedCase({ caseId: 'case-bbb', tenantId: 't-b', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
-    seedCase({ caseId: 'case-aaa', tenantId: 't-a', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
+    seedPlacement({ placementId: 'placement-bbb', tenantId: 't-b', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
+    seedPlacement({ placementId: 'placement-aaa', tenantId: 't-a', stage: 'awaiting_approval', attention: { reason: 'x', at: iso(-1) } });
 
     const first = (await getItems()).filter((i) => i.group === 'needs_you_now').map((i) => i.refId);
     const second = (await getItems()).filter((i) => i.group === 'needs_you_now').map((i) => i.refId);
     expect(first).toEqual(second);
-    expect(first).toEqual(['case-aaa', 'case-bbb']); // tie-break by refId ascending
+    expect(first).toEqual(['placement-aaa', 'placement-bbb']); // tie-break by refId ascending
   });
 
-  // --- FIX A: terminal cases (moved_in/lost) never surface in case-bearing groups -
-  it('a lost case with an overdue hard-clock deadline does NOT appear in needs_you_now (active one does)', async () => {
+  // --- FIX A: terminal placements (moved_in/lost) never surface in placement-bearing groups -
+  it('a lost placement with an overdue hard-clock deadline does NOT appear in needs_you_now (active one does)', async () => {
     seedTenant('t-lost', 'Lost', 'Case');
     seedTenant('t-live', 'Live', 'Case');
-    seedCase({
-      caseId: 'case-lost-deadline',
+    seedPlacement({
+      placementId: 'placement-lost-deadline',
       tenantId: 't-lost',
       stage: 'lost',
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // overdue, but terminal
     });
-    seedCase({
-      caseId: 'case-live-deadline',
+    seedPlacement({
+      placementId: 'placement-live-deadline',
       tenantId: 't-live',
       stage: 'awaiting_authority_approval',
       next_deadline_type: 'rta_window',
@@ -370,34 +370,34 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
     const ids = needs.map((i) => i.refId);
-    expect(ids).toContain('case-live-deadline'); // stage-scoped, not deadline-scoped
-    expect(ids).not.toContain('case-lost-deadline');
+    expect(ids).toContain('placement-live-deadline'); // stage-scoped, not deadline-scoped
+    expect(ids).not.toContain('placement-lost-deadline');
   });
 
-  it('a moved_in case with today\'s tour_date does NOT appear in tours_today (active one does)', async () => {
+  it('a moved_in placement with today\'s tour_date does NOT appear in tours_today (active one does)', async () => {
     seedTenant('t-movedin', 'Moved', 'In');
     seedTenant('t-touring', 'Still', 'Touring');
-    seedCase({ caseId: 'case-movedin-tour', tenantId: 't-movedin', stage: 'moved_in', tour_date: todayYmd() });
-    seedCase({ caseId: 'case-touring-tour', tenantId: 't-touring', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    seedPlacement({ placementId: 'placement-movedin-tour', tenantId: 't-movedin', stage: 'moved_in', tour_date: todayYmd() });
+    seedPlacement({ placementId: 'placement-touring-tour', tenantId: 't-touring', stage: 'awaiting_inspection', tour_date: todayYmd() });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
     const ids = tours.map((i) => i.refId);
-    expect(ids).toContain('case-touring-tour');
-    expect(ids).not.toContain('case-movedin-tour');
+    expect(ids).toContain('placement-touring-tour');
+    expect(ids).not.toContain('placement-movedin-tour');
   });
 
-  it('a lost case with a due follow-up deadline does NOT appear in follow_ups (active one does)', async () => {
+  it('a lost placement with a due follow-up deadline does NOT appear in follow_ups (active one does)', async () => {
     seedTenant('t-lostfu', 'Lost', 'Followup');
     seedTenant('t-livefu', 'Live', 'Followup');
-    seedCase({
-      caseId: 'case-lost-fu',
+    seedPlacement({
+      placementId: 'placement-lost-fu',
       tenantId: 't-lostfu',
       stage: 'lost',
-      next_deadline_type: 'stuck_case',
+      next_deadline_type: 'stuck_placement',
       next_deadline_at: iso(-60_000),
     });
-    seedCase({
-      caseId: 'case-live-fu',
+    seedPlacement({
+      placementId: 'placement-live-fu',
       tenantId: 't-livefu',
       stage: 'awaiting_approval',
       next_deadline_type: 'follow_up',
@@ -406,8 +406,8 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const follow = (await getItems()).filter((i) => i.group === 'follow_ups');
     const ids = follow.map((i) => i.refId);
-    expect(ids).toContain('case-live-fu');
-    expect(ids).not.toContain('case-lost-fu');
+    expect(ids).toContain('placement-live-fu');
+    expect(ids).not.toContain('placement-lost-fu');
   });
 
   // --- FIX B: relay_group threads never surface in unreplied --------------------
@@ -490,7 +490,7 @@ describe('today action-queue API (BE6/C7)', () => {
 
   it('the envelope is { items, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
-    seedCase({ caseId: 'case-env', tenantId: 't-env', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    seedPlacement({ placementId: 'placement-env', tenantId: 't-env', stage: 'awaiting_inspection', tour_date: todayYmd() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items']);

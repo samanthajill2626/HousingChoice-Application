@@ -18,12 +18,12 @@ TRANSITION_SOURCES, INSPECTION_OUTCOMES), added the transition endpoints
 (`transitionPlacement`/`setTenantStatus`/`setListingStatus`/`getPlacementHistory`),
 made the listing + contact status pickers type-aware (writing through the
 transition routes, never the plain PATCH), and rendered `lost_reason` as an object;
-F2 (commit 5b553b7) added the placement board at `/cases` (@dnd-kit drag→transition),
-the lost-reason modal, case detail + history, and finalRent/inspection-outcome
+F2 (commit 5b553b7) added the placement board at `/placements` (@dnd-kit drag→transition),
+the lost-reason modal, placement detail + history, and finalRent/inspection-outcome
 prompts. Tenant lifecycle lives on the single `contact.status` (no `tenant_status`).
 Verified: dashboard typecheck + eslint clean, 459 component tests, and the full
 Playwright e2e suite **21/21** (incl. board render, drag-move transition+persist,
-lost-modal gating, case detail+history) in a fresh hermetic run (commit 60b30ee).
+lost-modal gating, placement detail+history) in a fresh hermetic run (commit 60b30ee).
 Backend + frontend are now consistent and can merge together. (Also folded in on
 this branch: backend F0 (commit d6efb1c) added `inspection_outcome` and removed the
 RTA-in-hand app gate per product decision.) — the merge gate is cleared.
@@ -36,10 +36,10 @@ STRUCTURED `lost_reason` `{ category, text }` (no longer a plain string). The
 dashboard frontend still hardcodes the OLD enums and shapes, so until it is
 migrated in lockstep the dashboard will:
 
-- **400 on stage writes** — the frontend's `CaseStage` / `CASE_STAGES` list no
-  longer matches the backend's placement stages, and stage changes must now go
-  through `POST /api/cases/:caseId/transition` (the legacy `PATCH /api/cases/:id
-  { stage }` path now refuses a `stage` write).
+- **400 on stage writes** — the frontend's `PlacementStage` / `PLACEMENT_STAGES`
+  list no longer matches the backend's placement stages, and stage changes must
+  now go through `POST /api/placements/:placementId/transition` (the legacy
+  `PATCH /api/placements/:id { stage }` path now refuses a `stage` write).
 - **Show empty / wrong listing filters** — the listings status filter still uses
   `available` / `placed` / `inactive`; `placed`→`occupied` and
   `inactive`→`off_market`, and three new states (`setup`, `under_application`,
@@ -49,14 +49,14 @@ migrated in lockstep the dashboard will:
   `[object Object]` or break.
 
 **Specific frontend files / enums to update:**
-- `dashboard/src/api/types.ts` — `CaseStage` / `CASE_STAGES` (replace with the
-  new placement stage ladder); the `unit.status` type/union; the `lost_reason`
+- `dashboard/src/api/types.ts` — `PlacementStage` / `PLACEMENT_STAGES` (the new
+  placement stage ladder); the `unit.status` type/union; the `lost_reason`
   type (string → `{ category?: LostReasonCategory; text?: string }`); add the
   lost-reason category enum.
 - `dashboard/src/routes/listings/ListingsList.tsx` — the status filter
   (`available` / `placed` / `inactive` → the new six-value listing set).
-- Any stage-write call site — switch from `PATCH /api/cases/:id { stage }` to
-  `POST /api/cases/:caseId/transition { toStage, source, reason?, lostReason?,
+- Any stage-write call site — switch from `PATCH /api/placements/:id { stage }` to
+  `POST /api/placements/:placementId/transition { toStage, source, reason?, lostReason?,
   finalRent? }`; tenant-status / listing-status writes to the new
   `PATCH /api/contacts/:id/tenant-status` and `PATCH /api/units/:id/listing-status`.
 - Any UI rendering `lost_reason` — read `{ category, text }`.

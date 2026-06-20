@@ -104,7 +104,7 @@ interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
   type: ActivityEventType;
   label: string;
-  refType?: 'case' | 'unit' | 'conversation' | 'broadcast';
+  refType?: 'placement' | 'unit' | 'conversation' | 'broadcast';
   refId?: string;
 }
 type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;

@@ -334,7 +334,7 @@ export function ContactDetail(): React.JSX.Element {
               <LandlordFile
                 contact={contact}
                 phones={phones}
-                cases={file.cases}
+                placements={file.placements}
                 units={file.units}
                 media={media}
                 mediaLoading={mediaLoading}
@@ -349,7 +349,7 @@ export function ContactDetail(): React.JSX.Element {
               <UnknownFile
                 contact={contact}
                 phones={phones}
-                cases={file.cases}
+                placements={file.placements}
                 units={file.units}
                 media={media}
                 mediaLoading={mediaLoading}
@@ -366,7 +366,7 @@ export function ContactDetail(): React.JSX.Element {
               <TenantFile
                 contact={contact}
                 phones={phones}
-                cases={file.cases}
+                placements={file.placements}
                 units={file.units}
                 listingsSentPending={file.listingsSent.status !== 'ready'}
                 media={media}

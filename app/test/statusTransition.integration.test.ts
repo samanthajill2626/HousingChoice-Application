@@ -1,15 +1,15 @@
 // Status-model transition INTEGRATION tests against DynamoDB Local — the real
 // cross-repo writes the in-memory fakes can't fully validate:
-//   • a transition writes the denormalized stage onto cases, the DERIVED tenant
+//   • a transition writes the denormalized stage onto placements, the DERIVED tenant
 //     lifecycle onto the contact's unified `status`, the DERIVED listing status
 //     onto units, and a real audit_events row.
 //   • auditRepo.listByEntity reads the provenance back NEWEST-FIRST.
-//   • the stuck_case next-deadline round-trips through the byNextDeadline GSI.
+//   • the stuck_placement next-deadline round-trips through the byNextDeadline GSI.
 //   • an OVERRIDE state (manual on_hold) pins against a later DERIVED transition,
 //     while a manually-set BASELINE state is overwritten by derivation
 //     (2026-06-19 state-based gating decision).
 //
-// Self-skipping like casesRepo.integration.test.ts: when nothing answers at
+// Self-skipping like placementsRepo.integration.test.ts: when nothing answers at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green without
 // Docker. Uses a throwaway table prefix (created + dropped per run).
 import { randomUUID } from 'node:crypto';
@@ -19,7 +19,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createCasesRepo } from '../src/repos/casesRepo.js';
+import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createUnitsRepo } from '../src/repos/unitsRepo.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
@@ -46,7 +46,7 @@ if (!reachable) {
   );
 }
 
-const TABLES = ['cases', 'contacts', 'units', 'audit_events'] as const;
+const TABLES = ['placements', 'contacts', 'units', 'audit_events'] as const;
 
 describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway prefix)', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -54,12 +54,12 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   const doc = createDocumentClient({ endpoint });
   const logger = createLogger({ destination: createLogCapture().stream });
 
-  const cases = createCasesRepo({ doc, env: testEnv, logger });
+  const placements = createPlacementsRepo({ doc, env: testEnv, logger });
   const contacts = createContactsRepo({ doc, env: testEnv, logger });
   const units = createUnitsRepo({ doc, env: testEnv, logger });
   const audit = createAuditRepo({ doc, env: testEnv, logger });
   const svc = createStatusTransitionService({
-    casesRepo: cases,
+    placementsRepo: placements,
     unitsRepo: units,
     contactsRepo: contacts,
     auditRepo: audit,
@@ -86,15 +86,15 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
-    const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
+    const c = await placements.create({ tenantId, unitId, stage: 'send_application' });
 
-    await svc.transitionPlacement(c.caseId, { toStage: 'collect_rta', source: 'manual' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'collect_rta', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
 
-    // Denormalized stage on the case.
-    const storedCase = await cases.getById(c.caseId);
-    expect(storedCase!.stage).toBe('awaiting_hap_contract');
-    expect(typeof storedCase!.stage_entered_at).toBe('string');
+    // Denormalized stage on the placement.
+    const storedPlacement = await placements.getById(c.placementId);
+    expect(storedPlacement!.stage).toBe('awaiting_hap_contract');
+    expect(typeof storedPlacement!.stage_entered_at).toBe('string');
 
     // Derived tenant status on the contact (Contract phase ⇒ placing).
     expect((await contacts.getById(tenantId))!.status).toBe('placing');
@@ -102,8 +102,8 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     expect((await units.getById(unitId))!.status).toBe('finalizing');
 
     // A real audit_events row per transition, read back NEWEST-FIRST.
-    const history = await audit.listByEntity(`cases#${c.caseId}`);
-    const transitions = history.filter((e) => e.event_type === 'case_stage_changed');
+    const history = await audit.listByEntity(`placements#${c.placementId}`);
+    const transitions = history.filter((e) => e.event_type === 'placement_stage_changed');
     expect(transitions.length).toBeGreaterThanOrEqual(2);
     expect((transitions[0]!.payload as { to: string }).to).toBe('awaiting_hap_contract');
 
@@ -128,20 +128,20 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     expect((tenantDerived[0]!.payload as { to: string }).to).toBe('placing');
   });
 
-  it('the stuck_case next-deadline round-trips through the byNextDeadline GSI', async () => {
+  it('the stuck_placement next-deadline round-trips through the byNextDeadline GSI', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
-    const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
+    const c = await placements.create({ tenantId, unitId, stage: 'send_application' });
 
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
 
-    const stored = await cases.getById(c.caseId);
-    expect(stored!.next_deadline_type).toBe('stuck_case');
+    const stored = await placements.getById(c.placementId);
+    expect(stored!.next_deadline_type).toBe('stuck_placement');
     // Queryable via the byNextDeadline GSI (due-by a far cutoff finds it).
-    const page = await cases.listByNextDeadline('stuck_case', { beforeAt: '2099-01-01T00:00:00.000Z' });
-    expect(page.items.some((x) => x.caseId === c.caseId)).toBe(true);
+    const page = await placements.listByNextDeadline('stuck_placement', { beforeAt: '2099-01-01T00:00:00.000Z' });
+    expect(page.items.some((x) => x.placementId === c.placementId)).toBe(true);
   });
 
   it('an OVERRIDE state (manual on_hold) pins against a later DERIVED transition', async () => {
@@ -155,8 +155,8 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
 
     // A placement transition would DERIVE tenant→placing, but on_hold pins (the
     // current STATE is an override — 2026-06-19 state-based gating).
-    const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const c = await placements.create({ tenantId, unitId, stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
 
     const contact = await contacts.getById(tenantId);
     expect(contact!.status).toBe('on_hold'); // override preserved
@@ -174,8 +174,8 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     // states stay derivation-eligible, so the placement drives it forward.
     await svc.setTenantStatus(tenantId, { toStatus: 'searching', source: 'manual' });
 
-    const c = await cases.create({ tenantId, unitId, stage: 'send_application' });
-    await svc.transitionPlacement(c.caseId, { toStage: 'awaiting_approval', source: 'manual' });
+    const c = await placements.create({ tenantId, unitId, stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
 
     const contact = await contacts.getById(tenantId);
     expect(contact!.status).toBe('placing'); // derived forward over the manual baseline

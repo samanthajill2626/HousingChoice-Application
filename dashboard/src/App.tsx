@@ -16,8 +16,8 @@ import { ContactsList } from './routes/contacts/ContactsList.js';
 import { ListingsList } from './routes/listings/ListingsList.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
 import { ListingDetail } from './routes/listing/ListingDetail.js';
-import { CasesBoard } from './routes/cases/CasesBoard.js';
-import { CaseDetail } from './routes/cases/CaseDetail.js';
+import { PlacementsBoard } from './routes/placements/PlacementsBoard.js';
+import { PlacementDetail } from './routes/placements/PlacementDetail.js';
 import { Inbox } from './routes/inbox/Inbox.js';
 import { allNavTargets } from './app/nav.js';
 
@@ -25,7 +25,7 @@ import { allNavTargets } from './app/nav.js';
 // below) — excluded from the placeholder generator so they aren't double-mounted.
 const IMPLEMENTED = new Set<string>([
   '/',
-  '/cases',
+  '/placements',
   '/contacts',
   '/contacts/tenants',
   '/contacts/landlords',
@@ -61,9 +61,9 @@ export default function App(): React.JSX.Element {
             <Route path="contacts/unknown" element={<ContactsList filter="unknown" />} />
             <Route path="contacts/deleted" element={<ContactsList filter="deleted" />} />
 
-            {/* Placement board (§F2). Static — ranks above cases/:caseId. */}
-            <Route path="cases" element={<CasesBoard />} />
-            <Route path="cases/:caseId" element={<CaseDetail />} />
+            {/* Placement board (§F2). Static — ranks above placements/:placementId. */}
+            <Route path="placements" element={<PlacementsBoard />} />
+            <Route path="placements/:placementId" element={<PlacementDetail />} />
 
             {/* Listings list view. Static — ranks above listings/:unitId. */}
             <Route path="listings" element={<ListingsList />} />

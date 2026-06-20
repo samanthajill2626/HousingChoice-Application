@@ -1,15 +1,15 @@
 // buildListingFile — pure derivations for the listing detail right pane, from
-// the unit + EXISTING endpoints (/api/cases, /api/units) + the resolved landlord
+// the unit + EXISTING endpoints (/api/placements, /api/units) + the resolved landlord
 // contact. The C3 roster/related endpoint isn't live yet, so these provide the
 // honest FALLBACKS the spec calls for:
 //   - listingRoster: the unit's contacts[] (C3) when present, else a single
 //     landlord row synthesized from `landlordId` + the resolved contact.
-//   - casesOnUnit: REAL — cases whose unitId === this unit.
+//   - placementsOnUnit: REAL — placements whose unitId === this unit.
 //   - relatedByLandlord: REAL FALLBACK — other units of the same landlord,
 //     excluding self, labelled "Same landlord".
 // Tested in isolation so the components stay declarative.
 import type {
-  CaseItem,
+  PlacementItem,
   Contact,
   RelatedUnit,
   UnitContact,
@@ -79,9 +79,9 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
   ];
 }
 
-/** The cases on this unit (unitId === this unit). REAL data today. */
-export function casesOnUnit(cases: CaseItem[], unitId: string): CaseItem[] {
-  return cases.filter((c) => c.unitId === unitId);
+/** The placements on this unit (unitId === this unit). REAL data today. */
+export function placementsOnUnit(placements: PlacementItem[], unitId: string): PlacementItem[] {
+  return placements.filter((c) => c.unitId === unitId);
 }
 
 /** Other units of the same landlord, excluding self, as RelatedUnit rows

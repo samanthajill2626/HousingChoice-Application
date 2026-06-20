@@ -1,10 +1,10 @@
-// BE6/C7 — Today action-queue endpoint. A READ-ONLY aggregation over the cases,
-// conversations, and contacts repos (no new table) that assembles the navigator's
-// prioritized "what needs me now" queue. Mounted at /api/today (behind requireAuth
-// via the /api mount in app.ts).
+// BE6/C7 — Today action-queue endpoint. A READ-ONLY aggregation over the
+// placements, conversations, and contacts repos (no new table) that assembles the
+// navigator's prioritized "what needs me now" queue. Mounted at /api/today
+// (behind requireAuth via the /api mount in app.ts).
 //
 // The frontend (B1) imports the C7 wire shapes AND ships a client-side FALLBACK
-// that assembles the SAME shape from /api/cases + /api/conversations — so the
+// that assembles the SAME shape from /api/placements + /api/conversations — so the
 // grouping/ordering rules here MUST match the spec the fallback follows
 // (documentation: docs/superpowers/specs/2026-06-16-new-dashboard-design.md →
 // "Today action queue", and the contract in
@@ -31,11 +31,11 @@
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
-  createCasesRepo,
-  type CaseDeadlineType,
-  type CasesRepo,
+  createPlacementsRepo,
+  type PlacementDeadlineType,
+  type PlacementsRepo,
   TERMINAL_STAGES,
-} from '../repos/casesRepo.js';
+} from '../repos/placementsRepo.js';
 import { PLACEMENT_STAGES, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 import {
   createConversationsRepo,
@@ -55,7 +55,7 @@ export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow
 
 export interface TodayItem {
   group: TodayGroup;
-  refType: 'case' | 'contact' | 'conversation';
+  refType: 'placement' | 'contact' | 'conversation';
   refId: string;
   who: string;
   why: string;
@@ -71,7 +71,7 @@ export interface TodayResponse {
 
 export interface TodayRouterDeps {
   logger?: Logger;
-  casesRepo?: CasesRepo;
+  placementsRepo?: PlacementsRepo;
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
 }
@@ -79,18 +79,18 @@ export interface TodayRouterDeps {
 // --- Grouping rules (match the spec + the frontend fallback) -----------------
 
 /**
- * The "hard clock" deadline types whose due/overdue instant lands a case in
+ * The "hard clock" deadline types whose due/overdue instant lands a placement in
  * needs_you_now (the spec's business-clock examples). The remaining deadline
- * types (stuck_case, follow_up) are the follow_ups group.
+ * types (stuck_placement, follow_up) are the follow_ups group.
  */
-const HARD_CLOCK_DEADLINE_TYPES: readonly CaseDeadlineType[] = [
+const HARD_CLOCK_DEADLINE_TYPES: readonly PlacementDeadlineType[] = [
   'tour_reminder',
   'rta_window',
   'voucher_expiration',
 ];
 
-/** The stuck-case / due-follow-up deadline types → the follow_ups group. */
-const FOLLOW_UP_DEADLINE_TYPES: readonly CaseDeadlineType[] = ['stuck_case', 'follow_up'];
+/** The stuck-placement / due-follow-up deadline types → the follow_ups group. */
+const FOLLOW_UP_DEADLINE_TYPES: readonly PlacementDeadlineType[] = ['stuck_placement', 'follow_up'];
 
 /** The contact triage statuses that make an untriaged inbound (needs_you_now). */
 const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']);
@@ -103,11 +103,11 @@ const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']
 const GROUP_FETCH_LIMIT = 100;
 
 /** A human-friendly per-deadline-type label used in `why`. */
-const DEADLINE_WHY: Record<CaseDeadlineType, string> = {
+const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
   tour_reminder: 'Tour reminder',
   rta_window: 'RTA window closing',
   voucher_expiration: 'Voucher expiring',
-  stuck_case: 'Stuck case',
+  stuck_placement: 'Stuck placement',
   follow_up: 'Follow-up due',
 };
 
@@ -152,7 +152,7 @@ export function urgencyOf(deadlineAt: string, now: number): string {
 }
 
 /**
- * A case's sort priority within needs_you_now: attention/overdue (the most
+ * A placement's sort priority within needs_you_now: attention/overdue (the most
  * urgent) sort before soon-due. We key by the deadline instant (epoch ms) when
  * present, with attention-without-a-deadline treated as "now" (overdue-ish), so
  * the most-urgent surfaces first; ties break by refId for a stable total order.
@@ -184,7 +184,7 @@ function parseDayParam(raw: unknown): { day: string } | { error: string } | unde
 
 export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
-  const cases = deps.casesRepo ?? createCasesRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
 
@@ -204,7 +204,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     const todayYmd = parsedDay?.day ?? nowIso.slice(0, 10);
 
     // A best-effort contact cache so we resolve each contact at most once (the
-    // same tenant may anchor several cases). A missing contact must never 500 the
+    // same tenant may anchor several placements). A missing contact must never 500 the
     // endpoint — fall back to the contactId for `who`. Drives BOTH name hydration
     // and the soft-delete check (one getById per contact).
     const contactCache = new Map<string, ContactItem | undefined>();
@@ -224,7 +224,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     const resolveName = async (contactId: string): Promise<string | undefined> =>
       nameFromContact(await getContact(contactId));
     // Soft-deleted contacts are off the boards: an item anchored to a deleted
-    // contact (its own row, or a case whose tenant was deleted) is skipped. A
+    // contact (its own row, or a placement whose tenant was deleted) is skipped. A
     // lookup failure is NOT treated as deleted (best-effort → keep the item).
     const isDeletedContact = async (contactId: string): Promise<boolean> => {
       const contact = await getContact(contactId);
@@ -238,9 +238,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     };
 
-    // Track which cases are already placed (de-dupe across groups by the most
+    // Track which placements are already placed (de-dupe across groups by the most
     // relevant group: needs_you_now > tours_today > follow_ups).
-    const placedCaseIds = new Set<string>();
+    const placedPlacementIds = new Set<string>();
 
     const needsYouNow: Ranked[] = [];
     const toursToday: Ranked[] = [];
@@ -251,35 +251,35 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // One bounded GSI Query per hard-clock type, bounded to those due AT/BEFORE
     // now (beforeAt) — soonest-first by the index range key.
     for (const type of HARD_CLOCK_DEADLINE_TYPES) {
-      const page = await cases.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
+      const page = await placements.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`needs_you_now:${type}`, page.items.length);
       for (const c of page.items) {
-        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // Terminal placements (moved_in/lost) are off the boards — a lingering
         // deadline that was never cleared on the transition must not surface.
         if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedCaseIds.has(c.caseId)) continue;
-        placedCaseIds.add(c.caseId);
+        if (placedPlacementIds.has(c.placementId)) continue;
+        placedPlacementIds.add(c.placementId);
         if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
         const item: TodayItem = {
           group: 'needs_you_now',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who,
           why: DEADLINE_WHY[type],
           urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Case · ${stageLabel(c.stage)}`,
+          tag: `Placement · ${stageLabel(c.stage)}`,
         };
         needsYouNow.push({ item, at: Number.isNaN(at) ? now : at });
       }
     }
 
-    // --- needs_you_now: attention (escalation) cases -------------------------
+    // --- needs_you_now: attention (escalation) placements --------------------
     // The attention flag has no GSI of its own; the spec's escalation set is
-    // "active cases" flagged for a human. We surface them via the byStage GSI
+    // "active placements" flagged for a human. We surface them via the byStage GSI
     // over the non-terminal stages (a bounded Query per stage, never a Scan) and
-    // filter to those carrying `attention`. A case already placed by a deadline
+    // filter to those carrying `attention`. A placement already placed by a deadline
     // above is left there (de-dupe) but PROMOTED to attention:true.
     // Derive the non-terminal stages from the central model (never a hardcoded
     // copy of the ladder — it must track PLACEMENT_STAGES automatically).
@@ -287,17 +287,17 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       (s) => !TERMINAL_STAGES.has(s),
     );
     for (const stage of ATTENTION_STAGES) {
-      const page = await cases.listByStage(stage, { limit: GROUP_FETCH_LIMIT });
+      const page = await placements.listByStage(stage, { limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`attention:${stage}`, page.items.length);
       for (const c of page.items) {
         if (!c.attention || typeof c.attention !== 'object') continue;
-        if (placedCaseIds.has(c.caseId)) {
+        if (placedPlacementIds.has(c.placementId)) {
           // Already in needs_you_now via a deadline — just flag attention.
-          const existing = needsYouNow.find((r) => r.item.refId === c.caseId);
+          const existing = needsYouNow.find((r) => r.item.refId === c.placementId);
           if (existing) existing.item.attention = true;
           continue;
         }
-        placedCaseIds.add(c.caseId);
+        placedPlacementIds.add(c.placementId);
         if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const reason =
@@ -306,12 +306,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             : 'Escalated';
         const item: TodayItem = {
           group: 'needs_you_now',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who,
           why: reason,
           urgency: 'Escalated',
-          tag: `Case · ${stageLabel(c.stage)}`,
+          tag: `Placement · ${stageLabel(c.stage)}`,
           attention: true,
         };
         // Attention-only (no deadline) is treated as "now" so it sorts among the
@@ -320,22 +320,22 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
-    // --- tours_today: cases whose CURRENT tour is today (UTC date basis) ------
+    // --- tours_today: placements whose CURRENT tour is today (UTC date basis) ---
     {
-      const page = await cases.listByTourDate(todayYmd, { limit: GROUP_FETCH_LIMIT });
+      const page = await placements.listByTourDate(todayYmd, { limit: GROUP_FETCH_LIMIT });
       warnIfCapped('tours_today', page.items.length);
       for (const c of page.items) {
-        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // Terminal placements (moved_in/lost) are off the boards — a lingering
         // tour_date that was never cleared on the transition must not surface.
         if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now
-        placedCaseIds.add(c.caseId);
+        if (placedPlacementIds.has(c.placementId)) continue; // already needs_you_now
+        placedPlacementIds.add(c.placementId);
         if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const item: TodayItem = {
           group: 'tours_today',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who,
           why: 'Tour today',
           tag: stageLabel(c.stage),
@@ -347,25 +347,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
 
     // --- follow_ups: stuck / due follow-up deadlines (the soft-clock types) ---
     for (const type of FOLLOW_UP_DEADLINE_TYPES) {
-      const page = await cases.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
+      const page = await placements.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`follow_ups:${type}`, page.items.length);
       for (const c of page.items) {
-        // Terminal cases (moved_in/lost) are off the boards — a lingering
+        // Terminal placements (moved_in/lost) are off the boards — a lingering
         // deadline that was never cleared on the transition must not surface.
         if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedCaseIds.has(c.caseId)) continue; // already needs_you_now / tours_today
-        placedCaseIds.add(c.caseId);
+        if (placedPlacementIds.has(c.placementId)) continue; // already needs_you_now / tours_today
+        placedPlacementIds.add(c.placementId);
         if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
         const who = (await resolveName(c.tenantId)) ?? c.tenantId;
         const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
         const item: TodayItem = {
           group: 'follow_ups',
-          refType: 'case',
-          refId: c.caseId,
+          refType: 'placement',
+          refId: c.placementId,
           who,
           why: 'Follow-up due',
           urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Case · ${stageLabel(c.stage)}`,
+          tag: `Placement · ${stageLabel(c.stage)}`,
         };
         followUps.push({ item, at: Number.isNaN(at) ? now : at });
       }
@@ -414,7 +414,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           // Unreplied is anchored to a 1:1 tenant/landlord thread only. A
           // relay_group's participant_phone is the synthetic POOL number (no
           // display name) — surfacing it as an Unreplied row whose `who` is an
-          // internal pool number violates "anchored to a case/contact". Skip it
+          // internal pool number violates "anchored to a placement/contact". Skip it
           // (and anything that isn't a known 1:1 type). Link to the contact page;
           // fall back to the conversation ref only if the roster isn't linked yet.
           const contactId = oneToOneContactId(conv);

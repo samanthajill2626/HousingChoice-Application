@@ -91,21 +91,21 @@ function milestoneVariant(type: TimelineMilestoneType): string {
     case 'removed_from_group_text':
       return styles.purple ?? '';
     case 'tour_took_place':
-    case 'case_closed':
+    case 'placement_closed':
       return styles.green ?? '';
     default:
       return styles.neutral ?? '';
   }
 }
 
-/** The deep-link target for a milestone, by refType. Placeholders for cases /
+/** The deep-link target for a milestone, by refType. Placeholders for placements /
  *  listings until those detail routes land — that's expected (links out, never
  *  inlines content). Returns null when there's nothing to link to. */
 function milestoneHref(ms: TimelineMilestone): string | null {
   if (!ms.refId) return null;
   switch (ms.refType) {
-    case 'case':
-      return `/cases/${ms.refId}`;
+    case 'placement':
+      return `/placements/${ms.refId}`;
     case 'unit':
       return `/listings/${ms.refId}`;
     case 'conversation':

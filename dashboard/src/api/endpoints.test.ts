@@ -10,7 +10,7 @@ import { request } from './client.js';
 import {
   buildTransitionBody,
   createContact,
-  getCase,
+  getPlacement,
   getContactVocabulary,
   getPlacementHistory,
   setListingStatus,
@@ -53,32 +53,32 @@ it('getContactVocabulary forwards signal when provided', async () => {
 
 // --- Status-model transition endpoints --------------------------------------
 
-it('getCase GETs and unwraps { case }', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ case: { caseId: 'k1', stage: 'collect_rta' } });
-  const c = await getCase('k1');
-  expect(request).toHaveBeenCalledWith('/api/cases/k1', {});
-  expect(c).toEqual({ caseId: 'k1', stage: 'collect_rta' });
+it('getPlacement GETs and unwraps { placement }', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1', stage: 'collect_rta' } });
+  const c = await getPlacement('k1');
+  expect(request).toHaveBeenCalledWith('/api/placements/k1', {});
+  expect(c).toEqual({ placementId: 'k1', stage: 'collect_rta' });
 });
 
-it('transitionPlacement POSTs the body and unwraps { case }', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ case: { caseId: 'k1', stage: 'review_rta' } });
+it('transitionPlacement POSTs the body and unwraps { placement }', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1', stage: 'review_rta' } });
   const c = await transitionPlacement('k1', { toStage: 'review_rta', source: 'manual' });
-  expect(request).toHaveBeenCalledWith('/api/cases/k1/transition', {
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/transition', {
     method: 'POST',
     body: { toStage: 'review_rta', source: 'manual' },
   });
-  expect(c).toEqual({ caseId: 'k1', stage: 'review_rta' });
+  expect(c).toEqual({ placementId: 'k1', stage: 'review_rta' });
 });
 
 it('transitionPlacement carries finalRent/inspectionOutcome/lostReason only when set', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ case: { caseId: 'k1' } });
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1' } });
   await transitionPlacement('k1', {
     toStage: 'awaiting_hap_contract',
     source: 'manual',
     finalRent: 1550,
     inspectionOutcome: 'pass',
   });
-  expect(request).toHaveBeenCalledWith('/api/cases/k1/transition', {
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/transition', {
     method: 'POST',
     body: { toStage: 'awaiting_hap_contract', source: 'manual', finalRent: 1550, inspectionOutcome: 'pass' },
   });
@@ -92,22 +92,22 @@ it('transitionPlacement throws (no request) when a lost move has no reason', asy
 });
 
 it('transitionPlacement allows a lost move with a category', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ case: { caseId: 'k1', stage: 'lost' } });
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1', stage: 'lost' } });
   await transitionPlacement('k1', {
     toStage: 'lost',
     source: 'manual',
     lostReason: { category: 'tenant_withdrew' },
   });
-  expect(request).toHaveBeenCalledWith('/api/cases/k1/transition', {
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/transition', {
     method: 'POST',
     body: { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew' } },
   });
 });
 
 it('getPlacementHistory GETs with query and unwraps { history }', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ history: [{ entityKey: 'cases#k1', event_type: 'transition', ts: 't' }] });
+  vi.mocked(request).mockResolvedValueOnce({ history: [{ entityKey: 'placements#k1', event_type: 'transition', ts: 't' }] });
   const rows = await getPlacementHistory('k1', { limit: 10, before: 'cur' });
-  expect(request).toHaveBeenCalledWith('/api/cases/k1/history', {
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/history', {
     query: { limit: 10, before: 'cur' },
   });
   expect(rows).toHaveLength(1);

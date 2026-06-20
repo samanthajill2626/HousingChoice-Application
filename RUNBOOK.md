@@ -468,9 +468,9 @@ The founder's pre-ring/missed-call alert is only useful if it **pops up on scree
 banner, like a text), not just lands silently in the notification shade. Whether it pops is an
 **OS-level** decision driven by notification *importance* — the app sends the strongest signals it
 can (every push goes out `urgency: 'high'`, and the service worker attaches a `vibrate` pattern +
-`requireInteraction` for `missed_call`/`pre_ring` — see [app/src/adapters/webPush.ts](app/src/adapters/webPush.ts)
-and [dashboard-legacy/public/sw.js](dashboard-legacy/public/sw.js)), but the final gate is a per-device setting the
-founder must enable. Run this once per device during onboarding.
+`requireInteraction` for `missed_call`/`pre_ring` — see [app/src/adapters/webPush.ts](app/src/adapters/webPush.ts)),
+but the final gate is a per-device setting the founder must enable. Run this once per device during
+onboarding.
 
 **Prerequisites (both platforms):**
 

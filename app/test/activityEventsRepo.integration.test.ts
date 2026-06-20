@@ -60,28 +60,28 @@ describe.skipIf(!reachable)('activityEventsRepo against DynamoDB Local (throwawa
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     const item = await repo.record({
       contactId,
-      type: 'case_opened',
-      label: 'Case opened',
-      refType: 'case',
-      refId: 'case-1',
+      type: 'placement_opened',
+      label: 'Placement opened',
+      refType: 'placement',
+      refId: 'placement-1',
       at: '2026-06-16T10:00:00.000Z',
     });
     expect(item.eventId).toMatch(/^evt-/);
     expect(item.tsEventId).toBe(`2026-06-16T10:00:00.000Z#${item.eventId}`);
-    expect(item.type).toBe('case_opened');
-    expect(item.refType).toBe('case');
-    expect(item.refId).toBe('case-1');
+    expect(item.type).toBe('placement_opened');
+    expect(item.refType).toBe('placement');
+    expect(item.refId).toBe('placement-1');
     expect(item.created_at).toBeDefined();
   });
 
   it('listByContact returns events newest-first', async () => {
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    await repo.record({ contactId, type: 'case_opened', label: 'a', at: '2026-06-16T10:00:00.000Z' });
+    await repo.record({ contactId, type: 'placement_opened', label: 'a', at: '2026-06-16T10:00:00.000Z' });
     await repo.record({ contactId, type: 'tour_scheduled', label: 'b', at: '2026-06-16T11:00:00.000Z' });
     await repo.record({ contactId, type: 'stage_changed', label: 'c', at: '2026-06-16T12:00:00.000Z' });
 
     const { items } = await repo.listByContact(contactId);
-    expect(items.map((e) => e.type)).toEqual(['stage_changed', 'tour_scheduled', 'case_opened']);
+    expect(items.map((e) => e.type)).toEqual(['stage_changed', 'tour_scheduled', 'placement_opened']);
   });
 
   it('before paginates backward with no dups or skips', async () => {
@@ -121,7 +121,7 @@ describe.skipIf(!reachable)('activityEventsRepo against DynamoDB Local (throwawa
     const b = `contact-${randomUUID().slice(0, 8)}`;
     await repo.record({ contactId: a, type: 'number_added', label: 'a1' });
     await repo.record({ contactId: b, type: 'number_added', label: 'b1' });
-    await repo.record({ contactId: b, type: 'case_closed', label: 'b2' });
+    await repo.record({ contactId: b, type: 'placement_closed', label: 'b2' });
 
     const aPage = await repo.listByContact(a);
     const bPage = await repo.listByContact(b);

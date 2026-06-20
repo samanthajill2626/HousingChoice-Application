@@ -4,13 +4,13 @@
 // emit conversation.updated. Both entry points use it so the kill-switch /
 // voice-capability handling and the intro/audit/SSE tail never drift:
 //   • the standalone POST /api/relay-groups (test scaffold; routes/relayGroups.ts)
-//   • the case-scoped POST /api/cases/:caseId/relay (the product trigger; routes/cases.ts)
+//   • the placement-scoped POST /api/placements/:placementId/relay (the product trigger; routes/placements.ts)
 //
 // It does NOT catch RelayProvisioningDisabledError / VoiceCapabilityError —
 // those propagate so each route maps them to its own 503 + refusal audit (the
-// reason differs: 'create' vs 'case' vs 'reopen').
+// reason differs: 'create' vs 'placement' vs 'reopen').
 //
-// PII (doc §9): logs conversationId/caseId/memberCount/actor only — never a
+// PII (doc §9): logs conversationId/placementId/memberCount/actor only — never a
 // member phone/name or the placement tag.
 import { mergeContext } from '../lib/context.js';
 import { toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -37,8 +37,8 @@ export interface ProvisionRelayInput {
   members: ConversationParticipant[];
   /** Operator placement label (mirrored onto the pool number). */
   tag?: string;
-  /** The case this relay is the placement thread for (M1.10 back-reference). */
-  caseId?: string;
+  /** The placement this relay is the thread for (M1.10 back-reference). */
+  placementId?: string;
   /** Acting user for the audit (byActor GSI key). */
   actor?: string;
 }
@@ -55,7 +55,7 @@ export async function provisionRelayGroup(
   input: ProvisionRelayInput,
 ): Promise<ConversationItem> {
   const { conversationsRepo, poolNumbersService, auditRepo, events, logger } = deps;
-  const { members, tag, caseId, actor } = input;
+  const { members, tag, placementId, actor } = input;
 
   // Provision the pool number first (lazy reclaim → reuse → fresh). The
   // conversation is created AFTER the number is claimed, under a provisional id,
@@ -68,7 +68,7 @@ export async function provisionRelayGroup(
     poolNumber,
     members,
     ...(tag !== undefined && { tag }),
-    ...(caseId !== undefined && { caseId }),
+    ...(placementId !== undefined && { placementId }),
   });
   mergeContext({ conversationId: conversation.conversationId });
 
@@ -88,7 +88,7 @@ export async function provisionRelayGroup(
     actor,
     memberCount: members.length,
     ...(tag !== undefined && { tag }),
-    ...(caseId !== undefined && { caseId }),
+    ...(placementId !== undefined && { placementId }),
   });
 
   // Intro: throttle-send to each member (names everyone connected). A failure to
@@ -108,7 +108,7 @@ export async function provisionRelayGroup(
       conversationId: conversation.conversationId,
       memberCount: members.length,
       actor,
-      ...(caseId !== undefined && { caseId }),
+      ...(placementId !== undefined && { placementId }),
     },
     'relay group provisioned',
   );

@@ -67,7 +67,7 @@ describe('AppFrame', () => {
     );
 
     const workspace = screen.getByRole('navigation', { name: 'Workspace' });
-    for (const label of ['Today', 'Cases', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Listings']) {
+    for (const label of ['Today', 'Placements', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Listings']) {
       expect(within(workspace).getByRole('link', { name: label })).toBeInTheDocument();
     }
 

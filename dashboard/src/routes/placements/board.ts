@@ -1,14 +1,14 @@
 // board — PURE helpers for the placement board (no React, no I/O), tested
-// in isolation so CasesBoard stays declarative.
+// in isolation so PlacementsBoard stays declarative.
 //
 // LAYOUT MODEL (documented, consistent):
-//  - The board renders one column per PLACEMENT_PHASE (the 7 phases). A case is
+//  - The board renders one column per PLACEMENT_PHASE (the 7 phases). A placement is
 //    grouped into the column of STAGE_PHASE[stage].
 //  - TERMINAL handling: `moved_in` and `lost` both map to the Closure phase in
 //    STAGE_PHASE, but a terminal placement is no longer ACTIVE on the board — so
 //    we DO NOT put terminal cards in the Closure column. Instead they're split
-//    into a separate collapsed "Closed" area (partitionCases → closed). The
-//    Closure column therefore holds only the in-flight `awaiting_move_in` cases.
+//    into a separate collapsed "Closed" area (buildBoard → closed). The
+//    Closure column therefore holds only the in-flight `awaiting_move_in` placements.
 //  - DROP TARGET: dragging a card onto a phase column transitions it to the
 //    FIRST stage of that phase (firstStageOfPhase) — the card menu / detail
 //    offers the finer per-stage choice.
@@ -17,7 +17,7 @@ import {
   PLACEMENT_STAGES,
   STAGE_PHASE,
   TERMINAL_STAGES,
-  type CaseItem,
+  type PlacementItem,
   type PlacementPhase,
   type PlacementStage,
 } from '../../api/index.js';
@@ -49,24 +49,24 @@ export interface BoardColumn {
   phase: PlacementPhase;
   /** The drop-target stage for this column (its first stage). */
   targetStage: PlacementStage;
-  cases: CaseItem[];
+  placements: PlacementItem[];
 }
 
 export interface BoardModel {
   /** One entry per PLACEMENT_PHASE, in canonical order. */
   columns: BoardColumn[];
   /** Terminal placements (moved_in / lost) — the collapsed "Closed" area. */
-  closed: CaseItem[];
+  closed: PlacementItem[];
 }
 
-/** Split the case list into the active phase columns + the closed (terminal)
+/** Split the placement list into the active phase columns + the closed (terminal)
  *  bucket. Pure; preserves input order within each group. */
-export function buildBoard(cases: CaseItem[]): BoardModel {
-  const byPhase = new Map<PlacementPhase, CaseItem[]>();
+export function buildBoard(placements: PlacementItem[]): BoardModel {
+  const byPhase = new Map<PlacementPhase, PlacementItem[]>();
   for (const phase of PLACEMENT_PHASES) byPhase.set(phase, []);
-  const closed: CaseItem[] = [];
+  const closed: PlacementItem[] = [];
 
-  for (const c of cases) {
+  for (const c of placements) {
     if (isTerminal(c.stage)) {
       closed.push(c);
       continue;
@@ -88,15 +88,15 @@ export function buildBoard(cases: CaseItem[]): BoardModel {
   const columns: BoardColumn[] = PLACEMENT_PHASES.map((phase) => ({
     phase,
     targetStage: firstStageOfPhase(phase),
-    cases: byPhase.get(phase) ?? [],
+    placements: byPhase.get(phase) ?? [],
   }));
 
   return { columns, closed };
 }
 
-/** The phase a case currently sits in (its column), or null for a terminal case
+/** The phase a placement currently sits in (its column), or null for a terminal placement
  *  (which lives in the Closed area, not a column). */
-export function phaseOfCase(c: CaseItem): PlacementPhase | null {
+export function phaseOfPlacement(c: PlacementItem): PlacementPhase | null {
   if (isTerminal(c.stage)) return null;
   return STAGE_PHASE[c.stage];
 }
@@ -109,7 +109,7 @@ export function phaseOfCase(c: CaseItem): PlacementPhase | null {
  *  decision the drop handler uses. */
 export function isNoOpMove(fromStage: PlacementStage, toStage: PlacementStage): boolean {
   if (fromStage === toStage) return true;
-  const fromPhase = phaseOfCase({ stage: fromStage } as CaseItem);
+  const fromPhase = phaseOfPlacement({ stage: fromStage } as PlacementItem);
   const toPhase = STAGE_PHASE[toStage];
   return fromPhase !== null && fromPhase === toPhase;
 }

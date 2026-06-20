@@ -1,6 +1,6 @@
 // gen-tables generator contract: the in-memory tfvars object Terraform
 // consumes must carry all 9 tables with the contractual GSI names, the
-// matches TTL, streams on messages+cases only, and PITR on everything.
+// matches TTL, streams on messages+placements only, and PITR on everything.
 // (tables.test.ts asserts the TABLES source itself; this asserts the
 // Terraform-facing projection of it.)
 import { describe, expect, it } from 'vitest';
@@ -14,13 +14,13 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'activity_events',
       'audit_events',
       'broadcasts',
-      'cases',
       'contacts',
       'conversations',
       'invoices',
       'listing_sends',
       'matches',
       'messages',
+      'placements',
       'pool_numbers',
       'settings',
       'units',
@@ -108,7 +108,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     ]);
     expect(gsiNames('messages')).toEqual([]);
     expect(gsiNames('matches')).toEqual(['byUnit']);
-    expect(gsiNames('cases')).toEqual([
+    expect(gsiNames('placements')).toEqual([
       'byTenant',
       'byUnit',
       'byStage',
@@ -126,7 +126,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       range_key: { name: 'unitId', type: 'S' },
     });
     expect(tables['contacts']?.range_key).toBeUndefined();
-    const byNextDeadline = tables['cases']?.gsis.find((g) => g.index_name === 'byNextDeadline');
+    const byNextDeadline = tables['placements']?.gsis.find((g) => g.index_name === 'byNextDeadline');
     expect(byNextDeadline).toEqual({
       index_name: 'byNextDeadline',
       hash_key: { name: 'next_deadline_type', type: 'S' },
@@ -141,11 +141,11 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(withTtl.map(([base]) => base)).toEqual(['matches']);
   });
 
-  it('streams on messages and cases ONLY', () => {
+  it('streams on messages and placements ONLY', () => {
     const streaming = Object.entries(tables)
       .filter(([, t]) => t.stream)
       .map(([base]) => base);
-    expect(streaming).toEqual(['cases', 'messages']); // alphabetical key order
+    expect(streaming).toEqual(['messages', 'placements']); // alphabetical key order
   });
 
   it('PITR true for every table', () => {

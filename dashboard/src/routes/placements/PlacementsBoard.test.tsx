@@ -2,15 +2,15 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import type { CaseItem, Contact, UnitItem } from '../../api/index.js';
-import type { CasesState } from './useCases.js';
+import type { PlacementItem, Contact, UnitItem } from '../../api/index.js';
+import type { PlacementsState } from './usePlacements.js';
 
 // Mock the data hook so the board renders from a controlled state, and the
 // transition endpoint so moves are observable. The per-card "Move to…" select
 // drives requestMove (the accessible non-drag fallback — same handler the drop
 // uses), which is reliable in jsdom (pointer/keyboard DnD is not).
-const useCases = vi.fn<() => CasesState>();
-vi.mock('./useCases.js', () => ({ useCases: () => useCases() }));
+const usePlacements = vi.fn<() => PlacementsState>();
+vi.mock('./usePlacements.js', () => ({ usePlacements: () => usePlacements() }));
 
 const transitionPlacement = vi.fn();
 vi.mock('../../api/index.js', async () => {
@@ -34,20 +34,20 @@ vi.mock('@dnd-kit/core', async () => {
   };
 });
 
-function fireDrop(caseId: string, fromStage: string, targetStage: string): void {
+function fireDrop(placementId: string, fromStage: string, targetStage: string): void {
   capturedOnDragEnd?.({
-    active: { id: caseId, data: { current: { fromStage } } },
+    active: { id: placementId, data: { current: { fromStage } } },
     over: { id: `phase:x`, data: { current: { targetStage } } },
   });
 }
 
-import { CasesBoard } from './CasesBoard.js';
+import { PlacementsBoard } from './PlacementsBoard.js';
 
-function mkCase(over: Partial<CaseItem> & Pick<CaseItem, 'caseId' | 'stage'>): CaseItem {
-  return { tenantId: 't1', unitId: 'u1', ...over } as CaseItem;
+function mkPlacement(over: Partial<PlacementItem> & Pick<PlacementItem, 'placementId' | 'stage'>): PlacementItem {
+  return { tenantId: 't1', unitId: 'u1', ...over } as PlacementItem;
 }
 
-function baseState(cases: CaseItem[]): CasesState {
+function baseState(placements: PlacementItem[]): PlacementsState {
   const contacts = new Map<string, Contact>([
     ['t1', { contactId: 't1', type: 'tenant', firstName: 'Tasha', lastName: 'Nguyen', status: 'placing' }],
     ['t2', { contactId: 't2', type: 'tenant', firstName: 'Omar', lastName: 'Reyes', porting: true }],
@@ -55,27 +55,27 @@ function baseState(cases: CaseItem[]): CasesState {
   const units = new Map<string, UnitItem>([
     ['u1', { unitId: 'u1', landlordId: 'l1', status: 'available', address: { line1: '12 Oak St' } }],
   ]);
-  return { status: 'ready', cases, contacts, units, applyCase: vi.fn() };
+  return { status: 'ready', placements, contacts, units, applyPlacement: vi.fn() };
 }
 
 function renderBoard(): void {
   render(
     <MemoryRouter>
-      <CasesBoard />
+      <PlacementsBoard />
     </MemoryRouter>,
   );
 }
 
 beforeEach(() => {
-  useCases.mockReset();
+  usePlacements.mockReset();
   transitionPlacement.mockReset();
   capturedOnDragEnd = null;
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('CasesBoard', () => {
+describe('PlacementsBoard', () => {
   it('renders a card in its phase column (tenant name + listing)', () => {
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'collect_rta' })]));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
     const rta = screen.getByRole('listitem', { name: 'RTA' });
     expect(within(rta).getByText('Tasha Nguyen')).toBeInTheDocument();
@@ -83,8 +83,8 @@ describe('CasesBoard', () => {
   });
 
   it('shows a porting chip when the tenant is porting', () => {
-    useCases.mockReturnValue(
-      baseState([mkCase({ caseId: 'c2', tenantId: 't2', stage: 'collect_rta' })]),
+    usePlacements.mockReturnValue(
+      baseState([mkPlacement({ placementId: 'c2', tenantId: 't2', stage: 'collect_rta' })]),
     );
     renderBoard();
     expect(screen.getByText('Porting')).toBeInTheDocument();
@@ -92,8 +92,8 @@ describe('CasesBoard', () => {
 
   it('a move calls transitionPlacement with source:manual and the target phase first-stage', async () => {
     const user = userEvent.setup();
-    transitionPlacement.mockResolvedValue(mkCase({ caseId: 'c1', stage: 'schedule_inspection' }));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'collect_rta' })]));
+    transitionPlacement.mockResolvedValue(mkPlacement({ placementId: 'c1', stage: 'schedule_inspection' }));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
 
     // Move the card to the Inspection phase → its first stage is schedule_inspection.
@@ -110,7 +110,7 @@ describe('CasesBoard', () => {
   it('optimistically moves the card, then rolls back + shows an error on a rejected transition', async () => {
     const user = userEvent.setup();
     transitionPlacement.mockRejectedValue(new Error('rejected'));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'collect_rta' })]));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
 
     await user.selectOptions(screen.getByRole('combobox', { name: /Move Tasha Nguyen to phase/i }), 'Inspection');
@@ -124,8 +124,8 @@ describe('CasesBoard', () => {
 
   it('the Mark-lost action opens the Lost-reason modal (no immediate transition) and confirms with a reason', async () => {
     const user = userEvent.setup();
-    transitionPlacement.mockResolvedValue(mkCase({ caseId: 'c1', stage: 'lost' }));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'collect_rta' })]));
+    transitionPlacement.mockResolvedValue(mkPlacement({ placementId: 'c1', stage: 'lost' }));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
 
     await user.click(screen.getByRole('button', { name: /Mark Tasha Nguyen's placement lost/i }));
@@ -146,8 +146,8 @@ describe('CasesBoard', () => {
 
   it('a move OUT of awaiting_rent_acceptance prompts for finalRent before transitioning', async () => {
     const user = userEvent.setup();
-    transitionPlacement.mockResolvedValue(mkCase({ caseId: 'c1', stage: 'awaiting_hap_contract' }));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'awaiting_rent_acceptance' })]));
+    transitionPlacement.mockResolvedValue(mkPlacement({ placementId: 'c1', stage: 'awaiting_hap_contract' }));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'awaiting_rent_acceptance' })]));
     renderBoard();
 
     await user.selectOptions(screen.getByRole('combobox', { name: /Move Tasha Nguyen to phase/i }), 'Contract');
@@ -168,8 +168,8 @@ describe('CasesBoard', () => {
 
   it('a move OUT of awaiting_inspection prompts for inspectionOutcome before transitioning', async () => {
     const user = userEvent.setup();
-    transitionPlacement.mockResolvedValue(mkCase({ caseId: 'c1', stage: 'determine_rent' }));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'awaiting_inspection' })]));
+    transitionPlacement.mockResolvedValue(mkPlacement({ placementId: 'c1', stage: 'determine_rent' }));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'awaiting_inspection' })]));
     renderBoard();
 
     await user.selectOptions(
@@ -194,7 +194,7 @@ describe('CasesBoard', () => {
     // awaiting_rent_acceptance lives in Rent Determination; dropping it onto its
     // OWN phase column (target first-stage determine_rent) must NOT transition or
     // open the finalRent prompt.
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'awaiting_rent_acceptance' })]));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'awaiting_rent_acceptance' })]));
     renderBoard();
     act(() => fireDrop('c1', 'awaiting_rent_acceptance', 'determine_rent'));
     expect(transitionPlacement).not.toHaveBeenCalled();
@@ -202,8 +202,8 @@ describe('CasesBoard', () => {
   });
 
   it('M1 (DROP path): a CROSS-PHASE drop transitions to the target phase first stage', async () => {
-    transitionPlacement.mockResolvedValue(mkCase({ caseId: 'c1', stage: 'schedule_inspection' }));
-    useCases.mockReturnValue(baseState([mkCase({ caseId: 'c1', stage: 'collect_rta' })]));
+    transitionPlacement.mockResolvedValue(mkPlacement({ placementId: 'c1', stage: 'schedule_inspection' }));
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
     // Drop RTA card onto Inspection (first stage schedule_inspection).
     act(() => fireDrop('c1', 'collect_rta', 'schedule_inspection'));
@@ -216,10 +216,10 @@ describe('CasesBoard', () => {
   });
 
   it('shows terminal placements in the collapsed Closed area', () => {
-    useCases.mockReturnValue(
+    usePlacements.mockReturnValue(
       baseState([
-        mkCase({ caseId: 'c1', stage: 'collect_rta' }),
-        mkCase({ caseId: 'cm', stage: 'moved_in' }),
+        mkPlacement({ placementId: 'c1', stage: 'collect_rta' }),
+        mkPlacement({ placementId: 'cm', stage: 'moved_in' }),
       ]),
     );
     renderBoard();

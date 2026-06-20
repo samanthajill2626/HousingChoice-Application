@@ -3,9 +3,9 @@
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { request } from './client.js';
 import type {
-  CaseItem,
-  CasesPage,
-  CaseStage,
+  PlacementItem,
+  PlacementsPage,
+  PlacementStage,
   Contact,
   ContactCreate,
   ContactMediaItem,
@@ -56,7 +56,7 @@ export function loginUrl(): string {
 // --- Today (/api) -----------------------------------------------------------
 // The server-assembled action queue (�API Contract C7). When the backend slice
 // isn't live yet this 404s; useToday catches ApiError(404) and assembles the
-// same shape client-side from getCases() + getConversations().
+// same shape client-side from getPlacements() + getConversations().
 
 /** GET /api/today � the server-assembled Today queue, or throws ApiError(404)
  *  until the backend slice lands (the caller falls back to the client build).
@@ -69,24 +69,24 @@ export function getToday(day?: string, signal?: AbortSignal): Promise<TodayRespo
   return request<TodayResponse>(path, { ...(signal !== undefined && { signal }) });
 }
 
-/** GET /api/cases � the case board (the Today fallback's deadline/tour/attention
+/** GET /api/placements � the placement board (the Today fallback's deadline/tour/attention
  *  source). The server pages; pass `cursor` to fetch the next page (the
- *  placement board pages through ALL of them � see useCases). Other callers
+ *  placement board pages through ALL of them � see usePlacements). Other callers
  *  (Today / listing / contact-file) read only the first page (no cursor). */
-export function getCases(signal?: AbortSignal, cursor?: string): Promise<CasesPage> {
-  return request<CasesPage>('/api/cases', {
+export function getPlacements(signal?: AbortSignal, cursor?: string): Promise<PlacementsPage> {
+  return request<PlacementsPage>('/api/placements', {
     query: { cursor },
     ...(signal !== undefined && { signal }),
   });
 }
 
-/** GET /api/cases/:caseId � a single case record (the case detail page + the
- *  history view). Wrapped under { case } on the wire; unwrapped here. */
-export async function getCase(caseId: string, signal?: AbortSignal): Promise<CaseItem> {
-  const res = await request<{ case: CaseItem }>(`/api/cases/${encodeURIComponent(caseId)}`, {
+/** GET /api/placements/:placementId � a single placement record (the placement detail page + the
+ *  history view). Wrapped under { placement } on the wire; unwrapped here. */
+export async function getPlacement(placementId: string, signal?: AbortSignal): Promise<PlacementItem> {
+  const res = await request<{ placement: PlacementItem }>(`/api/placements/${encodeURIComponent(placementId)}`, {
     ...(signal !== undefined && { signal }),
   });
-  return res.case;
+  return res.placement;
 }
 
 // --- Status-model transitions (the ONE transition surface) ------------------
@@ -94,9 +94,9 @@ export async function getCase(caseId: string, signal?: AbortSignal): Promise<Cas
 // listing writes MUST go through these (NOT a plain PATCH) so provenance +
 // derivation are applied server-side.
 
-/** Input to a placement (case) stage transition. */
+/** Input to a placement stage transition. */
 export interface TransitionInput {
-  toStage: CaseStage;
+  toStage: PlacementStage;
   source: TransitionSource;
   reason?: string;
   lostReason?: LostReason;
@@ -128,33 +128,33 @@ export function buildTransitionBody(input: TransitionInput): Record<string, unkn
   };
 }
 
-/** POST /api/cases/:caseId/transition � move a placement to a new stage through
+/** POST /api/placements/:placementId/transition � move a placement to a new stage through
  *  the transition service. A `lost` move requires lostReason.category OR
  *  non-empty text (validated client-side, then server-side). Returns the updated
- *  case (unwrapped from { case }). */
+ *  placement (unwrapped from { placement }). */
 export async function transitionPlacement(
-  caseId: string,
+  placementId: string,
   input: TransitionInput,
-): Promise<CaseItem> {
+): Promise<PlacementItem> {
   if (input.toStage === 'lost' && !validateLostReason(input.lostReason)) {
     throw new Error('A lost move requires a reason: pick a category or write a note.');
   }
-  const res = await request<{ case: CaseItem }>(
-    `/api/cases/${encodeURIComponent(caseId)}/transition`,
+  const res = await request<{ placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}/transition`,
     { method: 'POST', body: buildTransitionBody(input) },
   );
-  return res.case;
+  return res.placement;
 }
 
-/** GET /api/cases/:caseId/history � the placement's provenance trail (newest
+/** GET /api/placements/:placementId/history � the placement's provenance trail (newest
  *  first). Unwrapped from { history }. */
 export async function getPlacementHistory(
-  caseId: string,
+  placementId: string,
   opts: { limit?: number; before?: string } = {},
   signal?: AbortSignal,
 ): Promise<HistoryRow[]> {
   const res = await request<{ history: HistoryRow[] }>(
-    `/api/cases/${encodeURIComponent(caseId)}/history`,
+    `/api/placements/${encodeURIComponent(placementId)}/history`,
     {
       query: { limit: opts.limit, before: opts.before },
       ...(signal !== undefined && { signal }),

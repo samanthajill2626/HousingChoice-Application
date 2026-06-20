@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CaseItem, Contact, UnitItem } from '../../api/index.js';
-import { casesOnUnit, listingRoster, relatedByLandlord } from './buildListingFile.js';
+import type { PlacementItem, Contact, UnitItem } from '../../api/index.js';
+import { placementsOnUnit, listingRoster, relatedByLandlord } from './buildListingFile.js';
 
 const unit = (over: Partial<UnitItem> = {}): UnitItem => ({
   unitId: 'u1',
@@ -63,19 +63,19 @@ describe('listingRoster', () => {
   });
 });
 
-describe('casesOnUnit', () => {
-  const cases: CaseItem[] = [
-    { caseId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' },
-    { caseId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'schedule_inspection' },
-    { caseId: 'c3', tenantId: 't3', unitId: 'u1', stage: 'awaiting_hap_contract' },
+describe('placementsOnUnit', () => {
+  const placements: PlacementItem[] = [
+    { placementId: 'c1', tenantId: 't1', unitId: 'u1', stage: 'awaiting_approval' },
+    { placementId: 'c2', tenantId: 't2', unitId: 'u2', stage: 'schedule_inspection' },
+    { placementId: 'c3', tenantId: 't3', unitId: 'u1', stage: 'awaiting_hap_contract' },
   ];
 
-  it('keeps only cases on this unit', () => {
-    expect(casesOnUnit(cases, 'u1').map((c) => c.caseId)).toEqual(['c1', 'c3']);
+  it('keeps only placements on this unit', () => {
+    expect(placementsOnUnit(placements, 'u1').map((c) => c.placementId)).toEqual(['c1', 'c3']);
   });
 
   it('returns [] when none match', () => {
-    expect(casesOnUnit(cases, 'zzz')).toEqual([]);
+    expect(placementsOnUnit(placements, 'zzz')).toEqual([]);
   });
 });
 

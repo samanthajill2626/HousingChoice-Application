@@ -1,7 +1,7 @@
-// casesFormat — small pure presentation helpers for the placement board + case
-// detail. Resolve a case's tenant NAME (home) and listing ADDRESS from the
-// lookup maps useCases builds, falling back to the id (honest — never
-// fabricated). Tested in isolation.
+// placementsFormat — small pure presentation helpers for the placement board +
+// placement detail. Resolve a placement's tenant NAME (home) and listing ADDRESS
+// from the lookup maps usePlacements builds, falling back to the id (honest —
+// never fabricated). Tested in isolation.
 import {
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
@@ -14,20 +14,20 @@ import {
 } from '../../api/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
 
-/** The tenant's display name for a case, or the tenant id when the contact isn't
- *  loaded. */
+/** The tenant's display name for a placement, or the tenant id when the contact
+ *  isn't loaded. */
 export function tenantName(contacts: Map<string, Contact>, tenantId: string): string {
   const c = contacts.get(tenantId);
   if (!c) return tenantId;
   return contactDisplayName(c.firstName, c.lastName, c.phone);
 }
 
-/** True when the case's tenant is porting (the F1 boolean flag on the contact). */
+/** True when the placement's tenant is porting (the F1 boolean flag on the contact). */
 export function isPorting(contacts: Map<string, Contact>, tenantId: string): boolean {
   return contacts.get(tenantId)?.porting === true;
 }
 
-/** The listing's (unit's) address line for a case, or the unit id when the unit
+/** The listing's (unit's) address line for a placement, or the unit id when the unit
  *  isn't loaded. */
 export function listingAddress(units: Map<string, UnitItem>, unitId: string): string {
   const u = units.get(unitId);
@@ -57,7 +57,7 @@ export function dateTime(iso: string): string {
 }
 
 /** Humanize a raw snake_case token into a Sentence-case phrase, e.g.
- *  "case_stage_changed" → "Case stage changed". The fallback for any
+ *  "placement_stage_changed" → "Placement stage changed". The fallback for any
  *  event_type / status we don't have an explicit label map for — staff NEVER
  *  see a raw snake_case token. */
 export function humanizeToken(token: string): string {
@@ -67,11 +67,11 @@ export function humanizeToken(token: string): string {
 }
 
 /** A readable title for a history row from its event_type, e.g.
- *  "case_stage_changed" → "Stage changed", "tenant_status_changed" →
+ *  "placement_stage_changed" → "Stage changed", "tenant_status_changed" →
  *  "Tenant status changed". Falls back to a humanized event_type. */
 export function historyTitle(eventType: string): string {
   switch (eventType) {
-    case 'case_stage_changed':
+    case 'placement_stage_changed':
       return 'Stage changed';
     case 'tenant_status_changed':
       return 'Tenant status changed';
@@ -89,7 +89,7 @@ export function historyTitle(eventType: string): string {
 function labelFor(eventType: string, value: string): string {
   if (!value) return '';
   switch (eventType) {
-    case 'case_stage_changed':
+    case 'placement_stage_changed':
       return STAGE_LABELS[value as PlacementStage] ?? humanizeToken(value);
     case 'tenant_status_changed':
       return TENANT_STATUS_LABELS[value as TenantStatus] ?? humanizeToken(value);

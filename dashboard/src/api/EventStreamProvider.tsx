@@ -23,15 +23,15 @@ import {
   type ReactNode,
 } from 'react';
 import type {
-  CaseUpdatedEvent,
+  PlacementUpdatedEvent,
   ConversationUpdatedEvent,
   MessagePersistedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
   onConversationUpdated?: (event: ConversationUpdatedEvent) => void;
-  /** A case (M1.10) changed — live board move / attention / tour / deadline. */
-  onCaseUpdated?: (event: CaseUpdatedEvent) => void;
+  /** A placement (M1.10) changed — live board move / attention / tour / deadline. */
+  onPlacementUpdated?: (event: PlacementUpdatedEvent) => void;
   /** A message was persisted — the contact timeline refetches to show it live. */
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
@@ -122,9 +122,9 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
         if (data) dispatch((h) => h.onConversationUpdated, data);
       });
 
-      source.addEventListener('case.updated', (ev) => {
-        const data = parse<CaseUpdatedEvent>((ev as MessageEvent).data);
-        if (data) dispatch((h) => h.onCaseUpdated, data);
+      source.addEventListener('placement.updated', (ev) => {
+        const data = parse<PlacementUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onPlacementUpdated, data);
       });
 
       source.addEventListener('message.persisted', (ev) => {

@@ -73,7 +73,7 @@ export function InboxRow({
           <span className={styles.head}>
             <span className={`${styles.name} ${unread ? styles.bold : ''}`}>{row.name}</span>
             <span className={styles.channel}>{CHANNEL_LABEL[row.channel]}</span>
-            {row.caseContext ? <span className={styles.tag}>{row.caseContext.label}</span> : null}
+            {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.assignment ? (
               <span className={styles.assigned}>

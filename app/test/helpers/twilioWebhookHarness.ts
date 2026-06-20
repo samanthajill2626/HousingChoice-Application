@@ -55,7 +55,7 @@ import {
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
-import { type CaseDeadline, type CaseItem, type CasesRepo } from '../../src/repos/casesRepo.js';
+import { type PlacementDeadline, type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   buildTsEventId,
   type ActivityEventItem,
@@ -155,9 +155,9 @@ export interface FakeWorld {
   /** In-memory units (M1.5), keyed by unitId. */
   units: Map<string, UnitItem>;
   unitsRepo: UnitsRepo;
-  /** In-memory cases (M1.10), keyed by caseId. */
-  cases: Map<string, CaseItem>;
-  casesRepo: CasesRepo;
+  /** In-memory placements (M1.10), keyed by placementId. */
+  placements: Map<string, PlacementItem>;
+  placementsRepo: PlacementsRepo;
   /** In-memory activity events (BE2/C2), in insert order. */
   activityEvents: ActivityEventItem[];
   activityEventsRepo: ActivityEventsRepo;
@@ -215,7 +215,7 @@ export function createFakeWorld(): FakeWorld {
   events.on('conversation.updated', (payload) => emitted.push({ event: 'conversation.updated', payload }));
   events.on('message.persisted', (payload) => emitted.push({ event: 'message.persisted', payload }));
   events.on('broadcast.updated', (payload) => emitted.push({ event: 'broadcast.updated', payload }));
-  events.on('case.updated', (payload) => emitted.push({ event: 'case.updated', payload }));
+  events.on('placement.updated', (payload) => emitted.push({ event: 'placement.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
@@ -320,7 +320,7 @@ export function createFakeWorld(): FakeWorld {
     },
 
     // --- Relay groups (M1.7) ---
-    async createRelayGroup({ poolNumber, members, tag, caseId }) {
+    async createRelayGroup({ poolNumber, members, tag, placementId }) {
       const now = new Date().toISOString();
       const item: ConversationItem = {
         conversationId: `conv-${++convCounter}`,
@@ -333,7 +333,7 @@ export function createFakeWorld(): FakeWorld {
         participants: members,
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
-        ...(caseId !== undefined && { caseId }),
+        ...(placementId !== undefined && { placementId }),
       };
       conversations.set(item.conversationId, item);
       return item;
@@ -1010,27 +1010,27 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
-  // In-memory cases (M1.10): mirror the repo's contractual semantics —
+  // In-memory placements (M1.10): mirror the repo's contractual semantics —
   // generate-id create, SET-merge update with null→REMOVE + the next_deadline
   // composite-key REFUSAL, both-or-neither setNextDeadline, conditional 404, and
   // the GSI-shaped list queries. (Cursor pagination is integration-tested in
-  // casesRepo.integration.test.ts; this fake slices by limit only.)
-  const cases = new Map<string, CaseItem>();
-  let caseCounter = 0;
+  // placementsRepo.integration.test.ts; this fake slices by limit only.)
+  const placements = new Map<string, PlacementItem>();
+  let placementCounter = 0;
   // Mirror the byTenant/byUnit GSI's keyset pagination (parity with the real
-  // repo, BE-foundation): resume after the cursor's caseId, take `limit`, and
+  // repo, BE-foundation): resume after the cursor's placementId, take `limit`, and
   // emit a lastEvaluatedKey ONLY when a limit was passed AND more items remain.
   // With NO limit the whole result returns in one page (no lastEvaluatedKey) —
   // so existing single-page callers are unaffected. The sibling-placement scan
   // passes a limit to force ≥2 pages and exercise the follow-the-cursor loop.
-  const casePage = (
-    all: CaseItem[],
+  const placementPage = (
+    all: PlacementItem[],
     opts: { limit?: number; exclusiveStartKey?: Record<string, unknown> },
-  ): { items: CaseItem[]; lastEvaluatedKey?: Record<string, unknown> } => {
+  ): { items: PlacementItem[]; lastEvaluatedKey?: Record<string, unknown> } => {
     let start = 0;
-    const cursorId = opts.exclusiveStartKey?.['caseId'];
+    const cursorId = opts.exclusiveStartKey?.['placementId'];
     if (typeof cursorId === 'string') {
-      const idx = all.findIndex((c) => c.caseId === cursorId);
+      const idx = all.findIndex((c) => c.placementId === cursorId);
       if (idx >= 0) start = idx + 1;
     }
     const window = opts.limit === undefined ? all.slice(start) : all.slice(start, start + opts.limit);
@@ -1041,33 +1041,33 @@ export function createFakeWorld(): FakeWorld {
       items,
       ...(hasMore &&
         last !== undefined && {
-          lastEvaluatedKey: { caseId: last.caseId } as Record<string, unknown>,
+          lastEvaluatedKey: { placementId: last.placementId } as Record<string, unknown>,
         }),
     };
   };
-  const casesRepo: CasesRepo = {
+  const placementsRepo: PlacementsRepo = {
     async create(input) {
       const now = new Date().toISOString();
-      const item: CaseItem = {
+      const item: PlacementItem = {
         ...input,
-        caseId: input.caseId ?? `case-${++caseCounter}`,
+        placementId: input.placementId ?? `placement-${++placementCounter}`,
         created_at: typeof input.created_at === 'string' ? input.created_at : now,
         updated_at: now,
       };
-      cases.set(item.caseId, item);
+      placements.set(item.placementId, item);
       return { ...item };
     },
-    async getById(caseId) {
-      const c = cases.get(caseId);
+    async getById(placementId) {
+      const c = placements.get(placementId);
       return c ? { ...c } : undefined;
     },
-    async update(caseId, patch) {
-      const c = cases.get(caseId);
-      if (!c) throw conditionalCheckFailed(`update: no case ${caseId}`);
+    async update(placementId, patch) {
+      const c = placements.get(placementId);
+      if (!c) throw conditionalCheckFailed(`update: no placement ${placementId}`);
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         if (key === 'next_deadline_type' || key === 'next_deadline_at') {
-          throw new Error('casesRepo.update: set next_deadline via setNextDeadline');
+          throw new Error('placementsRepo.update: set next_deadline via setNextDeadline');
         }
         if (value === null) delete c[key];
         else c[key] = value;
@@ -1075,9 +1075,9 @@ export function createFakeWorld(): FakeWorld {
       c.updated_at = new Date().toISOString();
       return { ...c };
     },
-    async setNextDeadline(caseId, deadline: CaseDeadline | null) {
-      const c = cases.get(caseId);
-      if (!c) throw conditionalCheckFailed(`setNextDeadline: no case ${caseId}`);
+    async setNextDeadline(placementId, deadline: PlacementDeadline | null) {
+      const c = placements.get(placementId);
+      if (!c) throw conditionalCheckFailed(`setNextDeadline: no placement ${placementId}`);
       if (deadline === null) {
         delete c.next_deadline_type;
         delete c.next_deadline_at;
@@ -1089,23 +1089,23 @@ export function createFakeWorld(): FakeWorld {
       return { ...c };
     },
     async listByTenant(tenantId, opts = {}) {
-      const all = [...cases.values()].filter((c) => c.tenantId === tenantId);
-      return casePage(all, opts);
+      const all = [...placements.values()].filter((c) => c.tenantId === tenantId);
+      return placementPage(all, opts);
     },
     async listByUnit(unitId, opts = {}) {
-      const all = [...cases.values()].filter((c) => c.unitId === unitId);
-      return casePage(all, opts);
+      const all = [...placements.values()].filter((c) => c.unitId === unitId);
+      return placementPage(all, opts);
     },
     async listByStage(stage, opts = {}) {
-      const items = [...cases.values()].filter((c) => c.stage === stage).slice(0, opts.limit ?? 50);
+      const items = [...placements.values()].filter((c) => c.stage === stage).slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
     },
     async listByTourDate(tourDate, opts = {}) {
-      const items = [...cases.values()].filter((c) => c.tour_date === tourDate).slice(0, opts.limit ?? 50);
+      const items = [...placements.values()].filter((c) => c.tour_date === tourDate).slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
     },
     async listByNextDeadline(type, opts = {}) {
-      const items = [...cases.values()]
+      const items = [...placements.values()]
         // Composite SPARSE key: a row exists in byNextDeadline only when BOTH
         // attrs are present — mirror the real GSI (never a half-set), so the fake
         // can't admit a state production can't represent.
@@ -1121,7 +1121,7 @@ export function createFakeWorld(): FakeWorld {
       return { items: items.map((c) => ({ ...c })) };
     },
     async list(opts = {}) {
-      const items = [...cases.values()].slice(0, opts.limit ?? 50);
+      const items = [...placements.values()].slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
     },
   };
@@ -1453,8 +1453,8 @@ export function createFakeWorld(): FakeWorld {
     auditRepo,
     units,
     unitsRepo,
-    cases,
-    casesRepo,
+    placements,
+    placementsRepo,
     activityEvents,
     activityEventsRepo,
     listingSends,
@@ -1553,7 +1553,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       settingsRepo: world.settingsRepo,
       contactVocabularyRepo: world.vocabularyRepo,
       unitsRepo: world.unitsRepo,
-      casesRepo: world.casesRepo,
+      placementsRepo: world.placementsRepo,
       activityEventsRepo: world.activityEventsRepo,
       listingSendsRepo: world.listingSendsRepo,
       broadcastsRepo: world.broadcastsRepo,
@@ -1604,7 +1604,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       messagesRepo: world.messagesRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
-      casesRepo: world.casesRepo,
+      placementsRepo: world.placementsRepo,
       // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
       unitsRepo: world.unitsRepo,
       broadcastsRepo: world.broadcastsRepo,

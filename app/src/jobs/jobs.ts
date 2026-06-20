@@ -175,7 +175,7 @@ function buildEnvelope(jobName: string, payload: unknown): JobEnvelope {
     ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
     ...(ctx.conversationId !== undefined && { conversationId: ctx.conversationId }),
     ...(ctx.tenantId !== undefined && { tenantId: ctx.tenantId }),
-    ...(ctx.caseId !== undefined && { caseId: ctx.caseId }),
+    ...(ctx.placementId !== undefined && { placementId: ctx.placementId }),
   };
   return {
     v: JOB_ENVELOPE_VERSION,

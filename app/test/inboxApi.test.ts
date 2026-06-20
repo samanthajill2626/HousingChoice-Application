@@ -194,12 +194,12 @@ describe('GET /api/inbox (C8)', () => {
     });
   });
 
-  it('caseContext is surfaced when the representative conversation has a caseId', async () => {
+  it('placementContext is surfaced when the representative conversation has a placementId', async () => {
     const { app, world } = makeWebhookHarness();
     seedContact(world, { contactId: 'c-1', type: 'tenant', phone: '+15550000001' });
-    seedConversation(world, 'conv-1', { participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', caseId: 'case-1' });
-    world.cases.set('case-1', {
-      caseId: 'case-1',
+    seedConversation(world, 'conv-1', { participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', placementId: 'placement-1' });
+    world.placements.set('placement-1', {
+      placementId: 'placement-1',
       tenantId: 'c-1',
       unitId: 'unit-1',
       stage: 'awaiting_inspection',
@@ -207,7 +207,7 @@ describe('GET /api/inbox (C8)', () => {
 
     const res = await auth(request(app).get('/api/inbox'));
     expect(res.status).toBe(200);
-    expect(res.body.rows[0].caseContext).toEqual({ caseId: 'case-1', label: 'Awaiting inspection' });
+    expect(res.body.rows[0].placementContext).toEqual({ placementId: 'placement-1', label: 'Awaiting inspection' });
   });
 
   it('400 on an invalid filter value (NOT 500)', async () => {

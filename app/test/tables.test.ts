@@ -1,5 +1,5 @@
 // M0.3 contract tests for lib/tables.ts: all 9 tables, exact PK/SK and GSI
-// names per architecture doc v2.12 §5 (p.11–12), streams on messages+cases,
+// names per architecture doc v2.12 §5 (p.11–12), streams on messages+placements,
 // TTL on matches, and the TABLE_PREFIX name resolution helper.
 //
 // These assertions ARE the contract Terraform must mirror in M0.4 — if one of
@@ -24,7 +24,7 @@ describe('tables.ts — the table contract', () => {
       'conversations',
       'messages',
       'matches',
-      'cases',
+      'placements',
       'invoices',
       'users',
       'audit_events',
@@ -137,9 +137,9 @@ describe('tables.ts — the table contract', () => {
     expect(t.stream).toBeUndefined();
   });
 
-  it('cases: PK caseId; GSIs byTenant, byUnit, byStage, byTourDate (sparse), byNextDeadline (sparse); stream on', () => {
-    const t = spec('cases');
-    expect(t.hashKey.name).toBe('caseId');
+  it('placements: PK placementId; GSIs byTenant, byUnit, byStage, byTourDate (sparse), byNextDeadline (sparse); stream on', () => {
+    const t = spec('placements');
+    expect(t.hashKey.name).toBe('placementId');
     expect(t.rangeKey).toBeUndefined();
     expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byStage', 'byTourDate', 'byNextDeadline']);
     expect(t.gsis.find((g) => g.indexName === 'byTourDate')?.sparse).toBe(true);
@@ -172,8 +172,8 @@ describe('tables.ts — the table contract', () => {
     expect(gsiNames(t)).toEqual(['byActor']);
   });
 
-  it('only messages and cases have streams; only matches has TTL', () => {
-    expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'cases']);
+  it('only messages and placements have streams; only matches has TTL', () => {
+    expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'placements']);
     expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual(['matches']);
   });
 
@@ -190,6 +190,6 @@ describe('tableName — TABLE_PREFIX resolution', () => {
 
   it('honors TABLE_PREFIX from env (hc-dev-/hc-prod- in M0.4)', () => {
     expect(tableName('audit_events', { TABLE_PREFIX: 'hc-dev-' })).toBe('hc-dev-audit_events');
-    expect(tableName('cases', { TABLE_PREFIX: 'hc-prod-' })).toBe('hc-prod-cases');
+    expect(tableName('placements', { TABLE_PREFIX: 'hc-prod-' })).toBe('hc-prod-placements');
   });
 });

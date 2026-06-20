@@ -8,7 +8,9 @@
 >
 > Naming follows the glossary: the dwelling is a **`unit`** in code/data, shown as
 > **home** to tenants and **listing** to landlords/staff. The workflow record is a
-> **`placement`** in code/data (it is being renamed from the legacy `case`/`cases`).
+> **`placement`** in code, data, and UI — the original `case`/`cases` naming was
+> renamed to `placement`/`placements` throughout (the API path is `/api/placements`,
+> the DynamoDB table is `placements`, the PK is `placementId`).
 
 ---
 
@@ -272,9 +274,10 @@ framing, no owner field, porting as an informational tenant flag, RTA-in-hand as
 `final_rent` on rent acceptance, `inspection_outcome` (pass/fail) captured on the
 inspection-complete move, state-based derivation gating (only override/exit states pin —
 see §8), `Finalizing` anchored at Contract, `Lost` bouncing the tenant to `Searching`,
-manual tenant drop-out.
+manual tenant drop-out, and the `case`/`cases` → `placement`/`placements` rename
+(now complete across code, data, and UI — the workflow entity is `placement`
+everywhere).
 
 **Open / future:**
-- Backend rename `case`/`cases` → `placement` (code still uses the legacy term).
 - Implementation (data fields, the transition service, derivation, UI) is a separate
   effort, to be planned when we build it — this doc captures the *model*, not the build.

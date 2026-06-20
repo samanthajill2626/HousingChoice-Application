@@ -72,6 +72,24 @@ is unrelated to this entity and stays.
 
 ---
 
+## The placement (workflow) entity
+
+The **workflow record** that tracks getting one tenant into one specific unit — the
+spine of the process — is a **`placement`** in code, data, and UI: the type is
+`PlacementItem`, the repo `placementsRepo`, the DynamoDB table `placements` (PK
+`placementId`), the API path `/api/placements`, and the dashboard surface is
+"Placements". It was originally named `case`/`cases`; that has been **renamed to
+`placement`/`placements` throughout** (no `case` entity term remains in current
+code/data — see [STATUS-MODEL.md](STATUS-MODEL.md), the living reference for the
+placement lifecycle). Unlike the unit/home/listing entity, the placement has **one
+label for every audience** ("placement") — there is no audience-specific synonym.
+
+> Note: plain-English "case" (a `switch`/`case` keyword, "in this case", "edge
+> case", "test case") and the unrelated tenant field `caseworker` are **not** this
+> entity and are left as-is.
+
+---
+
 ## Feature & label notes
 
 - **"Share Listings"** — the staff dashboard feature that fans a filtered broadcast

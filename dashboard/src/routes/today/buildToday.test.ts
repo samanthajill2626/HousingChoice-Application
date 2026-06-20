@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { buildTodayFromSources } from './buildToday.js';
-import type { CaseItem, ConversationSummary } from '../../api/index.js';
+import type { PlacementItem, ConversationSummary } from '../../api/index.js';
 
 // A fixed "now" in local time. Tests build deadlines/tours relative to it.
 const NOW = new Date('2026-06-16T12:00:00');
 
-function caseOf(partial: Partial<CaseItem> & Pick<CaseItem, 'caseId'>): CaseItem {
+function placementOf(partial: Partial<PlacementItem> & Pick<PlacementItem, 'placementId'>): PlacementItem {
   return {
-    tenantId: `t-${partial.caseId}`,
-    unitId: `u-${partial.caseId}`,
+    tenantId: `t-${partial.placementId}`,
+    unitId: `u-${partial.placementId}`,
     stage: 'schedule_inspection',
     ...partial,
   };
@@ -39,27 +39,27 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
 describe('buildTodayFromSources', () => {
-  it('puts a case with an upcoming deadline in needs_you_now with humanized urgency + tag', () => {
+  it('puts a placement with an upcoming deadline in needs_you_now with humanized urgency + tag', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'k1', stage: 'schedule_inspection', next_deadline_type: 'rta_window', next_deadline_at: at(2 * HOUR) })],
+      [placementOf({ placementId: 'k1', stage: 'schedule_inspection', next_deadline_type: 'rta_window', next_deadline_at: at(2 * HOUR) })],
       [],
       NOW,
     );
     expect(items).toHaveLength(1);
     const item = items[0];
     expect(item?.group).toBe('needs_you_now');
-    expect(item?.refType).toBe('case');
+    expect(item?.refType).toBe('placement');
     expect(item?.refId).toBe('k1');
     expect(item?.urgency).toBe('2h left');
-    expect(item?.tag).toBe('Case · Schedule inspection');
+    expect(item?.tag).toBe('Placement · Schedule inspection');
     expect(item?.why).toMatch(/RTA/i);
   });
 
   it('humanizes an overdue deadline and a multi-day deadline', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({ caseId: 'overdue', next_deadline_type: 'rta_window', next_deadline_at: at(-3 * HOUR) }),
-        caseOf({ caseId: 'days', next_deadline_type: 'voucher_expiration', next_deadline_at: at(3 * DAY) }),
+        placementOf({ placementId: 'overdue', next_deadline_type: 'rta_window', next_deadline_at: at(-3 * HOUR) }),
+        placementOf({ placementId: 'days', next_deadline_type: 'voucher_expiration', next_deadline_at: at(3 * DAY) }),
       ],
       [],
       NOW,
@@ -72,9 +72,9 @@ describe('buildTodayFromSources', () => {
   it('orders needs_you_now most-urgent first (soonest/overdue deadline before later)', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({ caseId: 'later', next_deadline_type: 'rta_window', next_deadline_at: at(5 * DAY) }),
-        caseOf({ caseId: 'soon', next_deadline_type: 'rta_window', next_deadline_at: at(1 * HOUR) }),
-        caseOf({ caseId: 'past', next_deadline_type: 'rta_window', next_deadline_at: at(-1 * HOUR) }),
+        placementOf({ placementId: 'later', next_deadline_type: 'rta_window', next_deadline_at: at(5 * DAY) }),
+        placementOf({ placementId: 'soon', next_deadline_type: 'rta_window', next_deadline_at: at(1 * HOUR) }),
+        placementOf({ placementId: 'past', next_deadline_type: 'rta_window', next_deadline_at: at(-1 * HOUR) }),
       ],
       [],
       NOW,
@@ -82,11 +82,11 @@ describe('buildTodayFromSources', () => {
     expect(items.map((i) => i.refId)).toEqual(['past', 'soon', 'later']);
   });
 
-  it('flags an attention case in needs_you_now with attention:true (no deadline)', () => {
+  it('flags an attention placement in needs_you_now with attention:true (no deadline)', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({
-          caseId: 'att',
+        placementOf({
+          placementId: 'att',
           stage: 'awaiting_approval',
           attention: { reason: 'Send failed — needs a call', at: NOW.toISOString() },
         }),
@@ -98,7 +98,7 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.group).toBe('needs_you_now');
     expect(items[0]?.attention).toBe(true);
     expect(items[0]?.why).toMatch(/Send failed/);
-    expect(items[0]?.tag).toBe('Case · Awaiting approval');
+    expect(items[0]?.tag).toBe('Placement · Awaiting approval');
   });
 
   it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
@@ -147,21 +147,21 @@ describe('buildTodayFromSources', () => {
     expect(unk?.refId).toBe('unknown?phone=%2B14040100007');
   });
 
-  it('puts a case touring today in tours_today', () => {
+  it('puts a placement touring today in tours_today', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'tour', stage: 'schedule_inspection', tour_date: '2026-06-16' })],
+      [placementOf({ placementId: 'tour', stage: 'schedule_inspection', tour_date: '2026-06-16' })],
       [],
       NOW,
     );
     const tour = items.find((i) => i.group === 'tours_today');
     expect(tour?.refId).toBe('tour');
     expect(tour?.why).toMatch(/Tour/);
-    expect(tour?.tag).toBe('Case · Schedule inspection');
+    expect(tour?.tag).toBe('Placement · Schedule inspection');
   });
 
   it('does not put a tour on a different day in tours_today', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'tmrw', tour_date: '2026-06-17' })],
+      [placementOf({ placementId: 'tmrw', tour_date: '2026-06-17' })],
       [],
       NOW,
     );
@@ -201,11 +201,11 @@ describe('buildTodayFromSources', () => {
     expect(items).toHaveLength(0);
   });
 
-  it('puts a follow_up-deadline case in follow_ups (not needs_you_now)', () => {
+  it('puts a follow_up-deadline placement in follow_ups (not needs_you_now)', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({
-          caseId: 'fu',
+        placementOf({
+          placementId: 'fu',
           stage: 'awaiting_approval',
           next_deadline_type: 'follow_up',
           next_deadline_at: at(2 * HOUR),
@@ -216,12 +216,12 @@ describe('buildTodayFromSources', () => {
     );
     expect(items).toHaveLength(1);
     expect(items[0]?.group).toBe('follow_ups');
-    expect(items[0]?.tag).toBe('Case · Awaiting approval');
+    expect(items[0]?.tag).toBe('Placement · Awaiting approval');
   });
 
-  it('puts a stuck_case in follow_ups', () => {
+  it('puts a stuck_placement in follow_ups', () => {
     const items = buildTodayFromSources(
-      [caseOf({ caseId: 'stuck', stage: 'awaiting_approval', next_deadline_type: 'stuck_case', next_deadline_at: at(-DAY) })],
+      [placementOf({ placementId: 'stuck', stage: 'awaiting_approval', next_deadline_type: 'stuck_placement', next_deadline_at: at(-DAY) })],
       [],
       NOW,
     );
@@ -233,9 +233,9 @@ describe('buildTodayFromSources', () => {
   it('returns groups in canonical order regardless of input order', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({ caseId: 'fu', stage: 'awaiting_approval', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
-        caseOf({ caseId: 'tour', tour_date: '2026-06-16' }),
-        caseOf({ caseId: 'need', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
+        placementOf({ placementId: 'fu', stage: 'awaiting_approval', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
+        placementOf({ placementId: 'tour', tour_date: '2026-06-16' }),
+        placementOf({ placementId: 'need', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
       ],
       [convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' })],
       NOW,
@@ -251,8 +251,8 @@ describe('buildTodayFromSources', () => {
   it('attention takes precedence over a follow-up deadline (needs_you_now only, not duplicated)', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({
-          caseId: 'esc',
+        placementOf({
+          placementId: 'esc',
           stage: 'awaiting_approval',
           next_deadline_type: 'follow_up',
           next_deadline_at: at(DAY),
@@ -272,18 +272,18 @@ describe('buildTodayFromSources', () => {
   it('renders an unknown stage / deadline type literally rather than "undefined"', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({
-          caseId: 'weird',
+        placementOf({
+          placementId: 'weird',
           // Flexible server doc: values outside the known enums.
-          stage: 'archived' as CaseItem['stage'],
-          next_deadline_type: 'mystery' as CaseItem['next_deadline_type'],
+          stage: 'archived' as PlacementItem['stage'],
+          next_deadline_type: 'mystery' as PlacementItem['next_deadline_type'],
           next_deadline_at: at(HOUR),
         }),
       ],
       [],
       NOW,
     );
-    expect(items[0]?.tag).toBe('Case · archived');
+    expect(items[0]?.tag).toBe('Placement · archived');
     expect(items[0]?.why).toBe('Deadline');
     expect(items[0]?.why).not.toContain('undefined');
     expect(items[0]?.tag).not.toContain('undefined');
@@ -292,8 +292,8 @@ describe('buildTodayFromSources', () => {
   it('does not crash on a malformed deadline instant (sorts after valid ones)', () => {
     const items = buildTodayFromSources(
       [
-        caseOf({ caseId: 'good', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
-        caseOf({ caseId: 'bad', next_deadline_type: 'rta_window', next_deadline_at: 'not-a-date' }),
+        placementOf({ placementId: 'good', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
+        placementOf({ placementId: 'bad', next_deadline_type: 'rta_window', next_deadline_at: 'not-a-date' }),
       ],
       [],
       NOW,

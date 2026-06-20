@@ -17,7 +17,7 @@ import {
 
 const contacts = SEED['contacts'] ?? [];
 const units = SEED['units'] ?? [];
-const cases = SEED['cases'] ?? [];
+const placements = SEED['placements'] ?? [];
 const auditEvents = SEED['audit_events'] ?? [];
 
 describe('seed data field casing', () => {
@@ -91,9 +91,9 @@ describe('seed data field casing', () => {
     expect(tenant!).not.toHaveProperty('tenant_status_source');
   });
 
-  it('every seed case stage is a snake_case PLACEMENT_STAGES value', () => {
-    expect(cases.length).toBeGreaterThanOrEqual(1);
-    for (const c of cases) {
+  it('every seed placement stage is a snake_case PLACEMENT_STAGES value', () => {
+    expect(placements.length).toBeGreaterThanOrEqual(1);
+    for (const c of placements) {
       expect(PLACEMENT_STAGES as readonly string[]).toContain(c['stage']);
       // snake_case (the byStage GSI partition key convention).
       expect(c['stage']).toMatch(/^[a-z][a-z_]*$/);
@@ -124,7 +124,7 @@ describe('seed data field casing', () => {
     // precedence-GATED derived status must be stamped source 'derived' (not
     // 'manual'), or the very regression this change fixes (a create-time
     // 'manual' pin blocking the first derived write) is reintroduced via the seed.
-    const placement = cases[0]!;
+    const placement = placements[0]!;
     const stage = placement['stage'] as PlacementStage;
     const derived = deriveStatuses(stage);
 

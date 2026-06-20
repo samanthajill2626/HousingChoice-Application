@@ -1,6 +1,6 @@
 // activity-events repo (BE2/C2) — the person-centric milestone log.
 //
-// Each row records ONE milestone for a contact (a case opened/closed, a stage
+// Each row records ONE milestone for a contact (a placement opened/closed, a stage
 // change, a listing sent, a number added, group-text membership, …). The
 // contact-timeline endpoint (GET /api/contacts/:id/timeline) MERGES these with
 // the contact's messages/calls into one chronological feed; the milestone is a
@@ -31,8 +31,8 @@ import type { RepoDeps } from './conversationsRepo.js';
  * timeline can render it once that lands. Do NOT rename any member.
  */
 export type ActivityEventType =
-  | 'case_opened'
-  | 'case_closed'
+  | 'placement_opened'
+  | 'placement_closed'
   | 'listing_sent'
   | 'listing_reviewed'
   | 'tour_scheduled'
@@ -43,7 +43,7 @@ export type ActivityEventType =
   | 'removed_from_group_text';
 
 /** What a milestone can deep-link out to (C2 `TimelineMilestone.refType`). */
-export type ActivityEventRefType = 'case' | 'unit' | 'conversation' | 'broadcast';
+export type ActivityEventRefType = 'placement' | 'unit' | 'conversation' | 'broadcast';
 
 /** One stored activity event. Flexible document — these are the read fields. */
 export interface ActivityEventItem {

@@ -1,13 +1,13 @@
 // useToday — the Today page's data hook. Prefers the server-assembled queue
 // (GET /api/today, §C7); when that endpoint isn't live yet (ApiError 404) it
-// falls back to assembling the SAME TodayItem[] client-side from /api/cases +
+// falls back to assembling the SAME TodayItem[] client-side from /api/placements +
 // /api/conversations (buildTodayFromSources). Subscribes to the SSE stream and
-// refetches (debounced) on case.updated / conversation.updated so the queue
+// refetches (debounced) on placement.updated / conversation.updated so the queue
 // stays live. Returns a small { status, items, source } state for the view.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
-  getCases,
+  getPlacements,
   getConversations,
   getToday,
   useEventStream,
@@ -26,7 +26,7 @@ export interface TodayState {
 }
 
 /** Debounce window (ms) for SSE-triggered refetches — coalesces a burst of
- *  case/conversation events (e.g. a broadcast send) into one refetch. */
+ *  placement/conversation events (e.g. a broadcast send) into one refetch. */
 const REFETCH_DEBOUNCE_MS = 300;
 
 async function loadToday(
@@ -45,8 +45,8 @@ async function loadToday(
     // Only a 404 means "endpoint not live yet" → assemble client-side. Any other
     // failure (and the fallback's own failures) propagates to the error state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
-    const [cases, conversations] = await Promise.all([getCases(signal), getConversations(signal)]);
-    const items = buildTodayFromSources(cases.cases, conversations.conversations, now);
+    const [placements, conversations] = await Promise.all([getPlacements(signal), getConversations(signal)]);
+    const items = buildTodayFromSources(placements.placements, conversations.conversations, now);
     return { items, source: 'fallback' };
   }
 }
@@ -102,7 +102,7 @@ export function useToday(): TodayState {
   }, []);
 
   useEventStream({
-    onCaseUpdated: scheduleRefetch,
+    onPlacementUpdated: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
   });
 

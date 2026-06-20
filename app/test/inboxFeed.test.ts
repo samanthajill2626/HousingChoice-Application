@@ -7,7 +7,7 @@
 //   - conversationsRepo.findByParticipantPhone — every conversation on a number.
 //   - contactsRepo.findByPhone — pointer-aware phone → contact resolution.
 //   - contactsRepo.getById / messagesRepo.listByConversation (latest message) /
-//     casesRepo.getById / usersRepo.findById — best-effort hydration.
+//     placementsRepo.getById / usersRepo.findById — best-effort hydration.
 //
 // The aggregator emits ONE row per contact at its NEWEST conversation (the
 // newest-conversation rule) so paging is split-proof: a contact represented on
@@ -24,7 +24,7 @@ interface Seed {
   /** Latest message per conversationId (drives channel/direction/preview). */
   latestMessage?: Record<string, Partial<MessageItem>>;
   users?: Record<string, { name?: string; email?: string }>;
-  cases?: Record<string, { stage: string }>;
+  placements?: Record<string, { stage: string }>;
 }
 
 /**
@@ -91,12 +91,12 @@ function makeDeps(seed: Seed): InboxRouterDeps {
         return latest ? [latest as MessageItem] : [];
       },
     } as unknown as NonNullable<InboxRouterDeps['messagesRepo']>,
-    casesRepo: {
-      async getById(caseId: string) {
-        const c = seed.cases?.[caseId];
-        return c ? ({ caseId, stage: c.stage } as unknown) : undefined;
+    placementsRepo: {
+      async getById(placementId: string) {
+        const c = seed.placements?.[placementId];
+        return c ? ({ placementId, stage: c.stage } as unknown) : undefined;
       },
-    } as unknown as NonNullable<InboxRouterDeps['casesRepo']>,
+    } as unknown as NonNullable<InboxRouterDeps['placementsRepo']>,
     usersRepo: {
       async findById(userId: string) {
         const u = seed.users?.[userId];
@@ -259,17 +259,17 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(mine.rows.map((r) => r.contactId)).toEqual(['c-mine']);
   });
 
-  it('caseContext present {caseId,label} when the representative conversation has a caseId', async () => {
+  it('placementContext present {placementId,label} when the representative conversation has a placementId', async () => {
     const deps = makeDeps({
       contacts: [{ contactId: 'c-1', type: 'tenant', phone: '+15550000001' }],
       conversations: [
-        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', caseId: 'case-9' }),
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', placementId: 'placement-9' }),
       ],
-      cases: { 'case-9': { stage: 'awaiting_inspection' } },
+      placements: { 'placement-9': { stage: 'awaiting_inspection' } },
     });
 
     const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
-    expect(page.rows[0]!.caseContext).toEqual({ caseId: 'case-9', label: 'Awaiting inspection' });
+    expect(page.rows[0]!.placementContext).toEqual({ placementId: 'placement-9', label: 'Awaiting inspection' });
   });
 
   it('assignment resolves {userId,name} from the users repo when assigned; omitted when unassigned', async () => {

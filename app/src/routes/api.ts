@@ -20,7 +20,7 @@ import {
   appEvents,
   toConversationUpdatedEvent,
   type BroadcastUpdatedEvent,
-  type CaseUpdatedEvent,
+  type PlacementUpdatedEvent,
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
@@ -46,7 +46,7 @@ import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingS
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
-import { type CasesRepo } from '../repos/casesRepo.js';
+import { type PlacementsRepo } from '../repos/placementsRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -65,7 +65,7 @@ import { type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { type AudienceResolutionService } from '../services/audienceResolution.js';
 import { createAdminUsersRouter } from './adminUsers.js';
 import { createBroadcastsRouter } from './broadcasts.js';
-import { createCasesRouter } from './cases.js';
+import { createPlacementsRouter } from './placements.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
@@ -131,8 +131,8 @@ export interface ApiRouterDeps {
   pushService?: PushService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
   unitsRepo?: UnitsRepo;
-  /** M1.10 boards/cases — injected in tests; default to the real repo. */
-  casesRepo?: CasesRepo;
+  /** M1.10 boards/placements — injected in tests; default to the real repo. */
+  placementsRepo?: PlacementsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -217,7 +217,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   // BE2/C2: the activity-event log feeds the merged timeline + is emitted into
-  // by the case/relay/phone flows. Shared across the sub-routers below.
+  // by the placement/relay/phone flows. Shared across the sub-routers below.
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   // BE4/C4: the listing-send record — read by the units recipients + contacts
   // listings-sent endpoints, written by the response PATCH. Shared across the
@@ -317,8 +317,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       listingSendsRepo: listingSends,
       // BE4: emit `listing_reviewed` on a real interested/not_a_fit change.
       activityEventsRepo: activityEvents,
-      // FIX 3: GET /:id/cases lists the unit's cases (tenant-name enriched).
-      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).
@@ -358,35 +358,35 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events,
     }),
   );
-  // Cases + boards (M1.10; requireAuth — VAs run the boards, no admin gate).
-  // Gets the relay-provisioning deps too (M1.10c: POST /cases/:id/relay derives
-  // the roster from the case + reuses the shared provisioning primitive).
+  // Placements + boards (M1.10; requireAuth — VAs run the boards, no admin gate).
+  // Gets the relay-provisioning deps too (M1.10c: POST /placements/:id/relay derives
+  // the roster from the placement + reuses the shared provisioning primitive).
   router.use(
-    '/cases',
-    createCasesRouter({
+    '/placements',
+    createPlacementsRouter({
       config,
       logger: deps.logger,
-      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       conversationsRepo: conversations,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       auditRepo: audit,
-      // BE2: emit case_opened/case_closed/stage_changed/tour_* milestones.
+      // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
       events,
     }),
   );
   // Status-model transitions (requireAuth via the /api mount). Mounted at '/' so
-  // it owns the distinct sub-paths /cases/:id/transition, /cases/:id/history,
+  // it owns the distinct sub-paths /placements/:id/transition, /placements/:id/history,
   // /contacts/:id/tenant-status, /units/:id/listing-status — all distinct
-  // segments from the cases/contacts/units CRUD routers above, so no collision.
+  // segments from the placements/contacts/units CRUD routers above, so no collision.
   // EVERY status/stage write routes through the ONE transition service here.
   router.use(
     '/',
     createStatusTransitionRouter({
       logger: deps.logger,
-      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
@@ -394,23 +394,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only
-  // aggregation over cases/conversations/contacts — its only path is GET / (i.e.
-  // GET /api/today), a distinct segment from every router above. Shares the
-  // process conversations repo; cases/contacts default to the real repos unless
-  // injected (tests pass the world fakes).
+  // aggregation over placements/conversations/contacts — its only path is GET /
+  // (i.e. GET /api/today), a distinct segment from every router above. Shares the
+  // process conversations repo; placements/contacts default to the real repos
+  // unless injected (tests pass the world fakes).
   router.use(
     '/today',
     createTodayRouter({
       logger: deps.logger,
       conversationsRepo: conversations,
-      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
     }),
   );
   // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,
-  // contact-aggregated lens over conversations/contacts/messages/cases/users —
+  // contact-aggregated lens over conversations/contacts/messages/placements/users —
   // its only path is GET / (GET /api/inbox), a distinct segment from every
-  // router above. Shares the process conversations + messages repos; cases/
+  // router above. Shares the process conversations + messages repos; placements/
   // contacts/users default to the real repos unless injected (tests pass the
   // world fakes).
   router.use(
@@ -422,7 +422,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       events,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
-      ...(deps.casesRepo !== undefined && { casesRepo: deps.casesRepo }),
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
     }),
   );
@@ -963,13 +963,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onBroadcastUpdated = (payload: BroadcastUpdatedEvent): void => {
       writeEvent('broadcast.updated', payload);
     };
-    const onCaseUpdated = (payload: CaseUpdatedEvent): void => {
-      writeEvent('case.updated', payload);
+    const onPlacementUpdated = (payload: PlacementUpdatedEvent): void => {
+      writeEvent('placement.updated', payload);
     };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
-    events.on('case.updated', onCaseUpdated);
+    events.on('placement.updated', onPlacementUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -990,7 +990,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('conversation.updated', onConversationUpdated);
       events.off('message.persisted', onMessagePersisted);
       events.off('broadcast.updated', onBroadcastUpdated);
-      events.off('case.updated', onCaseUpdated);
+      events.off('placement.updated', onPlacementUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

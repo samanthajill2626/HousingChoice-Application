@@ -1,46 +1,44 @@
-// M1.10 fast unit tests: cases repo PURE logic — the stage/deadline allowlists
+// M1.10 fast unit tests: placements repo PURE logic — the stage/deadline allowlists
 // and the UpdateExpression construction that the boards/relay/escalation paths
 // depend on (null→REMOVE for sparse keys; both-or-neither for the next_deadline
 // composite key). Real DynamoDB UpdateExpression SEMANTICS live in
-// casesRepo.integration.test.ts (DynamoDB Local); these assert what we BUILD.
+// placementsRepo.integration.test.ts (DynamoDB Local); these assert what we BUILD.
 import { UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
 import {
-  CASE_DEADLINE_TYPES,
-  CASE_STAGES,
-  createCasesRepo,
-  isCaseDeadlineType,
-  isCaseStage,
+  PLACEMENT_DEADLINE_TYPES,
+  createPlacementsRepo,
+  isPlacementDeadlineType,
   TERMINAL_STAGES,
-} from '../src/repos/casesRepo.js';
+} from '../src/repos/placementsRepo.js';
+import { PLACEMENT_STAGES, isPlacementStage } from '../src/lib/statusModel.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
-describe('case stage + deadline allowlists', () => {
-  it('isCaseStage accepts every ladder stage and rejects strays', () => {
-    for (const s of CASE_STAGES) expect(isCaseStage(s)).toBe(true);
-    expect(isCaseStage('property')).toBe(false); // terminology guard, just in case
-    expect(isCaseStage('placed')).toBe(false); // a tenant status, NOT a case stage
-    expect(isCaseStage('touring')).toBe(false); // legacy stage gone
-    expect(isCaseStage('')).toBe(false);
-    expect(isCaseStage(undefined)).toBe(false);
-    expect(isCaseStage(42)).toBe(false);
+describe('placement stage + deadline allowlists', () => {
+  it('isPlacementStage accepts every ladder stage and rejects strays', () => {
+    for (const s of PLACEMENT_STAGES) expect(isPlacementStage(s)).toBe(true);
+    expect(isPlacementStage('property')).toBe(false); // terminology guard, just in case
+    expect(isPlacementStage('placed')).toBe(false); // a tenant status, NOT a placement stage
+    expect(isPlacementStage('touring')).toBe(false); // legacy stage gone
+    expect(isPlacementStage('')).toBe(false);
+    expect(isPlacementStage(undefined)).toBe(false);
+    expect(isPlacementStage(42)).toBe(false);
   });
 
   it('the placement ladder runs send_application → … → moved_in | lost', () => {
-    // CASE_STAGES is the re-exported PLACEMENT_STAGES (status-model §4).
-    expect(CASE_STAGES[0]).toBe('send_application');
-    expect(CASE_STAGES).toContain('awaiting_authority_approval');
-    expect(CASE_STAGES).toContain('awaiting_hap_contract');
+    expect(PLACEMENT_STAGES[0]).toBe('send_application');
+    expect(PLACEMENT_STAGES).toContain('awaiting_authority_approval');
+    expect(PLACEMENT_STAGES).toContain('awaiting_hap_contract');
     expect(TERMINAL_STAGES.has('moved_in')).toBe(true);
     expect(TERMINAL_STAGES.has('lost')).toBe(true);
     expect(TERMINAL_STAGES.has('send_application')).toBe(false);
   });
 
-  it('isCaseDeadlineType gates the byNextDeadline partition key', () => {
-    for (const t of CASE_DEADLINE_TYPES) expect(isCaseDeadlineType(t)).toBe(true);
-    expect(isCaseDeadlineType('whenever')).toBe(false);
-    expect(isCaseDeadlineType(null)).toBe(false);
+  it('isPlacementDeadlineType gates the byNextDeadline partition key', () => {
+    for (const t of PLACEMENT_DEADLINE_TYPES) expect(isPlacementDeadlineType(t)).toBe(true);
+    expect(isPlacementDeadlineType('whenever')).toBe(false);
+    expect(isPlacementDeadlineType(null)).toBe(false);
   });
 });
 
@@ -51,7 +49,7 @@ function captureDoc(): { doc: DynamoDBDocumentClient; last: () => UpdateCommand 
     send: async (cmd: unknown) => {
       if (cmd instanceof UpdateCommand) {
         last = cmd;
-        return { Attributes: { caseId: 'case-1', ...(cmd.input.Key ?? {}) } };
+        return { Attributes: { placementId: 'placement-1', ...(cmd.input.Key ?? {}) } };
       }
       throw new Error(`unexpected command: ${String(cmd)}`);
     },
@@ -60,17 +58,17 @@ function captureDoc(): { doc: DynamoDBDocumentClient; last: () => UpdateCommand 
 }
 
 function repoWith(doc: DynamoDBDocumentClient) {
-  return createCasesRepo({
+  return createPlacementsRepo({
     doc,
     env: { TABLE_PREFIX: 'hc-fake-' } as NodeJS.ProcessEnv,
     logger: createLogger({ destination: createLogCapture().stream }),
   });
 }
 
-describe('casesRepo.update — SET non-null, REMOVE null, skip undefined', () => {
+describe('placementsRepo.update — SET non-null, REMOVE null, skip undefined', () => {
   it('builds a combined SET … REMOVE … expression and always bumps updated_at', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).update('case-1', {
+    await repoWith(doc).update('placement-1', {
       stage: 'awaiting_approval', // SET
       tour_date: null, // REMOVE (clear the sparse byTourDate key)
       attention: null, // REMOVE the escalation flag
@@ -95,13 +93,13 @@ describe('casesRepo.update — SET non-null, REMOVE null, skip undefined', () =>
 
   it('a patch with no removes emits a plain SET (no dangling REMOVE)', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).update('case-1', { stage: 'awaiting_inspection' });
+    await repoWith(doc).update('placement-1', { stage: 'awaiting_inspection' });
     expect(last()!.input.UpdateExpression).not.toContain('REMOVE');
   });
 
   it('an empty patch still bumps updated_at via a valid SET-only expression', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).update('case-1', {});
+    await repoWith(doc).update('placement-1', {});
     const expr = last()!.input.UpdateExpression!;
     // Never an empty SET (DynamoDB rejects that) and never a dangling REMOVE.
     expect(expr).toMatch(/^SET /);
@@ -112,19 +110,19 @@ describe('casesRepo.update — SET non-null, REMOVE null, skip undefined', () =>
   it('REFUSES to write the next_deadline composite key (must go through setNextDeadline)', async () => {
     const { doc } = captureDoc();
     const repo = repoWith(doc);
-    await expect(repo.update('case-1', { next_deadline_at: '2026-07-01T00:00:00.000Z' })).rejects.toThrow(
+    await expect(repo.update('placement-1', { next_deadline_at: '2026-07-01T00:00:00.000Z' })).rejects.toThrow(
       /setNextDeadline/,
     );
-    await expect(repo.update('case-1', { next_deadline_type: 'rta_window' })).rejects.toThrow(
+    await expect(repo.update('placement-1', { next_deadline_type: 'rta_window' })).rejects.toThrow(
       /setNextDeadline/,
     );
   });
 });
 
-describe('casesRepo.setNextDeadline — both-or-neither composite key', () => {
+describe('placementsRepo.setNextDeadline — both-or-neither composite key', () => {
   it('SETs both next_deadline attributes together', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).setNextDeadline('case-1', {
+    await repoWith(doc).setNextDeadline('placement-1', {
       type: 'rta_window',
       at: '2026-06-16T00:00:00.000Z',
     });
@@ -146,7 +144,7 @@ describe('casesRepo.setNextDeadline — both-or-neither composite key', () => {
 
   it('REMOVEs both next_deadline attributes when cleared with null', async () => {
     const { doc, last } = captureDoc();
-    await repoWith(doc).setNextDeadline('case-1', null);
+    await repoWith(doc).setNextDeadline('placement-1', null);
     const cmd = last()!;
     const expr = cmd.input.UpdateExpression!;
     expect(expr).toContain('REMOVE');

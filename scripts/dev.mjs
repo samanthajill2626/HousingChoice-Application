@@ -19,15 +19,15 @@
 //                         selected whenever DYNAMODB_ENDPOINT is set (env or .env).
 //
 // Either way, step "run": app (tsx watch, :8080) + worker (tsx watch) + the
-// dashboard Vite dev server (:5173, HMR) concurrently with prefixed output.
-// Open http://localhost:5173 for the UI — Vite serves the React app and
+// dashboard Vite dev server (:5174, HMR) concurrently with prefixed output.
+// Open http://localhost:5174 for the UI — Vite serves the React app and
 // proxies /api + /auth to the app on :8080 (which serves the API only in
 // local dev, not the built UI). Ctrl-C stops all three.
 //
 // Config layering (later wins): .env.dev (the dev stack's operator secrets —
 // Twilio, Google OAuth, VAPID — loaded in LIVE mode only) < .env (optional
 // local overrides) < real environment variables < mode defaults that must
-// hold locally (NODE_ENV=development, OTel off, PUBLIC_BASE_URL=:5173). So a
+// hold locally (NODE_ENV=development, OTel off, PUBLIC_BASE_URL=:5174). So a
 // local live run is a true mirror of deployed dev: real dev data AND real
 // Google login / Twilio / push — except logs go to THIS terminal (pino
 // stdout), never CloudWatch (that's the deployed server's awslogs driver).
@@ -49,9 +49,8 @@
 // Twilio against the LIVE dev backend, where those seeded personas won't map to
 // real dev contacts; `--local --mock` without --seeded starts with an empty DB,
 // so those personas won't resolve to any seeded contact either. Granular escape
-// hatches: npm run dev:app / dev:worker /
-// dev -w @housingchoice/dashboard-legacy / db:* (those do NOT load .env/.env.dev or
-// apply mode defaults).
+// hatches: npm run dev:app / dev:worker / db:* (those do NOT load
+// .env/.env.dev or apply mode defaults).
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Writable } from 'node:stream';
@@ -154,13 +153,11 @@ const childEnv = {
 
 // Local Google login must ride a Vite proxy: a direct hit on the app's :8080
 // carries no x-origin-verify header (the origin-secret validator 403s it), but
-// Vite stamps it on proxied /auth + /api. The NEW dashboard (:5174) owns Google
+// Vite stamps it on proxied /auth + /api. The dashboard (:5174) owns Google
 // OAuth in local dev, so the redirect_uri targets :5174 — point the app there
 // unless the operator set PUBLIC_BASE_URL explicitly. (Register
-// http://localhost:5174/auth/callback on the dev Google OAuth client.) The
-// legacy dashboard stays reachable on :5173 (its proxy still serves /api+/auth),
-// but the OAuth round-trip lands on :5174. Skipped with --no-web — no UI to log
-// in via.
+// http://localhost:5174/auth/callback on the dev Google OAuth client.) Skipped
+// with --no-web — no UI to log in via.
 if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BASE_URL === '')) {
   childEnv.PUBLIC_BASE_URL = 'http://localhost:5174';
 }
@@ -319,37 +316,29 @@ if (mockRedirect) {
   if (reaped.length) console.log(`dev — mock: reaped orphan(s) on :8889 before start: ${reaped.join(', ')}`);
 }
 
-// Reap any orphan still holding :5173 before concurrently spawns the dashboard
-// Vite server. The dashboard pins `strictPort: true` (dashboard-legacy/
-// vite.config.ts), so a held :5173 makes Vite exit with EADDRINUSE instead of
-// drifting to another port — and `killOthersOn: ['failure', …]` below would then
-// tear down the whole dev stack (app + worker). Freeing the port first keeps a
-// stale orphan from nuking the run (same rationale as the :8889 reap above).
+// Reap any orphan still holding :5174 before concurrently spawns the dashboard
+// Vite server. The dashboard pins `strictPort: true` (dashboard/vite.config.ts),
+// so a held :5174 makes Vite exit with EADDRINUSE instead of drifting to another
+// port — and `killOthersOn: ['failure', …]` below would then tear down the whole
+// dev stack (app + worker). Freeing the port first keeps a stale orphan from
+// nuking the run (same rationale as the :8889 reap above).
 if (webEnabled) {
-  const reapedWeb = killPort(5173);
-  if (reapedWeb.length) console.log(`dev — reaped orphan(s) on :5173 before start: ${reapedWeb.join(', ')}`);
-  // Same rationale for the NEW dashboard on :5174 (also strictPort): free it
-  // before concurrently spawns its Vite server so a stale orphan can't EADDRINUSE
-  // and trip killOthersOn:['failure'] into tearing down the whole stack.
   const reapedNext = killPort(5174);
   if (reapedNext.length) console.log(`dev — reaped orphan(s) on :5174 before start: ${reapedNext.join(', ')}`);
 }
 
 const runStep = mode === 'local' ? `step ${localSteps}/${localSteps}` : 'step 2/2';
 console.log(
-  `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5174) + legacy (:5173)' : ''}, ` +
+  `dev — ${runStep}: app (:8080) + worker${webEnabled ? ' + dashboard (:5174)' : ''}, ` +
     `watch mode (Ctrl-C stops all${mode === 'local' ? '; DB container stays up' : ''})`,
 );
 if (webEnabled) {
   // Printed as bare URLs so the terminal makes them clickable.
   console.log('');
-  console.log('  ▶ Open the NEW dashboard:  http://localhost:5174');
+  console.log('  ▶ Open the dashboard:  http://localhost:5174');
   console.log('    (UI with hot-reload; proxies /api + /auth to the app on http://localhost:8080)');
   console.log('    Google sign-in works here once http://localhost:5174/auth/callback is');
   console.log('    registered on the dev OAuth client (PUBLIC_BASE_URL set to :5174 for you).');
-  console.log('');
-  console.log('  ▶ Legacy dashboard:        http://localhost:5173');
-  console.log('    (still served + proxies /api + /auth; the Google OAuth round-trip lands on :5174)');
   console.log('');
 }
 if (mockRedirect) {
@@ -388,14 +377,6 @@ if (webEnabled) {
     prefixColor: 'green',
     env: childEnv,
   });
-  // The LEGACY dashboard's own `dev` script = Vite (:5173, its vite.config.ts).
-  // Kept reachable alongside the new one during the migration.
-  commands.push({
-    command: 'npm run dev -w @housingchoice/dashboard-legacy',
-    name: 'legacy',
-    prefixColor: 'blue',
-    env: childEnv,
-  });
 }
 if (mockRedirect) {
   // The fake-twilio host impersonates Twilio's REST API (the app's redirected
@@ -431,7 +412,6 @@ const NAME_COLOR = {
   app: '\x1b[36m',
   worker: '\x1b[35m',
   dashboard: '\x1b[32m',
-  legacy: '\x1b[34m',
 };
 const ANSI_RESET = '\x1b[0m';
 const PREFIXED = /^\[([^\]]+)\]\s?([\s\S]*)$/;

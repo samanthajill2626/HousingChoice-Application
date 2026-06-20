@@ -16,9 +16,7 @@ import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const dashboardDir = path.join(repoRoot, 'dashboard-legacy');
-// The NEW entity-centric dashboard (:5174). Served alongside legacy so the
-// dashboard-next/* specs can drive it; legacy specs keep hitting :5173.
+// The entity-centric dashboard (:5174) the e2e specs drive.
 const dashboardNextDir = path.join(repoRoot, 'dashboard');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 // The fake-phones UI is a static build served by the fake-twilio host on :8889.
@@ -97,23 +95,14 @@ function startApp() {
 function startWorker() {
   spawnNode('worker', ['--import', 'tsx', path.join('app', 'src', 'worker.ts')]);
 }
-function startVite() {
-  // PREFLIGHT — reap any orphan holding :5173 before spawning Vite. The dashboard
-  // pins `strictPort: true` (dashboard-legacy/vite.config.ts), so a held :5173
-  // makes Vite exit non-zero instead of drifting to another port — which here
-  // lands in `child.on('exit')` (logged, not a shutdown), so `web` silently
-  // vanishes and Playwright's webServer (:5173) polls a stale server or times
-  // out. Freeing the port first guarantees the child we spawn owns :5173 (same
-  // rationale as the :8889 reap in startFakeTwilio).
-  const reaped = killPort(5173);
-  if (reaped.length) log(`reaped orphan(s) holding :5173 before start: ${reaped.join(', ')}`);
-  // Run Vite's bin directly so it's a single node process we can kill cleanly.
-  spawnNode('web', [viteBin], dashboardDir);
-}
 function startViteNext() {
-  // PREFLIGHT — reap any orphan holding :5174 before spawning the NEW dashboard's
-  // Vite (it also pins strictPort, so a held port makes it exit non-zero rather
-  // than drift). Same rationale as startVite's :5173 reap.
+  // PREFLIGHT — reap any orphan holding :5174 before spawning the dashboard's
+  // Vite. It pins `strictPort: true` (dashboard/vite.config.ts), so a held :5174
+  // makes Vite exit non-zero instead of drifting to another port — which here
+  // lands in `child.on('exit')` (logged, not a shutdown), so `web-next` silently
+  // vanishes and Playwright's webServer (:5174) polls a stale server or times
+  // out. Freeing the port first guarantees the child we spawn owns :5174 (same
+  // rationale as the :8889 reap in startFakeTwilio).
   const reaped = killPort(5174);
   if (reaped.length) log(`reaped orphan(s) holding :5174 before start: ${reaped.join(', ')}`);
   spawnNode('web-next', [viteBin], dashboardNextDir);
@@ -268,14 +257,13 @@ async function main() {
   log('fake-twilio ready (:8889)');
   log('fake-phones UI → http://localhost:8889/');
 
-  log('starting app, worker, web :5173 (legacy), web :5174 (new) (non-watch)…');
+  log('starting app, worker, web :5174 (non-watch)…');
   startApp();
   startWorker();
-  startVite();
   startViteNext();
 
   await waitForHealth();
-  log('ready — app :8080, web :5173 (legacy), web :5174 (new), fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
+  log('ready — app :8080, web :5174, fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

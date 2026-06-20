@@ -7,7 +7,6 @@ export default tseslint.config(
     ignores: [
       '**/node_modules',
       '**/dist',
-      'dashboard-legacy/dist',
       'coverage',
       'infra/**/.terraform',
     ],

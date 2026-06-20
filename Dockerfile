@@ -24,8 +24,7 @@ COPY app/src ./app/src
 RUN npm run build -w app
 
 # Dashboard: vite-build the shell; the app serves dashboard/dist as static
-# files with SPA index fallback (DASHBOARD_DIST_DIR below). (dashboard-legacy
-# stays in the repo for local :5173 use but is no longer shipped.)
+# files with SPA index fallback (DASHBOARD_DIST_DIR below).
 COPY dashboard/index.html dashboard/vite.config.ts dashboard/tsconfig.json ./dashboard/
 COPY dashboard/src ./dashboard/src
 RUN npm run build -w dashboard

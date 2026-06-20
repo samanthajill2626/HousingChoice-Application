@@ -17,8 +17,7 @@ export default defineConfig({
     ['json', { outputFile: '.artifacts/results.json' }],
   ],
   use: {
-    // The NEW dashboard (:5174). Legacy (:5173) is deprecated and no longer has
-    // e2e specs; the surviving specs hit :5174, the fake-phones host (:8889), or
+    // The dashboard (:5174). Specs hit :5174, the fake-phones host (:8889), or
     // the backend API directly. Specs that need a different origin use an
     // absolute URL.
     baseURL: 'http://localhost:5174',
@@ -34,10 +33,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // Boots DynamoDB Local + app(:8080) + worker + Vite (:5173 legacy + :5174
-    // new) + fake-twilio (:8889) in hermetic mode. No AWS creds or secrets
-    // needed; messaging defaults to console. Env (DEV_AUTH_ENABLED,
-    // MESSAGING_RECORD_OUTBOX, etc.) is baked into the launcher.
+    // Boots DynamoDB Local + app(:8080) + worker + Vite (:5174) + fake-twilio
+    // (:8889) in hermetic mode. No AWS creds or secrets needed; messaging
+    // defaults to console. Env (DEV_AUTH_ENABLED, MESSAGING_RECORD_OUTBOX, etc.)
+    // is baked into the launcher.
     command: 'node scripts/e2e-session.mjs',
     cwd: repoRoot,
     // Readiness gate: the launcher only logs 'ready' after db:start/create/seed

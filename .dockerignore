@@ -9,14 +9,13 @@ documentation
 infra
 scripts
 # Only the files the Dockerfile copies for the shipped dashboard build reach the
-# context (dashboard-legacy is no longer shipped — local-only on :5173).
+# context.
 dashboard/*
 !dashboard/package.json
 !dashboard/index.html
 !dashboard/vite.config.ts
 !dashboard/tsconfig.json
 !dashboard/src
-dashboard-legacy
 *.md
 .env
 .env.*

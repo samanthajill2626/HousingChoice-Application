@@ -384,7 +384,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       // SET each supplied non-null field; REMOVE each explicit-null field (the
       // only way to truly CLEAR an attribute — e.g. removeContact dropping a
       // dangling primary_voice_contact when no landlord remains; mirrors
-      // casesRepo.update). Omitted (undefined) fields are LEFT untouched (the
+      // placementsRepo.update). Omitted (undefined) fields are LEFT untouched (the
       // no-overwrite contract). Names are expression-aliased so reserved words
       // (`status`, `priority`, `media`) are always legal. updated_at is always
       // bumped.

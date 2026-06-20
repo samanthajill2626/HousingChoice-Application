@@ -4,8 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
 // detail page renders the placement facts + the provenance history, and that a
 // transition made on the detail page adds a fresh history row (newest-first).
 // The seeded placement (placement-0001) is Tasha Nguyen on unit A, stage
-// awaiting_inspection. Served on :5174 alongside legacy (:5173); targeted by
-// absolute URL since the suite baseURL is :5173.
+// awaiting_inspection. Served on :5174 (the suite baseURL); targeted by
+// absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
 
 // Log in as the seeded VA, then reset the seeded placement (placement-0001) back to

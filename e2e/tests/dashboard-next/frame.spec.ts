@@ -4,9 +4,8 @@ import { test, expect } from '@playwright/test';
 // visitor sees the Login screen, uses the hermetic dev-login button to sign in as
 // the seeded VA, lands in the AppFrame with the full left nav (Workspace +
 // Communications groups, Contacts ▸ children, Settings), and can Sign out back to
-// Login. The new dashboard is served on :5174 by the e2e session alongside legacy
-// (:5173); these specs target it by absolute URL since the suite's baseURL is the
-// legacy :5173.
+// Login. The dashboard is served on :5174 by the e2e session, which is also the
+// suite's baseURL; these specs target it by absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
 
 test('new dashboard: dev-login → AppFrame nav renders → sign out', async ({ page }) => {

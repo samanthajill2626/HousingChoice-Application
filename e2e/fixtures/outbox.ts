@@ -15,8 +15,8 @@ export interface OutboxMessage {
  * (`listThreads`), which captures both directions + delivery status via the
  * fake-twilio control API. Kept for the three pre-existing specs only.
  */
-// Queries /__dev/outbox (proxied to the app via :5173). request.baseURL is the
-// Playwright baseURL (http://localhost:5173).
+// Queries /__dev/outbox (proxied to the app via the dashboard dev server).
+// request.baseURL is the Playwright baseURL (http://localhost:5174).
 export async function getOutbox(
   request: APIRequestContext,
   opts: { to?: string; since?: string } = {},

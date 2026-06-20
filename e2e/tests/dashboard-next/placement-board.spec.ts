@@ -6,8 +6,8 @@ import { test, expect, type Page } from '@playwright/test';
 // card lands in the new column after a reload). The seeded placement (placement-0001)
 // is tenant Tasha Nguyen on unit A, stage `awaiting_inspection` (Inspection phase)
 // — moving OUT of awaiting_inspection requires an inspectionOutcome, so the move
-// goes through the outcome prompt. Served on :5174 alongside legacy (:5173);
-// targeted by absolute URL since the suite baseURL is :5173.
+// goes through the outcome prompt. Served on :5174 (the suite baseURL);
+// targeted by absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
 
 // Log in as the seeded VA, then reset the seeded placement (placement-0001) back to

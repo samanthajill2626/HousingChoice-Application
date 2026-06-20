@@ -4,8 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
 // frontend (useInbox/InboxRow) + backend (GET /api/inbox + assign) behave together:
 // the contact-row model, the filter tabs, opening a row → its contact page, and the
 // inline Assign/Unassign round-trip with the live "Assigned · You" state-sync (the
-// project's #1 historical bug class). Served on :5174 alongside legacy (:5173);
-// targeted by absolute URL since the suite baseURL is :5173.
+// project's #1 historical bug class). Served on :5174 (the suite baseURL);
+// targeted by absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
 
 async function devLogin(page: Page): Promise<void> {

@@ -4,8 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
 // Mark-lost action opens the modal, the confirm stays BLOCKED until a reason
 // (category or text) is given, and confirming transitions the placement to the
 // `lost` terminal stage — after which the card moves into the collapsed Closed
-// area (terminal placements leave the active columns). Served on :5174 alongside
-// legacy (:5173); targeted by absolute URL since the suite baseURL is :5173.
+// area (terminal placements leave the active columns). Served on :5174 (the
+// suite baseURL); targeted by absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
 
 // Log in as the seeded VA, then reset the seeded placement (placement-0001) back to

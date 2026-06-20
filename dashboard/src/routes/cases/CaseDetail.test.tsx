@@ -1,14 +1,17 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { CaseItem, HistoryRow, UnitItem } from '../../api/index.js';
+import type { CaseItem, CaseUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem } from '../../api/index.js';
 
 const getCase = vi.fn();
 const getUnit = vi.fn();
 const getContact = vi.fn();
 const transitionPlacement = vi.fn();
 const getPlacementHistory = vi.fn();
+// Capture the SSE handlers the page (and its History panel) register so a test
+// can fire a case.updated event.
+let streamHandlers: EventStreamHandlers[] = [];
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -19,6 +22,9 @@ vi.mock('../../api/index.js', async () => {
     getContact: (...a: unknown[]) => getContact(...a),
     transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
     getPlacementHistory: (...a: unknown[]) => getPlacementHistory(...a),
+    useEventStream: (h: EventStreamHandlers) => {
+      streamHandlers.push(h);
+    },
   };
 });
 
@@ -62,8 +68,36 @@ beforeEach(() => {
     .mockResolvedValue({ contactId: 't1', type: 'tenant', firstName: 'Tasha', lastName: 'Nguyen' });
   transitionPlacement.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
+  streamHandlers = [];
 });
 afterEach(() => vi.restoreAllMocks());
+
+/** Fire a case.updated event at each DISTINCT subscriber the page registered.
+ *  The mock collects a handlers object per render; onCaseUpdated is a stable
+ *  useCallback per consumer, so dedupe by its identity to fire each consumer
+ *  (the page + its History panel) exactly once — as the real provider would. */
+function emitCaseUpdated(over: Partial<CaseUpdatedEvent> & { caseId: string }): void {
+  const ev: CaseUpdatedEvent = {
+    tenantId: 't1',
+    unitId: 'u1',
+    stage: 'awaiting_inspection',
+    tour_date: null,
+    next_deadline_type: null,
+    next_deadline_at: null,
+    group_thread: null,
+    attention: false,
+    lost_reason: null,
+    updated_at: null,
+    ...over,
+  };
+  const seen = new Set<NonNullable<EventStreamHandlers['onCaseUpdated']>>();
+  for (const h of streamHandlers) {
+    if (h.onCaseUpdated && !seen.has(h.onCaseUpdated)) {
+      seen.add(h.onCaseUpdated);
+      h.onCaseUpdated(ev);
+    }
+  }
+}
 
 describe('CaseDetail', () => {
   it('renders the stage, phase, links, time-in-stage, inspection + final rent', async () => {
@@ -152,5 +186,37 @@ describe('CaseDetail', () => {
     await user.type(input, '0');
     expect(within(dialog).getByRole('button', { name: 'Confirm move' })).toBeDisabled();
     expect(transitionPlacement).not.toHaveBeenCalled();
+  });
+
+  it('live-updates the page fields when a case.updated event for this case arrives', async () => {
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /Awaiting inspection/ })).toBeInTheDocument(),
+    );
+    expect(getCase).toHaveBeenCalledTimes(1);
+
+    // Another tab/user (or our own transition) moved the case → case.updated.
+    // The refetch returns the new stage; the page reflects it without a reload.
+    getCase.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    await act(async () => {
+      emitCaseUpdated({ caseId: 'c1', stage: 'determine_rent' });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /Determine rent/ })).toBeInTheDocument(),
+    );
+    expect(getCase).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a case.updated event for a different case', async () => {
+    renderAt();
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /Awaiting inspection/ })).toBeInTheDocument(),
+    );
+    await act(async () => {
+      emitCaseUpdated({ caseId: 'some-other-case', stage: 'moved_in' });
+    });
+    // No refetch for an unrelated case.
+    expect(getCase).toHaveBeenCalledTimes(1);
   });
 });

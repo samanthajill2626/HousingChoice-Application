@@ -3,8 +3,13 @@
 // via the `before` opaque cursor (the ts of the oldest loaded row). Exposes
 // rows + a loadMore() + hasMore. Mirrors useListing's derive-loading-on-id-
 // change pattern (no synchronous setState in the effect → no cascading render).
-import { useCallback, useEffect, useState } from 'react';
-import { getPlacementHistory, type HistoryRow } from '../../api/index.js';
+//
+// LIVE: a transition on this case emits a `case.updated` SSE event (the same one
+// that live-moves the board); we subscribe and refetch the newest page so a
+// status change shows up in the History panel without a manual reload — whether
+// the change came from this page, another tab, or another user.
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getPlacementHistory, useEventStream, type CaseUpdatedEvent, type HistoryRow } from '../../api/index.js';
 
 export type HistoryStatus = 'loading' | 'ready' | 'error';
 
@@ -39,32 +44,51 @@ const LOADING: Omit<Committed, 'forId'> = {
 export function useCaseHistory(caseId: string): CaseHistoryState {
   const [state, setState] = useState<Committed>({ ...LOADING, forId: caseId });
 
-  // Initial page on mount / caseId change. No synchronous loading reset here —
-  // when caseId changes we DERIVE loading during render (forId mismatch) until
-  // the new fetch commits, like useListing.
-  useEffect(() => {
+  // Track the in-flight first-page request so a refetch (SSE-driven or caseId
+  // change) supersedes the previous one and a late response can't clobber it.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Fetch (or refetch) the newest page. No synchronous loading reset — when
+  // caseId changes we DERIVE loading during render (forId mismatch) until this
+  // commits; a live refetch updates rows in place without a spinner flash.
+  const fetchFirstPage = useCallback(async () => {
+    abortRef.current?.abort();
     const controller = new AbortController();
+    abortRef.current = controller;
     const { signal } = controller;
-
-    (async () => {
-      try {
-        const page = await getPlacementHistory(caseId, { limit: PAGE }, signal);
-        if (signal.aborted) return;
-        setState({
-          status: 'ready',
-          rows: page,
-          hasMore: page.length === PAGE,
-          loadingMore: false,
-          forId: caseId,
-        });
-      } catch (err) {
-        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState({ ...LOADING, status: 'error', forId: caseId });
-      }
-    })();
-
-    return () => controller.abort();
+    try {
+      const page = await getPlacementHistory(caseId, { limit: PAGE }, signal);
+      if (signal.aborted) return;
+      setState({
+        status: 'ready',
+        rows: page,
+        hasMore: page.length === PAGE,
+        loadingMore: false,
+        forId: caseId,
+      });
+    } catch (err) {
+      if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+      setState({ ...LOADING, status: 'error', forId: caseId });
+    }
   }, [caseId]);
+
+  // Initial page on mount / caseId change.
+  useEffect(() => {
+    // fetchFirstPage sets state only after an await (never synchronously) — a
+    // fetch-on-mount, not the cascading-render case the rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchFirstPage();
+    return () => abortRef.current?.abort();
+  }, [fetchFirstPage]);
+
+  // Live: refetch the newest page when THIS case changes (e.g. a status move).
+  const onCaseUpdated = useCallback(
+    (ev: CaseUpdatedEvent) => {
+      if (ev.caseId === caseId) void fetchFirstPage();
+    },
+    [caseId, fetchFirstPage],
+  );
+  useEventStream({ onCaseUpdated });
 
   const loadMore = useCallback(() => {
     setState((prev) => {

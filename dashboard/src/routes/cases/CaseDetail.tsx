@@ -7,7 +7,7 @@
 // awaiting_rent_acceptance → finalRent; OUT of awaiting_inspection →
 // inspectionOutcome). A history panel (useCaseHistory) renders the audit rows
 // newest-first with "load more".
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   PLACEMENT_STAGES,
@@ -18,7 +18,9 @@ import {
   getContact,
   getUnit,
   transitionPlacement,
+  useEventStream,
   type CaseItem,
+  type CaseUpdatedEvent,
   type Contact,
   type LostReason,
   type PlacementStage,
@@ -56,8 +58,12 @@ export function CaseDetail(): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Track the in-flight load so a refetch (SSE-driven or caseId change)
+  // supersedes the previous one and a late response can't clobber fresher state.
+  const abortRef = useRef<AbortController | null>(null);
+
   // Apply an updated case in place (after a transition returns it), keeping the
-  // resolved unit.
+  // resolved unit — instant feedback before the case.updated refetch reconciles.
   const setCase = useCallback(
     (next: CaseItem) => {
       setLoaded((prev) => ({ ...prev, status: 'ready', case_: next, forId: caseId }));
@@ -65,30 +71,50 @@ export function CaseDetail(): React.JSX.Element {
     [caseId],
   );
 
-  useEffect(() => {
+  // Fetch (or refetch) the full case bundle. No synchronous loading reset — on a
+  // caseId change loading is DERIVED during render (forId mismatch); a live
+  // refetch updates in place (the unit carries final_rent, which a transition can
+  // change, so we refetch it too rather than patch from the SSE event).
+  const load = useCallback(async () => {
+    abortRef.current?.abort();
     const controller = new AbortController();
+    abortRef.current = controller;
     const { signal } = controller;
-    (async () => {
-      try {
-        const c = await getCase(caseId, signal);
-        if (signal.aborted) return;
-        // The unit (for final_rent + a readable address) AND the tenant contact
-        // (so staff see the person by NAME, not the raw id — GLOSSARY) are both
-        // best-effort: a failure on either is non-fatal — the page still renders
-        // from the case, degrading that field to the id.
-        const [u, t] = await Promise.all([
-          getUnit(c.unitId, signal).catch(() => null),
-          getContact(c.tenantId, signal).catch(() => null),
-        ]);
-        if (signal.aborted) return;
-        setLoaded({ status: 'ready', case_: c, unit: u, tenant: t, forId: caseId });
-      } catch (err) {
-        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setLoaded({ status: 'error', case_: null, unit: null, tenant: null, forId: caseId });
-      }
-    })();
-    return () => controller.abort();
+    try {
+      const c = await getCase(caseId, signal);
+      if (signal.aborted) return;
+      // The unit (for final_rent + a readable address) AND the tenant contact
+      // (so staff see the person by NAME, not the raw id — GLOSSARY) are both
+      // best-effort: a failure on either is non-fatal — the page still renders
+      // from the case, degrading that field to the id.
+      const [u, t] = await Promise.all([
+        getUnit(c.unitId, signal).catch(() => null),
+        getContact(c.tenantId, signal).catch(() => null),
+      ]);
+      if (signal.aborted) return;
+      setLoaded({ status: 'ready', case_: c, unit: u, tenant: t, forId: caseId });
+    } catch (err) {
+      if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+      setLoaded({ status: 'error', case_: null, unit: null, tenant: null, forId: caseId });
+    }
   }, [caseId]);
+
+  useEffect(() => {
+    // load sets state only after an await (never synchronously) — a fetch-on-mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+    return () => abortRef.current?.abort();
+  }, [load]);
+
+  // Live: a transition on THIS case (here, another tab, or another user) emits
+  // case.updated — refetch so every field reflects it, not just the History panel.
+  const onCaseUpdated = useCallback(
+    (ev: CaseUpdatedEvent) => {
+      if (ev.caseId === caseId) void load();
+    },
+    [caseId, load],
+  );
+  useEventStream({ onCaseUpdated });
 
   // Committed state is for a previous caseId → still loading the new one.
   const fresh =

@@ -73,6 +73,19 @@ test.describe('Settings — admin path', () => {
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('Saved')).toBeVisible();
 
+    // Confirm the edit actually PERSISTED (via the API the public handler reads)
+    // BEFORE signing up — the UI "Saved" badge can flip a tick before the write is
+    // observable, so gate the signup on the server's own view to kill the race.
+    await expect
+      .poll(
+        async () => {
+          const res = await page.request.get(`${NEXT}/api/settings`);
+          return res.ok() ? ((await res.json()).settings?.welcomeText ?? null) : null;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(welcomeBody);
+
     // A fresh housing-fair signup must now welcome with the operator's copy.
     const firstName = 'Welcometest';
     const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;

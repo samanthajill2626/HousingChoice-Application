@@ -102,6 +102,10 @@ export interface SessionEpochCache {
   set(userId: string, entry: { epoch: number; role: UserRole }): void;
   /** Evict — the next request re-reads the users table (logout uses this). */
   delete(userId: string): void;
+  /** Drop ALL entries — the next request re-reads for every user. Used after a
+   *  dev reseed wipes + reseeds the users table, so no stale epoch (e.g. one
+   *  bumped by a prior sign-out) rejects a freshly-minted post-reseed session. */
+  clear(): void;
 }
 
 export function createSessionEpochCache(
@@ -123,6 +127,9 @@ export function createSessionEpochCache(
     },
     delete(userId) {
       entries.delete(userId);
+    },
+    clear() {
+      entries.clear();
     },
   };
 }

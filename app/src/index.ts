@@ -108,12 +108,18 @@ if (config.jobsQueueUrl) {
   });
 }
 
-const devRouter = await maybeLoadDevRouter(config, logger);
+// One epoch cache shared by the app's auth middleware AND the dev router, so
+// /__dev/reseed can clear it after wiping + reseeding the users table.
+const { createSessionEpochCache } = await import('./middleware/auth.js');
+const sessionEpochCache = createSessionEpochCache();
+const devRouter = await maybeLoadDevRouter(config, logger, sessionEpochCache);
 // Construct the app INSIDE the boot context so any router-creation log line
 // (e.g. the voice founder-triage readiness line) carries the bootId as its
 // correlationId. Without this, a construction-time log is an orphan and trips
 // the hc-<env>-orphan-logs alarm (binding guideline #4).
-const app = runWithContext(bootContext, () => buildApp({ config, devRouter }));
+const app = runWithContext(bootContext, () =>
+  buildApp({ config, devRouter, auth: { sessionEpochCache } }),
+);
 
 const server = runWithContext(bootContext, () =>
   app.listen(config.port, () => {

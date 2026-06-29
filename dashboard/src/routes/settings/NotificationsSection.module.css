@@ -1,0 +1,72 @@
+/* NotificationsSection — this-device push controls. Tokens only. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  max-width: 560px;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.lede {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.hint {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.unsupported {
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-md);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.toggleLabel {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.testRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.testResult {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}

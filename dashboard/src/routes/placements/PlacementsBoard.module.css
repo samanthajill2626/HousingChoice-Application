@@ -5,6 +5,14 @@
   flex-direction: column;
 }
 
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-1);
+}
+
 .title {
   margin: 0;
   font-size: var(--fs-xl);

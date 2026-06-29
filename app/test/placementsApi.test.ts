@@ -4,12 +4,15 @@
 // world (the harness placementsRepo fake), authed via the real sealed session cookie
 // next to the origin secret.
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Express } from 'express';
+import express, { type Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { toPlacementUpdatedEvent } from '../src/lib/events.js';
 import type { PlacementItem } from '../src/repos/placementsRepo.js';
+import { createPlacementsRouter } from '../src/routes/placements.js';
+import type { StatusTransitionService } from '../src/services/statusTransition.js';
 
 describe('placements API (M1.10b)', () => {
   let app: Express;
@@ -252,6 +255,140 @@ describe('placements API — BE2/C2 activity milestones', () => {
     const ev = world.activityEvents.filter((e) => e.type === 'tour_took_place');
     expect(ev).toHaveLength(1);
     expect(ev[0]!.label).toContain('Attended');
+  });
+});
+
+describe('placements API — derive-on-create (§7)', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+  });
+
+  const authedPost = (path: string, body: object) =>
+    request(app).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
+
+  // Seed a tenant contact + a unit through the SAME world repos the router's
+  // self-constructed transition service reads/writes — so a derived write is
+  // observable via world.contactsRepo.getById / world.unitsRepo.getById.
+  const seedTenant = (status: string) =>
+    world.contactsRepo.create({ contactId: 't-derive', type: 'tenant', status });
+  const seedUnit = (status: string) =>
+    world.unitsRepo.create({ unitId: 'u-derive', landlordId: 'll-1', status });
+
+  it('create at a mid-ladder stage derives tenant placing + listing under_application + provenance', async () => {
+    await seedTenant('searching');
+    await seedUnit('available');
+
+    const res = await authedPost('/api/placements', {
+      tenantId: 't-derive',
+      unitId: 'u-derive',
+      stage: 'awaiting_inspection',
+    });
+    expect(res.status).toBe(201);
+
+    // The placement's OWN provenance (the stage is operator-set ⇒ 'manual').
+    expect(res.body.placement.stage_source).toBe('manual');
+    expect(typeof res.body.placement.stage_entered_at).toBe('string');
+
+    // Derived coarse statuses (source 'derived', the lowest-precedence input).
+    const tenant = await world.contactsRepo.getById('t-derive');
+    expect(tenant?.status).toBe('placing');
+    expect(tenant?.status_source).toBe('derived');
+    const unit = await world.unitsRepo.getById('u-derive');
+    expect(unit?.status).toBe('under_application');
+    expect(unit?.status_source).toBe('derived');
+  });
+
+  it('create at a Contract-phase stage derives listing finalizing (tenant placing)', async () => {
+    await seedTenant('searching');
+    await seedUnit('available');
+
+    const res = await authedPost('/api/placements', {
+      tenantId: 't-derive',
+      unitId: 'u-derive',
+      stage: 'awaiting_hap_contract',
+    });
+    expect(res.status).toBe(201);
+
+    const unit = await world.unitsRepo.getById('u-derive');
+    expect(unit?.status).toBe('finalizing');
+    const tenant = await world.contactsRepo.getById('t-derive');
+    expect(tenant?.status).toBe('placing');
+  });
+
+  it('a derived write respects an existing override pin (listing on_hold not clobbered)', async () => {
+    await seedTenant('searching');
+    await seedUnit('on_hold'); // an explicit override → derivation must NOT overwrite
+
+    const res = await authedPost('/api/placements', {
+      tenantId: 't-derive',
+      unitId: 'u-derive',
+      stage: 'awaiting_inspection',
+    });
+    expect(res.status).toBe(201);
+
+    const unit = await world.unitsRepo.getById('u-derive');
+    expect(unit?.status).toBe('on_hold'); // STILL pinned (gated; no under_application)
+    // The tenant side (not override-pinned) still derives.
+    const tenant = await world.contactsRepo.getById('t-derive');
+    expect(tenant?.status).toBe('placing');
+  });
+
+  it('the default stage (no stage) derives too (tenant placing + listing under_application)', async () => {
+    await seedTenant('searching');
+    await seedUnit('available');
+
+    const res = await authedPost('/api/placements', { tenantId: 't-derive', unitId: 'u-derive' });
+    expect(res.status).toBe(201);
+    expect(res.body.placement.stage).toBe('send_application');
+
+    const tenant = await world.contactsRepo.getById('t-derive');
+    expect(tenant?.status).toBe('placing');
+    const unit = await world.unitsRepo.getById('u-derive');
+    expect(unit?.status).toBe('under_application');
+  });
+
+  it('a failed derived write does NOT fail the 201 (best-effort — the row is persisted)', async () => {
+    // Mount the router standalone with an injected transition service whose
+    // deriveForStage REJECTS — proving the POST-create try/catch swallows it.
+    const isolated = createFakeWorld();
+    const rejectingTransitions: StatusTransitionService = {
+      transitionPlacement: () => {
+        throw new Error('not used in this test');
+      },
+      setTenantStatus: () => {
+        throw new Error('not used in this test');
+      },
+      setListingStatus: () => {
+        throw new Error('not used in this test');
+      },
+      deriveForStage: () => Promise.reject(new Error('boom: derived write failed')),
+    };
+    const bare = express();
+    bare.use(express.json());
+    bare.use(
+      '/api/placements',
+      createPlacementsRouter({
+        placementsRepo: isolated.placementsRepo,
+        unitsRepo: isolated.unitsRepo,
+        contactsRepo: isolated.contactsRepo,
+        auditRepo: isolated.auditRepo,
+        activityEventsRepo: isolated.activityEventsRepo,
+        events: isolated.events,
+        statusTransitionService: rejectingTransitions,
+      }),
+    );
+
+    const res = await request(bare)
+      .post('/api/placements')
+      .send({ tenantId: 't-x', unitId: 'u-x', stage: 'awaiting_inspection' });
+    expect(res.status).toBe(201); // the rejecting derive did NOT fail the create
+    expect(res.body.placement.placementId).toMatch(/^placement-/);
+    expect(isolated.placements.size).toBe(1); // the row WAS persisted
   });
 });
 

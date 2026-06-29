@@ -11,6 +11,12 @@ const deleteUnit = vi.fn();
 const restoreUnit = vi.fn();
 const updateUnit = vi.fn();
 const setListingStatus = vi.fn();
+// Used by the "Start placement" dialog (PlacementCreateForm) when opened.
+const getUnits = vi.fn();
+const getUnit = vi.fn();
+const getContacts = vi.fn();
+const getPlacementsBy = vi.fn();
+const createPlacement = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -19,6 +25,11 @@ vi.mock('../../api/index.js', async () => {
     restoreUnit: (...a: unknown[]) => restoreUnit(...a),
     updateUnit: (...a: unknown[]) => updateUnit(...a),
     setListingStatus: (...a: unknown[]) => setListingStatus(...a),
+    getUnits: (...a: unknown[]) => getUnits(...a),
+    getUnit: (...a: unknown[]) => getUnit(...a),
+    getContacts: (...a: unknown[]) => getContacts(...a),
+    getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
+    createPlacement: (...a: unknown[]) => createPlacement(...a),
   };
 });
 
@@ -228,6 +239,39 @@ describe('ListingDetail', () => {
     await waitFor(() =>
       expect(screen.queryByText(/Couldn.t update the listing status/i)).not.toBeInTheDocument(),
     );
+  });
+
+  it('the header "Start placement" button opens the create dialog pre-filled+locked to this unit', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
+    });
+    getUnits.mockResolvedValue({ units: [], nextCursor: null });
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
+    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+    getPlacementsBy.mockResolvedValue([]);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Start placement' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'New placement' });
+    // Unit side is LOCKED (read-only label, NOT a combobox); the label resolves to
+    // the unit's address. The Tenant side stays an editable picker.
+    expect(within(dialog).queryByRole('combobox', { name: 'Unit' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Unit')).toHaveTextContent('1450 Joseph Blvd NW'),
+    );
+    expect(within(dialog).getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
+  });
+
+  it('hides the "Start placement" button for a deleted listing', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+    });
+    renderAt();
+    expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
   });
 
   it('falls back gracefully when optional fields are missing', () => {

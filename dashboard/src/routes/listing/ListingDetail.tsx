@@ -24,6 +24,7 @@ import {
 } from '../../api/index.js';
 import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
+import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
@@ -76,6 +77,8 @@ export function ListingDetail(): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  // The "Start placement" dialog, pre-filled+locked to this listing's unit.
+  const [startingPlacement, setStartingPlacement] = useState(false);
   const { setUnit } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -193,9 +196,14 @@ export function ListingDetail(): React.JSX.Element {
               Restore
             </button>
           ) : (
-            <button type="button" className={styles.btn}>
-              📣 Broadcast to tenants
-            </button>
+            <>
+              <button type="button" className={styles.btn}>
+                📣 Broadcast to tenants
+              </button>
+              <button type="button" className={styles.btn} onClick={() => setStartingPlacement(true)}>
+                Start placement
+              </button>
+            </>
           )}
           <ListingActionsMenu
             triggerClassName={styles.kebab ?? ''}
@@ -445,6 +453,17 @@ export function ListingDetail(): React.JSX.Element {
           onSaved={(updated) => {
             setUnit(updated);
             setEditing(false);
+          }}
+        />
+      ) : null}
+
+      {startingPlacement ? (
+        <PlacementCreateForm
+          unitId={unit.unitId}
+          onClose={() => setStartingPlacement(false)}
+          onCreated={(p) => {
+            setStartingPlacement(false);
+            void navigate('/placements/' + p.placementId);
           }}
         />
       ) : null}

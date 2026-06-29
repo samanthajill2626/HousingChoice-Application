@@ -13,9 +13,20 @@ const usePlacements = vi.fn<() => PlacementsState>();
 vi.mock('./usePlacements.js', () => ({ usePlacements: () => usePlacements() }));
 
 const transitionPlacement = vi.fn();
+// The "New placement" dialog (PlacementCreateForm) fetches candidate lists on
+// mount; stub them so opening the dialog doesn't hit the network.
+const getContacts = vi.fn();
+const getUnits = vi.fn();
+const getPlacementsBy = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
-  return { ...actual, transitionPlacement: (...a: unknown[]) => transitionPlacement(...a) };
+  return {
+    ...actual,
+    transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
+    getContacts: (...a: unknown[]) => getContacts(...a),
+    getUnits: (...a: unknown[]) => getUnits(...a),
+    getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
+  };
 });
 
 // Capture the onDragEnd the board hands to DndContext so a test can drive the
@@ -69,6 +80,12 @@ function renderBoard(): void {
 beforeEach(() => {
   usePlacements.mockReset();
   transitionPlacement.mockReset();
+  getContacts.mockReset();
+  getUnits.mockReset();
+  getPlacementsBy.mockReset();
+  getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+  getUnits.mockResolvedValue({ units: [], nextCursor: null });
+  getPlacementsBy.mockResolvedValue([]);
   capturedOnDragEnd = null;
 });
 afterEach(() => vi.restoreAllMocks());
@@ -225,5 +242,20 @@ describe('PlacementsBoard', () => {
     renderBoard();
     const closed = screen.getByRole('list', { name: /Closed placements/i });
     expect(within(closed).getByText(/Moved in/)).toBeInTheDocument();
+  });
+
+  it('the header "New placement" button opens the create dialog with a BLANK form (neither side locked)', async () => {
+    const user = userEvent.setup();
+    usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
+    renderBoard();
+
+    expect(screen.queryByRole('dialog', { name: 'New placement' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'New placement' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'New placement' });
+    // Blank form: both the tenant + unit pickers are editable comboboxes (no
+    // locked read-only side).
+    expect(within(dialog).getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toBeInTheDocument();
   });
 });

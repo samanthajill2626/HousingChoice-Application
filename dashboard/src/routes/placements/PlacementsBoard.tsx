@@ -29,6 +29,7 @@
 // badge reflects whatever the last contacts load returned; the next board load /
 // a contact-page visit refreshes it).
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   DndContext,
   KeyboardSensor,
@@ -43,7 +44,7 @@ import {
   type LostReason,
   type PlacementStage,
 } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import { buildBoard, isNoOpMove } from './board.js';
 import { listingAddress, tenantName } from './placementsFormat.js';
 import { gateFor, type TransitionGate } from './transitionGate.js';
@@ -51,6 +52,7 @@ import { Column } from './Column.js';
 import { ClosedArea } from './ClosedArea.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
+import { PlacementCreateForm } from './PlacementCreateForm.js';
 import { usePlacements } from './usePlacements.js';
 import styles from './PlacementsBoard.module.css';
 
@@ -63,8 +65,11 @@ interface PendingMove {
 }
 
 export function PlacementsBoard(): React.JSX.Element {
+  const navigate = useNavigate();
   const { status, placements, contacts, units, applyPlacement } = usePlacements();
   const [pending, setPending] = useState<PendingMove | null>(null);
+  // The "New placement" dialog (blank — no side pre-filled).
+  const [createOpen, setCreateOpen] = useState(false);
   // placementIds whose optimistic move is in flight → dim + group in the target column.
   const [optimistic, setOptimistic] = useState<Map<string, PlacementStage>>(new Map());
   const [error, setError] = useState<string | null>(null);
@@ -179,7 +184,12 @@ export function PlacementsBoard(): React.JSX.Element {
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>Placements</h1>
+      <div className={styles.header}>
+        <h1 className={styles.title}>Placements</h1>
+        <Button variant="primary" size="sm" type="button" onClick={() => setCreateOpen(true)}>
+          New placement
+        </Button>
+      </div>
       <p className={styles.sub}>
         Placements by phase. Drag a card to a column to move it; terminal placements collapse below.
       </p>
@@ -228,6 +238,16 @@ export function PlacementsBoard(): React.JSX.Element {
           onClose={() => setPending(null)}
           onConfirm={(result) => runTransition(pending, result)}
           busy={optimistic.has(pending.placementId)}
+        />
+      ) : null}
+
+      {createOpen ? (
+        <PlacementCreateForm
+          onClose={() => setCreateOpen(false)}
+          onCreated={(p) => {
+            setCreateOpen(false);
+            void navigate('/placements/' + p.placementId);
+          }}
         />
       ) : null}
     </div>

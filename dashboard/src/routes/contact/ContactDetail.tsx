@@ -38,6 +38,7 @@ import { UnknownFile } from './UnknownFile.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
+import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
@@ -62,6 +63,8 @@ export function ContactDetail(): React.JSX.Element {
   const [pane, setPane] = useState<Pane>('comms');
   const [editing, setEditing] = useState(false);
   const [managingPhones, setManagingPhones] = useState(false);
+  // The "Start placement" dialog, pre-filled+locked to this (tenant) contact.
+  const [startingPlacement, setStartingPlacement] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -373,6 +376,7 @@ export function ContactDetail(): React.JSX.Element {
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
+                onStartPlacement={() => setStartingPlacement(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -400,6 +404,17 @@ export function ContactDetail(): React.JSX.Element {
           phones={phones}
           onClose={() => setManagingPhones(false)}
           onChanged={(updated) => setContact(updated)}
+        />
+      ) : null}
+
+      {startingPlacement ? (
+        <PlacementCreateForm
+          tenantId={contact.contactId}
+          onClose={() => setStartingPlacement(false)}
+          onCreated={(p) => {
+            setStartingPlacement(false);
+            void navigate('/placements/' + p.placementId);
+          }}
         />
       ) : null}
 

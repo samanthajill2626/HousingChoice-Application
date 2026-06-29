@@ -89,6 +89,40 @@ export async function getPlacement(placementId: string, signal?: AbortSignal): P
   return res.placement;
 }
 
+/** POST /api/placements � create a placement (one deal: this tenant on this unit).
+ *  The backend derives the tenant + listing coarse statuses for the initial stage
+ *  (�7). Returns the new placement (unwrapped from { placement }). */
+export async function createPlacement(body: {
+  tenantId: string;
+  unitId: string;
+  stage: PlacementStage;
+  placement_tag?: string;
+}): Promise<PlacementItem> {
+  const res = await request<{ placement: PlacementItem }>('/api/placements', {
+    method: 'POST',
+    body,
+  });
+  return res.placement;
+}
+
+/** GET /api/placements?tenantId= / ?unitId= � the placements on a tenant OR a unit
+ *  (the overlap check for manual creation). Exactly one of tenantId/unitId is sent;
+ *  the server honors the most-specific filter. First page only (overlap needs only
+ *  active rows; the pipeline per party is small). Returns the page's placements. */
+export async function getPlacementsBy(
+  params: { tenantId?: string; unitId?: string },
+  signal?: AbortSignal,
+): Promise<PlacementItem[]> {
+  const res = await request<PlacementsPage>('/api/placements', {
+    query: {
+      ...(params.tenantId !== undefined && { tenantId: params.tenantId }),
+      ...(params.unitId !== undefined && { unitId: params.unitId }),
+    },
+    ...(signal !== undefined && { signal }),
+  });
+  return res.placements;
+}
+
 // --- Status-model transitions (the ONE transition surface) ------------------
 // The four routes over the backend status-transition service. Stage/tenant/
 // listing writes MUST go through these (NOT a plain PATCH) so provenance +

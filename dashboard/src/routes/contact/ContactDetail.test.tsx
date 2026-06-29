@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -16,6 +16,9 @@ const updateContact = vi.fn();
 const getContacts = vi.fn();
 const deleteContact = vi.fn();
 const restoreContact = vi.fn();
+// Used by the "Start placement" dialog (PlacementCreateForm) when opened.
+const getPlacementsBy = vi.fn();
+const createPlacement = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -33,6 +36,8 @@ vi.mock('../../api/index.js', async () => {
     getContacts: (...a: unknown[]) => getContacts(...a),
     deleteContact: (...a: unknown[]) => deleteContact(...a),
     restoreContact: (...a: unknown[]) => restoreContact(...a),
+    getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
+    createPlacement: (...a: unknown[]) => createPlacement(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -107,6 +112,8 @@ beforeEach(() => {
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
   getContacts.mockReset();
+  getPlacementsBy.mockReset();
+  getPlacementsBy.mockResolvedValue([]);
   getPlacements.mockResolvedValue(CASES);
   getUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -181,6 +188,34 @@ describe('ContactDetail', () => {
     await waitFor(() => expect(screen.getByText('Tenant')).toBeInTheDocument());
     expect(screen.getByText('Voucher size')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Mark as Tenant/i })).not.toBeInTheDocument();
+  });
+
+  it('the Placements-card "Start placement" action opens the create dialog pre-filled+locked to this tenant', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    renderAt('k1');
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+    // The action lives on the Placements card (tenant view only).
+    await user.click(screen.getByRole('button', { name: 'Start a placement' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'New placement' });
+    // Tenant side is LOCKED (read-only label, NOT a combobox); the label resolves
+    // to the contact's name. The Unit side stays an editable picker.
+    expect(within(dialog).queryByRole('combobox', { name: 'Tenant' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Tenant')).toHaveTextContent('Tasha Williams'),
+    );
+    expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toBeInTheDocument();
+  });
+
+  it('the "Start placement" action is NOT shown for a landlord contact', async () => {
+    getContact.mockResolvedValue(LANDLORD);
+    renderAt('L1');
+    await waitFor(() => expect(screen.getByText('James Porter')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Start a placement' })).not.toBeInTheDocument();
   });
 
   it('shows an error state when the contact fails to load', async () => {

@@ -52,6 +52,10 @@ import {
   type PoolNumbersService,
 } from '../services/poolNumbers.js';
 import {
+  createStatusTransitionService,
+  type StatusTransitionService,
+} from '../services/statusTransition.js';
+import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
 } from '../repos/activityEventsRepo.js';
@@ -75,6 +79,11 @@ export interface PlacementsRouterDeps {
   poolNumbersService?: PoolNumbersService;
   /** BE2/C2: emit placement_opened/placement_closed/stage_changed/tour_* milestones. */
   activityEventsRepo?: ActivityEventsRepo;
+  /**
+   * Status-transition service — its derive helpers stamp tenant/listing coarse
+   * status on create (best-effort; §7). Defaulted to the real service below.
+   */
+  statusTransitionService?: StatusTransitionService;
 }
 
 /**
@@ -316,6 +325,19 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  // §7 derive-on-create: the transition service's derive helpers stamp the
+  // tenant + listing coarse statuses on create (override-gated, source 'derived').
+  // Self-construct from the SAME repos this router already builds when not injected.
+  const transitions =
+    deps.statusTransitionService ??
+    createStatusTransitionService({
+      placementsRepo: placements,
+      unitsRepo: units,
+      contactsRepo: contacts,
+      auditRepo: audit,
+      events,
+      ...(deps.logger !== undefined && { logger: deps.logger }),
+    });
 
   // BE2/C2: record one placement milestone against the tenant contact.
   // Best-effort — a log failure must NEVER fail the operator's board action (the
@@ -449,6 +471,16 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // BE2/C2: a new placement is a "placement opened" milestone on the tenant's timeline.
     await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
     events.emit('placement.updated', toPlacementUpdatedEvent(created));
+    // §7 derive-on-create: stamp the tenant + listing coarse statuses for the
+    // initial stage (override-gated, source 'derived'). Best-effort — a derived
+    // write failure must NEVER fail the 201 (the placement is already persisted).
+    // deriveForStage is itself try/catch-internally; we still guard defensively.
+    // IDs only in the log (NO placement_tag/names; matches recordPlacementMilestone).
+    try {
+      await transitions.deriveForStage(created.tenantId, created.unitId, created.stage);
+    } catch (err) {
+      log.error({ err, placementId: created.placementId }, 'derive-on-create failed (best-effort)');
+    }
     log.info(
       { placementId: created.placementId, stage: created.stage, actor: req.user?.userId },
       'placement created via api',

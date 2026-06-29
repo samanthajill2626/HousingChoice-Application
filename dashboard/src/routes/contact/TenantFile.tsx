@@ -44,6 +44,9 @@ export interface TenantFileProps {
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
+  /** Open the "New placement" dialog pre-filled+locked to this tenant (Placements
+   *  card "+ Start placement"). Only the tenant view wires this. */
+  onStartPlacement?: () => void;
 }
 
 /** A unit's address line (or its id as a last resort), for a row label. */
@@ -63,6 +66,7 @@ export function TenantFile({
   mediaLoading,
   onEdit,
   onManagePhones,
+  onStartPlacement,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myPlacements = tenantPlacements(placements, contact.contactId);
@@ -161,7 +165,23 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Placements" aside={myPlacements.length > 0 ? String(myPlacements.length) : undefined}>
+      <Card
+        title="Placements"
+        aside={
+          onStartPlacement ? (
+            <>
+              {myPlacements.length > 0 ? (
+                <span className={responseClass.muted}>{myPlacements.length} · </span>
+              ) : null}
+              <CardAction onClick={onStartPlacement} label="Start a placement">
+                + Start placement
+              </CardAction>
+            </>
+          ) : myPlacements.length > 0 ? (
+            String(myPlacements.length)
+          ) : undefined
+        }
+      >
         {myPlacements.length === 0 ? (
           <EmptyRow>No placements yet.</EmptyRow>
         ) : (

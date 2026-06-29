@@ -123,6 +123,11 @@ export interface StatusTransitionService {
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
   /** Explicit listing-status write. */
   setListingStatus(unitId: string, input: SetListingStatusInput): Promise<UnitItem>;
+  /**
+   * Best-effort derive coarse tenant+listing statuses for a stage (override-gated,
+   * source 'derived'). Used by placement CREATE (a non-transition). Never throws.
+   */
+  deriveForStage(tenantId: string, unitId: string, stage: PlacementStage): Promise<void>;
 }
 
 export function createStatusTransitionService(
@@ -386,6 +391,15 @@ export function createStatusTransitionService(
       });
       log.info({ unitId, from, to: toStatus, source, ...(actor !== undefined && { actor }) }, 'listing status set');
       return updated;
+    },
+
+    async deriveForStage(tenantId, unitId, stage) {
+      // Create is a NON-transition: it has no from-stage and offers no terminal,
+      // so (unlike transitionPlacement's `lost` branch) there is no
+      // no-other-active-placement gate — we derive deriveStatuses(stage) straight
+      // through the SAME override-gated, no-op-gated, best-effort, {from,to,
+      // source:'derived'}-audited helpers (parity with transitionPlacement step 5).
+      await applyDerivation(tenantId, unitId, deriveStatuses(stage));
     },
   };
 

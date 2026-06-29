@@ -370,19 +370,23 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
     expect(placementRes.status).toBe(201);
     const placementId = placementRes.body.placement.placementId as string;
 
-    // Precondition: the listing has NOT yet derived (still 'setup').
-    expect(world.units.get(unitId)!.status).toBe('setup');
+    // Precondition: §7 derive-on-create now stamps the coarse statuses at CREATE
+    // (the create-time 'setup' baseline is derivation-eligible and was NOT pinned,
+    // so the create's derived write drives the listing forward immediately). This
+    // is the latent-bug fix — a freshly created placement no longer leaves its
+    // listing publicly shareable while the deal progresses.
+    expect(world.units.get(unitId)!.status).toBe('under_application');
 
-    // 4) Transition the placement into the Application phase via the transition
-    //    ROUTE. Per §7 this derives tenant → placing, listing → under_application
-    //    — but ONLY if the create-time status_source did not pin it.
+    // 4) A later stage transition (still within the Application phase) re-derives
+    //    the SAME coarse statuses (a no-op on the listing, already
+    //    under_application) — proving the create-time source stamp did not pin it.
     const txRes = await authedPost(`/api/placements/${placementId}/transition`, {
       toStage: 'awaiting_approval',
       source: 'manual',
     });
     expect(txRes.status).toBe(200);
 
-    // 5) The derivation actually happened (the create-time source did NOT block it).
+    // 5) The derivation holds (the create-time source did NOT block it).
     const unit = await request(app)
       .get(`/api/units/${unitId}`)
       .set('x-origin-verify', SECRET)

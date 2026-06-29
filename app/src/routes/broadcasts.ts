@@ -1,4 +1,4 @@
-// Share-broadcast ("Share Listings") router (M1.8a) — mounted under /api,
+// Share-broadcast ("Share Properties") router (M1.8a) — mounted under /api,
 // behind requireAuth + CSRF via the /api mount (app.ts). VAs run share
 // broadcasts day-to-day, so NO admin gate (same posture as contacts/units/
 // relay-groups).

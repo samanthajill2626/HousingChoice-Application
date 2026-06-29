@@ -58,7 +58,7 @@ export function ContactsIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
-/** Listings — a building. */
+/** Properties — a building. */
 export function ListingsIcon({ size }: IconProps): React.JSX.Element {
   return (
     <Svg size={size}>

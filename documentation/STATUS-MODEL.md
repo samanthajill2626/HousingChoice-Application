@@ -7,7 +7,7 @@
 > [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-06-19**.
 >
 > Naming follows the glossary: the dwelling is a **`unit`** in code/data, shown as
-> **home** to tenants and **listing** to landlords/staff. The workflow record is a
+> **home** to tenants and **property** to landlords/staff. The workflow record is a
 > **`placement`** in code, data, and UI — the original `case`/`cases` naming was
 > renamed to `placement`/`placements` throughout (the API path is `/api/placements`,
 > the DynamoDB table is `placements`, the PK is `placementId`).
@@ -17,17 +17,17 @@
 ## 1. What this models
 
 Three entities move together from onboarding to a tenant placed, a placement closed,
-and a listing moved into:
+and a property moved into:
 
 - **Placement** — the **spine**. The fine-grained workflow ladder for getting one
   tenant into one specific unit. It begins **after a tour, once the tenant affirms a
   specific unit** (interest and touring happen earlier, on the tenant — see below).
 - **Tenant** — a **coarser** lifecycle for where the *person* is, independent of any
   one unit. Starts before any placement, ends after.
-- **Listing** (the `unit`) — a **coarser** lifecycle for where the *unit* is. Mostly
+- **Property** (the `unit`) — a **coarser** lifecycle for where the *unit* is. Mostly
   **derived** from its committed placement.
 
-The placement is authoritative; the tenant and listing lifecycles are largely
+The placement is authoritative; the tenant and property lifecycles are largely
 read-throughs of it (see §6).
 
 ---
@@ -92,7 +92,7 @@ read-throughs of it (see §6).
                                                                           (from any stage)
 
 ╔═══════════════════════════════════════════════════════════════════════════════════╗
-║  TENANT                                                  ║  LISTING                 ║
+║  TENANT                                                  ║  PROPERTY                ║
 ╠══════════════════════════════════════════════════════════╬══════════════════════════╣
 ║                                                          ║                          ║
 ║  Needs review                                            ║   Setup                  ║
@@ -138,10 +138,10 @@ Notes per phase:
 - **Inspection** carries a **date** and a pass/fail **outcome**. A failed inspection
   routes to reschedule or to `Lost`.
 - **Rent Determination** — when `Awaiting rent acceptance` clears (the **landlord**
-  accepts the determined rent), the accepted amount is written onto the listing as
+  accepts the determined rent), the accepted amount is written onto the property as
   **`final_rent`** (used for billing).
 - **Contract** — the **HAP** contract is executed between the **authority and the
-  landlord**; its own single stage, no substeps. This is where the listing flips to
+  landlord**; its own single stage, no substeps. This is where the property flips to
   `Finalizing`.
 - **Administrative** is **one** stage holding an **unordered checklist** — all three
   required, any order: **lease signed**, **LIF** document, **move-in details shared**.
@@ -177,7 +177,7 @@ Needs review → Onboarding → Searching → Placing → Placed
 
 ---
 
-## 6. Listing — coarse lifecycle (derived)
+## 6. Property — coarse lifecycle (derived)
 
 Where the *unit* is. Extends today's `unit.status` rather than replacing it.
 
@@ -196,10 +196,10 @@ Setup → Available → Under application → Finalizing → Occupied
 
 ## 7. How the three align (derivation)
 
-The placement spine drives the tenant and listing lifecycles. The derived value is the
+The placement spine drives the tenant and property lifecycles. The derived value is the
 **lowest-precedence** input — a manual / AI / automation write still wins (§8).
 
-| Placement is in… | → Tenant | → Listing |
+| Placement is in… | → Tenant | → Property |
 |---|---|---|
 | *(none yet)* | `Needs review` / `Onboarding` / `Searching` | `Setup` → `Available` |
 | **Application** → **Rent Determination** | `Placing` | `Under application` |
@@ -208,7 +208,7 @@ The placement spine drives the tenant and listing lifecycles. The derived value 
 | **Lost** ✕ *(no other active placement)* | back to `Searching` | back to `Available` |
 
 So a placement sitting at `RTA / Awaiting authority approval` reads as: **tenant
-`Placing`, listing `Under application`**, and the spine pinpoints the blocker — the
+`Placing`, property `Under application`**, and the spine pinpoints the blocker — the
 housing authority.
 
 **Tenant drop-out is manual for now.** A `Lost` placement automatically bounces the
@@ -222,14 +222,14 @@ not auto-dropping tenants yet.
 
 - **Cardinality — mostly one.** Early interest can be many units, but a tenant
   converges to **one primary placement** by the Application phase.
-- **Source of truth — derive + state-based override.** The coarse tenant/listing
+- **Source of truth — derive + state-based override.** The coarse tenant/property
   status is normally **derived** from the committed placement (§7). Whether a derived
   write may move an entity is gated on its **current state**, not on who last wrote it:
-  derivation freely drives the **baseline progression** states forward — listing
+  derivation freely drives the **baseline progression** states forward — property
   `Setup → Available → Under application → Finalizing → Occupied`, tenant
   `Needs review → Onboarding → Searching → Placing → Placed` — *regardless of source*,
   but it is **blocked (pinned)** when the entity currently sits in an **override / exit
-  state**: listing **`On hold`** / **`Off market`**, tenant **`On hold`** / **`Inactive`**.
+  state**: property **`On hold`** / **`Off market`**, tenant **`On hold`** / **`Inactive`**.
   Those override states are reached only by an explicit (`manual` / `ai` / `automation` /
   `import`) write and stick until a human/automation explicitly moves the entity back out
   — then derivation resumes on the baseline. Explicit writes always apply (last-writer

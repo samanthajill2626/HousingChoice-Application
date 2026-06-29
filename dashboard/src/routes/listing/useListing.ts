@@ -1,4 +1,4 @@
-// useListing — fetches everything the listing detail page (B4) needs and
+// useListing — fetches everything the property detail page (B4) needs and
 // assembles the right-pane panels, degrading gracefully where the C3/C4/C6
 // backend slices aren't live yet. Mirrors useContactFile's pattern:
 //   - unit (GET /api/units/:id) is REQUIRED → status 'error' on failure.
@@ -36,7 +36,7 @@ export type Slice<T> =
 export interface ListingState {
   status: 'loading' | 'ready' | 'error';
   unit: UnitItem | null;
-  /** Replace the in-memory unit after a mutation (e.g. a listing-status write
+  /** Replace the in-memory unit after a mutation (e.g. a property-status write
    *  RETURNS the updated unit) — applied directly, no refetch. Mirrors
    *  useContact.setContact. */
   setUnit: (unit: UnitItem) => void;
@@ -44,7 +44,7 @@ export interface ListingState {
   landlord: Contact | null;
   roster: RosterRow[];
   placementsOnUnit: ReturnType<typeof placementsOnUnit>;
-  /** Related listings: the live C3 endpoint, else the same-landlord fallback. */
+  /** Related properties: the live C3 endpoint, else the same-landlord fallback. */
   related: Slice<RelatedUnit>;
   /** Sent-to-tenants (C4) — 'pending' until BE4. */
   recipients: Slice<ListingSendRow>;

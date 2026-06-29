@@ -1,5 +1,5 @@
 // PlacementDetail — a single placement's detail page (F2.3) at /placements/:placementId. Shows
-// the stage label + phase, tenant (home) + listing links, time-in-stage
+// the stage label + phase, tenant (home) + property links, time-in-stage
 // (stage_entered_at), the lost reason (via formatLostReason), and
 // inspection_outcome + final_rent (the latter read off the linked unit) where
 // present. A full "Move to…" stage picker drives transitions through the SAME
@@ -231,7 +231,7 @@ export function PlacementDetail(): React.JSX.Element {
               k="Tenant"
               v={<Link to={`/contacts/${placement.tenantId}`}>{tenantLabel}</Link>}
             />
-            <KV k="Listing" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
+            <KV k="Property" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
             <KV k="Stage" v={stageLabel} />
             <KV k="Phase" v={phase} />
             <KV

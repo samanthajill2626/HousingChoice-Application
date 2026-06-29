@@ -1,6 +1,6 @@
-// ListingActionsMenu — the header ⋯ kebab on the listing detail page. A popover
+// ListingActionsMenu — the header ⋯ kebab on the property detail page. A popover
 // menu (outside-click + Escape close) mirroring ContactActionsMenu: Copy link to
-// this listing + a Delete/Restore action. Delete asks the parent to confirm first
+// this property + a Delete/Restore action. Delete asks the parent to confirm first
 // (it opens a confirm dialog); the parent owns the request + applies the result.
 import { useEffect, useRef, useState } from 'react';
 import styles from './ListingActionsMenu.module.css';
@@ -8,13 +8,13 @@ import styles from './ListingActionsMenu.module.css';
 export interface ListingActionsMenuProps {
   /** Class for the kebab trigger (the header supplies its dark-band style). */
   triggerClassName: string;
-  /** Open the edit dialog. Omitted (e.g. on a deleted listing) → no Edit item. */
+  /** Open the edit dialog. Omitted (e.g. on a deleted property) → no Edit item. */
   onEdit?: () => void;
   /** Current soft-delete state (drives Delete vs Restore). */
   deleted: boolean;
   /** Begin deleting — the parent opens a confirm dialog (then DELETEs). */
   onDelete: () => void;
-  /** Restore a soft-deleted listing; the parent does the request. */
+  /** Restore a soft-deleted property; the parent does the request. */
   onRestore: () => void;
   /** True while a delete/restore request is in flight (disables that item). */
   deleteBusy?: boolean;
@@ -84,7 +84,7 @@ export function ListingActionsMenu({
                 onEdit();
               }}
             >
-              Edit listing
+              Edit property
             </button>
           ) : null}
           <button
@@ -93,7 +93,7 @@ export function ListingActionsMenu({
             className={styles.item}
             onClick={copyLink}
           >
-            {copied ? 'Copied ✓' : 'Copy link to listing'}
+            {copied ? 'Copied ✓' : 'Copy link to property'}
           </button>
           <div className={styles.divider} />
           {deleted ? (
@@ -107,7 +107,7 @@ export function ListingActionsMenu({
                 onRestore();
               }}
             >
-              Restore listing
+              Restore property
             </button>
           ) : (
             <button
@@ -120,7 +120,7 @@ export function ListingActionsMenu({
                 onDelete();
               }}
             >
-              Delete listing
+              Delete property
             </button>
           )}
         </div>

@@ -110,7 +110,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // dashboard UnitItem); the flexible-doc repo would silently store
       // bedrooms / rent / pets_allowed and the UI would never find them.
       // unitA is the unit on the seeded placement placement-0001 (Inspection phase:
-      // awaiting_inspection), so by §7 derivation the listing reads
+      // awaiting_inspection), so by §7 derivation the property reads
       // 'under_application', source 'derived' (NOT 'manual') — the denormalized
       // value matches what derivation produces and stays drivable. (Stamping
       // 'manual' here would disagree with §7 AND block the first derived write.)
@@ -135,7 +135,7 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // DELIBERATE manual override: unitB is NOT the unit on the active seeded
       // placement (placement-0001 → unitA), so there is no placement to derive it;
       // 'manual' here is an intentional demo pin of a previously-placed unit,
-      // not the regression (which was pinning a freshly-derivable listing).
+      // not the regression (which was pinning a freshly-derivable property).
       status: 'occupied',
       status_source: 'manual',
       final_rent: 1975,

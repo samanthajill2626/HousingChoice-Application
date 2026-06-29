@@ -2,13 +2,13 @@
 // near-black header band (address � status badge � facts � "?? Broadcast to
 // tenants" + Edit + ?) over a two-column body and a full-width Photos gallery:
 //   LEFT  � a small hero image � a flyer line (View flyer ? + Copy public link)
-//           � Listing details (with Accepted vouchers as a BULLETED list) � Tour
+//           � Property details (with Accepted vouchers as a BULLETED list) � Tour
 //           & application process � Activity.
-//   RIGHT � Contacts roster � Sent to tenants � Placements on this listing � Related
-//           listings � Similar listings.
+//   RIGHT � Contacts roster � Sent to tenants � Placements on this property � Related
+//           properties � Similar properties.
 //   BOTTOM (full width) � Photos.
 // Real panels come from existing endpoints (unit, placements, units, the landlord
-// contact); the C4 "Sent to tenants" + C6 "Similar listings" panels show an
+// contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" (BE2) is
 // pending too. Nothing is fabricated.
 import { useState } from 'react';
@@ -39,7 +39,7 @@ import {
 } from './listingFormat.js';
 import styles from './ListingDetail.module.css';
 
-// Listing-status ? header badge class. `available` is the one publicly-shareable
+// Property-status ? header badge class. `available` is the one publicly-shareable
 // status (green); occupied/off_market read as a settled/closed badge; the rest
 // fall back to the neutral badge.
 const STATUS_BADGE: Record<ListingStatus, string> = {
@@ -52,7 +52,7 @@ const STATUS_BADGE: Record<ListingStatus, string> = {
   off_market: styles.badgeInactive ?? '',
 };
 
-// Listing-status ? status-dot colour for the related-listings rows.
+// Property-status ? status-dot colour for the related-properties rows.
 const STATUS_DOT: Record<ListingStatus, string> = {
   setup: responseClass.muted,
   available: responseClass.available,
@@ -77,13 +77,13 @@ export function ListingDetail(): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  // The "Start placement" dialog, pre-filled+locked to this listing's unit.
+  // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
   const { setUnit } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  // Listing-status write � goes through the transition service (status is NOT
+  // Property-status write � goes through the transition service (status is NOT
   // writable via a plain unit PATCH). On success apply the returned unit in
   // place (no refetch) and clear any prior error. On failure surface an inline
   // error (the select reverts to the unit's stored status, so without feedback a
@@ -97,7 +97,7 @@ export function ListingDetail(): React.JSX.Element {
         setStatusError(null);
       })
       .catch(() => {
-        setStatusError("Couldn't update the listing status � please try again.");
+        setStatusError("Couldn't update the property status � please try again.");
       })
       .finally(() => setStatusBusy(false));
   }
@@ -114,7 +114,7 @@ export function ListingDetail(): React.JSX.Element {
     return (
       <div className={styles.center}>
         <p role="alert" className={styles.error}>
-          We couldn&apos;t load this listing.
+          We couldn&apos;t load this property.
         </p>
       </div>
     );
@@ -127,8 +127,8 @@ export function ListingDetail(): React.JSX.Element {
   const programs = unit.accepted_programs ?? [];
   const media = unit.media ?? [];
 
-  // Soft-delete (reversible). Deleting is confirmed first, then the listing drops
-  // out of the normal views � so on success we navigate back to the Listings list
+  // Soft-delete (reversible). Deleting is confirmed first, then the property drops
+  // out of the normal views � so on success we navigate back to the Properties list
   // (it can be restored from the Deleted tab). Restore stays on the page and
   // applies the returned unit in place so the Deleted banner clears.
   const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
@@ -172,9 +172,9 @@ export function ListingDetail(): React.JSX.Element {
         </div>
         <div className={styles.actions}>
           <label className={styles.statusSelect}>
-            <span className={styles.srLabel}>Listing status</span>
+            <span className={styles.srLabel}>Property status</span>
             <select
-              aria-label="Listing status"
+              aria-label="Property status"
               value={unit.status}
               disabled={statusBusy}
               onChange={(e) => onChangeStatus(e.target.value as ListingStatus)}
@@ -219,7 +219,7 @@ export function ListingDetail(): React.JSX.Element {
       {deleted ? (
         <div className={styles.deletedBanner} role="status">
           <span>
-            This listing is <strong>deleted</strong> � hidden from the listings and the
+            This property is <strong>deleted</strong> � hidden from the properties and the
             landlord&apos;s file. Its data is retained.
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
@@ -247,7 +247,7 @@ export function ListingDetail(): React.JSX.Element {
             </span>
           </div>
 
-          <Card title="Listing details" aside="Edit">
+          <Card title="Property details" aside="Edit">
             <div className={styles.detailGrid}>
               <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || '�'} />
               <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '�'} />
@@ -286,7 +286,7 @@ export function ListingDetail(): React.JSX.Element {
           </Card>
 
           <Card title="Activity">
-            <PendingPanel note="The listing's activity log arrives with the backend." />
+            <PendingPanel note="The property's activity log arrives with the backend." />
           </Card>
         </div>
 
@@ -294,7 +294,7 @@ export function ListingDetail(): React.JSX.Element {
         <div className={styles.right}>
           <Card title="Contacts" aside="landlord / PM roster">
             {roster.length === 0 ? (
-              <EmptyRow>No contacts on this listing yet.</EmptyRow>
+              <EmptyRow>No contacts on this property yet.</EmptyRow>
             ) : (
               roster.map((r) => (
                 <Row
@@ -344,11 +344,11 @@ export function ListingDetail(): React.JSX.Element {
           </Card>
 
           <Card
-            title="Placements on this listing"
+            title="Placements on this property"
             aside={placementsOnUnit.length > 0 ? String(placementsOnUnit.length) : undefined}
           >
             {placementsOnUnit.length === 0 ? (
-              <EmptyRow>No placements on this listing yet.</EmptyRow>
+              <EmptyRow>No placements on this property yet.</EmptyRow>
             ) : (
               placementsOnUnit.map((c) => (
                 <Row
@@ -361,10 +361,10 @@ export function ListingDetail(): React.JSX.Element {
             )}
           </Card>
 
-          <Card title="Related listings" aside="same landlord">
+          <Card title="Related properties" aside="same landlord">
             {related.status === 'ready' ? (
               related.rows.length === 0 ? (
-                <EmptyRow>No related listings.</EmptyRow>
+                <EmptyRow>No related properties.</EmptyRow>
               ) : (
                 related.rows.map((r) => (
                   <Row
@@ -385,16 +385,16 @@ export function ListingDetail(): React.JSX.Element {
                 ))
               )
             ) : related.status === 'error' ? (
-              <EmptyRow>We couldn&apos;t load related listings.</EmptyRow>
+              <EmptyRow>We couldn&apos;t load related properties.</EmptyRow>
             ) : (
               <PendingPanel />
             )}
           </Card>
 
-          <Card title="Similar listings" aside="available comps">
+          <Card title="Similar properties" aside="available comps">
             {similar.status === 'ready' ? (
               similar.rows.length === 0 ? (
-                <EmptyRow>No similar listings.</EmptyRow>
+                <EmptyRow>No similar properties.</EmptyRow>
               ) : (
                 similar.rows.map((s) => (
                   <Row
@@ -411,7 +411,7 @@ export function ListingDetail(): React.JSX.Element {
                 ))
               )
             ) : similar.status === 'error' ? (
-              <EmptyRow>We couldn&apos;t load similar listings.</EmptyRow>
+              <EmptyRow>We couldn&apos;t load similar properties.</EmptyRow>
             ) : (
               <PendingPanel />
             )}
@@ -470,7 +470,7 @@ export function ListingDetail(): React.JSX.Element {
 
       {confirmingDelete ? (
         <Modal
-          title="Delete listing?"
+          title="Delete property?"
           onClose={() => {
             if (!deleteBusy) {
               setConfirmingDelete(false);
@@ -495,8 +495,8 @@ export function ListingDetail(): React.JSX.Element {
           }
         >
           <p>
-            <strong>{address}</strong> will be hidden from the listings and the landlord&apos;s
-            file. Nothing is erased � you can restore it from the Listings <em>Deleted</em> view.
+            <strong>{address}</strong> will be hidden from the properties and the landlord&apos;s
+            file. Nothing is erased � you can restore it from the Properties <em>Deleted</em> view.
           </p>
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>

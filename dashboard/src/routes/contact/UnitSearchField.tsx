@@ -115,7 +115,7 @@ export function UnitSearchField({
         value={value.label}
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
-        placeholder="Search listings…"
+        placeholder="Search properties…"
         autoComplete="off"
       />
       {isListShown && (

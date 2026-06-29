@@ -10,12 +10,12 @@ same change. If you find drift (a synonym creeping in for an entity that already
 has a blessed word), fix it toward this table.
 
 **See also:** [STATUS-MODEL.md](STATUS-MODEL.md) — the living reference for how the
-three core entities (tenant, **placement**, listing/`unit`) move through the process:
+three core entities (tenant, **placement**, property/`unit`) move through the process:
 their phases, stages, and how they derive from one another.
 
 ---
 
-## The unit / home / listing entity
+## The unit / home / property entity
 
 There is **one** entity for "a single dwelling a single household (a family,
 couple, or individual) can lease and move into." In code and data it is always
@@ -24,8 +24,8 @@ called a **`unit`**. What a *human* is shown depends on who they are:
 | Audience | Word they see | Singular / plural | Example copy |
 |---|---|---|---|
 | **Tenant** (voucher holder) | **home** | home / homes | "3 homes match your voucher" |
-| **Landlord** | **listing** | listing / listings | "Your listing is now live" |
-| **Staff / navigator** (dashboard) | **listing** | listing / listings | "Listings", "New listing" |
+| **Landlord** | **property** | property / properties | "Your property is now live" |
+| **Staff / navigator** (dashboard) | **property** | property / properties | "Properties", "New property" |
 | **Code / data / internal** | **unit** | unit / units | `unitId`, `unitsRepo`, `UnitItem` |
 
 One entity, three labels by audience. Pick the label by **who is reading**, not by
@@ -41,22 +41,27 @@ unit is **not** "an apartment" — it is "the one dwelling a household leases,"
 whatever its structure. That is why the code keeps `unit` and the tenant-facing
 copy softens it to **home**.
 
-### Why not "property"
+### Why "property" (the blessed landlord/staff word)
 
-In every property-management system (Yardi, AppFolio, Buildium), a **property** is
-the *parent* that can contain multiple units — a duplex is one property with two
-units. Using "property" for the leaf entity would collide the day we ever model
-buildings. We do not model a building/parcel layer today (each `unit` is a flat
-record with its own address; a duplex is two `unit` records), and we are not
-introducing a "property" concept. Treat any lingering "property" wording that means
-a single dwelling as drift to be normalized to `unit`.
+Landlords and staff see **property** because it is the most natural, everyday word
+for "the place" — a landlord thinks of their **property**, and a navigator scanning
+the dashboard reads **Properties**. It carries no Zillow-style "advertisement"
+connotation (that sense is reserved for the *external* listing — see below), and it
+reads cleanly in copy ("Your property is now live", "Properties", "New property").
 
-### Why "listing" for landlords (an easy flip)
+This is a deliberate choice, not a hard constraint — if we later decide landlords
+should hear "home" (it is, after all, the tenant's future home), this table is the
+single place to change it.
 
-Landlords see **listing** because it matches the inventory/business framing of the
-thing they are putting on the market. This is a deliberate choice, not a hard
-constraint — if we later decide landlords should hear "home" (it is, after all, the
-tenant's future home), this is the single place to change it.
+> **Reserved for a future parent layer: "building" / "parcel".** In some
+> property-management systems (Yardi, AppFolio, Buildium) "property" names the
+> *parent* that contains multiple units — a duplex as one property with two units.
+> We don't model that parent layer today (each `unit` is a flat record with its own
+> address; a duplex is two `unit` records). If we ever introduce a multi-unit parent,
+> name it **"building"** or **"parcel"** — *not* "property" — so the leaf-entity word
+> ("property" = one `unit` to landlords/staff) and the parent word never collide.
+> The old "property = parent of units" worry is handled by reserving a different word
+> for the parent, not by avoiding "property" for the leaf.
 
 ### What is genuinely a "listing" in code (keep these)
 
@@ -81,7 +86,7 @@ spine of the process — is a **`placement`** in code, data, and UI: the type is
 "Placements". It was originally named `case`/`cases`; that has been **renamed to
 `placement`/`placements` throughout** (no `case` entity term remains in current
 code/data — see [STATUS-MODEL.md](STATUS-MODEL.md), the living reference for the
-placement lifecycle). Unlike the unit/home/listing entity, the placement has **one
+placement lifecycle). Unlike the unit/home/property entity, the placement has **one
 label for every audience** ("placement") — there is no audience-specific synonym.
 
 > Note: plain-English "case" (a `switch`/`case` keyword, "in this case", "edge
@@ -92,17 +97,18 @@ label for every audience** ("placement") — there is no audience-specific synon
 
 ## Feature & label notes
 
-- **"Share Listings"** — the staff dashboard feature that fans a filtered broadcast
-  out to matched tenants. It was previously labeled **"Share Properties"**; the
-  human label is "Share Listings". Internal identifiers (the `broadcast` entity,
-  routes, jobs) are unchanged — only the displayed name follows the audience rule.
+- **"Share Properties"** — the staff dashboard feature that fans a filtered broadcast
+  out to matched tenants. The human label is "Share Properties" (a prior rename had
+  briefly flipped it to "Share Listings"; the property relabel returns it to "Share
+  Properties"). Internal identifiers (the `broadcast` entity, routes, jobs) are
+  unchanged — only the displayed name follows the audience rule.
 
 ---
 
 ## For the future AI layer
 
 When AI augmentation/automation talks to a party, it must use that party's word
-from the table above: **home** to tenants, **listing** to landlords and staff,
+from the table above: **home** to tenants, **property** to landlords and staff,
 and reason internally in terms of **units**. This document is the source of truth
 for that mapping. (We are keeping it docs-only for now; if a runtime constant is
 ever wanted so prompt-builders import one definition, mirror this table — do not

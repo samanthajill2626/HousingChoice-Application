@@ -144,13 +144,13 @@ describe('ContactDetail', () => {
     expect(screen.getByText(/Do Not Contact/i)).toBeInTheDocument();
   });
 
-  it('renders the landlord file (Listings card) for a landlord', async () => {
+  it('renders the landlord file (Properties card) for a landlord', async () => {
     getContact.mockResolvedValue(LANDLORD);
     renderAt('L1');
     await waitFor(() => expect(screen.getByText('James Porter')).toBeInTheDocument());
     // The teal type pill (one of the two "Landlord" labels — header + Details).
     expect(screen.getAllByText('Landlord').length).toBeGreaterThanOrEqual(1);
-    // The landlord's own unit shows in the Listings card.
+    // The landlord's own unit shows in the Properties card.
     await waitFor(() =>
       expect(screen.getByRole('link', { name: /1450 Joseph Blvd · 2BR/ })).toBeInTheDocument(),
     );
@@ -168,7 +168,7 @@ describe('ContactDetail', () => {
     // None of the tenant-specific cards/fields leak in.
     expect(screen.queryByText('Voucher size')).not.toBeInTheDocument();
     expect(screen.queryByText('Housing authority')).not.toBeInTheDocument();
-    expect(screen.queryByText('Listings sent')).not.toBeInTheDocument();
+    expect(screen.queryByText('Properties sent')).not.toBeInTheDocument();
   });
 
   it('triages an Unknown contact: clicking "Mark as Tenant" PATCHes type and switches to the Tenant view', async () => {

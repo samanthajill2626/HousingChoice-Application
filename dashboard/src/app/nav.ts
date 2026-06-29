@@ -64,7 +64,7 @@ export const NAV_GROUPS: NavGroup[] = [
           { to: '/contacts/unknown', label: 'Unknown', dot: 'unknown' },
         ],
       },
-      { to: '/listings', label: 'Listings', icon: 'listings' },
+      { to: '/listings', label: 'Properties', icon: 'listings' },
     ],
   },
   {

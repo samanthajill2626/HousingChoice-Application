@@ -1,4 +1,4 @@
-// StatusBadge — a small pill for a tenant or listing lifecycle status (the F1
+// StatusBadge — a small pill for a tenant or property lifecycle status (the F1
 // status model). One shared primitive so the same status reads identically on a
 // PlacementCard, a TenantFile/LandlordFile Details row, a ListingDetail header, and a
 // ContactsList row. Labels come from the F1 maps (TENANT_STATUS_LABELS /
@@ -27,7 +27,7 @@ const TENANT_TONE: Record<TenantStatus, BadgeTone> = {
   inactive: 'muted',
 };
 
-/** listing status → tone (colour family). `available` is the publicly-shareable
+/** property status → tone (colour family). `available` is the publicly-shareable
  *  status (positive/green); the in-flight ones read as progress; the closed/held
  *  ones read muted. */
 const LISTING_TONE: Record<ListingStatus, BadgeTone> = {

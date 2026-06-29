@@ -1,5 +1,5 @@
 /* StatusBadge — a small status pill. Tokens only; one tone class per colour
- * family. Mirrors the listing/contacts list `.badge` shape so statuses read
+ * family. Mirrors the property/contacts list `.badge` shape so statuses read
  * consistently wherever the badge is used. */
 
 .badge {

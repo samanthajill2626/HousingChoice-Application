@@ -1,4 +1,4 @@
-/* ListingDetail — the locked v4 Listing page: a dark header band, a two-column
+/* ListingDetail — the locked v4 Property page: a dark header band, a two-column
  * body (left details / right roster + panels) and a full-width Photos gallery.
  * All values from ui/tokens.css; the page scrolls as one column. */
 
@@ -88,7 +88,7 @@
   vertical-align: middle;
 }
 
-/* Standing banner under the header when the listing is soft-deleted. */
+/* Standing banner under the header when the property is soft-deleted. */
 .deletedBanner {
   display: flex;
   align-items: center;
@@ -279,7 +279,7 @@
   color: var(--c-text-subtle);
 }
 
-/* --- Listing details ------------------------------------------------------ */
+/* --- Property details ------------------------------------------------------ */
 
 .detailGrid {
   display: grid;

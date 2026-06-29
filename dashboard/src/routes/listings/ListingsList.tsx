@@ -113,14 +113,14 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>{deleted ? 'Deleted listings' : 'Listings'}</h1>
+      <h1 className={styles.title}>{deleted ? 'Deleted properties' : 'Properties'}</h1>
       <p className={styles.sub}>
         {deleted
-          ? 'Soft-deleted listings. Open one to restore it.'
+          ? 'Soft-deleted properties. Open one to restore it.'
           : 'Showing the first page of unit records.'}
       </p>
 
-      <nav className={styles.tabs} aria-label="Listings view">
+      <nav className={styles.tabs} aria-label="Properties view">
         {VIEW_TABS.map((t) => (
           <Link
             key={t.label}
@@ -190,7 +190,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
 
       <div className={styles.search}>
         <label className={styles.searchLabel} htmlFor="listings-search">
-          Search listings
+          Search properties
         </label>
         <input
           id="listings-search"
@@ -207,22 +207,22 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
 
       {status === 'error' ? (
         <p className={styles.error} role="alert">
-          We couldn&apos;t load listings. Please try again.
+          We couldn&apos;t load properties. Please try again.
         </p>
       ) : null}
 
       {status === 'ready' && units.length === 0 ? (
         <div className={styles.empty}>
-          <p className={styles.emptyTitle}>{deleted ? 'No deleted listings' : 'No listings yet'}</p>
+          <p className={styles.emptyTitle}>{deleted ? 'No deleted properties' : 'No properties yet'}</p>
           <p className={styles.emptyBody}>
-            {deleted ? 'Deleted listings will appear here.' : 'Nothing here to show right now.'}
+            {deleted ? 'Deleted properties will appear here.' : 'Nothing here to show right now.'}
           </p>
         </div>
       ) : null}
 
       {status === 'ready' && units.length > 0 ? (
         visible.length > 0 ? (
-          <ul className={styles.rows} aria-label="Listings">
+          <ul className={styles.rows} aria-label="Properties">
             {visible.map((unit) => (
               <Row key={unit.unitId} unit={unit} />
             ))}
@@ -231,7 +231,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
           <p className={styles.noMatches}>
             {query.trim()
               ? `No matches for “${query.trim()}”.`
-              : 'No listings match the selected filters.'}
+              : 'No properties match the selected filters.'}
           </p>
         )
       ) : null}

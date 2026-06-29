@@ -1,4 +1,4 @@
-// listingFormat — small pure presentation helpers for the listing detail page.
+// listingFormat — small pure presentation helpers for the property detail page.
 // Tested in isolation so the component stays declarative.
 import { LISTING_STATUS_LABELS, type ListingStatus, type UnitItem } from '../../api/index.js';
 import { formatAddress, humanize } from '../contact/format.js';
@@ -29,7 +29,7 @@ export function formatBedsBaths(beds: number | undefined, baths: number | undefi
 }
 
 /** The header status badge label, e.g. 'under_application' → "Under application".
- *  Uses the listing-status label map; an unknown status falls back to a humanized
+ *  Uses the property-status label map; an unknown status falls back to a humanized
  *  form (underscores → spaces, capitalized) so the badge never renders blank. */
 export function statusLabel(status: string): string {
   return LISTING_STATUS_LABELS[status as ListingStatus] ?? humanize(status);
@@ -52,7 +52,7 @@ export function buildListingFacts(unit: UnitItem, landlordName?: string): string
 
 /** True when a media entry looks like a resolvable URL (http/https/blob or a
  *  root-relative path) we can put in <img src>; false for a bare S3 key. `data:`
- *  is deliberately NOT accepted — listing media is never a data URI, and keeping
+ *  is deliberately NOT accepted — property media is never a data URI, and keeping
  *  it out avoids ever placing operator-supplied `data:` content in the DOM. */
 export function isMediaUrl(media: string): boolean {
   return /^(https?:|blob:|\/)/.test(media);

@@ -38,7 +38,7 @@ describe('historyTitle (readable event title)', () => {
   it('maps known event types to readable titles', () => {
     expect(historyTitle('placement_stage_changed')).toBe('Stage changed');
     expect(historyTitle('tenant_status_changed')).toBe('Tenant status changed');
-    expect(historyTitle('listing_status_changed')).toBe('Listing status changed');
+    expect(historyTitle('listing_status_changed')).toBe('Property status changed');
   });
 
   it('humanizes an unknown event type', () => {

@@ -16,7 +16,7 @@ same branch (`feat/status-model-be-foundation`): F1 (commit 645a410) migrated
 LISTING_STATUSES, TENANT_STATUSES, LostReason `{category,text}`,
 TRANSITION_SOURCES, INSPECTION_OUTCOMES), added the transition endpoints
 (`transitionPlacement`/`setTenantStatus`/`setListingStatus`/`getPlacementHistory`),
-made the listing + contact status pickers type-aware (writing through the
+made the property + contact status pickers type-aware (writing through the
 transition routes, never the plain PATCH), and rendered `lost_reason` as an object;
 F2 (commit 5b553b7) added the placement board at `/placements` (@dnd-kit drag→transition),
 the lost-reason modal, placement detail + history, and finalRent/inspection-outcome
@@ -40,7 +40,7 @@ migrated in lockstep the dashboard will:
   list no longer matches the backend's placement stages, and stage changes must
   now go through `POST /api/placements/:placementId/transition` (the legacy
   `PATCH /api/placements/:id { stage }` path now refuses a `stage` write).
-- **Show empty / wrong listing filters** — the listings status filter still uses
+- **Show empty / wrong property filters** — the properties status filter still uses
   `available` / `placed` / `inactive`; `placed`→`occupied` and
   `inactive`→`off_market`, and three new states (`setup`, `under_application`,
   `finalizing`) are unrepresented.
@@ -54,10 +54,10 @@ migrated in lockstep the dashboard will:
   type (string → `{ category?: LostReasonCategory; text?: string }`); add the
   lost-reason category enum.
 - `dashboard/src/routes/listings/ListingsList.tsx` — the status filter
-  (`available` / `placed` / `inactive` → the new six-value listing set).
+  (`available` / `placed` / `inactive` → the new six-value property set).
 - Any stage-write call site — switch from `PATCH /api/placements/:id { stage }` to
   `POST /api/placements/:placementId/transition { toStage, source, reason?, lostReason?,
-  finalRent? }`; tenant-status / listing-status writes to the new
+  finalRent? }`; tenant-status / property-status writes to the new
   `PATCH /api/contacts/:id/tenant-status` and `PATCH /api/units/:id/listing-status`.
 - Any UI rendering `lost_reason` — read `{ category, text }`.
 
@@ -83,4 +83,4 @@ the tenant lifecycle and persists onto the unified `contact.status`.
 **Suggested fix.** Migrate the frontend in the SAME change set as this backend.
 **This backend MUST NOT be merged to main until the frontend is migrated in
 lockstep (or the backend is gated)** — otherwise the live dashboard breaks on
-stage writes, listing filters, and lost-reason rendering.
+stage writes, property filters, and lost-reason rendering.

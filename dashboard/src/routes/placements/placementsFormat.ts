@@ -1,5 +1,5 @@
 // placementsFormat — small pure presentation helpers for the placement board +
-// placement detail. Resolve a placement's tenant NAME (home) and listing ADDRESS
+// placement detail. Resolve a placement's tenant NAME (home) and property ADDRESS
 // from the lookup maps usePlacements builds, falling back to the id (honest —
 // never fabricated). Tested in isolation.
 import {
@@ -27,7 +27,7 @@ export function isPorting(contacts: Map<string, Contact>, tenantId: string): boo
   return contacts.get(tenantId)?.porting === true;
 }
 
-/** The listing's (unit's) address line for a placement, or the unit id when the unit
+/** The property's (unit's) address line for a placement, or the unit id when the unit
  *  isn't loaded. */
 export function listingAddress(units: Map<string, UnitItem>, unitId: string): string {
   const u = units.get(unitId);
@@ -76,14 +76,14 @@ export function historyTitle(eventType: string): string {
     case 'tenant_status_changed':
       return 'Tenant status changed';
     case 'listing_status_changed':
-      return 'Listing status changed';
+      return 'Property status changed';
     default:
       return humanizeToken(eventType);
   }
 }
 
 /** Label a from/to value with the map that matches the event_type — stages via
- *  STAGE_LABELS, tenant statuses via TENANT_STATUS_LABELS, listing statuses via
+ *  STAGE_LABELS, tenant statuses via TENANT_STATUS_LABELS, property statuses via
  *  LISTING_STATUS_LABELS — falling back to a humanize so a raw snake_case value
  *  is NEVER shown to staff. */
 function labelFor(eventType: string, value: string): string {

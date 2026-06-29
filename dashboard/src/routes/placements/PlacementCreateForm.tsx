@@ -2,7 +2,7 @@
 // (this tenant on this unit) at a starting stage, with an optional label.
 //
 // A pre-filled side (tenantId/unitId prop set) renders LOCKED read-only (the
-// caller already knows that side — e.g. the listing page sets unitId, the tenant
+// caller already knows that side — e.g. the property page sets unitId, the tenant
 // file sets tenantId); the OTHER side stays an editable typeahead. The non-
 // blocking overlap notice (role="status") warns when the chosen tenant/unit
 // already has an active placement, but NEVER blocks submit (warn-but-allow).

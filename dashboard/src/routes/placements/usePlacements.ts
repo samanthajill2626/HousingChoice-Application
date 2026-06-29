@@ -1,6 +1,6 @@
 // usePlacements — the placement board's data hook. Abort-safe fetch of the placements
 // board (GET /api/placements) plus the contacts + units it needs to label cards
-// (tenant NAME / listing ADDRESS / porting chip). Mirrors useListings' single
+// (tenant NAME / property ADDRESS / porting chip). Mirrors useListings' single
 // abort-safe useState/useEffect pattern (NO react-query). Exposes:
 //   - applyPlacement(placement): replace/insert a placement in place after a transition returns
 //     the updated PlacementItem — the board re-positions it with NO refetch.
@@ -8,7 +8,7 @@
 //     the new stage; we patch the in-memory placement's stage/attention/tour/deadline).
 //
 // Name/address resolution: contacts + units back small lookup maps so a card can
-// show the tenant's name (home) and the listing's address. A contact/unit we
+// show the tenant's name (home) and the property's address. A contact/unit we
 // don't have falls back to the id (honest — never fabricated).
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -36,7 +36,7 @@ export interface PlacementsState {
   placements: PlacementItem[];
   /** contactId → contact (tenant names + porting flag). */
   contacts: Map<string, Contact>;
-  /** unitId → unit (listing addresses). */
+  /** unitId → unit (property addresses). */
   units: Map<string, UnitItem>;
   /** Replace/insert a placement in place after a transition (no refetch). */
   applyPlacement: (next: PlacementItem) => void;
@@ -91,7 +91,7 @@ async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
   }
 }
 
-/** Best-effort fetch of ALL units (paging through nextCursor) for card listing
+/** Best-effort fetch of ALL units (paging through nextCursor) for card property
  *  addresses — never throws (except AbortError); a failure falls back to the unit
  *  id. */
 async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {

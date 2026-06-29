@@ -1,5 +1,5 @@
 // PlacementCard — one placement on the board. Shows the tenant NAME (home), the
-// listing ADDRESS, the stage label, a tour date / next deadline when present, an
+// property ADDRESS, the stage label, a tour date / next deadline when present, an
 // attention dot, and a "Porting" chip when the tenant is porting.
 //
 // A11y: the draggable role/listeners live on a DEDICATED grip HANDLE (the "⠿"

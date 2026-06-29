@@ -128,10 +128,10 @@ describe('ListingDetail', () => {
     renderAt();
 
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    await user.click(screen.getByRole('menuitem', { name: /Edit listing/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Edit property/i }));
 
     // The edit dialog is open with the current values prefilled.
-    const dialog = screen.getByRole('dialog', { name: /Edit listing/i });
+    const dialog = screen.getByRole('dialog', { name: /Edit property/i });
     const utilities = within(dialog).getByLabelText(/Utilities/i);
     expect(utilities).toHaveValue('Tenant-paid');
 
@@ -150,7 +150,7 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('button', { name: /Copy public link/ })).not.toBeInTheDocument();
   });
 
-  it('renders listing details and accepted vouchers as a bulleted list', () => {
+  it('renders property details and accepted vouchers as a bulleted list', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByText('$1,550')).toBeInTheDocument(); // payment standard
@@ -171,7 +171,7 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('link', { name: /Awaiting approval/ })).toHaveAttribute('href', '/placements/c1');
   });
 
-  it('links related listings to their listing page', () => {
+  it('links related properties to their property page', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByRole('link', { name: /u2/ })).toHaveAttribute('href', '/listings/u2');
@@ -204,7 +204,7 @@ describe('ListingDetail', () => {
     setListingStatus.mockResolvedValue({ ...READY.unit!, status: 'off_market' });
 
     renderAt();
-    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'off_market');
+    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'off_market');
 
     await waitFor(() =>
       expect(setListingStatus).toHaveBeenCalledWith('u1', {
@@ -228,16 +228,16 @@ describe('ListingDetail', () => {
     // First change FAILS ? an inline error appears (no silent swallow).
     setListingStatus.mockRejectedValueOnce(new Error('boom'));
     renderAt();
-    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'off_market');
+    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'off_market');
     await waitFor(() =>
-      expect(screen.getByText(/Couldn.t update the listing status/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Couldn.t update the property status/i)).toBeInTheDocument(),
     );
 
     // A subsequent SUCCESSFUL change clears the error.
     setListingStatus.mockResolvedValueOnce({ ...READY.unit!, status: 'on_hold' });
-    await user.selectOptions(screen.getByRole('combobox', { name: /Listing status/i }), 'on_hold');
+    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'on_hold');
     await waitFor(() =>
-      expect(screen.queryByText(/Couldn.t update the listing status/i)).not.toBeInTheDocument(),
+      expect(screen.queryByText(/Couldn.t update the property status/i)).not.toBeInTheDocument(),
     );
   });
 
@@ -265,7 +265,7 @@ describe('ListingDetail', () => {
     expect(within(dialog).getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
   });
 
-  it('hides the "Start placement" button for a deleted listing', () => {
+  it('hides the "Start placement" button for a deleted property', () => {
     useListing.mockReturnValue({
       ...READY,
       unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
@@ -286,7 +286,7 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('heading', { name: /u1/ })).toBeInTheDocument();
   });
 
-  it('deleting confirms first, then DELETEs and navigates back to the Listings list', async () => {
+  it('deleting confirms first, then DELETEs and navigates back to the Properties list', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
     deleteUnit.mockResolvedValue({ ...READY.unit, deleted_at: '2026-06-19T00:00:00.000Z' });
@@ -295,24 +295,24 @@ describe('ListingDetail', () => {
       <MemoryRouter initialEntries={['/listings/u1']}>
         <Routes>
           <Route path="/listings/:unitId" element={<ListingDetail />} />
-          <Route path="/listings" element={<div>LISTINGS LIST</div>} />
+          <Route path="/listings" element={<div>PROPERTIES LIST</div>} />
         </Routes>
       </MemoryRouter>,
     );
 
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    await user.click(screen.getByRole('menuitem', { name: /Delete listing/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete property/i }));
 
     // A confirm dialog appears � nothing deleted yet.
-    expect(screen.getByRole('dialog', { name: /Delete listing\?/i })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: /Delete property\?/i })).toBeInTheDocument();
     expect(deleteUnit).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: /^Delete$/i }));
     expect(deleteUnit).toHaveBeenCalledWith('u1');
-    await screen.findByText('LISTINGS LIST');
+    await screen.findByText('PROPERTIES LIST');
   });
 
-  it('shows the Deleted banner + Restore for a deleted listing and restores in place', async () => {
+  it('shows the Deleted banner + Restore for a deleted property and restores in place', async () => {
     const user = userEvent.setup();
     const setUnit = vi.fn();
     restoreUnit.mockResolvedValue({ ...READY.unit }); // restored (no deleted_at)

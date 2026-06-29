@@ -28,12 +28,12 @@ const BASE_OPTIONS: { type: 'tenant' | 'landlord'; title: string; desc: string }
   {
     type: 'tenant',
     title: 'Tenant',
-    desc: 'Someone seeking housing — voucher size, housing authority, current address, and listings sent.',
+    desc: 'Someone seeking housing — voucher size, housing authority, current address, and properties sent.',
   },
   {
     type: 'landlord',
     title: 'Landlord',
-    desc: 'Someone offering housing — their company and their listings.',
+    desc: 'Someone offering housing — their company and their properties.',
   },
 ];
 

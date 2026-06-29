@@ -10,7 +10,7 @@ resolved: 2026-06-19
 refs: documentation/STATUS-MODEL.md, app/src/services/statusTransition.ts
 ---
 
-**Resolution.** Only override/exit states pin (listing on_hold/off_market,
+**Resolution.** Only override/exit states pin (property on_hold/off_market,
 tenant on_hold/inactive); baseline progression states stay derivation-eligible
 regardless of source. Implemented in statusModel.ts (override-state sets) +
 statusTransition.ts applyDerivation (state-gated).
@@ -21,14 +21,14 @@ statusTransition.ts applyDerivation (state-gated).
 `derived` writes until the next explicit (non-derived) write replaces it
 (`canOverwrite` in `app/src/lib/statusModel.ts`).
 
-Consequence at the terminal outcomes: if a tenant or listing has been **manually
-pinned** (e.g. tenant `on_hold`, listing `on_hold`) and the placement later
+Consequence at the terminal outcomes: if a tenant or property has been **manually
+pinned** (e.g. tenant `on_hold`, property `on_hold`) and the placement later
 reaches a terminal outcome, the derived terminal state is **NOT** applied — the
 entity stays at the stale pin:
 
-- `moved_in` ⇒ derived tenant `placed` / listing `occupied` — **not applied** if
+- `moved_in` ⇒ derived tenant `placed` / property `occupied` — **not applied** if
   pinned.
-- `lost` ⇒ derived bounce tenant `searching` / listing `available` — **not
+- `lost` ⇒ derived bounce tenant `searching` / property `available` — **not
   applied** if pinned.
 
 This is faithful to §8 as written ("an explicit write pins and wins"), but it may

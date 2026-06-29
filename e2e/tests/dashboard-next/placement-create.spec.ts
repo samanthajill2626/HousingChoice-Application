@@ -3,7 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 // Manual placement creation (:5174) against the real status-model backend. Proves
 // the "New placement" flow end-to-end from all three entry points:
 //   1. the board's "New placement" button → a BLANK form (pick tenant + unit),
-//   2. a listing detail's "Start placement" → the UNIT side pre-filled + LOCKED,
+//   2. a property detail's "Start placement" → the UNIT side pre-filled + LOCKED,
 //   3. a tenant file's "Start placement" → the TENANT side pre-filled + LOCKED.
 // In every case a successful create lands on the placement detail page
 // (/placements/<id>) showing the tenant + unit.
@@ -72,14 +72,14 @@ test.describe('Manual placement creation', () => {
     await expect(page.getByRole('link', { name: /88 Sycamore St/ })).toBeVisible();
   });
 
-  test('listing-prefilled create: the Unit side is locked, pick a tenant → lands on the detail', async ({
+  test('property-prefilled create: the Unit side is locked, pick a tenant → lands on the detail', async ({
     page,
   }) => {
     await devLogin(page);
     // unit-0002 (occupied, no active placement → no UNIT-side overlap).
     await page.goto(`${NEXT}/listings/${SEEDED_UNIT_FREE}`);
 
-    // The listing header "Start placement" opens the create dialog locked to this unit.
+    // The property header "Start placement" opens the create dialog locked to this unit.
     await page.getByRole('button', { name: 'Start placement' }).click();
     const dialog = page.getByRole('dialog', { name: /New placement/i });
     await expect(dialog).toBeVisible();

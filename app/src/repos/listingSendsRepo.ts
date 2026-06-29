@@ -1,10 +1,10 @@
-// listing-sends repo (BE4/C4) — the "Sent to tenants" / "Listings sent" record.
+// listing-sends repo (BE4/C4) — the "Sent to tenants" / "Properties sent" record.
 //
-// ONE row per unit↔contact pairing captures that a listing (a `unit`, the
+// ONE row per unit↔contact pairing captures that a property (a `unit`, the
 // tenant-facing "home") was sent to a tenant and the tenant's RESPONSE. Two read
 // directions share these rows:
 //   - listByUnit(unitId)    → the unit's "Sent to tenants" roster (base table).
-//   - listByContact(contactId) → the tenant's "Listings sent" (byContact GSI,
+//   - listByContact(contactId) → the tenant's "Properties sent" (byContact GSI,
 //     newest-first by sentAt).
 //
 // KEY shape (lib/tables.ts): PK unitId, SK contactId — one upsert-keyed row per
@@ -29,23 +29,23 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
- * The tenant's response to a sent listing (C4 `ListingResponse`, VERBATIM — the
+ * The tenant's response to a sent property (C4 `ListingResponse`, VERBATIM — the
  * frontend imports the identical union). Defaults to 'no_reply' on send; a
  * manual PATCH sets 'interested' / 'not_a_fit' (inference later). Do NOT rename.
  */
 export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
 
-/** How the listing reached the tenant (C4 `ListingSendRow.via`). */
+/** How the property reached the tenant (C4 `ListingSendRow.via`). */
 export type ListingSendVia = 'broadcast' | 'individual';
 
 /** One stored listing-send row. Flexible document — these are the read fields. */
 export interface ListingSendItem {
-  /** PK — the unit (listing) that was sent. */
+  /** PK — the unit (property) that was sent. */
   unitId: string;
   /** SK — the tenant the unit was sent to. */
   contactId: string;
   response: ListingResponse;
-  /** byContact GSI range (ISO 8601) — when the listing was (most recently) sent. */
+  /** byContact GSI range (ISO 8601) — when the property was (most recently) sent. */
   sentAt: string;
   via: ListingSendVia;
   /** The broadcast that sent it, when via='broadcast'. */

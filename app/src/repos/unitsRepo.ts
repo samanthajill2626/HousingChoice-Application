@@ -37,7 +37,7 @@ import {
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
- * Listing (unit) lifecycle status (byStatus GSI hash; also gates the public
+ * Property (unit) lifecycle status (byStatus GSI hash; also gates the public
  * flyer). The full enum lives in lib/statusModel.ts (LISTING_STATUSES, §6); the
  * route allowlists these so the GSI partition key never takes an arbitrary
  * value. `available` is the only publicly shareable status (SHAREABLE_STATUSES).
@@ -81,7 +81,7 @@ export const UNIT_CONTACT_ROLES: readonly UnitContact['role'][] = [
  * A related unit (BE3/C3 — contract verbatim): a sibling in the same property
  * (building/duplex group) or another unit owned by the same landlord. Fields
  * reuse the legacy unit shape (address/status) so the dashboard can render a
- * related-listing card without a second fetch.
+ * related-property card without a second fetch.
  */
 export interface RelatedUnit {
   unitId: string;
@@ -106,7 +106,7 @@ export class CannotRemovePrimaryLandlordError extends Error {
 
 /**
  * The contractual + commonly read attributes; items stay flexible documents
- * (only unitId + the three GSI keys are contractual). All listing facts are
+ * (only unitId + the three GSI keys are contractual). All property facts are
  * optional — a unit can be created as a stub and filled in over time, exactly
  * like a contact.
  */
@@ -138,7 +138,7 @@ export interface UnitItem {
   /** Landlord incentive fee (LIF). */
   lif?: number;
   /**
-   * Status-model (§4): the accepted rent, written onto the listing when
+   * Status-model (§4): the accepted rent, written onto the property when
    * `Awaiting rent acceptance` clears (the landlord accepts the determined
    * rent) — used for billing. Finite, non-negative. Set by the transition
    * service on the rent-acceptance move.
@@ -152,7 +152,7 @@ export interface UnitItem {
   accessibility?: string;
   /** Pets policy — free-form (string or boolean). */
   pets?: string | boolean;
-  /** Listing priority — free-form. */
+  /** Property priority — free-form. */
   priority?: string;
   /** Photo/media references — S3 keys or URLs. */
   media?: string[];
@@ -186,8 +186,8 @@ export interface UnitItem {
    */
   propertyId?: string;
   /**
-   * Soft-delete marker (ISO 8601). PRESENT → the listing is "deleted": hidden
-   * from the listing lists (and the landlord's listings card, related/similar),
+   * Soft-delete marker (ISO 8601). PRESENT → the property is "deleted": hidden
+   * from the property lists (and the landlord's properties card, related/similar),
    * but the record and ALL its data are retained so it can be restored (clear the
    * stamp). Mirrors the contact soft-delete.
    */
@@ -232,8 +232,8 @@ export interface ListUnitsOpts {
   limit?: number;
   exclusiveStartKey?: Record<string, unknown>;
   /**
-   * Soft-delete scope. Omitted/false → exclude deleted listings (every normal
-   * list). true → return ONLY soft-deleted listings (the "Deleted" view). Applied
+   * Soft-delete scope. Omitted/false → exclude deleted properties (every normal
+   * list). true → return ONLY soft-deleted properties (the "Deleted" view). Applied
    * as a FilterExpression on `deleted_at`.
    */
   deleted?: boolean;
@@ -259,12 +259,12 @@ export interface UnitsRepo {
    */
   update(unitId: string, patch: Record<string, unknown>): Promise<UnitItem>;
   /**
-   * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the listing is hidden from
+   * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the property is hidden from
    * the lists / landlord card / related / similar while every field is retained.
    * ConditionExpression guards existence (route → 404). Returns ALL_NEW.
    */
   softDelete(unitId: string, at: string): Promise<UnitItem>;
-  /** Restore a soft-deleted listing: REMOVE `deleted_at`. ALL_NEW; 404-guarded. */
+  /** Restore a soft-deleted property: REMOVE `deleted_at`. ALL_NEW; 404-guarded. */
   restore(unitId: string): Promise<UnitItem>;
   /** All units for a landlord via the byLandlord GSI. */
   listByLandlord(landlordId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;

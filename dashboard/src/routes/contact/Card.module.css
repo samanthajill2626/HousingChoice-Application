@@ -98,7 +98,7 @@
   color: var(--c-text);
 }
 
-/* --- List rows (Placements / Tours / Listings / Listings-sent) ----------- */
+/* --- List rows (Placements / Tours / Properties / Listings-sent) ----------- */
 
 .li {
   display: flex;

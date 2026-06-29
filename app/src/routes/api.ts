@@ -304,7 +304,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       config,
     }),
   );
-  // Units CRUD (M1.5; requireAuth — VAs maintain listings, no admin gate).
+  // Units CRUD (M1.5; requireAuth — VAs maintain properties, no admin gate).
   router.use(
     '/units',
     createUnitsRouter({

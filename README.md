@@ -4,7 +4,7 @@ HousingChoice is a text-first tenant-placement engine for the Section 8 (Housing
 
 **Stack (locked):** Node.js 24 LTS + Express + TypeScript modular monolith — one `app` process (API/webhooks/dashboard API) and one `worker` process (jobs), one codebase, one ARM64 Docker image, running on EC2 t4g.small behind CloudFront. React + Vite dashboard. AWS us-east-1, single account, two Terraform stacks (`hc-dev-` / `hc-prod-`), DynamoDB on-demand with PITR, Parameter Store for all config/secrets. No CI/CD — all ops via npm scripts.
 
-**Naming conventions:** the shared vocabulary (one `unit` entity → "home"/"listing" labels by audience) lives in [`documentation/GLOSSARY.md`](./documentation/GLOSSARY.md).
+**Naming conventions:** the shared vocabulary (one `unit` entity → "home"/"property" labels by audience) lives in [`documentation/GLOSSARY.md`](./documentation/GLOSSARY.md).
 
 ## Status
 

@@ -19,7 +19,7 @@ placement route/deadline logic). That means tour scheduling is attached to an en
 per the model, does not yet exist when a tour is booked.
 
 This was deliberately **deferred** out of the status-model backend-foundation build
-(which keeps existing tour fields intact and focuses on the placement/tenant/listing
+(which keeps existing tour fields intact and focuses on the placement/tenant/property
 status spine) so the two changes don't get coupled. Tracking it here so it isn't lost.
 
 **Suggested fix.** Relocate tour scheduling to the **tenant `Searching`** context

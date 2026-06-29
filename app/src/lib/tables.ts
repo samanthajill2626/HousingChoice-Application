@@ -260,7 +260,7 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // NEW in M1.8a (NOT in the doc §5 9-table model — README deviation
-    // 2026-06-13): the filtered share-broadcast ("Share Listings") record.
+    // 2026-06-13): the filtered share-broadcast ("Share Properties") record.
     // The operator picks a unit + bedroom-size/housing-authority filter and
     // texts the matching tenants the unit's flyer; this row is the draft →
     // sending → sent/failed lifecycle + the audience snapshot, per-recipient
@@ -288,7 +288,7 @@ export const TABLES: readonly TableSpec[] = [
   {
     // NEW in BE2/C2 (NOT in the doc §5 9-table model — new-dashboard build): the
     // person-centric activity-event log. Each row is one milestone (a case
-    // opened/closed, a stage change, a listing sent, a number added, group-text
+    // opened/closed, a stage change, a property sent, a number added, group-text
     // membership, …) for a contact, so the contact-timeline endpoint can MERGE
     // these with the contact's messages/calls into one chronological feed.
     //
@@ -305,7 +305,7 @@ export const TABLES: readonly TableSpec[] = [
   {
     // NEW in BE4/C4 (NOT in the doc §5 9-table model — new-dashboard build): the
     // listing-send record. ONE row per unit↔contact pairing captures that a
-    // listing (a `unit`, tenant-facing "home") was sent to a tenant and the
+    // property (a `unit`, tenant-facing "home") was sent to a tenant and the
     // tenant's response (interested / not_a_fit / no_reply). Two read directions
     // share these rows: GET /api/units/:id/recipients ("Sent to tenants") reads
     // the base table by unitId; GET /api/contacts/:id/listings-sent reads the

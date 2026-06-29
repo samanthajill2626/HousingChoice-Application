@@ -52,8 +52,8 @@ that reads/writes it**, or the new endpoints 500 against a missing table/index.
 | Change | Table | Kind | Powers |
 |--------|-------|------|--------|
 | BE2 activity/event log | `activity_events` | **new table** — PK `contactId`, SK `tsEventId` | contact timeline + milestone log |
-| BE4 listings-sent | `listing_sends` | **new table** — PK `unitId`, SK `contactId`, GSI `byContact` (`contactId`+`sentAt`) | "Sent to tenants" / "Listings sent" |
-| BE3 related units | `units` (existing) | **GSI add** — `byProperty` (sparse, hash `propertyId`) | duplex/building "Related listings" |
+| BE4 listings-sent | `listing_sends` | **new table** — PK `unitId`, SK `contactId`, GSI `byContact` (`contactId`+`sentAt`) | "Sent to tenants" / "Properties sent" |
+| BE3 related units | `units` (existing) | **GSI add** — `byProperty` (sparse, hash `propertyId`) | duplex/building "Related properties" |
 
 All three are already in both `tables.auto.tfvars.json` files. To ship: `npm run plan -- dev` (review the
 three adds), `npm run apply -- dev`, then `npm run deploy:dev` (same sequence for prod via the usual

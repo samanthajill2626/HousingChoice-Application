@@ -1,7 +1,7 @@
 // buildContactFile — pure derivations for the contact detail right pane from
 // EXISTING endpoints (/api/placements, /api/units). The C4/C5 slices (listings-sent,
 // media) aren't here — they 404 until the backend lands and render a pending
-// state. These functions back the Placements / Tours / Listings panels with REAL
+// state. These functions back the Placements / Tours / Properties panels with REAL
 // data today. Tested in isolation.
 import type { PlacementItem, UnitItem } from '../../api/index.js';
 

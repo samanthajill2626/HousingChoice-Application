@@ -78,7 +78,7 @@ export function useContactFile(contactId: string): ContactFileState {
 
     (async () => {
       try {
-        // Placements + units back the REAL panels (Placements / Tours / Listings); both
+        // Placements + units back the REAL panels (Placements / Tours / Properties); both
         // exist today. The C4/C5 slices degrade independently.
         const [placements, units, listingsSent, media] = await Promise.all([
           getPlacements(signal),

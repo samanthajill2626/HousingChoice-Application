@@ -1,4 +1,4 @@
-// buildListingFile — pure derivations for the listing detail right pane, from
+// buildListingFile — pure derivations for the property detail right pane, from
 // the unit + EXISTING endpoints (/api/placements, /api/units) + the resolved landlord
 // contact. The C3 roster/related endpoint isn't live yet, so these provide the
 // honest FALLBACKS the spec calls for:

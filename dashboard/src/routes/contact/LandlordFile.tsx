@@ -1,7 +1,7 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) ·
-// Preferences · Listings (their units, with status) · Placements on their units ·
-// Group texts · Media. Listings + Placements are REAL (from /api/units + /api/placements);
+// Preferences · Properties (their units, with status) · Placements on their units ·
+// Group texts · Media. Properties + Placements are REAL (from /api/units + /api/placements);
 // Preferences + Group texts + Media are pending until their backend slices land.
 import {
   STAGE_LABELS,
@@ -113,9 +113,9 @@ export function LandlordFile({
         <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
       </Card>
 
-      <Card title="Listings" aside={myUnits.length > 0 ? String(myUnits.length) : undefined}>
+      <Card title="Properties" aside={myUnits.length > 0 ? String(myUnits.length) : undefined}>
         {myUnits.length === 0 ? (
-          <EmptyRow>No listings yet.</EmptyRow>
+          <EmptyRow>No properties yet.</EmptyRow>
         ) : (
           myUnits.map((u) => (
             <Row

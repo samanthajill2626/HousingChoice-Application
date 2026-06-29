@@ -61,7 +61,7 @@ data "aws_iam_policy_document" "app" {
     )
   }
 
-  # Media bucket objects + listing.
+  # Media bucket objects + property.
   statement {
     sid = "MediaObjects"
     actions = [

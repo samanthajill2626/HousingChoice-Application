@@ -91,7 +91,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('PlacementsBoard', () => {
-  it('renders a card in its phase column (tenant name + listing)', () => {
+  it('renders a card in its phase column (tenant name + property)', () => {
     usePlacements.mockReturnValue(baseState([mkPlacement({ placementId: 'c1', stage: 'collect_rta' })]));
     renderBoard();
     const rta = screen.getByRole('listitem', { name: 'RTA' });

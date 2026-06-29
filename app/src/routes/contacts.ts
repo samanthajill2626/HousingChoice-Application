@@ -64,7 +64,7 @@ export interface ContactsRouterDeps {
   auditRepo?: AuditRepo;
   /** BE2/C2: emit a `number_added` milestone on a successful phone add. */
   activityEventsRepo?: ActivityEventsRepo;
-  /** BE4/C4: serve a contact's "Listings sent" (GET /:id/listings-sent). */
+  /** BE4/C4: serve a contact's "Properties sent" (GET /:id/listings-sent). */
   listingSendsRepo?: ListingSendsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   vocabularyRepo?: ContactVocabularyRepo;
@@ -640,10 +640,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ contact: { ...contact, phones: contactPhones(contact) } });
   });
 
-  // GET /api/contacts/:contactId/listings-sent — the tenant page's "Listings
+  // GET /api/contacts/:contactId/listings-sent — the tenant page's "Properties
   // sent" (BE4/C4). Returns { sent: ListingSendRow[] } via listByContact
   // (newest-first by sentAt). Returns [] for none. A phone-pointer id (BE1's
-  // internal routing record) is a 404 — never a contact, never a listings owner.
+  // internal routing record) is a 404 — never a contact, never a properties owner.
   // (`listings-sent` is a distinct segment from the bare :contactId routes, so
   // there is no route collision.)
   router.get('/:contactId/listings-sent', async (req, res) => {

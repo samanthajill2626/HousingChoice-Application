@@ -123,7 +123,7 @@ export interface MessagePersistedEvent {
 }
 
 /**
- * A share-broadcast (M1.8a "Share Listings") progressed — emitted from the
+ * A share-broadcast (M1.8a "Share Properties") progressed — emitted from the
  * broadcast.send job (on completion) and the delivery-callback rollup so the
  * results view updates live. Carries the lifecycle status + the rolled-up
  * counters; NO PII (counts only).

@@ -2,7 +2,7 @@
 // authenticated) the AppFrame shell wrapping the routed pages. Most routes are
 // still GENERATED from the nav model (allNavTargets) as placeholders so the nav
 // links and the routes can never drift apart; the implemented pages (Today, the
-// Contacts + Listings list views, and the contact/listing detail pages) are
+// Contacts + Properties list views, and the contact/property detail pages) are
 // swapped in explicitly, one destination at a time.
 import { Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './app/AuthContext.js';
@@ -65,7 +65,7 @@ export default function App(): React.JSX.Element {
             <Route path="placements" element={<PlacementsBoard />} />
             <Route path="placements/:placementId" element={<PlacementDetail />} />
 
-            {/* Listings list view. Static — ranks above listings/:unitId. */}
+            {/* Properties list view. Static — ranks above listings/:unitId. */}
             <Route path="listings" element={<ListingsList />} />
             <Route path="listings/deleted" element={<ListingsList deleted />} />
 
@@ -82,7 +82,7 @@ export default function App(): React.JSX.Element {
             {/* The tenant + landlord detail page (one shell). The static
                 /contacts/* list routes above rank above this dynamic segment. */}
             <Route path="contacts/:contactId" element={<ContactDetail />} />
-            {/* The listing detail page. The static /listings list route above
+            {/* The property detail page. The static /listings list route above
                 ranks above this dynamic segment. */}
             <Route path="listings/:unitId" element={<ListingDetail />} />
 

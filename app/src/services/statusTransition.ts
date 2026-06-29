@@ -121,10 +121,10 @@ export interface StatusTransitionService {
   transitionPlacement(placementId: string, input: TransitionPlacementInput): Promise<PlacementItem>;
   /** Explicit tenant-status write (incl. manual drop-out; no RTA-in-hand gate — 2026-06-19). */
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
-  /** Explicit listing-status write. */
+  /** Explicit property-status write. */
   setListingStatus(unitId: string, input: SetListingStatusInput): Promise<UnitItem>;
   /**
-   * Best-effort derive coarse tenant+listing statuses for a stage (override-gated,
+   * Best-effort derive coarse tenant+property statuses for a stage (override-gated,
    * source 'derived'). Used by placement CREATE (a non-transition). Never throws.
    */
   deriveForStage(tenantId: string, unitId: string, stage: PlacementStage): Promise<void>;
@@ -167,7 +167,7 @@ export function createStatusTransitionService(
   }
 
   /**
-   * Derived LISTING-status write — symmetric to deriveTenantStatus (override set
+   * Derived PROPERTY-status write — symmetric to deriveTenantStatus (override set
    * is on_hold/off_market). Same load → override-gate → no-op-gate →
    * update+audit, best-effort, NO actor, event-type `listing_status_changed`.
    */
@@ -312,7 +312,7 @@ export function createStatusTransitionService(
         }
       }
 
-      // 5) Derivation (§7). For `lost`, bounce tenant→searching / listing→
+      // 5) Derivation (§7). For `lost`, bounce tenant→searching / property→
       //    available ONLY when no OTHER active (non-terminal) placement exists
       //    on that tenant/unit; otherwise the existing derivation stands.
       if (toStage === 'lost') {
@@ -321,7 +321,7 @@ export function createStatusTransitionService(
         const derived = deriveStatuses('lost'); // searching / available
         // The lost-bounce is a DERIVED write: it goes through the SAME shared
         // helpers as applyDerivation, so it inherits the identical override-gate
-        // (a manually On-hold/Inactive tenant or On-hold/Off-market listing STAYS
+        // (a manually On-hold/Inactive tenant or On-hold/Off-market property STAYS
         // pinned), the no-op guard, and the {from,to,source:'derived'} audit.
         // Only clear the side that has no OTHER active placement.
         if (tenantClear) await deriveTenantStatus(existing.tenantId, derived.tenantStatus);

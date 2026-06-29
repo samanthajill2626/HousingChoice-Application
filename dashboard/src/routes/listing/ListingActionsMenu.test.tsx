@@ -21,44 +21,44 @@ function setup(props: Partial<React.ComponentProps<typeof ListingActionsMenu>> =
 }
 
 describe('ListingActionsMenu', () => {
-  it('shows Delete (not Restore) for a live listing and fires onDelete', async () => {
+  it('shows Delete (not Restore) for a live property and fires onDelete', async () => {
     const user = userEvent.setup();
     const { onDelete } = setup();
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    expect(screen.queryByRole('menuitem', { name: /Restore listing/i })).toBeNull();
-    await user.click(screen.getByRole('menuitem', { name: /Delete listing/i }));
+    expect(screen.queryByRole('menuitem', { name: /Restore property/i })).toBeNull();
+    await user.click(screen.getByRole('menuitem', { name: /Delete property/i }));
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
-  it('shows Restore (not Delete) for a deleted listing and fires onRestore', async () => {
+  it('shows Restore (not Delete) for a deleted property and fires onRestore', async () => {
     const user = userEvent.setup();
     const { onRestore } = setup({ deleted: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    expect(screen.queryByRole('menuitem', { name: /Delete listing/i })).toBeNull();
-    await user.click(screen.getByRole('menuitem', { name: /Restore listing/i }));
+    expect(screen.queryByRole('menuitem', { name: /Delete property/i })).toBeNull();
+    await user.click(screen.getByRole('menuitem', { name: /Restore property/i }));
     expect(onRestore).toHaveBeenCalledTimes(1);
   });
 
-  it('shows Edit listing and fires onEdit (when onEdit is provided)', async () => {
+  it('shows Edit property and fires onEdit (when onEdit is provided)', async () => {
     const user = userEvent.setup();
     const { onEdit } = setup();
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    await user.click(screen.getByRole('menuitem', { name: /Edit listing/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Edit property/i }));
     expect(onEdit).toHaveBeenCalledTimes(1);
   });
 
-  it('omits Edit listing when onEdit is not provided (e.g. a deleted listing)', async () => {
+  it('omits Edit property when onEdit is not provided (e.g. a deleted property)', async () => {
     const user = userEvent.setup();
     setup({ onEdit: undefined, deleted: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    expect(screen.queryByRole('menuitem', { name: /Edit listing/i })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Edit property/i })).toBeNull();
   });
 
   it('disables the delete/restore item while a request is in flight', async () => {
     const user = userEvent.setup();
     setup({ deleteBusy: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
-    expect(screen.getByRole('menuitem', { name: /Delete listing/i })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: /Delete property/i })).toBeDisabled();
   });
 
   it('closes on Escape', async () => {

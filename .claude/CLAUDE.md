@@ -6,14 +6,16 @@ One entity, three labels by audience. The "single dwelling a single household ca
 lease and move into" is **always `unit` in code/data**. Human-facing copy uses:
 
 - **Tenant →** "home"
-- **Landlord →** "listing"
-- **Staff / navigator (dashboard) →** "listing"
+- **Landlord →** "property"
+- **Staff / navigator (dashboard) →** "property"
 - **Code / data / internal →** "unit" (`unitId`, `unitsRepo`, `UnitItem`)
 
 `unit` is the HUD/Section 8 term and is **structure-agnostic** (a house, townhome,
-or apartment is all a "dwelling unit") — it is not apartment-specific. Do **not**
-use "property" for this entity (in PM systems a property is the *parent* of units);
-normalize stray "property" wording that means a single dwelling back to `unit`.
+or apartment is all a "dwelling unit") — it is not apartment-specific. **`property`
+is the blessed landlord/staff word for this single-`unit` entity** (its everyday,
+no-advertisement-connotation name). If we ever model a multi-unit *parent* layer,
+name it **"building"** or **"parcel"** — never "property" — so the leaf word
+(`property` = one `unit`) and the parent word never collide.
 Keep `listing_link` / "public listing" (the external listing URL) and the
 JS object-property sense of "property" as-is.
 

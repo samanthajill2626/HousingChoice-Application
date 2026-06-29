@@ -1,4 +1,4 @@
-// broadcasts repo (M1.8a) — the filtered share-broadcast ("Share Listings")
+// broadcasts repo (M1.8a) — the filtered share-broadcast ("Share Properties")
 // record: a draft → sending → sent/failed lifecycle row carrying the audience
 // filter snapshot, the per-recipient delivery map, and rolled-up stats the
 // results view reads.

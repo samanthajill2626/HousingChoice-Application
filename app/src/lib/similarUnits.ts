@@ -1,5 +1,5 @@
-// BE5/C6 — similar-listings ranking. A PURE, deterministic function that ranks
-// `available` units by attribute similarity to a target unit, for the listing
+// BE5/C6 — similar-properties ranking. A PURE, deterministic function that ranks
+// `available` units by attribute similarity to a target unit, for the property
 // detail page's "Similar" panel. No I/O, no clock, no randomness — the same
 // inputs always produce the same order + matchPct (unit-tested), so the route
 // is a thin shell over this.

@@ -23,7 +23,7 @@ type FieldKind = 'string' | 'number' | 'string[]' | 'pets' | 'address';
  * (checked by the caller). NOTE: unitId/created_at/updated_at are NOT writable
  * (repo-owned).
  *
- * `status` is DELIBERATELY not here (§8: every listing-status change routes
+ * `status` is DELIBERATELY not here (§8: every property-status change routes
  * through the ONE transition service so status_source provenance is stamped —
  * use PATCH /api/units/:unitId/listing-status). `final_rent` is NOT writable
  * either: it is written ONLY by the transition service on rent acceptance (§4),

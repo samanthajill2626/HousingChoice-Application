@@ -1,5 +1,5 @@
 // Units CRUD router (M1.5) — mounted under /api/units, behind requireAuth via
-// the /api mount (app.ts). VAs maintain listings day-to-day, so NO admin gate
+// the /api mount (app.ts). VAs maintain properties day-to-day, so NO admin gate
 // (same posture as contacts triage).
 //
 //   GET   /api/units?status=&jurisdiction=&landlordId=&limit=&cursor=
@@ -111,7 +111,7 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
- * BE5/C6: the cap on how many `available` units the similar-listings endpoint
+ * BE5/C6: the cap on how many `available` units the similar-properties endpoint
  * will sweep before ranking. The ranker is O(candidates) and the result is a
  * top-N panel, so 500 is a generous bound on a single jurisdiction's open
  * inventory. If MORE than this remain, we stop and log.warn (the ranker ran on
@@ -233,7 +233,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
     }
 
-    // ?deleted=true → the "Deleted" view (ONLY soft-deleted listings); omitted/
+    // ?deleted=true → the "Deleted" view (ONLY soft-deleted properties); omitted/
     // anything else → exclude deleted (every normal list path below).
     const rawDeleted = req.query['deleted'];
     const deleted = rawDeleted === 'true' || rawDeleted === '1';
@@ -273,10 +273,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
-    // status is NOT a writable CRUD field (§8: listing-status changes route
+    // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a
     // transition, but the denormalized provenance must be initialized: a new
-    // listing starts in 'setup' (§6: being prepped, NOT yet shareable — only
+    // property starts in 'setup' (§6: being prepped, NOT yet shareable — only
     // 'available' is shareable), stamped status_source 'derived' (NOT 'manual')
     // so it stays a derivation-permitting baseline. Staff move setup → available
     // (the publish/ready action) via PATCH /api/units/:unitId/listing-status,
@@ -315,12 +315,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // SEAM (BE4/C4 — individual flyer send): there is currently NO individual-send
-  // route in the codebase (only the share-broadcast fan-out sends a listing). The
+  // route in the codebase (only the share-broadcast fan-out sends a property). The
   // data model already supports `via:'individual'`; when an individual-send
   // endpoint lands, it should call
   //   listingSends.recordSend({ contactId, unitId, via: 'individual' })
   // (best-effort, alongside the send) so a one-off flyer send shows up in both
-  // the "Sent to tenants" and "Listings sent" lists, exactly like a broadcast.
+  // the "Sent to tenants" and "Properties sent" lists, exactly like a broadcast.
   // Individual-send CAPTURE is therefore a seam pending that endpoint.
 
   // GET /api/units/:unitId/recipients — the "Sent to tenants" list (BE4/C4).
@@ -478,7 +478,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // GET /api/units/:unitId/placements → { placements: Array<PlacementItem & { tenantName }> }
-  // (FIX 3). The "Placements on this listing" read: every placement on this unit,
+  // (FIX 3). The "Placements on this property" read: every placement on this unit,
   // each enriched with the tenant's display name resolved at READ time (null when
   // the tenant has no contact — never 500). 404 unknown unit (matches GET /:id).
   // Bounded (a unit has few placements); `placements` is a distinct segment so
@@ -596,7 +596,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     // Emit listing_reviewed ONLY on a real change to a reviewed response.
     if (changed && (response === 'interested' || response === 'not_a_fit')) {
-      const label = response === 'interested' ? 'Listing reviewed · Interested' : 'Listing reviewed · Not a fit';
+      const label = response === 'interested' ? 'Property reviewed · Interested' : 'Property reviewed · Not a fit';
       try {
         await activityEvents.record({
           contactId,
@@ -654,7 +654,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // DELETE /api/units/:unitId → 200 { unit }. SOFT delete: stamps deleted_at so the
   // record + ALL its data are retained (POST .../restore brings it back), but it's
-  // hidden from the listing lists, the landlord's listings card, and related/similar.
+  // hidden from the property lists, the landlord's properties card, and related/similar.
   // Audited. 404 when the unit doesn't exist.
   router.delete('/:unitId', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
@@ -675,7 +675,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // POST /api/units/:unitId/restore → 200 { unit }. Clear deleted_at, bringing a
-  // soft-deleted listing back into the normal views. Audited; 404 when missing.
+  // soft-deleted property back into the normal views. Audited; 404 when missing.
   router.post('/:unitId/restore', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     let unit;

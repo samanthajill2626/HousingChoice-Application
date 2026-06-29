@@ -103,7 +103,7 @@ export interface RowProps {
   right?: React.ReactNode;
 }
 
-/** A list row (a placement / tour / listing / listings-sent entry). Links out when
+/** A list row (a placement / tour / property / listings-sent entry). Links out when
  *  `to` is set. */
 export function Row({ to, label, right }: RowProps): React.JSX.Element {
   const inner = (

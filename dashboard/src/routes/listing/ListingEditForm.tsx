@@ -1,4 +1,4 @@
-// ListingEditForm — the edit dialog for a listing (unit). Mirrors ContactEditForm:
+// ListingEditForm — the edit dialog for a property (unit). Mirrors ContactEditForm:
 // stacked labelled fields in a Modal, DIRTY-TRACKED (only the changed fields are
 // PATCHed; the server SET-merges, so an untouched field is never blanked). On
 // success the parent applies the returned unit in place (no refetch). The field
@@ -168,7 +168,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
 
   return (
     <Modal
-      title="Edit listing"
+      title="Edit property"
       onClose={onClose}
       footer={
         <>

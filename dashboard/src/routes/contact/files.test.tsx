@@ -105,7 +105,7 @@ describe('LandlordFile', () => {
     );
   }
 
-  it('renders the landlord listings with status, linking to the listing route', () => {
+  it('renders the landlord properties with status, linking to the property route', () => {
     renderIt();
     const link = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA · 2BR/ });
     expect(link).toHaveAttribute('href', '/listings/u1');

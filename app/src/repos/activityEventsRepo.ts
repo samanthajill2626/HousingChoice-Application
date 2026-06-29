@@ -1,7 +1,7 @@
 // activity-events repo (BE2/C2) — the person-centric milestone log.
 //
 // Each row records ONE milestone for a contact (a placement opened/closed, a stage
-// change, a listing sent, a number added, group-text membership, …). The
+// change, a property sent, a number added, group-text membership, …). The
 // contact-timeline endpoint (GET /api/contacts/:id/timeline) MERGES these with
 // the contact's messages/calls into one chronological feed; the milestone is a
 // link-out marker (refType/refId) — it never inlines content.

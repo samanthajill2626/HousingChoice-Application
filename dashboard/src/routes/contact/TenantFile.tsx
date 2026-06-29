@@ -1,8 +1,8 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
-// status) · Preferences & notes · Listings sent (C4) · Tours · Placements · Group
+// status) · Preferences & notes · Properties sent (C4) · Tours · Placements · Group
 // texts · Media (C5). Placements + Tours are REAL (derived from /api/placements);
-// Listings-sent + Media render a "pending backend" state until BE4/BE5 land;
+// Properties-sent + Media render a "pending backend" state until BE4/BE5 land;
 // Preferences are manual-now (pending until the gleaning slice). Each list row
 // links to its detail route.
 import {
@@ -142,11 +142,11 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Listings sent">
+      <Card title="Properties sent">
         {listingsSentPending ? (
           <PendingPanel />
         ) : (
-          <EmptyRow>No listings sent yet.</EmptyRow>
+          <EmptyRow>No properties sent yet.</EmptyRow>
         )}
       </Card>
 

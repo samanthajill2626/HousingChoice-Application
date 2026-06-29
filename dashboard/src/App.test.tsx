@@ -100,19 +100,19 @@ describe('App', () => {
     expect(screen.queryByRole('heading', { level: 1, name: 'Contacts' })).not.toBeInTheDocument();
   });
 
-  it('resolves the Listings list at /listings', async () => {
+  it('resolves the Properties list at /listings', async () => {
     mockApi();
     renderAt('/listings');
     await waitFor(() =>
-      expect(screen.getByRole('heading', { level: 1, name: 'Listings' })).toBeInTheDocument(),
+      expect(screen.getByRole('heading', { level: 1, name: 'Properties' })).toBeInTheDocument(),
     );
   });
 
-  it('still resolves the listing DETAIL page at /listings/:unitId', async () => {
+  it('still resolves the property DETAIL page at /listings/:unitId', async () => {
     mockApi();
     renderAt('/listings/u1');
-    // The dynamic detail route resolves (not the static Listings list).
+    // The dynamic detail route resolves (not the static Properties list).
     await waitFor(() => expect(screen.getByTestId('listing-detail')).toBeInTheDocument());
-    expect(screen.queryByRole('heading', { level: 1, name: 'Listings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 1, name: 'Properties' })).not.toBeInTheDocument();
   });
 });

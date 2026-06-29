@@ -235,7 +235,7 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
   inactive: 'Inactive',
 };
 
-// --- Listing lifecycle (coarse, mostly derived) -----------------------------
+// --- Property lifecycle (coarse, mostly derived) -----------------------------
 export const LISTING_STATUSES = [
   'setup',
   'available',
@@ -258,7 +258,7 @@ export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
   off_market: 'Off market',
 };
 
-/** The ONLY publicly-shareable listing status (`available` gates the public flyer). */
+/** The ONLY publicly-shareable property status (`available` gates the public flyer). */
 export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
 
 // --- Transition sources -----------------------------------------------------
@@ -619,7 +619,7 @@ export interface UnitItem {
   unitId: string;
   landlordId: string;
   status: UnitStatus;
-  /** Provenance of the last listing-status write. */
+  /** Provenance of the last property-status write. */
   status_source?: TransitionSource;
   /** The accepted contract rent, written on the move OUT of awaiting_rent_acceptance. */
   final_rent?: number;
@@ -641,19 +641,19 @@ export interface UnitItem {
   accessibility?: string;
   /** Pet policy, e.g. "Cats only". */
   pets?: string;
-  /** S3 keys / URLs of listing media (the Photos gallery + hero). */
+  /** S3 keys / URLs of property media (the Photos gallery + hero). */
   media?: string[];
   listing_link?: string;
   /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
    *  single `landlordId` for a one-row roster. */
   contacts?: UnitContact[];
-  /** Free-text "how to tour" copy (the listing page's process card). */
+  /** Free-text "how to tour" copy (the property page's process card). */
   tour_process?: string;
-  /** Free-text "how to apply" copy (the listing page's process card). */
+  /** Free-text "how to apply" copy (the property page's process card). */
   application_process?: string;
   primary_voice_contact?: string;
-  /** Soft-delete marker (ISO 8601). Present → the listing is "deleted": hidden
-   *  from the listing lists + landlord card but fully retained (restore clears it). */
+  /** Soft-delete marker (ISO 8601). Present → the property is "deleted": hidden
+   *  from the property lists + landlord card but fully retained (restore clears it). */
   deleted_at?: string;
   created_at?: string;
   updated_at?: string;
@@ -776,7 +776,7 @@ export interface ContactTimelinePage {
 }
 
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------
-// Copied verbatim from the build plan §C4. The tenant file's "Listings sent".
+// Copied verbatim from the build plan §C4. The tenant file's "Properties sent".
 
 export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
 export interface ListingSendRow {
@@ -807,8 +807,8 @@ export interface ContactMediaItem {
 }
 
 // --- C3: Unit ↔ contacts roster + related (§API Contract C3) ----------------
-// Copied verbatim from the build plan §C3. The listing page's Contacts roster
-// (landlord/PM, each opening their contact page) + Related-listings panel.
+// Copied verbatim from the build plan §C3. The property page's Contacts roster
+// (landlord/PM, each opening their contact page) + Related-properties panel.
 // UnitItem gains an optional `contacts[]` (BE3); legacy `landlordId` stays = the
 // primary landlord, which the page uses as a single-row FALLBACK until BE3 lands.
 
@@ -828,8 +828,8 @@ export interface RelatedUnit {
   label?: string; // "Same building (duplex)"
 }
 
-// --- C6: Similar listings (§API Contract C6) --------------------------------
-// Copied verbatim from the build plan §C6. The listing page's "Similar listings"
+// --- C6: Similar properties (§API Contract C6) --------------------------------
+// Copied verbatim from the build plan §C6. The property page's "Similar properties"
 // comps panel. 404s until BE6 lands → an honest pending state.
 
 export interface SimilarUnit {

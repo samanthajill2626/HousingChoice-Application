@@ -1,4 +1,4 @@
-// broadcast.send (M1.8a) — fan a filtered share-broadcast ("Share Listings")
+// broadcast.send (M1.8a) — fan a filtered share-broadcast ("Share Properties")
 // out to each matching TENANT's 1:1 conversation, throttled and idempotent.
 //
 // Modeled on relayFanOut.ts, but the unit differs: a broadcast sends a 1:1
@@ -282,7 +282,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         });
         await broadcasts.bumpStats(payload.broadcastId, { sent: 1, queued: -1 });
         sentCount += 1;
-        // BE2/C2: a delivered listing is a `listing_sent` milestone on the
+        // BE2/C2: a delivered property is a `listing_sent` milestone on the
         // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
         // target; fall back to the broadcast when the broadcast has no unitId.
         // Best-effort — a milestone failure must NEVER fail the send (the SMS is
@@ -292,7 +292,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           await activityEvents.record({
             contactId: contact.contactId,
             type: 'listing_sent',
-            label: 'Listing sent',
+            label: 'Property sent',
             refType: hasUnit ? 'unit' : 'broadcast',
             refId: hasUnit ? broadcast.unitId! : payload.broadcastId,
           });
@@ -303,9 +303,9 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           );
         }
         // BE4/C4: record the unit↔contact listing-send row so the "Sent to
-        // tenants" / "Listings sent" pages light up. ONLY when the broadcast
+        // tenants" / "Properties sent" pages light up. ONLY when the broadcast
         // targets a unit (a unit-less broadcast records nothing — there is no
-        // listing to attribute). Best-effort + idempotent: the upsert is safe on
+        // property to attribute). Best-effort + idempotent: the upsert is safe on
         // SQS redelivery (and the job's terminal-recipient skip already prevents
         // re-entry), and a failure must NEVER fail the send (the SMS is already
         // out + the recipient slot recorded) — so it is swallowed + logged.

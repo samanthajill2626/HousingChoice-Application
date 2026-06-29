@@ -26,7 +26,7 @@ describe('status-model label coverage (drift-guard)', () => {
     expect(Object.keys(STAGE_LABELS)).toHaveLength(PLACEMENT_STAGES.length);
   });
 
-  it('every listing status has a label', () => {
+  it('every property status has a label', () => {
     for (const s of LISTING_STATUSES) expect(LISTING_STATUS_LABELS[s], `label for ${s}`).toBeTruthy();
     expect(Object.keys(LISTING_STATUS_LABELS)).toHaveLength(LISTING_STATUSES.length);
   });

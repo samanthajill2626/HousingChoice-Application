@@ -99,7 +99,7 @@ function milestoneVariant(type: TimelineMilestoneType): string {
 }
 
 /** The deep-link target for a milestone, by refType. Placeholders for placements /
- *  listings until those detail routes land — that's expected (links out, never
+ *  properties until those detail routes land — that's expected (links out, never
  *  inlines content). Returns null when there's nothing to link to. */
 function milestoneHref(ms: TimelineMilestone): string | null {
   if (!ms.refId) return null;

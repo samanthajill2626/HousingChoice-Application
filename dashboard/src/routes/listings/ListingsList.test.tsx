@@ -53,10 +53,10 @@ afterEach(() => {
 });
 
 describe('ListingsList', () => {
-  it('shows a Listings heading and a spinner while loading', () => {
+  it('shows a Properties heading and a spinner while loading', () => {
     state = { status: 'loading', units: [] };
     renderList();
-    expect(screen.getByRole('heading', { level: 1, name: 'Listings' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Properties' })).toBeInTheDocument();
     expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
@@ -66,10 +66,10 @@ describe('ListingsList', () => {
     expect(screen.getByText(/couldn.t load|try again/i)).toBeInTheDocument();
   });
 
-  it('shows a friendly empty state when there are no listings', () => {
+  it('shows a friendly empty state when there are no properties', () => {
     state = { status: 'ready', units: [] };
     renderList();
-    expect(screen.getByText(/no listings yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/no properties yet/i)).toBeInTheDocument();
   });
 
   it('renders a row per unit with address, status, beds/baths, rent, and a detail link', () => {
@@ -112,7 +112,7 @@ describe('ListingsList', () => {
     expect(within(rows[0]!).getByText(/88 Oak Ave/)).toBeInTheDocument();
   });
 
-  it('multi-selects housing authorities and clears back to all listings', async () => {
+  it('multi-selects housing authorities and clears back to all properties', async () => {
     state = { status: 'ready', units: UNITS };
     renderList();
     const haGroup = screen.getByRole('group', { name: /housing authority/i });
@@ -140,6 +140,6 @@ describe('ListingsList', () => {
     const haGroup = screen.getByRole('group', { name: /housing authority/i });
     await userEvent.click(within(haGroup).getByRole('button', { name: 'GA DCA' }));
     expect(screen.queryAllByRole('listitem')).toHaveLength(0);
-    expect(screen.getByText(/no listings match the selected filters/i)).toBeInTheDocument();
+    expect(screen.getByText(/no properties match the selected filters/i)).toBeInTheDocument();
   });
 });

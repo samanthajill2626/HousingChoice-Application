@@ -72,7 +72,7 @@ export function getToday(day?: string, signal?: AbortSignal): Promise<TodayRespo
 /** GET /api/placements � the placement board (the Today fallback's deadline/tour/attention
  *  source). The server pages; pass `cursor` to fetch the next page (the
  *  placement board pages through ALL of them � see usePlacements). Other callers
- *  (Today / listing / contact-file) read only the first page (no cursor). */
+ *  (Today / property / contact-file) read only the first page (no cursor). */
 export function getPlacements(signal?: AbortSignal, cursor?: string): Promise<PlacementsPage> {
   return request<PlacementsPage>('/api/placements', {
     query: { cursor },
@@ -90,7 +90,7 @@ export async function getPlacement(placementId: string, signal?: AbortSignal): P
 }
 
 /** POST /api/placements — create a placement (one deal: this tenant on this unit).
- *  The backend derives the tenant + listing coarse statuses for the initial stage
+ *  The backend derives the tenant + property coarse statuses for the initial stage
  *  (§7). Returns the new placement (unwrapped from { placement }). */
 export async function createPlacement(body: {
   tenantId: string;
@@ -125,7 +125,7 @@ export async function getPlacementsBy(
 
 // --- Status-model transitions (the ONE transition surface) ------------------
 // The four routes over the backend status-transition service. Stage/tenant/
-// listing writes MUST go through these (NOT a plain PATCH) so provenance +
+// property writes MUST go through these (NOT a plain PATCH) so provenance +
 // derivation are applied server-side.
 
 /** Input to a placement stage transition. */
@@ -220,7 +220,7 @@ export async function setTenantStatus(
   return res.contact;
 }
 
-/** PATCH /api/units/:unitId/listing-status � set a listing's lifecycle status
+/** PATCH /api/units/:unitId/listing-status � set a property's lifecycle status
  *  through the transition service (status is NOT writable via a plain unit
  *  PATCH). Returns the updated unit (unwrapped from { unit }). */
 export async function setListingStatus(
@@ -291,9 +291,9 @@ export function retryMessage(
 }
 
 /** GET /api/units � the unit records. The landlord file filters this by
- *  landlordId === contactId to show the landlord's own listings; the listing
- *  page reuses it for "Related listings" (same landlord). `deleted: true` returns
- *  ONLY soft-deleted listings (the Listings "Deleted" view); omitted = exclude them. */
+ *  landlordId === contactId to show the landlord's own properties; the property
+ *  page reuses it for "Related properties" (same landlord). `deleted: true` returns
+ *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them. */
 export function getUnits(
   params: { deleted?: boolean; cursor?: string } = {},
   signal?: AbortSignal,
@@ -307,7 +307,7 @@ export function getUnits(
   });
 }
 
-/** GET /api/units/:id � a single unit record (the listing detail page header +
+/** GET /api/units/:id � a single unit record (the property detail page header +
  *  details + photos). Wrapped under { unit } on the wire; unwrapped here. */
 export async function getUnit(unitId: string, signal?: AbortSignal): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
@@ -330,7 +330,7 @@ export async function updateUnit(
   return res.unit;
 }
 
-/** DELETE /api/units/:id � SOFT-delete the listing (stamp deleted_at). The record
+/** DELETE /api/units/:id � SOFT-delete the property (stamp deleted_at). The record
  *  + all data are retained; it's hidden from the lists and can be restored.
  *  Returns the updated (deleted) unit. */
 export async function deleteUnit(unitId: string): Promise<UnitItem> {
@@ -340,7 +340,7 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
   return res.unit;
 }
 
-/** POST /api/units/:id/restore � clear deleted_at, bringing a soft-deleted listing
+/** POST /api/units/:id/restore � clear deleted_at, bringing a soft-deleted property
  *  back into the normal views. Returns the updated unit. */
 export async function restoreUnit(unitId: string): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
@@ -350,8 +350,8 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
   return res.unit;
 }
 
-/** GET /api/units/:id/related (�C3) � duplex-sibling / same-landlord listings.
- *  404s until BE3 lands ? the listing page degrades to a same-landlord FALLBACK
+/** GET /api/units/:id/related (�C3) � duplex-sibling / same-landlord properties.
+ *  404s until BE3 lands ? the property page degrades to a same-landlord FALLBACK
  *  it derives from getUnits(). */
 export async function getUnitRelated(
   unitId: string,
@@ -379,7 +379,7 @@ export async function getUnitRecipients(
 }
 
 /** GET /api/units/:id/similar (�C6) � available comps ranked by similarity.
- *  404s until BE6 lands ? the "Similar listings" panel renders a "pending
+ *  404s until BE6 lands ? the "Similar properties" panel renders a "pending
  *  backend" state. */
 export async function getUnitSimilar(
   unitId: string,
@@ -446,7 +446,7 @@ export function getContactTimeline(
   );
 }
 
-/** GET /api/contacts/:id/listings-sent (�C4) � the "Listings sent" rows. 404s
+/** GET /api/contacts/:id/listings-sent (�C4) � the "Properties sent" rows. 404s
  *  until BE4 lands ? the panel renders a "pending backend" state. */
 export async function getContactListingsSent(
   contactId: string,

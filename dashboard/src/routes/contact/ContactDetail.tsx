@@ -229,7 +229,7 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setDeleteBusy(false));
   };
 
-  // Header facts subline: voucher / authority for tenants, company / listing
+  // Header facts subline: voucher / authority for tenants, company / property
   // count for landlords, plus the number count + status.
   const facts = buildFacts();
 
@@ -463,7 +463,7 @@ export function ContactDetail(): React.JSX.Element {
     if (isLandlord) {
       if (typeof contact!['company'] === 'string') parts.push(contact!['company'] as string);
       const owned = landlordUnits(file.units, contactId).length;
-      if (owned > 0) parts.push(`${owned} listing${owned === 1 ? '' : 's'}`);
+      if (owned > 0) parts.push(`${owned} propert${owned === 1 ? 'y' : 'ies'}`);
     } else {
       if (typeof contact!.voucherSize === 'number') parts.push(`Voucher ${contact!.voucherSize}BR`);
       if (typeof contact!['housingAuthority'] === 'string') {

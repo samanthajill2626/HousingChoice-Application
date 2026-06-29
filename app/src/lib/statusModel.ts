@@ -1,6 +1,6 @@
 // THE centralized status-model knowledge (STATUS-MODEL.md §9): the ONE ordered
 // stage list, the phase map, the display-label map, the derivation map, the
-// terminal set, the tenant/listing status enums, the transition-source
+// terminal set, the tenant/property status enums, the transition-source
 // precedence, the lost-reason categories, and the per-stage stuck thresholds.
 //
 // Pure constants/maps/guards — NO I/O. Every status transition routes through
@@ -161,7 +161,7 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
   inactive: 'Inactive',
 };
 
-// --- Listing lifecycle (coarse, mostly derived; §6) -------------------------
+// --- Property lifecycle (coarse, mostly derived; §6) -------------------------
 export const LISTING_STATUSES = [
   'setup',
   'available',
@@ -187,7 +187,7 @@ export const LISTING_STATUS_LABELS: Readonly<Record<ListingStatus, string>> = {
 };
 
 /**
- * The ONLY publicly-shareable listing status (§6: `available` gates the public
+ * The ONLY publicly-shareable property status (§6: `available` gates the public
  * flyer). Kept here so the central model owns it; unitsRepo re-exports it.
  */
 export const SHAREABLE: ReadonlySet<ListingStatus> = new Set<ListingStatus>(['available']);
@@ -224,17 +224,17 @@ export const SOURCE_PRECEDENCE: Readonly<Record<TransitionSource, number>> = {
 
 // --- Override/exit states that PIN against derivation (§5/§6) ---------------
 // The 2026-06-19 decision: derivation is gated on the entity's current STATE,
-// not its source. A `derived` write (from placement→tenant/listing derivation)
+// not its source. A `derived` write (from placement→tenant/property derivation)
 // MAY overwrite the entity's current status UNLESS the current status is one of
 // these OVERRIDE/exit states, in which case the derived write is BLOCKED (the
-// state is "pinned"). All BASELINE progression states (listing: setup,
+// state is "pinned"). All BASELINE progression states (property: setup,
 // available, under_application, finalizing, occupied; tenant: needs_review,
 // onboarding, searching, placing, placed) stay derivation-eligible regardless
 // of who last wrote them. Override/exit states are only ever produced by
 // EXPLICIT writes — derivation never outputs them (see deriveStatuses /
 // PLACEMENT_DERIVATION, asserted in the model test).
 //
-// Listing overrides/exit (§6: "ovr: On hold", "term: Off market").
+// Property overrides/exit (§6: "ovr: On hold", "term: Off market").
 export const LISTING_OVERRIDE_STATES: ReadonlySet<ListingStatus> = new Set<ListingStatus>([
   'on_hold',
   'off_market',
@@ -246,7 +246,7 @@ export const TENANT_OVERRIDE_STATES: ReadonlySet<TenantStatus> = new Set<TenantS
   'inactive',
 ]);
 
-/** True when a listing status PINS against derivation (an override/exit state). */
+/** True when a property status PINS against derivation (an override/exit state). */
 export function isListingOverrideStatus(s: ListingStatus | undefined): boolean {
   return s !== undefined && LISTING_OVERRIDE_STATES.has(s);
 }
@@ -297,7 +297,7 @@ export const STAGE_STUCK_THRESHOLDS: Readonly<Partial<Record<PlacementStage, num
   // moved_in / lost: terminal, no threshold.
 };
 
-// --- Derivation (§7): placement phase/stage → coarse tenant/listing statuses -
+// --- Derivation (§7): placement phase/stage → coarse tenant/property statuses -
 /** The derived coarse statuses a placement in a given phase/stage implies. */
 export interface DerivedStatuses {
   tenantStatus: TenantStatus;
@@ -305,9 +305,9 @@ export interface DerivedStatuses {
 }
 
 /**
- * Derive the coarse tenant + listing statuses implied by a placement stage
+ * Derive the coarse tenant + property statuses implied by a placement stage
  * (§7 table). `lost` resolves to the "bounce back" pair (tenant→searching,
- * listing→available) — but the SERVICE applies it ONLY when no OTHER active
+ * property→available) — but the SERVICE applies it ONLY when no OTHER active
  * placement exists on that tenant/unit (see statusTransition.ts). The derived
  * value is the lowest-precedence input; an explicit pin still wins (§8).
  */
@@ -319,14 +319,14 @@ export function deriveStatuses(stage: PlacementStage): DerivedStatuses {
     return { tenantStatus: 'searching', listingStatus: 'available' };
   }
   const phase = STAGE_PHASE[stage];
-  // Contract + Administrative + Closure (Awaiting move-in) ⇒ listing Finalizing
+  // Contract + Administrative + Closure (Awaiting move-in) ⇒ property Finalizing
   // (tenant still Placing). `moved_in`/`lost` already returned above, so the only
   // Closure stage reaching here is the non-terminal `awaiting_move_in` — a deal in
-  // final move-in prep is Finalizing, not Under application (§3/§6 listing lifecycle).
+  // final move-in prep is Finalizing, not Under application (§3/§6 property lifecycle).
   if (phase === 'Contract' || phase === 'Administrative' || phase === 'Closure') {
     return { tenantStatus: 'placing', listingStatus: 'finalizing' };
   }
-  // Application … Rent Determination ⇒ tenant Placing, listing Under application.
+  // Application … Rent Determination ⇒ tenant Placing, property Under application.
   return { tenantStatus: 'placing', listingStatus: 'under_application' };
 }
 

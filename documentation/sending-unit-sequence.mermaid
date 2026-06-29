@@ -1,0 +1,22 @@
+---
+title: Housing Choice — Tenant Onboarding (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor T as Tenant
+    participant A as Housing Choice App
+    participant S as Sam
+    Note over T,S: The app owns the phone number. Every message flows between Tenant and Sam through the app (both directions).<br/>Notes marked [AUTO] are app automation. Sam's messages are manual comms (Phase 1).
+    Note over S: Preferences are captured from feedback, not asked upfront<br/>(she's not their personal shopper)
+    loop Until a listing fits
+        S->>A: Send a specific listing for feedback
+        A->>T: Deliver listing
+        opt Tenant shares preferences
+            T->>A: e.g., no stairs (walker), near MARTA,<br/>near kid's school, must fit a king bed
+            Note over A: [MANUAL] Save preferences to tenant profile<br/>(remembered for future matches)
+            A->>S: Relay preferences
+        end
+        S->>A: Find another match
+        A-->>S: Next matching listing
+    end
+    Note over T,S: Hand off to Tours workflow (separate)

@@ -119,6 +119,16 @@ export interface ContactItem {
    */
   phone_ref?: boolean;
   phone_ref_owner?: string;
+  /**
+   * Eligibility intake (tenant onboarding). Free-text answers to the narrow LIF
+   * questions, plus a boolean LIF-eligibility flag. First-class fields (not
+   * customFields) so eligibility is reportable/filterable later.
+   */
+  pets?: string;
+  evictions?: string;
+  /** Time at current address (free text, e.g. "3 years"). */
+  tenure?: string;
+  lifEligible?: boolean;
   [key: string]: unknown;
 }
 

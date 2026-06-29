@@ -968,7 +968,9 @@ git commit -m "feat(dashboard): edit-form Eligibility intake fields (tenant)"
 Add these methods to the `Scenario` class:
 
 ```typescript
-  /** [Team] Record the eligibility intake answers via the edit form (real UI). */
+  /** [Team] Record the eligibility intake answers via the edit form (real UI). Uses
+   *  the AUDIT-PROVEN edit pattern: open via 'Edit contact details', scope to the
+   *  'Edit contact' dialog, fields by label, Save{exact}, wait for the dialog to close. */
   teamRecordsIntake(i: {
     pets?: string;
     evictions?: string;
@@ -977,16 +979,16 @@ Add these methods to the `Scenario` class:
   }): Promise<void> {
     return step('Team records eligibility intake', async () => {
       await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
-      await this.page.getByRole('button', { name: /^Edit$/ }).click();
-      if (i.pets !== undefined) await this.page.getByRole('textbox', { name: 'Pets' }).fill(i.pets);
-      if (i.evictions !== undefined)
-        await this.page.getByRole('textbox', { name: 'Evictions' }).fill(i.evictions);
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      if (i.pets !== undefined) await dialog.getByLabel('Pets').fill(i.pets);
+      if (i.evictions !== undefined) await dialog.getByLabel('Evictions').fill(i.evictions);
       if (i.tenure !== undefined)
-        await this.page.getByRole('textbox', { name: 'Time at current address' }).fill(i.tenure);
-      if (i.lifEligible === true)
-        await this.page.getByRole('checkbox', { name: 'LIF eligible' }).check();
-      await this.page.getByRole('button', { name: 'Save' }).click();
-      await expect(this.page.getByRole('button', { name: 'Save' })).toBeHidden({ timeout: 10_000 });
+        await dialog.getByLabel('Time at current address').fill(i.tenure);
+      if (i.lifEligible === true) await dialog.getByLabel('LIF eligible').check();
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
     });
   }
 
@@ -1016,10 +1018,12 @@ Add these methods to the `Scenario` class:
     const label = inHand ? 'Searching' : 'On hold';
     return step(`Team records RTA decision → ${label}`, async () => {
       await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
-      await this.page.getByRole('button', { name: /^Edit$/ }).click();
-      await this.page.getByRole('combobox', { name: 'Status' }).selectOption({ label });
-      await this.page.getByRole('button', { name: 'Save' }).click();
-      await expect(this.page.getByRole('button', { name: 'Save' })).toBeHidden({ timeout: 10_000 });
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('combobox', { name: 'Status' }).selectOption({ label });
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
     });
   }
 
@@ -1036,6 +1040,57 @@ Add these methods to the `Scenario` class:
     expect(res.ok()).toBeTruthy();
     const { contact } = (await res.json()) as { contact: { status?: string } };
     expect(contact.status).toBe(expected);
+  }
+
+  /**
+   * [Team→App] Open the contact created by the self-serve portal. The public form
+   * makes a `type:tenant, status:needs_review` contact (NOT an unknown), so resolve
+   * it from the TENANT list by phone (paging through nextCursor — the seeded set plus
+   * per-run contacts can exceed one page), record it active, and navigate to it.
+   */
+  openSelfServedContact(t: Tenant): Promise<void> {
+    return step('Team opens the self-served contact', async () => {
+      const id = await this.findTenantContactIdByPhone(t.phone);
+      this.activeContactId = id;
+      this.activeTenant = t;
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(this.page.getByRole('button', { name: 'Edit contact details' })).toBeVisible({
+        timeout: 10_000,
+      });
+    });
+  }
+
+  /** Page through GET /api/contacts?type=tenant (following nextCursor) until a contact
+   *  whose primary phone === `phone` is found; returns its contactId. Polls because the
+   *  public create may lag the request. NOTE: confirm the next-page query param name
+   *  (assumed `cursor`) against the list route during implementation. */
+  private async findTenantContactIdByPhone(phone: string): Promise<string> {
+    let id: string | undefined;
+    await expect
+      .poll(
+        async () => {
+          let cursor: string | null = null;
+          do {
+            const url = `${NEXT}/api/contacts?type=tenant${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+            const res = await this.page.request.get(url);
+            if (!res.ok()) return false;
+            const body = (await res.json()) as {
+              contacts: Array<{ contactId: string; phone?: string }>;
+              nextCursor: string | null;
+            };
+            const hit = body.contacts.find((c) => c.phone === phone);
+            if (hit) {
+              id = hit.contactId;
+              return true;
+            }
+            cursor = body.nextCursor;
+          } while (cursor);
+          return false;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    return id as string;
   }
 ```
 
@@ -1076,24 +1131,17 @@ test('framework: a real verb passes and a wrong assertion fails loudly', async (
   const flow = new Scenario(page, request);
   const tenant = freshTenant('Selfcheck');
 
-  // PASS path: inbound auto-captures an unknown the App relays to Team.
+  // PASS path: a real inbound auto-captures an unknown the App surfaces to Team.
   await flow.tenantTexts(tenant, `selfcheck inbound ${tenant.name}`);
   await flow.login();
   await flow.expectUnknownCaptured(tenant);
 
-  // FAIL path: a tenant that never texted must NOT be deliverable — the verb must
-  // throw (short timeout) rather than silently pass.
-  const ghost = freshTenant('Ghost');
-  let threw = false;
-  try {
-    await expect
-      .poll(async () => false, { timeout: 1500 })
-      .toBe(true); // stand-in for "absent behavior"; proves the assert harness fails.
-  } catch {
-    threw = true;
-  }
-  expect(threw).toBe(true);
-  void ghost;
+  // FAIL path: a REAL verb pointed at absent behavior must throw, not silently pass.
+  // expectTypedTenant on a fresh Scenario with no triaged/created contact must fail
+  // loudly (there is no active contact to assert), proving the harness surfaces a
+  // wrong assertion instead of passing it.
+  const ghost = new Scenario(page, request);
+  await expect(ghost.expectTypedTenant()).rejects.toThrow();
 });
 ```
 
@@ -1215,16 +1263,21 @@ test('inbound · by text → no RTA → parked', async ({ page, request }) => {
 
 - [ ] **Step 2: by-phone → RTA in hand → handoff** (uses the voice verbs + auto-reply)
 
+> **Audit-confirmed (validated live):** a missed CALL fires the auto-text but does
+> NOT auto-capture a contact. The tenant then TEXTS their details (the diagram's next
+> step) and THAT inbound creates the unknown to triage. So `tenantAnswers` comes
+> BEFORE `expectRelayedToTeam`; do NOT call `expectUnknownCaptured` right after the
+> call. The auto-text body is the generic operator template ("Sorry I missed you…"),
+> not a details request.
+
 ```typescript
 test('inbound · by phone call → RTA in hand → handoff', async ({ page, request }) => {
   const flow = new Scenario(page, request);
   const tenant = freshTenant('Caller');
   await flow.tenantCalls(tenant);
-  // The audited operator-template body — adjust the regex to the exact body recorded
-  // in Task 4 if it differs from the default.
-  await flow.expectAutoReply(/full name.*voucher size.*housing authority|missed you/i);
+  await flow.expectAutoReply(/missed you|call back soon/i);
   await flow.login();
-  await flow.expectUnknownCaptured(tenant);
+  // Missed call → no contact yet; the tenant texts their details, creating the unknown.
   await flow.tenantAnswers('Robin Cole, 3 bed, Fulton Housing');
   await flow.expectRelayedToTeam(tenant, /Robin Cole/i);
   await flow.teamTriagesUnknownToTenant(tenant, { firstName: 'Robin', lastName: 'Cole', voucherSize: 3 });
@@ -1262,16 +1315,44 @@ test('housing fair · Team enters details → no RTA → parked', async ({ page,
 });
 ```
 
-> **Self-serve portal path:** only add this `test()` if the Task 4 audit proved the
-> portal exists. If it does not (expected), the path is filed as a registry issue and
-> the human confirmed it is out of scope for this branch — do NOT add a perpetually-red
-> test here. Note its absence in the playbook (Task 12).
+- [ ] **Step 5: housing-fair · Tenant self-serves → RTA in hand → handoff**
 
-- [ ] **Step 5: Run the whole scenario file green**
+> **Audit-confirmed (validated live):** the self-serve portal IS supported — the
+> public `POST :5174/public/housing-fair` endpoint creates a `type:tenant,
+> status:needs_review` contact and fires the welcome text ("Hi {firstName}, thanks for
+> stopping by! …"). The `tenantSelfServes` verb drives it (tenant action via API). No
+> portal build / no scope escalation. The contact lands as a NEEDS-REVIEW tenant, so
+> `expectTypedTenant` resolves it via the unknown→? No: it is already `type:tenant`;
+> resolve its id via the tenant list. Use the verb's recorded active contact.
+
+```typescript
+test('housing fair · Tenant self-serves → RTA in hand → handoff', async ({ page, request }) => {
+  const flow = new Scenario(page, request);
+  const tenant = freshTenant('SelfServe');
+  await flow.tenantSelfServes(tenant, { firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
+  await flow.expectDeliveredToTenant(tenant, /thanks for stopping by/i);
+  await flow.login();
+  await flow.openSelfServedContact(tenant); // resolves the tenant-typed contact by phone + opens it
+  await flow.expectTypedTenant();
+  await intakeAndRtaTail(flow, { inHand: true });
+});
+```
+
+> **Verb note (Task 7/10):** `tenantSelfServes` records the active tenant but the
+> self-served contact is `type:tenant` (not `unknown`), so `resolveUnknownContactId`
+> won't find it. Add a small `openSelfServedContact(t)` helper to `Scenario` that polls
+> `GET /api/contacts?type=tenant` (or `?q=<phone>`) for the contact whose `.phone`
+> matches, records `activeContactId`, and navigates to `/contacts/<id>`. Confirm the
+> exact tenant-list query param during implementation (the audit confirmed
+> `?type=unknown`; verify the tenant filter the same way). If a phone-search contract
+> isn't available, fall back to scanning the `?type=tenant` page for the phone.
+
+- [ ] **Step 6: Run the whole scenario file green**
 
 With the session stack running:
-`cd /w/tmp/hc-seq-e2e && npm run e2e -- --grep "tenant-onboarding|by text|by phone|housing fair"`
-(or `--grep` the file). Expected: all paths PASS.
+`cd /w/tmp/hc-seq-e2e && npm run e2e -w @housingchoice/e2e -- --grep "tenant-onboarding|by text|by phone|housing fair" --reporter=line`
+(NOTE: pass args to the workspace playwright via `-w @housingchoice/e2e --`; the bare
+`npm run e2e -- --grep` form is swallowed by the nested script.) Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -1324,8 +1405,13 @@ Document the repeatable method, reflecting what worked:
    `npm run e2e` gate.
 Include: the "Team, never the founder's name" rule, the self-clean isolation rule (no
 per-test reseed), the triage-not-New-contact rule, and a pointer to `e2e/scenarios/steps.ts`
-as the reusable vocabulary for the next diagram (sending-unit, tours). Note the
-self-serve portal as a known unbuilt path (if the audit confirmed it absent).
+as the reusable vocabulary for the next diagram (sending-unit, tours). Capture the
+audit-surfaced realities the playbook reader will hit again: the fake requires an
+ad-hoc persona before `send-as-party`; a missed call fires the auto-text but does NOT
+auto-capture a contact (the tenant's follow-up text does); the self-serve portal is the
+public `POST /public/housing-fair` endpoint (driven via the `:5174` proxy); and the
+missed-call auto-text body is the generic operator template, not the diagram's
+details-request (filed as a decision issue).
 
 - [ ] **Step 2: Commit**
 

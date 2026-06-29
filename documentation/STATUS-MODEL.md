@@ -203,7 +203,7 @@ The placement spine drives the tenant and listing lifecycles. The derived value 
 |---|---|---|
 | *(none yet)* | `Needs review` / `Onboarding` / `Searching` | `Setup` → `Available` |
 | **Application** → **Rent Determination** | `Placing` | `Under application` |
-| **Contract** + **Administrative** | `Placing` | `Finalizing` |
+| **Contract** + **Administrative** + **Closure** (`Awaiting move-in`) | `Placing` | `Finalizing` |
 | **Closure → Moved in** ✓ | `Placed` | `Occupied` |
 | **Lost** ✕ *(no other active placement)* | back to `Searching` | back to `Available` |
 

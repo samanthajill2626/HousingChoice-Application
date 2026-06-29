@@ -94,9 +94,12 @@ describe('statusModel — derivation (§7)', () => {
     }
   });
 
-  it('Contract + Administrative ⇒ placing / finalizing', () => {
+  it('Contract + Administrative + Closure(awaiting_move_in) ⇒ placing / finalizing', () => {
     expect(deriveStatuses('awaiting_hap_contract')).toEqual({ tenantStatus: 'placing', listingStatus: 'finalizing' });
     expect(deriveStatuses('complete_paperwork')).toEqual({ tenantStatus: 'placing', listingStatus: 'finalizing' });
+    // awaiting_move_in is the non-terminal Closure stage — a deal in final move-in
+    // prep is Finalizing, not Under application (§3/§6 listing lifecycle).
+    expect(deriveStatuses('awaiting_move_in')).toEqual({ tenantStatus: 'placing', listingStatus: 'finalizing' });
   });
 
   it('moved_in ⇒ placed / occupied; lost ⇒ searching / available', () => {

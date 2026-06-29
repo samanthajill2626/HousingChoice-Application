@@ -319,8 +319,11 @@ export function deriveStatuses(stage: PlacementStage): DerivedStatuses {
     return { tenantStatus: 'searching', listingStatus: 'available' };
   }
   const phase = STAGE_PHASE[stage];
-  // Contract + Administrative ⇒ listing Finalizing (tenant still Placing).
-  if (phase === 'Contract' || phase === 'Administrative') {
+  // Contract + Administrative + Closure (Awaiting move-in) ⇒ listing Finalizing
+  // (tenant still Placing). `moved_in`/`lost` already returned above, so the only
+  // Closure stage reaching here is the non-terminal `awaiting_move_in` — a deal in
+  // final move-in prep is Finalizing, not Under application (§3/§6 listing lifecycle).
+  if (phase === 'Contract' || phase === 'Administrative' || phase === 'Closure') {
     return { tenantStatus: 'placing', listingStatus: 'finalizing' };
   }
   // Application … Rent Determination ⇒ tenant Placing, listing Under application.

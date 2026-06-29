@@ -279,7 +279,7 @@ export function PlacementCreateForm({
         <div className={styles.field}>
           <span className={styles.label}>Tenant</span>
           {tenantLocked ? (
-            <div className={styles.locked} aria-label="Tenant">
+            <div className={styles.locked} role="group" aria-label="Tenant">
               {lockedTenantLabel ?? tenantId}
             </div>
           ) : (
@@ -303,7 +303,7 @@ export function PlacementCreateForm({
         <div className={styles.field}>
           <span className={styles.label}>Unit</span>
           {unitLocked ? (
-            <div className={styles.locked} aria-label="Unit">
+            <div className={styles.locked} role="group" aria-label="Unit">
               {lockedUnitLabel ?? unitId}
             </div>
           ) : (

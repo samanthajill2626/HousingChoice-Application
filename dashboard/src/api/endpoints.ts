@@ -89,9 +89,9 @@ export async function getPlacement(placementId: string, signal?: AbortSignal): P
   return res.placement;
 }
 
-/** POST /api/placements � create a placement (one deal: this tenant on this unit).
+/** POST /api/placements — create a placement (one deal: this tenant on this unit).
  *  The backend derives the tenant + listing coarse statuses for the initial stage
- *  (�7). Returns the new placement (unwrapped from { placement }). */
+ *  (§7). Returns the new placement (unwrapped from { placement }). */
 export async function createPlacement(body: {
   tenantId: string;
   unitId: string;
@@ -105,7 +105,7 @@ export async function createPlacement(body: {
   return res.placement;
 }
 
-/** GET /api/placements?tenantId= / ?unitId= � the placements on a tenant OR a unit
+/** GET /api/placements?tenantId= / ?unitId= — the placements on a tenant OR a unit
  *  (the overlap check for manual creation). Exactly one of tenantId/unitId is sent;
  *  the server honors the most-specific filter. First page only (overlap needs only
  *  active rows; the pipeline per party is small). Returns the page's placements. */

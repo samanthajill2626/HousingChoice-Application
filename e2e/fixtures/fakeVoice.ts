@@ -63,10 +63,12 @@ export async function hangup(request: APIRequestContext, sid: string): Promise<F
  * resolves missed, which is what triggers the app's missed-call auto-text job.
  * Returns the callSid.
  *
- * NOTE: whether `scenario: { outcome: 'no-answer' }` alone drives the bridge to a
- * terminal missed state on the LIVE (real-clock) e2e stack, or whether an explicit
- * `hangup(sid)` is also needed, is resolved by the Task 4 conformance audit; adjust
- * this helper to whichever the audit proves correct.
+ * `scenario: { digit: null }` models "the founder never presses the whisper gate":
+ * the gate times out, the founder leg stays UNANSWERED, the <Dial action> summary
+ * posts DialCallStatus=no-answer, and the app fires its missed-call auto-text. This
+ * is the verified-correct shape (Task 4 conformance audit): `{ outcome: 'no-answer' }`
+ * does NOT work — the scenario runner still presses '1', the app records answered_at,
+ * treats the bridge as answered, and no auto-text fires.
  */
 export async function tenantCallNoAnswer(
   request: APIRequestContext,
@@ -75,6 +77,6 @@ export async function tenantCallNoAnswer(
   return placeCall(request, {
     from: input.from,
     to: input.to,
-    scenario: { outcome: 'no-answer', ringMs: 1000 },
+    scenario: { digit: null },
   });
 }

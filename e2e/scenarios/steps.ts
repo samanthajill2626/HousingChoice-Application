@@ -5,15 +5,19 @@
 // coordinator role is "Team" (the seeded VA dev-login), NEVER the founder's name.
 //
 // Fidelity rule: Team's in-flow actions are driven through the REAL dashboard UI;
-// the tenant's inbound and pure setup use the fake-twilio API seam. Outbound
-// proof-of-send is asserted via fake-twilio listThreads (/control/threads).
+// the tenant's inbound and pure setup use the fake-twilio API seam (and the public
+// housing-fair endpoint for the self-serve portal). Outbound proof-of-send is
+// asserted via fake-twilio listThreads (/control/threads).
+//
+// Selectors + contracts here were verified against the live --mock --local stack in
+// the Task 4 conformance audit (.superpowers/sdd/task-4-audit.md).
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
-import { sendAsParty, listThreads } from '../fixtures/fakeTwilio.js';
+import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
 import { tenantCallNoAnswer } from '../fixtures/fakeVoice.js';
 
 const NEXT = 'http://localhost:5174';
-/** The app's own number (the number that owns the conversation). */
-export const APP_NUMBER = '+15550000000';
+/** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
+export const APP_NUMBER = '+15550009999';
 
 export interface Tenant {
   phone: string;
@@ -25,19 +29,30 @@ export function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   return test.step(name, fn);
 }
 
-/** A fresh tenant with a per-run-unique phone + name (self-clean isolation). */
+/** A fresh tenant with a per-run-unique, valid 11-digit E.164 phone + name. The
+ *  number is `+1555` + 5 timestamp digits + a 2-digit zero-padded sequence, so it
+ *  is always a well-formed NANP number (accepted by normalizeToE164 + the fake
+ *  persona registry) and never truncates or collides within a run. */
 let seq = 0;
 export function freshTenant(label: string): Tenant {
-  const stamp = `${Date.now()}`.slice(-7);
+  const stamp = `${Date.now()}`.slice(-5);
   seq += 1;
-  // A valid-looking E.164 that won't collide with seeded numbers (+1555010xxxx).
-  const phone = `+1555${stamp}${seq}`.slice(0, 12);
+  const phone = `+1555${stamp}${String(seq).padStart(2, '0')}`;
   return { phone, name: `${label} ${stamp}-${seq}` };
+}
+
+/** E.164 +1NXXNXXXXXX → "(NXX) NXX-XXXX" — how the dashboard displays a US number,
+ *  so a nameless unknown row can be located by its visible (formatted) phone. */
+function formatUsPhone(e164: string): string {
+  const d = e164.replace(/\D/g, ''); // 1 + 10 digits
+  const ten = d.length === 11 ? d.slice(1) : d;
+  return `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6, 10)}`;
 }
 
 export class Scenario {
   private activeContactId: string | null = null;
   private activeTenant: Tenant | null = null;
+  private readonly registered = new Set<string>();
 
   constructor(
     private readonly page: Page,
@@ -57,6 +72,7 @@ export class Scenario {
   tenantTexts(t: Tenant, body: string): Promise<void> {
     return step(`Tenant texts: "${body}"`, async () => {
       this.activeTenant = t;
+      await this.ensureParty(t);
       await sendAsParty(this.request, { from: t.phone, to: APP_NUMBER, body });
     });
   }
@@ -65,6 +81,7 @@ export class Scenario {
   tenantAnswers(body: string): Promise<void> {
     const t = this.requireActiveTenant();
     return step(`Tenant replies: "${body}"`, async () => {
+      await this.ensureParty(t);
       await sendAsParty(this.request, { from: t.phone, to: APP_NUMBER, body });
     });
   }
@@ -78,8 +95,28 @@ export class Scenario {
   }
 
   /**
+   * [Tenant→App] The self-serve portal: the tenant submits their own details through
+   * the public housing-fair endpoint (the diagram's "Tenant self-serves"). Driven via
+   * the :5174 proxy (which injects the origin secret the public route requires). Sets
+   * the active tenant; the [AUTO] welcome text is asserted with expectDeliveredToTenant.
+   */
+  tenantSelfServes(t: Tenant, fields: {
+    firstName: string;
+    lastName: string;
+    voucherSize?: number;
+  }): Promise<void> {
+    return step('Tenant self-serves via the public portal', async () => {
+      this.activeTenant = t;
+      const res = await this.page.request.post(`${NEXT}/public/housing-fair`, {
+        data: { ...fields, phone: t.phone },
+      });
+      expect(res.ok()).toBeTruthy();
+    });
+  }
+
+  /**
    * [App→Tenant] The missed-call auto-text fired automatically (no Team action).
-   * Asserts the operator-template body reached the tenant's fake thread, delivered.
+   * Asserts the operator-template body reached the tenant's fake thread.
    */
   expectAutoReply(re: RegExp): Promise<void> {
     const t = this.requireActiveTenant();
@@ -103,28 +140,32 @@ export class Scenario {
 
   /**
    * [App→Team] The inbound surfaced in the Inbox. An untriaged unknown is nameless,
-   * so we locate it by phone under the "Unknown" tab (NOT by name). Opens the row so
-   * subsequent Team UI verbs act on this contact, and records its contactId.
+   * so we locate it by its (formatted) phone under the "Unknown" tab, open it, and
+   * assert the inbound body in the timeline. Records the contactId for later verbs.
    */
   expectRelayedToTeam(t: Tenant, bodyRe: RegExp): Promise<void> {
-    return step(`App relays the lead to Team (Unknown tab, by phone)`, async () => {
-      await this.page.goto(`${NEXT}/contacts/unknown`);
-      const row = this.page.getByRole('link').filter({ hasText: t.phone });
-      await expect(row).toBeVisible({ timeout: 15_000 });
-      await row.first().click();
-      await expect(this.page).toHaveURL(/\/contacts\//, { timeout: 10_000 });
-      await expect(this.page.getByText(bodyRe)).toBeVisible({ timeout: 10_000 });
-      this.activeContactId = await this.readActiveContactId();
+    return step('App relays the lead to Team (Unknown tab, by phone)', async () => {
       this.activeTenant = t;
+      const id = await this.resolveUnknownContactId(t);
+      await this.page.goto(`${NEXT}/contacts/unknown`);
+      await expect(
+        this.page.getByRole('link').filter({ hasText: formatUsPhone(t.phone) }),
+      ).toBeVisible({ timeout: 15_000 });
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(this.page.getByText(bodyRe)).toBeVisible({ timeout: 10_000 });
+      this.activeContactId = id;
     });
   }
 
   /** [App] An inbound from an unrecognized number auto-created an UNKNOWN contact. */
   expectUnknownCaptured(t: Tenant): Promise<void> {
     return step('App auto-captured an unknown contact', async () => {
+      this.activeTenant = t;
+      const id = await this.resolveUnknownContactId(t);
+      this.activeContactId = id;
       await this.page.goto(`${NEXT}/contacts/unknown`);
       await expect(
-        this.page.getByRole('link').filter({ hasText: t.phone }),
+        this.page.getByRole('link').filter({ hasText: formatUsPhone(t.phone) }),
       ).toBeVisible({ timeout: 15_000 });
     });
   }
@@ -140,7 +181,7 @@ export class Scenario {
 
   /** [App→Tenant] The outbound reached the tenant's fake thread and was delivered. */
   expectDeliveredToTenant(t: Tenant, re: RegExp): Promise<void> {
-    return step(`App delivers to Tenant (proof-of-send)`, async () => {
+    return step('App delivers to Tenant (proof-of-send)', async () => {
       await expect
         .poll(
           async () => {
@@ -159,9 +200,10 @@ export class Scenario {
   }
 
   /**
-   * [Team] Triage the captured unknown → Tenant via the contact page (Mark as Tenant).
-   * NOT "New contact" — the number already exists (that path 409s). Optionally set
-   * identity fields (name, voucher, housing authority) via the edit form afterward.
+   * [Team] Triage the captured unknown → Tenant via the contact page ("Mark as
+   * Tenant"). NOT "New contact" — the number already exists (that path 409s).
+   * Optionally set identity fields (name, voucher, housing authority) via the edit
+   * form afterward.
    */
   teamTriagesUnknownToTenant(
     t: Tenant,
@@ -169,16 +211,18 @@ export class Scenario {
   ): Promise<void> {
     return step('Team triages the unknown → Tenant', async () => {
       await this.openActiveContact(t);
-      await this.page.getByRole('button', { name: /Mark as Tenant/i }).click();
-      // The triage flips type → tenant; the page re-renders as a tenant contact.
-      await expect(this.page.getByText(/Tenant/).first()).toBeVisible({ timeout: 10_000 });
-      if (fields) await this.editTenantIdentity(t, fields);
+      await this.page.getByRole('button', { name: 'Mark as Tenant' }).click();
+      // Triage flips type → tenant in place; the "Mark as Tenant" affordance is gone.
+      await expect(this.page.getByRole('button', { name: 'Mark as Tenant' })).toHaveCount(0, {
+        timeout: 10_000,
+      });
+      if (fields) await this.editTenantIdentity(fields);
     });
   }
 
   /**
-   * [Team] Housing-fair in-person path ONLY: create a brand-new Tenant via the
-   * New-contact dialog (no prior number). Sets the active contact.
+   * [Team] Housing-fair in-person path: create a brand-new Tenant via the New-contact
+   * dialog (no prior number). Sets the active contact.
    */
   teamCreatesContact(fields: {
     firstName: string;
@@ -189,23 +233,26 @@ export class Scenario {
   }): Promise<void> {
     return step('Team creates a new Tenant contact (housing fair)', async () => {
       await this.page.goto(`${NEXT}/contacts`);
-      await this.page.getByRole('button', { name: /New contact/i }).click();
-      await this.page.getByRole('textbox', { name: 'First name' }).fill(fields.firstName);
-      await this.page.getByRole('textbox', { name: 'Last name' }).fill(fields.lastName);
-      // Choose the Tenant type in the create dialog (exact control confirmed by audit).
-      await this.page.getByRole('button', { name: /Tenant/i }).first().click();
-      if (fields.phone) {
-        await this.page.getByRole('textbox', { name: /Phone/i }).fill(fields.phone);
-      }
-      await this.page.getByRole('button', { name: /^Create|Save|Add contact$/ }).first().click();
-      await expect(this.page).toHaveURL(/\/contacts\//, { timeout: 10_000 });
+      await this.page.getByRole('button', { name: 'New contact' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /New contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog
+        .getByRole('group', { name: 'Contact kind' })
+        .getByRole('button', { name: 'Tenant' })
+        .click();
+      await dialog.getByLabel('First name').fill(fields.firstName);
+      await dialog.getByLabel('Last name').fill(fields.lastName);
+      if (fields.phone) await dialog.getByLabel('Phone').fill(fields.phone);
+      await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(this.page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
       this.activeContactId = await this.readActiveContactId();
       this.activeTenant = {
-        phone: fields.phone ? fields.phone : '',
+        phone: fields.phone ?? '',
         name: `${fields.firstName} ${fields.lastName}`,
       };
       if (fields.voucherSize !== undefined || fields.housingAuthority !== undefined) {
-        await this.editTenantIdentity(this.activeTenant, {
+        await this.editTenantIdentity({
           voucherSize: fields.voucherSize,
           housingAuthority: fields.housingAuthority,
         });
@@ -213,8 +260,8 @@ export class Scenario {
     });
   }
 
-  /** [App] The contact is now typed Tenant (assert via API on the open contact). */
-  expectTypedTenant(t: Tenant): Promise<void> {
+  /** [App] The contact is now typed Tenant (assert via API on the active contact). */
+  expectTypedTenant(_t?: Tenant): Promise<void> {
     return step('App: contact is typed Tenant', async () => {
       const id = this.requireActiveContactId();
       const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
@@ -227,7 +274,7 @@ export class Scenario {
   // ---- internal helpers ---------------------------------------------------
 
   private requireActiveTenant(): Tenant {
-    if (!this.activeTenant) throw new Error('no active tenant — call tenantTexts/expectRelayedToTeam first');
+    if (!this.activeTenant) throw new Error('no active tenant — call tenantTexts/tenantCalls first');
     return this.activeTenant;
   }
 
@@ -236,50 +283,67 @@ export class Scenario {
     return this.activeContactId;
   }
 
+  /** Register the tenant's number as an ad-hoc party once (send-as-party requires it). */
+  private async ensureParty(t: Tenant): Promise<void> {
+    if (this.registered.has(t.phone)) return;
+    await registerParty(this.request, { label: t.name, role: 'tenant', number: t.phone });
+    this.registered.add(t.phone);
+  }
+
+  /** Poll the unknown-contacts API until the inbound has auto-captured a contact for
+   *  this phone, and return its contactId (E.164 match — the API returns raw E.164). */
+  private async resolveUnknownContactId(t: Tenant): Promise<string> {
+    let id: string | undefined;
+    await expect
+      .poll(
+        async () => {
+          const res = await this.page.request.get(`${NEXT}/api/contacts?type=unknown`);
+          if (!res.ok()) return false;
+          const { contacts } = (await res.json()) as {
+            contacts: Array<{ contactId: string; phone?: string }>;
+          };
+          id = contacts.find((c) => c.phone === t.phone)?.contactId;
+          return id !== undefined;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    return id as string;
+  }
+
   /** The current contact page URL ends in /contacts/<id>; pull the id from it. */
   private async readActiveContactId(): Promise<string> {
-    const url = this.page.url();
-    const m = /\/contacts\/([^/?#]+)/.exec(url);
+    const m = /\/contacts\/([^/?#]+)/.exec(this.page.url());
     if (!m || m[1] === 'unknown') {
-      // On the unknown landing the id is not in the URL; read it from the API by phone.
-      const t = this.requireActiveTenant();
-      const res = await this.page.request.get(
-        `${NEXT}/api/contacts?type=unknown`,
-      );
-      const { contacts } = (await res.json()) as { contacts: Array<{ contactId: string; phone?: string }> };
-      const hit = contacts.find((c) => c.phone === t.phone);
-      if (!hit) throw new Error(`could not resolve contactId for ${t.phone}`);
-      return hit.contactId;
+      return this.resolveUnknownContactId(this.requireActiveTenant());
     }
     return m[1]!;
   }
 
+  /** Navigate to the active contact's page (resolving its id first if needed). */
   private async openActiveContact(t: Tenant): Promise<void> {
-    if (this.activeContactId) {
-      await this.page.goto(`${NEXT}/contacts/${this.activeContactId}`);
-      return;
-    }
-    await this.page.goto(`${NEXT}/contacts/unknown`);
-    await this.page.getByRole('link').filter({ hasText: t.phone }).first().click();
-    await expect(this.page).toHaveURL(/\/contacts\//);
-    this.activeContactId = await this.readActiveContactId();
+    const id = this.activeContactId ?? (await this.resolveUnknownContactId(t));
+    this.activeContactId = id;
+    await this.page.goto(`${NEXT}/contacts/${id}`);
   }
 
-  /** Open the edit form, set identity fields, save. (Intake/RTA verbs added in Task 9.) */
-  private async editTenantIdentity(
-    _t: Tenant,
-    fields: { firstName?: string; lastName?: string; voucherSize?: number; housingAuthority?: string },
-  ): Promise<void> {
-    await this.page.getByRole('button', { name: /^Edit$/ }).click();
-    if (fields.firstName !== undefined)
-      await this.page.getByRole('textbox', { name: 'First name' }).fill(fields.firstName);
-    if (fields.lastName !== undefined)
-      await this.page.getByRole('textbox', { name: 'Last name' }).fill(fields.lastName);
+  /** Open the edit form, set identity fields, save. (Intake/RTA verbs added in Task 7.) */
+  private async editTenantIdentity(fields: {
+    firstName?: string;
+    lastName?: string;
+    voucherSize?: number;
+    housingAuthority?: string;
+  }): Promise<void> {
+    await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+    const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+    await expect(dialog).toBeVisible();
+    if (fields.firstName !== undefined) await dialog.getByLabel('First name').fill(fields.firstName);
+    if (fields.lastName !== undefined) await dialog.getByLabel('Last name').fill(fields.lastName);
     if (fields.voucherSize !== undefined)
-      await this.page.getByRole('spinbutton', { name: /Voucher size/i }).fill(String(fields.voucherSize));
+      await dialog.getByLabel('Voucher size (bedrooms)').fill(String(fields.voucherSize));
     if (fields.housingAuthority !== undefined)
-      await this.page.getByRole('textbox', { name: 'Housing authority' }).fill(fields.housingAuthority);
-    await this.page.getByRole('button', { name: 'Save' }).click();
-    await expect(this.page.getByRole('button', { name: 'Save' })).toBeHidden({ timeout: 10_000 });
+      await dialog.getByLabel('Housing authority').fill(fields.housingAuthority);
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
   }
 }

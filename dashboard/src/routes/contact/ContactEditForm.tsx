@@ -125,6 +125,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   );
   const [company, setCompany] = useState(str(contact['company']));
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
+  const [pets, setPets] = useState(str(contact['pets']));
+  const [evictions, setEvictions] = useState(str(contact['evictions']));
+  const [tenure, setTenure] = useState(str(contact['tenure']));
+  const [lifEligible, setLifEligible] = useState(contact['lifEligible'] === true);
   const [relRows, setRelRows] = useState<Relationship[]>(contact.relationships ?? []);
   const [cfRows, setCfRows] = useState<CustomField[]>(contact.customFields ?? []);
   // Track whether the editors have been expanded (start collapsed to keep the
@@ -221,6 +225,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         }
       }
       if (housingAuthority !== str(contact.housingAuthority)) patch.housingAuthority = housingAuthority;
+      if (pets !== str(contact['pets'])) patch.pets = pets;
+      if (evictions !== str(contact['evictions'])) patch.evictions = evictions;
+      if (tenure !== str(contact['tenure'])) patch.tenure = tenure;
+      if (lifEligible !== (contact['lifEligible'] === true)) patch.lifEligible = lifEligible;
       // Address: if ANY part changed, send the whole object (the server keeps only
       // the non-empty parts).
       if (
@@ -383,6 +391,50 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               autoComplete="off"
             />
           </label>
+        ) : null}
+
+        {isTenant ? (
+          <div className={styles.fieldset}>
+            <span className={styles.label}>Eligibility intake</span>
+            <label className={styles.field}>
+              <span className={styles.label}>Pets</span>
+              <input
+                className={styles.input}
+                value={pets}
+                onChange={(e) => setPets(e.target.value)}
+                placeholder="e.g. 1 cat"
+                autoComplete="off"
+              />
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Evictions</span>
+              <input
+                className={styles.input}
+                value={evictions}
+                onChange={(e) => setEvictions(e.target.value)}
+                placeholder="e.g. none"
+                autoComplete="off"
+              />
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Time at current address</span>
+              <input
+                className={styles.input}
+                value={tenure}
+                onChange={(e) => setTenure(e.target.value)}
+                placeholder="e.g. 3 years"
+                autoComplete="off"
+              />
+            </label>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={lifEligible}
+                onChange={(e) => setLifEligible(e.target.checked)}
+              />
+              <span className={styles.label}>LIF eligible</span>
+            </label>
+          </div>
         ) : null}
 
         {isTenant ? (

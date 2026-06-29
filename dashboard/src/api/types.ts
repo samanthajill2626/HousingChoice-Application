@@ -555,6 +555,11 @@ export interface Contact {
   company?: string;
   /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
   housingAuthority?: string;
+  /** Eligibility intake (free-text answers + a boolean LIF flag). */
+  pets?: string;
+  evictions?: string;
+  tenure?: string;
+  lifEligible?: boolean;
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -578,6 +583,10 @@ export interface ContactPatch {
   notes?: string;
   company?: string;
   housingAuthority?: string;
+  pets?: string;
+  evictions?: string;
+  tenure?: string;
+  lifEligible?: boolean;
   /** Structured address; the server stores only the non-empty parts. */
   address?: Address;
   /** Contact's role within the organisation (e.g. case manager, property manager). */

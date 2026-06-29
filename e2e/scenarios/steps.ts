@@ -271,6 +271,91 @@ export class Scenario {
     });
   }
 
+  /** [Team] Record the eligibility intake answers via the edit form (real UI). Uses
+   *  the AUDIT-PROVEN edit pattern: open via 'Edit contact details', scope to the
+   *  'Edit contact' dialog, fields by label, Save{exact}, wait for the dialog to close. */
+  teamRecordsIntake(i: {
+    pets?: string;
+    evictions?: string;
+    tenure?: string;
+    lifEligible?: boolean;
+  }): Promise<void> {
+    return step('Team records eligibility intake', async () => {
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      if (i.pets !== undefined) await dialog.getByLabel('Pets').fill(i.pets);
+      if (i.evictions !== undefined) await dialog.getByLabel('Evictions').fill(i.evictions);
+      if (i.tenure !== undefined)
+        await dialog.getByLabel('Time at current address').fill(i.tenure);
+      if (i.lifEligible === true) await dialog.getByLabel('LIF eligible').check();
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    });
+  }
+
+  /** [App] The intake answers persisted on the contact. */
+  expectIntakeRecorded(i: {
+    pets?: string;
+    evictions?: string;
+    tenure?: string;
+    lifEligible?: boolean;
+  }): Promise<void> {
+    return step('App: intake answers stored', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${this.requireActiveContactId()}`);
+      expect(res.ok()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: Record<string, unknown> };
+      if (i.pets !== undefined) expect(contact['pets']).toBe(i.pets);
+      if (i.evictions !== undefined) expect(contact['evictions']).toBe(i.evictions);
+      if (i.tenure !== undefined) expect(contact['tenure']).toBe(i.tenure);
+      if (i.lifEligible !== undefined) expect(contact['lifEligible']).toBe(i.lifEligible);
+    });
+  }
+
+  /**
+   * [Team] The RTA gate — a tenant-STATUS move via the edit-form Status select.
+   * RTA in hand → 'searching' (Send-Unit handoff); no RTA → 'on_hold' (parked).
+   */
+  teamRecordsRtaDecision(inHand: boolean): Promise<void> {
+    const label = inHand ? 'Searching' : 'On hold';
+    return step(`Team records RTA decision → ${label}`, async () => {
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('combobox', { name: 'Status' }).selectOption({ label });
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    });
+  }
+
+  expectHandoffToSendUnit(): Promise<void> {
+    return step('App: tenant ready for Send-Unit (searching)', () => this.assertStatus('searching'));
+  }
+
+  expectParked(): Promise<void> {
+    return step('App: tenant parked (on_hold)', () => this.assertStatus('on_hold'));
+  }
+
+  /**
+   * [Team→App] Open the contact created by the self-serve portal. The public form
+   * makes a `type:tenant, status:needs_review` contact (NOT an unknown), so resolve
+   * it from the TENANT list by phone (paging through nextCursor — the seeded set plus
+   * per-run contacts can exceed one page), record it active, and navigate to it.
+   */
+  openSelfServedContact(t: Tenant): Promise<void> {
+    return step('Team opens the self-served contact', async () => {
+      const id = await this.findTenantContactIdByPhone(t.phone);
+      this.activeContactId = id;
+      this.activeTenant = t;
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(this.page.getByRole('button', { name: 'Edit contact details' })).toBeVisible({
+        timeout: 10_000,
+      });
+    });
+  }
+
   // ---- internal helpers ---------------------------------------------------
 
   private requireActiveTenant(): Tenant {
@@ -345,5 +430,45 @@ export class Scenario {
       await dialog.getByLabel('Housing authority').fill(fields.housingAuthority);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+  }
+
+  private async assertStatus(expected: string): Promise<void> {
+    const res = await this.page.request.get(`${NEXT}/api/contacts/${this.requireActiveContactId()}`);
+    expect(res.ok()).toBeTruthy();
+    const { contact } = (await res.json()) as { contact: { status?: string } };
+    expect(contact.status).toBe(expected);
+  }
+
+  /** Page through GET /api/contacts?type=tenant (following nextCursor) until a contact
+   *  whose primary phone === `phone` is found; returns its contactId. Polls because the
+   *  public create may lag the request. NOTE: confirm the next-page query param name
+   *  (assumed `cursor`) against the list route during implementation. */
+  private async findTenantContactIdByPhone(phone: string): Promise<string> {
+    let id: string | undefined;
+    await expect
+      .poll(
+        async () => {
+          let cursor: string | null = null;
+          do {
+            const url = `${NEXT}/api/contacts?type=tenant${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+            const res = await this.page.request.get(url);
+            if (!res.ok()) return false;
+            const body = (await res.json()) as {
+              contacts: Array<{ contactId: string; phone?: string }>;
+              nextCursor: string | null;
+            };
+            const hit = body.contacts.find((c) => c.phone === phone);
+            if (hit) {
+              id = hit.contactId;
+              return true;
+            }
+            cursor = body.nextCursor;
+          } while (cursor);
+          return false;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    return id as string;
   }
 }

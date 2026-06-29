@@ -46,9 +46,22 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   const doc = deps.doc ?? createDocumentClient({ config });
   const router = Router();
 
-  // GET /__dev/ping — confirms the dev endpoints are active (stack-identity probe).
+  // GET /__dev/ping — confirms the dev endpoints are active (stack-identity
+  // probe) AND surfaces the hermetic-stack config flags the e2e preflight
+  // (e2e/support/preflight.ts) asserts on. This is what catches a STALE or
+  // hand-started stack being silently reused via Playwright's
+  // reuseExistingServer: an app booted WITHOUT MESSAGING_RECORD_OUTBOX=1 has no
+  // outbox-recording wrapper, so every send skips the dev-outbox and outbox.spec
+  // fails with a baffling `Received: 0`. Flags only — booleans/enum/prefix,
+  // never secrets or PII.
   router.get('/__dev/ping', (_req, res) => {
-    res.status(200).json({ dev: true });
+    res.status(200).json({
+      dev: true,
+      recordOutbox: config.recordOutbox,
+      messagingDriver: config.messagingDriver,
+      smsSendingEnabled: config.smsSendingEnabled,
+      tablePrefix: config.tablePrefix,
+    });
   });
 
   // POST /auth/dev-login — mint a session for a dev user without Google.

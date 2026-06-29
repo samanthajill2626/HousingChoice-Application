@@ -7,6 +7,10 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 export default defineConfig({
   testDir: './tests',
   outputDir: '.artifacts/test-results',
+  // Fail fast (with an actionable message) if the stack under test is stale or
+  // misconfigured — e.g. a hand-started session reused via reuseExistingServer
+  // that lacks outbox recording. See support/preflight.ts.
+  globalSetup: './support/preflight.ts',
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,

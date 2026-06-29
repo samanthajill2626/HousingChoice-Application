@@ -71,12 +71,20 @@ describe('dev gating — router', () => {
     expect(await maybeLoadDevRouter(config)).toBeUndefined();
   });
 
-  it('mounts /__dev/ping when the dev router is present', async () => {
+  it('mounts /__dev/ping when the dev router is present (and echoes hermetic config flags)', async () => {
     const config = enabled();
     const app = buildApp({ config, devRouter: await maybeLoadDevRouter(config) });
     const res = await request(app).get('/__dev/ping');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ dev: true });
+    // The e2e preflight (e2e/support/preflight.ts) asserts on these flags to
+    // detect a stale/misconfigured reused stack — keep them on the response.
+    expect(res.body).toEqual({
+      dev: true,
+      recordOutbox: config.recordOutbox,
+      messagingDriver: config.messagingDriver,
+      smsSendingEnabled: config.smsSendingEnabled,
+      tablePrefix: config.tablePrefix,
+    });
   });
 
   it('does NOT expose /__dev/ping when the dev router is absent', async () => {

@@ -9,6 +9,7 @@
 // proof-of-send is asserted via fake-twilio listThreads (/control/threads).
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { sendAsParty, listThreads } from '../fixtures/fakeTwilio.js';
+import { tenantCallNoAnswer } from '../fixtures/fakeVoice.js';
 
 const NEXT = 'http://localhost:5174';
 /** The app's own number (the number that owns the conversation). */
@@ -65,6 +66,38 @@ export class Scenario {
     const t = this.requireActiveTenant();
     return step(`Tenant replies: "${body}"`, async () => {
       await sendAsParty(this.request, { from: t.phone, to: APP_NUMBER, body });
+    });
+  }
+
+  /** [Tenant→App] Inbound voice call that the founder bridge leaves unanswered. */
+  tenantCalls(t: Tenant): Promise<void> {
+    return step('Tenant phones in (no answer)', async () => {
+      this.activeTenant = t;
+      await tenantCallNoAnswer(this.request, { from: t.phone, to: APP_NUMBER });
+    });
+  }
+
+  /**
+   * [App→Tenant] The missed-call auto-text fired automatically (no Team action).
+   * Asserts the operator-template body reached the tenant's fake thread, delivered.
+   */
+  expectAutoReply(re: RegExp): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step('App auto-replies to the missed call', async () => {
+      await expect
+        .poll(
+          async () => {
+            const threads = await listThreads(this.request);
+            const thread = threads.find((x) => x.partyNumber === t.phone);
+            return (
+              thread?.messages.some(
+                (m) => m.direction === 'outbound' && re.test(m.body ?? ''),
+              ) ?? false
+            );
+          },
+          { timeout: 20_000 },
+        )
+        .toBe(true);
     });
   }
 

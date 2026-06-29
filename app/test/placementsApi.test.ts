@@ -45,6 +45,8 @@ describe('placements API (M1.10b)', () => {
   });
 
   it('POST /api/placements opens a placement (default stage send_application), emits placement.updated, audits — no PII on the wire', async () => {
+    await world.contactsRepo.create({ contactId: 'c-tenant', type: 'tenant', status: 'searching' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const res = await authedPost('/api/placements', {
       tenantId: 'c-tenant',
       unitId: 'unit-1',
@@ -75,6 +77,22 @@ describe('placements API (M1.10b)', () => {
     expect((await authedPost('/api/placements', { unitId: 'unit-1' })).status).toBe(400);
     expect((await authedPost('/api/placements', { tenantId: 'c-1' })).status).toBe(400);
     expect((await authedPost('/api/placements', { tenantId: 'c-1', unitId: 'u-1', stage: 'bogus' })).status).toBe(400);
+  });
+
+  it('POST /api/placements 404s (tenant_not_found) when the tenant does not exist — nothing persisted', async () => {
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+    const res = await authedPost('/api/placements', { tenantId: 'ghost-tenant', unitId: 'unit-1' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('tenant_not_found');
+    expect(world.placements.size).toBe(0);
+  });
+
+  it('POST /api/placements 404s (unit_not_found) when the unit does not exist — nothing persisted', async () => {
+    await world.contactsRepo.create({ contactId: 'c-real', type: 'tenant', status: 'searching' });
+    const res = await authedPost('/api/placements', { tenantId: 'c-real', unitId: 'ghost-unit' });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('unit_not_found');
+    expect(world.placements.size).toBe(0);
   });
 
   it('GET /api/placements/:placementId returns the placement; 404 for unknown', async () => {
@@ -214,6 +232,8 @@ describe('placements API — BE2/C2 activity milestones', () => {
     world.activityEvents.filter((e) => e.contactId === tenantId);
 
   it('placement create emits placement_opened against the tenant (refType placement)', async () => {
+    await world.contactsRepo.create({ contactId: 'c-keisha', type: 'tenant', status: 'searching' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const res = await authedPost('/api/placements', { tenantId: 'c-keisha', unitId: 'unit-1' });
     const placementId = res.body.placement.placementId;
     const ev = milestonesFor('c-keisha');
@@ -356,6 +376,8 @@ describe('placements API — derive-on-create (§7)', () => {
     // Mount the router standalone with an injected transition service whose
     // deriveForStage REJECTS — proving the POST-create try/catch swallows it.
     const isolated = createFakeWorld();
+    await isolated.contactsRepo.create({ contactId: 't-x', type: 'tenant', status: 'searching' });
+    await isolated.unitsRepo.create({ unitId: 'u-x', landlordId: 'll-1', status: 'available' });
     const rejectingTransitions: StatusTransitionService = {
       transitionPlacement: () => {
         throw new Error('not used in this test');

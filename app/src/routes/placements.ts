@@ -447,6 +447,18 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(400).json({ error: validation.error });
       return;
     }
+    // Referential integrity: the tenant + unit must exist. The UI only offers real
+    // entities, but a stale picker (an entity deleted between fetch and submit) or a
+    // direct API caller could reference a ghost — refuse rather than persist a
+    // dangling placement. 404 + a typed code, mirroring placement_not_found. (IDs only.)
+    if (!(await contacts.getById(validation.fields.tenantId))) {
+      res.status(404).json({ error: 'tenant_not_found' });
+      return;
+    }
+    if (!(await units.getById(validation.fields.unitId))) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
     // Create is NOT a transition, but the denormalized provenance fields for the
     // INITIAL stage must be initialized (stage_entered_at + stage_source) so a
     // later `derived` write respects precedence (§8) and time-in-stage is

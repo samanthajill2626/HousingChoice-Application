@@ -262,7 +262,9 @@ describe('GET /api/events — full loop (webhook in → SSE frame out)', () => {
   });
 
   it('a placement mutation reaches a connected SSE client as a placement.updated frame (no PII on the wire)', async () => {
-    const { app } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness();
+    await world.contactsRepo.create({ contactId: 't-sse', type: 'tenant', status: 'searching' });
+    await world.unitsRepo.create({ unitId: 'u-sse', landlordId: 'll-1', status: 'available' });
     const port = await startServer(app);
     const client = await connectSse(port);
     await client.waitFor(': connected');

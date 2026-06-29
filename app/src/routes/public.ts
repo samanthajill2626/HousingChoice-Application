@@ -28,6 +28,7 @@ import { toUnitFlyer } from '../lib/unitFields.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createSendMessageService,
@@ -36,15 +37,19 @@ import {
 } from '../services/sendMessage.js';
 
 /**
- * The §11.3 "housing-fair form → auto welcome text" default copy. A named
- * constant (optionally overridable via a settings welcomeText later — kept
- * simple per the kickoff). {firstName} is interpolated; nothing else.
+ * The §11.3 "housing-fair form → auto welcome text" DEFAULT copy. A named
+ * constant that is the bulletproof fallback: the operator can override it via
+ * the settings `welcomeText` field (resolved per-request below), but ANY
+ * settings-read failure falls back to THIS constant so intake never breaks.
+ * {firstName} is interpolated; nothing else.
  */
 export const WELCOME_TEXT_TEMPLATE =
   'Hi {firstName}, thanks for stopping by! This is HousingChoice — reply here anytime about housing options.';
 
-function renderWelcome(firstName: string): string {
-  return WELCOME_TEXT_TEMPLATE.replace('{firstName}', firstName);
+/** Render a welcome body from a template (the constant or the operator's
+ *  override), interpolating {firstName}. Pure. */
+function renderWelcome(template: string, firstName: string): string {
+  return template.replace('{firstName}', firstName);
 }
 
 /**
@@ -110,6 +115,7 @@ export interface PublicRouterDeps {
   conversationsRepo?: ConversationsRepo;
   unitsRepo?: UnitsRepo;
   auditRepo?: AuditRepo;
+  settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
 }
 
@@ -119,6 +125,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const sendMessage =
     deps.sendMessageService ??
     createSendMessageService({
@@ -182,10 +189,22 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // A repeat signup never re-sends (no SMS spend, no spam).
     let welcomeSent = false;
     if (!alreadyWelcomed) {
+      // Resolve the welcome template defensively: the operator's settings
+      // welcomeText when set, else the constant. A settings-read failure must
+      // NOT break intake — the send is best-effort — so fall back to the
+      // constant on ANY error. NO PII logged (marker only).
+      let template = WELCOME_TEXT_TEMPLATE;
+      try {
+        const s = await settings.getOrgSettings();
+        if (typeof s.welcomeText === 'string' && s.welcomeText.length > 0) template = s.welcomeText;
+      } catch {
+        // best-effort: a settings-read failure must NOT break intake — fall back to the constant.
+        log.warn({ marker }, 'welcomeText read failed; using default template');
+      }
       try {
         await sendMessage({
           conversationId: conversation.conversationId,
-          body: renderWelcome(firstName),
+          body: renderWelcome(template, firstName),
           automated: true,
         });
         welcomeSent = true;

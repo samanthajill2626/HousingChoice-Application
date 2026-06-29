@@ -45,6 +45,13 @@ export interface OrgSettings {
    * Parameter Store). Defaults to 2; a sane range is 0..10.
    */
   preRingPauseSeconds: number;
+  /**
+   * OPTIONAL — the housing-fair welcome SMS body; {firstName} is interpolated.
+   * Unset → public.ts falls back to WELCOME_TEXT_TEMPLATE. There is no sensible
+   * default welcome string HERE (the constant lives in public.ts), so this stays
+   * absent by default and is projected only when actually stored.
+   */
+  welcomeText?: string;
 }
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
@@ -93,6 +100,12 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
         (item['preRingPauseSeconds'] as number) >= 0
           ? (item['preRingPauseSeconds'] as number)
           : DEFAULT_ORG_SETTINGS.preRingPauseSeconds,
+      // welcomeText is OPTIONAL (no default): project it ONLY when a string is
+      // actually stored — an unset value stays absent so public.ts falls back
+      // to its WELCOME_TEXT_TEMPLATE constant.
+      ...(typeof item?.['welcomeText'] === 'string' && {
+        welcomeText: item['welcomeText'] as string,
+      }),
     };
   }
 

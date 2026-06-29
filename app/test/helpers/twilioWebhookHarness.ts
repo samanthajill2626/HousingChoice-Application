@@ -797,6 +797,7 @@ export function createFakeWorld(): FakeWorld {
         settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
       if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
       if (patch.preRingPauseSeconds !== undefined) settings.preRingPauseSeconds = patch.preRingPauseSeconds;
+      if (patch.welcomeText !== undefined) settings.welcomeText = patch.welcomeText;
       return { ...settings };
     },
   };
@@ -1586,6 +1587,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // The housing-fair welcome reads the operator's welcomeText override (with
+      // a constant fallback) — share the world's fake settings repo so a
+      // welcomeText edit is reflected without touching DynamoDB.
+      settingsRepo: world.settingsRepo,
       sendMessageService: createSendMessageService({
         config,
         logger: createLogger({ level: 'info', destination: capture.stream }),

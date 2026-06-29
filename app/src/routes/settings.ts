@@ -83,6 +83,13 @@ function parsePatch(body: unknown): { patch: Partial<OrgSettings> } | { error: s
     }
     patch.preRingPauseSeconds = v;
   }
+  if ('welcomeText' in b) {
+    const v = b['welcomeText'];
+    if (typeof v !== 'string' || v.length === 0 || v.length > MAX_TEMPLATE_CHARS) {
+      return { error: `welcomeText must be a 1..${MAX_TEMPLATE_CHARS}-char string` };
+    }
+    patch.welcomeText = v;
+  }
   return { patch };
 }
 

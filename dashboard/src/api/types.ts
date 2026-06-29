@@ -20,6 +20,46 @@ export interface DevLoginResult {
   role: UserRole;
 }
 
+// --- Settings: Team (admin user management) ---------------------------------
+// MIRRORS app/src/routes/adminUsers.ts `toAdminUserView` — the admin-list
+// projection of a user (NO google_sub / push_subscriptions). The dashboard is a
+// separate package and cannot import from app/src, so this is duplicated; keep
+// it in sync with the source when the projection changes.
+
+/** GET /api/users → { users: AdminUserView[] }; the team roster row. `status`
+ *  and `last_login_at` are null when unset. */
+export interface AdminUserView {
+  userId: string;
+  email: string;
+  /** Display name (Google profile name, else a humanized fallback). */
+  name: string;
+  role: UserRole;
+  status: string | null;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+// --- Settings: OrgSettings (founder-editable call-triage templates) ----------
+// MIRRORS app/src/repos/settingsRepo.ts `OrgSettings`. The dashboard cannot
+// import from app/src, so the shape is duplicated; keep it in sync. `welcomeText`
+// is OPTIONAL (absent until the operator sets it — the backend falls back to its
+// WELCOME_TEXT_TEMPLATE constant).
+
+/** GET /api/settings → { settings }, PUT /api/settings { patch } → { settings }. */
+export interface OrgSettings {
+  /** The zero-tap missed-call auto-text body (1..320 chars). */
+  missedCallAutoText: string;
+  /** Whether the missed-call auto-text fires at all. */
+  missedCallAutoTextEnabled: boolean;
+  /** The missed-call quick-reply buttons (≤10, each 1..320 chars). */
+  quickReplies: string[];
+  /** The pre-ring <Pause> before the founder-bridge dial (whole seconds, 0..10). */
+  preRingPauseSeconds: number;
+  /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
+   *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */
+  welcomeText?: string;
+}
+
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at
 // GET /api/today (TodayResponse); the B1 frontend assembles the SAME shape

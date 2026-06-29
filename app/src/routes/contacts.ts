@@ -467,13 +467,15 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
 
   for (const key of ['pets', 'evictions', 'tenure'] as const) {
     if (key in b) {
-      if (typeof b[key] !== 'string') return { error: `${key} must be a string` };
-      (item as Record<string, unknown>)[key] = b[key];
+      const v = b[key];
+      if (typeof v !== 'string') return { error: `${key} must be a string` };
+      item[key] = v;
     }
   }
   if ('lifEligible' in b) {
-    if (typeof b['lifEligible'] !== 'boolean') return { error: 'lifEligible must be a boolean' };
-    (item as Record<string, unknown>)['lifEligible'] = b['lifEligible'];
+    const v = b['lifEligible'];
+    if (typeof v !== 'boolean') return { error: 'lifEligible must be a boolean' };
+    item.lifEligible = v;
   }
 
   // A manual create asserts identity (past the front door, not needs_review).

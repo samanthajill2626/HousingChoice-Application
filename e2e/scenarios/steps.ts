@@ -439,10 +439,9 @@ export class Scenario {
     expect(contact.status).toBe(expected);
   }
 
-  /** Page through GET /api/contacts?type=tenant (following nextCursor) until a contact
-   *  whose primary phone === `phone` is found; returns its contactId. Polls because the
-   *  public create may lag the request. NOTE: confirm the next-page query param name
-   *  (assumed `cursor`) against the list route during implementation. */
+  /** Page through GET /api/contacts?type=tenant (following nextCursor via ?cursor=)
+   *  until a contact whose primary phone === `phone` is found; returns its contactId.
+   *  Polls because the public self-serve create may lag the request. */
   private async findTenantContactIdByPhone(phone: string): Promise<string> {
     let id: string | undefined;
     await expect

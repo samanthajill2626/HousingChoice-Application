@@ -6,15 +6,13 @@ import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 
-const SECRET = ORIGIN_SECRET;
-
 describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
   it('PATCH persists intake fields and GET returns them', async () => {
     const { app } = makeWebhookHarness();
     // Create a contact to triage/patch.
     const created = await request(app)
       .post('/api/contacts')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'tenant', firstName: 'Pat', lastName: 'Q' })
       .expect(201);
@@ -22,14 +20,14 @@ describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
 
     await request(app)
       .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ pets: '1 cat', evictions: 'none', tenure: '3 years', lifEligible: true })
       .expect(200);
 
     const got = await request(app)
       .get(`/api/contacts/${id}`)
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .expect(200);
     expect(got.body.contact.pets).toBe('1 cat');
@@ -42,7 +40,7 @@ describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
     const { app } = makeWebhookHarness();
     const created = await request(app)
       .post('/api/contacts')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'tenant', firstName: 'Pat', lastName: 'Q' })
       .expect(201);
@@ -50,13 +48,13 @@ describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
 
     await request(app)
       .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ pets: 5 })
       .expect(400);
     await request(app)
       .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ lifEligible: 'yes' })
       .expect(400);
@@ -66,7 +64,7 @@ describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
     const { app } = makeWebhookHarness();
     const created = await request(app)
       .post('/api/contacts')
-      .set('x-origin-verify', SECRET)
+      .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'tenant', firstName: 'Lee', lastName: 'M', pets: 'none', lifEligible: false })
       .expect(201);

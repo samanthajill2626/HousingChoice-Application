@@ -1,0 +1,53 @@
+---
+title: Housing Choice — Tenant Onboarding (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor T as Tenant
+    participant A as Housing Choice App
+    participant S as Sam
+    Note over T,S: The app owns the phone number. Every message flows between Tenant and Sam through the app (both directions).<br/>Notes marked [AUTO] are app automation. Sam's messages are manual comms (Phase 1).
+    alt Inbound by TEXT or PHONE CALL
+        Note over T,A: Prospect saw a specific listing on affordablehousing.com
+        alt By text
+            T->>A: Text — is this property still available?
+            Note over A: [AUTO] Log inbound text, create contact
+            A->>S: Relay new lead and message
+            S->>A: Reply — "no longer available. Send full name,<br/>voucher size, and housing authority."
+            A->>T: Deliver Sam's text
+        else By phone call
+            T->>A: Phone call to the app's number
+            A->>S: Incoming call
+            Note over S: Ignores the call
+            A->>T: [AUTO] Auto-reply text — "Send full name,<br/>voucher size, and housing authority."
+        end
+        T->>A: Full name, voucher size, housing authority
+        Note over A: [MANUAL] Save contact<br/>Populate details panel, mark record as Tenant
+        A->>S: Relay tenant details
+    else In person (housing fair)
+        Note over S,T: Goal — house them the same day. Match each person to a property,<br/>then a landlord shows the unit to them (or they go alone) that day.
+        alt Sam takes their details
+            Note over S: Sits down with the tenant at the fair
+            S->>A: Enter details on the new contact page<br/>(name, voucher size, housing authority)
+            Note over A: [MANUAL] Create contact, populate details panel, mark record as Tenant
+        else Tenant self-serves
+            T->>A: Submit details via the self-serve portal
+            Note over A: [AUTO] Contact created from portal submission,<br/>mark record as Tenant
+        end
+        A->>T: [AUTO] Automatic text message starting the process
+    end
+    Note over S,A: Eligibility intake — narrow questions for LIF
+    S->>A: Pets? Evictions? How long at current place?
+    A->>T: Deliver questions
+    T->>A: Answers
+    A->>S: Relay answers
+    S->>A: Do you have an RTA in hand?
+    A->>T: Deliver question
+    T->>A: RTA status
+    Note over A: [MANUAL] Store intake answers, set LIF-eligibility and RTA flags
+    A->>S: Relay RTA status
+    alt RTA in hand
+        Note over T,S: Hand off to Send Unit sequence (separate)
+    else No RTA in hand
+        Note over S,A: Can't meaningfully help yet — park lead until an RTA is in hand
+    end

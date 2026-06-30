@@ -120,7 +120,7 @@ test.describe('Settings — admin path', () => {
     // FlagPills always render (the go-live flags read straight from config) — the
     // Environment pill is present in every env.
     await expect(page.getByRole('heading', { name: 'Go-live flags', level: 3 })).toBeVisible();
-    await expect(page.getByText('Environment')).toBeVisible();
+    await expect(page.getByText('Environment', { exact: true })).toBeVisible();
     // Alarms + Recent errors degrade gracefully on the local stack (no AWS).
     await expect(page.getByRole('heading', { name: 'Alarms', level: 3 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Recent errors', level: 3 })).toBeVisible();

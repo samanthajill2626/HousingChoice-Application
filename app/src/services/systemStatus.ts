@@ -37,6 +37,17 @@ const WINDOW_MS: Readonly<Record<SystemErrorWindow, number>> = {
 /** Newest-first error projection cap (doc §6). */
 export const ERROR_EVENT_LIMIT = 25;
 
+/**
+ * The messaging driver as DISPLAYED in System Status: `twilio` | `console` |
+ * `mock`. `mock` is the real `twilio` driver REDIRECTED to a fake host
+ * (TWILIO_API_BASE_URL set — the local `--mock` dev loop): the production code
+ * path runs, but against a local impersonator, never real Twilio. Surfacing it
+ * as `mock` (not `twilio`) keeps an operator from reading the panel as if live
+ * sends were on. The override is rejected in production (config.ts), so `mock`
+ * can never appear on a deployed stack.
+ */
+export type MessagingDriverDisplay = AppConfig['messagingDriver'] | 'mock';
+
 /** Go-live readiness flags (booleans/enums/strings only — never secrets). */
 export interface SystemFlags {
   /** The deploy env name (local | dev | prod). */
@@ -49,8 +60,8 @@ export interface SystemFlags {
   founderCellSet: boolean;
   /** Whether Web Push (VAPID) is configured in this env. */
   pushConfigured: boolean;
-  /** The outbound messaging driver (twilio | console). */
-  messagingDriver: AppConfig['messagingDriver'];
+  /** The outbound messaging driver as displayed (twilio | console | mock). */
+  messagingDriver: MessagingDriverDisplay;
 }
 
 /** getAlarms result — degrades to { available: false, reason } (still HTTP 200). */
@@ -84,6 +95,17 @@ function isLocalEnv(config: AppConfig): boolean {
   return config.appEnv === 'local' || config.messagingDriver === 'console';
 }
 
+/**
+ * Display value for the messaging driver: the real `twilio` driver pointed at a
+ * fake host (TWILIO_API_BASE_URL set — the `--mock` loop) is shown as `mock`,
+ * not `twilio`. The redirect override is rejected in production (config.ts), so
+ * `mock` is local-only and never appears on a deployed stack.
+ */
+function messagingDriverDisplay(config: AppConfig): MessagingDriverDisplay {
+  if (config.messagingDriver === 'twilio' && config.twilioApiBaseUrl !== undefined) return 'mock';
+  return config.messagingDriver;
+}
+
 export function createSystemStatusService(deps: SystemStatusServiceDeps): SystemStatusService {
   const log = deps.logger ?? defaultLogger;
   const { config } = deps;
@@ -100,7 +122,7 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         relayLiveProvisioning: config.relayLiveProvisioning,
         founderCellSet: config.founderCell !== undefined,
         pushConfigured: isPushConfigured(config),
-        messagingDriver: config.messagingDriver,
+        messagingDriver: messagingDriverDisplay(config),
       };
     },
 

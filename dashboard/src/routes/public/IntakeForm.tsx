@@ -25,6 +25,15 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Clear a standing validation error the moment the user edits any field, so a
+  // corrected field stops reading as errored (the error re-evaluates on submit).
+  function onField(setter: (v: string) => void): (e: { target: { value: string } }) => void {
+    return (e) => {
+      if (error !== null) setError(null);
+      setter(e.target.value);
+    };
+  }
+
   async function handleSubmit(e: FormEvent): Promise<void> {
     e.preventDefault();
     // Client validation: names + phone must be non-empty (the backend re-checks).
@@ -52,37 +61,59 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
     }
   }
 
+  // The error element id — referenced by every required field's aria-describedby
+  // (only while an error is present) so SRs announce the message in context. The
+  // visible "*" is aria-hidden (keeps accessible names stable for getByLabel);
+  // aria-required carries the required semantics to assistive tech.
+  const errorId = 'intake-error';
+  const describedBy = error !== null ? errorId : undefined;
+
   return (
     <form className={styles.form} onSubmit={handleSubmit} noValidate>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="intake-first">
-          First name
+          First name{' '}
+          <span className={styles.required} aria-hidden="true">
+            *
+          </span>
         </label>
         <input
           id="intake-first"
           className={styles.input}
           value={firstName}
-          onChange={(e) => setFirstName(e.target.value)}
+          onChange={onField(setFirstName)}
           autoComplete="given-name"
+          aria-required="true"
+          aria-invalid={error !== null}
+          aria-describedby={describedBy}
           disabled={pending}
         />
       </div>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="intake-last">
-          Last name
+          Last name{' '}
+          <span className={styles.required} aria-hidden="true">
+            *
+          </span>
         </label>
         <input
           id="intake-last"
           className={styles.input}
           value={lastName}
-          onChange={(e) => setLastName(e.target.value)}
+          onChange={onField(setLastName)}
           autoComplete="family-name"
+          aria-required="true"
+          aria-invalid={error !== null}
+          aria-describedby={describedBy}
           disabled={pending}
         />
       </div>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="intake-phone">
-          Phone number
+          Phone number{' '}
+          <span className={styles.required} aria-hidden="true">
+            *
+          </span>
         </label>
         <input
           id="intake-phone"
@@ -90,8 +121,11 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           type="tel"
           inputMode="tel"
           value={phone}
-          onChange={(e) => setPhone(e.target.value)}
+          onChange={onField(setPhone)}
           autoComplete="tel"
+          aria-required="true"
+          aria-invalid={error !== null}
+          aria-describedby={describedBy}
           disabled={pending}
         />
       </div>
@@ -106,13 +140,13 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           inputMode="numeric"
           min={0}
           value={voucher}
-          onChange={(e) => setVoucher(e.target.value)}
+          onChange={onField(setVoucher)}
           disabled={pending}
         />
       </div>
 
       {error !== null && (
-        <p className={styles.error} role="alert">
+        <p id={errorId} className={styles.error} role="alert">
           {error}
         </p>
       )}

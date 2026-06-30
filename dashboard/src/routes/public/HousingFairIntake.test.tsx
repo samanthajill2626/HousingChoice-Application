@@ -28,7 +28,7 @@ describe('HousingFairIntake (/join)', () => {
     await user.click(screen.getByRole('button', { name: /sign me up/i }));
 
     await waitFor(() => expect(submitHousingFair).toHaveBeenCalled());
-    const arg = submitHousingFair.mock.calls[0][0] as Record<string, unknown>;
+    const arg = submitHousingFair.mock.calls[0]![0] as Record<string, unknown>;
     expect(arg).not.toHaveProperty('unitId');
     expect(arg).toMatchObject({ firstName: 'Grace', lastName: 'Hopper', phone: '4045559999' });
 
@@ -58,5 +58,38 @@ describe('HousingFairIntake (/join)', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/phone number/i);
     expect(submitHousingFair).not.toHaveBeenCalled();
+  });
+
+  it('marks name + phone fields required (aria-required) and associates the error', async () => {
+    const user = userEvent.setup();
+    render(<HousingFairIntake />);
+
+    for (const name of [/first name/i, /last name/i, /phone number/i]) {
+      expect(screen.getByLabelText(name)).toHaveAttribute('aria-required', 'true');
+    }
+    // The optional voucher field is NOT required.
+    expect(screen.getByLabelText(/voucher size/i)).not.toHaveAttribute('aria-required', 'true');
+
+    // On a validation error the field is marked invalid + describes the alert.
+    await user.click(screen.getByRole('button', { name: /sign me up/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveAttribute('id');
+    const errorId = alert.getAttribute('id')!;
+    const first = screen.getByLabelText(/first name/i);
+    expect(first).toHaveAttribute('aria-invalid', 'true');
+    expect(first).toHaveAttribute('aria-describedby', errorId);
+  });
+
+  it('clears the validation error as soon as the user edits a field', async () => {
+    const user = userEvent.setup();
+    render(<HousingFairIntake />);
+
+    await user.click(screen.getByRole('button', { name: /sign me up/i }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    // Editing any field clears the standing error (corrected field stops erroring).
+    await user.type(screen.getByLabelText(/first name/i), 'G');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/first name/i)).toHaveAttribute('aria-invalid', 'false');
   });
 });

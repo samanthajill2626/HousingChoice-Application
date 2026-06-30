@@ -15,7 +15,7 @@
 //              longer available" state (tenant-facing copy = "home").
 //
 // Tenant-facing copy: the dwelling is a "home" (never unit/property/listing).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   getFlyer,
@@ -58,6 +58,18 @@ function addressLines(a: PublicFlyerDetails['address']): string | null {
 export function FlyerFunnel(): React.JSX.Element {
   const { unitId } = useParams<{ unitId: string }>();
   const [stage, setStage] = useState<Stage>({ kind: 'loading' });
+
+  // On each meaningful state transition the section swaps to new content with a
+  // new <h1>, but focus would otherwise stay on the (now-removed) control — silent
+  // to screen readers. Move focus to the new state's heading (tabIndex={-1}) so the
+  // change is announced. Keyed on stage.kind; the intake/reveal moments are what
+  // matter (loading/teaser are the initial render, no prior focus to rescue).
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (stage.kind === 'intake' || stage.kind === 'reveal') {
+      headingRef.current?.focus();
+    }
+  }, [stage.kind]);
 
   useEffect(() => {
     if (unitId === undefined) {
@@ -123,7 +135,9 @@ export function FlyerFunnel(): React.JSX.Element {
   if (stage.kind === 'intake') {
     return (
       <section className={styles.card}>
-        <h1 className={styles.title}>Tell us how to reach you</h1>
+        <h1 className={styles.title} ref={headingRef} tabIndex={-1}>
+          Tell us how to reach you
+        </h1>
         <p className={styles.muted}>
           Share your info and we&apos;ll send you the full details for this home.
         </p>
@@ -136,7 +150,9 @@ export function FlyerFunnel(): React.JSX.Element {
     const { details } = stage;
     return (
       <section className={styles.card}>
-        <h1 className={styles.title}>Thanks — you&apos;re all set!</h1>
+        <h1 className={styles.title} ref={headingRef} tabIndex={-1}>
+          Thanks — you&apos;re all set!
+        </h1>
         <p className={styles.muted}>
           We&apos;ve got your info and a team member will be in touch. Here are the full details for
           this home.

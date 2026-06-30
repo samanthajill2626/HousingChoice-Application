@@ -97,6 +97,11 @@ describe('FlyerFunnel', () => {
       'href',
       'https://video.example/tour',
     );
+
+    // a11y: on the reveal (the conversion moment) focus moves to the new heading
+    // so screen readers announce the state change.
+    const revealHeading = screen.getByRole('heading', { name: /you're all set/i });
+    expect(revealHeading).toHaveFocus();
   });
 
   it('teaser shows NO address, fees, or external listing link', async () => {

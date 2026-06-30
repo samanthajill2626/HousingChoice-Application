@@ -18,6 +18,12 @@
   color: var(--c-text);
 }
 
+/* Subtle visible required indicator. aria-required on the input carries the
+   semantics for assistive tech; this "*" is a sighted-only cue (aria-hidden). */
+.required {
+  color: var(--c-danger);
+}
+
 .input {
   width: 100%;
   border: 1px solid var(--c-border-strong);

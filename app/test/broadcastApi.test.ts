@@ -708,6 +708,41 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(world.sent.map((s) => s.to)).toEqual(['+15550100001']);
   });
 
+  it('send-by-selection fans out across multiple fetch chunks and holds the fences (bounded-concurrency)', async () => {
+    // A moderate selection (66 ids) spans multiple 50-id fetch chunks, proving
+    // the bounded-concurrency getById fan-out accumulates correctly. Mix in
+    // opted-out / unreachable / non-tenant / unknown ids — the same hard fences
+    // must still drop them after the concurrent fetch.
+    seedUnit(world);
+    const checked: string[] = [];
+    const expectedSurviving: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      const cid = `sel-${i}`;
+      seedTenant(world, { contactId: cid, phone: `+1556${String(i).padStart(7, '0')}` });
+      checked.push(cid);
+      expectedSurviving.push(cid);
+    }
+    // Three drops + one unknown id, interleaved across the chunk boundary.
+    seedTenant(world, { contactId: 'sel-opt', phone: '+15559990001', sms_opt_out: true });
+    seedTenant(world, { contactId: 'sel-unreach', phone: '+15559990002', sms_unreachable: true });
+    world.contacts.push({ contactId: 'sel-ll', type: 'landlord', status: 'active', phone: '+15559990003' });
+    checked.push('sel-opt', 'sel-unreach', 'sel-ll', 'sel-missing');
+
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: checked });
+    expect(send.status).toBe(200);
+    // Exactly the 60 clean tenants survive — all dropped ids fenced out.
+    expect(send.body.count).toBe(60);
+    expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(
+      [...expectedSurviving].sort(),
+    );
+  });
+
   it('send-by-selection de-dupes repeated ids', async () => {
     seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
     seedUnit(world);
@@ -884,6 +919,42 @@ describe('share-broadcast API (M1.8a)', () => {
     const c2 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-2');
     expect(c1.alreadySentThisProperty).toBe(true);
     expect(c2.alreadySentThisProperty).toBe(false);
+  });
+
+  it('alreadySentThisProperty is true for a prior recipient keyed phone#… matched by the candidate phone', async () => {
+    // The candidate now HAS a contactId, but at the prior broadcast's send time
+    // the tenant was texted phone-only — keyed `phone#<E164>` in the recipients
+    // map. The preview must flag them by matching on the phone key, not just the
+    // contactId (which the prior set never carried).
+    const phone = '+15550100099';
+    const tenant = seedTenant(world, { contactId: 'c-late', firstName: 'Lena', phone });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    // A PRIOR sent broadcast for unit-1 whose recipients map is keyed phone#…
+    // (the phone-only recipient convention) — NOT the contactId.
+    const prior = await world.broadcastsRepo.create({
+      created_by: 'usr_test',
+      unitId: 'unit-1',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+    });
+    await world.broadcastsRepo.markSending(prior.broadcastId, { [`phone#${phone}`]: { status: 'sent' } });
+    // Flip it terminal so it counts as a prior sent broadcast.
+    world.broadcasts.get(prior.broadcastId)!.status = 'sent';
+
+    // A new draft for the same unit previews the tenant (now contactId-bearing).
+    const next = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${next}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    // The prior set carries the phone key (response shape unchanged — union of keys).
+    expect(res.body.priorRecipientContactIds).toEqual([`phone#${phone}`]);
+    const cand = res.body.candidates.find((c: { contactId: string }) => c.contactId === tenant.contactId);
+    // Flagged via the phone-key fallback even though the contactId never matched.
+    expect(cand.alreadySentThisProperty).toBe(true);
   });
 
   it('alreadySentThisProperty is false for a broadcast with NO unitId (no prior lookup)', async () => {

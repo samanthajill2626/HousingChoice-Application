@@ -311,8 +311,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     const audience = await resolveAudience(broadcast.audience_filter);
     // Prior-recipients for this unit (already-sent annotation). Only meaningful
     // with a unitId; degrades safely to an empty set otherwise (or when the
-    // byUnit GSI is absent on an un-applied env). The set is contactKeys —
-    // resolved contacts here key on contactId.
+    // byUnit GSI is absent on an un-applied env). The set is contactKeys — which
+    // are contactId OR `phone#<E164>` (a phone-only recipient at the prior
+    // broadcast's send time), so a candidate must be matched on EITHER key.
     const priorRecipients =
       broadcast.unitId !== undefined
         ? await broadcasts.priorRecipientContactIds(broadcast.unitId)
@@ -325,7 +326,16 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       phone: c.phone,
       ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
       ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
-      alreadySentThisProperty: broadcast.unitId !== undefined && priorRecipients.has(c.contactId),
+      // Match on contactId OR the `phone#<E164>` key (same prefix the recipients
+      // map uses) so a tenant previously texted under a phone-only key (who
+      // later gained a contactId) is still flagged. SOFT hint — never excludes.
+      // TODO(broadcasts): the manually-added-tenant client-side annotation (the
+      // dashboard matches `priorRecipientContactIds` by contactId) has the same
+      // rare phone-only edge — a manually-added tenant prior-texted under a
+      // `phone#…` key won't be flagged client-side. Not addressed here.
+      alreadySentThisProperty:
+        broadcast.unitId !== undefined &&
+        (priorRecipients.has(c.contactId) || priorRecipients.has(`phone#${c.phone}`)),
     }));
     log.info(
       { broadcastId, count: audience.count, truncated: audience.truncated },
@@ -378,8 +388,21 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
 
     if (selection !== undefined) {
       // (a) Explicit selection. Build recipients from THIS set — re-fence each.
-      for (const contactId of selection.ids) {
-        const contact = await contacts.getById(contactId);
+      // contactsRepo has no batch-get, so resolve the ids with a BOUNDED-
+      // CONCURRENCY fan-out: chunk the ids and Promise.all each chunk, capping
+      // in-flight getById round-trips at FETCH_CONCURRENCY. The raw list is
+      // already capped at MAX_BROADCAST_RECIPIENTS pre-fetch (parse guard), so
+      // this only trims request latency (sequential awaits were 7–15s on a
+      // 1500-id send) — it does NOT change which contacts survive. The fences,
+      // de-dupe, contactKey convention, empty→400, and cap below are identical.
+      const FETCH_CONCURRENCY = 50;
+      const fetched: Array<Awaited<ReturnType<typeof contacts.getById>>> = [];
+      for (let i = 0; i < selection.ids.length; i += FETCH_CONCURRENCY) {
+        const chunk = selection.ids.slice(i, i + FETCH_CONCURRENCY);
+        const resolved = await Promise.all(chunk.map((id) => contacts.getById(id)));
+        for (const contact of resolved) fetched.push(contact);
+      }
+      for (const contact of fetched) {
         if (!contact) continue; // unknown id — drop
         if (contact.type !== 'tenant') continue; // never text a non-tenant
         if (contact.sms_opt_out === true) continue; // HARD exclusion (re-enforced)

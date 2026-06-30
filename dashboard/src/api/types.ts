@@ -151,7 +151,7 @@ export interface TodayResponse {
 }
 
 // --- Conversations (legacy reuse — verbatim from the proven contract) --------
-// Copied unchanged from dashboard-legacy/src/api/types.ts; field names match the
+// Copied unchanged from the legacy dashboard; field names match the
 // wire JSON the server emits (the Today fallback reads `unread_count`,
 // `participant_display_name`, `preview`, `participant_phone`, `type`).
 
@@ -205,7 +205,7 @@ export interface ConversationsPage {
 }
 
 // --- Placements / boards (M1.10) (legacy reuse — verbatim) ------------------
-// Copied unchanged from dashboard-legacy/src/api/types.ts. The Today fallback
+// Copied unchanged from the legacy dashboard. The Today fallback
 // reads `stage`, `tour_date`, `next_deadline_type`, `next_deadline_at`,
 // `attention`, `tenantId`, `unitId`.
 
@@ -508,7 +508,7 @@ export interface PlacementsPage {
 }
 
 // --- SSE (legacy reuse — verbatim) ------------------------------------------
-// Copied unchanged from dashboard-legacy/src/api/types.ts. useEventStream
+// Copied unchanged from the legacy dashboard. useEventStream
 // dispatches these; useToday refetches on placement.updated + conversation.updated.
 
 /** Message direction relative to the platform. */
@@ -633,7 +633,7 @@ export interface ContactCreate {
 }
 
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------
-// Copied from dashboard-legacy/src/api/types.ts. The contact detail page reads
+// Copied from the legacy dashboard. The contact detail page reads
 // type/status/phone/firstName/lastName/voucherSize/notes off this flexible doc.
 
 /** A contact (GET /api/contacts/:id → { contact }). Flexible document. C1 adds
@@ -785,7 +785,7 @@ export interface UnitsPage {
 }
 
 // --- Messages (legacy reuse — verbatim) -------------------------------------
-// Copied from dashboard-legacy/src/api/types.ts. The timeline fallback maps
+// Copied from the legacy dashboard. The timeline fallback maps
 // these into TimelineMessage; the relay/voice fields are carried but unused here.
 
 /** One timeline message (GET /api/conversations/:id/messages → { messages }).

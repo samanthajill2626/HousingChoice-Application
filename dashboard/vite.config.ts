@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react';
 // Vite server proxies both there and stamps the DEV origin-secret placeholder
 // (the app's validator middleware rejects requests without it — the value
 // matches CF_ORIGIN_SECRET's local default in app/src/lib/config.ts).
-// Cloned verbatim from dashboard-legacy/vite.config.ts (same backend seam) —
+// Cloned verbatim from the legacy dashboard's vite config (same backend seam) —
 // only the listen port differs (:5174, the new dashboard owns Google OAuth in
 // local dev; see scripts/dev.mjs PUBLIC_BASE_URL default).
 const appProxy = {

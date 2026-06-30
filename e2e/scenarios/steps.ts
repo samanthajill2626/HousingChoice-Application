@@ -271,6 +271,31 @@ export class Scenario {
     });
   }
 
+  /**
+   * [App] The onboarding identity (name / voucher size / housing authority) was
+   * captured onto the tenant — the diagram collects "full name, voucher size, and
+   * housing authority". Asserts via the API on the active contact; only the supplied
+   * fields are checked.
+   */
+  expectTenantDetails(fields: {
+    firstName?: string;
+    lastName?: string;
+    voucherSize?: number;
+    housingAuthority?: string;
+  }): Promise<void> {
+    return step('App: tenant onboarding details captured', async () => {
+      const id = this.requireActiveContactId();
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
+      expect(res.ok()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: Record<string, unknown> };
+      if (fields.firstName !== undefined) expect(contact['firstName']).toBe(fields.firstName);
+      if (fields.lastName !== undefined) expect(contact['lastName']).toBe(fields.lastName);
+      if (fields.voucherSize !== undefined) expect(contact['voucherSize']).toBe(fields.voucherSize);
+      if (fields.housingAuthority !== undefined)
+        expect(contact['housingAuthority']).toBe(fields.housingAuthority);
+    });
+  }
+
   /** [Team] Record the eligibility intake answers via the edit form (real UI). Uses
    *  the AUDIT-PROVEN edit pattern: open via 'Edit contact details', scope to the
    *  'Edit contact' dialog, fields by label, Save{exact}, wait for the dialog to close. */

@@ -37,6 +37,12 @@ test('inbound · by text → RTA in hand → handoff', async ({ page, request })
     housingAuthority: 'atlanta_housing',
   });
   await flow.expectTypedTenant(tenant);
+  await flow.expectTenantDetails({
+    firstName: 'Jordan',
+    lastName: 'Rivera',
+    voucherSize: 2,
+    housingAuthority: 'atlanta_housing',
+  });
 
   await intakeAndRtaTail(flow, { inHand: true });
 });
@@ -52,8 +58,19 @@ test('inbound · by text → no RTA → parked', async ({ page, request }) => {
   await flow.expectDeliveredToTenant(tenant, /no longer available/i);
 
   await flow.tenantAnswers('Sam Lee, 1 bed, DeKalb Housing');
-  await flow.teamTriagesUnknownToTenant(tenant, { firstName: 'Sam', lastName: 'Lee', voucherSize: 1 });
+  await flow.teamTriagesUnknownToTenant(tenant, {
+    firstName: 'Sam',
+    lastName: 'Lee',
+    voucherSize: 1,
+    housingAuthority: 'dekalb_housing',
+  });
   await flow.expectTypedTenant(tenant);
+  await flow.expectTenantDetails({
+    firstName: 'Sam',
+    lastName: 'Lee',
+    voucherSize: 1,
+    housingAuthority: 'dekalb_housing',
+  });
 
   await intakeAndRtaTail(flow, { inHand: false });
 });
@@ -69,8 +86,19 @@ test('inbound · by phone call → RTA in hand → handoff', async ({ page, requ
   // then TEXTS their details (the diagram's next step), creating the unknown to triage.
   await flow.tenantAnswers('Robin Cole, 3 bed, Fulton Housing');
   await flow.expectRelayedToTeam(tenant, /Robin Cole/i);
-  await flow.teamTriagesUnknownToTenant(tenant, { firstName: 'Robin', lastName: 'Cole', voucherSize: 3 });
+  await flow.teamTriagesUnknownToTenant(tenant, {
+    firstName: 'Robin',
+    lastName: 'Cole',
+    voucherSize: 3,
+    housingAuthority: 'fulton_housing',
+  });
   await flow.expectTypedTenant(tenant);
+  await flow.expectTenantDetails({
+    firstName: 'Robin',
+    lastName: 'Cole',
+    voucherSize: 3,
+    housingAuthority: 'fulton_housing',
+  });
 
   await intakeAndRtaTail(flow, { inHand: true });
 });
@@ -85,14 +113,31 @@ test('housing fair · Team enters details → RTA in hand → handoff', async ({
     housingAuthority: 'atlanta_housing',
   });
   await flow.expectTypedTenant();
+  await flow.expectTenantDetails({
+    firstName: 'Casey',
+    lastName: 'Nguyen',
+    voucherSize: 2,
+    housingAuthority: 'atlanta_housing',
+  });
   await intakeAndRtaTail(flow, { inHand: true });
 });
 
 test('housing fair · Team enters details → no RTA → parked', async ({ page, request }) => {
   const flow = new Scenario(page, request);
   await flow.login();
-  await flow.teamCreatesContact({ firstName: 'Drew', lastName: 'Park', voucherSize: 1 });
+  await flow.teamCreatesContact({
+    firstName: 'Drew',
+    lastName: 'Park',
+    voucherSize: 1,
+    housingAuthority: 'dekalb_housing',
+  });
   await flow.expectTypedTenant();
+  await flow.expectTenantDetails({
+    firstName: 'Drew',
+    lastName: 'Park',
+    voucherSize: 1,
+    housingAuthority: 'dekalb_housing',
+  });
   await intakeAndRtaTail(flow, { inHand: false });
 });
 
@@ -100,11 +145,14 @@ test('housing fair · Tenant self-serves → RTA in hand → handoff', async ({ 
   const flow = new Scenario(page, request);
   const tenant = freshTenant('SelfServe');
 
+  // The public self-serve portal captures name + voucher size (no housing-authority
+  // field on POST /public/housing-fair), so we verify those — not housing authority.
   await flow.tenantSelfServes(tenant, { firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
   await flow.expectDeliveredToTenant(tenant, /thanks for stopping by/i);
   await flow.login();
   await flow.openSelfServedContact(tenant);
   await flow.expectTypedTenant();
+  await flow.expectTenantDetails({ firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
 
   await intakeAndRtaTail(flow, { inHand: true });
 });

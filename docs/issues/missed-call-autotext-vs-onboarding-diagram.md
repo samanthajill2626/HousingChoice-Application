@@ -3,10 +3,11 @@ id: missed-call-autotext-vs-onboarding-diagram
 title: Missed-call auto-text copy doesn't request the onboarding details the diagram shows
 type: decision
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-06-29
-refs: app/src/repos/settingsRepo.ts:52, documentation/tenant-onboarding-sequence.mermaid
+resolved: 2026-06-30
+refs: app/src/repos/settingsRepo.ts:59, documentation/tenant-onboarding-sequence.mermaid
 ---
 
 **Problem.** The tenant-onboarding diagram's by-phone branch shows the missed-call
@@ -17,12 +18,13 @@ authority." The implemented missed-call auto-text is the generic operator templa
 So the auto-reply does NOT request the three onboarding details the diagram depicts;
 the prospect supplies them only after a human follows up.
 
-This is a copy/product decision, not a code bug. The e2e suite asserts the REAL
-operator-template body (per the design's `expectAutoReply` = "assert the operator
-template"), and the by-phone scenario continues with the tenant texting their details
-in the next step regardless — so the suite stays faithful and green.
+This was a copy/product decision, not a code bug.
 
-**Suggested fix (optional).** If the product wants the missed-call auto-text to request
-the onboarding details, change the default `missedCallAutoText` template (or add a
-distinct onboarding-specific template). Until then, the divergence is intentional and
-documented.
+**Decision (2026-06-30).** Align the copy with the diagram's intent. The default
+`missedCallAutoText` now requests the onboarding details:
+`"Sorry we missed your call! To get started, please text us your full name, voucher
+size, and housing authority and we'll be right with you."` (`settingsRepo.ts:59`,
+still founder-editable, still ON by default). The diagram's exact wording was
+illustrative — this is close in intent, not verbatim. The by-phone e2e path now asserts
+the request-for-details intent (`expectAutoReply(/voucher size/i)`) and continues with
+the tenant texting their details, as before.

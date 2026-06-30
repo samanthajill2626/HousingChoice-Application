@@ -37,6 +37,12 @@ verbs. Reuse it for the next diagram; add new verbs once.
   portal endpoint — never the UI.
 - **App** assertions read the fake-twilio `listThreads` (`/control/threads`,
   proof-of-send) and the dashboard API (typed-tenant, status, intake).
+- **Assert what Team SEES, not just what persisted.** An API read-back proves
+  storage, not display — a field can save yet render nowhere (intake fields shipped
+  write-only this way). So for anything the diagram implies Team must *see*, assert
+  the **rendered** surface too, on top of the API check. Scope each UI assertion to
+  its card/section (`page.locator('section').filter({ has: heading })`) so common
+  values (`none`/`Yes`) and summary-line copies don't double-match.
 
 Use **accessibility-first selectors** (`getByRole`/`getByLabel`/`getByText`,
 [`e2e/support/selectors.md`](../e2e/support/selectors.md)). Dialog interactions are
@@ -93,9 +99,10 @@ These cost real debugging time on tenant onboarding; the next diagram should exp
   secret) creates a `type:tenant, status:needs_review` contact + fires the welcome text.
 - **The Unknown list shows a FORMATTED phone** (`(555) 123-4567`), not E.164 — locate the
   UI row by the formatted number; resolve the contactId via the API (`?type=unknown`).
-- **The missed-call auto-text body is the generic operator template** ("Sorry I missed
-  you…"), not the diagram's details-request — assert the real template (filed as a
-  decision issue).
+- **The missed-call auto-text requests the onboarding details** (full name, voucher
+  size, housing authority — `settingsRepo.ts` `DEFAULT_ORG_SETTINGS`), matching the
+  diagram's intent. It is the founder-editable default with no settings seed, so assert
+  a stable phrase from it (`/voucher size/i`), not verbatim copy.
 - **`missedCallAutoTextEnabled` defaults ON** — the voice auto-text fires with no settings
   seed.
 - **`/__dev/reseed` and the in-memory session-epoch cache:** a reseed used to leave the

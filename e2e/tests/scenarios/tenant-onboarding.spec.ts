@@ -111,7 +111,9 @@ test('inbound · by phone call → RTA in hand → handoff', async ({ page, requ
   const tenant = freshTenant('Caller');
 
   await flow.tenantCalls(tenant);
-  await flow.expectAutoReply(/missed you|call back soon/i);
+  // The missed-call auto-text now requests the onboarding details (full name,
+  // voucher size, housing authority) per the diagram — assert that intent.
+  await flow.expectAutoReply(/voucher size/i);
   await flow.login();
   // A missed call fires the auto-text but does NOT auto-capture a contact; the tenant
   // then TEXTS their details (the diagram's next step), creating the unknown to triage.

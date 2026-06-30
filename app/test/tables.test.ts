@@ -57,17 +57,23 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus (status), byCreatedAt (created_by + created_at); no stream/TTL', () => {
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus (status), byCreatedAt (created_by + created_at), byUnit (unitId, sparse); no stream/TTL', () => {
     const t = spec('broadcasts');
     expect(t.hashKey.name).toBe('broadcastId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byStatus', 'byCreatedAt']);
+    expect(gsiNames(t)).toEqual(['byStatus', 'byCreatedAt', 'byUnit']);
     const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
     expect(byStatus?.hashKey.name).toBe('status');
     expect(byStatus?.rangeKey).toBeUndefined();
     const byCreatedAt = t.gsis.find((g) => g.indexName === 'byCreatedAt');
     expect(byCreatedAt?.hashKey.name).toBe('created_by');
     expect(byCreatedAt?.rangeKey?.name).toBe('created_at');
+    // Broadcasts dashboard: the prior-recipients lookup — partition by unitId,
+    // sparse (only broadcasts WITH a unitId index here).
+    const byUnit = t.gsis.find((g) => g.indexName === 'byUnit');
+    expect(byUnit?.hashKey.name).toBe('unitId');
+    expect(byUnit?.rangeKey).toBeUndefined();
+    expect(byUnit?.sparse).toBe(true);
     expect(t.stream).toBeUndefined();
     expect(t.ttlAttribute).toBeUndefined();
   });

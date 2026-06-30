@@ -283,6 +283,13 @@ export const TABLES: readonly TableSpec[] = [
         hashKey: { name: 'created_by', type: 'S' },
         rangeKey: { name: 'created_at', type: 'S' },
       },
+      // Prior-recipients lookup (Broadcasts dashboard): partition by unitId so a
+      // unit's prior sent/sending broadcasts come back in one Query (never a
+      // Scan) — the composer flags tenants already broadcast for this property.
+      // Sparse by data convention: only broadcasts WITH a unitId index here, so
+      // a unit-less broadcast never appears (and the lookup degrades to empty
+      // when the GSI is absent on an un-applied env).
+      { indexName: 'byUnit', hashKey: { name: 'unitId', type: 'S' }, sparse: true },
     ],
   },
   {

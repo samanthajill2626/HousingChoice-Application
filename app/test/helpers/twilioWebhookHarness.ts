@@ -1365,6 +1365,30 @@ export function createFakeWorld(): FakeWorld {
       b.updated_at = new Date().toISOString();
       return { ...b };
     },
+    async listByUnit(unitId, opts = {}) {
+      // Sparse byUnit GSI: only broadcasts WITH a unitId index.
+      const all = [...broadcasts.values()].filter((b) => b.unitId === unitId);
+      return pageBroadcasts(all, opts);
+    },
+    async priorRecipientContactIds(unitId) {
+      // Union of every sent/sending broadcast's recipients KEYS for the unit.
+      const prior = new Set<string>();
+      for (const b of broadcasts.values()) {
+        if (b.unitId !== unitId) continue;
+        if (b.status !== 'sent' && b.status !== 'sending') continue;
+        for (const key of Object.keys(b.recipients ?? {})) prior.add(key);
+      }
+      return prior;
+    },
+    async delete(broadcastId) {
+      // Conditional delete — only a draft. Mirror the real repo's discriminated
+      // result (the route maps it to 200 / 404 / 409).
+      const b = broadcasts.get(broadcastId);
+      if (!b) return { deleted: false, reason: 'not_found' };
+      if (b.status !== 'draft') return { deleted: false, reason: 'not_draft' };
+      broadcasts.delete(broadcastId);
+      return { deleted: true };
+    },
   };
 
   const adapter: MessagingAdapter = {

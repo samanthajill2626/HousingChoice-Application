@@ -114,6 +114,9 @@ describe('RecipientPreview — list rendering', () => {
     expect(within(list).getByText('Tasha')).toBeInTheDocument();
     expect(within(list).getByText('Bo')).toBeInTheDocument();
     expect(within(list).getByText('Cy')).toBeInTheDocument();
+    // Each checkbox has a clean per-tenant accessible name (NOT the whole row).
+    expect(within(list).getByRole('checkbox', { name: 'Tasha' })).toBeInTheDocument();
+    expect(within(list).getByRole('checkbox', { name: 'Bo' })).toBeInTheDocument();
     // All checked (none already-sent).
     checkboxes.forEach((cb) => expect(cb).toBeChecked());
   });
@@ -215,6 +218,40 @@ describe('RecipientPreview — add a tenant', () => {
     const row = within(list).getByText('Prior Sent').closest('li') as HTMLElement;
     expect(within(row).getByRole('checkbox')).not.toBeChecked();
     expect(within(row).getByText('Already sent')).toBeInTheDocument();
+  });
+
+  it('does NOT add an opted-out tenant — surfaces an inline reason instead', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })] }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Opted', lastName: 'Out', sms_opt_out: true })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Opted');
+    await u.click(await screen.findByRole('option', { name: /Opted Out/ }));
+
+    // Not added to the sendable list (count stays at the lone candidate).
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    expect(within(list).queryByText('Opted Out')).not.toBeInTheDocument();
+    // An inline reason surfaces (not a silent failure).
+    const note = await screen.findByRole('alert');
+    expect(note).toHaveTextContent(/opted out/i);
+    // The "Send to N" count was NOT inflated (still 1 — just Tasha).
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeInTheDocument();
+  });
+
+  it('does NOT add an unreachable tenant — surfaces an inline reason', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })] }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Bad', lastName: 'Number', sms_unreachable: true })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bad');
+    await u.click(await screen.findByRole('option', { name: /Bad Number/ }));
+
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    expect(within(list).queryByText('Bad Number')).not.toBeInTheDocument();
+    const note = await screen.findByRole('alert');
+    expect(note).toHaveTextContent(/unreachable/i);
   });
 });
 

@@ -71,6 +71,9 @@ export function RecipientPreview({
   const [sending, setSending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Brief inline reason an add-a-tenant pick couldn't be added (phone-less /
+   *  not-found / opted-out / unreachable) — so a can't-add never fails silently. */
+  const [addNote, setAddNote] = useState<string | null>(null);
   /** When a 409 fired (already sent / raced), offer the Results link inline. */
   const [racedToResults, setRacedToResults] = useState(false);
 
@@ -105,14 +108,33 @@ export function RecipientPreview({
   }
 
   /** Add a tenant from the search (must resolve to a contactId). Annotate
-   *  already-sent locally via priorRecipientContactIds; ignore duplicates. */
+   *  already-sent locally via priorRecipientContactIds; ignore duplicates. We
+   *  VALIDATE before clearing the search box so a can't-add surfaces an inline
+   *  reason instead of vanishing silently. Mirrors the server fence: an opted-out
+   *  / unreachable tenant is NOT added (the server would drop it anyway). */
   function addTenant(picked: ContactSearchValue): void {
-    setSearch({ name: '' });
+    setAddNote(null);
     if (picked.contactId === undefined) return;
     const candidate = tenantCandidates.find((c) => c.contactId === picked.contactId);
-    if (candidate === undefined) return;
+    if (candidate === undefined) {
+      setAddNote("Couldn't add that tenant — try the search again.");
+      return;
+    }
+    const name = contactDisplayName(candidate.firstName, candidate.lastName, candidate.phone);
     const phone = candidate.phones?.find((p) => p.primary)?.phone ?? candidate.phone ?? '';
-    if (phone.length === 0) return; // unsendable — don't add a phone-less tenant
+    if (phone.length === 0) {
+      setAddNote(`Can't add ${name} — no phone number on file.`);
+      return;
+    }
+    if (candidate.sms_opt_out === true) {
+      setAddNote(`Can't add ${name} — opted out of texts.`);
+      return;
+    }
+    if (candidate.sms_unreachable === true) {
+      setAddNote(`Can't add ${name} — number is unreachable.`);
+      return;
+    }
+    setSearch({ name: '' });
     setRows((prev) => {
       if (prev.some((r) => r.contactId === candidate.contactId)) return prev; // already listed
       const already = priorIds.has(candidate.contactId);
@@ -120,7 +142,7 @@ export function RecipientPreview({
         ...prev,
         {
           contactId: candidate.contactId,
-          name: contactDisplayName(candidate.firstName, candidate.lastName, phone),
+          name,
           phone,
           alreadySentThisProperty: already,
           checked: !already,
@@ -223,6 +245,10 @@ export function RecipientPreview({
                 <input
                   type="checkbox"
                   className={styles.checkbox}
+                  // Explicit, clean accessible name (the tenant's name, plus an
+                  // "already sent" cue) so getByRole('checkbox',{name}) resolves
+                  // by the row's tenant — NOT the whole name+phone+tags blob.
+                  aria-label={row.alreadySentThisProperty ? `${row.name} — already sent` : row.name}
                   checked={row.checked}
                   onChange={() => toggle(row.contactId)}
                 />
@@ -263,6 +289,11 @@ export function RecipientPreview({
           />
         )}
       </div>
+      {addNote !== null ? (
+        <p className={styles.addNote} role="alert">
+          {addNote}
+        </p>
+      ) : null}
 
       {error !== null ? (
         <p className={styles.error} role="alert">
@@ -283,7 +314,9 @@ export function RecipientPreview({
       ) : null}
 
       {preview.truncated ? (
-        <p className={styles.truncated} role="status">
+        // role="alert" (announces on insertion) — the warning mounts WITH content,
+        // so role="status" wouldn't reliably announce.
+        <p className={styles.truncated} role="alert">
           The audience hit the cap — some matches may be missing. Narrow the filter for a complete
           list.
         </p>

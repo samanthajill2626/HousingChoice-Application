@@ -14,8 +14,25 @@ const appProxy = {
   headers: { 'x-origin-verify': 'dev-placeholder-not-a-secret' },
 };
 
+// Stamps the launch commit (set by scripts/e2e-session.mjs as VITE_E2E_COMMIT)
+// into index.html as <meta name="x-app-commit">, so the e2e preflight can detect
+// a STALE reused Vite server (one serving old modules at a different commit than
+// the checkout — e.g. a session whose Vite wasn't restarted after a backend
+// change). A no-op when the env is unset (a normal `npm run dev` / prod build).
+function commitStampPlugin() {
+  const commit = process.env['VITE_E2E_COMMIT'];
+  return {
+    name: 'e2e-commit-stamp',
+    transformIndexHtml() {
+      return commit
+        ? [{ tag: 'meta', attrs: { name: 'x-app-commit', content: commit }, injectTo: 'head' as const }]
+        : [];
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), commitStampPlugin()],
   server: {
     port: 5174,
     strictPort: true,

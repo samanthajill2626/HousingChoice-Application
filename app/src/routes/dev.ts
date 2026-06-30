@@ -65,6 +65,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
       tablePrefix: config.tablePrefix,
+      // Launch commit (set by scripts/e2e-session.mjs) — the e2e preflight compares
+      // it to the checkout to catch a stale reused backend. null when unstamped.
+      appCommit: process.env['E2E_APP_COMMIT'] ?? null,
     });
   });
 

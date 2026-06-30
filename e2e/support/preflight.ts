@@ -1,4 +1,6 @@
 import type { FullConfig } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Global preflight — runs ONCE before any spec (Playwright `globalSetup`), after
@@ -73,5 +75,49 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
         `bakes in the correct env. Note: recordOutbox=false means NO outbox recording, which makes ` +
         `outbox.spec.ts fail with "Received: 0".`,
     );
+  }
+
+  // --- Stale-stack freshness guard -------------------------------------------
+  // reuseExistingServer also reuses a stack booted at a DIFFERENT commit — e.g. a
+  // long-lived session whose Vite was NOT restarted after a backend change, so the
+  // backend config above looks correct while the FRONTEND serves stale modules
+  // (a Settings spec once "rendered" an old page this way). e2e-session.mjs stamps
+  // the launch commit on the app (/__dev/ping appCommit) and the dashboard
+  // (index.html <meta name="x-app-commit">). Compare BOTH to the current checkout.
+  // Best-effort: if git or a stamp is absent we SKIP (don't fail) — only a
+  // PRESENT-but-MISMATCHED stamp is a hard error.
+  let currentCommit: string | undefined;
+  try {
+    const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+    currentCommit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot })
+      .toString()
+      .trim();
+  } catch {
+    /* no git — skip the freshness check */
+  }
+  if (currentCommit) {
+    const stale: string[] = [];
+    const appCommit = typeof ping['appCommit'] === 'string' ? ping['appCommit'] : '';
+    if (appCommit && appCommit !== currentCommit) {
+      stale.push(`  - backend (app): booted at ${appCommit}, checkout is ${currentCommit}`);
+    }
+    try {
+      const html = await (await fetch(`${baseURL}/`)).text();
+      const frontendCommit = html.match(/<meta name="x-app-commit" content="([^"]+)"/)?.[1] ?? '';
+      if (frontendCommit && frontendCommit !== currentCommit) {
+        stale.push(`  - frontend (dashboard/Vite): built at ${frontendCommit}, checkout is ${currentCommit}`);
+      }
+    } catch {
+      /* couldn't fetch the dashboard root — skip the frontend half */
+    }
+    if (stale.length > 0) {
+      throw new Error(
+        `e2e preflight: a STALE server is being reused on ${baseURL} — booted at a different ` +
+          `commit than this checkout:\n${stale.join('\n')}\n\n` +
+          `Playwright reuses an existing server (reuseExistingServer), so a long-lived session ` +
+          `(especially a Vite not restarted after a backend change) serves OLD code. Fix: stop it ` +
+          `with \`npm run e2e:stop\` (plus any stray app on :8080/:5174/:8889) and re-run.`,
+      );
+    }
   }
 }

@@ -7,7 +7,7 @@
 // / keep their place). Teardown is verified on Windows (taskkill /T); the POSIX
 // path kills each tracked child directly — full Linux/CI teardown is validated
 // separately when CI is set up.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,18 @@ const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const sentinel = path.join(artifactsDir, '.restart');
 const pidFile = path.join(artifactsDir, 'session.pid');
+
+// The current checkout's commit, stamped into BOTH the app and the dashboard at
+// launch so the e2e preflight (e2e/support/preflight.ts) can detect a STALE
+// reused stack — a long-lived session serving old code, especially a Vite that
+// wasn't restarted after a backend change. Best-effort: if git is unavailable
+// the stamp is empty and the preflight simply skips its freshness check.
+let gitSha = '';
+try {
+  gitSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot }).toString().trim();
+} catch {
+  /* no git / detached HEAD — the preflight freshness check is then skipped */
+}
 
 const childEnv = {
   ...process.env,
@@ -63,6 +75,11 @@ const childEnv = {
   // makes sendMessage throw before anything reaches the fake — force it ON so the
   // hermetic stack actually exercises outbound sends against the fake host.
   SMS_SENDING_ENABLED: 'true',
+  // Stale-stack guard (e2e/support/preflight.ts): stamp the launch commit on the
+  // app (/__dev/ping → appCommit) AND the dashboard (index.html <meta>) so a
+  // reused server booted at a different commit is caught with an actionable error.
+  E2E_APP_COMMIT: gitSha,
+  VITE_E2E_COMMIT: gitSha,
 };
 
 const children = new Map(); // name -> ChildProcess

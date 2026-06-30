@@ -261,7 +261,7 @@ export class Scenario {
   }
 
   /** [App] The contact is now typed Tenant (assert via API on the active contact). */
-  expectTypedTenant(_t?: Tenant): Promise<void> {
+  expectTypedTenant(): Promise<void> {
     return step('App: contact is typed Tenant', async () => {
       const id = this.requireActiveContactId();
       const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);

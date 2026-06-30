@@ -67,7 +67,7 @@ test('inbound · by text → RTA in hand → handoff', async ({ page, request })
     voucherSize: 2,
     housingAuthority: 'atlanta_housing',
   });
-  await flow.expectTypedTenant(tenant);
+  await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Jordan',
     lastName: 'Rivera',
@@ -95,7 +95,7 @@ test('inbound · by text → no RTA → parked', async ({ page, request }) => {
     voucherSize: 1,
     housingAuthority: 'dekalb_housing',
   });
-  await flow.expectTypedTenant(tenant);
+  await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Sam',
     lastName: 'Lee',
@@ -123,7 +123,7 @@ test('inbound · by phone call → RTA in hand → handoff', async ({ page, requ
     voucherSize: 3,
     housingAuthority: 'fulton_housing',
   });
-  await flow.expectTypedTenant(tenant);
+  await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Robin',
     lastName: 'Cole',

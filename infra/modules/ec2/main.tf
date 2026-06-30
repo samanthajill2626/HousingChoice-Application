@@ -182,6 +182,30 @@ data "aws_iam_policy_document" "app" {
       values   = ["hc/${var.env}", "CWAgent"]
     }
   }
+
+  # System Status read model (M1.4): backs the admin-only Settings → System
+  # Status panel — DescribeAlarms (alarm metadata, filtered AlarmNamePrefix
+  # hc-<env>- in the app) + FilterLogEvents (recent app errors, pino level ≥ 50).
+  # Read-only; the panel degrades gracefully until this is applied.
+  statement {
+    sid = "SystemStatusObservability"
+    actions = [
+      # NOTE: cloudwatch:DescribeAlarms does NOT support resource-level
+      # permissions, so resources = ["*"] is REQUIRED here (there is nothing
+      # narrower to constrain by; this is read-only alarm metadata).
+      "cloudwatch:DescribeAlarms",
+    ]
+    resources = ["*"]
+  }
+  statement {
+    sid = "SystemStatusLogs"
+    # FilterLogEvents is missing from the "Logs" statement above (which grants
+    # only Create/Put for the agent). Scope it to THIS env's log groups.
+    actions = ["logs:FilterLogEvents"]
+    resources = [
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "app" {

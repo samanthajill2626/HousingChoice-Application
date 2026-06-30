@@ -16,6 +16,7 @@
 // number or any secret. Errors are projected to message + correlationId (+
 // timestamp/level) by the adapter; this service logs counts/reasons only.
 import {
+  classifyCloudWatchError,
   createCloudWatchClient,
   type AlarmView,
   type CloudWatchClientSeam,
@@ -146,8 +147,13 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         log.info({ alarmCount: sorted.length }, 'system status: alarms read');
         return { available: true, alarms: sorted };
       } catch (err) {
-        // No PII — a CloudWatch read carries no message bodies.
-        log.error({ err: (err as Error).message }, 'system status: DescribeAlarms failed');
+        // No PII — a CloudWatch read carries no message bodies. `kind` classifies
+        // the failure (credentials / unauthorized / throttled / unreachable) so a
+        // degraded panel is diagnosable in the logs, not opaque.
+        log.error(
+          { kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: DescribeAlarms failed',
+        );
         return { available: false, reason: 'cloudwatch_error' };
       }
     },
@@ -166,7 +172,10 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         log.info({ window, errorCount: events.length }, 'system status: errors read');
         return { available: true, events };
       } catch (err) {
-        log.error({ window, err: (err as Error).message }, 'system status: FilterLogEvents failed');
+        log.error(
+          { window, kind: classifyCloudWatchError(err), err: (err as Error).message },
+          'system status: FilterLogEvents failed',
+        );
         return { available: false, reason: 'cloudwatch_error' };
       }
     },

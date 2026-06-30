@@ -130,6 +130,36 @@ function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorE
   return { timestamp, level, message, correlationId };
 }
 
+/**
+ * Classify a thrown CloudWatch/Logs SDK error into a coarse, PII-free kind so a
+ * degraded System Status read is DIAGNOSABLE in the logs (credentials vs network
+ * vs throttling vs IAM) instead of an opaque "cloudwatch_error". Inspects the SDK
+ * error `name` and any node `code`/`errno`. The HTTP `reason` stays the stable
+ * `cloudwatch_error` (the panel just shows "available in deployed envs"); this is
+ * for the operator reading CloudWatch — never surfaced as PII.
+ */
+export type CloudWatchErrorKind =
+  | 'credentials'
+  | 'unauthorized'
+  | 'throttled'
+  | 'unreachable'
+  | 'unknown';
+
+export function classifyCloudWatchError(err: unknown): CloudWatchErrorKind {
+  const e = (err ?? {}) as { name?: unknown; code?: unknown; errno?: unknown };
+  const name = typeof e.name === 'string' ? e.name : '';
+  const code = `${typeof e.code === 'string' ? e.code : ''} ${typeof e.errno === 'string' ? e.errno : ''}`;
+  if (/Credentials|UnrecognizedClient|InvalidClientTokenId|InvalidSignature|ExpiredToken/i.test(name)) {
+    return 'credentials';
+  }
+  if (/AccessDenied|Unauthorized|NotAuthorized|Forbidden/i.test(name)) return 'unauthorized';
+  if (/Throttl|TooManyRequests|RequestLimitExceeded|Limitexceeded/i.test(name)) return 'throttled';
+  if (/Timeout|Network|Abort|Connection/i.test(name) || /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET/.test(code)) {
+    return 'unreachable';
+  }
+  return 'unknown';
+}
+
 export interface CreateCloudWatchClientDeps {
   config: AppConfig;
   /** Test seams — fake SDK clients (default to real, region-configured ones). */

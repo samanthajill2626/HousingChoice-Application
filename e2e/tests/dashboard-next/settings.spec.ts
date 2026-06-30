@@ -1,13 +1,13 @@
 import { test, expect, type Page } from '@playwright/test';
-import { getOutbox } from '../../fixtures/outbox.js';
+import { listThreads } from '../../fixtures/fakeTwilio.js';
 
 // Settings surface (:5174), Phase A — the rebuilt tabbed page (Team · Templates ·
 // Notifications · System status). Proves the role-aware shell + the section flows
 // end-to-end against the real backend:
 //   - ADMIN: Team + System tabs visible; invite a user (appears); change a role;
 //     edit a template field (persists across reload); a welcome-text edit is
-//     reflected in a subsequent housing-fair welcome (asserted via the dev outbox);
-//     the System status tab is reachable (Phase-A stub).
+//     reflected in a subsequent housing-fair welcome (asserted via the fake-twilio
+//     thread store); the System status tab is reachable (Phase-A stub).
 //   - VA: limited tab set (no Team/System); Templates inputs read-only.
 // Served on :5174 (the suite baseURL); targeted by absolute URL for explicitness.
 const NEXT = 'http://localhost:5174';
@@ -86,19 +86,29 @@ test.describe('Settings — admin path', () => {
       )
       .toBe(welcomeBody);
 
-    // A fresh housing-fair signup must now welcome with the operator's copy.
+    // A fresh housing-fair signup must now welcome with the operator's copy. Use a
+    // unique phone so the assertion is independent of any prior/other thread.
     const firstName = 'Welcometest';
     const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+    const expectedWelcome = welcomeBody.replace('{firstName}', firstName);
     const submit = await page.request.post(`${NEXT}/public/housing-fair`, {
       data: { firstName, lastName: 'Person', phone, voucherSize: 2 },
     });
     expect(submit.ok()).toBeTruthy();
 
+    // PROOF OF SEND via the fake-twilio thread store (the preferred, more reliable
+    // capture vs. the deprecated /__dev/outbox): the welcome lands as an outbound
+    // message in this phone's thread with the operator's interpolated copy.
     await expect
-      .poll(async () => (await getOutbox(page.request, { to: phone })).length, { timeout: 10_000 })
-      .toBeGreaterThan(0);
-    const messages = await getOutbox(page.request, { to: phone });
-    expect(messages[0]?.body ?? '').toBe(welcomeBody.replace('{firstName}', firstName));
+      .poll(
+        async () => {
+          const threads = await listThreads(page.request);
+          const t = threads.find((x) => x.partyNumber === phone);
+          return t?.messages.some((m) => m.direction === 'outbound' && m.body === expectedWelcome) ?? false;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
 
     // --- System status tab is reachable by an admin (Phase-A stub) ---
     await page.getByRole('tab', { name: 'System status' }).click();

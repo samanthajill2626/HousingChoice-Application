@@ -7,20 +7,35 @@
 import { test } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
 
-// Opt-in: hold the HEADED browser open at the END of each test so you can look
-// around the live dashboard (the page is parked on the tenant's contact page —
-// eyeball the Details panel for Housing authority). Gated on E2E_PAUSE so CI/normal
-// runs are unaffected. Run ONE test headed (PowerShell):
-//   $env:E2E_PAUSE=1; npm run e2e -w @housingchoice/e2e -- tests/scenarios/tenant-onboarding.spec.ts --grep "by text.*RTA in hand" --headed
-// The browser stays open + clickable for ~10 min (override with E2E_PAUSE_MS); press
-// Ctrl+C in the terminal when you're done. No --debug / Inspector needed.
+// Opt-in: pause at the END of each test so you can look around the live dashboard
+// (the page is parked on the tenant's contact page — eyeball the Details panel for
+// Housing authority). Gated on E2E_PAUSE so CI/normal runs are unaffected. Two modes:
+//
+//   E2E_PAUSE=1   (default) — page.pause(): opens the Playwright INSPECTOR and halts.
+//                 Click the green "Resume" (▶) button IN THE INSPECTOR WINDOW (a
+//                 SEPARATE window from Chrome) to continue to the NEXT test. The held
+//                 browser is fully clickable while paused. Run headed:
+//     $env:E2E_PAUSE=1; npm run e2e -w @housingchoice/e2e -- tests/scenarios/tenant-onboarding.spec.ts --headed
+//                 (drop --grep to run all six; keep it to run one). If the Inspector
+//                 doesn't open in your setup, use hold mode instead:
+//
+//   E2E_PAUSE=hold — no button: the headed browser just stays open + clickable, then
+//                 auto-advances to the next test after E2E_PAUSE_MS (default 10 min),
+//                 or Ctrl+C ends the whole run.
 test.afterEach(async ({ page }) => {
-  if (!process.env.E2E_PAUSE) return;
+  const mode = process.env.E2E_PAUSE;
+  if (!mode) return;
   test.setTimeout(0); // don't let the per-test timeout close the browser mid-look
-  const ms = Number(process.env.E2E_PAUSE_MS ?? 600_000);
-  // eslint-disable-next-line no-console
-  console.log(`\n[E2E_PAUSE] test done — browser stays open ~${Math.round(ms / 1000)}s to look around (Ctrl+C to quit).\n`);
-  await page.waitForTimeout(ms);
+  if (mode === 'hold') {
+    const ms = Number(process.env.E2E_PAUSE_MS ?? 600_000);
+    // eslint-disable-next-line no-console
+    console.log(`\n[E2E_PAUSE] test done — browser open ~${Math.round(ms / 1000)}s (Ctrl+C to quit).\n`);
+    await page.waitForTimeout(ms);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log('\n[E2E_PAUSE] test done — click "Resume" (▶) in the Playwright Inspector window to continue to the next test.\n');
+    await page.pause();
+  }
 });
 
 /** Eligibility intake → RTA gate → parked/handoff. Shared by every leaf path. */

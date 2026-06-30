@@ -29,6 +29,11 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     navigationTimeout: 15_000,
+    // Opt-in slow motion for watching a --headed run: each browser action is
+    // delayed by E2E_SLOWMO milliseconds. Default 0 = no delay, so CI and normal
+    // runs are unaffected. e.g.:
+    //   E2E_SLOWMO=800 npm run e2e -w @housingchoice/e2e -- <spec> --headed
+    launchOptions: { slowMo: Number(process.env.E2E_SLOWMO ?? 0) },
   },
   projects: [
     {

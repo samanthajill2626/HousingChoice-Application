@@ -121,10 +121,23 @@ test.describe('Settings — admin path', () => {
     // Environment pill is present in every env.
     await expect(page.getByRole('heading', { name: 'Go-live flags', level: 3 })).toBeVisible();
     await expect(page.getByText('Environment', { exact: true })).toBeVisible();
+    // The two A2P kill-switch pills are present (labels rendered as TEXT, not just
+    // colour). On the hermetic mock stack SMS_SENDING_ENABLED=true and the relay
+    // provisioning default is on (Twilio driver redirected at the fake host), so
+    // they read "On" here; the off state ("Off · pre-A2P") is unit-tested in
+    // FlagPills.test.tsx where the config can be driven directly.
+    await expect(page.getByText('SMS sending', { exact: true })).toBeVisible();
+    await expect(page.getByText('Relay provisioning', { exact: true })).toBeVisible();
+    // The founder-cell + push readiness flags render too.
+    await expect(page.getByText('Founder cell', { exact: true })).toBeVisible();
+    await expect(page.getByText('Push notifications', { exact: true })).toBeVisible();
     // Alarms + Recent errors degrade gracefully on the local stack (no AWS).
     await expect(page.getByRole('heading', { name: 'Alarms', level: 3 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Recent errors', level: 3 })).toBeVisible();
     await expect(page.getByText('Available in deployed environments.')).toHaveCount(2);
+    // The alarms block exposes a manual refresh affordance (the 60s-while-visible
+    // auto-refresh is unit-tested); it's present even in the degraded state.
+    await expect(page.getByRole('button', { name: 'Refresh alarms' })).toBeVisible();
 
     // --- Restore the welcome-text to a neutral copy that still interpolates
     // {firstName} so later specs (e.g. outbox.spec, which only checks the first

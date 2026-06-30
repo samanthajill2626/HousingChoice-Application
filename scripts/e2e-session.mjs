@@ -50,6 +50,15 @@ const childEnv = {
   PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? 'http://localhost:5173',
   DEV_AUTH_ENABLED: '1',
   MESSAGING_RECORD_OUTBOX: '1',
+  // The public surface ships a strict per-IP abuse fence (default 5 req / 60s)
+  // on its unauthenticated, SMS-spending routes. That's correct for prod, but a
+  // single e2e run legitimately drives /public/* far more often than that from
+  // ONE IP (every flyer teaser load + housing-fair POST + details reveal across
+  // the public-pages, outbox, settings, and tenant-onboarding specs share the
+  // window) — so the default trips and 429s cascade into "no longer available"
+  // funnels + missing welcomes. Raise the ceiling for the hermetic suite ONLY
+  // (this never touches a deployed env); an externally-set value still wins.
+  PUBLIC_RATE_LIMIT_MAX: process.env.PUBLIC_RATE_LIMIT_MAX ?? '100000',
   // --- fake-twilio (HTTP-seam messaging mock) ---
   // The app runs the REAL Twilio driver (MESSAGING_DRIVER=twilio) but is pointed
   // at the in-process fake host via TWILIO_API_BASE_URL, so the production

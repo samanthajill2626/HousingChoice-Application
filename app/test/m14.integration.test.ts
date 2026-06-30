@@ -109,6 +109,23 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
       s = await settings.getOrgSettings();
       expect(s.preRingPauseSeconds).toBe(6);
     });
+
+    it('welcomeText: set projects it; null CLEARS it (REMOVE) so it is absent again', async () => {
+      // Set a custom welcomeText — it rides the GET projection.
+      await settings.putOrgSettings({ welcomeText: 'Hi {firstName}, welcome!' });
+      let s = await settings.getOrgSettings();
+      expect(s.welcomeText).toBe('Hi {firstName}, welcome!');
+
+      // A null CLEAR issues a DynamoDB REMOVE — the attribute is deleted, so the
+      // projection no longer carries welcomeText (public.ts falls back to default).
+      await settings.putOrgSettings({ welcomeText: null });
+      s = await settings.getOrgSettings();
+      expect(s.welcomeText).toBeUndefined();
+      expect('welcomeText' in s).toBe(false);
+
+      // The REMOVE is field-level too: other fields survive the clear.
+      expect(s.preRingPauseSeconds).toBe(6);
+    });
   });
 
   describe('usersRepo push-subscription array writes', () => {

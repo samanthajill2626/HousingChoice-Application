@@ -182,9 +182,10 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
     }
   });
 
-  it('400s an empty string, an over-320-char string, and a non-string', async () => {
+  it('400s an empty string, an over-320-char string, and a non-string (but NOT null — that CLEARS)', async () => {
     const { app } = makeWebhookHarness();
-    for (const v of ['', 'x'.repeat(321), 123, true, null, ['hi']]) {
+    // null is an explicit CLEAR (its own test below), so it is NOT in this list.
+    for (const v of ['', 'x'.repeat(321), 123, true, ['hi']]) {
       const res = await request(app)
         .put('/api/settings')
         .set('x-origin-verify', SECRET)
@@ -192,6 +193,42 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
         .send({ welcomeText: v });
       expect(res.status, JSON.stringify(v)).toBe(400);
     }
+  });
+
+  it('an admin can CLEAR welcomeText with null — the attribute is removed and a welcome falls back to the default', async () => {
+    const { app, world } = makeWebhookHarness();
+    const custom = 'Hi {firstName}, custom welcome!';
+
+    // First set a custom welcomeText...
+    const set = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ welcomeText: custom });
+    expect(set.status).toBe(200);
+    expect(world.settings.welcomeText).toBe(custom);
+
+    // ...then CLEAR it with an explicit null.
+    const cleared = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ welcomeText: null });
+    expect(cleared.status).toBe(200);
+    // The attribute is gone — neither the PUT response nor a GET projects it.
+    expect(cleared.body.settings.welcomeText).toBeUndefined();
+    expect(world.settings.welcomeText).toBeUndefined();
+
+    const get = await request(app)
+      .get('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE); // VA
+    expect(get.status).toBe(200);
+    expect(get.body.settings.welcomeText).toBeUndefined();
+
+    // The clear is audited as a welcomeText change too.
+    const audit = world.auditEvents.filter((e) => e.event_type === 'settings_updated');
+    expect(audit.at(-1)?.payload).toMatchObject({ fields: ['welcomeText'] });
   });
 
   it('a VA is still forbidden (403) from setting welcomeText — the gate is unchanged', async () => {

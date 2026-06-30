@@ -5,6 +5,7 @@ import { request } from './client.js';
 import type {
   AdminUserView,
   OrgSettings,
+  SettingsPatch,
   UserRole,
   PlacementItem,
   PlacementsPage,
@@ -697,8 +698,9 @@ export async function getSettings(signal?: AbortSignal): Promise<OrgSettings> {
 }
 
 /** PUT /api/settings { ...patch } — admin-only edit; send ONLY changed fields.
- *  Returns the merged settings (unwrapped). 400 on a validation failure. */
-export async function putSettings(patch: Partial<OrgSettings>): Promise<OrgSettings> {
+ *  Returns the merged settings (unwrapped). 400 on a validation failure.
+ *  `welcomeText: null` is an explicit CLEAR (revert to the built-in default). */
+export async function putSettings(patch: SettingsPatch): Promise<OrgSettings> {
   const res = await request<{ settings: OrgSettings }>('/api/settings', {
     method: 'PUT',
     body: patch,

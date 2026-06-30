@@ -60,6 +60,14 @@ export interface OrgSettings {
   welcomeText?: string;
 }
 
+/** The PUT /api/settings patch: only the changed fields. `welcomeText` accepts
+ *  an explicit `null` to CLEAR a previously-set value (revert to the built-in
+ *  default) — the backend deletes the stored attribute. Every other field keeps
+ *  its OrgSettings type. */
+export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
+  welcomeText?: string | null;
+};
+
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at
 // GET /api/today (TodayResponse); the B1 frontend assembles the SAME shape

@@ -3,7 +3,7 @@
 // VAs may VIEW (GET requireAuth) but not EDIT (PUT is admin-only); the section
 // disables the inputs for VAs, so the save path here is only reached by admins.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getSettings, putSettings, type OrgSettings } from '../../api/index.js';
+import { getSettings, putSettings, type OrgSettings, type SettingsPatch } from '../../api/index.js';
 
 export type SettingsStatus = 'loading' | 'ready' | 'error';
 
@@ -12,8 +12,9 @@ export interface SettingsState {
   settings: OrgSettings | undefined;
   retry: () => void;
   /** PUT only the changed fields; returns the merged settings. Throws ApiError
-   *  (e.g. 400) so the caller can surface validation inline. */
-  save: (patch: Partial<OrgSettings>) => Promise<OrgSettings>;
+   *  (e.g. 400) so the caller can surface validation inline. `welcomeText: null`
+   *  clears a previously-set value. */
+  save: (patch: SettingsPatch) => Promise<OrgSettings>;
 }
 
 export function useSettings(): SettingsState {
@@ -50,7 +51,7 @@ export function useSettings(): SettingsState {
     void load();
   }, [load]);
 
-  const save = useCallback(async (patch: Partial<OrgSettings>): Promise<OrgSettings> => {
+  const save = useCallback(async (patch: SettingsPatch): Promise<OrgSettings> => {
     const updated = await putSettings(patch);
     setSettings(updated);
     return updated;

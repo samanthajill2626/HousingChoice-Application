@@ -3,8 +3,8 @@
 // admin-only), so for a VA every input is disabled and the Save button is gone
 // (a "read-only" note explains why). Save sends ONLY the changed fields and
 // surfaces a 400 validation error inline; the server is authoritative.
-import { useEffect, useMemo, useState } from 'react';
-import { ApiError, type OrgSettings } from '../../api/index.js';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, type OrgSettings, type SettingsPatch } from '../../api/index.js';
 import { useAuth } from '../../app/AuthContext.js';
 import { Button, Spinner } from '../../ui/index.js';
 import { useSettings } from './useSettings.js';
@@ -17,7 +17,10 @@ const MAX_PRE_RING = 10;
 const MAX_QUICK_REPLIES = 10;
 
 /** A local, editable mirror of the five settings fields. welcomeText is a string
- *  here (empty = "use the default"); it's only PUT when non-empty. */
+ *  here (empty box = "use the default"): when the box is cleared from a
+ *  previously-set value the patch carries `welcomeText: null` (an explicit CLEAR);
+ *  when it was never set and stays empty nothing is sent; a non-empty value is
+ *  sent verbatim. */
 interface FormState {
   preRingPauseSeconds: number;
   missedCallAutoText: string;
@@ -37,10 +40,12 @@ function toForm(s: OrgSettings): FormState {
 }
 
 /** The patch of CHANGED fields only (so an admin's save never touches untouched
- *  values). welcomeText is sent only when non-empty AND changed (the backend
- *  requires 1..320 — an empty box means "leave the default"). */
-function diff(form: FormState, base: OrgSettings): Partial<OrgSettings> {
-  const patch: Partial<OrgSettings> = {};
+ *  values). welcomeText: a non-empty change is sent verbatim; CLEARING a
+ *  previously-set value sends `welcomeText: null` (an explicit revert-to-default,
+ *  which the backend turns into a REMOVE); a box that was empty and stays empty
+ *  sends nothing (the backend rejects empty strings). */
+function diff(form: FormState, base: OrgSettings): SettingsPatch {
+  const patch: SettingsPatch = {};
   if (form.preRingPauseSeconds !== base.preRingPauseSeconds) {
     patch.preRingPauseSeconds = form.preRingPauseSeconds;
   }
@@ -57,8 +62,14 @@ function diff(form: FormState, base: OrgSettings): Partial<OrgSettings> {
     patch.quickReplies = form.quickReplies;
   }
   const baseWelcome = base.welcomeText ?? '';
-  if (form.welcomeText !== baseWelcome && form.welcomeText.length > 0) {
-    patch.welcomeText = form.welcomeText;
+  if (form.welcomeText !== baseWelcome) {
+    if (form.welcomeText.length > 0) {
+      patch.welcomeText = form.welcomeText;
+    } else if (baseWelcome.length > 0) {
+      // Cleared a previously-set value → explicit CLEAR (revert to default).
+      patch.welcomeText = null;
+    }
+    // (never-set + still-empty → no key; the backend rejects empty strings)
   }
   return patch;
 }
@@ -72,10 +83,21 @@ export function TemplatesSection(): React.JSX.Element {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The latest form, read inside the hydrate effect WITHOUT making the form a
+  // dependency (so the effect runs on `settings` changes only, never on keystrokes).
+  const formRef = useRef<FormState | null>(form);
+  formRef.current = form;
+
   // Hydrate the local form from the loaded settings (and re-hydrate after a save
-  // returns the merged record).
+  // returns the merged record). GUARD: do NOT clobber edits the user made while a
+  // PUT was in flight — only (re)hydrate when there is no form yet (initial load)
+  // or the current form has NO pending edits relative to the incoming baseline.
+  // Without this, the post-save `settings` update would overwrite a field the
+  // user changed after clicking Save but before the PUT resolved (a lost edit).
   useEffect(() => {
-    if (settings !== undefined) {
+    if (settings === undefined) return;
+    const current = formRef.current;
+    if (current === null || Object.keys(diff(current, settings)).length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm(toForm(settings));
     }

@@ -797,7 +797,13 @@ export function createFakeWorld(): FakeWorld {
         settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
       if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
       if (patch.preRingPauseSeconds !== undefined) settings.preRingPauseSeconds = patch.preRingPauseSeconds;
-      if (patch.welcomeText !== undefined) settings.welcomeText = patch.welcomeText;
+      if (patch.welcomeText === null) {
+        // Explicit CLEAR — delete the attribute (mirrors the real repo's REMOVE),
+        // so getOrgSettings projects no welcomeText and public.ts falls back.
+        delete settings.welcomeText;
+      } else if (patch.welcomeText !== undefined) {
+        settings.welcomeText = patch.welcomeText;
+      }
       return { ...settings };
     },
   };

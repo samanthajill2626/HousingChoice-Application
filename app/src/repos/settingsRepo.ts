@@ -62,6 +62,14 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   preRingPauseSeconds: 2,
 };
 
+/** A settings patch. `welcomeText` may be `null` — an explicit CLEAR that issues a
+ *  DynamoDB REMOVE so the attribute is deleted (getOrgSettings then projects no
+ *  welcomeText and public.ts falls back to WELCOME_TEXT_TEMPLATE). Every other
+ *  field keeps its OrgSettings type. */
+export type OrgSettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
+  welcomeText?: string | null;
+};
+
 export interface SettingsRepo {
   /** The org-settings item merged over DEFAULT_ORG_SETTINGS (defaults when absent). */
   getOrgSettings(): Promise<OrgSettings>;
@@ -69,8 +77,9 @@ export interface SettingsRepo {
    * Merge a partial patch onto the stored settings and return the result.
    * Field-level merge (a patch omitting a field leaves it untouched);
    * quickReplies is replaced wholesale when present (it's a list, not a map).
+   * A `null`-valued field (today only welcomeText) is REMOVEd (cleared).
    */
-  putOrgSettings(patch: Partial<OrgSettings>): Promise<OrgSettings>;
+  putOrgSettings(patch: OrgSettingsPatch): Promise<OrgSettings>;
 }
 
 export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
@@ -118,40 +127,51 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
     },
 
     async putOrgSettings(patch) {
-      // Build a SET update from only the fields present in the patch — a merge,
-      // not a replace (an omitted field is left as stored). An UpdateCommand
-      // (not a Put) so a partial patch never blanks the other fields, and the
-      // item is created on first write (upsert semantics, no condition).
+      // Build a SET (and, for null-valued fields, REMOVE) update from only the
+      // fields present in the patch — a merge, not a replace (an omitted field is
+      // left as stored). An UpdateCommand (not a Put) so a partial patch never
+      // blanks the other fields, and the item is created on first write (upsert
+      // semantics, no condition). A `null` value (today only welcomeText) REMOVEs
+      // the attribute so getOrgSettings no longer projects it (revert to default).
       const sets: string[] = [];
+      const removes: string[] = [];
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         const nameKey = `#k${i}`;
-        const valueKey = `:v${i}`;
         names[nameKey] = key;
-        values[valueKey] = value;
-        sets.push(`${nameKey} = ${valueKey}`);
+        if (value === null) {
+          removes.push(nameKey);
+        } else {
+          const valueKey = `:v${i}`;
+          values[valueKey] = value;
+          sets.push(`${nameKey} = ${valueKey}`);
+        }
         i += 1;
       }
-      if (sets.length === 0) {
+      if (sets.length === 0 && removes.length === 0) {
         // Nothing to write — return the current merged view.
         return this.getOrgSettings();
       }
+      const clauses: string[] = [];
+      if (sets.length > 0) clauses.push(`SET ${sets.join(', ')}`);
+      if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { settingId: ORG_SETTINGS_ID },
-          UpdateExpression: `SET ${sets.join(', ')}`,
+          UpdateExpression: clauses.join(' '),
           ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
+          // ALL update expressions reference names; only SET clauses carry values.
+          ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
           ReturnValues: 'ALL_NEW',
         }),
       );
       // Field names only (template copy is operator content, fine to omit; the
       // audit event records the actual change at the route).
-      log.info({ fields: Object.keys(values).length }, 'org settings updated');
+      log.info({ fields: sets.length + removes.length }, 'org settings updated');
       return toOrgSettings(Attributes as Record<string, unknown> | undefined);
     },
   };

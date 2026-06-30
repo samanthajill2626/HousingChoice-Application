@@ -488,7 +488,10 @@ export class Scenario {
       // Curate to exactly the active tenant: clear the audience, then check only them.
       await this.page.getByRole('button', { name: 'Deselect all' }).click();
       const list = this.page.getByRole('list', { name: 'Candidate recipients' });
-      await list.getByRole('checkbox', { name: firstName }).check();
+      // exact: the row's accessible name is the FIRST name only; without exact a
+      // prior-run tenant whose firstName is a prefix (e.g. "Searcher123451" inside
+      // "Searcher1234512") would also match this substring.
+      await list.getByRole('checkbox', { name: firstName, exact: true }).check();
       await this.page.getByRole('button', { name: /^Send to/ }).click();
       await expect(this.page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/, { timeout: 15_000 });
     });
@@ -546,7 +549,10 @@ export class Scenario {
     const id = this.requireActiveContactId();
     return step('App relays the tenant preferences to Team (contact timeline)', async () => {
       await this.page.goto(`${NEXT}/contacts/${id}`);
-      await expect(this.page.getByText(re)).toBeVisible({ timeout: 10_000 });
+      // Scope to the timeline region so the assertion proves the inbound RENDERED
+      // there (not a stray match elsewhere on the page) — per the playbook.
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(timeline.getByText(re)).toBeVisible({ timeout: 10_000 });
     });
   }
 

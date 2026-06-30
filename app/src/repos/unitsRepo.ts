@@ -158,6 +158,12 @@ export interface UnitItem {
   media?: string[];
   /** Public flyer link. */
   listing_link?: string;
+  /** Public flyer details (public-pages §3): a tour video link. Shareable. */
+  video_url?: string;
+  /** Public flyer details (public-pages §3): the application fee in dollars (>= 0). Shareable. */
+  application_fee?: number;
+  /** Public flyer details (public-pages §3): same-day RTA available. Shareable. */
+  same_day_rta?: boolean;
   /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
   /** The never-standardized per-unit application process (free text). INTERNAL. */

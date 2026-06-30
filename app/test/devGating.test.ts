@@ -84,6 +84,9 @@ describe('dev gating — router', () => {
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
       tablePrefix: config.tablePrefix,
+      // The preflight's stale-stack freshness guard reads this (launch commit,
+      // stamped by scripts/e2e-session.mjs); null when unstamped, as in this test.
+      appCommit: process.env['E2E_APP_COMMIT'] ?? null,
     });
   });
 

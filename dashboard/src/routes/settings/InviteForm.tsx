@@ -58,6 +58,8 @@ export function InviteForm({ onInvite }: InviteFormProps): React.JSX.Element {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="name@example.com"
             autoComplete="off"
+            aria-invalid={error !== null}
+            {...(error !== null && { 'aria-describedby': 'invite-email-error' })}
           />
         </label>
         <label className={styles.field}>
@@ -79,7 +81,7 @@ export function InviteForm({ onInvite }: InviteFormProps): React.JSX.Element {
       </div>
 
       {error !== null ? (
-        <p role="alert" className={styles.error}>
+        <p id="invite-email-error" role="alert" className={styles.error}>
           {error}
         </p>
       ) : null}

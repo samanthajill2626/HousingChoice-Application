@@ -24,8 +24,9 @@ export function SettingsPage(): React.JSX.Element {
       <h1 className={styles.heading}>Settings</h1>
 
       {isMobile ? (
-        <label className={styles.mobileSelect}>
-          <span className={styles.srOnly}>Settings section</span>
+        // One accessible name only: aria-label (no redundant <label> text — a
+        // wrapping <label> with its own text would double-label the <select>).
+        <div className={styles.mobileSelect}>
           <select
             aria-label="Settings section"
             className={styles.select}
@@ -38,7 +39,7 @@ export function SettingsPage(): React.JSX.Element {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       ) : (
         <div role="tablist" aria-label="Settings sections" className={styles.tabs}>
           {tabs.map((tab) => (

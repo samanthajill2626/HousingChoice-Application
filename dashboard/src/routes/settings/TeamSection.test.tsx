@@ -116,6 +116,30 @@ describe('TeamSection — invite', () => {
     const status = await screen.findByRole('status');
     expect(status).toHaveTextContent(/dave@example.com is already on the team/i);
   });
+
+  it('associates a 400 error with the email input (aria-invalid + aria-describedby)', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([]);
+    inviteUser.mockRejectedValue(new ApiError(400, 'invalid_email', 'not a valid email'));
+    render(<TeamSection />);
+    await screen.findByText(/No teammates yet/i);
+
+    const emailInput = screen.getByLabelText('Email');
+    // No error yet → not flagged.
+    expect(emailInput).toHaveAttribute('aria-invalid', 'false');
+
+    // Syntactically valid (so the native type=email check passes) but rejected
+    // by the server with a 400.
+    await u.type(emailInput, 'blocked@example.com');
+    await u.click(screen.getByRole('button', { name: 'Invite' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/not a valid email/i);
+    // The input is now flagged invalid and points at the error element.
+    expect(emailInput).toHaveAttribute('aria-invalid', 'true');
+    expect(emailInput).toHaveAttribute('aria-describedby', alert.id);
+    expect(alert.id).toBe('invite-email-error');
+  });
 });
 
 describe('TeamSection — optimistic role change revert', () => {

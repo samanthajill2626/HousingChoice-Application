@@ -196,6 +196,29 @@ async function waitForHealth(url = 'http://localhost:8080/health', timeoutMs = 6
   }
 }
 
+async function cleanSlate() {
+  // Reseed the backend so every session boots HERMETIC. The DynamoDB container is
+  // REUSED across boots for speed and `db-seed` only idempotently re-PutItems fixed-ID
+  // rows — it never CLEARS — so dynamically-created rows (contacts, messages, and the
+  // `sid#<providerSid>` inbound-dedup pointers) accumulate across boots forever.
+  // /__dev/reseed clears + re-seeds, wiping those stale pointers. (Together with
+  // fake-twilio's now-randomized SID base this keeps interactive `e2e:session` driving
+  // clean and collision-free. `npm run e2e` ALSO reseeds in globalSetup — the extra
+  // reseed there is a cheap, harmless no-op.)
+  const res = await fetch('http://localhost:8080/__dev/reseed', { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(`clean-slate reseed failed (HTTP ${res.status}) at http://localhost:8080/__dev/reseed`);
+  }
+  // Best-effort: also clear the fake's threads + any in-flight status-callback timers.
+  await fetch('http://localhost:8889/control/reset', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  }).catch(() => {
+    /* the fake may be momentarily unavailable — never fail boot over its reset */
+  });
+}
+
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -280,6 +303,12 @@ async function main() {
   startViteNext();
 
   await waitForHealth();
+
+  // Clean slate: clear any rows accumulated in the reused DynamoDB container (incl.
+  // stale fake-SID dedup pointers) so this session starts hermetic. See cleanSlate().
+  log('clean-slate reseed (hermetic session start)…');
+  await cleanSlate();
+
   log('ready — app :8080, web :5174, fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,

@@ -41,9 +41,20 @@ raw inbound passes the scenario after the reseed; full suite green (33/33).
 stale pointers → seeded-TASHA inbound dropped). Same harness bug, different surface; the
 one globalSetup reseed resolves both. See that issue for its boundary reproduction.
 
-**Follow-up (optional, not blocking).** This fixes `npm run e2e`. Ad-hoc dev that drives
-the stack directly (`e2e:session` + Playwright MCP, no globalSetup) still accumulates
-pointers — run `npm run e2e:reseed` before manual inbound testing (per the
-mock-comms-debugging note). A more complete fix would have the `e2e:session` launcher
-reseed on every boot so each session is hermetic from the start; deferred to avoid a
-shared-infra change while several branches are in flight.
+**Follow-up — DONE (2026-06-30).** The deferred follow-up shipped, fixing the
+collision class at the SOURCE plus a session-boot clean slate:
+
+1. **Collision-proof SIDs (root fix).** `fake-twilio`'s engine now seeds its SID
+   counter from a **random high base** (`randomSidSeqStart`, `[10M, 90M)`) instead of 0,
+   so a restarted fake never re-mints a prior process's low `SMfake0000000N` SIDs — no
+   collision with stale `sid#` pointers regardless of DB state. This also covers the
+   `e2e:restart` case (a mid-session backend bounce restarts the fake), which a boot-only
+   reseed could not. A `sidSeqStart` dep keeps SIDs deterministic in tests. No test
+   asserts a literal SID; full fake-twilio suite green.
+2. **Hermetic session boot.** `scripts/e2e-session.mjs` now reseeds (`/__dev/reseed` +
+   `/control/reset`) once after app-health on every boot (`cleanSlate()`), so an
+   interactive `e2e:session` starts with a clean DATA slate too — no need to remember
+   `npm run e2e:reseed` first.
+
+Verified: fake-twilio unit suite 120/120; full `npm run e2e` green 33/33 (boot-reseed log
+present). Closes the manual-`e2e:reseed` caveat above.

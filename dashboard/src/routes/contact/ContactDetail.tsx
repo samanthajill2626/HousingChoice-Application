@@ -372,6 +372,7 @@ export function ContactDetail(): React.JSX.Element {
                 placements={file.placements}
                 units={file.units}
                 listingsSentPending={file.listingsSent.status !== 'ready'}
+                listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
                 media={media}
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}

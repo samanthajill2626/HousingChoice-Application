@@ -11,6 +11,8 @@ import {
   type Contact,
   type ContactPhone,
   type UnitItem,
+  type ListingSendRow,
+  type ListingResponse,
 } from '../../api/index.js';
 import { StatusBadge } from '../../ui/index.js';
 import {
@@ -37,6 +39,8 @@ export interface TenantFileProps {
   units: UnitItem[];
   /** C4 listings-sent slice status (panel degrades to pending on 404). */
   listingsSentPending: boolean;
+  /** C4 listings-sent rows — the properties broadcast/sent to this tenant. */
+  listingsSent: ListingSendRow[];
   /** "Media from comms" — derived from the live timeline (updates as messages
    *  arrive); `mediaLoading` covers the brief window before the timeline lands. */
   media: CommsMediaItem[];
@@ -57,12 +61,20 @@ function unitLabel(units: Map<string, UnitItem>, unitId: string): string {
   return addr || unitId;
 }
 
+/** The tenant's reaction to a sent listing, as a row's right-hand label. */
+const LISTING_RESPONSE_LABEL: Record<ListingResponse, string> = {
+  interested: 'Interested',
+  not_a_fit: 'Not a fit',
+  no_reply: 'No reply',
+};
+
 export function TenantFile({
   contact,
   phones,
   placements,
   units,
   listingsSentPending,
+  listingsSent,
   media,
   mediaLoading,
   onEdit,
@@ -145,11 +157,25 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Properties sent">
+      <Card
+        title="Properties sent"
+        aside={listingsSent.length > 0 ? String(listingsSent.length) : undefined}
+      >
         {listingsSentPending ? (
           <PendingPanel />
-        ) : (
+        ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
+        ) : (
+          listingsSent.map((s) => (
+            <Row
+              key={`${s.unitId}:${s.sentAt}`}
+              to={`/listings/${s.unitId}`}
+              label={unitLabel(unitMap, s.unitId)}
+              right={
+                <span className={responseClass.muted}>{LISTING_RESPONSE_LABEL[s.response]}</span>
+              }
+            />
+          ))
         )}
       </Card>
 

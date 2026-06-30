@@ -3,9 +3,10 @@ id: properties-sent-card-stubbed
 title: Tenant page "Properties sent" card never renders its rows (hardcoded empty state)
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-06-30
+resolved: 2026-06-30
 refs: dashboard/src/routes/contact/TenantFile.tsx:148, dashboard/src/routes/contact/ContactDetail.tsx:374, dashboard/src/api/endpoints.ts:463
 ---
 
@@ -47,3 +48,12 @@ mirroring the adjacent **Tours**/**Placements** cards which already map their ar
 suite — the scenarios assert listing delivery via the fake-twilio thread (proof-of-send),
 the `listings-sent` API, and the timeline "Property sent" item, none of which depend on this
 card. Filed for follow-up.
+
+**Resolution (2026-06-30).** Threaded the `ListingSendRow[]` through to `TenantFile`
+(`ContactDetail` now passes `listingsSent` alongside `listingsSentPending`) and gave the
+"Properties sent" card a row-rendering branch — one `Row` per send linking to
+`/listings/<unitId>` with the tenant's response (Interested / Not a fit / No reply), plus a
+count `aside`, mirroring the adjacent Tours/Placements cards. Pending → `PendingPanel`,
+ready-but-empty → "No properties sent yet.", ready-with-rows → the rows. Backed by a new
+`files.test.tsx` case (sent row renders + links + shows the response) and an empty-state
+case; dashboard typecheck + 255 contact tests green.

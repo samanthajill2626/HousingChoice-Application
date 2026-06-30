@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import type { CommsMediaItem } from './media.js';
-import type { PlacementItem, Contact, UnitItem } from '../../api/index.js';
+import type { PlacementItem, Contact, UnitItem, ListingSendRow } from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -32,7 +32,13 @@ describe('TenantFile', () => {
     phone: '+14040100007',
   };
 
-  function renderIt(opts: { listingsSentPending?: boolean; media?: CommsMediaItem[] } = {}) {
+  function renderIt(
+    opts: {
+      listingsSentPending?: boolean;
+      listingsSent?: ListingSendRow[];
+      media?: CommsMediaItem[];
+    } = {},
+  ) {
     return render(
       <MemoryRouter>
         <TenantFile
@@ -41,6 +47,7 @@ describe('TenantFile', () => {
           placements={[TENANT_CASE]}
           units={[UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
+          listingsSent={opts.listingsSent ?? []}
           media={opts.media ?? []}
         />
       </MemoryRouter>,
@@ -65,6 +72,26 @@ describe('TenantFile', () => {
   it('shows the pending state for listings-sent until the backend lands', () => {
     renderIt({ listingsSentPending: true });
     expect(screen.getAllByText(/Arrives with the backend/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders Properties-sent rows linking to the unit, with the response (C4 data)', () => {
+    renderIt({
+      listingsSentPending: false,
+      listingsSent: [
+        { contactId: 'T1', unitId: 'u1', response: 'no_reply', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' },
+      ],
+    });
+    // The sent row links to the LISTING route (placements/tours link to /placements/*),
+    // so a /listings/u1 link uniquely identifies the Properties-sent row.
+    const sentLink = screen.getAllByRole('link').find((a) => a.getAttribute('href') === '/listings/u1');
+    expect(sentLink).toBeDefined();
+    expect(sentLink).toHaveTextContent(/1450 Joseph Blvd/);
+    expect(screen.getByText('No reply')).toBeInTheDocument();
+  });
+
+  it('shows "No properties sent yet." when the slice is ready but empty', () => {
+    renderIt({ listingsSentPending: false, listingsSent: [] });
+    expect(screen.getByText('No properties sent yet.')).toBeInTheDocument();
   });
 
   it('shows "No media yet" when there is no comms media', () => {

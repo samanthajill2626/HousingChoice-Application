@@ -18,10 +18,22 @@ import { tenantCallNoAnswer } from '../fixtures/fakeVoice.js';
 const NEXT = 'http://localhost:5174';
 /** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
 export const APP_NUMBER = '+15550009999';
+/** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */
+const SEEDED_LANDLORD = 'contact-landlord-0001';
 
 export interface Tenant {
   phone: string;
   name: string;
+  /** Unique, space-free first name — used to locate the tenant's broadcast row
+   *  (the audience preview shows the FIRST name only). */
+  firstName: string;
+  lastName: string;
+}
+
+/** An available property the team can send to a tenant (sending-unit scenarios). */
+export interface Unit {
+  unitId: string;
+  addressLine1: string;
 }
 
 /** Thin wrapper over Playwright's test.step so a scenario reads as the diagram. */
@@ -38,7 +50,10 @@ export function freshTenant(label: string): Tenant {
   const stamp = `${Date.now()}`.slice(-5);
   seq += 1;
   const phone = `+1555${stamp}${String(seq).padStart(2, '0')}`;
-  return { phone, name: `${label} ${stamp}-${seq}` };
+  // firstName is unique + space-free (so a broadcast preview row — which shows the
+  // FIRST name only — is locatable by an exact accessible-name match).
+  const firstName = `${label}${stamp}${seq}`;
+  return { phone, firstName, lastName: 'Tester', name: `${label} ${stamp}-${seq}` };
 }
 
 /** E.164 +1NXXNXXXXXX → "(NXX) NXX-XXXX" — how the dashboard displays a US number,
@@ -52,6 +67,8 @@ function formatUsPhone(e164: string): string {
 export class Scenario {
   private activeContactId: string | null = null;
   private activeTenant: Tenant | null = null;
+  /** First name of the active tenant — to locate their broadcast preview row. */
+  private activeFirstName: string | null = null;
   private readonly registered = new Set<string>();
 
   constructor(
@@ -247,9 +264,12 @@ export class Scenario {
       await expect(dialog).toHaveCount(0);
       await expect(this.page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
       this.activeContactId = await this.readActiveContactId();
+      this.activeFirstName = fields.firstName;
       this.activeTenant = {
         phone: fields.phone ?? '',
         name: `${fields.firstName} ${fields.lastName}`,
+        firstName: fields.firstName,
+        lastName: fields.lastName,
       };
       if (fields.voucherSize !== undefined || fields.housingAuthority !== undefined) {
         await this.editTenantIdentity({
@@ -407,7 +427,213 @@ export class Scenario {
     });
   }
 
+  // ==== Sending-unit verbs (documentation/sending-unit-sequence.mermaid) ====
+  // Audited live against --mock --local (2026-06-30): "send a listing" is the
+  // broadcast-to-tenants flow (no individual-send route); preferences are the
+  // contact's free-form `notes`; there is NO automated matcher (the team browses
+  // available units); Tours is a SEPARATE, unbuilt workflow and `searching`
+  // absorbs touring (documentation/STATUS-MODEL.md), so the loop-exit signal that
+  // exists today is "the fitting unit was sent + tenant stays searching".
+
+  /**
+   * [Setup] Create an AVAILABLE property the team can send. Pure setup → API:
+   * POST /api/units starts a property in 'setup', then PATCH …/listing-status
+   * publishes it to 'available' (the only shareable status). beds defaults to the
+   * tenant's voucher size so it lands in the broadcast's pre-filled audience.
+   */
+  seedAvailableUnit(opts: { beds: number; jurisdiction?: string }): Promise<Unit> {
+    return step(`Setup: an available ${opts.beds}-BR property to send`, async () => {
+      seq += 1;
+      const addressLine1 = `${200 + seq} Sender Way NW`;
+      const created = await this.page.request.post(`${NEXT}/api/units`, {
+        data: {
+          landlordId: SEEDED_LANDLORD,
+          jurisdiction: opts.jurisdiction ?? 'atlanta_housing',
+          beds: opts.beds,
+          rent_min: 1500,
+          rent_max: 1600,
+          address: { line1: addressLine1, city: 'Atlanta', state: 'GA', zip: '30314' },
+        },
+      });
+      expect(created.ok()).toBeTruthy();
+      const unitId = ((await created.json()) as { unit: { unitId: string } }).unit.unitId;
+      const published = await this.page.request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+        data: { toStatus: 'available', source: 'manual' },
+      });
+      expect(published.ok()).toBeTruthy();
+      return { unitId, addressLine1 };
+    });
+  }
+
+  /**
+   * [Team→App] Send a specific listing to the active tenant for feedback. Phase-1
+   * mechanism = the broadcast-to-tenants composer, CURATED down to just this tenant
+   * (Deselect all → check their row). The body carries [Address] + [FlyerLink] so the
+   * delivered SMS is assertable by the unit's flyer link.
+   */
+  teamSendsListing(unit: Unit): Promise<void> {
+    const firstName = this.requireActiveFirstName();
+    return step(`Team sends a listing (${unit.unitId}) to the tenant`, async () => {
+      await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
+      await this.page.getByRole('button', { name: /Broadcast to tenants/i }).click();
+      await expect(this.page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unit.unitId}`));
+      await expect(this.page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
+      await this.page
+        .getByLabel('Message')
+        .fill('Take a look at this home: [Address] — details [FlyerLink]');
+      const preview = this.page.getByRole('button', { name: 'Preview recipients' });
+      await expect(preview).toBeEnabled({ timeout: 15_000 });
+      await preview.click();
+      await expect(this.page.getByRole('heading', { name: 'Review recipients' })).toBeVisible();
+      // Curate to exactly the active tenant: clear the audience, then check only them.
+      await this.page.getByRole('button', { name: 'Deselect all' }).click();
+      const list = this.page.getByRole('list', { name: 'Candidate recipients' });
+      await list.getByRole('checkbox', { name: firstName }).check();
+      await this.page.getByRole('button', { name: /^Send to/ }).click();
+      await expect(this.page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/, { timeout: 15_000 });
+    });
+  }
+
+  /**
+   * [App→Tenant] The listing reached the tenant. Three proofs: (1) the templated SMS
+   * (flyer link) landed in the tenant's fake thread, DELIVERED; (2) a listing_send
+   * row links tenant↔unit (GET …/listings-sent); (3) Team SEES a "Property sent"
+   * link to the unit on the tenant's timeline.
+   */
+  expectListingDelivered(t: Tenant, unit: Unit): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step(`App delivers the listing (${unit.unitId}) to the tenant`, async () => {
+      await expect
+        .poll(
+          async () => {
+            const threads = await listThreads(this.request);
+            const thread = threads.find((x) => x.partyNumber === t.phone);
+            return (
+              thread?.messages.some(
+                (m) =>
+                  m.direction === 'outbound' &&
+                  (m.body ?? '').includes(`/flyer/${unit.unitId}`) &&
+                  m.state === 'delivered',
+              ) ?? false
+            );
+          },
+          { timeout: 15_000 },
+        )
+        .toBe(true);
+      await expect
+        .poll(
+          async () => {
+            const res = await this.page.request.get(`${NEXT}/api/contacts/${id}/listings-sent`);
+            if (!res.ok()) return false;
+            const { sent } = (await res.json()) as { sent: Array<{ unitId: string }> };
+            return sent.some((s) => s.unitId === unit.unitId);
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(
+        this.page.locator(`a[href="/listings/${unit.unitId}"]`).first(),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App→Team] The tenant's preference text was relayed to Team — it surfaces in the
+   * tenant's contact timeline (the relay rule: every inbound flows to Team via the app).
+   */
+  expectPreferencesRelayed(re: RegExp): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App relays the tenant preferences to Team (contact timeline)', async () => {
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(this.page.getByText(re)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Save the tenant's preferences to their profile — the free-form
+   * "Notes" field of the Edit-contact dialog (renders in the "Preferences & notes"
+   * card). The diagram tags this [MANUAL]: a person records it.
+   */
+  teamSavesPreferences(prefs: string): Promise<void> {
+    return step('Team saves preferences to the tenant profile', async () => {
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog.getByLabel('Notes').fill(prefs);
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] The preferences persisted on the tenant (contact.notes) AND Team can SEE
+   * them in the "Preferences & notes" card — remembered for future matches.
+   */
+  expectPreferencesRecorded(prefs: string): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: preferences saved to the tenant profile', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
+      expect(res.ok()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: { notes?: string } };
+      expect(contact.notes).toBe(prefs);
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Preferences & notes' }) });
+      await expect(card.getByText(prefs)).toBeVisible();
+    });
+  }
+
+  /**
+   * [Team→App] "Find another match." Phase-1 reality: NO automated matcher — the team
+   * browses available properties. Asserts the deterministic fact (a next listing IS
+   * available to send + Team can see it in the Properties list), never a re-ranking.
+   */
+  teamFindsNextMatch(nextUnit: Unit): Promise<void> {
+    return step('Team finds another match (browses available properties)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units?status=available&limit=100`);
+      expect(res.ok()).toBeTruthy();
+      const { units } = (await res.json()) as { units: Array<{ unitId: string }> };
+      expect(units.some((u) => u.unitId === nextUnit.unitId)).toBe(true);
+      await this.page.goto(`${NEXT}/listings`);
+      await expect(
+        this.page.locator(`a[href="/listings/${nextUnit.unitId}"]`).first(),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] Loop exit — a listing fits → hand off to the separate Tours workflow. Tours
+   * is NOT built in Phase 1 and `searching` absorbs touring (STATUS-MODEL.md), so the
+   * real, deterministic handoff signal is: the fitting unit was sent (listing_send) and
+   * the tenant stays `searching` (Tours-ready — not prematurely placed). Team sees the
+   * "Searching" status in Details.
+   */
+  expectHandoffToTours(fittingUnit: Unit): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: a listing fits → hand off to Tours (tenant stays searching)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}/listings-sent`);
+      expect(res.ok()).toBeTruthy();
+      const { sent } = (await res.json()) as { sent: Array<{ unitId: string }> };
+      expect(sent.some((s) => s.unitId === fittingUnit.unitId)).toBe(true);
+      await this.assertStatus('searching');
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Searching')).toBeVisible();
+    });
+  }
+
   // ---- internal helpers ---------------------------------------------------
+
+  private requireActiveFirstName(): string {
+    if (!this.activeFirstName)
+      throw new Error('no active tenant first name — create the tenant first');
+    return this.activeFirstName;
+  }
 
   private requireActiveTenant(): Tenant {
     if (!this.activeTenant) throw new Error('no active tenant — call tenantTexts/tenantCalls first');

@@ -111,6 +111,53 @@ These cost real debugging time on tenant onboarding; the next diagram should exp
   after a reseed and bounces to the login screen, suspect this class of process-state
   (survives the DB wipe) — not the data.
 
+## Audit-surfaced realities — sending-unit (the second diagram)
+
+The sending-unit loop (send a listing → optional preferences → next listing → Tours)
+surfaced these. They generalize: **a diagram verb often maps to an EXISTING feature wearing
+a different name, not a gap to build** — the audit's job is to find the mapping.
+
+- **"Send a listing" IS the broadcast-to-tenants flow.** There is no individual
+  send-listing-to-one-tenant route; the Phase-1 mechanism is the broadcast composer
+  (`/listings/:unitId` → "📣 Broadcast to tenants" → fill `Message` → "Preview recipients"
+  → curate → "Send to N tenant(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,
+  `[FlyerLink]`) and records a `listing_send` row. **Curate to ONE tenant** with
+  "Deselect all" → check the tenant's row by their **first name** (preview rows show the
+  first name only — so `freshTenant` now mints a unique, space-free `firstName`). Assert
+  delivery three ways: the fake thread (proof-of-send, body contains `/flyer/<unitId>`),
+  `GET /api/contacts/:id/listings-sent` (`{ sent: [...] }`), and the timeline "Property
+  sent" link (`a[href="/listings/<unitId>"]`).
+- **An existing dashboard spec is a live-verified selector source.** `broadcasts.spec.ts`
+  already encoded the composer selectors against the live stack — reuse those rather than
+  re-deriving from component source (the "don't transcribe blind" warning is about SOURCE,
+  not a passing spec). Still smoke-check the parts your scenario adds (here: single-tenant
+  curation).
+- **Preferences are the contact's free-form `notes`, not a structured schema.** Saved via
+  the Edit-contact dialog's `Notes` textarea (`PATCH /api/contacts/:id { notes }`), shown in
+  the "Preferences & notes" card. Deliberately free-form — do NOT build a preferences model.
+- **A KNOWN tenant's inbound surfaces in their OWN contact timeline** — not the Unknown
+  tab. `expectRelayedToTeam` is unknown-only; the relay verb for a typed tenant
+  (`expectPreferencesRelayed`) just opens `/contacts/:id` and asserts the body in the
+  timeline.
+- **No automated matcher exists in Phase 1.** The `matches` table is seeded but unused (no
+  repo/route); `GET /api/units/:id/similar` is a property-detail helper, not tenant-driven.
+  "Find another match" = the team browses `GET /api/units?status=available`. Assert the
+  deterministic fact (*a next listing can be sent*), **never** that an algorithm re-ranked.
+- **Tours is a SEPARATE, unbuilt workflow; `searching` absorbs touring** (STATUS-MODEL.md).
+  There is no tour entity to create at handoff (creating a placement would jump ahead to
+  Application). The real loop-exit signal: the fitting unit's `listing_send` row exists AND
+  the tenant stays `searching` (Tours-ready). Assert that — don't invent a Tours feature.
+- **Set up an available property via the API:** `POST /api/units { landlordId, beds,
+  jurisdiction, address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
+  writable create field; `address` MUST be an object), then `PATCH /api/units/:id/listing-status
+  { toStatus:'available', source:'manual' }` publishes it (only `available` is shareable).
+  Set a tenant to searching via `PATCH /api/contacts/:id/tenant-status { toStatus, source }`.
+- **Stubbed-card trap:** the tenant "Properties sent" card is wired to the backend slice but
+  hard-codes the empty state (it never renders the rows — issue
+  `properties-sent-card-stubbed`). Assert listing-sends via the API + the **timeline**, not
+  that card. Lesson: when "assert what Team sees", confirm the rendered surface actually
+  renders the data — a card can exist yet be a stub.
+
 ## Debugging discipline
 
 When the suite is red, **find the root cause before fixing** (`superpowers:systematic-
@@ -127,3 +174,5 @@ state**, usually process-memory that survives a DB reseed.
 - Framework self-check: [`e2e/tests/scenarios/selfcheck.spec.ts`](../e2e/tests/scenarios/selfcheck.spec.ts).
 - Worked example: [`e2e/tests/scenarios/tenant-onboarding.spec.ts`](../e2e/tests/scenarios/tenant-onboarding.spec.ts)
   and its diagram [`documentation/tenant-onboarding-sequence.mermaid`](tenant-onboarding-sequence.mermaid).
+- Second worked example: [`e2e/tests/scenarios/sending-unit.spec.ts`](../e2e/tests/scenarios/sending-unit.spec.ts)
+  and its diagram [`documentation/sending-unit-sequence.mermaid`](sending-unit-sequence.mermaid).

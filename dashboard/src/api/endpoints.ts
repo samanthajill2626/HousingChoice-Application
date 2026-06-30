@@ -4,6 +4,11 @@
 import { request } from './client.js';
 import type {
   AdminUserView,
+  AudienceFilter,
+  BroadcastResults,
+  BroadcastsPage,
+  BroadcastStatus,
+  PreviewResponse,
   OrgSettings,
   SettingsPatch,
   UserRole,
@@ -650,6 +655,87 @@ export function assignInbox(
     method: 'POST',
     body: { userId },
     ...(signal !== undefined && { signal }),
+  });
+}
+
+// --- Broadcasts (/api/broadcasts) -------------------------------------------
+// The "Share properties to tenants" surface: draft → preview (full annotated
+// candidate list) → send-by-explicit-selection → live results, plus a list and
+// a draft-delete. VA-accessible (no admin gate). The dashboard ALWAYS sends the
+// explicit `recipientContactIds` curated list on send.
+
+/** GET /api/broadcasts?status=&limit=&cursor= — the broadcasts list (newest-first).
+ *  No `status` → the acting user's broadcasts; a `status` → that status's rows. */
+export function listBroadcasts(
+  params: { status?: BroadcastStatus; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<BroadcastsPage> {
+  return request<BroadcastsPage>('/api/broadcasts', {
+    query: { status: params.status, cursor: params.cursor, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/broadcasts — create a DRAFT + estimate the audience reach. Returns
+ *  the new draft's id, the estimated reach, and `truncated` (the estimate hit
+ *  the page cap → incomplete). The client sends the `audience_filter` client
+ *  shape (contact_type/housing_authority?/bedroomSize?); the server adds the
+ *  always-on opt-out/unreachable fences. */
+export function createBroadcast(body: {
+  unitId?: string;
+  body_template: string;
+  audience_filter: AudienceFilter;
+}): Promise<{ broadcastId: string; status: 'draft'; estimatedCount: number; truncated: boolean }> {
+  return request<{
+    broadcastId: string;
+    status: 'draft';
+    estimatedCount: number;
+    truncated: boolean;
+  }>('/api/broadcasts', { method: 'POST', body });
+}
+
+/** POST /api/broadcasts/:id/preview — re-resolve the audience + return the FULL
+ *  annotated candidate list (bounded by the recipient cap) + the prior-recipients
+ *  set for the unit (so a manually-added tenant can be flagged client-side). */
+export function previewBroadcast(broadcastId: string): Promise<PreviewResponse> {
+  return request<PreviewResponse>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/preview`,
+    { method: 'POST' },
+  );
+}
+
+/** POST /api/broadcasts/:id/send — send to the explicit curated selection.
+ *  The server snapshots, re-enforces opt-out/unreachable + the recipient cap,
+ *  marks sending, and enqueues the fan-out. Throws ApiError on 400 empty_audience
+ *  / 400 over-cap (message matches /cap/i) / 409 broadcast_not_draft. */
+export function sendBroadcast(
+  broadcastId: string,
+  recipientContactIds: string[],
+): Promise<{ broadcastId: string; status: 'sending'; count: number }> {
+  return request<{ broadcastId: string; status: 'sending'; count: number }>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/send`,
+    { method: 'POST', body: { recipientContactIds } },
+  );
+}
+
+/** GET /api/broadcasts/:id/results — stats + the per-recipient delivery map. */
+export function getBroadcastResults(
+  broadcastId: string,
+  signal?: AbortSignal,
+): Promise<BroadcastResults> {
+  return request<BroadcastResults>(
+    `/api/broadcasts/${encodeURIComponent(broadcastId)}/results`,
+    { ...(signal !== undefined && { signal }) },
+  );
+}
+
+/** DELETE /api/broadcasts/:id — delete an UNSENT draft. 200 { deleted:true } on
+ *  success; throws ApiError(404 broadcast_not_found) when missing, or
+ *  ApiError(409 broadcast_not_draft) when already sending/sent/failed (the
+ *  caller falls back to the Results view). */
+export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }> {
+  return request<{ deleted: true }>(`/api/broadcasts/${encodeURIComponent(broadcastId)}`, {
+    method: 'DELETE',
   });
 }
 

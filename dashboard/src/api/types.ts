@@ -957,6 +957,143 @@ export interface SimilarUnit {
   summary: string;
 }
 
+// --- Broadcasts (the "Share properties to tenants" surface) -----------------
+// MIRRORS app/src/routes/broadcasts.ts + app/src/repos/broadcastsRepo.ts — the
+// wire shapes the broadcasts router exchanges. The dashboard is a separate
+// package and cannot import from app/src, so these are duplicated; keep them in
+// sync when the backend contract changes. PII: the preview/results responses
+// carry phones (authed/internal — the operator must see the audience); never
+// console.log a phone/name/body (rendering them in the UI is fine).
+
+/** The CLIENT send shape for an audience filter — contact_type is fixed
+ *  'tenant' (M1.8 targets tenants only); housing_authority/bedroomSize are
+ *  optional narrowers. The server FILLS excludeOptedOut/excludeUnreachable
+ *  (always-on hard fences) — the client never sends them. */
+export interface AudienceFilter {
+  contact_type: 'tenant';
+  /** Tenant housing authority (the byHousingAuthority GSI key). */
+  housing_authority?: string;
+  /** Approved bedroom size to match against the tenant's voucherSize (0=Studio). */
+  bedroomSize?: number;
+}
+
+/** The merge-field tokens the message editor can insert (interpolated at send
+ *  time by the backend's mergeFields). [FlyerLink] resolves only when the
+ *  broadcast carries a unitId. */
+export const BROADCAST_MERGE_FIELDS = [
+  '[TenantName]',
+  '[Beds]',
+  '[Address]',
+  '[Rent]',
+  '[FlyerLink]',
+] as const;
+export type BroadcastMergeField = (typeof BROADCAST_MERGE_FIELDS)[number];
+
+/** A broadcast's lifecycle status (byStatus GSI partition values). */
+export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
+
+/** The delivery rollup carried on a summary / results row. */
+export interface BroadcastStats {
+  /** The resolved audience size at send time. */
+  audience: number;
+  sent: number;
+  delivered: number;
+  failed: number;
+  /** Recipients dropped because they opted out between resolve + send. */
+  skipped_opted_out: number;
+  queued: number;
+}
+
+/** GET /api/broadcasts → one list-row summary (no recipients map). */
+export interface BroadcastSummary {
+  broadcastId: string;
+  status: BroadcastStatus;
+  /** The property this broadcast is about, or null (audience-only broadcast). */
+  unitId: string | null;
+  audience_filter: AudienceFilter;
+  stats: BroadcastStats;
+  created_at: string;
+  /** The userId that created the broadcast. */
+  created_by: string;
+}
+
+/** GET /api/broadcasts page. */
+export interface BroadcastsPage {
+  broadcasts: BroadcastSummary[];
+  /** Opaque cursor to fetch the next page, or null when exhausted. */
+  nextCursor: string | null;
+}
+
+/** The per-recipient delivery slot in the results map (keyed by contactKey —
+ *  the contactId, else `phone#<E164>` for a phone-only recipient). */
+export interface BroadcastRecipient {
+  status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
+  conversationId?: string;
+  tsMsgId?: string;
+  /** Twilio error class on a failure (mapped to a reason for display). */
+  errorCode?: string;
+}
+
+/** GET /api/broadcasts/:id/results — stats + the per-recipient delivery map. */
+export interface BroadcastResults {
+  broadcastId: string;
+  status: BroadcastStatus;
+  unitId: string | null;
+  audience_filter: AudienceFilter;
+  stats: BroadcastStats;
+  /** contactKey → delivery slot. Key is the contactId (usual) else `phone#<E164>`. */
+  recipients: Record<string, BroadcastRecipient>;
+  last_error?: string;
+  created_at: string;
+}
+
+/** A flattened recipient row for rendering (the results map entries, with the
+ *  contactKey split into its contactId / phone form). A `contactId` row links
+ *  to /contacts/:contactId; a `phone`-only row renders without a link. */
+export interface BroadcastRecipientView {
+  /** The raw map key (contactId or `phone#<E164>`). */
+  contactKey: string;
+  /** Present when the key is a real contactId (links to the contact's comms). */
+  contactId?: string;
+  /** Present when the key is `phone#<E164>` (a contact-less recipient). */
+  phone?: string;
+  status: BroadcastRecipient['status'];
+  errorCode?: string;
+  conversationId?: string;
+}
+
+/** POST /api/broadcasts/:id/preview → one candidate row (the full annotated
+ *  list, bounded by the recipient cap). `alreadySentThisProperty` is a SOFT
+ *  flag (a prior sent/sending broadcast for this unit already included them). */
+export interface PreviewCandidate {
+  contactId: string;
+  firstName?: string;
+  phone: string;
+  voucherSize?: number;
+  housingAuthority?: string;
+  alreadySentThisProperty: boolean;
+}
+
+/** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is the
+ *  set already sent for this unit (so a MANUALLY-added tenant can be annotated
+ *  client-side). `truncated` warns the audience hit the page/recipient cap. */
+export interface PreviewResponse {
+  count: number;
+  truncated: boolean;
+  candidates: PreviewCandidate[];
+  priorRecipientContactIds: string[];
+}
+
+/** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup
+ *  emit this with the live status + stats (NO per-recipient detail — the
+ *  Results view refetches getBroadcastResults to pick up recipient changes).
+ *  NO PII — never logged. */
+export interface BroadcastUpdatedEvent {
+  broadcastId: string;
+  status: BroadcastStatus;
+  stats: BroadcastStats;
+}
+
 // --- C8: Inbox feed (§API Contract C8) --------------------------------------
 // Copied verbatim from the spec (2026-06-17-inbox-design.md §C8). The entity-
 // centric inbox: ONE row per contact (or one untriaged unknown number),

@@ -68,6 +68,65 @@ export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
   welcomeText?: string | null;
 };
 
+// --- Settings: System Status (admin-only) -----------------------------------
+// MIRRORS app/src/services/systemStatus.ts (getFlags) + app/src/adapters/
+// cloudwatch.ts (AlarmView / ErrorEventView) + the /api/system route shapes.
+// The dashboard cannot import from app/src, so these are duplicated; keep them
+// in sync with the backend contract.
+
+/** GET /api/system/flags → go-live readiness (booleans/enums/strings — never secrets). */
+export interface SystemFlags {
+  /** Deploy env name (local | dev | prod). */
+  env: string;
+  /** A2P kill-switch: outbound SMS enabled (false = expected pre-A2P). */
+  smsSendingEnabled: boolean;
+  /** A2P kill-switch: relay number provisioning enabled (false = expected pre-A2P). */
+  relayLiveProvisioning: boolean;
+  /** Whether a founder cell is configured (boolean only — never the number). */
+  founderCellSet: boolean;
+  /** Whether Web Push (VAPID) is configured in this env. */
+  pushConfigured: boolean;
+  /** Outbound messaging driver. */
+  messagingDriver: 'twilio' | 'console';
+}
+
+/** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
+export type SystemAlarmState = 'OK' | 'ALARM' | 'INSUFFICIENT_DATA';
+
+/** GET /api/system/alarms → one alarm row. */
+export interface SystemAlarm {
+  name: string;
+  state: SystemAlarmState;
+  /** ISO 8601 of the last state transition, or '' when absent. */
+  stateUpdatedAt: string;
+}
+
+/** GET /api/system/errors → one error event (PII-safe projection ONLY). */
+export interface SystemErrorEvent {
+  /** ISO 8601 of the log event. */
+  timestamp: string;
+  /** pino numeric level (≥ 50 = error/fatal). */
+  level: number;
+  /** The log's short message — never a body/PII payload. */
+  message: string;
+  /** The correlation id, or null when the event carried none. */
+  correlationId: string | null;
+}
+
+/** GET /api/system/alarms response — degrades to { available: false, reason }. */
+export interface SystemAlarmsResult {
+  available: boolean;
+  alarms?: SystemAlarm[];
+  reason?: string;
+}
+
+/** GET /api/system/errors response — degrades to { available: false, reason }. */
+export interface SystemErrorsResult {
+  available: boolean;
+  events?: SystemErrorEvent[];
+  reason?: string;
+}
+
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at
 // GET /api/today (TodayResponse); the B1 frontend assembles the SAME shape

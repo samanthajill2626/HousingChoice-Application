@@ -32,6 +32,9 @@ import type {
   RelatedUnit,
   SendMessageResult,
   SimilarUnit,
+  SystemAlarmsResult,
+  SystemErrorsResult,
+  SystemFlags,
   TenantStatus,
   TodayResponse,
   TransitionSource,
@@ -745,5 +748,33 @@ export function unsubscribePush(endpoint: string): Promise<void> {
 export function sendPushTest(): Promise<{ sent: number; failed: number; [k: string]: unknown }> {
   return request<{ sent: number; failed: number; [k: string]: unknown }>('/api/push/test', {
     method: 'POST',
+  });
+}
+
+// --- Settings ▸ System Status (/api/system) (admin-only on the server) -------
+// Admin-only (403 a VA upstream); the tab is admin-only + route-guarded too.
+// Flags always load (config only). Alarms/errors degrade to { available: false,
+// reason } (still HTTP 200) when AWS is unreachable (local/hermetic).
+
+/** GET /api/system/flags — go-live readiness from runtime config (always loads). */
+export function getSystemFlags(signal?: AbortSignal): Promise<SystemFlags> {
+  return request<SystemFlags>('/api/system/flags', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/system/alarms — CloudWatch alarms (ALARM-first) or { available:false, reason }. */
+export function getSystemAlarms(signal?: AbortSignal): Promise<SystemAlarmsResult> {
+  return request<SystemAlarmsResult>('/api/system/alarms', {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/system/errors?since= — recent error events (PII-safe) or { available:false, reason }. */
+export function getSystemErrors(
+  since: '1h' | '24h' | '7d',
+  signal?: AbortSignal,
+): Promise<SystemErrorsResult> {
+  return request<SystemErrorsResult>('/api/system/errors', {
+    query: { since },
+    ...(signal !== undefined && { signal }),
   });
 }

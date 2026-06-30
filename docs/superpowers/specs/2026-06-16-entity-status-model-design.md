@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-06-20).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted on 2026-06-20. **This file is NOT
+> current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** The
+> LIVING source of truth for the status model is `documentation/STATUS-MODEL.md`; also read
+> the code. Kept only as a point-in-time record of intent.
 # Entity Status Model — Tenant, Listing, Case
 
 **Date:** 2026-06-16

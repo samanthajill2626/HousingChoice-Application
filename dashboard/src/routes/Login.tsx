@@ -4,20 +4,31 @@
 // AuthContext re-probes /auth/me. Rendered whenever the session is anonymous.
 //
 // DEV-ONLY affordance: when the hermetic dev router is mounted (GET /__dev/ping
-// → 200 {dev:true}), we also surface a "Continue as dev user" button that POSTs
-// /auth/dev-login and reloads into / (AuthProvider then re-probes /auth/me). It
-// FAILS CLOSED — the probe defaults to absent and any error keeps it hidden, so
-// it is never reachable in a deployed env (where the router is 404).
+// → 200 {dev:true}), we also surface "Continue as dev …" buttons that POST
+// /auth/dev-login and reload into / (AuthProvider then re-probes /auth/me). Two
+// seeded personas are offered — the VA (va@example.com) and the admin/founder
+// (founder@example.com) — so the local stack can be exercised at BOTH roles
+// without OAuth. It FAILS CLOSED — the probe defaults to absent and any error
+// keeps it hidden, so it is never reachable in a deployed env: the dev router
+// only mounts on a hermetic LOCAL stack (NODE_ENV!=='production' + the dev flag
+// + a DynamoDB-Local endpoint — see app/src/lib/devRoutes.ts), and config.ts
+// fails fast if the flag is ever set in production.
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/index.js';
 import { devLogin, devPing, loginUrl } from '../api/index.js';
 import styles from './Login.module.css';
 
-const DEV_EMAIL = 'va@example.com';
+// The two seeded dev personas (app/src/routes/dev.ts KNOWN_PERSONAS): va → 'va',
+// founder → 'admin'. Offering both named personas makes the role explicit at a
+// glance (the admin one reaches the admin-only Team + System Status surfaces).
+const DEV_VA_EMAIL = 'va@example.com';
+const DEV_ADMIN_EMAIL = 'founder@example.com';
 
 export default function Login(): React.JSX.Element {
   const [devAvailable, setDevAvailable] = useState(false);
-  const [devBusy, setDevBusy] = useState(false);
+  // The email currently being submitted — so only the clicked button spins and
+  // both are disabled while a login is in flight; undefined when idle.
+  const [devBusyEmail, setDevBusyEmail] = useState<string | undefined>(undefined);
   const [devError, setDevError] = useState<string | undefined>(undefined);
   const mounted = useRef(true);
 
@@ -39,20 +50,22 @@ export default function Login(): React.JSX.Element {
     };
   }, []);
 
-  async function onDevLogin(): Promise<void> {
-    setDevBusy(true);
+  async function onDevLogin(email: string): Promise<void> {
+    setDevBusyEmail(email);
     setDevError(undefined);
     try {
-      await devLogin(DEV_EMAIL);
+      await devLogin(email);
       // Reload into / so AuthProvider re-runs getMe() with the new cookie.
       window.location.assign('/');
     } catch {
       if (mounted.current) {
         setDevError('Dev login failed. Is the seeded dev user present?');
-        setDevBusy(false);
+        setDevBusyEmail(undefined);
       }
     }
   }
+
+  const devBusy = devBusyEmail !== undefined;
 
   return (
     <main className={styles.wrapper}>
@@ -69,10 +82,21 @@ export default function Login(): React.JSX.Element {
               variant="secondary"
               size="md"
               block
-              loading={devBusy}
-              onClick={() => void onDevLogin()}
+              loading={devBusyEmail === DEV_VA_EMAIL}
+              disabled={devBusy}
+              onClick={() => void onDevLogin(DEV_VA_EMAIL)}
             >
               Continue as dev user (seeded VA)
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
+              block
+              loading={devBusyEmail === DEV_ADMIN_EMAIL}
+              disabled={devBusy}
+              onClick={() => void onDevLogin(DEV_ADMIN_EMAIL)}
+            >
+              Continue as dev admin (seeded founder)
             </Button>
             {devError !== undefined && (
               <p className={styles.devError} role="alert">

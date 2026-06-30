@@ -145,12 +145,21 @@ describe('ListingDetail', () => {
     expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Owner-paid' });
   });
 
-  it('shows an honest pending note for the flyer (no misleading JSON link)', () => {
+  it('shows the public flyer link + copy for an available property', () => {
     useListing.mockReturnValue(READY);
     renderAt();
-    expect(screen.getByText(/Public flyer page arrives with the new public routes/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View flyer/ })).toHaveAttribute('href', '/p/u1');
+    expect(screen.getByRole('button', { name: /Copy public link/ })).toBeInTheDocument();
+    expect(screen.queryByText(/arrives with the new public routes/)).not.toBeInTheDocument();
+  });
+
+  it('shows an honest note for a non-available property (flyer not public yet)', () => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit, status: 'setup' } });
+    renderAt();
+    expect(
+      screen.getByText(/public flyer goes live when this property is Available/i),
+    ).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /View flyer/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Copy public link/ })).not.toBeInTheDocument();
   });
 
   it('renders property details and accepted vouchers as a bulleted list', () => {

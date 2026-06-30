@@ -83,6 +83,7 @@ export function ListingDetail(): React.JSX.Element {
   const { setUnit } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   // Property-status write � goes through the transition service (status is NOT
   // writable via a plain unit PATCH). On success apply the returned unit in
@@ -129,6 +130,20 @@ export function ListingDetail(): React.JSX.Element {
   const media = unit.media ?? [];
   // Only an http(s) video link becomes clickable (never javascript:/data:/… — XSS).
   const videoUrl = safeHttpUrl(unit.video_url);
+  // Public flyer: live only for a shareable (available) unit, at the same-origin
+  // /p/:unitId funnel (what flyerUrl() emits). Copy the absolute public URL.
+  const flyerShareable = unit.status === 'available';
+  const onCopyFlyerLink = (): void => {
+    void navigator.clipboard
+      ?.writeText(`${window.location.origin}/p/${encodeURIComponent(unit.unitId)}`)
+      .then(() => {
+        setCopiedLink(true);
+        window.setTimeout(() => setCopiedLink(false), 1500);
+      })
+      .catch(() => {
+        /* clipboard unavailable/blocked - no-op */
+      });
+  };
 
   // Soft-delete (reversible). Deleting is confirmed first, then the property drops
   // out of the normal views � so on success we navigate back to the Properties list
@@ -244,14 +259,28 @@ export function ListingDetail(): React.JSX.Element {
             <div className={styles.hero} aria-hidden="true" />
           )}
 
-          {/* Flyer affordance is PENDING: the public flyer is currently a JSON
-              endpoint (and only for `available` units), not a shareable HTML page.
-              The new dashboard's public flyer route lands in a later public-routes
-              phase � surface an honest note rather than a misleading JSON link. */}
+          {/* Public flyer affordance: live only for a shareable (available) unit,
+              at the same-origin /p/:unitId funnel (what flyerUrl() emits). */}
           <div className={styles.flyerLine}>
-            <span className={styles.flyerNote}>
-              ?? Public flyer page arrives with the new public routes.
-            </span>
+            {flyerShareable ? (
+              <>
+                <a
+                  className={styles.flyerLink}
+                  href={`/p/${encodeURIComponent(unit.unitId)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View flyer
+                </a>
+                <button type="button" className={styles.flyerCopy} onClick={onCopyFlyerLink}>
+                  {copiedLink ? 'Copied!' : 'Copy public link'}
+                </button>
+              </>
+            ) : (
+              <span className={styles.flyerNote}>
+                The public flyer goes live when this property is Available.
+              </span>
+            )}
           </div>
 
           <Card title="Property details" aside="Edit">

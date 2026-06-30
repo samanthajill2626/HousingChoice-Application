@@ -9,9 +9,17 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 // (a relative outputFolder only resolves from inside e2e/, not the repo root).
 const htmlReportDir = fileURLToPath(new URL('.artifacts/html-report', import.meta.url));
 
+// Opt-in slow motion for WATCHING a --headed run (E2E_SLOWMO ms per browser
+// action). Because every action is delayed, an action-heavy scenario blows past
+// the default 30s per-test timeout — so scale the timeout up WITH the slow-motion
+// (a generous per-action budget); a genuine hang still eventually fails. 0 = off.
+const slowMo = Number(process.env.E2E_SLOWMO ?? 0);
+
 export default defineConfig({
   testDir: './tests',
   outputDir: '.artifacts/test-results',
+  // Default 30s; when slow-motion is on, give each delayed action headroom.
+  timeout: slowMo > 0 ? 30_000 + slowMo * 150 : 30_000,
   // Fail fast (with an actionable message) if the stack under test is stale or
   // misconfigured — e.g. a hand-started session reused via reuseExistingServer
   // that lacks outbox recording. See support/preflight.ts.
@@ -36,9 +44,9 @@ export default defineConfig({
     navigationTimeout: 15_000,
     // Opt-in slow motion for watching a --headed run: each browser action is
     // delayed by E2E_SLOWMO milliseconds. Default 0 = no delay, so CI and normal
-    // runs are unaffected. e.g.:
+    // runs are unaffected (the per-test timeout above scales with it). e.g.:
     //   E2E_SLOWMO=800 npm run e2e -w @housingchoice/e2e -- <spec> --headed
-    launchOptions: { slowMo: Number(process.env.E2E_SLOWMO ?? 0) },
+    launchOptions: { slowMo },
   },
   projects: [
     {

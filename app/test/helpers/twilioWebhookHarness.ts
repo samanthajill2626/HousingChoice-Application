@@ -86,6 +86,7 @@ import {
   createAudienceResolutionService,
   type AudienceResolutionService,
 } from '../../src/services/audienceResolution.js';
+import { type SystemStatusService } from '../../src/services/systemStatus.js';
 import { createSendMessageService } from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
@@ -1501,6 +1502,13 @@ export interface HarnessOptions {
    * truncated refusal paths without seeding thousands of contacts.
    */
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * Inject a fake System Status service (M1.4; no AWS). Default: the route's
+   * real config-driven service, which degrades to { available: false } on the
+   * hermetic stack (console driver). Tests inject a stub to drive the
+   * available:true alarms/errors route shape.
+   */
+  systemStatusService?: SystemStatusService;
 }
 
 export interface Harness {
@@ -1582,6 +1590,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,
+      }),
+      ...(opts.systemStatusService !== undefined && {
+        systemStatusService: opts.systemStatusService,
       }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair

@@ -56,7 +56,8 @@ export interface OrgSettings {
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
-  missedCallAutoText: "Sorry I missed you — I'll call back soon; you can also text me here.",
+  missedCallAutoText:
+    "Sorry we missed your call! To get started, please text us your full name, voucher size, and housing authority and we'll be right with you.",
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
   preRingPauseSeconds: 2,

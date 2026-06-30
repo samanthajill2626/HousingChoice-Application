@@ -7,6 +7,15 @@
 import { test } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
 
+// Opt-in: pause at the END of each test so you can look around the live dashboard
+// (e.g. open the tenant's contact page and eyeball the Details panel). Gated on
+// E2E_PAUSE so CI/normal runs are unaffected. Run ONE test headed, e.g. (PowerShell):
+//   $env:E2E_PAUSE=1; npm run e2e -w @housingchoice/e2e -- tests/scenarios/tenant-onboarding.spec.ts --grep "by text → RTA" --headed
+// The Playwright Inspector opens and the browser stays live — click "Resume" to finish.
+test.afterEach(async ({ page }) => {
+  if (process.env.E2E_PAUSE) await page.pause();
+});
+
 /** Eligibility intake → RTA gate → parked/handoff. Shared by every leaf path. */
 async function intakeAndRtaTail(flow: Scenario, opts: { inHand: boolean }): Promise<void> {
   const intake = { pets: '1 cat', evictions: 'none', tenure: '3 years', lifEligible: true };

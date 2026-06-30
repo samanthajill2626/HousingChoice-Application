@@ -4,6 +4,11 @@ import { fileURLToPath } from 'node:url';
 // The hermetic dev loop lives at the repo root, one level up from e2e/.
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
+// Absolute path for the HTML report, so the "npx playwright show-report <path>"
+// line Playwright prints at the end of a run is copy-pasteable from ANY directory
+// (a relative outputFolder only resolves from inside e2e/, not the repo root).
+const htmlReportDir = fileURLToPath(new URL('.artifacts/html-report', import.meta.url));
+
 export default defineConfig({
   testDir: './tests',
   outputDir: '.artifacts/test-results',
@@ -17,7 +22,7 @@ export default defineConfig({
   retries: 0,
   reporter: [
     ['list'],
-    ['html', { outputFolder: '.artifacts/html-report', open: 'never' }],
+    ['html', { outputFolder: htmlReportDir, open: 'never' }],
     ['json', { outputFile: '.artifacts/results.json' }],
   ],
   use: {

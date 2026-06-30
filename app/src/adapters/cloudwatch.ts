@@ -21,7 +21,45 @@ import {
   CloudWatchLogsClient,
   FilterLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { type AppConfig } from '../lib/config.js';
+
+// A bounded request handler so a slow/blackholed CloudWatch connection degrades
+// (caught → cloudwatch_error) instead of tying up the Express handler for
+// minutes — the dashboard auto-refreshes every 60s, so hung handlers would
+// stack server-side. Paired with maxAttempts: 2 to cap total retry time.
+const CW_CONNECTION_TIMEOUT_MS = 2_000;
+const CW_REQUEST_TIMEOUT_MS = 5_000;
+const CW_MAX_ATTEMPTS = 2;
+
+/** A region-configured SDK client config with bounded socket/connect timeouts. */
+function boundedClientConfig(region: string): {
+  region: string;
+  maxAttempts: number;
+  requestHandler: NodeHttpHandler;
+} {
+  return {
+    region,
+    maxAttempts: CW_MAX_ATTEMPTS,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: CW_CONNECTION_TIMEOUT_MS,
+      requestTimeout: CW_REQUEST_TIMEOUT_MS,
+    }),
+  };
+}
+
+/**
+ * Bounded wider scan budget for FilterLogEvents. We page WITHOUT the small
+ * 25-cap (FilterLogEvents returns OLDEST-first per page, so a 25 SDK limit
+ * would yield the 25 *oldest* in-window events and MISS the newest), then sort
+ * descending + slice the newest 25 locally. The scan is capped so it stays
+ * cheap: at most ERROR_SCAN_MAX_PAGES pages OR ERROR_SCAN_MAX_EVENTS events,
+ * whichever comes first. Limitation: in an extreme burst beyond this budget the
+ * absolute-newest events could still be missed — acceptable for a best-effort
+ * observability panel.
+ */
+const ERROR_SCAN_MAX_PAGES = 5;
+const ERROR_SCAN_MAX_EVENTS = 500;
 
 /** One alarm, projected to the view the dashboard renders. */
 export interface AlarmView {
@@ -50,7 +88,8 @@ export interface CloudWatchClientSeam {
   describeAlarms(prefix: string): Promise<AlarmView[]>;
   /**
    * FilterLogEvents on `logGroup` for pino level ≥ 50, since `sinceMs` (epoch
-   * ms), capped at `limit`. Returns PII-safe projections, NEWEST-FIRST.
+   * ms). Pages a BOUNDED wider scan (oldest-first per page), then returns the
+   * NEWEST `limit` PII-safe projections, NEWEST-FIRST.
    */
   filterErrorEvents(logGroup: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
 }
@@ -106,8 +145,8 @@ export interface CreateCloudWatchClientDeps {
  */
 export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudWatchClientSeam {
   const { config } = deps;
-  const cw = deps.cloudwatch ?? new CloudWatchClient({ region: config.awsRegion });
-  const logs = deps.logs ?? new CloudWatchLogsClient({ region: config.awsRegion });
+  const cw = deps.cloudwatch ?? new CloudWatchClient(boundedClientConfig(config.awsRegion));
+  const logs = deps.logs ?? new CloudWatchLogsClient(boundedClientConfig(config.awsRegion));
 
   return {
     async describeAlarms(prefix) {
@@ -122,20 +161,34 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
     },
 
     async filterErrorEvents(logGroup, sinceMs, limit) {
-      const out = await logs.send(
-        new FilterLogEventsCommand({
-          logGroupName: logGroup,
-          startTime: sinceMs,
-          // pino stamps a numeric `level`; ≥ 50 is error/fatal.
-          filterPattern: '{ $.level >= 50 }',
-          limit,
-        }),
+      // Bounded wider scan: page through FilterLogEvents WITHOUT a small SDK-side
+      // `limit` (it returns oldest-first per page, so a 25-cap would surface the
+      // 25 *oldest* in-window events and miss the newest). Accumulate up to the
+      // scan budget, then sort descending + slice the newest `limit` locally.
+      const projected: ErrorEventView[] = [];
+      let nextToken: string | undefined;
+      let pages = 0;
+      do {
+        const out = await logs.send(
+          new FilterLogEventsCommand({
+            logGroupName: logGroup,
+            startTime: sinceMs,
+            // pino stamps a numeric `level`; ≥ 50 is error/fatal.
+            filterPattern: '{ $.level >= 50 }',
+            nextToken,
+          }),
+        );
+        for (const e of out.events ?? []) {
+          projected.push(projectErrorEvent(e.message ?? '', e.timestamp ?? Date.now()));
+        }
+        nextToken = out.nextToken;
+        pages += 1;
+      } while (
+        nextToken !== undefined &&
+        pages < ERROR_SCAN_MAX_PAGES &&
+        projected.length < ERROR_SCAN_MAX_EVENTS
       );
-      const events = out.events ?? [];
-      const projected = events.map((e) =>
-        projectErrorEvent(e.message ?? '', e.timestamp ?? Date.now()),
-      );
-      // Newest-first, capped at the limit (FilterLogEvents returns oldest-first).
+      // Newest-first, then the newest `limit`.
       projected.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
       return projected.slice(0, limit);
     },

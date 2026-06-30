@@ -87,8 +87,9 @@ function isLocalEnv(config: AppConfig): boolean {
 export function createSystemStatusService(deps: SystemStatusServiceDeps): SystemStatusService {
   const log = deps.logger ?? defaultLogger;
   const { config } = deps;
-  // Lazily resolved: in a local env the SDK clients are never even constructed
-  // (the degradation short-circuit returns before this is read).
+  // The SDK clients ARE constructed here at service-creation time, but in a
+  // local env they're never `.send()`-ed (getAlarms/getErrors short-circuit
+  // before any call) — so no I/O or credential resolution happens locally.
   const cloudwatch = deps.cloudwatch ?? createCloudWatchClient({ config });
 
   return {
@@ -111,11 +112,14 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       }
       try {
         const alarms = await cloudwatch.describeAlarms(config.alarmNamePrefix);
-        // ALARM-first (the spec's requirement), then by name for a stable order.
+        // ALARM-first (the spec's requirement), then by name; a name tie breaks
+        // by most-recent stateUpdatedAt (recency-aware, stable) — spec allows
+        // ties by name OR stateUpdatedAt.
         const sorted = [...alarms].sort((a, b) => {
           if (a.state === 'ALARM' && b.state !== 'ALARM') return -1;
           if (b.state === 'ALARM' && a.state !== 'ALARM') return 1;
-          return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+          if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+          return a.stateUpdatedAt < b.stateUpdatedAt ? 1 : a.stateUpdatedAt > b.stateUpdatedAt ? -1 : 0;
         });
         log.info({ alarmCount: sorted.length }, 'system status: alarms read');
         return { available: true, alarms: sorted };

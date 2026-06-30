@@ -99,6 +99,19 @@ describe('systemStatus.getAlarms — degradation', () => {
     expect(seam.describeAlarms).toHaveBeenCalledTimes(1);
   });
 
+  it('a CloudWatch request TIMEOUT lands in the degraded path (cloudwatch_error) and does NOT hang', async () => {
+    // The bounded request handler rejects a hung connection with a timeout-like
+    // error; the service must map that to the degraded notice, never hang or throw.
+    const timeout = Object.assign(new Error('Connection timed out after 5000ms'), { name: 'TimeoutError' });
+    const seam = fakeSeam({
+      describeAlarms: async () => {
+        throw timeout;
+      },
+    });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getAlarms();
+    expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
+  });
+
   it('deployed-like + a working seam → available:true with ALARM-first sort (then by name)', async () => {
     const seam = fakeSeam({
       describeAlarms: async () => [
@@ -119,6 +132,24 @@ describe('systemStatus.getAlarms — degradation', () => {
       'hc-dev-c-ok',
     ]);
     expect(seam.describeAlarms).toHaveBeenCalledWith(deployedConfig().alarmNamePrefix);
+  });
+
+  it('breaks a name tie by most-recent stateUpdatedAt (recency-aware secondary order)', async () => {
+    const seam = fakeSeam({
+      describeAlarms: async () => [
+        { name: 'hc-dev-dup', state: 'ALARM', stateUpdatedAt: '2026-06-29T01:00:00.000Z' },
+        { name: 'hc-dev-dup', state: 'ALARM', stateUpdatedAt: '2026-06-29T03:00:00.000Z' },
+        { name: 'hc-dev-dup', state: 'ALARM', stateUpdatedAt: '2026-06-29T02:00:00.000Z' },
+      ],
+    });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getAlarms();
+    if (!result.available) throw new Error('unreachable');
+    // Same name → most-recent transition first.
+    expect(result.alarms.map((a) => a.stateUpdatedAt)).toEqual([
+      '2026-06-29T03:00:00.000Z',
+      '2026-06-29T02:00:00.000Z',
+      '2026-06-29T01:00:00.000Z',
+    ]);
   });
 });
 

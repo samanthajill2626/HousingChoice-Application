@@ -79,7 +79,7 @@ describe('cloudwatch adapter — describeAlarms', () => {
 });
 
 describe('cloudwatch adapter — filterErrorEvents', () => {
-  it('builds the level≥50 filter pattern, log group, startTime + limit on the SDK request', async () => {
+  it('builds the level≥50 filter pattern, log group + startTime on the SDK request — NO small limit (the wider scan slices newest-25 locally)', async () => {
     const logs = fakeCw({ events: [] });
     const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
 
@@ -88,11 +88,14 @@ describe('cloudwatch adapter — filterErrorEvents', () => {
     expect(logs.send).toHaveBeenCalledTimes(1);
     const command = logs.send.mock.calls[0]![0] as FilterLogEventsCommand;
     expect(command).toBeInstanceOf(FilterLogEventsCommand);
+    // No SDK-side `limit` — FilterLogEvents returns oldest-first per page, so a
+    // 25-cap would surface the OLDEST 25 and miss the newest. nextToken starts
+    // undefined (first page).
     expect(command.input).toEqual({
       logGroupName: '/hc/dev/app',
       startTime: 1_700_000_000_000,
       filterPattern: '{ $.level >= 50 }',
-      limit: 25,
+      nextToken: undefined,
     });
   });
 
@@ -151,6 +154,60 @@ describe('cloudwatch adapter — filterErrorEvents', () => {
     // Capped at the limit (2), newest-first.
     expect(events.map((e) => e.message)).toEqual(['newest', 'middle']);
     expect(events[0]!.level).toBe(60);
+  });
+
+  it('follows nextToken across pages, then returns the NEWEST 25 — not the oldest 25 (FilterLogEvents is oldest-first)', async () => {
+    const at = (iso: string): number => Date.parse(iso);
+    // 30 in-window events spread across two pages, in oldest-first order (as the
+    // SDK yields them): minutes 0..29 of the hour. The NEWEST 25 are minutes
+    // 5..29; the 5 oldest (0..4) must be dropped.
+    const evAt = (minute: number): { timestamp: number; message: string } => ({
+      timestamp: at(`2026-06-29T10:${String(minute).padStart(2, '0')}:00.000Z`),
+      message: JSON.stringify({ level: 50, msg: `m${minute}` }),
+    });
+    const page1 = Array.from({ length: 18 }, (_, i) => evAt(i)); // minutes 0..17
+    const page2 = Array.from({ length: 12 }, (_, i) => evAt(18 + i)); // minutes 18..29
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ events: page1, nextToken: 'tok-1' })
+      .mockResolvedValueOnce({ events: page2 }); // no nextToken → scan stops
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    const events = await seam.filterErrorEvents('/hc/dev/app', 0, 25);
+
+    // Pagination was followed (two sends), the second carrying the first's token.
+    expect(send).toHaveBeenCalledTimes(2);
+    expect((send.mock.calls[0]![0] as FilterLogEventsCommand).input.nextToken).toBeUndefined();
+    expect((send.mock.calls[1]![0] as FilterLogEventsCommand).input.nextToken).toBe('tok-1');
+    // Exactly the NEWEST 25, newest-first: m29, m28, …, m5. The oldest 5 dropped.
+    expect(events).toHaveLength(25);
+    expect(events[0]!.message).toBe('m29');
+    expect(events[24]!.message).toBe('m5');
+    expect(events.map((e) => e.message)).not.toContain('m0');
+    expect(events.map((e) => e.message)).not.toContain('m4');
+  });
+
+  it('bounds the scan: stops paging after the max-pages budget even if nextToken keeps coming', async () => {
+    // Every page returns one event and ALWAYS a nextToken — an unbounded stream.
+    // The scan must stop after the 5-page budget rather than loop forever.
+    const at = (iso: string): number => Date.parse(iso);
+    let n = 0;
+    const send = vi.fn().mockImplementation(async () => {
+      n += 1;
+      return {
+        events: [{ timestamp: at(`2026-06-29T10:00:0${n}.000Z`), message: JSON.stringify({ level: 50, msg: `p${n}` }) }],
+        nextToken: `tok-${n}`, // never runs out
+      };
+    });
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    const events = await seam.filterErrorEvents('/hc/dev/app', 0, 25);
+
+    // Bounded at 5 pages (ERROR_SCAN_MAX_PAGES), not infinite.
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(events).toHaveLength(5);
   });
 
   it('degrades a non-JSON / off-shape log line WITHOUT surfacing its raw text', async () => {

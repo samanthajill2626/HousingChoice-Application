@@ -38,6 +38,7 @@ import {
   type BroadcastStatus,
 } from '../repos/broadcastsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
@@ -53,8 +54,6 @@ const BROADCAST_STATUSES: ReadonlySet<string> = new Set<BroadcastStatus>([
 
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
-/** The preview returns at most this many sample contacts (the audience is bounded). */
-const PREVIEW_SAMPLE_SIZE = 25;
 /** Sane cap so a template body can't be used to store a huge blob. */
 const MAX_TEMPLATE_LEN = 1600;
 
@@ -63,6 +62,7 @@ export interface BroadcastsRouterDeps {
   logger?: Logger;
   broadcastsRepo?: BroadcastsRepo;
   unitsRepo?: UnitsRepo;
+  contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   audienceResolutionService?: AudienceResolutionService;
   events?: EventBus;
@@ -105,6 +105,43 @@ function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
     excludeOptedOut: true,
     excludeUnreachable: true,
   };
+}
+
+/**
+ * Parse an optional `recipientContactIds` send body. Returns:
+ *  - `undefined` when the field is absent/null → keep the filter-resolve path.
+ *  - `{ ids }` (de-duped, non-empty) when a valid non-empty string array.
+ *  - `{ error }` when malformed (not an array, a non-string/empty element, or
+ *    over the recipient cap defensively).
+ * Empty-after-dedupe is surfaced as `{ error }` too (the send refuses an empty
+ * effective set with 400 empty_audience; an empty explicit list is the same
+ * intent — but we let the caller map it, returning `{ ids: [] }` here so the
+ * route emits the consistent empty_audience shape).
+ */
+function parseRecipientContactIds(
+  raw: unknown,
+): { ids: string[] } | { error: string } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    return { error: 'recipientContactIds must be an array of non-empty strings' };
+  }
+  if (raw.length > MAX_BROADCAST_RECIPIENTS) {
+    return {
+      error: `recipientContactIds exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap`,
+    };
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const el of raw) {
+    if (typeof el !== 'string' || el.trim().length === 0) {
+      return { error: 'recipientContactIds must be an array of non-empty strings' };
+    }
+    const id = el.trim();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return { ids };
 }
 
 /** Parse an optional ?limit= into 1..MAX_PAGE_LIMIT, or undefined when invalid. */
@@ -174,6 +211,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   const config = deps.config ?? loadConfig();
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const resolveAudience =
     deps.audienceResolutionService ?? createAudienceResolutionService({ logger: deps.logger });
@@ -255,7 +293,13 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     });
   });
 
-  // POST /api/broadcasts/:id/preview — re-resolve the audience + a sample.
+  // POST /api/broadcasts/:id/preview — re-resolve the audience + return the FULL
+  // annotated candidate list (bounded by the recipient cap, NOT the old 25-row
+  // sample) so the composer can render an editable curated recipient list. Each
+  // candidate carries voucherSize/housingAuthority for the row, plus
+  // `alreadySentThisProperty` (SOFT — a prior sent/sending broadcast for this
+  // unit already included the tenant). `priorRecipientContactIds` lets the
+  // composer annotate MANUALLY-added tenants locally too.
   router.post('/broadcasts/:broadcastId/preview', async (req, res) => {
     const { broadcastId } = req.params;
     mergeContext({});
@@ -265,11 +309,33 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       return;
     }
     const audience = await resolveAudience(broadcast.audience_filter);
-    // The sample carries phones — authed/internal response only; NEVER logged.
-    const sample = audience.contacts.slice(0, PREVIEW_SAMPLE_SIZE).map((c) => ({
+    // Prior-recipients for this unit (already-sent annotation). Only meaningful
+    // with a unitId; degrades safely to an empty set otherwise (or when the
+    // byUnit GSI is absent on an un-applied env). The set is contactKeys — which
+    // are contactId OR `phone#<E164>` (a phone-only recipient at the prior
+    // broadcast's send time), so a candidate must be matched on EITHER key.
+    const priorRecipients =
+      broadcast.unitId !== undefined
+        ? await broadcasts.priorRecipientContactIds(broadcast.unitId)
+        : new Set<string>();
+    // The candidate list carries phones — authed/internal response only; the
+    // log line below stays IDs/counts only (NEVER phones/names/bodies).
+    const candidates = audience.contacts.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
       contactId: c.contactId,
       ...(c.firstName !== undefined && { firstName: c.firstName }),
       phone: c.phone,
+      ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
+      ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
+      // Match on contactId OR the `phone#<E164>` key (same prefix the recipients
+      // map uses) so a tenant previously texted under a phone-only key (who
+      // later gained a contactId) is still flagged. SOFT hint — never excludes.
+      // TODO(broadcasts): the manually-added-tenant client-side annotation (the
+      // dashboard matches `priorRecipientContactIds` by contactId) has the same
+      // rare phone-only edge — a manually-added tenant prior-texted under a
+      // `phone#…` key won't be flagged client-side. Not addressed here.
+      alreadySentThisProperty:
+        broadcast.unitId !== undefined &&
+        (priorRecipients.has(c.contactId) || priorRecipients.has(`phone#${c.phone}`)),
     }));
     log.info(
       { broadcastId, count: audience.count, truncated: audience.truncated },
@@ -277,7 +343,12 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     );
     // Surface `truncated` (FIX 3+4) so the operator sees an incomplete/over-cap
     // audience BEFORE sending (and the dashboard can warn).
-    res.json({ count: audience.count, truncated: audience.truncated, sample });
+    res.json({
+      count: audience.count,
+      truncated: audience.truncated,
+      candidates,
+      priorRecipientContactIds: [...priorRecipients],
+    });
   });
 
   // POST /api/broadcasts/:id/send — snapshot the audience, mark sending, enqueue.
@@ -296,40 +367,112 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       return;
     }
 
-    // Re-resolve the audience snapshot at send time (the source of truth — the
-    // draft estimate may be stale). Build the recipients map keyed by contactKey
-    // (contactId else phone#<E164>, the shared convention), all 'queued'.
-    const audience = await resolveAudience(broadcast.audience_filter);
-    if (audience.count === 0) {
-      // Empty audience: refuse clearly (no point marking a broadcast sending
-      // with nobody to send to). Leave it a draft so the operator can adjust.
-      res.status(400).json({ error: 'empty_audience' });
-      return;
-    }
-    // Bound the audience (FIX 3+4): refuse when the resolved set exceeds the
-    // recipients-map item-size cap, OR when resolution was truncated (page cap
-    // hit → the set is INCOMPLETE; sending would silently under-deliver). Either
-    // way leave the broadcast a DRAFT and do NOT enqueue — the operator must
-    // narrow the bedroom/housing-authority filter.
-    if (audience.count > MAX_BROADCAST_RECIPIENTS || audience.truncated) {
-      log.warn(
-        { broadcastId, count: audience.count, truncated: audience.truncated, cap: MAX_BROADCAST_RECIPIENTS },
-        'broadcast send refused: audience too large',
-      );
-      res.status(400).json({
-        error: 'audience_too_large',
-        message: audience.truncated
-          ? `audience resolution was truncated (more than ${MAX_BROADCAST_RECIPIENTS} candidates) — narrow the housing authority and/or bedroom-size filter`
-          : `audience of ${audience.count} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap — narrow the housing authority and/or bedroom-size filter`,
-        count: audience.count,
-        truncated: audience.truncated,
-      });
-      return;
-    }
+    // Two send paths share the rest of the flow once they've produced a bounded
+    // `recipients` map + count:
+    //  (a) explicit selection — the dashboard's curated checked list (a body
+    //      `recipientContactIds`): resolve EACH contact + RE-ENFORCE the same
+    //      hard fences the audience resolver applies (drop unknown / non-tenant
+    //      / opted-out / unreachable / phone-less). The already-sent flag is a
+    //      preview hint only — NEVER excluded here.
+    //  (b) filter-resolve (back-compat — no body): the existing snapshot path.
     const recipients: Record<string, BroadcastRecipient> = {};
-    for (const c of audience.contacts) {
-      const contactKey = c.contactId && c.contactId.length > 0 ? c.contactId : `phone#${c.phone}`;
-      recipients[contactKey] = { status: 'queued' };
+    let count: number;
+
+    const selection = parseRecipientContactIds(
+      (req.body as { recipientContactIds?: unknown } | undefined)?.recipientContactIds,
+    );
+    if (selection !== undefined && 'error' in selection) {
+      res.status(400).json({ error: selection.error });
+      return;
+    }
+
+    if (selection !== undefined) {
+      // (a) Explicit selection. Build recipients from THIS set — re-fence each.
+      // contactsRepo has no batch-get, so resolve the ids with a BOUNDED-
+      // CONCURRENCY fan-out: chunk the ids and Promise.all each chunk, capping
+      // in-flight getById round-trips at FETCH_CONCURRENCY. The raw list is
+      // already capped at MAX_BROADCAST_RECIPIENTS pre-fetch (parse guard), so
+      // this only trims request latency (sequential awaits were 7–15s on a
+      // 1500-id send) — it does NOT change which contacts survive. The fences,
+      // de-dupe, contactKey convention, empty→400, and cap below are identical.
+      const FETCH_CONCURRENCY = 50;
+      const fetched: Array<Awaited<ReturnType<typeof contacts.getById>>> = [];
+      for (let i = 0; i < selection.ids.length; i += FETCH_CONCURRENCY) {
+        const chunk = selection.ids.slice(i, i + FETCH_CONCURRENCY);
+        const resolved = await Promise.all(chunk.map((id) => contacts.getById(id)));
+        for (const contact of resolved) fetched.push(contact);
+      }
+      for (const contact of fetched) {
+        if (!contact) continue; // unknown id — drop
+        if (contact.type !== 'tenant') continue; // never text a non-tenant
+        if (contact.sms_opt_out === true) continue; // HARD exclusion (re-enforced)
+        if (contact.sms_unreachable === true) continue; // HARD exclusion (re-enforced)
+        if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue; // unsendable
+        // Same contactKey convention (contactId else phone#<E164>) — here ids
+        // are real contactIds, so the key is the contactId.
+        const contactKey =
+          contact.contactId && contact.contactId.length > 0
+            ? contact.contactId
+            : `phone#${contact.phone}`;
+        recipients[contactKey] = { status: 'queued' };
+      }
+      count = Object.keys(recipients).length;
+      if (count === 0) {
+        // Nothing survived the fences (all dropped) — refuse clearly, leave the
+        // draft for the operator to adjust.
+        res.status(400).json({ error: 'empty_audience' });
+        return;
+      }
+      if (count > MAX_BROADCAST_RECIPIENTS) {
+        log.warn(
+          { broadcastId, count, cap: MAX_BROADCAST_RECIPIENTS },
+          'broadcast send refused: explicit selection too large',
+        );
+        res.status(400).json({
+          error: 'audience_too_large',
+          message: `audience of ${count} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap — remove recipients`,
+          count,
+          truncated: false,
+        });
+        return;
+      }
+    } else {
+      // (b) Re-resolve the audience snapshot at send time (the source of truth —
+      // the draft estimate may be stale). Build the recipients map keyed by
+      // contactKey (contactId else phone#<E164>, the shared convention),
+      // all 'queued'.
+      const audience = await resolveAudience(broadcast.audience_filter);
+      if (audience.count === 0) {
+        // Empty audience: refuse clearly (no point marking a broadcast sending
+        // with nobody to send to). Leave it a draft so the operator can adjust.
+        res.status(400).json({ error: 'empty_audience' });
+        return;
+      }
+      // Bound the audience (FIX 3+4): refuse when the resolved set exceeds the
+      // recipients-map item-size cap, OR when resolution was truncated (page cap
+      // hit → the set is INCOMPLETE; sending would silently under-deliver).
+      // Either way leave the broadcast a DRAFT and do NOT enqueue — the operator
+      // must narrow the bedroom/housing-authority filter.
+      if (audience.count > MAX_BROADCAST_RECIPIENTS || audience.truncated) {
+        log.warn(
+          { broadcastId, count: audience.count, truncated: audience.truncated, cap: MAX_BROADCAST_RECIPIENTS },
+          'broadcast send refused: audience too large',
+        );
+        res.status(400).json({
+          error: 'audience_too_large',
+          message: audience.truncated
+            ? `audience resolution was truncated (more than ${MAX_BROADCAST_RECIPIENTS} candidates) — narrow the housing authority and/or bedroom-size filter`
+            : `audience of ${audience.count} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap — narrow the housing authority and/or bedroom-size filter`,
+          count: audience.count,
+          truncated: audience.truncated,
+        });
+        return;
+      }
+      for (const c of audience.contacts) {
+        const contactKey = c.contactId && c.contactId.length > 0 ? c.contactId : `phone#${c.phone}`;
+        recipients[contactKey] = { status: 'queued' };
+      }
+      count = audience.count;
     }
 
     let sending: BroadcastItem;
@@ -366,10 +509,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
 
     await audit.append(`broadcasts#${broadcastId}`, 'broadcast_sent', {
       actor,
-      count: audience.count,
+      count,
     });
-    log.info({ broadcastId, count: audience.count, actor }, 'broadcast send started via api');
-    res.json({ broadcastId, status: sending.status, count: audience.count });
+    log.info({ broadcastId, count, actor }, 'broadcast send started via api');
+    res.json({ broadcastId, status: sending.status, count });
   });
 
   // GET /api/broadcasts/:id/results — stats + per-recipient delivery map.
@@ -420,6 +563,34 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       broadcasts: page.items.map(toBroadcastSummary),
       nextCursor:
         page.lastEvaluatedKey !== undefined ? encodeCursor(page.lastEvaluatedKey) : null,
+    });
+  });
+
+  // DELETE /api/broadcasts/:id — delete an UNSENT draft only. A sending/sent/
+  // failed broadcast is permanent (409). The repo's conditional delete is the
+  // race guard — a concurrent send that flips draft→sending mid-call yields 409,
+  // never a silent delete of a sent broadcast. Audited IDs-only (NEVER the body/
+  // audience). VA-accessible (same posture as the rest of the router).
+  router.delete('/broadcasts/:broadcastId', async (req, res) => {
+    const actor = (req as AuthedRequest).user?.userId ?? 'unknown';
+    const { broadcastId } = req.params;
+    const result = await broadcasts.delete(broadcastId);
+    if (result.deleted) {
+      await audit.append(`broadcasts#${broadcastId}`, 'broadcast_deleted', { actor });
+      log.info({ broadcastId, actor }, 'broadcast draft deleted via api');
+      res.status(200).json({ deleted: true });
+      return;
+    }
+    if (result.reason === 'not_found') {
+      res.status(404).json({ error: 'broadcast_not_found' });
+      return;
+    }
+    // not_draft: re-read the current status so the client can fall back to the
+    // results view (the row is already sending/sent/failed).
+    const current = await broadcasts.getById(broadcastId);
+    res.status(409).json({
+      error: 'broadcast_not_draft',
+      ...(current !== undefined && { status: current.status }),
     });
   });
 

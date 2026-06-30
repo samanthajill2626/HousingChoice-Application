@@ -1,0 +1,68 @@
+/* BroadcastComposer — two-step layout (compose cols → preview). Tokens only. */
+.page {
+}
+.title {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+.cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-5);
+}
+@media (max-width: 820px) {
+  .cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+}
+.previewBtn {
+  padding: var(--sp-2) var(--sp-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--c-brand);
+  color: var(--c-text-inverse);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+.previewBtn:hover:not(:disabled) {
+  background: var(--c-brand-hover);
+}
+.previewBtn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.backStep {
+  display: inline-block;
+  margin-bottom: var(--sp-4);
+  border: none;
+  background: none;
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.backStep:hover {
+  text-decoration: underline;
+}
+
+.error {
+  margin: var(--sp-4) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}

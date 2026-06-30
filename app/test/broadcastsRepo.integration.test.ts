@@ -227,4 +227,142 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions against Dy
     expect(source?.delivery_recipients?.['c-alice']?.status).toBe('sent');
     expect(source?.delivery_recipients?.['c-bob']?.status).toBe('queued'); // untouched seed
   });
+
+  // --- Broadcasts dashboard Phase A: byUnit GSI + conditional delete --------
+  // These exercise the REAL DynamoDB-Local semantics the in-memory fake cannot:
+  // the sparse byUnit GSI projection/query and the status='draft'-conditional
+  // DeleteCommand (incl. the draft→sending race that must fail the condition).
+
+  it('byUnit GSI: listByUnit returns this unit\'s broadcasts; a unit-less broadcast never indexes', async () => {
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+    const a = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'a',
+      unitId,
+    });
+    const b = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'b',
+      unitId,
+    });
+    // A unit-LESS broadcast: sparse GSI means it never appears for any unit.
+    await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'no-unit',
+    });
+
+    const page = await broadcasts.listByUnit(unitId);
+    expect(page.items.map((x) => x.broadcastId).sort()).toEqual([a.broadcastId, b.broadcastId].sort());
+  });
+
+  it('priorRecipientContactIds: unions recipients KEYS of sent/sending only (NOT draft/failed)', async () => {
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+
+    // SENT broadcast for the unit → recipients counted.
+    const sent = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'sent',
+      unitId,
+    });
+    await broadcasts.markSending(sent.broadcastId, {
+      'c-1': { status: 'queued' },
+      'c-2': { status: 'queued' },
+    });
+    await broadcasts.markSent(sent.broadcastId);
+
+    // SENDING broadcast for the unit → recipients counted (union).
+    const sending = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'sending',
+      unitId,
+    });
+    await broadcasts.markSending(sending.broadcastId, { 'c-3': { status: 'queued' } });
+
+    // DRAFT broadcast for the unit → recipients NOT counted.
+    const draft = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'draft',
+      unitId,
+    });
+    // Force a recipients map onto the draft via a direct write would need the
+    // repo; instead mark→sending→failed so it leaves recipients but a failed
+    // status (also excluded).
+    const failed = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'failed',
+      unitId,
+    });
+    await broadcasts.markSending(failed.broadcastId, { 'c-9': { status: 'queued' } });
+    await broadcasts.markFailed(failed.broadcastId, 'forced');
+    expect(draft.status).toBe('draft'); // sanity: the bare draft stays out
+
+    const prior = await broadcasts.priorRecipientContactIds(unitId);
+    expect([...prior].sort()).toEqual(['c-1', 'c-2', 'c-3'].sort()); // c-9 (failed) excluded
+  });
+
+  it('priorRecipientContactIds: a unit with no sent/sending broadcasts → empty set', async () => {
+    const unitId = `unit-${randomUUID().slice(0, 8)}`;
+    await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'just-a-draft',
+      unitId,
+    });
+    const prior = await broadcasts.priorRecipientContactIds(unitId);
+    expect(prior.size).toBe(0);
+  });
+
+  it('conditional delete: a DRAFT deletes; a SENT broadcast is refused (not_draft) and survives', async () => {
+    const draft = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'deletable',
+    });
+    const okDelete = await broadcasts.delete(draft.broadcastId);
+    expect(okDelete).toEqual({ deleted: true });
+    expect(await broadcasts.getById(draft.broadcastId)).toBeUndefined();
+
+    // A missing broadcast → not_found.
+    const missing = await broadcasts.delete(`bcast-${randomUUID()}`);
+    expect(missing).toEqual({ deleted: false, reason: 'not_found' });
+
+    // A SENT broadcast → not_draft (the conditional refuses), the row survives.
+    const sent = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'permanent',
+    });
+    await broadcasts.markSending(sent.broadcastId, { 'c-1': { status: 'queued' } });
+    await broadcasts.markSent(sent.broadcastId);
+    const refused = await broadcasts.delete(sent.broadcastId);
+    expect(refused).toEqual({ deleted: false, reason: 'not_draft' });
+    expect(await broadcasts.getById(sent.broadcastId)).toBeDefined();
+  });
+
+  it('conditional delete race: status flips draft→sending before the delete → not_draft, NO silent delete', async () => {
+    // The real race: read sees a draft, but a concurrent send flips it to
+    // 'sending' before the conditional DeleteCommand commits. We reproduce it
+    // for real against DynamoDB Local by flipping the status (markSending) and
+    // THEN issuing the conditional delete — the condition (status='draft') must
+    // fail, leaving the now-sending broadcast intact.
+    const b = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'raced',
+    });
+    await broadcasts.markSending(b.broadcastId, { 'c-1': { status: 'queued' } }); // the concurrent send won
+    const result = await broadcasts.delete(b.broadcastId);
+    expect(result).toEqual({ deleted: false, reason: 'not_draft' });
+    // The broadcast was NOT silently deleted — it is still present and sending.
+    const after = await broadcasts.getById(b.broadcastId);
+    expect(after).toBeDefined();
+    expect(after?.status).toBe('sending');
+  });
 });

@@ -31,6 +31,10 @@ export interface ResolvedContact {
   contactId: string;
   phone: string;
   firstName?: string;
+  /** The tenant's approved bedroom (voucher) size — for the preview row display. */
+  voucherSize?: number;
+  /** The administering housing authority — for the preview row display. */
+  housingAuthority?: string;
 }
 
 export interface ResolvedAudience {
@@ -72,6 +76,12 @@ function voucherSizeOf(contact: ContactItem): number | undefined {
 /** Resolved first name for the [TenantName] merge token, or undefined. */
 function firstNameOf(contact: ContactItem): string | undefined {
   const v = contact['firstName'];
+  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+/** The administering housing authority for the preview row, or undefined. */
+function housingAuthorityOf(contact: ContactItem): string | undefined {
+  const v = contact['housingAuthority'];
   return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 }
 
@@ -118,10 +128,14 @@ export function createAudienceResolutionService(
           continue;
         }
         const firstName = firstNameOf(contact);
+        const voucherSize = voucherSizeOf(contact);
+        const housingAuthority = housingAuthorityOf(contact);
         resolved.push({
           contactId: contact.contactId,
           phone: contact.phone,
           ...(firstName !== undefined && { firstName }),
+          ...(voucherSize !== undefined && { voucherSize }),
+          ...(housingAuthority !== undefined && { housingAuthority }),
         });
       }
 

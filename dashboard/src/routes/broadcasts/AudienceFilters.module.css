@@ -1,0 +1,113 @@
+/* AudienceFilters — the audience filter framework. Tokens only. */
+.filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+}
+.heading {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.audienceKind {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.criterion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.criterionLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.chip {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.chip:hover {
+  border-color: var(--c-border-strong);
+}
+.chip:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+.chipActive {
+  background: var(--c-brand);
+  border-color: var(--c-brand);
+  color: var(--c-text-inverse);
+}
+.matchTag {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  opacity: 0.85;
+}
+.matchNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-md);
+}
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 0;
+  border-color: var(--c-brand);
+}
+.addFilter {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+  cursor: not-allowed;
+}
+.excludedNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.reach {
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+.reachPending {
+  color: var(--c-text-muted);
+}
+.reachCount strong {
+  color: var(--c-brand);
+}
+.truncated {
+  color: var(--c-warning);
+}

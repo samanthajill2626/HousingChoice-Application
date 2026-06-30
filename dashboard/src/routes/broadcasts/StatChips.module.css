@@ -1,0 +1,46 @@
+/* StatChips — a row of labeled count chips. Tokens only. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+}
+.chip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 88px;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+}
+.chipLabel {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.chipValue {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+.success {
+  border-color: var(--c-match-border);
+  background: var(--c-match-bg);
+}
+.success .chipValue {
+  color: var(--c-match-text);
+}
+.danger {
+  border-color: var(--c-evt-amber-border);
+  background: var(--c-evt-amber-bg);
+}
+.danger .chipValue {
+  color: var(--c-danger);
+}

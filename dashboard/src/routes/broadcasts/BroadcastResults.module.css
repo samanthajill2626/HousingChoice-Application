@@ -1,0 +1,131 @@
+/* BroadcastResults — header, stat chips, per-recipient rows + states. Tokens only. */
+.page {
+}
+.backLink {
+  display: inline-block;
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-brand);
+  text-decoration: none;
+}
+.backLink:hover {
+  text-decoration: underline;
+}
+
+.header {
+  position: relative;
+}
+.headTop {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+.meta {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.lastError {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+.refresh {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.refresh:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+}
+.refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.recipientsHeading {
+  margin: var(--sp-5) 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.recipients {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recipient {
+  border-bottom: 1px solid var(--c-border);
+}
+.recipientLink,
+.recipientFlat {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2);
+  text-decoration: none;
+  color: inherit;
+}
+.recipientLink:hover {
+  background: var(--c-surface-2);
+}
+.recipientLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+.recipientFailed {
+  background: var(--c-evt-amber-bg);
+}
+.recipientName {
+  flex: 1 1 auto;
+  font-size: var(--fs-md);
+  color: var(--c-text);
+  min-width: 0;
+}
+.retryHint {
+  flex: 0 0 auto;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+  font-weight: var(--fw-medium);
+}
+
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.error {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+.retry {
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}

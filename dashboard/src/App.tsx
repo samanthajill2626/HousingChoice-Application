@@ -19,6 +19,9 @@ import { ListingDetail } from './routes/listing/ListingDetail.js';
 import { PlacementsBoard } from './routes/placements/PlacementsBoard.js';
 import { PlacementDetail } from './routes/placements/PlacementDetail.js';
 import { Inbox } from './routes/inbox/Inbox.js';
+import { BroadcastsList } from './routes/broadcasts/BroadcastsList.js';
+import { BroadcastComposer } from './routes/broadcasts/BroadcastComposer.js';
+import { BroadcastResults } from './routes/broadcasts/BroadcastResults.js';
 import { SettingsPage } from './routes/settings/SettingsPage.js';
 import { TeamSection } from './routes/settings/TeamSection.js';
 import { TemplatesSection } from './routes/settings/TemplatesSection.js';
@@ -46,6 +49,11 @@ const IMPLEMENTED = new Set<string>([
   '/contacts/unknown',
   '/listings',
   '/inbox',
+  // Broadcasts now has a REAL list page + the static composer route (the
+  // /broadcasts/:broadcastId Results route is a dynamic <Route> below). Exclude
+  // them from the placeholder generator so they aren't double-mounted.
+  '/broadcasts',
+  '/broadcasts/new',
   // /settings now has a REAL tabbed page (with nested sub-routes below); exclude
   // it from the placeholder generator (allNavTargets includes the footer link).
   '/settings',
@@ -88,6 +96,14 @@ export default function App(): React.JSX.Element {
 
             {/* Communications ▸ Inbox (replaces the generated placeholder). */}
             <Route path="inbox" element={<Inbox />} />
+
+            {/* Communications ▸ Broadcasts (replaces the generated placeholder):
+                the list, the composer, and the live Results view. The static
+                /broadcasts/new ranks above the dynamic /broadcasts/:broadcastId
+                (per the route-ordering convention). */}
+            <Route path="broadcasts" element={<BroadcastsList />} />
+            <Route path="broadcasts/new" element={<BroadcastComposer />} />
+            <Route path="broadcasts/:broadcastId" element={<BroadcastResults />} />
 
             {/* Settings ▸ tabbed surface (replaces the generated placeholder).
                 The index redirects to the first tab visible for the role; the

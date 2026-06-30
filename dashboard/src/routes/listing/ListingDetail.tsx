@@ -197,7 +197,11 @@ export function ListingDetail(): React.JSX.Element {
             </button>
           ) : (
             <>
-              <button type="button" className={styles.btn}>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`)}
+              >
                 📣 Broadcast to tenants
               </button>
               <button type="button" className={styles.btn} onClick={() => setStartingPlacement(true)}>

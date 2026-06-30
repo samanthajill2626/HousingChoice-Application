@@ -26,6 +26,7 @@ import type {
   PlacementUpdatedEvent,
   ConversationUpdatedEvent,
   MessagePersistedEvent,
+  BroadcastUpdatedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
@@ -34,6 +35,9 @@ export interface EventStreamHandlers {
   onPlacementUpdated?: (event: PlacementUpdatedEvent) => void;
   /** A message was persisted — the contact timeline refetches to show it live. */
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
+  /** A broadcast changed — the Results view overlays status+stats live (then
+   *  refetches for the per-recipient detail the payload omits). */
+  onBroadcastUpdated?: (event: BroadcastUpdatedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -130,6 +134,11 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
       source.addEventListener('message.persisted', (ev) => {
         const data = parse<MessagePersistedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onMessagePersisted, data);
+      });
+
+      source.addEventListener('broadcast.updated', (ev) => {
+        const data = parse<BroadcastUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onBroadcastUpdated, data);
       });
 
       source.addEventListener('error', () => {

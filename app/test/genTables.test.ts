@@ -54,7 +54,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     });
   });
 
-  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus + byCreatedAt; no stream/TTL', () => {
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus + byCreatedAt + byUnit; no stream/TTL', () => {
     expect(tables['broadcasts']).toEqual({
       hash_key: { name: 'broadcastId', type: 'S' },
       gsis: [
@@ -66,6 +66,13 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
           index_name: 'byCreatedAt',
           hash_key: { name: 'created_by', type: 'S' },
           range_key: { name: 'created_at', type: 'S' },
+        },
+        {
+          // Prior-recipients lookup (Broadcasts dashboard). Sparse in tables.ts,
+          // but the tfvars GSI shape carries no `sparse` field (the module emits
+          // none — sparseness is a data convention, not a schema attribute).
+          index_name: 'byUnit',
+          hash_key: { name: 'unitId', type: 'S' },
         },
       ],
       stream: false,

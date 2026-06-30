@@ -1,0 +1,39 @@
+/* BroadcastStatusPill — the lifecycle pill. Tokens only; one tone class per
+ * status family. */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.neutral {
+  /* base look (draft) */
+}
+
+.progress {
+  background: var(--c-brand-soft);
+  border-color: var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+
+.positive {
+  background: var(--c-match-bg);
+  border-color: var(--c-match-border);
+  color: var(--c-match-text);
+}
+
+.danger {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+  color: var(--c-danger);
+}

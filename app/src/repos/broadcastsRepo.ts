@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -154,6 +155,21 @@ export interface BroadcastsRepo {
   /** List a creator's broadcasts newest-first via the byCreatedAt GSI. */
   listByCreatedBy(createdBy: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
+   * List the broadcasts targeting a unit via the sparse byUnit GSI (only
+   * broadcasts WITH a unitId index here). One page per call; the route's
+   * prior-recipients lookup walks them.
+   */
+  listByUnit(unitId: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
+  /**
+   * The set of contactKeys already sent a broadcast for this unit — the union
+   * of every sent/sending broadcast's `recipients` map KEYS for the unit. The
+   * composer flags these (soft, opt-in resend; never a server-side exclusion).
+   * Degrades SAFELY: if the byUnit GSI is absent (an un-applied env) or the
+   * query throws/returns nothing, returns an EMPTY set (nothing flagged) — the
+   * already-sent protection is best-effort until the operator applies the GSI.
+   */
+  priorRecipientContactIds(unitId: string): Promise<Set<string>>;
+  /**
    * Persist the resolved recipients map + audience count, then flip to
    * `sending` — one conditional write, gated on the broadcast still being a
    * draft (so a double-send can't re-seed mid-flight). Throws
@@ -187,7 +203,23 @@ export interface BroadcastsRepo {
   markSent(broadcastId: string): Promise<BroadcastItem>;
   /** Flip to `failed` (terminal); records last_error. */
   markFailed(broadcastId: string, lastError?: string): Promise<BroadcastItem>;
+  /**
+   * Delete a broadcast — ONLY when it is still a draft (a sending/sent/failed
+   * broadcast is permanent). One conditional DeleteCommand gated on
+   * `attribute_exists(broadcastId) AND status='draft'`: the condition is the
+   * race guard — a concurrent send that flipped draft→sending between the
+   * route's read and this delete fails the condition (never a silent delete of
+   * a sent broadcast). Returns a discriminated result the route maps to
+   * 200 / 404 / 409 (on the conditional failure a follow-up getById tells
+   * `not_found` from `not_draft`).
+   */
+  delete(broadcastId: string): Promise<DeleteBroadcastResult>;
 }
+
+/** Outcome of a draft-only delete (the route maps it to 200 / 404 / 409). */
+export type DeleteBroadcastResult =
+  | { deleted: true }
+  | { deleted: false; reason: 'not_found' | 'not_draft' };
 
 export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
   const doc = deps.doc ?? getDocumentClient();
@@ -294,6 +326,39 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
     async listByCreatedBy(createdBy, opts = {}) {
       // Newest-first: byCreatedAt sorts on created_at; descending.
       return queryIndex('byCreatedAt', 'created_by', createdBy, opts, false);
+    },
+
+    async listByUnit(unitId, opts = {}) {
+      // Sparse byUnit GSI (unit-less broadcasts never index here).
+      return queryIndex('byUnit', 'unitId', unitId, opts);
+    },
+
+    async priorRecipientContactIds(unitId) {
+      // Best-effort union of every sent/sending broadcast's recipients KEYS for
+      // this unit. The byUnit GSI keeps this O(matches) not a Scan. Degrade
+      // SAFELY: a missing GSI (un-applied env) or any query error → empty set
+      // (nothing flagged); log IDs/counts only (NEVER recipient phones/keys).
+      const prior = new Set<string>();
+      try {
+        let exclusiveStartKey: Record<string, unknown> | undefined;
+        do {
+          const page = await queryIndex('byUnit', 'unitId', unitId, {
+            ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+          });
+          for (const b of page.items) {
+            if (b.status !== 'sent' && b.status !== 'sending') continue;
+            for (const key of Object.keys(b.recipients ?? {})) prior.add(key);
+          }
+          exclusiveStartKey = page.lastEvaluatedKey;
+        } while (exclusiveStartKey !== undefined);
+      } catch (err) {
+        // Index missing on an un-applied env (or a transient query error): the
+        // already-sent annotation degrades to "nothing flagged" per the spec.
+        log.warn({ unitId, err }, 'priorRecipientContactIds: byUnit query failed — degrading to empty');
+        return new Set<string>();
+      }
+      log.info({ unitId, priorCount: prior.size }, 'broadcast prior-recipients resolved');
+      return prior;
     },
 
     async markSending(broadcastId, recipients) {
@@ -421,6 +486,36 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
 
     async markFailed(broadcastId, lastError) {
       return flipStatus(broadcastId, 'failed', lastError);
+    },
+
+    async delete(broadcastId) {
+      // Conditional delete: only a DRAFT may be deleted. The condition is the
+      // race guard — a concurrent send that flipped draft→sending between the
+      // route's read and here fails the condition (no silent delete of a sent
+      // broadcast). On ConditionalCheckFailedException a follow-up getById
+      // distinguishes a missing broadcast (404) from a non-draft one (409),
+      // mirroring markSending's CCF handling.
+      try {
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { broadcastId },
+            ConditionExpression: 'attribute_exists(broadcastId) AND #s = :draft',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: { ':draft': 'draft' },
+          }),
+        );
+        log.info({ broadcastId }, 'broadcast draft deleted');
+        return { deleted: true };
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          const existing = await getById(broadcastId);
+          return existing === undefined
+            ? { deleted: false, reason: 'not_found' }
+            : { deleted: false, reason: 'not_draft' };
+        }
+        throw err;
+      }
     },
   };
 }

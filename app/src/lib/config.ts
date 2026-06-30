@@ -29,6 +29,26 @@ export interface AppConfig {
   cfOriginSecret: string;
   otelSdkDisabled: boolean;
   awsRegion: string;
+  /**
+   * Deploy environment name — `local` | `dev` | `prod` (M1.4 System Status).
+   * Prefer an explicit HC_ENV; otherwise derived from TABLE_PREFIX
+   * (hc-local- → local, hc-dev- → dev, hc-prod- → prod; default local).
+   * Names the alarm prefix + error log group below and is surfaced (as a
+   * plain string) in GET /api/system/flags. NOT a secret.
+   */
+  appEnv: string;
+  /**
+   * CloudWatch alarm-name prefix for THIS env — `hc-<appEnv>-`, matching the
+   * Terraform `var.name_prefix` every alarm is named with. The System Status
+   * alarms endpoint filters DescribeAlarms by this prefix (M1.4).
+   */
+  alarmNamePrefix: string;
+  /**
+   * The app's error log group for THIS env — `/hc/<appEnv>/app`, matching the
+   * observability module's app log group (pino error level ≥ 50 lands here).
+   * The System Status errors endpoint runs FilterLogEvents against it (M1.4).
+   */
+  errorLogGroupName: string;
   /** DynamoDB Local endpoint for local dev (M0.3). Unset in AWS. */
   dynamodbEndpoint?: string;
   /**
@@ -233,6 +253,24 @@ export const DEV_SESSION_SECRET_DEFAULT = 'dev-placeholder-session-secret';
 export const DEFAULT_TABLE_PREFIX = 'hc-local-';
 
 /**
+ * Resolve the deploy environment name (`local` | `dev` | `prod`) for the
+ * M1.4 System Status surface. Prefer an explicit HC_ENV; otherwise derive it
+ * from TABLE_PREFIX (the only env-stamped value already wired everywhere):
+ * `hc-dev-` → dev, `hc-prod-` → prod, anything else (incl. the local default
+ * `hc-local-`) → local. The alarm prefix (`hc-<env>-`) and error log group
+ * (`/hc/<env>/app`) are built from this so they always match the Terraform
+ * naming for the SAME env the app runs in.
+ */
+export function resolveAppEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.HC_ENV?.trim();
+  if (explicit !== undefined && explicit.length > 0) return explicit;
+  const prefix = env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX;
+  if (prefix === 'hc-dev-') return 'dev';
+  if (prefix === 'hc-prod-') return 'prod';
+  return 'local';
+}
+
+/**
  * Resolve a table's physical name from its base name (see lib/tables.ts):
  * `${TABLE_PREFIX}${base}`. Never hardcode physical table names.
  */
@@ -242,6 +280,12 @@ export function tableName(base: string, env: NodeJS.ProcessEnv = process.env): s
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = env.NODE_ENV ?? 'development';
+
+  // Deploy env name + the observability names derived from it (M1.4 System
+  // Status). All three are non-secret naming values; see resolveAppEnv.
+  const appEnv = resolveAppEnv(env);
+  const alarmNamePrefix = `hc-${appEnv}-`;
+  const errorLogGroupName = `/hc/${appEnv}/app`;
 
   // Dev-only endpoints (dev-login, outbox, reseed in later phases) are gated
   // behind this flag. It must NEVER be set in production; if it is, refuse to
@@ -562,6 +606,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cfOriginSecret: cfOriginSecret ?? DEV_ORIGIN_SECRET_DEFAULT,
     otelSdkDisabled: (env.OTEL_SDK_DISABLED ?? '').toLowerCase() === 'true',
     awsRegion: env.AWS_REGION ?? 'us-east-1',
+    appEnv,
+    alarmNamePrefix,
+    errorLogGroupName,
     dynamodbEndpoint: env.DYNAMODB_ENDPOINT,
     tablePrefix: env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX,
     otelExporterOtlpEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,

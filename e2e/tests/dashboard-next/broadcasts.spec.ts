@@ -41,14 +41,16 @@ async function createTenant(
   request: APIRequestContext,
   firstName: string,
   voucherSize = 2,
-): Promise<{ contactId: string; name: string; phone: string }> {
+): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
   const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
   const res = await request.post(`${NEXT}/api/contacts`, {
     data: { type: 'tenant', firstName, lastName: 'Bcastest', phone, voucherSize },
   });
   expect(res.ok()).toBeTruthy();
   const contactId = (await res.json()).contact.contactId as string;
-  return { contactId, name: `${firstName} Bcastest`, phone };
+  // Preview rows from the resolver show the FIRST name only (no lastName); the
+  // add-a-tenant search row shows the full "First Last".
+  return { contactId, firstName, name: `${firstName} Bcastest`, phone };
 }
 
 test.describe('Broadcasts — compose from a property → curate → send → results', () => {
@@ -56,18 +58,20 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     page,
     request,
   }) => {
+    // dev-login FIRST so page.request carries the session cookie for the
+    // authenticated /api setup calls below (the bare `request` fixture has none).
     await devLogin(page);
 
     // --- Set up the audience: two fresh 2-BR tenants we control (unique names). ---
     const stamp = `${Date.now()}`.slice(-6);
-    const keep = await createTenant(request, `Keepme${stamp}`);
-    const drop = await createTenant(request, `Dropme${stamp}`);
+    const keep = await createTenant(page.request, `Keepme${stamp}`);
+    const drop = await createTenant(page.request, `Dropme${stamp}`);
     // A 3-BR tenant: NOT caught by the 2-BR filter → must be added via search.
-    const added = await createTenant(request, `Addme${stamp}`, 3);
+    const added = await createTenant(page.request, `Addme${stamp}`, 3);
 
     // --- Seed a PRIOR sent broadcast for unit-0001 that includes Tasha, so the
     // next preview flags her "already sent". Built straight through the API. ---
-    const draftRes = await request.post(`${NEXT}/api/broadcasts`, {
+    const draftRes = await page.request.post(`${NEXT}/api/broadcasts`, {
       data: {
         unitId: SEEDED_UNIT,
         body_template: `Prior send ${stamp} for [TenantName]`,
@@ -76,7 +80,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     });
     expect(draftRes.ok()).toBeTruthy();
     const priorId = (await draftRes.json()).broadcastId as string;
-    const sentRes = await request.post(`${NEXT}/api/broadcasts/${priorId}/send`, {
+    const sentRes = await page.request.post(`${NEXT}/api/broadcasts/${priorId}/send`, {
       data: { recipientContactIds: [TASHA] },
     });
     expect(sentRes.ok()).toBeTruthy();
@@ -107,9 +111,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     const list = page.getByRole('list', { name: 'Candidate recipients' });
     await expect(list).toBeVisible();
 
-    // Our three created tenants + Tasha are all 2-BR candidates.
-    await expect(list.getByText(keep.name)).toBeVisible();
-    await expect(list.getByText(drop.name)).toBeVisible();
+    // Our two 2-BR tenants are filter-matched candidates (preview rows show the
+    // FIRST name only). Tasha is too (already-sent).
+    await expect(list.getByText(keep.firstName)).toBeVisible();
+    await expect(list.getByText(drop.firstName)).toBeVisible();
 
     // Tasha is flagged "already sent" and starts UNCHECKED (soft opt-in to resend).
     const tashaRow = list.locator('li', { hasText: 'Tasha' });
@@ -117,7 +122,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     await expect(tashaRow.getByRole('checkbox')).not.toBeChecked();
 
     // Uncheck one candidate (drop) so it is excluded from the send.
-    const dropRow = list.locator('li', { hasText: drop.name });
+    const dropRow = list.locator('li', { hasText: drop.firstName });
     await dropRow.getByRole('checkbox').uncheck();
     await expect(dropRow.getByRole('checkbox')).not.toBeChecked();
 
@@ -132,8 +137,9 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // Send to the curated selection.
     await page.getByRole('button', { name: /^Send to/ }).click();
 
-    // --- Lands on Results for this broadcast. ---
-    await expect(page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/);
+    // --- Lands on Results for this broadcast (the send POST resolves, then the
+    // composer navigates). Allow headroom for the send round-trip. ---
+    await expect(page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/, { timeout: 15_000 });
     await expect(page.getByRole('heading', { name: /Tenants/ })).toBeVisible();
     await expect(page.getByLabel('Delivery stats')).toBeVisible();
 
@@ -166,7 +172,6 @@ test.describe('Broadcasts — compose from a property → curate → send → re
 test.describe('Broadcasts — delete an unsent draft', () => {
   test('compose a draft, see it in the Drafts list, delete it → gone afterwards', async ({
     page,
-    request,
   }) => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
@@ -212,7 +217,7 @@ test.describe('Broadcasts — delete an unsent draft', () => {
     });
     // The API confirms the original draft is deleted (404).
     await expect
-      .poll(async () => (await request.get(`${NEXT}/api/broadcasts/${draftId}/results`)).status(), {
+      .poll(async () => (await page.request.get(`${NEXT}/api/broadcasts/${draftId}/results`)).status(), {
         timeout: 10_000,
       })
       .toBe(404);

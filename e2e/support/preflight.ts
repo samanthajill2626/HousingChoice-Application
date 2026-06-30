@@ -120,4 +120,35 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
       );
     }
   }
+
+  // --- Clean-slate reset (sync the backend with the freshly-restarted fake) --------
+  // The hermetic launcher reuses the DynamoDB CONTAINER across e2e:session boots (for
+  // speed) but only IDEMPOTENTLY RE-SEEDS it (db-seed = fixed-ID PutItems) — it never
+  // CLEARS. So dynamically-created rows accumulate forever, including the
+  // `sid#<providerSid>` inbound-dedup pointers (messagesRepo). Meanwhile fake-twilio
+  // restarts each boot with its DETERMINISTIC SID counter back at 1. A fresh fake's
+  // early SIDs (SMfake00000001…) then collide with stale pointers from prior runs, so
+  // the backend dedups the inbound and DROPS it: the contact is created but the message
+  // never lands on the timeline — surfacing as a flaky "inbound body not visible" failure
+  // (worst on a freshly-booted stack; the full suite warms past it as the counter
+  // climbs). Reseeding here clears those pointers so the fresh fake's SID space is clean.
+  // (CI gets a fresh container, so this is a cheap near-no-op there.)
+  const appUrl = process.env['E2E_APP_URL'] ?? 'http://localhost:8080';
+  const fakeUrl = process.env['FAKE_TWILIO_URL'] ?? 'http://localhost:8889';
+  const reseed = await fetch(`${appUrl}/__dev/reseed`, { method: 'POST' });
+  if (!reseed.ok) {
+    throw new Error(
+      `e2e preflight: clean-slate reseed failed (HTTP ${reseed.status}) at ${appUrl}/__dev/reseed. ` +
+        `The hermetic stack must expose /__dev/reseed (DEV_AUTH_ENABLED=1).`,
+    );
+  }
+  // Best-effort: also clear the fake's threads + any in-flight status-callback timers
+  // (orphaned timers would fire stale delivery webhooks at the reseeded app).
+  await fetch(`${fakeUrl}/control/reset`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  }).catch(() => {
+    /* the fake may be absent in some contexts — never fail the suite over its reset */
+  });
 }

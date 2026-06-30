@@ -40,6 +40,10 @@ export interface ComposerDraftState {
   reachPending: boolean;
   /** A non-validation creation error (network), or null. */
   error: string | null;
+  /** True when the LAST (re)create FAILED, so the current draft id no longer
+   *  matches the on-screen audience/message — Preview/Send must stay disabled
+   *  (don't act on a stale draft) until a fresh create succeeds. */
+  stale: boolean;
   /** Adopt an externally-known draft id (resuming a draft row) WITHOUT creating
    *  one — subsequent material edits still recreate + clean up as usual. */
   adoptDraftId: (id: string) => void;
@@ -63,6 +67,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const [truncated, setTruncated] = useState(false);
   const [reachPending, setReachPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
 
   // The currently-live draft id, read inside async callbacks without re-binding.
   const currentIdRef = useRef<string | null>(null);
@@ -94,6 +99,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
         setReachCount(undefined);
         setTruncated(false);
         setReachPending(false);
+        setStale(false);
       }
       return;
     }
@@ -116,7 +122,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       })
         .then((created) => {
           if (gen !== genRef.current) {
-            // Superseded by a newer create — delete THIS throwaway so it doesn't leak.
+            // Superseded by a newer create (or unmounted — cleanup bumps genRef):
+            // delete THIS throwaway so it doesn't leak, and do NOT setState.
             void deleteBroadcast(created.broadcastId).catch(() => {});
             return;
           }
@@ -126,6 +133,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
           setReachCount(created.estimatedCount);
           setTruncated(created.truncated);
           setReachPending(false);
+          setStale(false); // a fresh draft now matches the screen again
           // Clean up the PREVIOUS throwaway draft now that a fresh one supersedes it.
           if (previousId !== null && previousId !== created.broadcastId) {
             void deleteBroadcast(previousId).catch(() => {});
@@ -134,6 +142,10 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
         .catch((err: unknown) => {
           if (gen !== genRef.current) return;
           setReachPending(false);
+          // The recreate FAILED, so currentIdRef still points at the PRIOR draft
+          // whose body/filter no longer match the screen — mark stale so Preview/
+          // Send stay disabled until a fresh create succeeds.
+          setStale(true);
           if (err instanceof ApiError && err.status === 400) {
             // A validation bounce (e.g. body too long) — surface, keep prior id.
             setError(err.message);
@@ -145,6 +157,10 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
 
     return () => {
       if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
+      // Bump the generation so a createBroadcast resolving AFTER unmount takes the
+      // superseded branch — it self-deletes the orphan draft and never setStates
+      // on an unmounted component (no React warning, no leaked orphan).
+      genRef.current += 1;
     };
   }, [key, hasBody, input.unitId, input.bodyTemplate, input.filter]);
 
@@ -154,6 +170,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
     truncated,
     reachPending,
     error,
+    stale,
     adoptDraftId,
   };
 }

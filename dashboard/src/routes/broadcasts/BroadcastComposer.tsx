@@ -118,7 +118,11 @@ export function BroadcastComposer(): React.JSX.Element {
     }
   }
 
-  const canPreview = bodyTemplate.trim().length > 0 && draft.draftId !== null && !draft.reachPending;
+  // Disable Preview/Send while a recreate is pending OR after one FAILED (stale):
+  // the current draft id no longer matches the on-screen audience/message, so we
+  // must not Preview/Send against it. Editing again retries the recreate.
+  const canPreview =
+    bodyTemplate.trim().length > 0 && draft.draftId !== null && !draft.reachPending && !draft.stale;
 
   // PREVIEW step — the curated list.
   if (preview !== null && draft.draftId !== null) {

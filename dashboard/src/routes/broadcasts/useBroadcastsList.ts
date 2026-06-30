@@ -66,6 +66,7 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
     setStatus('loading');
     setRows([]);
     setCursor(null);
+    setLoadingMore(false); // a stale in-flight loadMore now bails (gen-guarded)
     void fetchFirstPage();
     return () => abortRef.current?.abort();
   }, [fetchFirstPage]);
@@ -77,6 +78,10 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
 
   const loadMore = useCallback(() => {
     if (cursor === null || loadingMore) return;
+    // Capture the generation at start — a ?status= filter change mid-flight bumps
+    // genRef (via fetchFirstPage's effect), so we bail rather than append the OLD
+    // filter's page onto the NEW list and clobber the cursor.
+    const gen = genRef.current;
     setLoadingMore(true);
     listBroadcasts({
       ...(statusParam !== undefined && { status: statusParam }),
@@ -84,13 +89,17 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
       cursor,
     })
       .then((page) => {
+        if (gen !== genRef.current) return; // filter changed mid-load — discard
         setRows((prev) => [...prev, ...page.broadcasts]);
         setCursor(page.nextCursor);
       })
       .catch(() => {
         /* keep the cursor so the user can retry "Load more" */
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        if (gen !== genRef.current) return; // a newer load owns loadingMore now
+        setLoadingMore(false);
+      });
   }, [statusParam, cursor, loadingMore]);
 
   // --- SSE: a broadcast changed → patch the matching row's status+stats in

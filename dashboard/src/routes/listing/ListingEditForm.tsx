@@ -48,6 +48,11 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [tourProcess, setTourProcess] = useState(str(unit.tour_process));
   const [applicationProcess, setApplicationProcess] = useState(str(unit.application_process));
   const [listingLink, setListingLink] = useState(str(unit.listing_link));
+  // Public flyer details (public-pages §5): tenants see these on the post-intake
+  // reveal. video URL (text) + application fee (number) + same-day RTA (boolean).
+  const [videoUrl, setVideoUrl] = useState(str(unit.video_url));
+  const [applicationFee, setApplicationFee] = useState(numStr(unit.application_fee));
+  const [sameDayRta, setSameDayRta] = useState(unit.same_day_rta === true);
 
   // Address parts (a structured object, or a legacy string folded into line1).
   const addrObj: Partial<Address> =
@@ -93,6 +98,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     const patch: Record<string, unknown> = {};
     if (jurisdiction !== str(unit.jurisdiction)) patch['jurisdiction'] = jurisdiction;
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
+    if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
+    // same_day_rta — a boolean toggle; send when it differs from the stored value.
+    if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
     if (accessibility !== str(unit.accessibility)) patch['accessibility'] = accessibility;
     if (listingLink !== str(unit.listing_link)) patch['listing_link'] = listingLink;
     if (tourProcess !== str(unit.tour_process)) patch['tour_process'] = tourProcess;
@@ -119,6 +127,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
       return null;
     }
     if (!addNumber(patch, 'deposit', deposit, numStr(unit.deposit), 'Deposit')) return null;
+    if (!addNumber(patch, 'application_fee', applicationFee, numStr(unit.application_fee), 'Application fee')) {
+      return null;
+    }
 
     // Accepted programs — comma-separated; normalize (trim, drop empties) and
     // send the array only when the normalized form changed.
@@ -379,6 +390,39 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             placeholder="https://…"
             autoComplete="off"
           />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Video URL</span>
+          <input
+            className={styles.input}
+            value={videoUrl}
+            onChange={(e) => setVideoUrl(e.target.value)}
+            placeholder="https://… (tour video)"
+            autoComplete="off"
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Application fee</span>
+          <input
+            className={styles.input}
+            type="number"
+            min={0}
+            step={1}
+            value={applicationFee}
+            onChange={(e) => setApplicationFee(e.target.value)}
+          />
+        </label>
+
+        <label className={`${styles.field} ${styles.checkField}`}>
+          <input
+            className={styles.checkbox}
+            type="checkbox"
+            checked={sameDayRta}
+            onChange={(e) => setSameDayRta(e.target.checked)}
+          />
+          <span className={styles.label}>Same-day RTA</span>
         </label>
 
         <label className={styles.field}>

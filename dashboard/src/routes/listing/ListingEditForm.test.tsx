@@ -75,6 +75,42 @@ describe('ListingEditForm', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('renders the new public-flyer inputs', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText(/Video URL/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Application fee/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Same-day RTA/i)).toBeInTheDocument();
+  });
+
+  it('prefills the new fields and includes them (typed) in the PATCH when changed', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withDetails: UnitItem = {
+      ...UNIT,
+      video_url: 'https://v.example/old',
+      application_fee: 25,
+      same_day_rta: false,
+    };
+    render(<ListingEditForm unit={withDetails} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    // Prefilled from the unit.
+    expect(screen.getByLabelText(/Video URL/i)).toHaveValue('https://v.example/old');
+    expect(screen.getByLabelText(/Application fee/i)).toHaveValue(25);
+    expect(screen.getByLabelText(/Same-day RTA/i)).not.toBeChecked();
+
+    await user.clear(screen.getByLabelText(/Video URL/i));
+    await user.type(screen.getByLabelText(/Video URL/i), 'https://v.example/new');
+    fireEvent.change(screen.getByLabelText(/Application fee/i), { target: { value: '40' } });
+    await user.click(screen.getByLabelText(/Same-day RTA/i));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', {
+      video_url: 'https://v.example/new',
+      application_fee: 40,
+      same_day_rta: true,
+    });
+  });
+
   it('surfaces a save failure and stays open', async () => {
     const user = userEvent.setup();
     updateUnit.mockRejectedValue(new Error('boom'));

@@ -761,6 +761,12 @@ export interface UnitItem {
   /** S3 keys / URLs of property media (the Photos gallery + hero). */
   media?: string[];
   listing_link?: string;
+  /** Public flyer details (public-pages §3): a tour video link. */
+  video_url?: string;
+  /** Public flyer details (public-pages §3): the application fee in dollars (>= 0). */
+  application_fee?: number;
+  /** Public flyer details (public-pages §3): same-day RTA available. */
+  same_day_rta?: boolean;
   /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
    *  single `landlordId` for a one-row roster. */
   contacts?: UnitContact[];

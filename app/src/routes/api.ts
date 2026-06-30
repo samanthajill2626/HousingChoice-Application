@@ -367,6 +367,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.broadcastsRepo !== undefined && { broadcastsRepo: deps.broadcastsRepo }),
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // Send-by-explicit-selection re-fences each contactId (opt-out/unreachable
+      // /type) — inject the same contactsRepo tests use; default kicks in here.
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.audienceResolutionService !== undefined && {
         audienceResolutionService: deps.audienceResolutionService,
       }),

@@ -152,7 +152,7 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.body.error).toMatch(/tenant/);
   });
 
-  it('POST /preview re-resolves the audience + returns a sample with phones', async () => {
+  it('POST /preview re-resolves the audience + returns the full candidate list with phones', async () => {
     seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
     seedTenant(world, { contactId: 'c-2', sms_opt_out: true, phone: '+15550100002' });
     seedUnit(world);
@@ -173,7 +173,12 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.status).toBe(200);
     // The opted-out contact is excluded from the audience.
     expect(res.body.count).toBe(1);
-    expect(res.body.sample).toEqual([{ contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' }]);
+    // The full annotated candidate list (renamed from `sample`); no prior
+    // sent/sending broadcast for this unit → not already-sent.
+    expect(res.body.candidates).toEqual([
+      { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', alreadySentThisProperty: false },
+    ]);
+    expect(res.body.priorRecipientContactIds).toEqual([]);
   });
 
   it('draft → send transitions, fans out, and reports the count', async () => {

@@ -19,6 +19,26 @@ export interface FakeThread {
   }>;
 }
 
+/**
+ * Register an ad-hoc party persona on the fake. `send-as-party` REJECTS an
+ * unregistered `from` number (`{"error":"unknown party number"}`), so a scenario
+ * using a fresh, per-run-unique tenant number must register it first. Idempotent
+ * from the caller's view: a duplicate registration (the fake 409s "already exists")
+ * is swallowed so a tenant who calls-then-texts registers exactly once safely.
+ */
+export async function registerParty(
+  request: APIRequestContext,
+  input: { label: string; role: 'tenant' | 'landlord' | 'pm' | 'staff'; number: string },
+): Promise<void> {
+  const res = await request.post(`${FAKE_BASE}/control/personas/ad-hoc`, { data: input });
+  if (!res.ok() && res.status() !== 409) {
+    const body = await res.text();
+    if (!/already exists/i.test(body)) {
+      throw new Error(`register-party failed: ${res.status()} ${body}`);
+    }
+  }
+}
+
 export async function sendAsParty(
   request: APIRequestContext,
   input: { from: string; body?: string; to?: string },

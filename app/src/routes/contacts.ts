@@ -343,6 +343,23 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('customFields');
   }
 
+  // Structured intake fields (free-text + a boolean LIF flag). First-class fields,
+  // not customFields, so eligibility is reportable/filterable later.
+  for (const key of ['pets', 'evictions', 'tenure'] as const) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'string') return { error: `${key} must be a string` };
+      patch[key] = v;
+      changedFields.push(key);
+    }
+  }
+  if ('lifEligible' in b) {
+    const v = b['lifEligible'];
+    if (typeof v !== 'boolean') return { error: 'lifEligible must be a boolean' };
+    patch['lifEligible'] = v;
+    changedFields.push('lifEligible');
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
@@ -446,6 +463,19 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     const cf = parseCustomFields(b['customFields']);
     if (!Array.isArray(cf)) return cf;              // { error }
     item.customFields = cf;
+  }
+
+  for (const key of ['pets', 'evictions', 'tenure'] as const) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'string') return { error: `${key} must be a string` };
+      item[key] = v;
+    }
+  }
+  if ('lifEligible' in b) {
+    const v = b['lifEligible'];
+    if (typeof v !== 'boolean') return { error: 'lifEligible must be a boolean' };
+    item.lifEligible = v;
   }
 
   // A manual create asserts identity (past the front door, not needs_review).

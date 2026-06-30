@@ -8,7 +8,7 @@ import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { sealSession, sessionCookieOptions } from '../middleware/auth.js';
+import { sealSession, sessionCookieOptions, type SessionEpochCache } from '../middleware/auth.js';
 import { SESSION_COOKIE_NAME } from '../lib/sessionCookie.js';
 import {
   createUsersRepo,
@@ -25,6 +25,10 @@ export interface DevRouterDeps {
   config?: AppConfig;
   usersRepo?: UsersRepo;
   doc?: DynamoDBDocumentClient;
+  /** The app's shared session-epoch cache, so /__dev/reseed can clear it after
+   *  wiping + reseeding the users table (a stale cached epoch — e.g. one bumped by
+   *  a prior sign-out — would otherwise reject a freshly-minted post-reseed session). */
+  sessionEpochCache?: SessionEpochCache;
 }
 
 // Role assigned when dev-login auto-provisions a missing user. The seed
@@ -124,6 +128,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // POST /__dev/reseed — wipe local tables (incl. outbox) and re-seed.
   router.post('/__dev/reseed', async (_req, res) => {
     await resetLocalData({ config, logger: log });
+    // The users table was wiped + reseeded, so every cached epoch is now stale
+    // (a prior sign-out may have bumped one). Drop them all, else a freshly-minted
+    // post-reseed dev-login session is rejected (cookie epoch ≠ stale cached epoch).
+    deps.sessionEpochCache?.clear();
     res.status(200).json({ ok: true });
   });
 

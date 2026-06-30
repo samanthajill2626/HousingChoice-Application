@@ -26,6 +26,7 @@ import {
   type HousingFairInput,
 } from './publicApi.js';
 import { IntakeForm } from './IntakeForm.js';
+import { safeHttpUrl } from '../../lib/safeUrl.js';
 import styles from './FlyerFunnel.module.css';
 
 type Stage =
@@ -148,6 +149,9 @@ export function FlyerFunnel(): React.JSX.Element {
 
   if (stage.kind === 'reveal') {
     const { details } = stage;
+    // Sanitize the staff-set video link: only http(s) becomes a clickable href,
+    // never javascript:/data:/… (XSS) — this is a PUBLIC, unauthenticated page.
+    const safeVideoUrl = safeHttpUrl(details?.video_url);
     return (
       <section className={styles.card}>
         <h1 className={styles.title} ref={headingRef} tabIndex={-1}>
@@ -185,11 +189,11 @@ export function FlyerFunnel(): React.JSX.Element {
                 <dd className={styles.dd}>Available</dd>
               </div>
             )}
-            {details.video_url !== null && (
+            {safeVideoUrl !== null && (
               <div className={styles.detailRow}>
                 <dt className={styles.dt}>Video tour</dt>
                 <dd className={styles.dd}>
-                  <a href={details.video_url} target="_blank" rel="noreferrer">
+                  <a href={safeVideoUrl} target="_blank" rel="noreferrer">
                     Watch the tour
                   </a>
                 </dd>

@@ -37,6 +37,7 @@ import {
   shortAddress,
   statusLabel,
 } from './listingFormat.js';
+import { safeHttpUrl } from '../../lib/safeUrl.js';
 import styles from './ListingDetail.module.css';
 
 // Property-status ? header badge class. `available` is the one publicly-shareable
@@ -126,6 +127,8 @@ export function ListingDetail(): React.JSX.Element {
   const facts = buildListingFacts(unit, landlordName);
   const programs = unit.accepted_programs ?? [];
   const media = unit.media ?? [];
+  // Only an http(s) video link becomes clickable (never javascript:/data:/… — XSS).
+  const videoUrl = safeHttpUrl(unit.video_url);
 
   // Soft-delete (reversible). Deleting is confirmed first, then the property drops
   // out of the normal views � so on success we navigate back to the Properties list
@@ -269,8 +272,8 @@ export function ListingDetail(): React.JSX.Element {
               <KV
                 k="Video tour"
                 v={
-                  unit.video_url ? (
-                    <a href={unit.video_url} target="_blank" rel="noreferrer">
+                  videoUrl ? (
+                    <a href={videoUrl} target="_blank" rel="noreferrer">
                       Watch video
                     </a>
                   ) : (

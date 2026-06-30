@@ -172,6 +172,12 @@ describe('ListingDetail', () => {
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
   });
 
+  it('does not render a video link for a non-http(s) (javascript:) URL — XSS guard', () => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit, video_url: 'javascript:alert(1)' } });
+    renderAt();
+    expect(screen.queryByRole('link', { name: 'Watch video' })).not.toBeInTheDocument();
+  });
+
   it('links roster rows to the contact page and placements to the placement page', () => {
     useListing.mockReturnValue(READY);
     renderAt();

@@ -22,6 +22,7 @@ import { registerBroadcastSendJobHandler } from '../src/jobs/broadcastFanOut.js'
 import { loadConfig, DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { MAX_BROADCAST_RECIPIENTS } from '../src/repos/broadcastsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -535,5 +536,406 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({});
     expect(send.status).toBe(409);
     expect(send.body.error).toBe('broadcast_not_draft');
+  });
+
+  // --- Broadcasts dashboard Phase A: DELETE a draft (draft-only) ------------
+  async function createDraft(app: import('express').Express, body: Record<string, unknown> = {}) {
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', audience_filter: { contact_type: 'tenant' }, ...body });
+    return create.body.broadcastId as string;
+  }
+
+  it('DELETE a draft → 200 {deleted:true}, the row is gone, audit broadcast_deleted', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+
+    const del = await request(app)
+      .delete(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ deleted: true });
+    // The row is actually gone.
+    expect(world.broadcasts.has(id)).toBe(false);
+    // Audited IDs-only (broadcast_deleted on the broadcast's entity key).
+    const audit = world.auditEvents.find(
+      (e) => e.entityKey === `broadcasts#${id}` && e.event_type === 'broadcast_deleted',
+    );
+    expect(audit).toBeDefined();
+    expect(audit!.actorId).toBeDefined();
+    // A subsequent GET results is a 404 (truly deleted).
+    const after = await request(app)
+      .get(`/api/broadcasts/${id}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(after.status).toBe(404);
+  });
+
+  it('DELETE a missing broadcast → 404, no audit', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const del = await request(app)
+      .delete('/api/broadcasts/bcast-does-not-exist')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(404);
+    expect(del.body.error).toBe('broadcast_not_found');
+    expect(world.auditEvents.some((e) => e.event_type === 'broadcast_deleted')).toBe(false);
+  });
+
+  it('DELETE a sent/sending broadcast → 409 broadcast_not_draft (+status), the row survives', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    // Send it (the in-process fan-out finalizes it 'sent').
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(world.broadcasts.get(id)!.status).toBe('sent');
+
+    const del = await request(app)
+      .delete(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(409);
+    expect(del.body.error).toBe('broadcast_not_draft');
+    expect(del.body.status).toBe('sent');
+    // The sent broadcast is NOT deleted (permanent).
+    expect(world.broadcasts.has(id)).toBe(true);
+    expect(world.auditEvents.some((e) => e.event_type === 'broadcast_deleted')).toBe(false);
+  });
+
+  it('DELETE a failed broadcast → 409 broadcast_not_draft', async () => {
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await world.broadcastsRepo.markFailed(id, 'forced for the test');
+    const del = await request(app)
+      .delete(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(409);
+    expect(del.body.error).toBe('broadcast_not_draft');
+    expect(del.body.status).toBe('failed');
+  });
+
+  it('DELETE racing a draft→sending flip → 409, NO silent delete of the (now sending) row', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    // Simulate the race: the conditional delete reads a draft, but between the
+    // read and the conditional write the broadcast was flipped to 'sending' by a
+    // concurrent send. Mirror it by wrapping the repo's delete so the row flips
+    // under the hood right before the conditional check fires — the conditional
+    // (status='draft') must then fail → not_draft (409), never a silent delete.
+    const realDelete = world.broadcastsRepo.delete.bind(world.broadcastsRepo);
+    world.broadcastsRepo.delete = async (broadcastId) => {
+      const b = world.broadcasts.get(broadcastId);
+      if (b) b.status = 'sending'; // the concurrent send won the flip
+      return realDelete(broadcastId);
+    };
+
+    const del = await request(app)
+      .delete(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(409);
+    expect(del.body.error).toBe('broadcast_not_draft');
+    expect(del.body.status).toBe('sending');
+    // The broadcast survives — never silently removed under the race.
+    expect(world.broadcasts.has(id)).toBe(true);
+    expect(world.auditEvents.some((e) => e.event_type === 'broadcast_deleted')).toBe(false);
+  });
+
+  it('DELETE requires auth (no cookie → 401/403)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const del = await request(app)
+      .delete('/api/broadcasts/bcast-anything')
+      .set('x-origin-verify', ORIGIN_SECRET);
+    expect(del.status).toBeGreaterThanOrEqual(401);
+    expect(del.status).toBeLessThan(404);
+  });
+
+  // --- Broadcasts dashboard Phase A: send by explicit selection -------------
+  it('send with recipientContactIds builds recipients from EXACTLY that checked set', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-2', phone: '+15550100002' });
+    seedTenant(world, { contactId: 'c-3', phone: '+15550100003' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1', 'c-3'] });
+    expect(send.status).toBe(200);
+    expect(send.body.count).toBe(2);
+    // The recipients map keys are EXACTLY the surviving checked ids (c-2 excluded).
+    expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-1', 'c-3']);
+    // Only those two were texted.
+    expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550100001', '+15550100003'].sort());
+  });
+
+  it('send-by-selection re-enforces opt-out / unreachable / non-tenant / unknown-id drops', async () => {
+    seedTenant(world, { contactId: 'c-ok', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-opt', phone: '+15550100002', sms_opt_out: true });
+    seedTenant(world, { contactId: 'c-unreach', phone: '+15550100003', sms_unreachable: true });
+    // A non-tenant contact (landlord) must NEVER be texted even if checked.
+    world.contacts.push({ contactId: 'c-ll', type: 'landlord', status: 'active', phone: '+15550100004' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-ok', 'c-opt', 'c-unreach', 'c-ll', 'c-missing'] });
+    expect(send.status).toBe(200);
+    // Only the clean tenant survives all the re-enforced fences.
+    expect(send.body.count).toBe(1);
+    expect(Object.keys(world.broadcasts.get(id)!.recipients)).toEqual(['c-ok']);
+    expect(world.sent.map((s) => s.to)).toEqual(['+15550100001']);
+  });
+
+  it('send-by-selection de-dupes repeated ids', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1', 'c-1', 'c-1'] });
+    expect(send.status).toBe(200);
+    expect(send.body.count).toBe(1);
+    expect(Object.keys(world.broadcasts.get(id)!.recipients)).toEqual(['c-1']);
+  });
+
+  it('send-by-selection with an effective-empty set (all dropped) → 400 empty_audience, stays draft', async () => {
+    seedTenant(world, { contactId: 'c-opt', phone: '+15550100002', sms_opt_out: true });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-opt', 'c-unknown'] });
+    expect(send.status).toBe(400);
+    expect(send.body.error).toBe('empty_audience');
+    expect(world.broadcasts.get(id)!.status).toBe('draft');
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('send-by-selection with an empty array → 400 empty_audience, stays draft', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: [] });
+    expect(send.status).toBe(400);
+    expect(send.body.error).toBe('empty_audience');
+    expect(world.broadcasts.get(id)!.status).toBe('draft');
+  });
+
+  it('send-by-selection over the recipient cap → 400 refusal, stays draft, nothing sent', async () => {
+    seedUnit(world);
+    // A checked list LONGER than the cap. The send refuses with a 400 BEFORE any
+    // resolution/markSending (parseRecipientContactIds guards the array length —
+    // the surviving set can never exceed the input length, so the over-cap
+    // explicit selection is rejected at parse). It's a clean 400 that leaves the
+    // broadcast a draft and sends nothing; we assert that contract, not the exact
+    // error slug (the parse guard reports the cap explicitly).
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_BROADCAST_RECIPIENTS + 1; i++) ids.push(`cap-${i}`);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ids });
+    expect(send.status).toBe(400);
+    expect(send.body.error).toMatch(/cap/i); // "...exceeds the 1500 recipient cap"
+    expect(world.broadcasts.get(id)!.status).toBe('draft');
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('send-by-selection still honors the draft gate (a non-draft → 409)', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    const again = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe('broadcast_not_draft');
+  });
+
+  it('back-compat: an ABSENT body still uses the filter-resolve path', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-2', phone: '+15550100002' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const send = await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({}); // no recipientContactIds → filter-resolve both tenants
+    expect(send.status).toBe(200);
+    expect(send.body.count).toBe(2);
+    expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-1', 'c-2']);
+  });
+
+  // --- Broadcasts dashboard Phase A: full annotated preview -----------------
+  it('preview returns the FULL candidate list (not capped at the old 25-sample)', async () => {
+    seedUnit(world);
+    for (let i = 0; i < 30; i++) {
+      seedTenant(world, { contactId: `p-${i}`, firstName: `T${i}`, phone: `+1557${String(i).padStart(7, '0')}` });
+    }
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${id}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(30);
+    expect(res.body.candidates).toHaveLength(30); // FULL list, > 25
+    expect(res.body.truncated).toBe(false);
+  });
+
+  it('preview candidates carry voucherSize/housingAuthority when present', async () => {
+    seedUnit(world);
+    seedTenant(world, {
+      contactId: 'c-rich',
+      firstName: 'Rosa',
+      phone: '+15550100001',
+      voucherSize: 2,
+      housingAuthority: 'METRO_HA',
+    } as Partial<ContactItem>);
+    seedTenant(world, { contactId: 'c-bare', phone: '+15550100002' }); // no voucher/HA
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${id}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    const rich = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-rich');
+    const bare = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-bare');
+    expect(rich).toMatchObject({ voucherSize: 2, housingAuthority: 'METRO_HA', firstName: 'Rosa' });
+    // Absent on a contact lacking them (the fields are omitted, not null).
+    expect(bare).not.toHaveProperty('voucherSize');
+    expect(bare).not.toHaveProperty('housingAuthority');
+  });
+
+  it('alreadySentThisProperty + priorRecipientContactIds reflect a PRIOR sent broadcast of this unit', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
+    seedTenant(world, { contactId: 'c-2', firstName: 'Bo', phone: '+15550100002' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    // Prior broadcast for unit-1: send to ONLY c-1 (so c-1 is already-sent).
+    const prior = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${prior}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    expect(world.broadcasts.get(prior)!.status).toBe('sent');
+
+    // A NEW draft for the same unit previews both — c-1 flagged, c-2 not.
+    const next = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${next}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.priorRecipientContactIds.sort()).toEqual(['c-1']);
+    const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
+    const c2 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-2');
+    expect(c1.alreadySentThisProperty).toBe(true);
+    expect(c2.alreadySentThisProperty).toBe(false);
+  });
+
+  it('alreadySentThisProperty is false for a broadcast with NO unitId (no prior lookup)', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    // A prior SENT broadcast that happens to include c-1, but for a DIFFERENT unit.
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const prior = await createDraft(app); // unit-1
+    await request(app)
+      .post(`/api/broadcasts/${prior}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+
+    // A unit-LESS draft: no unitId → no prior lookup → nothing flagged.
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body_template: 'hi', audience_filter: { contact_type: 'tenant' } });
+    const res = await request(app)
+      .post(`/api/broadcasts/${create.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.priorRecipientContactIds).toEqual([]);
+    const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
+    expect(c1.alreadySentThisProperty).toBe(false);
+  });
+
+  it('alreadySentThisProperty is NOT set by a prior DRAFT/FAILED broadcast (only sent/sending)', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    // A prior DRAFT for unit-1 with c-1 seeded into recipients, but never sent.
+    const draft = await createDraft(app);
+    world.broadcasts.get(draft)!.recipients = { 'c-1': { status: 'queued' } };
+    // And a prior FAILED one, also with c-1 in recipients.
+    const failed = await createDraft(app);
+    world.broadcasts.get(failed)!.recipients = { 'c-1': { status: 'queued' } };
+    await world.broadcastsRepo.markFailed(failed);
+
+    const next = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${next}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.priorRecipientContactIds).toEqual([]);
+    const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
+    expect(c1.alreadySentThisProperty).toBe(false);
   });
 });

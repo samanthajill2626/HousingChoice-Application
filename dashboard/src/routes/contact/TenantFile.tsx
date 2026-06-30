@@ -24,6 +24,7 @@ import {
   Row,
   responseClass,
 } from './Card.js';
+import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements, tenantTours } from './buildContactFile.js';
@@ -122,6 +123,8 @@ export function TenantFile({
           }
         />
       </Card>
+
+      <EligibilityIntakeCard contact={contact} />
 
       <Card
         title="Preferences & notes"

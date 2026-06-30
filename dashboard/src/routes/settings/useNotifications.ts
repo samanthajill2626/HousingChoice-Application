@@ -127,7 +127,19 @@ export function useNotifications(): NotificationsState {
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(key),
       });
-      await subscribePush(sub.toJSON());
+      try {
+        await subscribePush(sub.toJSON());
+      } catch (err) {
+        // The browser holds a LIVE subscription but the server never recorded it.
+        // Roll the browser back (best-effort) so browser + server stay consistent
+        // and we don't strand an orphaned subscription, THEN surface the error.
+        try {
+          await sub.unsubscribe();
+        } catch {
+          /* best-effort rollback — ignore */
+        }
+        throw err;
+      }
       setEnabled(true);
     } catch (err) {
       handleError(err, "Couldn't enable notifications on this device.");
@@ -144,12 +156,46 @@ export function useNotifications(): NotificationsState {
       const reg = await getRegistration();
       const sub = reg !== undefined ? await reg.pushManager.getSubscription() : null;
       if (sub !== null) {
-        await unsubscribePush(sub.endpoint);
-        await sub.unsubscribe();
+        // Tell the server and unsubscribe the browser INDEPENDENTLY (best-effort):
+        // if one fails the other still runs, so we never strand the toggle in a
+        // half-state. Remember the first failure to surface afterward.
+        let failure: unknown = null;
+        try {
+          await unsubscribePush(sub.endpoint);
+        } catch (err) {
+          failure = err;
+        }
+        try {
+          await sub.unsubscribe();
+        } catch (err) {
+          failure ??= err;
+        }
+        if (failure !== null) throw failure;
       }
-      setEnabled(false);
+      // Converge `enabled` from the TRUTH (does a subscription still exist?)
+      // rather than assuming false — so a partial failure leaves the toggle
+      // reflecting reality, not a stale guess.
+      if (reg !== undefined) {
+        try {
+          const after = await reg.pushManager.getSubscription();
+          setEnabled(after !== null);
+        } catch {
+          setEnabled(false);
+        }
+      } else {
+        setEnabled(false);
+      }
     } catch (err) {
       handleError(err, "Couldn't disable notifications on this device.");
+      // Re-probe so the toggle converges even on the error path (e.g. the
+      // unsubscribe succeeded but the server DELETE failed → enabled is now false).
+      try {
+        const reg = await getRegistration();
+        const after = reg !== undefined ? await reg.pushManager.getSubscription() : null;
+        setEnabled(after !== null);
+      } catch {
+        /* leave enabled as-is — getSubscription itself is unavailable */
+      }
     } finally {
       setBusy(false);
     }

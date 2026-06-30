@@ -27,13 +27,28 @@ import { NotificationsSection } from './NotificationsSection.js';
 
 // A fake push subscription + service-worker registration, installed for the
 // "supported browser" tests. The real APIs are absent in jsdom.
-function installPushSupport(opts: { subscribed?: boolean } = {}): { fakeSub: { endpoint: string } } {
-  const fakeSub = {
+interface FakeSub {
+  endpoint: string;
+  toJSON: () => { endpoint: string };
+  unsubscribe: ReturnType<typeof vi.fn>;
+}
+interface FakeRegistration {
+  pushManager: {
+    getSubscription: ReturnType<typeof vi.fn>;
+    subscribe: ReturnType<typeof vi.fn>;
+  };
+}
+
+function installPushSupport(opts: { subscribed?: boolean } = {}): {
+  fakeSub: FakeSub;
+  registration: FakeRegistration;
+} {
+  const fakeSub: FakeSub = {
     endpoint: 'https://push.example/endpoint',
     toJSON: () => ({ endpoint: 'https://push.example/endpoint' }),
     unsubscribe: vi.fn().mockResolvedValue(true),
   };
-  const registration = {
+  const registration: FakeRegistration = {
     pushManager: {
       getSubscription: vi.fn().mockResolvedValue(opts.subscribed ? fakeSub : null),
       subscribe: vi.fn().mockResolvedValue(fakeSub),
@@ -49,7 +64,7 @@ function installPushSupport(opts: { subscribed?: boolean } = {}): { fakeSub: { e
     permission: 'granted',
     requestPermission: vi.fn().mockResolvedValue('granted'),
   });
-  return { fakeSub };
+  return { fakeSub, registration };
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -86,6 +101,57 @@ describe('NotificationsSection — push not configured (503)', () => {
     ).toBeInTheDocument();
     // And the toggle is gone (controls disabled / removed in the degraded state).
     expect(screen.queryByRole('button', { name: /Turn on/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('NotificationsSection — enable partial failure rollback', () => {
+  it('rolls back the browser subscription when the server POST fails (no orphan)', async () => {
+    const { fakeSub } = installPushSupport({ subscribed: false });
+    const u = userEvent.setup();
+    getVapidPublicKey.mockResolvedValue('BHk_fakeVapidKey');
+    // subscribe() succeeds → the browser holds a live sub; the server POST fails.
+    subscribePush.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    render(<NotificationsSection />);
+
+    const turnOn = await screen.findByRole('button', { name: /Turn on/i });
+    await u.click(turnOn);
+
+    // The error is surfaced…
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn't enable notifications/i);
+    // …and the orphaned browser subscription was rolled back.
+    await waitFor(() => expect(fakeSub.unsubscribe).toHaveBeenCalledTimes(1));
+    // The UI stays Off (the device is not enabled).
+    expect(screen.getByText(/Push on this device:/i)).toHaveTextContent(/Off/);
+  });
+});
+
+describe('NotificationsSection — disable partial failure convergence', () => {
+  it('converges enabled from a re-probe when the server DELETE fails but the browser unsubscribe succeeds', async () => {
+    const { fakeSub, registration } = installPushSupport({ subscribed: true });
+    const u = userEvent.setup();
+    // The server DELETE fails, but the browser unsubscribe succeeds → after the
+    // unsubscribe there is NO subscription, so enabled must converge to false.
+    unsubscribePush.mockRejectedValue(new ApiError(500, 'server_error', 'boom'));
+    fakeSub.unsubscribe.mockResolvedValue(true);
+    // The post-disable re-probe sees no subscription.
+    registration.pushManager.getSubscription
+      .mockResolvedValueOnce(fakeSub) // mount probe
+      .mockResolvedValueOnce(fakeSub) // disable() reads the current sub
+      .mockResolvedValue(null); // re-probe after unsubscribe
+    render(<NotificationsSection />);
+
+    const turnOff = await screen.findByRole('button', { name: /Turn off/i });
+    await u.click(turnOff);
+
+    // The error is surfaced (the server step genuinely failed)…
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn't disable notifications/i);
+    // …but the toggle converges to Off (a sub no longer exists) — not stranded On.
+    await waitFor(() =>
+      expect(screen.getByText(/Push on this device:/i)).toHaveTextContent(/Off/),
+    );
+    expect(fakeSub.unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -73,8 +73,10 @@ import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
+import { createSystemRouter } from './system.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
+import { type SystemStatusService } from '../services/systemStatus.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
@@ -129,6 +131,8 @@ export interface ApiRouterDeps {
   contactVocabularyRepo?: ContactVocabularyRepo;
   usersRepo?: UsersRepo;
   pushService?: PushService;
+  /** M1.4 System Status — injected in tests (fake, no AWS); defaults to the real service. */
+  systemStatusService?: SystemStatusService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
   unitsRepo?: UnitsRepo;
   /** M1.10 boards/placements — injected in tests; default to the real repo. */
@@ -268,6 +272,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
       auditRepo: audit,
+    }),
+  );
+  // System Status (M1.4; requireRole admin on every route). Go-live flags +
+  // CloudWatch alarms/errors, degrading gracefully when AWS is unreachable.
+  router.use(
+    '/system',
+    createSystemRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.systemStatusService !== undefined && {
+        systemStatusService: deps.systemStatusService,
+      }),
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation

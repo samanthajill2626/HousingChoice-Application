@@ -30,6 +30,9 @@ import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
+import { PublicLayout } from './routes/public/PublicLayout.js';
+import { FlyerFunnel } from './routes/public/FlyerFunnel.js';
+import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
 
 /** /settings index → the first tab visible for the viewer's role (admin → Team,
  *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
@@ -59,7 +62,45 @@ const IMPLEMENTED = new Set<string>([
   '/settings',
 ]);
 
+/**
+ * The PUBLIC, UNAUTHENTICATED surface. These routes render OUTSIDE
+ * AuthProvider / AuthGate / EventStreamProvider / AppFrame — they must NEVER
+ * trigger the auth gate (no redirect-to-login, no session fetch, no event
+ * stream). `/p/:unitId` is what `flyerUrl()` emits, so every shared
+ * [FlyerLink] broadcast lands on the funnel teaser. `/join` is the standalone
+ * housing-fair intake. The trailing `<Route path="/*">` hands everything else
+ * to the authed app.
+ */
 export default function App(): React.JSX.Element {
+  return (
+    <Routes>
+      <Route
+        path="/p/:unitId"
+        element={
+          <PublicLayout>
+            <FlyerFunnel />
+          </PublicLayout>
+        }
+      />
+      <Route
+        path="/join"
+        element={
+          <PublicLayout>
+            <HousingFairIntake />
+          </PublicLayout>
+        }
+      />
+      <Route path="/*" element={<AuthedApp />} />
+    </Routes>
+  );
+}
+
+/**
+ * The authenticated app: the session provider + gate, and (when authenticated)
+ * the AppFrame shell wrapping the routed pages. Extracted from the former root
+ * `App` so the public routes above can be siblings that never mount this tree.
+ */
+function AuthedApp(): React.JSX.Element {
   return (
     <AuthProvider>
       <AuthGate>

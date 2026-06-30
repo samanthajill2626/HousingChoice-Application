@@ -1,0 +1,115 @@
+/* FlyerFunnel — the public teaser/intake/reveal card. Mobile-first. Tokens only. */
+
+.status {
+  padding: var(--sp-6) 0;
+  text-align: center;
+  color: var(--c-text-muted);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--sp-5);
+}
+
+.title {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  color: var(--c-text);
+}
+
+.muted {
+  color: var(--c-text-muted);
+}
+
+/* Photo gallery — horizontal scroll on mobile, snapping per photo. */
+.gallery {
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  margin: calc(-1 * var(--sp-2));
+  padding: var(--sp-2);
+}
+
+.photo {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  scroll-snap-align: center;
+  background: var(--c-media-placeholder-bg);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--fs-md);
+  color: var(--c-text);
+}
+
+.programs {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.cta,
+.linkButton {
+  display: inline-block;
+  text-align: center;
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-inverse);
+  background: var(--c-brand);
+  cursor: pointer;
+}
+
+.cta:hover,
+.linkButton:hover {
+  background: var(--c-brand-hover);
+  text-decoration: none;
+  color: var(--c-text-inverse);
+}
+
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin: 0;
+}
+
+.detailRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.dt {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-subtle);
+}
+
+.dd {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--c-text);
+}

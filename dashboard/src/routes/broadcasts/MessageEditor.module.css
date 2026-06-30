@@ -1,0 +1,72 @@
+/* MessageEditor — label, merge-field chips, textarea, count, property note. */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.field {
+  display: block;
+}
+.fieldLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.chip {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.chip:hover {
+  border-color: var(--c-border-strong);
+  background: var(--c-brand-soft);
+}
+.chip:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  resize: vertical;
+}
+.textarea:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 0;
+  border-color: var(--c-brand);
+}
+.footRow {
+  display: flex;
+  justify-content: flex-end;
+}
+.count {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+.propertyNote {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.propertyNote code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}

@@ -63,6 +63,9 @@ const READY: ListingState = {
     utilities: 'Tenant-paid',
     accessibility: 'Ground floor',
     pets: 'Cats only',
+    application_fee: 25,
+    same_day_rta: true,
+    video_url: 'https://example.com/tour.mp4',
     accepted_programs: ['Housing Choice Voucher (HCV)', 'Section 8', 'VASH'],
     tour_process: 'Text the landlord to arrange access.',
     application_process: 'Apply via the property portal.',
@@ -156,6 +159,14 @@ describe('ListingDetail', () => {
     expect(screen.getByText('$1,550')).toBeInTheDocument(); // payment standard
     expect(screen.getByText('Tenant-paid')).toBeInTheDocument();
     expect(screen.getByText('Cats only')).toBeInTheDocument();
+    // Flyer-detail fields now surface on the read view (staff see what's on the flyer).
+    expect(screen.getByText('Application fee')).toBeInTheDocument();
+    expect(screen.getByText('$25')).toBeInTheDocument();
+    expect(screen.getByText('Same-day RTA')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Watch video' })).toHaveAttribute(
+      'href',
+      'https://example.com/tour.mp4',
+    );
     const list = screen.getByRole('list', { name: /Accepted vouchers/i });
     const items = within(list).getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);

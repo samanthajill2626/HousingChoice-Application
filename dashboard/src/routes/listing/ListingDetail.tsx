@@ -261,6 +261,23 @@ export function ListingDetail(): React.JSX.Element {
               <KV k="Utilities" v={unit.utilities ?? '�'} />
               <KV k="Accessibility" v={unit.accessibility ?? '�'} />
               <KV k="Pets" v={unit.pets ?? '�'} />
+              <KV k="Application fee" v={formatMoney(unit.application_fee) || '—'} />
+              <KV
+                k="Same-day RTA"
+                v={unit.same_day_rta === true ? 'Yes' : unit.same_day_rta === false ? 'No' : '—'}
+              />
+              <KV
+                k="Video tour"
+                v={
+                  unit.video_url ? (
+                    <a href={unit.video_url} target="_blank" rel="noreferrer">
+                      Watch video
+                    </a>
+                  ) : (
+                    '—'
+                  )
+                }
+              />
             </div>
             <div className={styles.vouchers}>
               <span className={styles.vouchersLabel} id={`vouchers-${unit.unitId}`}>

@@ -60,6 +60,23 @@ describe('AlarmGrid — available:true', () => {
     render(<AlarmGrid />);
     expect(await screen.findByText(/No alarms configured for this environment/i)).toBeInTheDocument();
   });
+
+  it('exposes a POLITE live region announcing the firing count (a11y for silent auto-refresh)', async () => {
+    getSystemAlarms.mockResolvedValue(
+      available([
+        { name: 'hc-dev-5xx', state: 'ALARM', stateUpdatedAt: '2026-06-29T00:00:00.000Z' },
+        { name: 'hc-dev-cpu', state: 'OK', stateUpdatedAt: '2026-06-29T00:00:00.000Z' },
+      ]),
+    );
+    render(<AlarmGrid />);
+    await screen.findByText('hc-dev-5xx');
+
+    const live = screen.getByTestId('alarm-status-line');
+    // Polite (not assertive) so a refresh doesn't interrupt the screen reader.
+    expect(live).toHaveAttribute('aria-live', 'polite');
+    // Summarizes the firing count so an OK→ALARM swap on refresh is announced.
+    expect(live).toHaveTextContent('1 alarm firing');
+  });
 });
 
 describe('AlarmGrid — degraded / error', () => {

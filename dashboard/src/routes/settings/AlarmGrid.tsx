@@ -40,6 +40,7 @@ export function AlarmGrid(): React.JSX.Element {
 
   const available = result?.available === true;
   const alarms = result?.alarms ?? [];
+  const firingCount = alarms.filter((a) => a.state === 'ALARM').length;
 
   return (
     <div className={styles.block} aria-labelledby="system-alarms-heading">
@@ -57,6 +58,15 @@ export function AlarmGrid(): React.JSX.Element {
           {refreshing ? 'Refreshing…' : '↻ Refresh'}
         </Button>
       </div>
+
+      {/* Polite live region: announces firing-count changes to assistive tech on
+          each successful (auto-)refresh — present in the DOM so updates are read,
+          polite (not assertive) so it doesn't interrupt, and never steals focus. */}
+      <p className={styles.srOnly} aria-live="polite" data-testid="alarm-status-line">
+        {available
+          ? `${firingCount} ${firingCount === 1 ? 'alarm' : 'alarms'} firing`
+          : ''}
+      </p>
 
       {status === 'loading' ? (
         <div className={styles.center}>

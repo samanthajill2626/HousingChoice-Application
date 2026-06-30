@@ -59,6 +59,19 @@ export interface FakeTwilioEngineDeps {
   appNumber?: string;
   registry?: PersonaRegistry;
   store?: ConversationStore;
+  /** Starting value for the SMS/MMS SID counter. Defaults to a random HIGH base
+   *  (see {@link randomSidSeqStart}) so a restarted fake never re-mints a prior
+   *  process's low SIDs — which would collide with `sid#` dedup pointers still in a
+   *  reused DB and cause the inbound to be DROPPED. Pin it in tests for determinism. */
+  sidSeqStart?: number;
+}
+
+/** A random high base for the SID counter, in [10_000_000, 90_000_000) — always
+ *  8 digits and well clear of the low `SMfake0000000N` range that older runs (and
+ *  a from-zero counter) emit, so two fake processes' SID ranges effectively never
+ *  overlap. Local mock only; SIDs are opaque (no test asserts a literal value). */
+function randomSidSeqStart(): number {
+  return 10_000_000 + Math.floor(Math.random() * 80_000_000);
 }
 
 export class FakeTwilioEngine {
@@ -68,7 +81,7 @@ export class FakeTwilioEngine {
   private readonly registry: PersonaRegistry;
   private readonly store: ConversationStore;
   private readonly nextProfile = new Map<string, DeliveryProfile>();
-  private sidSeq = 0;
+  private sidSeq: number;
   /** Cancel fns for every still-pending scheduled status callback (FIX 1). */
   private readonly pendingCancels = new Set<() => void>();
   /** Bumped on reset(); scheduled callbacks captured under an older generation no-op (FIX 1). */
@@ -87,6 +100,7 @@ export class FakeTwilioEngine {
     this.appNumber = deps.appNumber ?? APP_NUMBER;
     this.registry = deps.registry ?? new PersonaRegistry();
     this.store = deps.store ?? new ConversationStore();
+    this.sidSeq = deps.sidSeqStart ?? randomSidSeqStart();
   }
 
   /** Subscribe to live engine events; returns an unsubscribe fn. Delegates to the

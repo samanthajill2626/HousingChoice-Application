@@ -55,4 +55,23 @@ describe('FakeTwilioEngine', () => {
     const { engine } = makeEngine();
     await expect(engine.sendAsParty({ from: '+15559999999', body: 'x' })).rejects.toThrow(/unknown/i);
   });
+
+  it('a fresh engine starts SIDs above the low range, so a restarted fake cannot reuse a prior run\'s SIDs', async () => {
+    // The dedup bug: fake-twilio used to mint SMfake00000001… from 0 on every process
+    // start, so a restart re-emitted SIDs already persisted as sid# dedup pointers in a
+    // reused DB → the inbound was dropped. A fresh engine must start its counter high so
+    // a restart lands in a different range than any prior run's low SIDs.
+    const { engine } = makeEngine();
+    const sid = await engine.sendAsParty({ from: '+15550100001', body: 'x' });
+    const n = Number(sid.replace(/^SMfake/, ''));
+    expect(n).toBeGreaterThanOrEqual(10_000_000);
+  });
+
+  it('sidSeqStart pins the counter for deterministic, reproducible SIDs', async () => {
+    const clock = new ManualClock('2026-06-15T00:00:00.000Z');
+    const dispatcher = { post: async () => 200 };
+    const engine = new FakeTwilioEngine({ clock, dispatcher, hub: new EventHub(), sidSeqStart: 42 });
+    const sid = await engine.sendAsParty({ from: '+15550100001', body: 'x' });
+    expect(sid).toBe('SMfake00000043');
+  });
 });

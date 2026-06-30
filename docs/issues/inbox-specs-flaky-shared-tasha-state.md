@@ -3,10 +3,11 @@ id: inbox-specs-flaky-shared-tasha-state
 title: Inbox e2e specs flake in the full suite (shared seeded-TASHA cross-spec state)
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-06-30
-refs: e2e/tests/dashboard-next/inbox-comms.spec.ts, e2e/tests/dashboard-next/inbox-markread.spec.ts, fake-twilio/src/engine/engine.ts:102, e2e/tests/flows/outbox.spec.ts
+resolved: 2026-06-30
+refs: e2e/tests/dashboard-next/inbox-comms.spec.ts, e2e/tests/dashboard-next/inbox-markread.spec.ts, fake-twilio/src/engine/engine.ts:102, e2e/support/preflight.ts, app/src/repos/messagesRepo.ts:10
 ---
 
 **Problem.** The full e2e suite (`npm run e2e`) intermittently fails three specs, which
@@ -28,22 +29,43 @@ while the rest of the suite (incl. the tenant-onboarding scenarios) passed.
 - The app DB is reseeded mid-suite by `e2e/tests/flows/outbox.spec.ts` (`POST /__dev/reseed`), which clears the app messages table but NOT the fake's threads / SID counter.
 - These three specs reuse the **seeded TASHA** contact and do not reseed/reset between runs, so they ride on whatever TASHA conversation state has accumulated by the time they run.
 
-**Candidate mechanisms (not yet confirmed — root-cause first).**
+**Root cause (CONFIRMED 2026-06-30, deterministic boundary reproduction).** Candidate #1
+in spirit, but NOT via the mid-suite reseed — the failing `dashboard-next/inbox-*` specs
+run *alphabetically before* `flows/outbox.spec`, so that reseed cannot affect them. The
+real mechanism is identical to the cold-boot flake in
+[[e2e-fake-sid-collision-flake]]: the inbound pipeline dedups by `sid#<providerSid>`
+pointer (`messagesRepo.append` — a `TransactWrite` conditioned on
+`attribute_not_exists` for BOTH the message SK and the pointer), and those pointers
+**accumulate in the REUSED DynamoDB container** (`e2e:session`/CI reuse the container;
+`db-seed` never CLEARS). `fake-twilio` mints **deterministic monotonic** SIDs
+(`SMfake0000000N`) and resets its counter to 0 only on a **process restart** — NOT on
+`/control/reset` (confirmed: `engine.reset()` clears threads/timers/profiles but leaves
+`sidSeq`). So a freshly-restarted fake re-mints the SAME low SIDs from a prior run. The
+`inbox-*` specs run **early** in the suite → mint the **lowest** SIDs → highest odds of
+colliding with a stale low-SID pointer left by a prior boot → the genuinely-new TASHA
+inbound is dedup-**dropped** (contact unchanged, message gone) → `getByText(<body>)` times
+out. (Candidate #2 accumulated-state and #3 SSE-timing were refuted: a primed-clean
+container lands every inbound; only a pre-existing pointer drops one.)
 
-1. Provider-SID dedup / idempotency in the inbound pipeline dropping the message after the
-   mid-suite reseed leaves the app DB and the fake's SID counter out of sync.
-2. Accumulated TASHA conversation state (many prior specs use TASHA) changing
-   timeline/unread behavior.
-3. SSE / async-processing render timing under a long run vs. the fixed 10s `getByText`
-   wait.
+Reproduced deterministically against a live `e2e:session` stack: plant a
+`sid#SMfake0000000N` pointer for the fake's NEXT SID, send a TASHA inbound → app logs
+`message append deduped (provider SID already persisted)` and the body never reaches
+`GET /api/contacts/contact-tenant-0001/timeline`. Clear the pointer (`/__dev/reseed`) →
+the same send lands.
 
-**Suggested fix (pending confirmed root cause).** Make these TASHA-dependent specs
-self-isolating the way the scenario suite (`e2e/scenarios/steps.ts`) already is, without
-reintroducing anti-patterns: give them a clean, in-sync slate (reset the fake AND reseed
-together at file start so app DB and fake SID counter don't drift — `beforeAll`, since
-per-test `/__dev/reseed` is heavy and historically broke dev-login, see
-[[reseed-leaves-stale-session-epoch-cache]]), or switch them to a fresh per-run number
-with a named contact created up front. If the cause is SSE/async timing, replace the fixed
-timeout with condition-based polling on the API before asserting the DOM — do NOT just bump
-timeouts. Being fixed on the `chore/relay-verb-flake` branch alongside the related relay
-flake work.
+**Resolution (2026-06-30).** Already fixed at the harness layer by the **globalSetup
+clean-slate reseed** added for the cold-boot flake on this same branch
+(`e2e/support/preflight.ts` — `POST /__dev/reseed` + `POST /control/reset` once before any
+spec). `/__dev/reseed` clears the messages table, so **every** stale `sid#…` pointer is
+gone before the first spec sends — removing exactly the pointers the early `inbox-*` specs
+would collide with. No per-spec change was needed: within a single run the fake's SID
+counter is monotonic and no spec calls `/control/reset`, so once the container starts
+clean there is no intra-run collision source. A per-file reset+reseed would be redundant
+and is deliberately NOT added (YAGNI).
+
+Verified: (a) deterministic A/B — a stale pointer planted at the fake's next SID drops a
+raw inbound, but the `inbox-*` specs planted the same way go **green** because globalSetup
+clears it first; (b) the two specs pass in isolation (3 passed); (c) the full
+`npm run e2e` is green 3×/3 (33/33), with `inbox-comms` + both `inbox-markread` tests
+passing every run. This and [[e2e-fake-sid-collision-flake]] are the same harness bug
+surfacing in two places; both are closed by the one globalSetup reseed.

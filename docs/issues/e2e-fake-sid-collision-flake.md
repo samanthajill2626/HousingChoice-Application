@@ -36,6 +36,11 @@ the suite, after the stale-stack guards pass — clearing the accumulated `sid#�
 so the fresh fake's SID space is clean. Verified: a collision-primed stack that dropped a
 raw inbound passes the scenario after the reseed; full suite green (33/33).
 
+**Also closed by this fix:** `inbox-specs-flaky-shared-tasha-state` — the
+`dashboard-next/inbox-*` specs flaked the SAME way (early specs → low SIDs → collide with
+stale pointers → seeded-TASHA inbound dropped). Same harness bug, different surface; the
+one globalSetup reseed resolves both. See that issue for its boundary reproduction.
+
 **Follow-up (optional, not blocking).** This fixes `npm run e2e`. Ad-hoc dev that drives
 the stack directly (`e2e:session` + Playwright MCP, no globalSetup) still accumulates
 pointers — run `npm run e2e:reseed` before manual inbound testing (per the

@@ -7,13 +7,20 @@
 import { test } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
 
-// Opt-in: pause at the END of each test so you can look around the live dashboard
-// (e.g. open the tenant's contact page and eyeball the Details panel). Gated on
-// E2E_PAUSE so CI/normal runs are unaffected. Run ONE test headed, e.g. (PowerShell):
-//   $env:E2E_PAUSE=1; npm run e2e -w @housingchoice/e2e -- tests/scenarios/tenant-onboarding.spec.ts --grep "by text → RTA" --headed
-// The Playwright Inspector opens and the browser stays live — click "Resume" to finish.
+// Opt-in: hold the HEADED browser open at the END of each test so you can look
+// around the live dashboard (the page is parked on the tenant's contact page —
+// eyeball the Details panel for Housing authority). Gated on E2E_PAUSE so CI/normal
+// runs are unaffected. Run ONE test headed (PowerShell):
+//   $env:E2E_PAUSE=1; npm run e2e -w @housingchoice/e2e -- tests/scenarios/tenant-onboarding.spec.ts --grep "by text.*RTA in hand" --headed
+// The browser stays open + clickable for ~10 min (override with E2E_PAUSE_MS); press
+// Ctrl+C in the terminal when you're done. No --debug / Inspector needed.
 test.afterEach(async ({ page }) => {
-  if (process.env.E2E_PAUSE) await page.pause();
+  if (!process.env.E2E_PAUSE) return;
+  test.setTimeout(0); // don't let the per-test timeout close the browser mid-look
+  const ms = Number(process.env.E2E_PAUSE_MS ?? 600_000);
+  // eslint-disable-next-line no-console
+  console.log(`\n[E2E_PAUSE] test done — browser stays open ~${Math.round(ms / 1000)}s to look around (Ctrl+C to quit).\n`);
+  await page.waitForTimeout(ms);
 });
 
 /** Eligibility intake → RTA gate → parked/handoff. Shared by every leaf path. */

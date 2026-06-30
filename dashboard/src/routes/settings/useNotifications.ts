@@ -136,7 +136,9 @@ export function useNotifications(): NotificationsState {
         try {
           await sub.unsubscribe();
         } catch {
-          /* best-effort rollback — ignore */
+          // Rollback itself failed → the browser may hold an orphaned subscription
+          // the server never recorded. Surface the FACT (no PII) so it's observable.
+          console.warn('push: best-effort subscription rollback failed after a server-subscribe error');
         }
         throw err;
       }

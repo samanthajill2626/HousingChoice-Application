@@ -27,7 +27,7 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { SHAREABLE_STATUSES } from '../repos/unitsRepo.js';
+import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -187,7 +187,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     let viaFlyer = false;
     if (unitId !== undefined) {
       const flyerUnit = await units.getById(unitId);
-      if (flyerUnit && SHAREABLE_STATUSES.has(flyerUnit.status)) viaFlyer = true;
+      // A soft-deleted unit is not publicly shareable (it's hidden everywhere),
+      // so it must not earn flyer attribution either — mirror the flyer/details
+      // gate exactly.
+      if (flyerUnit && !isDeleted(flyerUnit) && SHAREABLE_STATUSES.has(flyerUnit.status)) {
+        viaFlyer = true;
+      }
     }
 
     // (1) Dedupe by phone. A fair signup for an existing phone must NOT create
@@ -290,14 +295,14 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   });
 
   // GET /public/units/:unitId/flyer — the shareable flyer view (M1.5).
-  // 404 when the unit is missing OR not in a shareable status (the public must
-  // never learn a non-available unit even exists). Returns ONLY the allowlisted
-  // flyer fields (lib/unitFields.toUnitFlyer) — internal fields can't leak.
+  // 404 when the unit is missing, soft-deleted, OR not in a shareable status
+  // (the public must never learn a non-available unit even exists). Returns ONLY
+  // the allowlisted flyer fields (lib/unitFields.toUnitFlyer) — no internal leak.
   router.get('/units/:unitId/flyer', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
-    if (!unit || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing and not-shareable — no existence oracle.
+    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
+      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
       res.status(404).json({ error: 'not_found' });
       return;
     }
@@ -305,15 +310,16 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   });
 
   // GET /public/units/:unitId/details — the post-intake "full details" reveal.
-  // SAME shareable gate + opaque 404 as the flyer (soft reveal, NO token).
-  // Returns ONLY the richer allowlist (lib/unitFields.toUnitFlyerDetails):
-  // the teaser fields + address/utilities/video/app-fee/same-day-RTA. Internal
-  // and landlord/contact fields can never leak (the allowlist IS the wall).
+  // SAME gate + opaque 404 as the flyer (soft reveal, NO token): missing,
+  // soft-deleted, or not-shareable all 404 identically. Returns ONLY the richer
+  // allowlist (lib/unitFields.toUnitFlyerDetails): the teaser fields +
+  // address/utilities/video/app-fee/same-day-RTA. Internal and landlord/contact
+  // fields can never leak (the allowlist IS the wall).
   router.get('/units/:unitId/details', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
-    if (!unit || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing and not-shareable — no existence oracle.
+    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
+      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
       res.status(404).json({ error: 'not_found' });
       return;
     }

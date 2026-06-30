@@ -302,6 +302,19 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(placed.status).toBe(404);
     expect(placed.body).toEqual({ error: 'not_found' });
   });
+
+  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
+    const { app, world } = makeWebhookHarness();
+    // status stays 'available' so the ONLY thing hiding it is the deleted_at
+    // stamp — proves the soft-delete guard, not the status gate.
+    seedFullUnit(world, { deleted_at: '2026-06-30T00:00:00.000Z' });
+
+    const res = await request(app)
+      .get('/public/units/unit-1/flyer')
+      .set('x-origin-verify', SECRET);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'not_found' });
+  });
 });
 
 describe('POST /public/housing-fair — flyer attribution (optional unitId)', () => {
@@ -354,6 +367,27 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
       .post(FAIR)
       .set('x-origin-verify', SECRET)
       .send(signupBody({ unitId: 'unit-placed' }));
+    expect(res.status).toBe(200);
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.capture_source).toBe('housing_fair');
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+  });
+
+  it('falls back to housing_fair when the unit is soft-deleted (even if still shareable status)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-deleted', {
+      unitId: 'unit-deleted',
+      landlordId: 'll-1',
+      status: 'available', // shareable status, but…
+      deleted_at: '2026-06-30T00:00:00.000Z', // …soft-deleted → no attribution
+      beds: 2,
+    });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-deleted' }));
     expect(res.status).toBe(200);
 
     const contact = world.contacts.find((c) => c.phone === '+15550102000');
@@ -465,6 +499,17 @@ describe('GET /public/units/:unitId/details — the post-intake reveal', () => {
       .set('x-origin-verify', SECRET);
     expect(placed.status).toBe(404);
     expect(placed.body).toEqual({ error: 'not_found' });
+  });
+
+  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, { deleted_at: '2026-06-30T00:00:00.000Z' });
+
+    const res = await request(app)
+      .get('/public/units/unit-1/details')
+      .set('x-origin-verify', SECRET);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'not_found' });
   });
 });
 

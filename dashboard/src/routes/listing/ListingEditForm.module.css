@@ -79,6 +79,19 @@
   border: 0;
 }
 
+/* A horizontal checkbox field (label text after the box) — the boolean toggles. */
+.checkField {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.checkbox {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+}
+
 .error {
   margin: 0;
   color: var(--c-danger);

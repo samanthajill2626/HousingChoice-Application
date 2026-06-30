@@ -302,6 +302,215 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(placed.status).toBe(404);
     expect(placed.body).toEqual({ error: 'not_found' });
   });
+
+  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
+    const { app, world } = makeWebhookHarness();
+    // status stays 'available' so the ONLY thing hiding it is the deleted_at
+    // stamp — proves the soft-delete guard, not the status gate.
+    seedFullUnit(world, { deleted_at: '2026-06-30T00:00:00.000Z' });
+
+    const res = await request(app)
+      .get('/public/units/unit-1/flyer')
+      .set('x-origin-verify', SECRET);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'not_found' });
+  });
+});
+
+describe('POST /public/housing-fair — flyer attribution (optional unitId)', () => {
+  it('stamps capture_source:flyer + unit_of_interest for a shareable unit', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-flyer', {
+      unitId: 'unit-flyer',
+      landlordId: 'll-1',
+      status: 'available',
+      beds: 2,
+    });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-flyer' }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true }); // still leaks nothing
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact).toMatchObject({
+      capture_source: 'flyer',
+      unit_of_interest: 'unit-flyer',
+    });
+  });
+
+  it('falls back to housing_fair (no unit_of_interest) when the unitId is missing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'no-such-unit' }));
+    expect(res.status).toBe(200);
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.capture_source).toBe('housing_fair');
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+  });
+
+  it('falls back to housing_fair when the unit exists but is NOT shareable', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-placed', {
+      unitId: 'unit-placed',
+      landlordId: 'll-1',
+      status: 'placed', // not shareable
+      beds: 2,
+    });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-placed' }));
+    expect(res.status).toBe(200);
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.capture_source).toBe('housing_fair');
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+  });
+
+  it('falls back to housing_fair when the unit is soft-deleted (even if still shareable status)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-deleted', {
+      unitId: 'unit-deleted',
+      landlordId: 'll-1',
+      status: 'available', // shareable status, but…
+      deleted_at: '2026-06-30T00:00:00.000Z', // …soft-deleted → no attribution
+      beds: 2,
+    });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-deleted' }));
+    expect(res.status).toBe(200);
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.capture_source).toBe('housing_fair');
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+  });
+
+  it('rejects a present-but-non-string unitId with the generic 400', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 12345 }));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid request' });
+    expect(world.contacts).toHaveLength(0);
+  });
+
+  it('keeps housing_fair when no unitId is supplied (today’s behavior)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.capture_source).toBe('housing_fair');
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+  });
+});
+
+describe('GET /public/units/:unitId/details — the post-intake reveal', () => {
+  function seedFullUnit(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
+    const unit: UnitItem = {
+      unitId: 'unit-1',
+      landlordId: 'contact-ll-secret',
+      status: 'available',
+      jurisdiction: 'DCA',
+      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      beds: 2,
+      baths: 1,
+      area: 'Westside',
+      subzone: 'Zone 4',
+      accepted_programs: ['GHV'],
+      rent_min: 1400,
+      rent_max: 1600,
+      payment_standard: 1700,
+      deposit: 1400,
+      lif: 500,
+      media: ['s3://photo1.jpg'],
+      listing_link: 'https://example.com/listing/1',
+      utilities: 'Tenant-paid',
+      video_url: 'https://v.example/tour1',
+      application_fee: 50,
+      same_day_rta: true,
+      tour_process: 'SECRET lockbox 9999',
+      application_process: 'SECRET portal',
+      primary_voice_contact: 'contact-ll-agent',
+      ...overrides,
+    };
+    world.units.set(unit.unitId, unit);
+    return unit;
+  }
+
+  it('returns the richer reveal set (address/video/utilities/fee/RTA) for a shareable unit', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world);
+
+    const res = await request(app)
+      .get('/public/units/unit-1/details')
+      .set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.details).toMatchObject({
+      unitId: 'unit-1',
+      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      utilities: 'Tenant-paid',
+      video_url: 'https://v.example/tour1',
+      application_fee: 50,
+      same_day_rta: true,
+    });
+
+    // INTERNAL fields must never appear in the response.
+    const serialized = JSON.stringify(res.body);
+    for (const secret of [
+      'tour_process',
+      'application_process',
+      'primary_voice_contact',
+      'landlordId',
+      'contact-ll-secret',
+      'payment_standard',
+      'deposit',
+      'lif',
+      'SECRET',
+    ]) {
+      expect(serialized, secret).not.toContain(secret);
+    }
+  });
+
+  it('404s a missing unit and a non-shareable (placed) unit — no existence oracle', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, { status: 'placed' });
+
+    const missing = await request(app)
+      .get('/public/units/nope/details')
+      .set('x-origin-verify', SECRET);
+    expect(missing.status).toBe(404);
+    expect(missing.body).toEqual({ error: 'not_found' });
+
+    const placed = await request(app)
+      .get('/public/units/unit-1/details')
+      .set('x-origin-verify', SECRET);
+    expect(placed.status).toBe(404);
+    expect(placed.body).toEqual({ error: 'not_found' });
+  });
+
+  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, { deleted_at: '2026-06-30T00:00:00.000Z' });
+
+    const res = await request(app)
+      .get('/public/units/unit-1/details')
+      .set('x-origin-verify', SECRET);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'not_found' });
+  });
 });
 
 describe('/public sits behind the origin-secret validator (locked chain stage 2)', () => {

@@ -124,7 +124,7 @@ a different name, not a gap to build** — the audit's job is to find the mappin
   `[FlyerLink]`) and records a `listing_send` row. **Curate to ONE tenant** with
   "Deselect all" → check the tenant's row by their **first name** (preview rows show the
   first name only — so `freshTenant` now mints a unique, space-free `firstName`). Assert
-  delivery three ways: the fake thread (proof-of-send, body contains `/flyer/<unitId>`),
+  delivery three ways: the fake thread (proof-of-send, body contains `/p/<unitId>`),
   `GET /api/contacts/:id/listings-sent` (`{ sent: [...] }`), and the timeline "Property
   sent" link (`a[href="/listings/<unitId>"]`).
 - **An existing dashboard spec is a live-verified selector source.** `broadcasts.spec.ts`

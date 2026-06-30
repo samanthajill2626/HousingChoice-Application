@@ -515,7 +515,7 @@ export class Scenario {
               thread?.messages.some(
                 (m) =>
                   m.direction === 'outbound' &&
-                  (m.body ?? '').includes(`/flyer/${unit.unitId}`) &&
+                  (m.body ?? '').includes(`/p/${unit.unitId}`) &&
                   m.state === 'delivered',
               ) ?? false
             );

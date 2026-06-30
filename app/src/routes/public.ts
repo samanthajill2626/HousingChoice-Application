@@ -10,11 +10,15 @@
 // and NO PII is ever logged (names/phones are hashed/truncated to a marker).
 //
 // Routes:
-//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize? }
+//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId? }
 //        → 200 { ok: true }   (creates/dedupes a tenant contact, sends the
-//          welcome text on FIRST capture only; leaks NO internal IDs/PII)
+//          welcome text on FIRST capture only; leaks NO internal IDs/PII. A
+//          present + shareable unitId stamps capture_source:'flyer' +
+//          unit_of_interest on the CREATED contact instead of 'housing_fair'.)
 //   GET  /public/units/:unitId/flyer
-//        → 200 { flyer }      (ONLY the shareable field set) | 404
+//        → 200 { flyer }      (ONLY the shareable teaser field set) | 404
+//   GET  /public/units/:unitId/details
+//        → 200 { details }    (the richer post-intake reveal allowlist) | 404
 //
 // Money note: housing-fair sends an SMS (real cost in prod). Idempotency +
 // rate limiting are what keep this from being an SMS-spend abuse vector.
@@ -23,8 +27,8 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { SHAREABLE_STATUSES } from '../repos/unitsRepo.js';
-import { toUnitFlyer } from '../lib/unitFields.js';
+import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
+import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -64,12 +68,16 @@ function phoneMarker(phone: string): string {
 
 /** Generic field caps so the public body can't be used to store huge blobs. */
 const MAX_NAME_LEN = 100;
+/** A unitId is an opaque id; cap it so it can't smuggle a blob through the body. */
+const MAX_UNIT_ID_LEN = 200;
 
 interface HousingFairFields {
   firstName: string;
   lastName: string;
   phone: string;
   voucherSize?: number;
+  /** Optional flyer unit-of-interest (validated as shareable in the handler). */
+  unitId?: string;
 }
 
 /**
@@ -106,7 +114,27 @@ function parseHousingFairBody(body: unknown): HousingFairFields | { error: strin
     voucherSize = v;
   }
 
-  return { firstName, lastName, phone, ...(voucherSize !== undefined && { voucherSize }) };
+  // Optional unitId: the flyer the signup came from. Absent is fine; present
+  // must be a non-empty, length-capped string (a present-but-non-string is a
+  // malformed request → the same generic error). Whether the unit is actually
+  // shareable is decided in the handler (a non-shareable id just degrades to a
+  // plain housing-fair signup — never an existence oracle).
+  let unitId: string | undefined;
+  if ('unitId' in b && b['unitId'] !== undefined && b['unitId'] !== null) {
+    const u = b['unitId'];
+    if (typeof u !== 'string' || u.length === 0 || u.length > MAX_UNIT_ID_LEN) {
+      return { error: 'invalid request' };
+    }
+    unitId = u;
+  }
+
+  return {
+    firstName,
+    lastName,
+    phone,
+    ...(voucherSize !== undefined && { voucherSize }),
+    ...(unitId !== undefined && { unitId }),
+  };
 }
 
 export interface PublicRouterDeps {
@@ -146,9 +174,26 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       res.status(400).json({ error: 'invalid request' });
       return;
     }
-    const { firstName, lastName, phone, voucherSize } = parsed;
+    const { firstName, lastName, phone, voucherSize, unitId } = parsed;
     const marker = phoneMarker(phone);
     mergeContext({}); // keep this request's log lines correlated (no PII added)
+
+    // Flyer attribution: when the signup carries a unitId for a SHAREABLE unit,
+    // stamp the created contact with capture_source:'flyer' + unit_of_interest so
+    // staff see which home prompted the signup. A missing/non-shareable unit
+    // (or no unitId) keeps today's plain 'housing_fair' source (no oracle — we
+    // never reveal whether the id existed). unitId is NOT PII, so logging its
+    // presence as a boolean is fine.
+    let viaFlyer = false;
+    if (unitId !== undefined) {
+      const flyerUnit = await units.getById(unitId);
+      // A soft-deleted unit is not publicly shareable (it's hidden everywhere),
+      // so it must not earn flyer attribution either — mirror the flyer/details
+      // gate exactly.
+      if (flyerUnit && !isDeleted(flyerUnit) && SHAREABLE_STATUSES.has(flyerUnit.status)) {
+        viaFlyer = true;
+      }
+    }
 
     // (1) Dedupe by phone. A fair signup for an existing phone must NOT create
     // a second contact and must NOT re-send the welcome (idempotent — the
@@ -172,7 +217,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         firstName,
         lastName,
         ...(voucherSize !== undefined && { voucherSize }),
-        capture_source: 'housing_fair',
+        // Flyer signups are attributed to the originating home; a plain fair
+        // signup (no/non-shareable unit) keeps the generic source. Only stamped
+        // on CREATE (matching how capture_source is set), never on a deduped
+        // existing contact.
+        capture_source: viaFlyer ? 'flyer' : 'housing_fair',
+        ...(viaFlyer && unitId !== undefined && { unit_of_interest: unitId }),
         captured_at: new Date().toISOString(),
         housing_fair_welcomed: false,
       });
@@ -231,10 +281,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       marker,
       isNew: existing === undefined,
       welcomeSent,
+      viaFlyer,
     });
     // Log a hashed marker only — NEVER the name or phone (doc §9 / kickoff).
+    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed).
     log.info(
-      { marker, isNew: existing === undefined, welcomeSent },
+      { marker, isNew: existing === undefined, welcomeSent, viaFlyer },
       'housing-fair signup captured',
     );
 
@@ -243,18 +295,35 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   });
 
   // GET /public/units/:unitId/flyer — the shareable flyer view (M1.5).
-  // 404 when the unit is missing OR not in a shareable status (the public must
-  // never learn a non-available unit even exists). Returns ONLY the allowlisted
-  // flyer fields (lib/unitFields.toUnitFlyer) — internal fields can't leak.
+  // 404 when the unit is missing, soft-deleted, OR not in a shareable status
+  // (the public must never learn a non-available unit even exists). Returns ONLY
+  // the allowlisted flyer fields (lib/unitFields.toUnitFlyer) — no internal leak.
   router.get('/units/:unitId/flyer', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
-    if (!unit || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing and not-shareable — no existence oracle.
+    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
+      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
       res.status(404).json({ error: 'not_found' });
       return;
     }
     res.json({ flyer: toUnitFlyer(unit) });
+  });
+
+  // GET /public/units/:unitId/details — the post-intake "full details" reveal.
+  // SAME gate + opaque 404 as the flyer (soft reveal, NO token): missing,
+  // soft-deleted, or not-shareable all 404 identically. Returns ONLY the richer
+  // allowlist (lib/unitFields.toUnitFlyerDetails): the teaser fields +
+  // address/utilities/video/app-fee/same-day-RTA. Internal and landlord/contact
+  // fields can never leak (the allowlist IS the wall).
+  router.get('/units/:unitId/details', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
+      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json({ details: toUnitFlyerDetails(unit) });
   });
 
   return router;

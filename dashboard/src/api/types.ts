@@ -20,6 +20,113 @@ export interface DevLoginResult {
   role: UserRole;
 }
 
+// --- Settings: Team (admin user management) ---------------------------------
+// MIRRORS app/src/routes/adminUsers.ts `toAdminUserView` — the admin-list
+// projection of a user (NO google_sub / push_subscriptions). The dashboard is a
+// separate package and cannot import from app/src, so this is duplicated; keep
+// it in sync with the source when the projection changes.
+
+/** GET /api/users → { users: AdminUserView[] }; the team roster row. `status`
+ *  and `last_login_at` are null when unset. */
+export interface AdminUserView {
+  userId: string;
+  email: string;
+  /** Display name (Google profile name, else a humanized fallback). */
+  name: string;
+  role: UserRole;
+  status: string | null;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+// --- Settings: OrgSettings (founder-editable call-triage templates) ----------
+// MIRRORS app/src/repos/settingsRepo.ts `OrgSettings`. The dashboard cannot
+// import from app/src, so the shape is duplicated; keep it in sync. `welcomeText`
+// is OPTIONAL (absent until the operator sets it — the backend falls back to its
+// WELCOME_TEXT_TEMPLATE constant).
+
+/** GET /api/settings → { settings }, PUT /api/settings { patch } → { settings }. */
+export interface OrgSettings {
+  /** The zero-tap missed-call auto-text body (1..320 chars). */
+  missedCallAutoText: string;
+  /** Whether the missed-call auto-text fires at all. */
+  missedCallAutoTextEnabled: boolean;
+  /** The missed-call quick-reply buttons (≤10, each 1..320 chars). */
+  quickReplies: string[];
+  /** The pre-ring <Pause> before the founder-bridge dial (whole seconds, 0..10). */
+  preRingPauseSeconds: number;
+  /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
+   *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */
+  welcomeText?: string;
+}
+
+/** The PUT /api/settings patch: only the changed fields. `welcomeText` accepts
+ *  an explicit `null` to CLEAR a previously-set value (revert to the built-in
+ *  default) — the backend deletes the stored attribute. Every other field keeps
+ *  its OrgSettings type. */
+export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
+  welcomeText?: string | null;
+};
+
+// --- Settings: System Status (admin-only) -----------------------------------
+// MIRRORS app/src/services/systemStatus.ts (getFlags) + app/src/adapters/
+// cloudwatch.ts (AlarmView / ErrorEventView) + the /api/system route shapes.
+// The dashboard cannot import from app/src, so these are duplicated; keep them
+// in sync with the backend contract.
+
+/** GET /api/system/flags → go-live readiness (booleans/enums/strings — never secrets). */
+export interface SystemFlags {
+  /** Deploy env name (local | dev | prod). */
+  env: string;
+  /** A2P kill-switch: outbound SMS enabled (false = expected pre-A2P). */
+  smsSendingEnabled: boolean;
+  /** A2P kill-switch: relay number provisioning enabled (false = expected pre-A2P). */
+  relayLiveProvisioning: boolean;
+  /** Whether a founder cell is configured (boolean only — never the number). */
+  founderCellSet: boolean;
+  /** Whether Web Push (VAPID) is configured in this env. */
+  pushConfigured: boolean;
+  /** Outbound messaging driver. */
+  messagingDriver: 'twilio' | 'console';
+}
+
+/** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
+export type SystemAlarmState = 'OK' | 'ALARM' | 'INSUFFICIENT_DATA';
+
+/** GET /api/system/alarms → one alarm row. */
+export interface SystemAlarm {
+  name: string;
+  state: SystemAlarmState;
+  /** ISO 8601 of the last state transition, or '' when absent. */
+  stateUpdatedAt: string;
+}
+
+/** GET /api/system/errors → one error event (PII-safe projection ONLY). */
+export interface SystemErrorEvent {
+  /** ISO 8601 of the log event. */
+  timestamp: string;
+  /** pino numeric level (≥ 50 = error/fatal). */
+  level: number;
+  /** The log's short message — never a body/PII payload. */
+  message: string;
+  /** The correlation id, or null when the event carried none. */
+  correlationId: string | null;
+}
+
+/** GET /api/system/alarms response — degrades to { available: false, reason }. */
+export interface SystemAlarmsResult {
+  available: boolean;
+  alarms?: SystemAlarm[];
+  reason?: string;
+}
+
+/** GET /api/system/errors response — degrades to { available: false, reason }. */
+export interface SystemErrorsResult {
+  available: boolean;
+  events?: SystemErrorEvent[];
+  reason?: string;
+}
+
 // --- Today action queue (§API Contract C7) ----------------------------------
 // The prioritized "what needs the navigator now" queue. The backend serves it at
 // GET /api/today (TodayResponse); the B1 frontend assembles the SAME shape

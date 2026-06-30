@@ -1,0 +1,257 @@
+/* TemplatesSection — labelled form fields + the quick-replies chip editor.
+ * Tokens only; shares the labelled-field pattern with ContactCreateForm. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.readonlyNote {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.center {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-6);
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.fieldLabel {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+}
+
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.hint code {
+  font-family: var(--font-mono);
+  background: var(--c-surface-2);
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-sm);
+}
+
+.number {
+  width: 6rem;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.textarea {
+  width: 100%;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+  resize: vertical;
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.number:focus-visible,
+.textarea:focus-visible,
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.number:disabled,
+.textarea:disabled,
+.input:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  cursor: not-allowed;
+}
+
+.checkboxField {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+/* --- Quick-replies chip editor ------------------------------------------- */
+.chips {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.chipList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.chipText {
+  white-space: pre-wrap;
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chipRemove:hover {
+  background: var(--c-surface);
+  color: var(--c-danger);
+}
+
+.chipRemove:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.chipEmpty {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+}
+
+.chipAddRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+
+.chipAddField {
+  flex: 1;
+  min-width: 0;
+}
+
+.chipAddBtn {
+  flex: 0 0 auto;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.chipAddBtn:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.chipAddBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.chipAddBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --- Save / status ------------------------------------------------------- */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.savedNote {
+  color: var(--c-success);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

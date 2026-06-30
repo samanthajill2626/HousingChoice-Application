@@ -35,12 +35,17 @@ const MAX_PRE_RING_PAUSE_SECONDS = 10;
  * (only the supplied, valid fields) or an error message. An empty patch is
  * valid (a no-op PUT returns the current settings).
  */
-function parsePatch(body: unknown): { patch: Partial<OrgSettings> } | { error: string } {
+/** The validated patch. `welcomeText` may be `null` — an explicit CLEAR that the
+ *  repo turns into a DynamoDB REMOVE (revert to the WELCOME_TEXT_TEMPLATE
+ *  default); every other field keeps its OrgSettings type. */
+type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & { welcomeText?: string | null };
+
+function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string } {
   if (typeof body !== 'object' || body === null) {
     return { error: 'body must be a JSON object' };
   }
   const b = body as Record<string, unknown>;
-  const patch: Partial<OrgSettings> = {};
+  const patch: SettingsPatch = {};
 
   if ('missedCallAutoText' in b) {
     const v = b['missedCallAutoText'];
@@ -82,6 +87,17 @@ function parsePatch(body: unknown): { patch: Partial<OrgSettings> } | { error: s
       };
     }
     patch.preRingPauseSeconds = v;
+  }
+  if ('welcomeText' in b) {
+    const v = b['welcomeText'];
+    if (v === null) {
+      // Explicit CLEAR — revert to the WELCOME_TEXT_TEMPLATE default (repo REMOVE).
+      patch.welcomeText = null;
+    } else if (typeof v !== 'string' || v.length === 0 || v.length > MAX_TEMPLATE_CHARS) {
+      return { error: `welcomeText must be a 1..${MAX_TEMPLATE_CHARS}-char string` };
+    } else {
+      patch.welcomeText = v;
+    }
   }
   return { patch };
 }

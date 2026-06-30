@@ -3,6 +3,10 @@
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { request } from './client.js';
 import type {
+  AdminUserView,
+  OrgSettings,
+  SettingsPatch,
+  UserRole,
   PlacementItem,
   PlacementsPage,
   PlacementStage,
@@ -28,6 +32,9 @@ import type {
   RelatedUnit,
   SendMessageResult,
   SimilarUnit,
+  SystemAlarmsResult,
+  SystemErrorsResult,
+  SystemFlags,
   TenantStatus,
   TodayResponse,
   TransitionSource,
@@ -642,6 +649,132 @@ export function assignInbox(
   return request<void>(`/api/inbox/${encodeURIComponent(contactId)}/assign`, {
     method: 'POST',
     body: { userId },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+// --- Settings ▸ Team (/api/users) (admin-only on the server) ----------------
+// The in-app team-management surface (replaces the CLI ops scripts). Every
+// route is requireRole('admin') upstream; a VA never reaches this section.
+
+/** GET /api/users — the team roster (unwrapped from { users }). */
+export async function listUsers(signal?: AbortSignal): Promise<AdminUserView[]> {
+  const res = await request<{ users: AdminUserView[] }>('/api/users', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.users;
+}
+
+/** POST /api/users { email, role } — invite (idempotent). `created` is false when
+ *  the email was already on the team (surface as a friendly no-op, not an error). */
+export function inviteUser(body: {
+  email: string;
+  role: UserRole;
+}): Promise<{ user: AdminUserView; created: boolean }> {
+  return request<{ user: AdminUserView; created: boolean }>('/api/users', {
+    method: 'POST',
+    body,
+  });
+}
+
+/** PATCH /api/users/:userId/role { role } — promote/demote. 409
+ *  cannot_demote_self / cannot_demote_last_admin on a lockout (revert + inline). */
+export function setUserRole(
+  userId: string,
+  role: UserRole,
+): Promise<{ user: AdminUserView; changed: boolean }> {
+  return request<{ user: AdminUserView; changed: boolean }>(
+    `/api/users/${encodeURIComponent(userId)}/role`,
+    { method: 'PATCH', body: { role } },
+  );
+}
+
+// --- Settings ▸ Templates (/api/settings) -----------------------------------
+// VAs may VIEW (GET requireAuth); only admins EDIT (PUT requireRole('admin')).
+
+/** GET /api/settings — the founder-editable templates (unwrapped from { settings }). */
+export async function getSettings(signal?: AbortSignal): Promise<OrgSettings> {
+  const res = await request<{ settings: OrgSettings }>('/api/settings', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.settings;
+}
+
+/** PUT /api/settings { ...patch } — admin-only edit; send ONLY changed fields.
+ *  Returns the merged settings (unwrapped). 400 on a validation failure.
+ *  `welcomeText: null` is an explicit CLEAR (revert to the built-in default). */
+export async function putSettings(patch: SettingsPatch): Promise<OrgSettings> {
+  const res = await request<{ settings: OrgSettings }>('/api/settings', {
+    method: 'PUT',
+    body: patch,
+  });
+  return res.settings;
+}
+
+// --- Settings ▸ Notifications (/api/push) -----------------------------------
+// This-device push. Every route 503s `push_not_configured` when VAPID is
+// unconfigured in the environment — callers must handle that gracefully.
+
+/** GET /api/push/vapid-public-key — the key the SW passes to pushManager.subscribe
+ *  (unwrapped from { publicKey }). 503 push_not_configured when VAPID is unset. */
+export async function getVapidPublicKey(signal?: AbortSignal): Promise<string> {
+  const res = await request<{ publicKey: string }>('/api/push/vapid-public-key', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.publicKey;
+}
+
+/** POST /api/push/subscriptions { subscription } — store THIS device's
+ *  subscription on the caller's user. Returns the device count. */
+export function subscribePush(
+  subscription: PushSubscriptionJSON | PushSubscription,
+): Promise<{ subscriptionCount: number }> {
+  return request<{ subscriptionCount: number }>('/api/push/subscriptions', {
+    method: 'POST',
+    body: { subscription },
+  });
+}
+
+/** DELETE /api/push/subscriptions { endpoint } — remove THIS device (204). */
+export function unsubscribePush(endpoint: string): Promise<void> {
+  return request<void>('/api/push/subscriptions', {
+    method: 'DELETE',
+    body: { endpoint },
+  });
+}
+
+/** POST /api/push/test — self-test send to the caller's own devices; returns the
+ *  per-call tally. 503 push_not_configured when VAPID is unset. */
+export function sendPushTest(): Promise<{ sent: number; failed: number; [k: string]: unknown }> {
+  return request<{ sent: number; failed: number; [k: string]: unknown }>('/api/push/test', {
+    method: 'POST',
+  });
+}
+
+// --- Settings ▸ System Status (/api/system) (admin-only on the server) -------
+// Admin-only (403 a VA upstream); the tab is admin-only + route-guarded too.
+// Flags always load (config only). Alarms/errors degrade to { available: false,
+// reason } (still HTTP 200) when AWS is unreachable (local/hermetic).
+
+/** GET /api/system/flags — go-live readiness from runtime config (always loads). */
+export function getSystemFlags(signal?: AbortSignal): Promise<SystemFlags> {
+  return request<SystemFlags>('/api/system/flags', { ...(signal !== undefined && { signal }) });
+}
+
+/** GET /api/system/alarms — CloudWatch alarms (ALARM-first) or { available:false, reason }. */
+export function getSystemAlarms(signal?: AbortSignal): Promise<SystemAlarmsResult> {
+  return request<SystemAlarmsResult>('/api/system/alarms', {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/system/errors?since= — recent error events (PII-safe) or { available:false, reason }. */
+export function getSystemErrors(
+  since: '1h' | '24h' | '7d',
+  signal?: AbortSignal,
+): Promise<SystemErrorsResult> {
+  return request<SystemErrorsResult>('/api/system/errors', {
+    query: { since },
     ...(signal !== undefined && { signal }),
   });
 }

@@ -108,6 +108,51 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     expect(capture.lines.some((l) => l['msg'] === 'housing-fair signup captured')).toBe(true);
   });
 
+  it('renders the operator welcomeText override (with {firstName}) when set', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Operator has overridden the welcome copy via the settings record.
+    world.settings.welcomeText = 'Welcome {firstName}! Reply STOP to opt out.';
+
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]?.body).toBe('Welcome Keisha! Reply STOP to opt out.');
+    // NOT the constant — the override won.
+    expect(world.sent[0]?.body).not.toBe(
+      WELCOME_TEXT_TEMPLATE.replace('{firstName}', 'Keisha'),
+    );
+  });
+
+  it('falls back to the WELCOME_TEXT_TEMPLATE constant when welcomeText is unset', async () => {
+    const { app, world } = makeWebhookHarness();
+    // No override on a fresh stack — welcomeText is absent.
+    expect(world.settings.welcomeText).toBeUndefined();
+
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]?.body).toBe(WELCOME_TEXT_TEMPLATE.replace('{firstName}', 'Keisha'));
+  });
+
+  it('falls back to the constant (and intake STILL succeeds) when the settings read throws', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A settings-read failure must NOT break intake — the welcome send is
+    // best-effort. Override the world settings repo to throw.
+    world.settingsRepo.getOrgSettings = async () => {
+      throw new Error('settings store unavailable');
+    };
+
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200); // intake never breaks
+    expect(res.body).toEqual({ ok: true });
+
+    // The welcome still went out, using the bulletproof constant.
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]?.body).toBe(WELCOME_TEXT_TEMPLATE.replace('{firstName}', 'Keisha'));
+  });
+
   it('does not fail the public request when the welcome send is refused (opted-out phone)', async () => {
     const { app, world } = makeWebhookHarness();
     // Pre-seed a contact that has opted out — the send wrapper refuses.

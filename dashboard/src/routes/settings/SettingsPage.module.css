@@ -1,0 +1,83 @@
+/* SettingsPage — the tab shell. Tokens only; mirrors AppFrame's accessibility-
+ * first patterns (focus-visible rings, real controls). The desktop tab row
+ * WRAPS (flex-wrap) so it never horizontally scrolls as sections grow; below the
+ * nav breakpoint a labeled <select> replaces it. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 880px;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.01em;
+  color: var(--c-text);
+}
+
+/* --- Desktop: wrapping tab row ------------------------------------------- */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: var(--sp-1);
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.tab:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  text-decoration: none;
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.tabActive,
+.tabActive:hover {
+  background: var(--c-brand-soft);
+  color: var(--c-brand);
+}
+
+/* --- Mobile: section dropdown -------------------------------------------- */
+.mobileSelect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.select {
+  width: 100%;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.select:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* --- Routed section panel ------------------------------------------------ */
+.panel {
+  padding-top: var(--sp-2);
+}

@@ -86,6 +86,7 @@ import {
   createAudienceResolutionService,
   type AudienceResolutionService,
 } from '../../src/services/audienceResolution.js';
+import { type SystemStatusService } from '../../src/services/systemStatus.js';
 import { createSendMessageService } from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
@@ -797,6 +798,13 @@ export function createFakeWorld(): FakeWorld {
         settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
       if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
       if (patch.preRingPauseSeconds !== undefined) settings.preRingPauseSeconds = patch.preRingPauseSeconds;
+      if (patch.welcomeText === null) {
+        // Explicit CLEAR — delete the attribute (mirrors the real repo's REMOVE),
+        // so getOrgSettings projects no welcomeText and public.ts falls back.
+        delete settings.welcomeText;
+      } else if (patch.welcomeText !== undefined) {
+        settings.welcomeText = patch.welcomeText;
+      }
       return { ...settings };
     },
   };
@@ -1494,6 +1502,13 @@ export interface HarnessOptions {
    * truncated refusal paths without seeding thousands of contacts.
    */
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * Inject a fake System Status service (M1.4; no AWS). Default: the route's
+   * real config-driven service, which degrades to { available: false } on the
+   * hermetic stack (console driver). Tests inject a stub to drive the
+   * available:true alarms/errors route shape.
+   */
+  systemStatusService?: SystemStatusService;
 }
 
 export interface Harness {
@@ -1576,6 +1591,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,
       }),
+      ...(opts.systemStatusService !== undefined && {
+        systemStatusService: opts.systemStatusService,
+      }),
     },
     // M1.5 public surface — shares the SAME world repos so a housing-fair
     // signup writes the same contacts/conversations/units the authed API reads,
@@ -1586,6 +1604,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // The housing-fair welcome reads the operator's welcomeText override (with
+      // a constant fallback) — share the world's fake settings repo so a
+      // welcomeText edit is reflected without touching DynamoDB.
+      settingsRepo: world.settingsRepo,
       sendMessageService: createSendMessageService({
         config,
         logger: createLogger({ level: 'info', destination: capture.stream }),

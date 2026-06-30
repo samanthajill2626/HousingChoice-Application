@@ -12,6 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.test.json"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1068.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1068.0",
     "@aws-sdk/client-dynamodb": "^3.1067.0",
     "@aws-sdk/client-s3": "^3.1068.0",
     "@aws-sdk/client-scheduler": "^3.1067.0",

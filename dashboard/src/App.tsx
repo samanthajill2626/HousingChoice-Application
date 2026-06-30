@@ -4,8 +4,8 @@
 // links and the routes can never drift apart; the implemented pages (Today, the
 // Contacts + Properties list views, and the contact/property detail pages) are
 // swapped in explicitly, one destination at a time.
-import { Route, Routes } from 'react-router-dom';
-import { AuthProvider } from './app/AuthContext.js';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { AuthProvider, useAuth } from './app/AuthContext.js';
 import { AuthGate } from './app/AuthGate.js';
 import { AppFrame } from './app/AppFrame.js';
 import { UnreadProvider } from './app/UnreadContext.js';
@@ -19,7 +19,21 @@ import { ListingDetail } from './routes/listing/ListingDetail.js';
 import { PlacementsBoard } from './routes/placements/PlacementsBoard.js';
 import { PlacementDetail } from './routes/placements/PlacementDetail.js';
 import { Inbox } from './routes/inbox/Inbox.js';
+import { SettingsPage } from './routes/settings/SettingsPage.js';
+import { TeamSection } from './routes/settings/TeamSection.js';
+import { TemplatesSection } from './routes/settings/TemplatesSection.js';
+import { NotificationsSection } from './routes/settings/NotificationsSection.js';
+import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
+import { AdminRoute } from './routes/settings/AdminRoute.js';
+import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
+
+/** /settings index → the first tab visible for the viewer's role (admin → Team,
+ *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
+function SettingsIndexRedirect(): React.JSX.Element {
+  const { isAdmin } = useAuth();
+  return <Navigate to={defaultTabPath(isAdmin)} replace />;
+}
 
 // Nav destinations that now have a REAL page (handled by an explicit <Route>
 // below) — excluded from the placeholder generator so they aren't double-mounted.
@@ -32,6 +46,9 @@ const IMPLEMENTED = new Set<string>([
   '/contacts/unknown',
   '/listings',
   '/inbox',
+  // /settings now has a REAL tabbed page (with nested sub-routes below); exclude
+  // it from the placeholder generator (allNavTargets includes the footer link).
+  '/settings',
 ]);
 
 export default function App(): React.JSX.Element {
@@ -71,6 +88,32 @@ export default function App(): React.JSX.Element {
 
             {/* Communications ▸ Inbox (replaces the generated placeholder). */}
             <Route path="inbox" element={<Inbox />} />
+
+            {/* Settings ▸ tabbed surface (replaces the generated placeholder).
+                The index redirects to the first tab visible for the role; the
+                admin-only sections (team, system) are route-guarded so a VA
+                hitting them directly is redirected to /settings/templates. */}
+            <Route path="settings" element={<SettingsPage />}>
+              <Route index element={<SettingsIndexRedirect />} />
+              <Route
+                path="team"
+                element={
+                  <AdminRoute>
+                    <TeamSection />
+                  </AdminRoute>
+                }
+              />
+              <Route path="templates" element={<TemplatesSection />} />
+              <Route path="notifications" element={<NotificationsSection />} />
+              <Route
+                path="system"
+                element={
+                  <AdminRoute>
+                    <SystemStatusSection />
+                  </AdminRoute>
+                }
+              />
+            </Route>
 
             {/* The remaining nav destinations stay placeholders for now. */}
             {allNavTargets()

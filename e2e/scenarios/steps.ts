@@ -293,6 +293,18 @@ export class Scenario {
       if (fields.voucherSize !== undefined) expect(contact['voucherSize']).toBe(fields.voucherSize);
       if (fields.housingAuthority !== undefined)
         expect(contact['housingAuthority']).toBe(fields.housingAuthority);
+
+      // UI: Team can SEE these in the Details panel — voucher renders as "<n> BR",
+      // housing authority renders raw (e.g. "atlanta_housing"). Scope to the Details
+      // section so the header-subtitle copy of the authority doesn't double-match.
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      if (fields.voucherSize !== undefined)
+        await expect(details.getByText(`${fields.voucherSize} BR`)).toBeVisible();
+      if (fields.housingAuthority !== undefined)
+        await expect(details.getByText(fields.housingAuthority)).toBeVisible();
     });
   }
 
@@ -335,6 +347,20 @@ export class Scenario {
       if (i.evictions !== undefined) expect(contact['evictions']).toBe(i.evictions);
       if (i.tenure !== undefined) expect(contact['tenure']).toBe(i.tenure);
       if (i.lifEligible !== undefined) expect(contact['lifEligible']).toBe(i.lifEligible);
+
+      // UI: Team can SEE the recorded intake in the "Eligibility intake" section of
+      // the Details pane (not just via the editor). Scope to that card so common
+      // values like "none"/"Yes" can't double-match elsewhere on the page.
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Eligibility intake' }) });
+      await expect(card).toBeVisible();
+      if (i.pets) await expect(card.getByText(i.pets)).toBeVisible();
+      if (i.evictions) await expect(card.getByText(i.evictions)).toBeVisible();
+      if (i.tenure) await expect(card.getByText(i.tenure)).toBeVisible();
+      if (i.lifEligible !== undefined)
+        await expect(card.getByText(i.lifEligible ? 'Yes' : 'No')).toBeVisible();
     });
   }
 

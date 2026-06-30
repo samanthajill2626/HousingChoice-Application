@@ -25,10 +25,14 @@ import { useBroadcastResults } from './useBroadcastResults.js';
 import styles from './BroadcastResults.module.css';
 
 /** A recipient's display name: the formatted phone for a phone-only row, else a
- *  short contact reference (the contactId — names aren't on the results map). */
+ *  neutral "Tenant" (names aren't on the results map — never leak a raw id /
+ *  `phone#…` key into the UI). */
 function recipientLabel(row: BroadcastRecipientView): string {
-  if (row.phone !== undefined) return formatPhone(row.phone);
-  return `Tenant ${row.contactId ?? row.contactKey}`;
+  if (row.phone !== undefined) {
+    const formatted = formatPhone(row.phone);
+    return formatted.length > 0 ? formatted : 'Tenant';
+  }
+  return 'Tenant';
 }
 
 /** One recipient row. A contactId row is a link to the tenant's comms; a failed
@@ -41,9 +45,9 @@ function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Eleme
       <span className={styles.recipientName}>{recipientLabel(row)}</span>
       <DeliveryBadge status={row.status} {...(row.errorCode !== undefined && { errorCode: row.errorCode })} />
       {failed && row.contactId !== undefined ? (
-        <span className={styles.retryHint} aria-hidden="true">
-          ↗ open conversation to retry
-        </span>
+        // NOT aria-hidden: the hint contributes to the link's accessible name so
+        // a role+name lookup for "open conversation to retry" resolves the link.
+        <span className={styles.retryHint}>↗ open conversation to retry</span>
       ) : null}
     </>
   );
@@ -51,11 +55,10 @@ function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Eleme
   if (row.contactId !== undefined) {
     return (
       <li className={`${styles.recipient} ${failed ? styles.recipientFailed : ''}`.trim()}>
-        <Link
-          to={`/contacts/${encodeURIComponent(row.contactId)}`}
-          className={styles.recipientLink}
-          {...(failed && { 'aria-label': `${recipientLabel(row)} — failed; open conversation to retry` })}
-        >
+        {/* No aria-label override on a failed row — the inner text (incl. the
+            "↗ open conversation to retry" hint) IS the accessible name, so the
+            single canonical name is name-resolvable. */}
+        <Link to={`/contacts/${encodeURIComponent(row.contactId)}`} className={styles.recipientLink}>
           {inner}
         </Link>
       </li>
@@ -132,11 +135,14 @@ export function BroadcastResults(): React.JSX.Element {
 
       <StatChips stats={results.stats} />
 
-      <h2 className={styles.recipientsHeading}>Recipients</h2>
+      <h2 id="recipients-heading" className={styles.recipientsHeading}>
+        Recipients
+      </h2>
       {recipients.length === 0 ? (
         <p className={styles.emptyBody}>No recipients recorded yet.</p>
       ) : (
-        <ul className={styles.recipients} aria-label="Recipients">
+        // Named by the heading (aria-labelledby) — no duplicate aria-label.
+        <ul className={styles.recipients} aria-labelledby="recipients-heading">
           {recipients.map((row) => (
             <RecipientRow key={row.contactKey} row={row} />
           ))}

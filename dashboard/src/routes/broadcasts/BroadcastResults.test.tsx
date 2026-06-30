@@ -103,10 +103,12 @@ describe('BroadcastResults — render', () => {
     const list = await screen.findByRole('list', { name: 'Recipients' });
     // Error class surfaced through the badge reason.
     expect(within(list).getByText(/Phone unreachable/i)).toBeInTheDocument();
-    // The conversation-only disposition affordance.
-    expect(within(list).getByText(/open conversation to retry/i)).toBeInTheDocument();
+    // The conversation-only disposition affordance is NAME-RESOLVABLE on the link:
+    // its inner "↗ open conversation to retry" hint contributes to the accessible
+    // name (not aria-hidden), so a role+name lookup resolves the failed-row link.
+    const retryLink = within(list).getByRole('link', { name: /open conversation to retry/i });
     // The row links to the contact's comms (the in-thread Retry lives there).
-    expect(within(list).getByRole('link')).toHaveAttribute('href', '/contacts/c1');
+    expect(retryLink).toHaveAttribute('href', '/contacts/c1');
   });
 });
 

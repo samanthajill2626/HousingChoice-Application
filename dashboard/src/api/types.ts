@@ -86,8 +86,9 @@ export interface SystemFlags {
   founderCellSet: boolean;
   /** Whether Web Push (VAPID) is configured in this env. */
   pushConfigured: boolean;
-  /** Outbound messaging driver. */
-  messagingDriver: 'twilio' | 'console';
+  /** Outbound messaging driver as displayed. `mock` = the twilio driver
+   *  redirected to a fake host (local `--mock` loop); never appears deployed. */
+  messagingDriver: 'twilio' | 'console' | 'mock';
 }
 
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */

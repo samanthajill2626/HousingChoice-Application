@@ -70,6 +70,27 @@ describe('systemStatus.getFlags', () => {
     const flags = makeService({ config, cloudwatch: fakeSeam() }).getFlags();
     expect(flags.founderCellSet).toBe(false);
   });
+
+  it('messagingDriver shows "mock" when the twilio driver is redirected to a fake host', () => {
+    // The `--mock` dev loop: MESSAGING_DRIVER=twilio + TWILIO_API_BASE_URL set.
+    const config = localConfig({ messagingDriver: 'twilio', twilioApiBaseUrl: 'http://localhost:8889' });
+    const flags = makeService({ config, cloudwatch: fakeSeam() }).getFlags();
+    expect(flags.messagingDriver).toBe('mock');
+  });
+
+  it('messagingDriver shows "twilio" for the real twilio driver (no fake-host redirect)', () => {
+    const config = deployedConfig({ messagingDriver: 'twilio', twilioApiBaseUrl: undefined });
+    const flags = makeService({ config, cloudwatch: fakeSeam() }).getFlags();
+    expect(flags.messagingDriver).toBe('twilio');
+  });
+
+  it('messagingDriver shows "console" for the console driver — even with a base-URL override', () => {
+    // The base-URL override only redirects the twilio driver; the console driver
+    // is unaffected, so it must never read as "mock".
+    const config = localConfig({ messagingDriver: 'console', twilioApiBaseUrl: 'http://localhost:8889' });
+    const flags = makeService({ config, cloudwatch: fakeSeam() }).getFlags();
+    expect(flags.messagingDriver).toBe('console');
+  });
 });
 
 describe('systemStatus.getAlarms — degradation', () => {

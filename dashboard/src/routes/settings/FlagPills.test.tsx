@@ -70,6 +70,14 @@ describe('FlagPills', () => {
     expect(screen.getByText('console')).toBeInTheDocument();
   });
 
+  it('shows the driver as "mock" when the twilio driver is redirected to a fake host (--mock)', async () => {
+    getSystemFlags.mockResolvedValue(flags({ env: 'local', messagingDriver: 'mock' }));
+    render(<FlagPills />);
+    await waitFor(() => expect(screen.getByText('Messaging driver')).toBeInTheDocument());
+    expect(screen.getByText('mock')).toBeInTheDocument();
+    expect(screen.queryByText('twilio')).not.toBeInTheDocument();
+  });
+
   it('shows an error block + Retry when the fetch fails, and retries on click', async () => {
     getSystemFlags.mockRejectedValueOnce(new ApiError(500, 'server_error', 'boom'));
     render(<FlagPills />);

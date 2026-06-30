@@ -21,20 +21,41 @@ const EXPECTED = {
   smsSendingEnabled: true,
 } as const;
 
+/** How long to wait for the app to finish booting before giving up. */
+const PREFLIGHT_DEADLINE_MS = 60_000;
+const PREFLIGHT_POLL_MS = 1_000;
+
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const baseURL =
     config.projects[0]?.use?.baseURL ?? process.env['E2E_BASE_URL'] ?? 'http://localhost:5174';
   const url = `${baseURL}/__dev/ping`;
 
-  let ping: Record<string, unknown>;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
-    ping = (await res.json()) as Record<string, unknown>;
-  } catch (err) {
+  // Poll until the app answers, rather than failing on the first miss. Playwright's
+  // webServer readiness gate keys on Vite (:5174) being up, but the app (:8080, which
+  // /__dev/ping proxies to) finishes booting a beat later — so a cold ONE-TERMINAL
+  // `npm run e2e` can race ahead and hit ECONNREFUSED / a proxy 5xx. Retry those
+  // (transient: app still booting) until a deadline; a genuine CONFIG mismatch below
+  // still fails fast (it isn't a timing problem).
+  let ping: Record<string, unknown> | undefined;
+  let lastErr: unknown;
+  const deadline = Date.now() + PREFLIGHT_DEADLINE_MS;
+  for (;;) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
+      ping = (await res.json()) as Record<string, unknown>;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, PREFLIGHT_POLL_MS));
+    }
+  }
+  if (!ping) {
     throw new Error(
-      `e2e preflight: could not reach ${url} (${String(err)}). The stack must be up with the ` +
-        `dev endpoints enabled (DEV_AUTH_ENABLED=1). The launcher scripts/e2e-session.mjs sets this.`,
+      `e2e preflight: could not reach ${url} within ${Math.round(PREFLIGHT_DEADLINE_MS / 1000)}s ` +
+        `(${String(lastErr)}). The stack must be up with the dev endpoints enabled ` +
+        `(DEV_AUTH_ENABLED=1). The launcher scripts/e2e-session.mjs sets this.`,
     );
   }
 

@@ -1,0 +1,288 @@
+/* SystemStatusSection — go-live flags + alarms + recent errors. Tokens only.
+ * Status is conveyed by TEXT as well as colour (a11y); the amber "pre-A2P"
+ * pill is deliberately distinct from the red error/alarm tones. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 720px;
+}
+
+.heading {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.lede {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* --- A stacked block (flags / alarms / errors) --------------------------- */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+}
+
+.blockHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.blockHeading {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.center {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-5);
+}
+
+.empty,
+.degraded {
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-md);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+/* --- FlagPills ----------------------------------------------------------- */
+.pills {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  font-size: var(--fs-sm);
+}
+
+.pillLabel {
+  color: var(--c-text-muted);
+}
+
+.pillState {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.pillOn {
+  background: var(--c-evt-green-bg);
+  border-color: var(--c-evt-green-border);
+  color: var(--c-evt-green-text);
+}
+
+/* Amber "Off · pre-A2P": the EXPECTED pre-launch state — distinct from red. */
+.pillPreA2p {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+
+.pillOff {
+  background: var(--c-surface-2);
+  border-color: var(--c-border);
+  color: var(--c-text-subtle);
+}
+
+.pillInfo {
+  background: var(--c-evt-neutral-bg);
+  border-color: var(--c-evt-neutral-border);
+  color: var(--c-evt-neutral-text);
+}
+
+/* --- AlarmGrid ----------------------------------------------------------- */
+.alarmList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.alarmRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  font-size: var(--fs-sm);
+}
+
+.alarmName {
+  flex: 1 1 auto;
+  color: var(--c-text);
+  font-weight: var(--fw-medium);
+  word-break: break-word;
+}
+
+.alarmBadge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+.alarmOk {
+  background: var(--c-evt-green-bg);
+  border-color: var(--c-evt-green-border);
+  color: var(--c-evt-green-text);
+}
+
+.alarmFiring {
+  background: #fde8e6;
+  border-color: #f7c4c0;
+  color: var(--c-danger);
+}
+
+.alarmInsufficient {
+  background: var(--c-surface-2);
+  border-color: var(--c-border);
+  color: var(--c-text-subtle);
+}
+
+.alarmWhen {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* --- RecentErrors -------------------------------------------------------- */
+.errorControls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.windowLabel {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.windowSelect {
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.windowSelect:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.errorList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.errorRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+}
+
+.errorMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.errorWhen {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.errorLevel {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: #fde8e6;
+  border: 1px solid #f7c4c0;
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.errorMessage {
+  margin: 0;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+
+.errorCorrelation {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono, monospace);
+}

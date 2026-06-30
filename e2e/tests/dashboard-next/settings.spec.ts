@@ -110,11 +110,21 @@ test.describe('Settings — admin path', () => {
       )
       .toBe(true);
 
-    // --- System status tab is reachable by an admin (Phase-A stub) ---
+    // --- System status tab is reachable by an admin (Phase-B real section) ---
+    // On the local/hermetic stack there is no AWS, so flags load (config only)
+    // while the alarms + errors blocks degrade to the "Available in deployed
+    // environments." notice.
     await page.getByRole('tab', { name: 'System status' }).click();
     await expect(page).toHaveURL(/\/settings\/system$/);
     await expect(page.getByRole('heading', { name: 'System status', level: 2 })).toBeVisible();
-    await expect(page.getByText(/coming soon/i)).toBeVisible();
+    // FlagPills always render (the go-live flags read straight from config) — the
+    // Environment pill is present in every env.
+    await expect(page.getByRole('heading', { name: 'Go-live flags', level: 3 })).toBeVisible();
+    await expect(page.getByText('Environment')).toBeVisible();
+    // Alarms + Recent errors degrade gracefully on the local stack (no AWS).
+    await expect(page.getByRole('heading', { name: 'Alarms', level: 3 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Recent errors', level: 3 })).toBeVisible();
+    await expect(page.getByText('Available in deployed environments.')).toHaveCount(2);
 
     // --- Restore the welcome-text to a neutral copy that still interpolates
     // {firstName} so later specs (e.g. outbox.spec, which only checks the first

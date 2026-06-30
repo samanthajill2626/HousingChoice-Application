@@ -23,7 +23,7 @@ import { SettingsPage } from './routes/settings/SettingsPage.js';
 import { TeamSection } from './routes/settings/TeamSection.js';
 import { TemplatesSection } from './routes/settings/TemplatesSection.js';
 import { NotificationsSection } from './routes/settings/NotificationsSection.js';
-import { SystemStubSection } from './routes/settings/SystemStubSection.js';
+import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
@@ -109,7 +109,7 @@ export default function App(): React.JSX.Element {
                 path="system"
                 element={
                   <AdminRoute>
-                    <SystemStubSection />
+                    <SystemStatusSection />
                   </AdminRoute>
                 }
               />

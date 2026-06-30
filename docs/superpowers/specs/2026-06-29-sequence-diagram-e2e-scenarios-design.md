@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed task, merged to `main` (2026-06-29).** This document
+> describes the sequence-diagram→e2e scenario suite (tenant onboarding) as *designed at the
+> time of writing*. The work shipped to `main` (merge `964c87e`): the `e2e/scenarios/steps.ts`
+> vocabulary, the `fakeVoice` fixture, the tenant-onboarding scenario suite, structured contact
+> intake fields, and a reseed/session-epoch-cache fix. **This file is NOT current documentation
+> and may have drifted from the live code. Do not treat it as authoritative guidance on how the
+> system is built or behaves today.** For current truth read the code and the living docs —
+> especially the playbook `documentation/sequence-diagram-to-test.md`, plus `e2e/README.md`.
+> Kept only as a point-in-time record of intent.
 # Sequence-diagram → e2e scenario suite — design
 
 **Date:** 2026-06-29

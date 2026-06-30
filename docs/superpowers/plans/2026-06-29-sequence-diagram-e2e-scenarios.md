@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-06-29).** This document
+> describes how this work was *planned at the time of writing*. The work shipped to `main`
+> (merge `964c87e`) — full e2e suite green (31/31) — and the audit reshaped several tasks as it
+> ran (settings-seed de-scoped, self-serve promoted to supported, selectors corrected, a latent
+> reseed/epoch-cache bug found + fixed). **This file is NOT current documentation, and the live
+> code may have drifted from it. Do not treat it as authoritative guidance on how the system
+> should be built or how it behaves today.** For current truth read the code and the living docs
+> — especially the playbook `documentation/sequence-diagram-to-test.md` and `e2e/README.md`.
+> Kept only as a point-in-time record of intent.
 # Sequence-diagram → e2e scenario suite (tenant onboarding) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

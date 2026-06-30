@@ -1,0 +1,56 @@
+/* IntakeForm — stacked labelled fields, mobile-first. Tokens only. */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.error {
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.submit {
+  margin-top: var(--sp-2);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-inverse);
+  background: var(--c-brand);
+  cursor: pointer;
+}
+
+.submit:hover:not(:disabled) {
+  background: var(--c-brand-hover);
+}
+
+.submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

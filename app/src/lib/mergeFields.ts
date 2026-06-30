@@ -7,7 +7,7 @@
 //   [Beds]        — the unit's bedroom count.
 //   [Address]     — formatAddress of the unit (one-line, NOT the public flyer).
 //   [Rent]        — the unit's asking-rent range.
-//   [FlyerLink]   — `${PUBLIC_BASE_URL}/flyer/${unitId}`.
+//   [FlyerLink]   — `${PUBLIC_BASE_URL}/p/${unitId}`.
 //
 // Unit-derived tokens come from the unit and are identical for every recipient;
 // only [TenantName] is per-recipient, so the unit context is rendered ONCE and
@@ -20,10 +20,11 @@ import type { UnitItem } from '../repos/unitsRepo.js';
 /** Neutral [TenantName] fallback when no first name is known — NEVER a phone. */
 export const NEUTRAL_TENANT_NAME = 'there';
 
-/** Public flyer URL shape (matches routes/public.ts). */
+/** Public flyer URL shape — the funnel route the public surface mounts (the
+ *  FlyerFunnel at /p/:unitId). Every shared [FlyerLink] must land here. */
 export function flyerUrl(publicBaseUrl: string | undefined, unitId: string): string {
   const base = (publicBaseUrl ?? '').replace(/\/+$/, '');
-  return `${base}/flyer/${unitId}`;
+  return `${base}/p/${unitId}`;
 }
 
 /** Format a unit's asking-rent range; '' when no rent is known. */

@@ -27,10 +27,10 @@ function unit(overrides: Partial<UnitItem> = {}): UnitItem {
 }
 
 describe('mergeFields (M1.8a)', () => {
-  it('flyerUrl builds ${PUBLIC_BASE_URL}/flyer/${unitId}, trimming a trailing slash', () => {
-    expect(flyerUrl(BASE, 'unit-7')).toBe(`${BASE}/flyer/unit-7`);
-    expect(flyerUrl(`${BASE}/`, 'unit-7')).toBe(`${BASE}/flyer/unit-7`);
-    expect(flyerUrl(undefined, 'unit-7')).toBe('/flyer/unit-7');
+  it('flyerUrl builds ${PUBLIC_BASE_URL}/p/${unitId}, trimming a trailing slash', () => {
+    expect(flyerUrl(BASE, 'unit-7')).toBe(`${BASE}/p/unit-7`);
+    expect(flyerUrl(`${BASE}/`, 'unit-7')).toBe(`${BASE}/p/unit-7`);
+    expect(flyerUrl(undefined, 'unit-7')).toBe('/p/unit-7');
   });
 
   it('formatRent renders a range, a single value, or empty', () => {
@@ -48,7 +48,7 @@ describe('mergeFields (M1.8a)', () => {
       'Maria',
     );
     expect(out).toBe(
-      `Hi Maria! A 2bd at 123 Main St, Springfield, IL 60000 for $1200–$1500. See ${BASE}/flyer/unit-7`,
+      `Hi Maria! A 2bd at 123 Main St, Springfield, IL 60000 for $1200–$1500. See ${BASE}/p/unit-7`,
     );
   });
 

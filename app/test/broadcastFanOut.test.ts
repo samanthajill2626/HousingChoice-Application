@@ -174,7 +174,7 @@ describe('broadcast.send (M1.8a)', () => {
 
     // Merge fields rendered: Alice by name, Bob falls back to the neutral label.
     const aliceMsg = world.messages.find((m) => m.body?.startsWith('Hi Alice'));
-    expect(aliceMsg?.body).toBe(`Hi Alice, a 2bd for $1200–$1400: ${PUBLIC_BASE}/flyer/unit-1`);
+    expect(aliceMsg?.body).toBe(`Hi Alice, a 2bd for $1200–$1400: ${PUBLIC_BASE}/p/unit-1`);
     const bobMsg = world.messages.find((m) => m.body?.startsWith('Hi there'));
     expect(bobMsg).toBeDefined();
     expect(bobMsg?.body).not.toMatch(/\+1555/); // never leak the phone

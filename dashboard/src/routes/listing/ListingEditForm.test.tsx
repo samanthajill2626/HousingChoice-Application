@@ -111,6 +111,22 @@ describe('ListingEditForm', () => {
     });
   });
 
+  it('renders the "Voucher size accepted" input, prefills it, and PATCHes it (as a number) when changed', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withVoucher: UnitItem = { ...UNIT, voucher_size_accepted: 2 };
+    render(<ListingEditForm unit={withVoucher} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    const input = screen.getByLabelText('Voucher size accepted');
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveValue(2);
+
+    fireEvent.change(input, { target: { value: '3' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: 3 });
+  });
+
   it('surfaces a save failure and stays open', async () => {
     const user = userEvent.setup();
     updateUnit.mockRejectedValue(new Error('boom'));

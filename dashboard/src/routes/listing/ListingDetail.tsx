@@ -298,6 +298,9 @@ export function ListingDetail(): React.JSX.Element {
                 k="Same-day RTA"
                 v={unit.same_day_rta === true ? 'Yes' : unit.same_day_rta === false ? 'No' : '—'}
               />
+              {typeof unit.voucher_size_accepted === 'number' ? (
+                <KV k="Voucher size accepted" v={String(unit.voucher_size_accepted)} />
+              ) : null}
               <KV
                 k="Video tour"
                 v={

@@ -30,6 +30,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
+import { CELL_VERIFY_MAX_ATTEMPTS } from '../lib/cellVerification.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
@@ -610,7 +611,7 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       }
       const attempts =
         typeof current.cell_verify_attempts === 'number' ? current.cell_verify_attempts : 0;
-      if (attempts >= 5) {
+      if (attempts >= CELL_VERIFY_MAX_ATTEMPTS) {
         return { ok: false, reason: 'too_many_attempts' };
       }
       if (codeHash !== storedHash) {

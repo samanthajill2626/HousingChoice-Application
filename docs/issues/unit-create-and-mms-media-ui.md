@@ -38,3 +38,10 @@ proven via the landlord timeline gallery + a unit `media` set through the API?
 
 **e2e impact.** Governs whether `teamCreatesUnitFromIntake` drives a real form (needs the build)
 or an API-setup verb. Related: [[unit-onboarding-fields]].
+
+**Update (2026-07-01) — deferred (human decision: "API setup, defer UI").** The
+landlord-onboarding e2e suite models unit creation as **API setup** (`teamCreatesUnitFromIntake`
+→ `POST /api/units` + publish), and property intake is **text-only** (no MMS media sent — an
+inbound MMS from a disallowed host logs `MediaFetchRefusedError`). Both UI builds remain
+UNBUILT and this issue stays **open**: (1) a "New unit for this landlord" form on the landlord
+page, (2) attaching inbound MMS media to a unit. No product code was added for either.

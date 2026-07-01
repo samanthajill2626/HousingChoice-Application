@@ -3,9 +3,10 @@ id: landlord-lead-status-and-park
 title: No landlord lead-status (interested/declined) or "parked" terminal + decline reason
 type: decision
 severity: high
-status: open
+status: resolved
 area: app
 created: 2026-06-30
+resolved: 2026-07-01
 refs: app/src/lib/statusModel.ts, app/src/routes/contacts.ts:117, app/src/routes/statusTransition.ts:189, documentation/landlord-onboarding-sequence.mermaid
 ---
 
@@ -42,3 +43,14 @@ no lead-status concept, no parked/declined terminal, and no reason storage.
 
 **e2e impact.** `expectLeadParked` / the "mark interested" verb assert against whatever we pick.
 Related: [[landlord-onboarding-record-fields]].
+
+**Resolution (2026-07-01) — new landlord statuses (human decision).** Added
+`LANDLORD_STATUSES = ['needs_review','interested','active','parked']` (+ `LANDLORD_STATUS_LABELS`
++ `isLandlordStatus`) in `statusModel.ts`, and a `park_reason` field on the contact (written when
+the status moves to `parked`; also settable via the generic PATCH so the edit form persists it
+alongside the status change). Centralized `statusAllowlistFor(type)` — used by BOTH the generic
+`PATCH /api/contacts/:id` status branch and the `/tenant-status` route — which CLOSES the leak
+where a landlord could be set to tenant-only `on_hold`/`inactive` (the route previously guarded
+only with `isTenantStatus`). Tenants unaffected. Commit `bdbe98a`; the dashboard renders the
+status LABEL and drives Parked + "Park reason" through the edit form
+(`e2e/tests/scenarios/landlord-onboarding.spec.ts`).

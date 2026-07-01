@@ -3,9 +3,10 @@ id: landlord-onboarding-record-fields
 title: Landlord record has no fields for onboarding-call deal terms, approval criteria, or contract-signed
 type: decision
 severity: high
-status: open
+status: resolved
 area: app
 created: 2026-06-30
+resolved: 2026-07-01
 refs: app/src/routes/contacts.ts, app/src/lib/contactProfile.ts, app/src/repos/contactsRepo.ts, dashboard/src/routes/contact/LandlordFile.tsx, documentation/landlord-onboarding-sequence.mermaid
 ---
 
@@ -50,3 +51,12 @@ customField? (The diagram asserts recording it, not a DocuSign integration — s
 
 **Not a blocker for the e2e suite's SHAPE** — the scenarios can drive whatever surface we choose;
 this issue is the schema decision they'll assert against. Related: [[landlord-lead-status-and-park]].
+
+**Resolution (2026-07-01) — Hybrid (human decision).** Built the logic/matching-driving fields
+as first-class, validated contact fields (settable via `POST`/`PATCH /api/contacts`, on the
+`Contact` type, shown in a "Landlord onboarding" dashboard card + edit-form inputs):
+`contract_status` ('unsigned'|'signed'), `expected_rent`, `registered_landlord`, `rta_within_48h`,
+`pass_inspection_first_try`, `income_includes_voucher`. The softer terms (utilities, hold fee,
+tour logistics, comms prefs, evictions/utility-debt/credit/references narrative) stay free-form in
+the existing `notes` / `customFields` — no schema. Commits `e116460` (fields) + `6377353` (card +
+inputs). Exercised by `e2e/tests/scenarios/landlord-onboarding.spec.ts`.

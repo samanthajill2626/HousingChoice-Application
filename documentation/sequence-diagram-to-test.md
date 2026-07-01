@@ -158,6 +158,54 @@ a different name, not a gap to build** — the audit's job is to find the mappin
   that card. Lesson: when "assert what Team sees", confirm the rendered surface actually
   renders the data — a card can exist yet be a stub.
 
+## Audit-surfaced realities — landlord & unit onboarding (the third diagram)
+
+The first diagram to surface a **substantial backing build** (most fields didn't exist). The
+big lesson: when the audit shows a large schema gap, **STOP after the audit and get a human
+data-model decision before building** — file each gap in `docs/issues/`, present the gap list
++ the product/data-model choices, then build to the decision. Do NOT autonomously commit a big
+schema on a guess.
+
+- **Landlords had a two-value lifecycle** (`needs_review|active`) — no interested/parked/lost
+  and no reason field. Added a landlord lifecycle (`needs_review|interested|active|parked`) +
+  `park_reason`. **Leak found:** the `PATCH /api/contacts/:id/tenant-status` route guarded only
+  with `isTenantStatus`, so a LANDLORD could be pushed into tenant-only `on_hold`/`inactive`.
+  Fixed by centralizing a type-scoped `statusAllowlistFor(type)` used by BOTH the generic PATCH
+  status branch and the `/tenant-status` route. Landlord status is set via the SAME
+  `/tenant-status` route (it handles all types), not a landlord-specific endpoint.
+- **Hybrid data model (a real decision):** structure the fields that drive logic/matching
+  (`contract_status`, `expected_rent`, `registered_landlord`, `rta_within_48h`,
+  `pass_inspection_first_try`, `income_includes_voucher`); leave soft terms (utilities, hold
+  fee, tour logistics, comms prefs, evictions/credit/references prose) in the existing free-form
+  `notes`/`customFields`. `teamRecordsApprovalCriteria` uses a **custom field** so it doesn't
+  overwrite the onboarding `notes`.
+- **Contract-signed / DocuSign is external** — assert the RECORDED `contract_status`, not an
+  email/DocuSign integration. Email is a filed future channel ([[email-as-first-class-channel]]).
+- **A landlord "cold call" is not testable as an app-placed call** — model first-touch as the
+  Team CREATING the landlord contact (New-contact dialog → **"Landlord"** kind) + marking
+  interested. The inbound-text path reuses the unknown-capture/relay verbs and triages via
+  **"Mark as Landlord"** (not "Mark as Tenant").
+- **Unit `voucher_size_accepted` is distinct from `beds`** (a 3bd that accepts a 2BR voucher;
+  the derived `voucher_size` from beds is a different, read-only thing). Only this unit field was
+  built; king-bed/sqft/W-D/qualifications were **deferred** (`unit-onboarding-fields`).
+- **Unit creation modeled as API setup** (`teamCreatesUnitFromIntake` → `POST /api/units` +
+  publish), because there is **no create-unit UI** and no MMS-attach-to-unit
+  (`unit-create-and-mms-media-ui`, deferred). The listing link is the generated
+  `GET /public/units/:id/flyer`.
+- **Selector collision:** the landlord edit dialog has BOTH a lifecycle **"Status"** select and
+  a **"Contract status"** select — a loose `/Status/` name matches both; use
+  `getByRole('combobox',{name:'Status', exact:true})`.
+- **Render the status LABEL, not the raw enum** — landlords initially showed raw `interested`
+  while tenants showed `Searching`; map via `LANDLORD_STATUS_LABELS` in the Details card
+  (consistency + robustness), and assert the label in e2e.
+- **Inbound MMS from a disallowed host logs `MediaFetchRefusedError`** (the app refuses to
+  mirror media outside twilio/`localhost:8889`, and the fake serves canned *recordings*, not
+  images). For a **deferred** media feature, keep property intake **text-only** rather than
+  emit an error log every run.
+- **Mermaid authoring gotcha (drafting the diagram):** a `;` inside a `Note` is parsed as a
+  statement separator and BREAKS the diagram parse. Use `.` / `—` inside notes, and avoid
+  quotes in notes.
+
 ## Debugging discipline
 
 When the suite is red, **find the root cause before fixing** (`superpowers:systematic-
@@ -176,3 +224,6 @@ state**, usually process-memory that survives a DB reseed.
   and its diagram [`documentation/tenant-onboarding-sequence.mermaid`](tenant-onboarding-sequence.mermaid).
 - Second worked example: [`e2e/tests/scenarios/sending-unit.spec.ts`](../e2e/tests/scenarios/sending-unit.spec.ts)
   and its diagram [`documentation/sending-unit-sequence.mermaid`](sending-unit-sequence.mermaid).
+- Third worked example (with a real backing build): [`e2e/tests/scenarios/landlord-onboarding.spec.ts`](../e2e/tests/scenarios/landlord-onboarding.spec.ts)
+  and its diagram [`documentation/landlord-onboarding-sequence.mermaid`](landlord-onboarding-sequence.mermaid);
+  build plan [`docs/superpowers/plans/2026-06-30-landlord-onboarding.md`](../docs/superpowers/plans/2026-06-30-landlord-onboarding.md).

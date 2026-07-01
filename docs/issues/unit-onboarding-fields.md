@@ -38,3 +38,9 @@ reuses `listing_link` or gets its own field.
 
 **e2e impact.** `teamCreatesUnitFromIntake(...)` / `expectUnitAvailableWithListingLink` assert
 against whichever fields we add. Related: [[unit-create-and-mms-media-ui]].
+
+**Update (2026-07-01) — partially built (human decision: "only voucher-size-accepted").** Added
+the matching-critical field `voucher_size_accepted` (number, distinct from `beds`) as a writable
+unit field + edit input + property-detail row (commits `cabffcd` + `3dd7d7a`). The rest —
+king-bed fit, sqft, W/D hookups, qualifications — remain **DEFERRED** (this issue stays open for
+them). The Zillow link reuses the existing writable `listing_link`.

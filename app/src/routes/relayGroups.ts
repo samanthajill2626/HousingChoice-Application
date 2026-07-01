@@ -23,6 +23,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
+import { relayMemberKey } from '../repos/messagesRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -276,6 +277,18 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     await audit.append(`conversations#${conversationId}`, 'relay_member_removed', {
       actor,
     });
+    // A2P — resolve the Today opt-out attention item: removing the member clears
+    // their relay_opted_out_members entry (the item auto-resolves). Keyed by the
+    // SAME relayMemberKey the fan-out used (contactId, else `phone#<E164>`).
+    // Best-effort — a failure must not fail the remove.
+    if (removedMember !== undefined) {
+      const memberKey = relayMemberKey(removedMember);
+      try {
+        await conversations.clearRelayMemberOptedOut(conversationId, memberKey);
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay member remove: clearing opt-out annotation failed');
+      }
+    }
     // BE2/C2: a real member-remove is a timeline milestone for THAT member's
     // contact. Only for members with a contactId; best-effort.
     if (removedMember?.contactId && removedMember.contactId.length > 0) {

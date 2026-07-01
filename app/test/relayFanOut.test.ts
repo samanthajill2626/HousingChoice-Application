@@ -168,6 +168,30 @@ describe('relay.fanOut (M1.7)', () => {
     expect(stored.delivery_recipients?.['c-carol']?.status).toBe('queued');
   });
 
+  it('records the opted-out member on the CONVERSATION (relay_opted_out_members) so Today can surface it', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    // The conversation now carries Bob's opt-out (keyed by his relayMemberKey =
+    // contactId), with his display data for the Today item + the observed instant.
+    const conv = world.conversations.get('conv-relay-1')!;
+    expect(conv.relay_opted_out_members?.['c-bob']).toMatchObject({
+      contactId: 'c-bob',
+      phone: BOB,
+      name: 'Bob',
+    });
+    expect(typeof conv.relay_opted_out_members?.['c-bob']?.at).toBe('string');
+    // Only the opted-out member is recorded (Carol received, is not annotated).
+    expect(Object.keys(conv.relay_opted_out_members ?? {})).toEqual(['c-bob']);
+  });
+
   it('relay intro skips an opted-out member', async () => {
     seedRelay(world);
     world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });

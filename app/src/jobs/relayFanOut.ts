@@ -327,6 +327,24 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
           status: 'failed',
           errorCode: 'contact_opted_out',
         });
+        // Annotate the conversation so staff get a Today attention item linking
+        // to the member's contact page (they investigate/remove there). BEST-
+        // EFFORT: a failure to annotate must NEVER break the fan-out. PII: log
+        // IDs/keys only — the stored phone/name are DATA (for display), not a log.
+        try {
+          await conversations.setRelayMemberOptedOut(payload.relayConversationId, key, {
+            ...(member.contactId !== undefined &&
+              member.contactId.length > 0 && { contactId: member.contactId }),
+            phone: member.phone,
+            ...(member.name !== undefined && { name: member.name }),
+            at: new Date().toISOString(),
+          });
+        } catch (err) {
+          log.error(
+            { err, conversationId: payload.relayConversationId, memberKey: key },
+            'relayFanOut: annotating conversation with member opt-out failed — continuing',
+          );
+        }
         log.info(
           { conversationId: payload.relayConversationId, memberKey: key },
           'relayFanOut: recipient opted out (sms_opt_out) — skipped, not sent',

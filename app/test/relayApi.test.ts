@@ -303,6 +303,32 @@ describe('relay-group API (M1.7)', () => {
     expect(world.activityEvents.filter((e) => e.type === 'removed_from_group_text')).toHaveLength(1);
   });
 
+  // --- A2P: removing a member clears their relay_opted_out_members entry -------
+  it('removing a member clears their relay_opted_out_members entry (the Today item auto-resolves)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, contactId: 'c-alice', name: 'Alice' }, { phone: BOB, contactId: 'c-bob', name: 'Bob' }] });
+    const id = created.body.conversation.conversationId;
+
+    // Simulate the fan-out having flagged Bob as opted-out on the conversation.
+    const conv = world.conversations.get(id)!;
+    conv.relay_opted_out_members = {
+      'c-bob': { contactId: 'c-bob', phone: BOB, name: 'Bob', at: new Date().toISOString() },
+    };
+
+    // Remove Bob → his opt-out entry is cleared (keyed by his relayMemberKey).
+    const del = await request(app)
+      .delete(`/api/conversations/${id}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(200);
+    expect(world.conversations.get(id)!.relay_opted_out_members?.['c-bob']).toBeUndefined();
+  });
+
   it('PATCH close releases the pool number to quarantine; reopen provisions a fresh one', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);

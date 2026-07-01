@@ -126,6 +126,8 @@ function makeFakes(
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
+    setRelayMemberOptedOut: async () => {},
+    clearRelayMemberOptedOut: async () => {},
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,

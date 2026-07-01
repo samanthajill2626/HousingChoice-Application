@@ -132,6 +132,20 @@ export interface ConversationItem {
   outbound_minute_bucket?: string;
   /** Automated sends observed within outbound_minute_bucket. */
   outbound_minute_count?: number;
+  /**
+   * Relay opt-out signal (A2P): members of THIS relay_group who were skipped by
+   * the fan-out because they carry contact-level `sms_opt_out` — so staff can be
+   * alerted (Today attention item) and investigate/remove them. Keyed by the
+   * relayMemberKey (contactId, else `phone#<E164>`); the entry records the member
+   * for display + the instant it was observed. The Today endpoint LIVE-CONFIRMS
+   * each entry is still opted out, so an opt-back-in / removal auto-resolves the
+   * item even before the entry is cleared. Storing phone/name here is DATA (for
+   * display) — never logged. Absent on 1:1 threads.
+   */
+  relay_opted_out_members?: Record<
+    string,
+    { contactId?: string; phone?: string; name?: string; at: string }
+  >;
   [key: string]: unknown;
 }
 
@@ -352,6 +366,26 @@ export interface ConversationsRepo {
     poolNumber: string | null,
     expectedStatus?: 'open' | 'closed',
   ): Promise<ConversationItem>;
+  /**
+   * Record ONE relay member as opted-out on the conversation's
+   * `relay_opted_out_members` map (A2P — the fan-out detected `sms_opt_out` and
+   * skipped them). MERGES a single map slot (a targeted `SET
+   * relay_opted_out_members.#mk` — the map is auto-seeded if absent), so it never
+   * clobbers OTHER members' entries. Best-effort caller: a failure must never
+   * break the fan-out. `memberKey` is the relayMemberKey (may contain `#`), bound
+   * via an aliased name.
+   */
+  setRelayMemberOptedOut(
+    conversationId: string,
+    memberKey: string,
+    entry: { contactId?: string; phone?: string; name?: string; at: string },
+  ): Promise<void>;
+  /**
+   * Clear ONE relay member's `relay_opted_out_members` entry (they opted back in
+   * or were removed from the group). A targeted `REMOVE` of the single map slot —
+   * leaves the others intact. Idempotent (removing an absent slot is a no-op).
+   */
+  clearRelayMemberOptedOut(conversationId: string, memberKey: string): Promise<void>;
 }
 
 export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo {
@@ -904,6 +938,58 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId, status }, 'relay status set');
       return Attributes as ConversationItem;
+    },
+
+    async setRelayMemberOptedOut(conversationId, memberKey, entry) {
+      // MERGE one slot without clobbering the others. DynamoDB rejects a single
+      // SET that both seeds the parent map AND writes a child of it (overlapping
+      // document paths — the same constraint messagesRepo.setRecipientDelivery
+      // documents), and the parent map is NOT pre-seeded here (unlike
+      // delivery_recipients). So: try the child-only SET first (the common path
+      // once the map exists); if the map is absent the path SET fails its
+      // implicit parent-exists precondition, so we seed the whole (merged) map in
+      // a second write. Best-effort caller — a failure never breaks the fan-out.
+      // memberKey may carry `#` (phone keys) → aliased name. PII: log keys only.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET relay_opted_out_members.#mk = :entry',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND attribute_exists(relay_opted_out_members)',
+            ExpressionAttributeNames: { '#mk': memberKey },
+            ExpressionAttributeValues: { ':entry': entry },
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The map didn't exist yet — seed it with THIS one entry (existence of
+        // the conversation still guarded so an unknown id doesn't create a row).
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET relay_opted_out_members = :map',
+            ConditionExpression: 'attribute_exists(conversationId)',
+            ExpressionAttributeValues: { ':map': { [memberKey]: entry } },
+          }),
+        );
+      }
+      log.info({ conversationId, memberKey }, 'relay member opt-out recorded on conversation');
+    },
+
+    async clearRelayMemberOptedOut(conversationId, memberKey) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'REMOVE relay_opted_out_members.#mk',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeNames: { '#mk': memberKey },
+        }),
+      );
+      log.info({ conversationId, memberKey }, 'relay member opt-out cleared on conversation');
     },
   };
 }

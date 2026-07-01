@@ -36,10 +36,18 @@ import {
   listCalls,
   pressCall,
   findOutboundCall,
-  type FakeCall,
 } from '../../fixtures/fakeVoice.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { reseed } from '../../fixtures/reseed.js';
+// SHARED voice setup/drive helpers — one source of truth also used by the
+// diagram-driven landlord-onboarding scenario (e2e/scenarios/steps.ts).
+import {
+  verifyCell,
+  driveBridge,
+  callTimeline,
+  legPhones,
+  uniqueVoicePhone as uniquePhone,
+} from '../../fixtures/voiceSetup.js';
 
 // The app's real address (not the dashboard proxy — webhooks go direct to the app).
 const APP_URL = process.env['E2E_APP_URL'] ?? 'http://localhost:8080';
@@ -106,14 +114,6 @@ const BUSINESS = '+15550009999';
  *  the inbound cases prove a REASSIGNED holder's cell wins over this value. */
 const FOUNDER_CELL = '+15550000001';
 
-/** Per-run-unique NANP E.164s so cases never collide (mirrors steps.freshContact). */
-let seq = 0;
-function uniquePhone(): string {
-  const stamp = `${Date.now()}`.slice(-5);
-  seq += 1;
-  return `+1555${stamp}${String(seq).padStart(2, '0')}`;
-}
-
 /** Dev-login as a persona (va→navigator, founder→admin), then load the SPA so the
  *  session cookie is live for subsequent page.request API calls. */
 async function devLoginAs(page: Page, email: string): Promise<{ userId: string }> {
@@ -139,45 +139,6 @@ async function createContact(
   return { contactId: contact.contactId, phone };
 }
 
-/**
- * Verify the CURRENT session user's cell FOR REAL (spec §7): verify-start sends a
- * 6-digit SMS code (which the app really dispatches via the fake) → we read it from
- * /__dev/outbox → verify-confirm stamps cell_verified_at. Returns the verified cell.
- * This is the exact self-service path a navigator uses before placing masked calls.
- */
-async function verifyCell(api: APIRequestContext, cell: string): Promise<string> {
-  const start = await api.post(`${NEXT}/api/users/me/cell/verify-start`, { data: { cell } });
-  expect(start.status(), await start.text()).toBe(200);
-
-  // The app really sent the code SMS — read it back from the recorded outbox.
-  const code = await readVerifyCode(api, cell);
-  const confirm = await api.post(`${NEXT}/api/users/me/cell/verify-confirm`, { data: { code } });
-  expect(confirm.status(), await confirm.text()).toBe(200);
-  expect(typeof ((await confirm.json()) as { cell_verified_at: string }).cell_verified_at).toBe(
-    'string',
-  );
-  return cell;
-}
-
-/** Poll /__dev/outbox for the verification SMS to `cell` and extract its 6-digit code. */
-async function readVerifyCode(api: APIRequestContext, cell: string): Promise<string> {
-  let code: string | undefined;
-  await expect
-    .poll(
-      async () => {
-        const msgs = await getOutbox(api, { to: cell });
-        for (const m of msgs) {
-          const match = /(\d{6})/.exec(m.body ?? '');
-          if (match) code = match[1];
-        }
-        return code;
-      },
-      { timeout: 10_000 },
-    )
-    .toBeTruthy();
-  return code!;
-}
-
 /** Set/clear a user's inbound-voice-line (admin session required). */
 async function assignInboundLine(api: APIRequestContext, userId: string): Promise<number> {
   const res = await api.post(`${NEXT}/api/users/${userId}/inbound-voice-line`, { data: {} });
@@ -186,48 +147,6 @@ async function assignInboundLine(api: APIRequestContext, userId: string): Promis
 async function clearInboundLine(api: APIRequestContext, userId: string): Promise<number> {
   const res = await api.delete(`${NEXT}/api/users/${userId}/inbound-voice-line`);
   return res.status();
-}
-
-/** The contact's `call` timeline entries (kind:'call'), newest-first. */
-async function callTimeline(
-  api: APIRequestContext,
-  contactId: string,
-): Promise<Array<Record<string, unknown>>> {
-  const res = await api.get(
-    `${NEXT}/api/contacts/${contactId}/timeline?kinds=call&limit=50`,
-  );
-  expect(res.status(), await res.text()).toBe(200);
-  const body = (await res.json()) as { items: Array<Record<string, unknown>> };
-  return body.items.filter((i) => i['kind'] === 'call');
-}
-
-/**
- * Press '1' on the navigator leg and wait for the bridge to complete. The app's
- * originate route places the fake call fire-and-forget (Twilio's Calls.json returns
- * the queued sid immediately, then the CallEngine fetches the outbound-bridge TwiML
- * asynchronously), so a press can land BEFORE the engine has built the pre-dial gate
- * — in which case it no-ops and the call stays `ringing`. Retry the press until the
- * call reaches a terminal state. Returns the terminal FakeCall.
- */
-async function driveBridge(api: APIRequestContext, callSid: string): Promise<FakeCall> {
-  let last: FakeCall | undefined;
-  await expect
-    .poll(
-      async () => {
-        const call = await pressCall(api, callSid, '1');
-        last = call;
-        return call.status;
-      },
-      { timeout: 10_000, intervals: [100, 200, 300, 500] },
-    )
-    .toBe('completed');
-  return last!;
-}
-
-/** Every leg phone recorded on a fake call (the dialed target ends up here). */
-function legPhones(call: FakeCall): string[] {
-  const legs = (call['legs'] as Array<{ phone: string }> | undefined) ?? [];
-  return legs.map((l) => l.phone);
 }
 
 // ---------------------------------------------------------------------------

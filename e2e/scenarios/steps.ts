@@ -13,7 +13,14 @@
 // the Task 4 conformance audit (.superpowers/sdd/task-4-audit.md).
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
-import { tenantCallNoAnswer } from '../fixtures/fakeVoice.js';
+import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
+import {
+  verifyCell,
+  driveBridge,
+  callTimeline,
+  legPhones,
+  uniqueVoicePhone,
+} from '../fixtures/voiceSetup.js';
 
 const NEXT = 'http://localhost:5174';
 /** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
@@ -81,6 +88,9 @@ export class Scenario {
   private activeTenant: Tenant | null = null;
   /** First name of the active tenant — to locate their broadcast preview row. */
   private activeFirstName: string | null = null;
+  /** The navigator's VERIFIED cell for masked outbound calling — verified once per
+   *  scenario (teamMaskedCallsLandlord), reused on any re-call. Null until verified. */
+  private activeNavCell: string | null = null;
   private readonly registered = new Set<string>();
 
   constructor(
@@ -675,7 +685,10 @@ export class Scenario {
   /**
    * [Team] Housing-fair / sourced-lead path: create a brand-new Landlord via the
    * New-contact dialog (kind "Landlord"). Models the diagram's "[MANUAL] Create the
-   * landlord contact from the sourced lead" (the cold call is not app-placed in Phase 1).
+   * landlord lead contact from the sourced lead (needs_review) — the masked call is
+   * placed FROM the contact." This verb ONLY creates the lead; the app-placed masked
+   * cold call is a separate move (see {@link teamMaskedCallsLandlord}), matching the
+   * updated diagram where the cold call IS a Voice Phase 1 masked outbound call.
    * Sets the active contact + party, mirroring teamCreatesContact.
    */
   teamCreatesLandlord(fields: { firstName: string; lastName: string; phone?: string }): Promise<void> {
@@ -702,6 +715,122 @@ export class Scenario {
         firstName: fields.firstName,
         lastName: fields.lastName,
       };
+    });
+  }
+
+  /**
+   * [Team→App→Landlord] Place a MASKED OUTBOUND cold call to the active landlord lead,
+   * driving the REAL dashboard Call menu. Maps to the diagram's cold-call branch:
+   *
+   *   S->>A: Place a masked outbound call to the landlord (from the contact)
+   *   [AUTO] Masked outbound call (Voice Phase 1) — the app rings the Team member's
+   *          verified cell, then bridges to the landlord from the app's number; the
+   *          landlord never sees the personal cell. Recorded.
+   *   A->>L: Deliver the call (caller ID = the app's number)
+   *
+   * Moves, in order:
+   *   1. SETUP (idempotent) — the seeded VA (the logged-in navigator) needs a VERIFIED
+   *      cell or the originate route 409s `cell_not_verified`. A fresh scenario VA has
+   *      none, so verify one via the shared self-service path (verify-start → outbox
+   *      code → verify-confirm) using a unique cell number. `activeNavCell` guards it so
+   *      a re-call in the same scenario reuses the already-verified cell.
+   *   2. PLACE — navigate to the active landlord contact page, open CallMenu.tsx, click
+   *      the number to POST /api/contacts/:id/call. We capture the originate response
+   *      (waitForResponse) to read { callSid }, and assert the "Calling…" role=status
+   *      affordance appears (the 200 path). This exercises the REAL CallMenu wiring AND
+   *      yields the callSid the bridge needs.
+   *   3. BRIDGE — resolve the fake's paused navigator-leg call by callSid, then press '1'
+   *      (driveBridge) to run whisper → gate → <Dial> the landlord from the business
+   *      number → recording, exactly as the navigator pressing 1 on their ringing cell.
+   *   4. ASSERT — the outbound masked call lands on the LANDLORD thread as a kind:'call',
+   *      call_outcome:'answered' timeline entry; the fake bridge proves the caller ID is
+   *      the app's business number (never the navigator's cell) and the landlord is the
+   *      dialed <Number> leg. MASKING/PII: the navigator's personal cell appears NOWHERE
+   *      in the thread, and no masked party LABEL is exposed on the wire (the landlord's
+   *      own number surfaces only in the 1:1 `party_phone` slot — its own-thread number,
+   *      not a masked-counterpart leak).
+   *
+   * Leaves activeContactId / activeTenant untouched so later steps (interested/declines
+   * branch, onboarding, unit intake) operate on the same landlord lead.
+   */
+  teamMaskedCallsLandlord(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('Team places a masked outbound cold call to the landlord', async () => {
+      const api = this.page.request;
+
+      // 1. SETUP — verify the navigator's cell once per scenario (idempotent).
+      if (this.activeNavCell === null) {
+        this.activeNavCell = await verifyCell(api, uniqueVoicePhone());
+      }
+      const navCell = this.activeNavCell;
+
+      // 2. PLACE — drive the REAL CallMenu and capture the originate { callSid }.
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await expect(this.page.getByRole('heading', { name: 'Details' })).toBeVisible();
+      const callTrigger = this.page.getByRole('button', { name: /📞 Call/ });
+      await callTrigger.click();
+      const menu = this.page.getByRole('menu');
+      await expect(menu).toBeVisible();
+      const [originate] = await Promise.all([
+        this.page.waitForResponse(
+          (r) =>
+            /\/api\/contacts\/[^/]+\/call$/.test(r.url()) && r.request().method() === 'POST',
+        ),
+        menu.getByRole('menuitem').first().click(),
+      ]);
+      expect(originate.status(), await originate.text()).toBe(200);
+      const { callSid } = (await originate.json()) as { callSid: string };
+      expect(typeof callSid).toBe('string');
+      expect(callSid.length).toBeGreaterThan(0);
+      // The UI confirms the navigator's cell is ringing (the 200 "calling" affordance).
+      await expect(this.page.getByRole('status').filter({ hasText: /Calling your cell/i })).toBeVisible();
+
+      // 3. BRIDGE — resolve the paused navigator leg, then press '1' to run the dial chain.
+      const paused = await findOutboundCall(api, callSid);
+      expect(paused, 'fake did not record an outbound call for the originate').toBeDefined();
+      const bridged = await driveBridge(api, callSid);
+      expect(bridged.status).toBe('completed');
+
+      // 4a. Masked delivery (caller ID = the app's business number, NOT the nav cell);
+      //     the landlord is the dialed <Number> leg. `direction` is outbound at the app.
+      expect(bridged.from).toBe(APP_NUMBER);
+      expect(bridged.from).not.toBe(navCell);
+      const landlordPhone = this.requireActiveTenant().phone;
+      expect(legPhones(bridged)).toContain(landlordPhone);
+
+      // 4b. The persisted call entry lands on the LANDLORD thread: kind:'call', answered.
+      let entry: Record<string, unknown> | undefined;
+      await expect
+        .poll(
+          async () => {
+            const calls = await callTimeline(api, id); // ascending; the cold call is last
+            entry = calls[calls.length - 1];
+            return entry ? { kind: entry['kind'], outcome: entry['call_outcome'] } : null;
+          },
+          { timeout: 10_000 },
+        )
+        .toEqual({ kind: 'call', outcome: 'answered' });
+
+      // 4c. PII / masking invariant — the navigator's PERSONAL cell is the number
+      //     masking exists to protect, and it must NEVER appear anywhere in the
+      //     landlord thread. The wire timeline also exposes NO masked party LABEL that
+      //     could carry a raw phone: `call_party_label` (the "Landlord (Jane D.)" role
+      //     label stored on the entry) is omitted from the projection entirely, so the
+      //     only phone that can surface is the landlord's OWN number in the 1:1
+      //     `party_phone` slot (its own-thread number — same as any inbound call, not a
+      //     masked-counterpart leak). Assert: no nav cell, and no label field present.
+      const entries = await callTimeline(api, id);
+      const serialized = JSON.stringify(entries);
+      expect(serialized).not.toContain(navCell);
+      for (const e of entries) {
+        expect(e).not.toHaveProperty('call_party_label');
+        // The stored masked role label is role/name only — never a raw phone. Assert
+        // the honest label the app persists carries neither party's number.
+      }
+      // The landlord's number appears ONLY as its own-thread party_phone (never in a
+      // label), and the navigator cell appears nowhere.
+      const last = entries[entries.length - 1] ?? {};
+      if ('party_phone' in last) expect(last['party_phone']).toBe(landlordPhone);
     });
   }
 

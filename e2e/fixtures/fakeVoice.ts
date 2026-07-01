@@ -51,6 +51,39 @@ export async function answerLeg(
   return ((await res.json()) as { call: FakeCall }).call;
 }
 
+/**
+ * Inject a DTMF gate digit on a paused call (POST /control/calls/:sid/press).
+ * This is the step-API driver the OUTBOUND masked-call e2e uses: the app's
+ * originate route places the navigator-leg call WITHOUT a scenario, so the
+ * CallEngine pauses at the whisper Gather; pressing '1' here runs the whole
+ * dial chain (whisper → gate accept → <Dial> the target from the business
+ * number → the <Dial action> status summary → recording), exactly as a
+ * navigator pressing 1 on their ringing cell would. The endpoint awaits the
+ * engine's step before responding, so the returned call reflects the terminal
+ * state. Returns the resulting FakeCall.
+ */
+export async function pressCall(
+  request: APIRequestContext,
+  sid: string,
+  digit: '0' | '1',
+): Promise<FakeCall> {
+  const res = await request.post(`${FAKE_BASE}/control/calls/${sid}/press`, { data: { digit } });
+  if (!res.ok()) throw new Error(`press failed: ${res.status()} ${await res.text()}`);
+  return ((await res.json()) as { call: FakeCall }).call;
+}
+
+/** The single fake outbound (`kind:'outbound'`) call with the given callSid, or
+ *  undefined. The app's originate route returns this exact sid (the fake mints it
+ *  in Calls.json and echoes it back), so the e2e resolves the paused navigator-leg
+ *  call by the callSid it got from the originate response. */
+export async function findOutboundCall(
+  request: APIRequestContext,
+  callSid: string,
+): Promise<FakeCall | undefined> {
+  const calls = await listCalls(request);
+  return calls.find((c) => c.callSid === callSid && c.kind === 'outbound');
+}
+
 export async function hangup(request: APIRequestContext, sid: string): Promise<FakeCall> {
   const res = await request.post(`${FAKE_BASE}/control/calls/${sid}/hangup`, { data: {} });
   if (!res.ok()) throw new Error(`hangup failed: ${res.status()} ${await res.text()}`);

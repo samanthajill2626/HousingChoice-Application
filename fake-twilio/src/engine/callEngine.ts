@@ -82,6 +82,16 @@ interface PendingDial {
   scenario: CallScenario;
   /** Guard so a call advances through the dial chain exactly once. */
   resolved: boolean;
+  /**
+   * Voice Phase 1 OUTBOUND masked-bridge shape: when the FIRST TwiML the
+   * originating (navigator) leg receives is a whisper Gather (press-1 gate) rather
+   * than a direct <Dial>, the <Dial> to the target is produced only AFTER the gate
+   * is POSTed with the accept digit. This holds that gate's action URL; on advance,
+   * the engine POSTs it, interprets the resulting <Dial>, builds the target leg,
+   * and runs the normal dial chain (status + recording). Undefined for the classic
+   * top-level-<Dial> flow (inbound bridges + the click-to-call originate test).
+   */
+  preDialGateUrl?: string;
 }
 
 /** Map a scenario outcome to Twilio's DialCallStatus vocabulary. */
@@ -231,6 +241,25 @@ export class CallEngine {
     );
     const plan = interpretTwiml(body);
 
+    // Voice Phase 1 OUTBOUND masked bridge: the navigator leg's FIRST TwiML is a
+    // whisper Gather (press-1 to connect), NOT a <Dial>. The <Dial> to the target is
+    // produced by the gate action only after the accept digit is POSTed. Stash the
+    // gate URL as a pre-dial gate so pressDigit resolves the <Dial> then continues.
+    if (plan.kind === 'gather' && plan.actionUrl !== undefined) {
+      this.pendingDials.set(callSid, {
+        // Placeholder answering leg — the REAL target leg is discovered from the
+        // gate's <Dial> on advance. No whisper on it (the gate already gated).
+        answering: { phone: '' },
+        actionUrl: undefined,
+        recording: { enabled: false },
+        scenario,
+        resolved: false,
+        preDialGateUrl: plan.actionUrl,
+      });
+      if (!hasScenario) return call; // step-API: await pressDigit/hangup
+      return this.scheduleAutoRun(callSid, scenario);
+    }
+
     if (plan.kind !== 'dial' || plan.numbers.length === 0) {
       // No dial instruction (or no dialable number) — nothing to bridge. Terminal.
       call.status = 'completed';
@@ -261,10 +290,14 @@ export class CallEngine {
       // Step-API mode: pause here. The call awaits pressDigit/answerLeg/hangup.
       return call;
     }
+    return this.scheduleAutoRun(callSid, scenario);
+  }
 
-    // Scenario auto-run: schedule a tick that invokes the step methods in order on
-    // the injected clock (deterministic). The auto-run is just the step API driven
-    // by the scenario — keeping the 5.2 webhook sequence + status identical.
+  /** Scenario auto-run: schedule a tick that invokes the step methods in order on
+   *  the injected clock (deterministic). The auto-run is just the step API driven
+   *  by the scenario — keeping the webhook sequence + status identical. */
+  private scheduleAutoRun(callSid: string, scenario: CallScenario): CallState {
+    const call = this.calls.get(callSid)!;
     const delayMs = scenario.ringMs ?? (this.scheduleSeq += 1);
     const stepPromise = new Promise<void>((resolve) => {
       this.clock.schedule(delayMs, () => {
@@ -277,7 +310,6 @@ export class CallEngine {
     });
     this.pending.add(stepPromise);
     void stepPromise.finally(() => this.pending.delete(stepPromise));
-
     return call;
   }
 
@@ -334,13 +366,83 @@ export class CallEngine {
     const live = this.pendingDials.get(call.callSid);
     if (live) live.resolved = true;
     try {
-      await this.runDialChain(call, pd.answering, pd.actionUrl, pd.scenario, pd.recording, digit, answeredPhone);
+      // OUTBOUND pre-dial gate (Voice Phase 1): POST the navigator-leg whisper-gate
+      // with the accept digit FIRST — its response is the <Dial> to the target. On
+      // no-press (digit === null) the gate times out → no dial, no-answer terminal.
+      const resolvedPd = pd.preDialGateUrl !== undefined
+        ? await this.resolvePreDialGate(call, pd, digit)
+        : pd;
+      if (resolvedPd === undefined) return; // no dial produced (timeout/hangup) — already finalized
+      const nextDigit = pd.preDialGateUrl !== undefined ? undefined : digit;
+      await this.runDialChain(
+        call,
+        resolvedPd.answering,
+        resolvedPd.actionUrl,
+        resolvedPd.scenario,
+        resolvedPd.recording,
+        nextDigit,
+        pd.preDialGateUrl !== undefined ? resolvedPd.answering.phone : answeredPhone,
+      );
     } finally {
       // Always drop the pending-dial entry — even if a webhook in the chain throws —
       // so a rejected dispatcher call can never leak the map entry (the scheduled
       // callback's .catch() prevents a crash but would otherwise strand this entry).
       this.pendingDials.delete(call.callSid);
     }
+  }
+
+  /**
+   * OUTBOUND masked-bridge pre-dial gate (Voice Phase 1): POST the navigator-leg
+   * whisper-gate action with the accept digit; its TwiML response is the <Dial> to
+   * the target. Build the target leg (no per-leg whisper — the gate already gated)
+   * and return a resolved PendingDial carrying the dial's action/recording context.
+   * A no-press (digit === null) or a non-<Dial> gate response (Hangup) is a
+   * no-answer terminal: finalize the call here and return undefined.
+   */
+  private async resolvePreDialGate(
+    call: CallState,
+    pd: PendingDial,
+    digit: string | null | undefined,
+  ): Promise<PendingDial | undefined> {
+    const gateUrl = pd.preDialGateUrl!;
+    // No-press → the navigator never accepted; the outbound bridge is no-answer.
+    if (digit === null) {
+      call.status = 'no-answer';
+      this.touch(call);
+      this.hub.emit({ type: 'call.completed', call });
+      return undefined;
+    }
+    const acceptDigit = digit ?? '1';
+    const { body } = await this.dispatcher.postForResponse(
+      this.pathOf(gateUrl),
+      buildWhisperGateParams({ callSid: call.callSid, digits: acceptDigit }),
+    );
+    call.digit = acceptDigit;
+    const plan = interpretTwiml(body);
+    if (plan.kind !== 'dial' || plan.numbers.length === 0) {
+      // The gate hung up (e.g. an unresolved target) — no bridge. Terminal no-answer.
+      call.status = 'no-answer';
+      this.touch(call);
+      this.hub.emit({ type: 'call.completed', call });
+      return undefined;
+    }
+    // Build the target leg(s) from the gate's <Dial>. The target rides ONLY inside
+    // <Number> (never a URL param) — mirror it onto the call for leg assertions.
+    for (const n of plan.numbers) {
+      const leg: CallLeg = { phone: n.phone, answered: false };
+      if (n.whisperUrl !== undefined) leg.whisperUrl = n.whisperUrl;
+      call.legs.push(leg);
+    }
+    const answering = plan.numbers[0] as DialNumber;
+    return {
+      // No whisper on the target leg — the navigator gate already accepted, so the
+      // target bridges directly (runDialChain marks it answered).
+      answering: { phone: answering.phone },
+      actionUrl: plan.actionUrl,
+      recording: this.recordingContextOf(plan),
+      scenario: pd.scenario,
+      resolved: true,
+    };
   }
 
   /** The dial-level recording instruction extracted from the inbound TwiML plan.

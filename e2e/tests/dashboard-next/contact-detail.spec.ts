@@ -22,19 +22,26 @@ test.describe('Contact detail — header actions + edit', () => {
     await expect(page.getByText('Tasha Nguyen').first()).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Details' })).toBeVisible();
 
-    // The ⋯ menu lists Edit / Copy link / Do-Not-Contact.
+    // The ⋯ menu lists Edit / Copy link / Do-Not-Contact + the Voice Phase 1
+    // Do-Not-Call toggle (independent of the SMS opt-out).
     await page.getByRole('button', { name: 'More actions' }).click();
     await expect(page.getByRole('menuitem', { name: /Edit contact details/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /Copy link to contact/i })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /Mark Do-Not-Contact/i })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /Mark Do-Not-Call/i })).toBeVisible();
     await page.keyboard.press('Escape');
 
-    // The Call menu dials a number from the device + is honest about masking.
+    // The Call menu now places a MASKED in-app call (Voice Phase 1 §5): the old
+    // device-side `tel:` dial is gone — each number is a menuitem BUTTON that POSTs
+    // the originate route, and the menu is honest that it rings the navigator's cell
+    // first and the contact sees the business number (never the navigator's cell).
     await page.getByRole('button', { name: /Call/i }).click();
     const dial = page.getByRole('menuitem', { name: /555/ }).first();
     await expect(dial).toBeVisible();
-    await expect(dial).toHaveAttribute('href', /^tel:\+1555/);
-    await expect(page.getByText(/Dials from your device/i)).toBeVisible();
+    // A masked-call button, NOT a tel: link (the old device dial is gone).
+    await expect(dial).toHaveJSProperty('tagName', 'BUTTON');
+    await expect(page.getByText(/Rings your cell first/i)).toBeVisible();
+    await expect(page.getByText(/contact sees our business number/i)).toBeVisible();
   });
 
   test('editing a contact PATCHes and persists across a reload', async ({ page }) => {

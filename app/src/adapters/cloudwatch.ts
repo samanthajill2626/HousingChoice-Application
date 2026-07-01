@@ -2,8 +2,8 @@
 // are imported (adapter rule, mirroring mediaStore). It exposes exactly the two
 // narrow reads the System Status service needs (M1.4):
 //
-//   describeAlarms(prefix)                 → DescribeAlarms (AlarmNamePrefix)
-//   filterErrorEvents(group, sinceMs, lim) → FilterLogEvents (pino level ≥ 50)
+//   describeAlarms(prefix)                           → DescribeAlarms (AlarmNamePrefix)
+//   queryInsights(groups, filter, sinceMs, limit)    → Logs Insights (StartQuery → poll)
 //
 // The seam is INJECTABLE into the service so tests pass a fake/throwing client
 // and never resolve AWS credentials or hit the network. The clients are
@@ -19,7 +19,9 @@ import {
 } from '@aws-sdk/client-cloudwatch';
 import {
   CloudWatchLogsClient,
-  FilterLogEventsCommand,
+  GetQueryResultsCommand,
+  StartQueryCommand,
+  StopQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { type AppConfig } from '../lib/config.js';
@@ -31,6 +33,10 @@ import { type AppConfig } from '../lib/config.js';
 const CW_CONNECTION_TIMEOUT_MS = 2_000;
 const CW_REQUEST_TIMEOUT_MS = 5_000;
 const CW_MAX_ATTEMPTS = 2;
+
+// Insights polling config: at most 20 polls × 400ms = 8s maximum wait.
+const INSIGHTS_MAX_POLLS = 20;
+const INSIGHTS_POLL_INTERVAL_MS = 400;
 
 /** A region-configured SDK client config with bounded socket/connect timeouts. */
 function boundedClientConfig(region: string): {
@@ -48,23 +54,13 @@ function boundedClientConfig(region: string): {
   };
 }
 
-/**
- * Bounded wider scan budget for FilterLogEvents. We page WITHOUT the small
- * 25-cap (FilterLogEvents returns OLDEST-first per page, so a 25 SDK limit
- * would yield the 25 *oldest* in-window events and MISS the newest), then sort
- * descending + slice the newest 25 locally. The scan is capped so it stays
- * cheap: at most ERROR_SCAN_MAX_PAGES pages OR ERROR_SCAN_MAX_EVENTS events,
- * whichever comes first. Limitation: in an extreme burst beyond this budget the
- * absolute-newest events could still be missed — acceptable for a best-effort
- * observability panel.
- */
-const ERROR_SCAN_MAX_PAGES = 5;
-const ERROR_SCAN_MAX_EVENTS = 500;
-
-/** CloudWatch filter patterns for OOM lines (unstructured — NOT pino JSON, so the
- *  `{ $.level >= 50 }` error query never matches them). `?term` = OR match. */
-export const OOM_APP_FILTER_PATTERN = '?"JavaScript heap out of memory" ?"Reached heap limit"';
-export const OOM_SYSTEM_FILTER_PATTERN = '?"Out of memory: Killed process" ?"oom-kill:" ?"oom_reaper"';
+/** Insights filter for pino error/fatal lines. Insights parses JSON, so `level`
+ *  is a field; non-JSON lines have no `level` and are excluded (as before). */
+export const PINO_ERROR_INSIGHTS_FILTER = 'level >= 50';
+/** Insights filter for V8 heap-OOM (Node stderr, non-JSON). */
+export const OOM_APP_INSIGHTS_FILTER = '@message like /JavaScript heap out of memory/ or @message like /Reached heap limit/';
+/** Insights filter for kernel OOM-killer lines (shipped from /var/log/messages). */
+export const OOM_SYSTEM_INSIGHTS_FILTER = '@message like /Out of memory: Killed process/ or @message like /oom-kill:/ or @message like /oom_reaper/';
 
 /** One alarm, projected to the view the dashboard renders. */
 export interface AlarmView {
@@ -92,17 +88,12 @@ export interface CloudWatchClientSeam {
   /** DescribeAlarms filtered by AlarmNamePrefix → mapped alarm views. */
   describeAlarms(prefix: string): Promise<AlarmView[]>;
   /**
-   * FilterLogEvents on `logGroup` for pino level ≥ 50, since `sinceMs` (epoch
-   * ms). Pages a BOUNDED wider scan (oldest-first per page), then returns the
-   * NEWEST `limit` PII-safe projections, NEWEST-FIRST.
+   * Logs Insights query across one or more log groups with an arbitrary filter
+   * expression, since `sinceMs` (epoch ms). Returns up to `limit` events,
+   * NEWEST-FIRST (Insights natively supports `sort @timestamp desc | limit N`).
+   * PII-safe: each result row projected through projectErrorEvent.
    */
-  filterErrorEvents(logGroup: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
-  /**
-   * FilterLogEvents on `logGroup` with an ARBITRARY `filterPattern` since `sinceMs`,
-   * newest-first, capped at `limit`. Same bounded paged scan as filterErrorEvents.
-   * Used to surface OOM lines (raw text) that the pino level>=50 query misses.
-   */
-  filterEventsByPattern(logGroup: string, sinceMs: number, limit: number, filterPattern: string): Promise<ErrorEventView[]>;
+  queryInsights(logGroupNames: string[], filterExpr: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
 }
 
 /** Map a CloudWatch StateValue to the three-value view enum. */
@@ -139,6 +130,21 @@ function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorE
     // Non-JSON line — keep the generic message; never surface the raw text.
   }
   return { timestamp, level, message, correlationId };
+}
+
+/**
+ * Parse an Insights @timestamp value ("YYYY-MM-DD HH:MM:SS.mmm" UTC, no zone
+ * marker) to epoch ms. Falls back to Date.now() if absent or unparseable.
+ */
+function parseInsightsTimestamp(value: string | undefined): number {
+  if (!value) return Date.now();
+  const ms = Date.parse(value.replace(' ', 'T') + 'Z');
+  return isNaN(ms) ? Date.now() : ms;
+}
+
+/** Simple promise-based delay for polling. */
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -179,48 +185,6 @@ export interface CreateCloudWatchClientDeps {
 }
 
 /**
- * Bounded paged scan shared by both filterErrorEvents and filterEventsByPattern.
- * Pages through FilterLogEvents without an SDK-side limit (FilterLogEvents returns
- * oldest-first per page, so a small limit would surface the oldest events and miss
- * the newest). Accumulates up to the scan budget, then sorts newest-first and
- * slices to `limit`. The scan budget caps the cost: at most ERROR_SCAN_MAX_PAGES
- * pages OR ERROR_SCAN_MAX_EVENTS events, whichever comes first.
- */
-async function scanFiltered(
-  logs: CloudWatchLogsClient,
-  logGroup: string,
-  sinceMs: number,
-  limit: number,
-  filterPattern: string,
-): Promise<ErrorEventView[]> {
-  const projected: ErrorEventView[] = [];
-  let nextToken: string | undefined;
-  let pages = 0;
-  do {
-    const out = await logs.send(
-      new FilterLogEventsCommand({
-        logGroupName: logGroup,
-        startTime: sinceMs,
-        filterPattern,
-        nextToken,
-      }),
-    );
-    for (const e of out.events ?? []) {
-      projected.push(projectErrorEvent(e.message ?? '', e.timestamp ?? Date.now()));
-    }
-    nextToken = out.nextToken;
-    pages += 1;
-  } while (
-    nextToken !== undefined &&
-    pages < ERROR_SCAN_MAX_PAGES &&
-    projected.length < ERROR_SCAN_MAX_EVENTS
-  );
-  // Newest-first, then the newest `limit`.
-  projected.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
-  return projected.slice(0, limit);
-}
-
-/**
  * Construct the CloudWatch seam over the two SDK clients. The clients use
  * `region: config.awsRegion` and the ambient (instance-role) credentials when
  * deployed; tests inject fakes so neither AWS nor credential resolution is
@@ -243,13 +207,62 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       }));
     },
 
-    filterErrorEvents(logGroup, sinceMs, limit) {
-      // pino stamps a numeric `level`; ≥ 50 is error/fatal.
-      return scanFiltered(logs, logGroup, sinceMs, limit, '{ $.level >= 50 }');
-    },
+    async queryInsights(logGroupNames, filterExpr, sinceMs, limit) {
+      // Build an Insights query string: filter + newest-first + limit.
+      const queryString = `fields @timestamp, @message | filter ${filterExpr} | sort @timestamp desc | limit ${limit}`;
 
-    filterEventsByPattern(logGroup, sinceMs, limit, filterPattern) {
-      return scanFiltered(logs, logGroup, sinceMs, limit, filterPattern);
+      // CRITICAL: Insights StartQuery uses epoch SECONDS, not milliseconds.
+      const startOut = await logs.send(
+        new StartQueryCommand({
+          logGroupNames,
+          startTime: Math.floor(sinceMs / 1000),
+          endTime: Math.ceil(Date.now() / 1000),
+          queryString,
+          limit,
+        }),
+      );
+
+      const queryId = startOut.queryId;
+      if (!queryId) return [];
+
+      // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
+      for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {
+        if (poll > 0) {
+          await delay(INSIGHTS_POLL_INTERVAL_MS);
+        }
+        const result = await logs.send(new GetQueryResultsCommand({ queryId }));
+        const status = result.status;
+
+        if (status === 'Complete') {
+          const rows = result.results ?? [];
+          return rows
+            .map((row) => {
+              // Each row is an array of { field, value } objects.
+              let message = '';
+              let tsValue: string | undefined;
+              for (const cell of row) {
+                if (cell.field === '@message') message = cell.value ?? '';
+                if (cell.field === '@timestamp') tsValue = cell.value ?? undefined;
+              }
+              return projectErrorEvent(message, parseInsightsTimestamp(tsValue));
+            })
+            .slice(0, limit);
+        }
+
+        if (status === 'Failed' || status === 'Cancelled' || status === 'Timeout') {
+          throw new Error(`Insights query ${queryId} ended with status: ${status}`);
+        }
+
+        // 'Scheduled' | 'Running' — keep polling
+      }
+
+      // Budget exhausted — best-effort cleanup then degrade.
+      try {
+        await logs.send(new StopQueryCommand({ queryId }));
+      } catch {
+        // Ignore StopQuery errors — we're already in a degraded path.
+      }
+      throw new Error(`Insights query ${queryId} did not complete within ${INSIGHTS_MAX_POLLS} polls`);
     },
   };
 }

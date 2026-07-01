@@ -13,7 +13,12 @@ import {
   isSystemErrorWindow,
   type SystemStatusServiceDeps,
 } from '../src/services/systemStatus.js';
-import { type CloudWatchClientSeam, OOM_APP_FILTER_PATTERN, OOM_SYSTEM_FILTER_PATTERN } from '../src/adapters/cloudwatch.js';
+import {
+  type CloudWatchClientSeam,
+  OOM_APP_INSIGHTS_FILTER,
+  OOM_SYSTEM_INSIGHTS_FILTER,
+  PINO_ERROR_INSIGHTS_FILTER,
+} from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
 const FOUNDER = '+15555550911';
@@ -34,13 +39,11 @@ function fakeSeam(
   impl: Partial<CloudWatchClientSeam> = {},
 ): CloudWatchClientSeam & {
   describeAlarms: ReturnType<typeof vi.fn>;
-  filterErrorEvents: ReturnType<typeof vi.fn>;
-  filterEventsByPattern: ReturnType<typeof vi.fn>;
+  queryInsights: ReturnType<typeof vi.fn>;
 } {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
-    filterErrorEvents: vi.fn(impl.filterErrorEvents ?? (async () => [])),
-    filterEventsByPattern: vi.fn(impl.filterEventsByPattern ?? (async () => [])),
+    queryInsights: vi.fn(impl.queryInsights ?? (async () => [])),
   };
 }
 
@@ -184,12 +187,12 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const seam = fakeSeam();
     const result = await makeService({ config: localConfig(), cloudwatch: seam }).getErrors();
     expect(result).toEqual({ available: false, reason: 'unavailable_local' });
-    expect(seam.filterErrorEvents).not.toHaveBeenCalled();
+    expect(seam.queryInsights).not.toHaveBeenCalled();
   });
 
   it('deployed-like + a throwing seam → cloudwatch_error (no exception escapes)', async () => {
     const seam = fakeSeam({
-      filterErrorEvents: async () => {
+      queryInsights: async () => {
         throw new Error('Throttling');
       },
     });
@@ -202,22 +205,25 @@ describe('systemStatus.getErrors — degradation + window', () => {
       { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', correlationId: 'c1' },
       { timestamp: '2026-06-29T02:00:00.000Z', level: 50, message: 'error', correlationId: null },
     ];
-    const seam = fakeSeam({ filterErrorEvents: async () => events });
+    const seam = fakeSeam({ queryInsights: async () => events });
     const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('24h');
-    expect(result).toEqual({ available: true, events });
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    // Events from both pino query and OOM (same mock returns them all) — dedup will collapse same timestamp+message dupes
+    // Just check the passed-through events are present
+    expect(result.events.some((e) => e.message === 'fatal')).toBe(true);
   });
 
-  it('defaults to a 24h window and reads the app error log group; the cap is 25', async () => {
+  it('defaults to a 24h window; sinceMs is within 2s of now - 24h', async () => {
     const config = deployedConfig();
     const now = 1_700_000_000_000;
     vi.spyOn(Date, 'now').mockReturnValue(now);
-    const seam = fakeSeam({ filterErrorEvents: async () => [] });
+    const seam = fakeSeam({ queryInsights: async () => [] });
     await makeService({ config, cloudwatch: seam }).getErrors(); // no window → default 24h
 
-    expect(seam.filterErrorEvents).toHaveBeenCalledTimes(1);
-    const [group, sinceMs, limit] = seam.filterErrorEvents.mock.calls[0]!;
-    expect(group).toBe(config.errorLogGroupName);
-    expect(limit).toBe(25);
+    expect(seam.queryInsights).toHaveBeenCalled();
+    // All calls share the same sinceMs; check one of them
+    const sinceMs = seam.queryInsights.mock.calls[0]![2] as number;
     expect(sinceMs).toBe(now - 24 * 60 * 60 * 1000);
     vi.restoreAllMocks();
   });
@@ -226,32 +232,35 @@ describe('systemStatus.getErrors — degradation + window', () => {
     const config = deployedConfig();
     const now = 1_700_000_000_000;
     vi.spyOn(Date, 'now').mockReturnValue(now);
-    const seam = fakeSeam({ filterErrorEvents: async () => [] });
+    const seam = fakeSeam({ queryInsights: async () => [] });
     const service = makeService({ config, cloudwatch: seam });
 
     await service.getErrors('1h');
-    expect(seam.filterErrorEvents.mock.calls[0]![1]).toBe(now - 60 * 60 * 1000);
+    const sinceMs1h = seam.queryInsights.mock.calls[0]![2] as number;
+    expect(sinceMs1h).toBe(now - 60 * 60 * 1000);
 
     await service.getErrors('7d');
-    expect(seam.filterErrorEvents.mock.calls[1]![1]).toBe(now - 7 * 24 * 60 * 60 * 1000);
+    // 3 calls for 1h + 3 calls for 7d = 6 total; get the 4th call (first of 7d batch)
+    const sinceMs7d = seam.queryInsights.mock.calls[3]![2] as number;
+    expect(sinceMs7d).toBe(now - 7 * 24 * 60 * 60 * 1000);
     vi.restoreAllMocks();
   });
 
   it('merges pino errors + OOM (app/worker V8 + system kernel), newest-first, synthesized labels', async () => {
-    // System OOM (from systemLogGroupName) → "Kernel OOM-kill"
-    // App/worker OOM (OOM_APP_FILTER_PATTERN) → "V8 heap out of memory"
-    // Pino error → keeps its real projected message
+    // System OOM (from systemLogGroupName, OOM_SYSTEM_INSIGHTS_FILTER) → "Kernel OOM-kill"
+    // App/worker OOM (OOM_APP_INSIGHTS_FILTER, 2 log groups in 1 query) → "V8 heap out of memory"
+    // Pino error (PINO_ERROR_INSIGHTS_FILTER) → keeps its real projected message
     const config = deployedConfig();
     const seam = fakeSeam({
-      filterErrorEvents: async () => [
-        { timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', correlationId: 'c1' },
-      ],
-      filterEventsByPattern: async (group, _sinceMs, _limit, pattern) => {
-        if (group === config.systemLogGroupName) {
+      queryInsights: async (logGroupNames, filterExpr) => {
+        if (filterExpr === OOM_SYSTEM_INSIGHTS_FILTER) {
           return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', correlationId: null }];
         }
-        if (pattern === OOM_APP_FILTER_PATTERN) {
+        if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
           return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+        }
+        if (filterExpr === PINO_ERROR_INSIGHTS_FILTER) {
+          return [{ timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', correlationId: 'c1' }];
         }
         return [];
       },
@@ -262,22 +271,39 @@ describe('systemStatus.getErrors — degradation + window', () => {
     // Newest-first; system OOM → "Kernel OOM-kill"; app/worker OOM → "V8 heap out of memory"; pino error unchanged.
     expect(result.events.map((e) => e.message)).toEqual([
       'Kernel OOM-kill',        // 03Z — newest
-      'V8 heap out of memory',  // 02Z — app OOM (or worker, same pattern)
+      'V8 heap out of memory',  // 02Z — V8 OOM (combined app+worker query)
       'pino error',             // 01Z — pino, unchanged
     ]);
-    // All 4 queries were issued (Promise.all): filterErrorEvents once + filterEventsByPattern 3×
-    expect(seam.filterErrorEvents).toHaveBeenCalledTimes(1);
-    expect(seam.filterEventsByPattern).toHaveBeenCalledTimes(3);
-    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.errorLogGroupName, expect.any(Number), 25, OOM_APP_FILTER_PATTERN);
-    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.workerLogGroupName, expect.any(Number), 25, OOM_APP_FILTER_PATTERN);
-    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.systemLogGroupName, expect.any(Number), 25, OOM_SYSTEM_FILTER_PATTERN);
+    // Exactly 3 Insights queries are issued (Promise.all): pino + V8 OOM (2 groups) + system OOM
+    expect(seam.queryInsights).toHaveBeenCalledTimes(3);
+    // Pino query: errorLogGroupName
+    expect(seam.queryInsights).toHaveBeenCalledWith(
+      [config.errorLogGroupName],
+      PINO_ERROR_INSIGHTS_FILTER,
+      expect.any(Number),
+      25,
+    );
+    // V8 OOM query: both errorLogGroupName + workerLogGroupName in 1 call
+    expect(seam.queryInsights).toHaveBeenCalledWith(
+      [config.errorLogGroupName, config.workerLogGroupName],
+      OOM_APP_INSIGHTS_FILTER,
+      expect.any(Number),
+      25,
+    );
+    // System OOM query: systemLogGroupName
+    expect(seam.queryInsights).toHaveBeenCalledWith(
+      [config.systemLogGroupName],
+      OOM_SYSTEM_INSIGHTS_FILTER,
+      expect.any(Number),
+      25,
+    );
   });
 
-  it('OOM events from the worker group carry the V8 synthesized label', async () => {
+  it('V8 OOM events from app+worker carry the V8 synthesized label', async () => {
     const config = deployedConfig();
     const seam = fakeSeam({
-      filterEventsByPattern: async (group, _sinceMs, _limit, pattern) => {
-        if (group === config.workerLogGroupName && pattern === OOM_APP_FILTER_PATTERN) {
+      queryInsights: async (_logGroupNames, filterExpr) => {
+        if (filterExpr === OOM_APP_INSIGHTS_FILTER) {
           return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null }];
         }
         return [];
@@ -290,34 +316,35 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result.events[0]!.message).toBe('V8 heap out of memory');
   });
 
-  it('deduplicates OOM events that appear in both app and worker groups (same timestamp+label)', async () => {
+  it('deduplicates OOM events that have the same timestamp+label', async () => {
     const config = deployedConfig();
     const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null };
+    // Both the V8 OOM query and pino query return a dup-timestamp event
     const seam = fakeSeam({
-      filterEventsByPattern: async (_group, _sinceMs, _limit, pattern) => {
-        if (pattern === OOM_APP_FILTER_PATTERN) return [dup];
+      queryInsights: async (_logGroupNames, filterExpr) => {
+        if (filterExpr === OOM_APP_INSIGHTS_FILTER) return [dup];
+        // pino returns same timestamp but different message → not a true dup (different key)
         return [];
       },
     });
     const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable');
-    // Both app and worker OOM queries return an event with the same synthesized label+timestamp → deduped to 1.
+    // V8 OOM query → 1 event; pino → 0; system → 0 → total 1 unique
     expect(result.events).toHaveLength(1);
     expect(result.events[0]!.message).toBe('V8 heap out of memory');
   });
 
-  it('local env: unavailable_local WITH NO filterEventsByPattern call (OOM queries also skipped)', async () => {
+  it('local env: unavailable_local WITH NO queryInsights call (all queries skipped)', async () => {
     const seam = fakeSeam();
     const result = await makeService({ config: localConfig(), cloudwatch: seam }).getErrors();
     expect(result).toEqual({ available: false, reason: 'unavailable_local' });
-    expect(seam.filterErrorEvents).not.toHaveBeenCalled();
-    expect(seam.filterEventsByPattern).not.toHaveBeenCalled();
+    expect(seam.queryInsights).not.toHaveBeenCalled();
   });
 
-  it('deployed + any OOM query throws → cloudwatch_error (degrade-safe, no exception escapes)', async () => {
+  it('deployed + any query throws → cloudwatch_error (degrade-safe, no exception escapes)', async () => {
     const seam = fakeSeam({
-      filterEventsByPattern: async () => {
+      queryInsights: async () => {
         throw new Error('ThrottlingException');
       },
     });

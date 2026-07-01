@@ -1313,7 +1313,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // terminal miss returns true — a redelivered/stale callback never
         // re-triggers (and the auto-text job is ALSO CallSid-idempotent as a
         // second layer).
-        if (isMissed && fresh.type === 'call' && fresh.masked !== true) {
+        if (isMissed && fresh.type === 'call' && fresh.masked !== true && fresh.direction !== 'outbound') {
           await onFounderBridgeMissed(entryCallSid, fresh.conversationId);
         }
       }

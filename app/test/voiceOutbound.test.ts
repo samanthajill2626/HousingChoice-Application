@@ -10,8 +10,19 @@
 //   - inbound-line assign single-holder + 409 on unverified;
 //   - the voice_opt_out route;
 //   - PII: no raw phone in any stored call label, TwiML URL, or log line.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
+import {
+  InMemorySchedulerAdapter,
+  type OutboundQueueAdapter,
+  type EnqueueQueueOptions,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureOutboundQueue,
+  configureScheduler,
+} from '../src/jobs/jobs.js';
+import type { JobEnvelope } from '../src/jobs/types.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -27,6 +38,14 @@ import {
   TEST_SESSION_USER,
 } from './helpers/authSession.js';
 import { hashCellVerifyCode } from '../src/lib/cellVerification.js';
+
+/** A recording outbound-queue adapter that captures enqueued jobs without dispatching them. */
+class RecordingOutboundQueue implements OutboundQueueAdapter {
+  readonly enqueued: { envelope: JobEnvelope; opts?: EnqueueQueueOptions }[] = [];
+  async enqueue(envelope: JobEnvelope, opts?: EnqueueQueueOptions): Promise<void> {
+    this.enqueued.push({ envelope, opts });
+  }
+}
 
 const SECRET = ORIGIN_SECRET;
 const NAV_CELL = '+15550140000'; // the calling navigator's verified cell
@@ -88,7 +107,7 @@ describe('POST /api/contacts/:contactId/call — originate (spec §5)', () => {
     expect(entry.direction).toBe('outbound');
     expect(entry.author).toBe('teammate');
     expect(entry.call_status).toBe('ringing');
-    expect(entry.masked).not.toBe(true);
+    expect(entry.masked).toBe(false);
     expect(entry.provider_sid).toBe(res.body.callSid);
     // The stored label is the MASKED contact (role/name) — NEVER a raw phone.
     expect(entry.call_party_label).toBe('Tenant (Jane D.)');
@@ -177,6 +196,50 @@ describe('POST /api/contacts/:contactId/call — originate (spec §5)', () => {
       .set('x-origin-verify', SECRET)
       .send({});
     expect(res.status).toBe(401);
+  });
+
+  it('409 contact_voice_opted_out when voice_opt_out contact has NO phone — DNC wins over invalid_phone (spec §5 step ordering)', async () => {
+    // A contact that is do-not-call AND has no phone must get 409 contact_voice_opted_out,
+    // not 400 invalid_phone. The voice_opt_out guard must run BEFORE phone resolution.
+    const world = createFakeWorld();
+    // Seed a voice_opt_out contact without any phone number.
+    const contactId = 'c-no-phone-dnc';
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      // deliberately no `phone` field
+      firstName: 'No',
+      lastName: 'Phone',
+      voice_opt_out: true,
+    } as never);
+    const harness = makeWebhookHarness({ world });
+    seedNavigatorCell(harness);
+
+    const res = await request(harness.app)
+      .post(`/api/contacts/${contactId}/call`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_voice_opted_out');
+    expect(world.initiatedCalls).toHaveLength(0);
+  });
+
+  it('503 voice_not_configured when business caller ID is undefined — initiateCall NOT called', async () => {
+    const world = createFakeWorld();
+    const contactId = seedContact(world);
+    // Build a harness without any OUR_PHONE_NUMBERS so config.ourPhoneNumbers[0] is undefined.
+    const harness = makeWebhookHarness({ world, env: { OUR_PHONE_NUMBERS: '' } });
+    seedNavigatorCell(harness);
+
+    const res = await request(harness.app)
+      .post(`/api/contacts/${contactId}/call`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('voice_not_configured');
+    expect(world.initiatedCalls).toHaveLength(0);
   });
 });
 
@@ -285,6 +348,62 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(entry.call_status).toBe('completed');
     expect(entry.call_outcome).toBe('answered');
     expect(entry.call_duration).toBe(30);
+  });
+
+  // B-missed: outbound call that the target never answers must NOT fire
+  // onFounderBridgeMissed — no missed-call push, no MISSED_CALL_AUTOTEXT_JOB.
+  // (Regression test for review finding I-1 / I-2.)
+  describe('outbound missed-call — no false "we missed your call" auto-text or push', () => {
+    let recordingQueue: RecordingOutboundQueue;
+
+    beforeEach(() => {
+      configureScheduler(new InMemorySchedulerAdapter());
+      recordingQueue = new RecordingOutboundQueue();
+      configureOutboundQueue(recordingQueue);
+    });
+
+    afterEach(() => {
+      _resetForTests();
+    });
+
+    it('navigator no-answer (target never picks up) → call stamped missed, NO push, NO auto-text job', async () => {
+      const world = createFakeWorld();
+      const contactId = seedContact(world);
+      const harness = makeWebhookHarness({ world });
+      seedNavigatorCell(harness);
+
+      // Originate the call.
+      const res = await request(harness.app)
+        .post(`/api/contacts/${contactId}/call`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({});
+      expect(res.status).toBe(200);
+      const { callSid } = res.body as { callSid: string };
+
+      // The navigator does NOT press 1 (or target doesn't answer).
+      // The <Dial action> summary fires with a terminal no-answer status.
+      await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+        CallSid: callSid,
+        DialCallStatus: 'no-answer',
+        ApiVersion: '2010-04-01',
+      });
+
+      const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+      expect(entry.call_status).toBe('no-answer');
+      expect(entry.call_outcome).toBe('missed');
+
+      // NO missed-call push (founders should NOT see a phantom "missed call").
+      const missedPush = world.pushSends.find((p) => p.notification.kind === 'missed_call');
+      expect(missedPush).toBeUndefined();
+
+      // NO MISSED_CALL_AUTOTEXT_JOB enqueued (contact should NOT get a false
+      // "sorry we missed your call, text us" SMS).
+      expect(recordingQueue.enqueued).toHaveLength(0);
+
+      // Also: no SMS was sent (world.sent stays empty).
+      expect(world.sent).toHaveLength(0);
+    });
   });
 });
 

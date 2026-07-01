@@ -29,7 +29,6 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
-import { authorForContact } from '../lib/voiceMasking.js';
 import { createUsersRepo, type UsersRepo } from '../repos/usersRepo.js';
 
 /**
@@ -112,6 +111,13 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
     }
     mergeContext({ contactId: contact.contactId });
 
+    // company do-not-call (spec §8): honored on EVERY originate path. NO call.
+    // Must be checked BEFORE phone resolution so a DNC contact with no phone gets
+    // 409 contact_voice_opted_out, not 400 invalid_phone (spec §5 step ordering).
+    if (contact.voice_opt_out === true) {
+      throw new OriginateRefusedError('contact_voice_opted_out');
+    }
+
     let targetPhone: string | undefined;
     if (input.phone !== undefined) {
       // An explicit target must be one of the contact's OWN numbers (never an
@@ -122,11 +128,6 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
     } else {
       targetPhone = primaryPhoneOf(contact);
       if (targetPhone === undefined) throw new OriginateRefusedError('invalid_phone');
-    }
-
-    // company do-not-call (spec §8): honored on EVERY originate path. NO call.
-    if (contact.voice_opt_out === true) {
-      throw new OriginateRefusedError('contact_voice_opted_out');
     }
 
     // No business number to mask behind → we cannot place a masked call without

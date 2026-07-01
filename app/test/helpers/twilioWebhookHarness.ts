@@ -445,7 +445,7 @@ export function createFakeWorld(): FakeWorld {
         ...(message.answeredAt !== undefined && { answered_at: message.answeredAt }),
         ...(message.endedAt !== undefined && { ended_at: message.endedAt }),
         ...(message.callDuration !== undefined && { call_duration: message.callDuration }),
-        ...(message.masked === true && { masked: true }),
+        ...(message.masked !== undefined && { masked: message.masked }),
         ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
         ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
         ...(message.transcript !== undefined && { transcript: message.transcript }),

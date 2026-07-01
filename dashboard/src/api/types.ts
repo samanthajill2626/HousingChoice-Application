@@ -544,8 +544,37 @@ export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
 
+/**
+ * A2P/CTIA consent method (spec §2). MIRROR of the app's
+ * lib/smsCompliance.ts ConsentMethod — the dashboard can't import from app/, so
+ * keep the two in sync by hand. web_form/inbound_text are stamped automatically;
+ * the other four are only ever set by a human.
+ */
+export type ConsentMethod =
+  | 'web_form'
+  | 'inbound_text'
+  | 'verbal_phone'
+  | 'verbal_in_person'
+  | 'paper_form'
+  | 'imported';
+
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
+
+/**
+ * Per-recipient delivery slot on a relay-group source message (M1.7). MIRRORS
+ * app/src/repos/messagesRepo.ts `RelayRecipientDelivery` — the dashboard can't
+ * import from app/, so keep it in sync by hand. Keyed by member key
+ * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map;
+ * a `status:'failed'` + `errorCode:'contact_opted_out'` slot means that member
+ * opted out and was NOT relayed to (surfaced as a subtle Timeline note). */
+export interface RelayRecipientDelivery {
+  status: DeliveryStatus;
+  sid?: string;
+  errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
 
 /** GET /api/events 'conversation.updated' payload. */
 export interface ConversationUpdatedEvent {
@@ -636,7 +665,10 @@ export interface ContactVocabulary {
   fieldLabels: string[];
 }
 
-/** POST /api/contacts — create a brand-new contact record. */
+/** POST /api/contacts — create a brand-new contact record. The optional
+ *  `consent_*` fields let staff record text consent at create time (CONTRACT 4);
+ *  `consent_method` is a HUMAN value only (the server stamps consent_captured_by).
+ *  Left blank → nothing sent (the just-in-time gate catches it later). */
 export interface ContactCreate {
   type: ContactType;
   firstName?: string;
@@ -647,6 +679,12 @@ export interface ContactCreate {
   role?: string;
   relationships?: Relationship[];
   customFields?: CustomField[];
+  /** A2P/CTIA consent captured at create time — a HUMAN method only. */
+  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  /** When consent was obtained (ISO 8601). */
+  consent_at?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
 }
 
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------
@@ -677,6 +715,17 @@ export interface Contact {
   capture_source?: string;
   captured_at?: string;
   created_at?: string;
+  /** A2P/CTIA consent model (spec §2) — all optional. "Has SMS consent" =
+   *  a non-empty `consent_method`. */
+  consent_method?: ConsentMethod;
+  /** When consent was obtained (ISO 8601) — may differ from created_at. */
+  consent_at?: string;
+  /** The disclosure version shown on the web form (e.g. `ctia-2026-06`). */
+  consent_version?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
+  /** Actor userId when staff-entered; unset for automatic methods. */
+  consent_captured_by?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
   /** Landlord/PM company name (editable). */
@@ -742,6 +791,13 @@ export interface ContactPatch {
   relationships?: Relationship[];
   /** Operator-defined custom fields stored on this record. */
   customFields?: CustomField[];
+  /** A2P/CTIA consent capture (CONTRACT 2) — a HUMAN method only. Sent by the
+   *  just-in-time consent-capture modal; the server stamps consent_captured_by. */
+  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  /** When consent was obtained (ISO 8601). */
+  consent_at?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the
@@ -857,6 +913,9 @@ export interface Message {
   provider_ts: string;
   delivery_status: DeliveryStatus;
   error_code?: string;
+  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
+   *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
   // --- Voice call — present only on a type:'call' entry --------------------
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -917,6 +976,11 @@ export interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string; // which number this used
+  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
+   *  keyed by member key. A `contact_opted_out` failed slot means that member
+   *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
+   *  on 1:1 messages. */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
 }
 export interface TimelineCall extends TimelineBase {
   kind: 'call';
@@ -1121,6 +1185,10 @@ export interface PreviewCandidate {
   voucherSize?: number;
   housingAuthority?: string;
   alreadySentThisProperty: boolean;
+  /** A2P/CTIA consent (CONTRACT 3): whether this candidate has recorded SMS
+   *  consent. `false` → the row is fenced out of the send + surfaced for staff to
+   *  resolve (a broadcast can't pop a modal mid-fan-out). */
+  has_consent: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is the

@@ -443,6 +443,94 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(items.some((i) => i.refId === 'conv-relay')).toBe(false);
   });
 
+  // --- A2P: relay opt-out attention (a relay member on the Do-Not-Contact list) --
+  const seedRelayWithOptOut = (memberContactId: string, memberPhone: string): void => {
+    seedConversation({
+      conversationId: 'conv-relay-optout',
+      participant_phone: '+15550103333', // synthetic pool number
+      status: 'open',
+      last_activity_at: iso(-40_000),
+      type: 'relay_group',
+      ai_mode: 'manual',
+      created_at: iso(-200_000),
+      participants: [{ contactId: memberContactId, phone: memberPhone, name: 'Opted Member' }],
+      relay_opted_out_members: {
+        [memberContactId]: { contactId: memberContactId, phone: memberPhone, name: 'Opted Member', at: iso(-20_000) },
+      },
+    } as ConversationItem);
+  };
+
+  it('a still-opted-out relay member surfaces a needs_you_now item linking to the CONTACT page', async () => {
+    world.contacts.push({
+      contactId: 'c-optout',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'Opted',
+      lastName: 'Out',
+      phone: '+15550102222',
+      sms_opt_out: true, // live-confirmed still opted out
+    });
+    seedRelayWithOptOut('c-optout', '+15550102222');
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const item = needs.find((i) => i.refType === 'contact' && i.refId === 'c-optout');
+    expect(item).toBeDefined();
+    expect(item).toMatchObject({
+      group: 'needs_you_now',
+      refType: 'contact',
+      refId: 'c-optout',
+      who: 'Opted Out',
+      why: 'Opted out of a group text — not receiving messages',
+      tag: 'Group text',
+      attention: true,
+    });
+  });
+
+  it('does NOT surface the item once the member has opted back in (sms_opt_out cleared) — live-confirmed', async () => {
+    world.contacts.push({
+      contactId: 'c-backin',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'Back',
+      lastName: 'In',
+      phone: '+15550102222',
+      // sms_opt_out is NOT set → they opted back in; the stale conv flag must not surface.
+    });
+    seedRelayWithOptOut('c-backin', '+15550102222');
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    expect(needs.some((i) => i.refId === 'c-backin')).toBe(false);
+  });
+
+  it('does NOT surface the item when the member contact is deleted, or has no contactId', async () => {
+    // Deleted contact → off the boards even though still opted out.
+    world.contacts.push({
+      contactId: 'c-del',
+      type: 'tenant',
+      phone: '+15550102222',
+      sms_opt_out: true,
+      deleted_at: iso(-5_000),
+    });
+    seedRelayWithOptOut('c-del', '+15550102222');
+    // A second relay whose opted-out entry has NO contactId → can't link/confirm.
+    seedConversation({
+      conversationId: 'conv-relay-nocid',
+      participant_phone: '+15550101111',
+      status: 'open',
+      last_activity_at: iso(-40_000),
+      type: 'relay_group',
+      ai_mode: 'manual',
+      created_at: iso(-200_000),
+      relay_opted_out_members: {
+        'phone#+15550100000': { phone: '+15550100000', name: 'No Contact', at: iso(-20_000) },
+      },
+    } as ConversationItem);
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    expect(needs.some((i) => i.refId === 'c-del')).toBe(false);
+    expect(needs.some((i) => i.refId === 'phone#+15550100000')).toBe(false);
+  });
+
   // --- FIX C: de-dupe untriaged inbounds by phone (one item per person) ----------
   it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item linking to the contact', async () => {
     const phone = '+15550105555';

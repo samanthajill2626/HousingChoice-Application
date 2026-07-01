@@ -25,12 +25,19 @@ describe('HousingFairIntake (/join)', () => {
     await user.type(screen.getByLabelText(/first name/i), 'Grace');
     await user.type(screen.getByLabelText(/last name/i), 'Hopper');
     await user.type(screen.getByLabelText(/phone number/i), '4045559999');
+    // A2P/CTIA consent gate — check the required box before submit.
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
     await user.click(screen.getByRole('button', { name: /sign me up/i }));
 
     await waitFor(() => expect(submitHousingFair).toHaveBeenCalled());
     const arg = submitHousingFair.mock.calls[0]![0] as Record<string, unknown>;
     expect(arg).not.toHaveProperty('unitId');
-    expect(arg).toMatchObject({ firstName: 'Grace', lastName: 'Hopper', phone: '4045559999' });
+    expect(arg).toMatchObject({
+      firstName: 'Grace',
+      lastName: 'Hopper',
+      phone: '4045559999',
+      smsConsent: true,
+    });
 
     expect(await screen.findByText(/you're signed up/i)).toBeInTheDocument();
     // No reveal: no address/details ever shown on /join.

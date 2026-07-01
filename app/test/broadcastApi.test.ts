@@ -48,6 +48,9 @@ function seedTenant(world: FakeWorld, overrides: Partial<ContactItem>): ContactI
     // NOT filter on status (services/audienceResolution.ts), so any value works.
     status: 'searching',
     phone: `+1555010${String(world.contacts.length + 1).padStart(4, '0')}`,
+    // A2P/CTIA: a real broadcast audience carries recorded consent; default it so
+    // fan-out sends (override to drop it for the no-consent-fence coverage).
+    consent_method: 'inbound_text',
     ...overrides,
   };
   world.contacts.push(c);
@@ -177,7 +180,13 @@ describe('share-broadcast API (M1.8a)', () => {
     // The full annotated candidate list (renamed from `sample`); no prior
     // sent/sending broadcast for this unit → not already-sent.
     expect(res.body.candidates).toEqual([
-      { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', alreadySentThisProperty: false },
+      {
+        contactId: 'c-1',
+        firstName: 'Ann',
+        phone: '+15550100001',
+        has_consent: true,
+        alreadySentThisProperty: false,
+      },
     ]);
     expect(res.body.priorRecipientContactIds).toEqual([]);
   });
@@ -422,9 +431,9 @@ describe('share-broadcast API (M1.8a)', () => {
     const overCap = {
       contactIds: ['c-1', 'c-2', 'c-3'],
       contacts: [
-        { contactId: 'c-1', phone: '+15550100001' },
-        { contactId: 'c-2', phone: '+15550100002' },
-        { contactId: 'c-3', phone: '+15550100003' },
+        { contactId: 'c-1', phone: '+15550100001', has_consent: true },
+        { contactId: 'c-2', phone: '+15550100002', has_consent: true },
+        { contactId: 'c-3', phone: '+15550100003', has_consent: true },
       ],
       count: 5_000, // > MAX_BROADCAST_RECIPIENTS (1500)
       truncated: true,

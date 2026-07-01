@@ -52,6 +52,10 @@ function seedTenant(world: FakeWorld, overrides: Partial<ContactItem>): ContactI
     type: 'tenant',
     status: 'active',
     phone: `+1555010${String(world.contacts.length + 1).padStart(4, '0')}`,
+    // A2P/CTIA: a real broadcast audience carries recorded consent; default it
+    // so these fan-out tests exercise the SEND path (override to drop it for the
+    // no-consent-fence test).
+    consent_method: 'inbound_text',
     ...overrides,
   };
   world.contacts.push(c);
@@ -95,6 +99,7 @@ function seedBroadcast(
       delivered: 0,
       failed: 0,
       skipped_opted_out: 0,
+      skipped_no_consent: 0,
       queued: tenants.length,
     },
     recipients,
@@ -218,6 +223,36 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.stats.skipped_opted_out).toBe(1);
     expect(bcast.recipients['c-stop']?.status).toBe('skipped');
     expect(bcast.status).toBe('sent'); // sent ones succeeded
+  });
+
+  it('A2P/CTIA (spec §4): skips a NO-CONSENT recipient (skipped_no_consent++), NO token, NO send', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', firstName: 'Ok', phone: '+15550100001' });
+    // Override the default consent so this recipient has NONE.
+    const noConsent = seedTenant(world, {
+      contactId: 'c-noconsent',
+      phone: '+15550100002',
+      consent_method: undefined,
+    });
+    seedUnit(world);
+    seedBroadcast(world, [ok, noConsent]);
+
+    const acquire = vi.fn(async () => {});
+    const bucket = { acquire } as unknown as TokenBucket;
+    wireHandler(world, logger, bucket);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    // Only the consented tenant was texted; the no-consent one never.
+    expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
+    expect(acquire).toHaveBeenCalledTimes(1); // NO token spent on the consent skip
+
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.stats.sent).toBe(1);
+    expect(bcast.stats.skipped_no_consent).toBe(1);
+    expect(bcast.stats.skipped_opted_out).toBe(0); // a distinct bucket
+    expect(bcast.recipients['c-noconsent']?.status).toBe('skipped');
+    expect(bcast.recipients['c-noconsent']?.errorCode).toBe('no_consent');
+    expect(bcast.status).toBe('sent');
   });
 
   it('100-recipient broadcast trickles through the bucket (injected clock) and completes', async () => {

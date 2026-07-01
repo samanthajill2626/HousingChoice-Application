@@ -16,6 +16,7 @@ import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -43,6 +44,7 @@ export class SendRefusedError extends Error {
     readonly code:
       | 'conversation_not_found'
       | 'contact_opted_out'
+      | 'contact_no_consent'
       | 'breaker_open'
       | 'manual_mode'
       | 'relay_not_supported'
@@ -75,6 +77,24 @@ export class ConversationNotFoundError extends SendRefusedError {
 export class ContactOptedOutError extends SendRefusedError {
   constructor(conversationId: string) {
     super(`contact for conversation ${conversationId} has sms_opt_out — send refused`, 'contact_opted_out');
+  }
+}
+
+/**
+ * A2P/CTIA JIT consent gate (spec §3.4): a HUMAN proactive first 1:1 text to a
+ * contact with NO documented `consent_method` is blocked. The dashboard pops a
+ * modal to record consent, then retries. Routes map this to HTTP 409
+ * (`contact_no_consent`). NOT thrown for automated system sends (welcome /
+ * missed-call / reminders — no human/modal) nor for a contact who started the
+ * conversation (they carry `inbound_text` from auto-capture, so replies never
+ * block).
+ */
+export class ContactNoConsentError extends SendRefusedError {
+  constructor(conversationId: string) {
+    super(
+      `contact for conversation ${conversationId} has no recorded SMS consent — proactive human send blocked`,
+      'contact_no_consent',
+    );
   }
 }
 
@@ -216,6 +236,23 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
         'send refused: sms_opt_out is set (conversation and/or contact)',
       );
       throw new ContactOptedOutError(conversationId);
+    }
+
+    // (1.5) JIT consent gate (A2P/CTIA, spec §3.4) — AFTER the opt-out gate
+    // (opt-out is the firmer refusal) and ONLY for a HUMAN proactive send
+    // (automated === false). A contact who STARTED the conversation carries
+    // `inbound_text` from auto-capture, so hasSmsConsent is true and replies
+    // never block. Automated system sends (welcome / missed-call / reminders)
+    // are NOT gated here — there is no human/modal to capture consent, and those
+    // paths are covered by their own opt-in basis. A send with no contact record
+    // (a proactive send to a raw phone) is left to the opt-out gate above; the
+    // gate fires only when a contact EXISTS and lacks consent.
+    if (automated === false && contact && !hasSmsConsent(contact)) {
+      log.warn(
+        { conversationId, contactId: contact.contactId },
+        'send refused: contact has no recorded SMS consent (JIT gate)',
+      );
+      throw new ContactNoConsentError(conversationId);
     }
 
     // (2) Circuit breaker — automated sends only; manual human sends are

@@ -326,6 +326,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       phone: c.phone,
       ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
       ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
+      // A2P/CTIA (LOCKED CONTRACT 3): whether this candidate has recorded SMS
+      // consent. The composer surfaces "consent not recorded" for `false` +
+      // a count; the fan-out EXCLUDES !has_consent recipients (broadcastFanOut).
+      has_consent: c.has_consent,
       // Match on contactId OR the `phone#<E164>` key (same prefix the recipients
       // map uses) so a tenant previously texted under a phone-only key (who
       // later gained a contactId) is still flagged. SOFT hint — never excludes.

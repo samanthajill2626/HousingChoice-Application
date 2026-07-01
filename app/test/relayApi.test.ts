@@ -113,6 +113,7 @@ describe('relay-group API (M1.7)', () => {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
@@ -303,6 +304,32 @@ describe('relay-group API (M1.7)', () => {
     expect(world.activityEvents.filter((e) => e.type === 'removed_from_group_text')).toHaveLength(1);
   });
 
+  // --- A2P: removing a member clears their relay_opted_out_members entry -------
+  it('removing a member clears their relay_opted_out_members entry (the Today item auto-resolves)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, contactId: 'c-alice', name: 'Alice' }, { phone: BOB, contactId: 'c-bob', name: 'Bob' }] });
+    const id = created.body.conversation.conversationId;
+
+    // Simulate the fan-out having flagged Bob as opted-out on the conversation.
+    const conv = world.conversations.get(id)!;
+    conv.relay_opted_out_members = {
+      'c-bob': { contactId: 'c-bob', phone: BOB, name: 'Bob', at: new Date().toISOString() },
+    };
+
+    // Remove Bob → his opt-out entry is cleared (keyed by his relayMemberKey).
+    const del = await request(app)
+      .delete(`/api/conversations/${id}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(del.status).toBe(200);
+    expect(world.conversations.get(id)!.relay_opted_out_members?.['c-bob']).toBeUndefined();
+  });
+
   it('PATCH close releases the pool number to quarantine; reopen provisions a fresh one', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
@@ -451,8 +478,8 @@ describe('relay-group API (M1.7)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
     expect(world.sent.some((s) => s.to === poolNumber)).toBe(false);
-    // Neutral team label prefix, NEVER a phone.
-    expect(world.sent.every((s) => s.body === 'Housing Choice: Showing is at 4pm')).toBe(true);
+    // Neutral team label prefix (the registered A2P brand — spec §5), NEVER a phone.
+    expect(world.sent.every((s) => s.body === 'Tenant Place LLC: Showing is at 4pm')).toBe(true);
   });
 
   it('FIX 2: POST a message to a CLOSED relay group → 409', async () => {

@@ -367,6 +367,55 @@ describe('Timeline', () => {
     expect(screen.getByRole('button', { name: /Retry sending/i })).toBeInTheDocument();
   });
 
+  it('renders the relay opted-out note when a message has a contact_opted_out recipient', () => {
+    const relaySource: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'm-relay',
+      tsMsgId: 'm-relay',
+      body: 'is the unit available?',
+      // Two OTHER members: one opted out (skipped), one delivered.
+      delivery_recipients: {
+        'c-bob': { status: 'failed', errorCode: 'contact_opted_out' },
+        'c-carol': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [relaySource] });
+    // Real text (not color-only), singular phrasing for one member.
+    expect(screen.getByText(/1 member opted out — not relayed to them\./)).toBeInTheDocument();
+  });
+
+  it('pluralizes the relay opted-out note for multiple opted-out members', () => {
+    const relaySource: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'm-relay2',
+      tsMsgId: 'm-relay2',
+      body: 'open house Saturday',
+      delivery_recipients: {
+        'c-bob': { status: 'failed', errorCode: 'contact_opted_out' },
+        'c-dave': { status: 'failed', errorCode: 'contact_opted_out' },
+        'c-carol': { status: 'sent' },
+      },
+    };
+    renderTimeline({ items: [relaySource] });
+    expect(screen.getByText(/2 members opted out — not relayed to them\./)).toBeInTheDocument();
+  });
+
+  it('renders NO opted-out note when a relay message has no contact_opted_out recipient', () => {
+    const relaySource: TimelineItem = {
+      ...MESSAGE_IN,
+      id: 'm-relay3',
+      tsMsgId: 'm-relay3',
+      body: 'all good',
+      // A non-opt-out failure (carrier) must NOT trigger the opted-out note.
+      delivery_recipients: {
+        'c-bob': { status: 'failed', errorCode: '30007' },
+        'c-carol': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [relaySource] });
+    expect(screen.queryByText(/opted out — not relayed/)).not.toBeInTheDocument();
+  });
+
   it('shows no status chip (and no Retry) when delivery_status is absent — seed/legacy rows', () => {
     const noStatus = {
       ...MESSAGE_OUT,

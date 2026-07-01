@@ -40,6 +40,38 @@
   color: var(--c-danger);
 }
 
+/* A2P/CTIA consent gate — a required checkbox with the filed disclosure text. */
+.consentField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.consentLabel {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.consentBox {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.consentText {
+  flex: 1 1 auto;
+}
+
+.consentText a {
+  color: var(--c-brand);
+  text-decoration: underline;
+}
+
 .submit {
   margin-top: var(--sp-2);
   border: none;

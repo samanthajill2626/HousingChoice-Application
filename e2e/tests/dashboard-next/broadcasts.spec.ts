@@ -48,6 +48,12 @@ async function createTenant(
   });
   expect(res.ok()).toBeTruthy();
   const contactId = (await res.json()).contact.contactId as string;
+  // A2P/CTIA (spec §4): a no-consent tenant is fenced out of broadcasts (its preview
+  // row is disabled). These test tenants are meant to be SENDABLE, so record consent.
+  const consentRes = await request.patch(`${NEXT}/api/contacts/${contactId}`, {
+    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+  });
+  expect(consentRes.ok()).toBeTruthy();
   // Preview rows from the resolver show the FIRST name only (no lastName); the
   // add-a-tenant search row shows the full "First Last".
   return { contactId, firstName, name: `${firstName} Bcastest`, phone };
@@ -61,6 +67,14 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // dev-login FIRST so page.request carries the session cookie for the
     // authenticated /api setup calls below (the bare `request` fixture has none).
     await devLogin(page);
+
+    // A2P/CTIA (spec §4): seeded Tasha (contact-tenant-0001) carries no consent, so
+    // she'd be fenced out of the preview (badged no-consent, not "Already sent").
+    // Record consent so she remains a normal already-sent candidate row.
+    const tashaConsent = await page.request.patch(`${NEXT}/api/contacts/${TASHA}`, {
+      data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+    });
+    expect(tashaConsent.ok()).toBeTruthy();
 
     // --- Set up the audience: two fresh 2-BR tenants we control (unique names). ---
     const stamp = `${Date.now()}`.slice(-6);

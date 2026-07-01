@@ -33,6 +33,11 @@ import styles from './Timeline.module.css';
 function sendFailureMessage(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.code) {
+      case 'contact_no_consent':
+        // A2P/CTIA just-in-time gate: the parent (ContactDetail) intercepts this
+        // 409 and opens the consent-capture modal. We restore the draft (throwing
+        // reaches here) but show NO inline error — the modal is the UI.
+        return '';
       case 'contact_opted_out':
         return 'This contact is on the Do-Not-Contact list — texting is disabled. Clear the opt-out from the ⋯ menu to message them.';
       case 'manual_mode':
@@ -162,6 +167,13 @@ function MessageBubble({
   // show no chip. Failures expose a reason (when error_code is present) + Retry.
   const delivery = outbound ? presentDeliveryStatus(msg.delivery_status) : null;
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
+
+  // Relay group (M1.7): count recipients this message was NOT relayed to because
+  // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
+  // so staff know the group text didn't reach everyone. Absent on 1:1 messages.
+  const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
+    (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
+  ).length;
   const toneClass = delivery
     ? ({
         neutral: styles.toneNeutral,
@@ -242,6 +254,13 @@ function MessageBubble({
           </span>
         ) : null}
       </div>
+      {optedOutCount > 0 ? (
+        <p className={styles.relayOptOutNote}>
+          {optedOutCount === 1
+            ? '1 member opted out — not relayed to them.'
+            : `${optedOutCount} members opted out — not relayed to them.`}
+        </p>
+      ) : null}
       {delivery?.isFailure && onRetry ? (
         <button
           type="button"

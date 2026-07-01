@@ -27,6 +27,9 @@ interface Row {
   name: string;
   phone: string;
   alreadySentThisProperty: boolean;
+  /** A2P/CTIA consent (CONTRACT 3): false → a HARD fence (excluded from the send,
+   *  badged "consent not recorded", never checkable). */
+  hasConsent: boolean;
   /** Whether this row will be sent to. */
   checked: boolean;
   /** True for a manually-added tenant (badge cue). */
@@ -50,7 +53,10 @@ function initialRows(preview: PreviewResponse): Row[] {
     name: contactDisplayName(c.firstName, undefined, c.phone),
     phone: c.phone,
     alreadySentThisProperty: c.alreadySentThisProperty,
-    checked: !c.alreadySentThisProperty,
+    hasConsent: c.has_consent,
+    // No-consent rows are a HARD fence — never checked; already-sent rows start
+    // unchecked (soft opt-in). Everyone else starts checked.
+    checked: c.has_consent && !c.alreadySentThisProperty,
   }));
 }
 
@@ -78,6 +84,9 @@ export function RecipientPreview({
   const [racedToResults, setRacedToResults] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
+  // A2P/CTIA: how many listed recipients have NO recorded consent (fenced out of
+  // the send + surfaced so staff can resolve them — mirrors the skipped counts).
+  const noConsentCount = rows.filter((r) => !r.hasConsent).length;
 
   // Search-within-recipients: filter the visible rows by name/phone (the model
   // keeps every row's checked state; only the rendered set is filtered).
@@ -91,7 +100,11 @@ export function RecipientPreview({
 
   function toggle(contactId: string): void {
     setRows((prev) =>
-      prev.map((r) => (r.contactId === contactId ? { ...r, checked: !r.checked } : r)),
+      prev.map((r) =>
+        // A no-consent row can't be checked (hard fence) — record consent to
+        // include them; toggling it is a no-op.
+        r.contactId === contactId && r.hasConsent ? { ...r, checked: !r.checked } : r,
+      ),
     );
   }
 
@@ -99,9 +112,12 @@ export function RecipientPreview({
     setRows((prev) => prev.filter((r) => r.contactId !== contactId));
   }
 
-  /** Select all — but SKIP already-sent rows (they stay unchecked; opt-in only). */
+  /** Select all — but SKIP already-sent rows (opt-in only) AND no-consent rows
+   *  (hard fence; they can never be sent to). */
   function selectAll(): void {
-    setRows((prev) => prev.map((r) => ({ ...r, checked: !r.alreadySentThisProperty })));
+    setRows((prev) =>
+      prev.map((r) => ({ ...r, checked: r.hasConsent && !r.alreadySentThisProperty })),
+    );
   }
   function deselectAll(): void {
     setRows((prev) => prev.map((r) => ({ ...r, checked: false })));
@@ -134,6 +150,15 @@ export function RecipientPreview({
       setAddNote(`Can't add ${name} — number is unreachable.`);
       return;
     }
+    // A2P/CTIA: "has SMS consent" == a non-empty consent_method. A no-consent
+    // tenant can't be added (mirrors the opt-out guard + the server fence) —
+    // record consent for them first, then they re-enter the audience.
+    const hasConsent =
+      typeof candidate.consent_method === 'string' && candidate.consent_method.length > 0;
+    if (!hasConsent) {
+      setAddNote(`Can't add ${name} — no consent recorded.`);
+      return;
+    }
     setSearch({ name: '' });
     setRows((prev) => {
       if (prev.some((r) => r.contactId === candidate.contactId)) return prev; // already listed
@@ -145,6 +170,7 @@ export function RecipientPreview({
           name,
           phone,
           alreadySentThisProperty: already,
+          hasConsent: true,
           checked: !already,
           added: true,
         },
@@ -219,6 +245,16 @@ export function RecipientPreview({
         Already-sent tenants are unchecked — check one to resend. “Select all” skips them.
       </p>
 
+      {/* A2P/CTIA: surface no-consent recipients (fenced out of the send) with a
+          count so staff can record consent → they re-enter the audience. */}
+      {noConsentCount > 0 ? (
+        <p className={styles.noConsentCount} role="status">
+          {noConsentCount} recipient{noConsentCount === 1 ? '' : 's'} without recorded consent{' '}
+          {noConsentCount === 1 ? 'is' : 'are'} excluded — record consent to include{' '}
+          {noConsentCount === 1 ? 'them' : 'them'}.
+        </p>
+      ) : null}
+
       <label className={styles.searchField}>
         <span className={styles.srOnly}>Search recipients</span>
         <input
@@ -239,22 +275,32 @@ export function RecipientPreview({
           {visibleRows.map((row) => (
             <li
               key={row.contactId}
-              className={`${styles.row} ${row.alreadySentThisProperty ? styles.rowAlready : ''}`.trim()}
+              className={`${styles.row} ${!row.hasConsent ? styles.rowNoConsent : row.alreadySentThisProperty ? styles.rowAlready : ''}`.trim()}
             >
               <label className={styles.rowLabel}>
                 <input
                   type="checkbox"
                   className={styles.checkbox}
-                  // Explicit, clean accessible name (the tenant's name, plus an
-                  // "already sent" cue) so getByRole('checkbox',{name}) resolves
-                  // by the row's tenant — NOT the whole name+phone+tags blob.
-                  aria-label={row.alreadySentThisProperty ? `${row.name} — already sent` : row.name}
+                  // Explicit, clean accessible name (the tenant's name, plus a
+                  // status cue) so getByRole('checkbox',{name}) resolves by the
+                  // row's tenant — NOT the whole name+phone+tags blob. A no-consent
+                  // row is DISABLED (hard fence — can never be sent to).
+                  aria-label={
+                    !row.hasConsent
+                      ? `${row.name} — consent not recorded`
+                      : row.alreadySentThisProperty
+                        ? `${row.name} — already sent`
+                        : row.name
+                  }
                   checked={row.checked}
+                  disabled={!row.hasConsent}
                   onChange={() => toggle(row.contactId)}
                 />
                 <span className={styles.rowName}>{row.name}</span>
                 <span className={styles.rowPhone}>{formatPhone(row.phone)}</span>
-                {row.alreadySentThisProperty ? (
+                {!row.hasConsent ? (
+                  <span className={styles.noConsentTag}>consent not recorded — fix before sending</span>
+                ) : row.alreadySentThisProperty ? (
                   <span className={styles.alreadyTag}>Already sent</span>
                 ) : null}
                 {row.added ? <span className={styles.addedTag}>Added</span> : null}

@@ -17,6 +17,7 @@ import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { DEFAULT_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /** The singleton org-settings item id (per-user rows would use other ids later). */
@@ -56,8 +57,11 @@ export interface OrgSettings {
 
 /** CO2's copy — the defaults a fresh stack reads before any admin edit. */
 export const DEFAULT_ORG_SETTINGS: OrgSettings = {
-  missedCallAutoText:
-    "Sorry we missed your call! To get started, please text us your full name, voucher size, and housing authority and we'll be right with you.",
+  // A2P/CTIA (spec §5): the missed-call auto-text is a FIRST-CONTACT template, so
+  // its default carries brand identity + opt-out language. Sourced from the
+  // single source of truth (lib/smsCompliance.ts) — the CO2 helpful content is
+  // preserved, with the identity prefix + "Reply STOP to opt out." added.
+  missedCallAutoText: DEFAULT_MISSED_CALL_AUTOTEXT,
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
   preRingPauseSeconds: 2,

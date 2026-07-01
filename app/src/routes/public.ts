@@ -27,6 +27,7 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -41,14 +42,16 @@ import {
 } from '../services/sendMessage.js';
 
 /**
- * The §11.3 "housing-fair form → auto welcome text" DEFAULT copy. A named
- * constant that is the bulletproof fallback: the operator can override it via
- * the settings `welcomeText` field (resolved per-request below), but ANY
- * settings-read failure falls back to THIS constant so intake never breaks.
- * {firstName} is interpolated; nothing else.
+ * The housing-fair "auto welcome text" DEFAULT copy — now the FILED A2P welcome
+ * (spec §5): brand identity + opt-out language, verbatim from
+ * lib/smsCompliance.ts (the single source of truth). The operator can still
+ * override it via the settings `welcomeText` field (resolved per-request below),
+ * but ANY settings-read failure falls back to THIS constant so intake never
+ * breaks. `WELCOME_SMS` carries no `{firstName}` token, so renderWelcome is a
+ * no-op interpolation — but an operator override MAY still use `{firstName}`.
+ * Re-exported under the historical name so existing importers keep working.
  */
-export const WELCOME_TEXT_TEMPLATE =
-  'Hi {firstName}, thanks for stopping by! This is HousingChoice — reply here anytime about housing options.';
+export const WELCOME_TEXT_TEMPLATE = WELCOME_SMS;
 
 /** Render a welcome body from a template (the constant or the operator's
  *  override), interpolating {firstName}. Pure. */
@@ -85,12 +88,25 @@ interface HousingFairFields {
  * field/why in detail beyond the field name) and strict shapes: names are
  * non-empty and length-capped, phone normalizes to valid E.164 or it's
  * rejected, voucherSize (optional) is an integer 0..12.
+ *
+ * do-not-remove — A2P/CTIA consent gate (server-side). The public form gates
+ * submit on a required, unchecked-by-default consent checkbox (spec §3.1); the
+ * SERVER re-enforces it: a body missing `smsConsent === true` is REJECTED with
+ * the distinct `consent_required` error (NOT the generic "invalid request"), so
+ * the app never texts a signup with no documented opt-in. This is the second
+ * fence behind the client checkbox — never remove it.
  */
 function parseHousingFairBody(body: unknown): HousingFairFields | { error: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { error: 'invalid request' };
   }
   const b = body as Record<string, unknown>;
+
+  // do-not-remove — A2P/CTIA consent gate (server-side). Require explicit
+  // opt-in: exactly `true` (a missing/false/"true"-string value is rejected).
+  if (b['smsConsent'] !== true) {
+    return { error: 'consent_required' };
+  }
 
   const firstName = typeof b['firstName'] === 'string' ? b['firstName'].trim() : '';
   const lastName = typeof b['lastName'] === 'string' ? b['lastName'].trim() : '';
@@ -169,9 +185,13 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   router.post('/housing-fair', async (req, res) => {
     const parsed = parseHousingFairBody(req.body);
     if ('error' in parsed) {
-      // Generic message — never reveal which validation tripped on a public,
+      // The consent gate returns a DISTINCT `consent_required` (the frontend
+      // surfaces "please agree to texts"); every other validation failure stays
+      // the generic message — never reveal which field tripped on a public,
       // abuse-prone surface.
-      res.status(400).json({ error: 'invalid request' });
+      res
+        .status(400)
+        .json({ error: parsed.error === 'consent_required' ? 'consent_required' : 'invalid request' });
       return;
     }
     const { firstName, lastName, phone, voucherSize, unitId } = parsed;
@@ -225,6 +245,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         ...(viaFlyer && unitId !== undefined && { unit_of_interest: unitId }),
         captured_at: new Date().toISOString(),
         housing_fair_welcomed: false,
+        // A2P/CTIA consent (spec §3.1): the required checkbox was checked (the
+        // server gate above enforced it), so this signup carries a documented
+        // web-form opt-in. consent_version pins the disclosure copy version.
+        consent_method: 'web_form',
+        consent_at: new Date().toISOString(),
+        consent_version: CONSENT_VERSION,
       });
       contactId = created.contactId;
       alreadyWelcomed = false;

@@ -72,6 +72,12 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
       capture_source: 'inbound_sms',
       captured_at: now,
       created_at: now,
+      // A2P/CTIA consent (spec §3.2): a first inbound text IS the consent basis
+      // — customer-initiated contact for an INFORMATIONAL/transactional program.
+      // Stamp `inbound_text` so replies never hit the JIT gate. hasSmsConsent()
+      // reads `consent_method`; this is the automatic (non-human) stamp.
+      consent_method: 'inbound_text',
+      consent_at: now,
     };
   }
 

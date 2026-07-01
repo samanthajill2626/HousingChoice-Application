@@ -16,6 +16,7 @@ const updateContact = vi.fn();
 const getContacts = vi.fn();
 const deleteContact = vi.fn();
 const restoreContact = vi.fn();
+const sendMessage = vi.fn();
 // Used by the "Start placement" dialog (PlacementCreateForm) when opened.
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
@@ -36,6 +37,7 @@ vi.mock('../../api/index.js', async () => {
     getContacts: (...a: unknown[]) => getContacts(...a),
     deleteContact: (...a: unknown[]) => deleteContact(...a),
     restoreContact: (...a: unknown[]) => restoreContact(...a),
+    sendMessage: (...a: unknown[]) => sendMessage(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
@@ -112,6 +114,8 @@ beforeEach(() => {
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
   getContacts.mockReset();
+  sendMessage.mockReset();
+  updateContact.mockReset();
   getPlacementsBy.mockReset();
   getPlacementsBy.mockResolvedValue([]);
   getPlacements.mockResolvedValue(CASES);
@@ -335,6 +339,131 @@ describe('ContactDetail', () => {
 
       // No option for Tasha (the contact herself) must appear — self-link guard.
       expect(screen.queryByRole('option', { name: /Tasha Williams/i })).not.toBeInTheDocument();
+    });
+  });
+
+  // ── Just-in-time consent gate (§3.4) ────────────────────────────────────────
+  describe('just-in-time consent gate', () => {
+    // A server timeline with one prior outbound to the contact's number, so the
+    // reply box resolves a conversation (canSend === true) and a send fires.
+    const TIMELINE = {
+      nextCursor: null,
+      items: [
+        {
+          kind: 'message',
+          id: 'm0',
+          at: '2026-06-01T10:00:00.000Z',
+          conversationId: 'conv-k1',
+          tsMsgId: '2026-06-01T10:00:00.000Z#SM0',
+          direction: 'outbound',
+          author: 'teammate',
+          type: 'sms',
+          body: 'Hi',
+          delivery_status: 'delivered',
+          toPhone: '+14040100007',
+        },
+      ],
+    };
+
+    async function typeAndSend(user: ReturnType<typeof import('@testing-library/user-event').default.setup>, text: string): Promise<void> {
+      const box = screen.getByLabelText('Reply message');
+      await user.type(box, text);
+      await user.click(screen.getByRole('button', { name: /^Send$/i }));
+    }
+
+    it('opens the consent modal on a 409 contact_no_consent, PATCHes consent, then retries the send', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getContactTimeline.mockResolvedValue(TIMELINE);
+      // First send is refused for no consent; after consent is recorded the retry succeeds.
+      sendMessage
+        .mockRejectedValueOnce(new ApiError(409, 'contact_no_consent', 'contact_no_consent'))
+        .mockResolvedValueOnce({
+          conversationId: 'conv-k1',
+          providerSid: 'SM1',
+          tsMsgId: '2026-06-02T10:00:00.000Z#SM1',
+          status: 'sent',
+        });
+      updateContact.mockResolvedValue({ ...TENANT, consent_method: 'verbal_phone' });
+
+      renderAt('k1');
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      await typeAndSend(user, 'Property that fits your voucher');
+
+      // The hard-block modal appears.
+      const dialog = await screen.findByRole('dialog', { name: /Record consent before texting/i });
+      // Confirm is disabled until a method is chosen.
+      const confirm = within(dialog).getByRole('button', { name: /Record consent & send/i });
+      expect(confirm).toBeDisabled();
+
+      await user.selectOptions(within(dialog).getByLabelText(/How did they consent/i), 'verbal_phone');
+      expect(confirm).toBeEnabled();
+      await user.click(confirm);
+
+      // PATCH carried the human consent method + a consent_at.
+      await waitFor(() => expect(updateContact).toHaveBeenCalled());
+      const [id, patch] = updateContact.mock.calls[0]! as [string, Record<string, unknown>];
+      expect(id).toBe('k1');
+      expect(patch['consent_method']).toBe('verbal_phone');
+      expect(typeof patch['consent_at']).toBe('string');
+
+      // The original send was retried (sendMessage called twice) and the modal closed.
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
+      expect(sendMessage.mock.calls[1]![0]).toBe('conv-k1');
+      expect(sendMessage.mock.calls[1]![1]).toEqual({ body: 'Property that fits your voucher' });
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: /Record consent before texting/i })).not.toBeInTheDocument(),
+      );
+    });
+
+    it('Cancel aborts the send (no PATCH, no retry) and the message stays in the box', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getContactTimeline.mockResolvedValue(TIMELINE);
+      sendMessage.mockRejectedValueOnce(new ApiError(409, 'contact_no_consent', 'contact_no_consent'));
+
+      renderAt('k1');
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      await typeAndSend(user, 'A first proactive text');
+
+      const dialog = await screen.findByRole('dialog', { name: /Record consent before texting/i });
+      await user.click(within(dialog).getByRole('button', { name: /^Cancel$/i }));
+
+      // No consent recorded, no retry; the drafted message is restored to the box.
+      expect(updateContact).not.toHaveBeenCalled();
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: /Record consent before texting/i })).not.toBeInTheDocument(),
+      );
+      expect(screen.getByLabelText('Reply message')).toHaveValue('A first proactive text');
+    });
+
+    it('a normal successful send does NOT open the consent modal', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getContactTimeline.mockResolvedValue(TIMELINE);
+      sendMessage.mockResolvedValue({
+        conversationId: 'conv-k1',
+        providerSid: 'SM2',
+        tsMsgId: '2026-06-03T10:00:00.000Z#SM2',
+        status: 'sent',
+      });
+
+      renderAt('k1');
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      await typeAndSend(user, 'A consented reply');
+
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+      expect(
+        screen.queryByRole('dialog', { name: /Record consent before texting/i }),
+      ).not.toBeInTheDocument();
+      expect(updateContact).not.toHaveBeenCalled();
     });
   });
 });

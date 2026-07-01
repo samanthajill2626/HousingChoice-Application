@@ -259,4 +259,45 @@ describe('ContactCreateForm', () => {
     expect('relationships' in body).toBe(false);
     expect('customFields' in body).toBe(false);
   });
+
+  // ── Consent to text (§3.3): optional; sent only when a method is chosen ──────
+  it('omits consent fields when the consent section is left untouched (optional)', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'c-nc', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Nora');
+    await user.type(screen.getByLabelText(/Phone/i), '+14041110000');
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect('consent_method' in body).toBe(false);
+    expect('consent_at' in body).toBe(false);
+    expect('consent_note' in body).toBe(false);
+  });
+
+  it('includes consent_method + consent_at (+ note) when a method is chosen', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'c-c', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Cara');
+    await user.type(screen.getByLabelText(/Phone/i), '+14041112222');
+
+    // Open the optional consent section, pick a method + a note.
+    await user.click(screen.getByRole('button', { name: /Record text consent/i }));
+    await user.selectOptions(screen.getByLabelText(/How did they consent/i), 'verbal_phone');
+    await user.type(screen.getByLabelText(/Note \(optional\)/i), 'said OK on the call');
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['consent_method']).toBe('verbal_phone');
+    expect(typeof body['consent_at']).toBe('string');
+    expect(body['consent_note']).toBe('said OK on the call');
+  });
 });

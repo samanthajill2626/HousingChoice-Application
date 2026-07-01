@@ -15,6 +15,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -118,6 +119,25 @@ export interface ContactItem {
   /** When auto-capture created the stub (ISO 8601). */
   captured_at?: string;
   created_at?: string;
+  /**
+   * A2P/CTIA consent model (spec §2). All OPTIONAL so a fast add stays fast; the
+   * flexible-doc create/update path persists them without any special wiring.
+   * "Has SMS consent" is derived off a non-empty `consent_method`
+   * (lib/smsCompliance.ts → hasSmsConsent) — the single predicate the JIT gate
+   * and broadcast fence read.
+   */
+  /** How consent was obtained (spec §2). web_form/inbound_text are stamped
+   *  automatically; the other four are only ever set by a human. */
+  consent_method?: ConsentMethod;
+  /** When consent was obtained (ISO 8601) — may differ from created_at. */
+  consent_at?: string;
+  /** The disclosure version shown on the web form (e.g. `ctia-2026-06`);
+   *  absent for non-form methods. */
+  consent_version?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
+  /** Actor userId when staff-entered; unset for automatic (form/inbound) methods. */
+  consent_captured_by?: string;
   /**
    * Phone-pointer marker (BE1). A pointer item carries `phone_ref: true`,
    * `phone_ref_owner` (the real contactId), and the indexed scalar `phone`,

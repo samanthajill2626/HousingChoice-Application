@@ -33,6 +33,7 @@ function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): P
     phone: '+14040000001',
     voucherSize: 2,
     alreadySentThisProperty: false,
+    has_consent: true,
     ...over,
   };
 }
@@ -54,6 +55,9 @@ function tenant(over: Partial<Contact> = {}): Contact {
     firstName: 'New',
     lastName: 'Tenant',
     phone: '+14040000099',
+    // Default: consent recorded, so the add-a-tenant flow succeeds. Tests that
+    // exercise the no-consent guard override consent_method to undefined.
+    consent_method: 'verbal_phone',
     ...over,
   };
 }
@@ -252,6 +256,68 @@ describe('RecipientPreview — add a tenant', () => {
     expect(within(list).queryByText('Bad Number')).not.toBeInTheDocument();
     const note = await screen.findByRole('alert');
     expect(note).toHaveTextContent(/unreachable/i);
+  });
+
+  it('does NOT add a no-consent tenant — surfaces "no consent recorded" inline', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })] }),
+      // consent_method undefined → no recorded consent.
+      tenantCandidates: [
+        tenant({ contactId: 'cX', firstName: 'No', lastName: 'Consent', consent_method: undefined }),
+      ],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'No');
+    await u.click(await screen.findByRole('option', { name: /No Consent/ }));
+
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    expect(within(list).queryByText('No Consent')).not.toBeInTheDocument();
+    const note = await screen.findByRole('alert');
+    expect(note).toHaveTextContent(/no consent recorded/i);
+    // The sendable count is not inflated (still just Tasha).
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeInTheDocument();
+  });
+});
+
+// ── A2P/CTIA consent treatment (§4) ─────────────────────────────────────────
+describe('RecipientPreview — consent treatment', () => {
+  it('badges a no-consent candidate, disables + unchecks it, and shows the count', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha' }),
+          candidate({ contactId: 'c2', firstName: 'NoConsent', phone: '+14040000002', has_consent: false }),
+        ],
+      }),
+    });
+    const list = screen.getByRole('list', { name: 'Candidate recipients' });
+    // The no-consent row carries the "consent not recorded — fix before sending"
+    // treatment, is unchecked, and is disabled (a hard fence).
+    expect(within(list).getByText(/consent not recorded — fix before sending/i)).toBeInTheDocument();
+    const noConsentBox = within(list).getByRole('checkbox', { name: /NoConsent — consent not recorded/i });
+    expect(noConsentBox).not.toBeChecked();
+    expect(noConsentBox).toBeDisabled();
+    // The count of no-consent recipients is surfaced.
+    expect(screen.getByText(/1 recipient without recorded consent/i)).toBeInTheDocument();
+  });
+
+  it('excludes no-consent candidates from the send (only consented ids are posted)', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha' }),
+          candidate({ contactId: 'c2', firstName: 'NoConsent', phone: '+14040000002', has_consent: false }),
+        ],
+      }),
+    });
+    // Only Tasha is checkable → "Send to 1 tenant". Try Select all — the
+    // no-consent row must still be excluded.
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    await u.click(screen.getByRole('button', { name: /^Send to/ }));
+    await waitFor(() => expect(sendBroadcast).toHaveBeenCalledTimes(1));
+    const [, ids] = sendBroadcast.mock.calls[0] as [string, string[]];
+    expect(new Set(ids)).toEqual(new Set(['c1']));
   });
 });
 

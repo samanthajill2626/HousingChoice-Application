@@ -1119,6 +1119,10 @@ export interface PreviewCandidate {
   voucherSize?: number;
   housingAuthority?: string;
   alreadySentThisProperty: boolean;
+  /** A2P/CTIA consent (CONTRACT 3): whether this candidate has recorded SMS
+   *  consent. `false` → the row is fenced out of the send + surfaced for staff to
+   *  resolve (a broadcast can't pop a modal mid-fan-out). */
+  has_consent: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is the

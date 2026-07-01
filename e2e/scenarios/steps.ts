@@ -21,26 +21,26 @@ export const APP_NUMBER = '+15550009999';
 /** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */
 const SEEDED_LANDLORD = 'contact-landlord-0001';
 
-export interface Tenant {
+/** A fresh contact (any role) the scenarios drive. Modelled with the SAME inbound
+ *  machinery regardless of role (the fake persona registry is role-agnostic for
+ *  send-as-party); `firstName` is the unique, space-free handle used to locate the
+ *  contact's row (e.g. a broadcast audience preview shows the FIRST name only). */
+export interface Contact {
   phone: string;
   name: string;
-  /** Unique, space-free first name — used to locate the tenant's broadcast row
-   *  (the audience preview shows the FIRST name only). */
   firstName: string;
   lastName: string;
 }
+
+/** Role-reading aliases over {@link Contact} — same shape, clearer at call sites. */
+export type Tenant = Contact;
+export type Landlord = Contact;
 
 /** An available property the team can send to a tenant (sending-unit scenarios). */
 export interface Unit {
   unitId: string;
   addressLine1: string;
 }
-
-/** A landlord lead the team onboards (landlord-onboarding scenarios). A landlord is
- *  modelled with the SAME inbound machinery as a tenant (the fake persona registry is
- *  role-agnostic for send-as-party), so it reuses the Tenant shape — `firstName` is the
- *  unique, space-free handle used to locate the contact. */
-export type Landlord = Tenant;
 
 /** Thin wrapper over Playwright's test.step so a scenario reads as the diagram. */
 export function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
@@ -52,7 +52,7 @@ export function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
  *  is always a well-formed NANP number (accepted by normalizeToE164 + the fake
  *  persona registry) and never truncates or collides within a run. */
 let seq = 0;
-export function freshTenant(label: string): Tenant {
+export function freshContact(label: string): Contact {
   const stamp = `${Date.now()}`.slice(-5);
   seq += 1;
   const phone = `+1555${stamp}${String(seq).padStart(2, '0')}`;
@@ -61,6 +61,12 @@ export function freshTenant(label: string): Tenant {
   const firstName = `${label}${stamp}${seq}`;
   return { phone, firstName, lastName: 'Tester', name: `${label} ${stamp}-${seq}` };
 }
+
+/** Role-reading aliases over {@link freshContact} — identical behavior; they read as
+ *  the role at the call site (freshLandlord('Landlord'), freshTenant('Caller'), …).
+ *  freshTenant is kept so the existing tenant/sending-unit specs need no change. */
+export const freshTenant = freshContact;
+export const freshLandlord = freshContact;
 
 /** E.164 +1NXXNXXXXXX → "(NXX) NXX-XXXX" — how the dashboard displays a US number,
  *  so a nameless unknown row can be located by its visible (formatted) phone. */
@@ -243,11 +249,17 @@ export class Scenario {
     });
   }
 
+  /** @deprecated Alias of {@link teamCreatesTenant} — kept for the tenant/sending-unit
+   *  specs that predate the rename. */
+  teamCreatesContact(...args: Parameters<Scenario['teamCreatesTenant']>): Promise<void> {
+    return this.teamCreatesTenant(...args);
+  }
+
   /**
    * [Team] Housing-fair in-person path: create a brand-new Tenant via the New-contact
    * dialog (no prior number). Sets the active contact.
    */
-  teamCreatesContact(fields: {
+  teamCreatesTenant(fields: {
     firstName: string;
     lastName: string;
     voucherSize?: number;

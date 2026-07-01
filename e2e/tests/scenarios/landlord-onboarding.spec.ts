@@ -4,7 +4,7 @@
 // sales-first landlord & unit onboarding flow (prove value → sign the contract → onboard
 // the landlord → intake the unit → publish → hand off to Matching). Reads as the diagram:
 // each line is a verb from e2e/scenarios/steps.ts. Coordinator role is "Team", never the
-// founder's name. Self-clean isolation: fresh timestamped landlords (freshTenant), no
+// founder's name. Self-clean isolation: fresh timestamped landlords (freshLandlord), no
 // per-test reseed.
 //
 // Phase-1 realities encoded here:
@@ -17,7 +17,7 @@
 //   - Unit creation is API setup (no create-unit UI); publish → available; the handoff
 //     to Matching is "the unit appears in GET /api/units?status=available".
 import { test } from '@playwright/test';
-import { Scenario, freshTenant, type Landlord, type Unit } from '../../scenarios/steps.js';
+import { Scenario, freshLandlord, type Landlord, type Unit } from '../../scenarios/steps.js';
 
 // Opt-in end-of-test pause for eyeballing the live dashboard (gated on E2E_PAUSE so
 // CI/normal runs are unaffected). Same two modes as the sibling specs:
@@ -90,7 +90,7 @@ test('cold call → interested → signed → onboarded → unit available → h
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const landlord = freshTenant('Landlord');
+  const landlord = freshLandlord('Landlord');
 
   await flow.login();
   // Cold call (not app-placed in Phase 1): Team creates the landlord from the sourced lead.
@@ -110,7 +110,7 @@ test('inbound text → worth pursuing → interested → signed → onboarded �
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const landlord: Landlord = freshTenant('Landlord');
+  const landlord: Landlord = freshLandlord('Landlord');
 
   // First touch — inbound text from an unknown number.
   await flow.landlordTexts(landlord, 'Can you help fill my unit?');
@@ -134,7 +134,7 @@ test('inbound text → worth pursuing → interested → signed → onboarded �
 
 test('cold call → declines → parked (reason)', async ({ page, request }) => {
   const flow = new Scenario(page, request);
-  const landlord = freshTenant('Landlord');
+  const landlord = freshLandlord('Landlord');
 
   await flow.login();
   await flow.teamCreatesLandlord({
@@ -149,7 +149,7 @@ test('cold call → declines → parked (reason)', async ({ page, request }) => 
 
 test('inbound text → not a fit → parked (reason)', async ({ page, request }) => {
   const flow = new Scenario(page, request);
-  const landlord: Landlord = freshTenant('Landlord');
+  const landlord: Landlord = freshLandlord('Landlord');
 
   await flow.landlordTexts(landlord, 'Do you take listings outside Georgia?');
   await flow.login();
@@ -170,7 +170,7 @@ test('inbound text → not a fit → parked (reason)', async ({ page, request })
 
 test('contract → never signed → parked (reason "never signed")', async ({ page, request }) => {
   const flow = new Scenario(page, request);
-  const landlord = freshTenant('Landlord');
+  const landlord = freshLandlord('Landlord');
 
   await flow.login();
   await flow.teamCreatesLandlord({
@@ -192,7 +192,7 @@ test('property intake · missing field → follow-up → set → published → h
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const landlord = freshTenant('Landlord');
+  const landlord = freshLandlord('Landlord');
 
   await flow.login();
   await flow.teamCreatesLandlord({

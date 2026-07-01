@@ -99,6 +99,33 @@ export interface UserItem {
    * items provisioned before the field existed read as 1 via sessionEpochOf().
    */
   session_epoch?: number;
+  /**
+   * Voice Phase 1 (spec §4). The user's OWN phone (E.164) — their outbound
+   * masked-call bridge leg. NEVER dialed unless `cell_verified_at` is set
+   * (an unverified cell could silently bridge a stranger into a call). Stored
+   * as data (fine) but NEVER logged (PII, spec §9).
+   */
+  cell?: string;
+  /** Voice Phase 1: ISO 8601 stamped when `cell` passed verification (§7). Unverified = never dialed. */
+  cell_verified_at?: string;
+  /**
+   * Voice Phase 1 (spec §6): the single "Inbound voice line" designation —
+   * EXACTLY ONE user holds it at a time (assignInboundVoiceLine enforces the
+   * single-holder invariant). That holder's verified `cell` is what inbound
+   * calls ring, replacing the `FOUNDER_CELL` env var.
+   */
+  inbound_voice_line?: boolean;
+  /**
+   * Voice Phase 1 (spec §7) pending-verification storage — the OTP flow lives
+   * on the user item (no new table). `cell_pending` is the not-yet-trusted
+   * candidate cell; `cell_verify_code_hash` is sha256(code) (NEVER plaintext);
+   * `cell_verify_expires_at` is the TTL deadline (ISO 8601); `cell_verify_attempts`
+   * counts confirm tries for lockout. All are cleared on a successful confirm.
+   */
+  cell_pending?: string;
+  cell_verify_code_hash?: string;
+  cell_verify_expires_at?: string;
+  cell_verify_attempts?: number;
   created_at: string;
   last_login_at?: string;
   [key: string]: unknown;
@@ -151,6 +178,16 @@ export interface InviteResult {
   created: boolean;
   user: UserItem;
 }
+
+/**
+ * confirmCellVerification() result (Voice Phase 1, spec §7). On success the
+ * candidate cell is promoted (`cell` = the now-verified number, stamped
+ * `cell_verified_at`). On failure a machine-readable `reason` tells the route
+ * which 4xx/message to surface (never leaks the code or the number).
+ */
+export type ConfirmResult =
+  | { ok: true; cell: string; cell_verified_at: string }
+  | { ok: false; reason: 'no_pending' | 'expired' | 'mismatch' | 'too_many_attempts' };
 
 export interface UsersRepo {
   /** Normalizes the input; byEmail GSI Query; undefined when unknown. */
@@ -223,6 +260,51 @@ export interface UsersRepo {
    * not exist.
    */
   removePushSubscription(userId: string, endpoint: string): Promise<PushSubscriptionRecord[]>;
+
+  // --- Voice Phase 1: per-user cell verification (spec §7) ------------------
+  /**
+   * Begin verifying a candidate cell: SET the pending fields (`cell_pending`,
+   * `cell_verify_code_hash`, `cell_verify_expires_at`) and RESET
+   * `cell_verify_attempts` to 0. Deliberately does NOT touch `cell`/
+   * `cell_verified_at` — the cell is not trusted until confirmCellVerification
+   * matches the code. Throws if the user does not exist. Never logs the code
+   * (it is passed pre-hashed) or the number (PII, §9).
+   */
+  startCellVerification(
+    userId: string,
+    cell: string,
+    codeHash: string,
+    expiresAt: string,
+  ): Promise<void>;
+  /**
+   * Confirm a pending cell against a submitted code hash (spec §7). Loads the
+   * user and, in order: no pending code → `no_pending`; past
+   * `cell_verify_expires_at` → `expired`; attempts already at the cap →
+   * `too_many_attempts`; hash mismatch → increment attempts, return `mismatch`;
+   * on match → promote (`cell` = `cell_pending`, `cell_verified_at` = now),
+   * REMOVE the 4 pending fields, return { ok, cell, cell_verified_at }. A
+   * read-modify-write (per-user, low-frequency op). `now` is ISO 8601.
+   */
+  confirmCellVerification(userId: string, codeHash: string, now: string): Promise<ConfirmResult>;
+
+  // --- Voice Phase 1: single inbound-voice-line holder (spec §6) ------------
+  /**
+   * Assign the single inbound-voice-line holder to `userId`: clears
+   * `inbound_voice_line` on EVERY other user that currently holds it, then SETs
+   * it on the target (single-holder invariant). Does NOT enforce the
+   * verified-cell precondition — the CALLER (Phase 2 route) must ensure the
+   * target has a verified cell (it returns 409 otherwise) before assigning.
+   * Throws if the target user does not exist.
+   */
+  assignInboundVoiceLine(userId: string): Promise<void>;
+  /** Unassign: REMOVE `inbound_voice_line` on `userId`. Throws if the user does not exist. */
+  clearInboundVoiceLine(userId: string): Promise<void>;
+  /**
+   * The single user holding `inbound_voice_line === true`, or undefined when
+   * none is set. If (invariant-violation) more than one holds it, returns the
+   * first and logs a warning with userIds ONLY — never PII.
+   */
+  getInboundVoiceLineHolder(): Promise<UserItem | undefined>;
 }
 
 export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
@@ -485,6 +567,140 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
         log.info({ userId, subscriptionCount: remaining.length }, 'push subscription removed');
       }
       return remaining;
+    },
+
+    // --- Voice Phase 1: cell verification (spec §7) ------------------------
+    async startCellVerification(userId, cell, codeHash, expiresAt) {
+      // SET the pending fields + RESET attempts. Deliberately leaves cell /
+      // cell_verified_at untouched — the candidate is not trusted until a
+      // matching confirm. `cell`/`codeHash` are never logged (PII/secret).
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression:
+            'SET cell_pending = :pending, cell_verify_code_hash = :hash, ' +
+            'cell_verify_expires_at = :exp, cell_verify_attempts = :zero',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeValues: {
+            ':pending': cell,
+            ':hash': codeHash,
+            ':exp': expiresAt,
+            ':zero': 0,
+          },
+        }),
+      );
+      log.info({ userId }, 'cell verification started');
+    },
+
+    async confirmCellVerification(userId, codeHash, now) {
+      // Read-modify-write: per-user, low-frequency; the contention window is a
+      // single person confirming their own code, so a plain RMW is fine.
+      const current = await repo.findById(userId);
+      if (!current) throw new Error(`confirmCellVerification: no user ${userId}`);
+
+      const pending = current.cell_pending;
+      const storedHash = current.cell_verify_code_hash;
+      if (typeof pending !== 'string' || typeof storedHash !== 'string') {
+        return { ok: false, reason: 'no_pending' };
+      }
+      const expiresAt = current.cell_verify_expires_at;
+      if (typeof expiresAt === 'string' && now > expiresAt) {
+        return { ok: false, reason: 'expired' };
+      }
+      const attempts =
+        typeof current.cell_verify_attempts === 'number' ? current.cell_verify_attempts : 0;
+      if (attempts >= 5) {
+        return { ok: false, reason: 'too_many_attempts' };
+      }
+      if (codeHash !== storedHash) {
+        // Wrong code — burn an attempt (RMW increment; the cap above gates the
+        // NEXT try). Guard existence so a deleted user is not resurrected.
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { userId },
+            UpdateExpression: 'SET cell_verify_attempts = :next',
+            ConditionExpression: 'attribute_exists(userId)',
+            ExpressionAttributeValues: { ':next': attempts + 1 },
+          }),
+        );
+        log.info({ userId, attempts: attempts + 1 }, 'cell verification code mismatch');
+        return { ok: false, reason: 'mismatch' };
+      }
+      // Match — promote the candidate to the verified cell and clear the pending
+      // fields in ONE write.
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression:
+            'SET cell = :cell, cell_verified_at = :now ' +
+            'REMOVE cell_pending, cell_verify_code_hash, cell_verify_expires_at, cell_verify_attempts',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeValues: { ':cell': pending, ':now': now },
+        }),
+      );
+      log.info({ userId }, 'cell verified');
+      return { ok: true, cell: pending, cell_verified_at: now };
+    },
+
+    // --- Voice Phase 1: single inbound-voice-line holder (spec §6) ---------
+    async assignInboundVoiceLine(userId) {
+      // Single-holder: clear the flag on every OTHER current holder, then set it
+      // on the target. listAll() scans the tiny, bounded users table (same
+      // economy as listByRole). NOTE: the CALLER must ensure the target has a
+      // verified cell (the Phase 2 route 409s otherwise) — not enforced here.
+      const all = await repo.listAll();
+      for (const u of all) {
+        if (u.inbound_voice_line === true && u.userId !== userId) {
+          await doc.send(
+            new UpdateCommand({
+              TableName: table,
+              Key: { userId: u.userId },
+              UpdateExpression: 'REMOVE inbound_voice_line',
+              ConditionExpression: 'attribute_exists(userId)',
+            }),
+          );
+          log.info({ userId: u.userId }, 'inbound voice line cleared (reassigned)');
+        }
+      }
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression: 'SET inbound_voice_line = :true',
+          ConditionExpression: 'attribute_exists(userId)',
+          ExpressionAttributeValues: { ':true': true },
+        }),
+      );
+      log.info({ userId }, 'inbound voice line assigned');
+    },
+
+    async clearInboundVoiceLine(userId) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { userId },
+          UpdateExpression: 'REMOVE inbound_voice_line',
+          ConditionExpression: 'attribute_exists(userId)',
+        }),
+      );
+      log.info({ userId }, 'inbound voice line cleared');
+    },
+
+    async getInboundVoiceLineHolder() {
+      const all = await repo.listAll();
+      const holders = all.filter((u) => u.inbound_voice_line === true);
+      if (holders.length === 0) return undefined;
+      if (holders.length > 1) {
+        // Invariant violation — return the first but flag it. userIds ONLY (PII).
+        log.warn(
+          { holderUserIds: holders.map((u) => u.userId) },
+          'more than one inbound-voice-line holder — single-holder invariant violated',
+        );
+      }
+      return holders[0];
     },
   };
 

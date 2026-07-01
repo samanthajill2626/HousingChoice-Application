@@ -20,11 +20,15 @@ import type { TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
- * Messaging suppression flags (doc §7.1 error-class handling):
+ * Suppression flags (doc §7.1 error-class handling + Voice Phase 1 §8):
  * sms_opt_out — STOP/21610 suppression; sends are REFUSED.
  * sms_unreachable — 30005/30006 (invalid number / landline); prompt voice.
+ * voice_opt_out — staff-set company do-not-call; originate paths REFUSE.
+ *   INDEPENDENT of sms_opt_out (someone may allow texts but not calls).
+ * setFlag/clearFlag handle any value generically (the flag IS the attribute
+ * name), so this union is the single place a new suppression flag is added.
  */
-export type ContactFlag = 'sms_opt_out' | 'sms_unreachable';
+export type ContactFlag = 'sms_opt_out' | 'sms_unreachable' | 'voice_opt_out';
 
 /**
  * Contact types (doc §5, plus `unknown` — 2026-06-12 deviation): auto-capture
@@ -106,6 +110,13 @@ export interface ContactItem {
   phones?: ContactPhone[];
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /**
+   * Voice Phase 1 (spec §8): staff-set company do-not-call. Honored by every
+   * outbound originate path (409 contact_voice_opted_out) and the CallMenu.
+   * INDEPENDENT of sms_opt_out — a contact may allow texts but not calls (or
+   * vice-versa). Set/cleared via setFlag/clearFlag('voice_opt_out').
+   */
+  voice_opt_out?: boolean;
   /**
    * Soft-delete marker (ISO 8601). PRESENT → the contact is "deleted": hidden
    * from the normal lists, inbox, today, and broadcast targeting, but the record

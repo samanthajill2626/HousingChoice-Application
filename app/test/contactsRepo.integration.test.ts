@@ -163,4 +163,27 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     const legacyRead = await contacts.getById(legacy.contactId);
     expect(legacyRead?.phones).toBeUndefined();
   });
+
+  // Voice Phase 1 (spec §8): the voice_opt_out do-not-call flag routes through
+  // the generic setFlag/clearFlag, INDEPENDENT of the sms flags.
+  it('setFlag/clearFlag handle voice_opt_out independently of sms_opt_out', async () => {
+    const created = await contacts.create({ type: 'landlord', phone: nextPhone() });
+
+    await contacts.setFlag(created.contactId, 'voice_opt_out');
+    let read = await contacts.getById(created.contactId);
+    expect(read?.voice_opt_out).toBe(true);
+    expect(read?.sms_opt_out).toBeUndefined(); // independent — untouched
+
+    // Setting the sms flag does not disturb voice_opt_out.
+    await contacts.setFlag(created.contactId, 'sms_opt_out');
+    read = await contacts.getById(created.contactId);
+    expect(read?.voice_opt_out).toBe(true);
+    expect(read?.sms_opt_out).toBe(true);
+
+    // Clearing voice_opt_out leaves sms_opt_out set.
+    await contacts.clearFlag(created.contactId, 'voice_opt_out');
+    read = await contacts.getById(created.contactId);
+    expect(read?.voice_opt_out).toBe(false);
+    expect(read?.sms_opt_out).toBe(true);
+  });
 });

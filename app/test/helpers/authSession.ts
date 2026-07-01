@@ -232,6 +232,58 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       user.push_subscriptions = remaining;
       return remaining;
     },
+    // --- Voice Phase 1: cell verification + inbound-voice-line (mirrors real) --
+    async startCellVerification(userId, cell, codeHash, expiresAt) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`startCellVerification: no user ${userId}`);
+      user.cell_pending = cell;
+      user.cell_verify_code_hash = codeHash;
+      user.cell_verify_expires_at = expiresAt;
+      user.cell_verify_attempts = 0;
+    },
+    async confirmCellVerification(userId, codeHash, now) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`confirmCellVerification: no user ${userId}`);
+      const pending = user.cell_pending;
+      const storedHash = user.cell_verify_code_hash;
+      if (typeof pending !== 'string' || typeof storedHash !== 'string') {
+        return { ok: false, reason: 'no_pending' };
+      }
+      if (typeof user.cell_verify_expires_at === 'string' && now > user.cell_verify_expires_at) {
+        return { ok: false, reason: 'expired' };
+      }
+      const attempts =
+        typeof user.cell_verify_attempts === 'number' ? user.cell_verify_attempts : 0;
+      if (attempts >= 5) return { ok: false, reason: 'too_many_attempts' };
+      if (codeHash !== storedHash) {
+        user.cell_verify_attempts = attempts + 1;
+        return { ok: false, reason: 'mismatch' };
+      }
+      user.cell = pending;
+      user.cell_verified_at = now;
+      delete user.cell_pending;
+      delete user.cell_verify_code_hash;
+      delete user.cell_verify_expires_at;
+      delete user.cell_verify_attempts;
+      return { ok: true, cell: pending, cell_verified_at: now };
+    },
+    async assignInboundVoiceLine(userId) {
+      const target = users.get(userId);
+      if (!target) throw new Error(`assignInboundVoiceLine: no user ${userId}`);
+      for (const u of users.values()) {
+        if (u.inbound_voice_line === true && u.userId !== userId) delete u.inbound_voice_line;
+      }
+      target.inbound_voice_line = true;
+    },
+    async clearInboundVoiceLine(userId) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`clearInboundVoiceLine: no user ${userId}`);
+      delete user.inbound_voice_line;
+    },
+    async getInboundVoiceLineHolder() {
+      const holders = [...users.values()].filter((u) => u.inbound_voice_line === true);
+      return holders.length > 0 ? { ...holders[0]! } : undefined;
+    },
   };
   return { users, creates, activations, findByIdCalls, activateCalls, touchCalls, repo };
 }

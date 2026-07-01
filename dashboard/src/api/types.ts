@@ -37,6 +37,15 @@ export interface AdminUserView {
   status: string | null;
   created_at: string;
   last_login_at: string | null;
+  /** Voice Phase 1 (spec §4): the user's OWN verified cell (E.164) — their
+   *  outbound bridge leg. Absent until set. MIRRORS UserItem.cell. */
+  cell?: string;
+  /** Voice Phase 1: ISO 8601 when `cell` passed verification; absent = unverified
+   *  (never dialed). MIRRORS UserItem.cell_verified_at. */
+  cell_verified_at?: string;
+  /** Voice Phase 1 (spec §6): true on the single inbound-voice-line holder.
+   *  MIRRORS UserItem.inbound_voice_line. */
+  inbound_voice_line?: boolean;
 }
 
 // --- Settings: OrgSettings (founder-editable call-triage templates) ----------
@@ -709,6 +718,9 @@ export interface Contact {
   notes?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
+   *  sms_opt_out. MIRRORS ContactItem.voice_opt_out. */
+  voice_opt_out?: boolean;
   /** Soft-delete marker (ISO 8601). Present → the contact is "deleted": hidden
    *  from the normal lists/inbox/today but fully retained (restore clears it). */
   deleted_at?: string;

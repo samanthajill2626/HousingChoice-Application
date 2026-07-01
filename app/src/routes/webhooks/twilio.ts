@@ -29,6 +29,13 @@ import {
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
+import {
+  HELP_REPLY,
+  OPT_IN_KEYWORDS,
+  OPT_OUT_KEYWORDS,
+  STOP_CONFIRMATION,
+  WELCOME_SMS,
+} from '../../lib/smsCompliance.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import {
@@ -63,10 +70,34 @@ import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
-// Standard stop/start keywords (Twilio Advanced Opt-Out's defaults). Twilio
-// auto-replies at the provider; OUR job is recording the suppression state.
-const STOP_KEYWORDS = new Set(['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT']);
-const START_KEYWORDS = new Set(['START', 'UNSTOP', 'YES']);
+/**
+ * TwiML wrapper for a single reply message — the idiomatic Twilio mechanism for
+ * a webhook to answer inbound SMS. WE own the keyword replies now (spec §6):
+ * Twilio Advanced Opt-Out auto-reply is OFF (operator step), so a matched
+ * keyword's filed reply is returned HERE. Critically, the STOP confirmation goes
+ * to a JUST-opted-out number, so it must ride the TwiML response — NOT the
+ * opt-out-GATED sendMessage wrapper (which would refuse it). XML-escape the body
+ * so filed copy can never break the TwiML.
+ */
+function messageTwiml(body: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(body)}</Message></Response>`;
+}
+
+/** Minimal XML entity escaping for a TwiML text node (filed copy is trusted, but
+ *  ampersands/angle brackets must still be escaped to stay well-formed). */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Opt-out / opt-in keyword sets + the filed replies now live in the SINGLE
+// SOURCE OF TRUTH (lib/smsCompliance.ts) so they can never drift from the
+// approved A2P campaign. OPT_OUT_KEYWORDS adds OPTOUT+REVOKE; OPT_IN_KEYWORDS
+// adds JOIN+HOME (keeps UNSTOP). HELP is detected separately below.
 
 /** The webhook form fields this module reads (all optional strings). */
 type WebhookParams = Record<string, string | undefined>;
@@ -537,14 +568,30 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
     }
 
-    // (4) STOP/opt-out recording (doc §7.1; Twilio Advanced Opt-Out already
-    // auto-replied at the provider). The message itself stays on the
-    // timeline either way (persisted above).
+    // (4) STOP / HELP / START keyword handling (spec §6 — WE own the replies).
+    // Twilio Advanced Opt-Out auto-reply is OFF (operator step) so no double
+    // confirmations; the filed reply is returned as TwiML at the ack below. The
+    // message itself stays on the timeline either way (persisted above).
+    //   - opt-out keyword → suppress + reply STOP_CONFIRMATION;
+    //   - HELP           → reply HELP_REPLY (no flag change);
+    //   - opt-in keyword → clear suppression, stamp inbound_text consent if the
+    //                      contact has none, reply WELCOME_SMS.
+    // `keywordReply` is captured here and emitted as the TwiML response at the
+    // end of the handler. The STOP confirmation MUST ride this TwiML response,
+    // NOT the opt-out-gated sendMessage wrapper (which would refuse a send to a
+    // just-opted-out number).
+    let keywordReply: string | undefined;
     try {
       const keyword = (Body ?? '').trim().toUpperCase();
-      const optedOut = OptOutType === 'STOP' || STOP_KEYWORDS.has(keyword);
-      const optedIn = !optedOut && (OptOutType === 'START' || START_KEYWORDS.has(keyword));
-      if (optedOut || optedIn) {
+      const isHelp = OptOutType === 'HELP' || keyword === 'HELP';
+      const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
+      const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
+
+      if (isHelp) {
+        // HELP: no suppression change. Reply the filed HELP copy (declares no
+        // phone number — verified in lib/smsCompliance.ts + its test).
+        keywordReply = HELP_REPLY;
+      } else if (optedOut || optedIn) {
         // The CONVERSATION flag is always written — a STOP from a phone with
         // no contact record yet (auto-capture is M1.2) must still suppress
         // every later send. The send wrapper gates on either flag.
@@ -568,6 +615,17 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             conversationId: conversation.conversationId,
             source,
           });
+          // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
+          // opt-in (spec §6): if this (primary-number) contact has NO
+          // consent_method yet, stamp inbound_text so proactive sends aren't
+          // JIT-gated. Idempotent — only stamped when absent (never overwrites
+          // a web_form / verbal record). Best-effort inside the same try.
+          if (optedIn && !effectiveContact.consent_method) {
+            await contacts.update(effectiveContact.contactId, {
+              consent_method: 'inbound_text',
+              consent_at: new Date().toISOString(),
+            });
+          }
         } else if (effectiveContact) {
           // Non-primary (attached) number: the contact flag is NOT touched (per-
           // number scope) — only this conversation is suppressed (above). Audit on
@@ -594,6 +652,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             source,
           });
         }
+        // The filed reply for the matched keyword (rides the TwiML response).
+        keywordReply = optedOut ? STOP_CONFIRMATION : WELCOME_SMS;
       }
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed — message persisted, flag NOT updated');
@@ -652,10 +712,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: 'inbound',
         bodyLength: Body?.length ?? 0,
         mediaCount: mediaUrls.length,
+        keywordReply: keywordReply !== undefined,
       },
       'twilio inbound message processed',
     );
-    res.type('text/xml').send(EMPTY_TWIML);
+    // A matched keyword (STOP/HELP/opt-in) returns its filed reply as a TwiML
+    // <Message>; every other inbound acks with empty TwiML. NO PII in the body
+    // (all filed copy). The STOP confirmation reaching a just-opted-out number
+    // is exactly why this rides the TwiML response, not the gated send wrapper.
+    res.type('text/xml').send(keywordReply !== undefined ? messageTwiml(keywordReply) : EMPTY_TWIML);
   });
 
   // ---------------------------------------------------------------------

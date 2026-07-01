@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Status:** Draft for review → then implementation plan
-**Related:** `documentation/tours-sequence.mermaid` (intended flow, drafted), `docs/issues/tour-scheduling-off-placement.md`, `documentation/sending-unit-sequence.mermaid` (upstream), Post-Tour & Application (downstream, not yet designed)
+**Related:** `docs/issues/tour-scheduling-off-placement.md`, `documentation/sending-unit-sequence.mermaid` (upstream), Post-Tour & Application (downstream, not yet designed). The Tours **sequence diagram + writeup are DEFERRED** — authored after this feature is built. (An earlier draft was struck as inaccurate: it under-modeled the tenant↔landlord relay-group back-and-forth needed just to *schedule* a tour.)
 
 ## Goal
 
@@ -14,8 +14,9 @@ which no longer fits now that a placement should represent a **committed deal** 
 *after* the tour.
 
 This spec covers the **build** (the Tour entity + its machinery + dashboard surfaces).
-The e2e scenario suite for `tours-sequence.mermaid` is written **after** this ships, via
-the sequence-diagram→test playbook, against the real built system.
+The Tours sequence diagram + writeup and the e2e scenario suite are written **after** this
+ships, against the real built system (the earlier diagram draft was struck as inaccurate —
+the scheduling itself is a real tenant↔landlord relay negotiation that the draft flattened).
 
 ## Settled decisions (from founder/product discussion, 2026-07-01)
 
@@ -135,7 +136,8 @@ fire-while-app-down is ever required — not the case for a single-EC2 tour-remi
   decided here.
 
 ## Downstream: diagram + tests
-After this ships: finalize `documentation/tours-sequence.mermaid` + writeup against the real
-entities, then write `e2e/tests/scenarios/tours.spec.ts` via the playbook (audit → verbs →
-green), and update the sending-unit suite's placeholder `expectHandoffToTours` to assert the
-real tour handoff.
+After this ships: **author** the Tours sequence diagram + writeup against the real entities
+(the earlier draft was struck — it missed the tenant↔landlord relay-group back-and-forth
+needed to even schedule a tour), then write `e2e/tests/scenarios/tours.spec.ts` via the
+playbook (audit → verbs → green), and update the sending-unit suite's placeholder
+`expectHandoffToTours` to assert the real tour handoff.

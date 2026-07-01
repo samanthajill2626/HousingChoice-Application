@@ -16,7 +16,7 @@
 - **Reminders = durable DynamoDB rows + worker poller.** No EventBridge. Must be testable against DynamoDB Local with a controllable clock (no real AWS).
 - **`placement.tours[]` has no real data** → clean repoint of the "Tours" card + retire the field. No data migration.
 - **Group threads become owner-agnostic** (tour | placement | none), re-parentable. Reuse the existing masked-relay feature — do not invent a second group mechanism.
-- **Out of scope (documented):** multi-concurrent-tour group-thread numbering/UX (`docs/issues/group-threads-across-multiple-tours.md`); lockbox vendor; email; the e2e scenario suite + finalized diagram (a follow-on).
+- **Out of scope (documented):** multi-concurrent-tour group-thread numbering/UX (`docs/issues/group-threads-across-multiple-tours.md`); lockbox vendor; email; the e2e scenario suite + the Tours sequence diagram/writeup, which are a follow-on **authored after** this ships (no diagram exists yet — an earlier draft was struck as inaccurate).
 - **TDD, backend-first, frequent commits.** End commit messages with the project's Co-Authored-By line. Do NOT merge to main without human approval.
 
 ---
@@ -149,5 +149,5 @@
 
 ## Not in this plan (follow-on)
 - The tour→placement **conversion** (downstream Post-Tour & Application sequence).
-- The **e2e scenario suite** for `tours-sequence.mermaid` + the finalized diagram/writeup (built via the sequence-diagram→test playbook against this feature), and updating sending-unit's placeholder `expectHandoffToTours`.
+- The Tours **sequence diagram + writeup**, authored post-build against the real entities (the earlier draft was struck as inaccurate), and the **e2e scenario suite** (built via the sequence-diagram→test playbook), and updating sending-unit's placeholder `expectHandoffToTours`.
 - Multi-concurrent-tour group-thread strategy (`group-threads-across-multiple-tours`).

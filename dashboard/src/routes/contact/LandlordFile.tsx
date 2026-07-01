@@ -41,6 +41,8 @@ export interface LandlordFileProps {
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
+  /** Open the "New property" dialog pre-filled + locked to this landlord (Properties card). */
+  onAddProperty?: () => void;
 }
 
 /** The landlord lead status as its display LABEL (mirrors StatusBadge's label
@@ -66,6 +68,7 @@ export function LandlordFile({
   mediaLoading,
   onEdit,
   onManagePhones,
+  onAddProperty,
 }: LandlordFileProps): React.JSX.Element {
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
@@ -125,7 +128,18 @@ export function LandlordFile({
         <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
       </Card>
 
-      <Card title="Properties" aside={myUnits.length > 0 ? String(myUnits.length) : undefined}>
+      <Card
+        title="Properties"
+        aside={
+          onAddProperty ? (
+            <CardAction onClick={onAddProperty} label="Add a property for this landlord">
+              + Add a property
+            </CardAction>
+          ) : myUnits.length > 0 ? (
+            String(myUnits.length)
+          ) : undefined
+        }
+      >
         {myUnits.length === 0 ? (
           <EmptyRow>No properties yet.</EmptyRow>
         ) : (

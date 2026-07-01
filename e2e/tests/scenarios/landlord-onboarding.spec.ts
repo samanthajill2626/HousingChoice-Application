@@ -14,8 +14,9 @@
 //     contract_status ("signed"/"unsigned"), never the signing itself.
 //   - "Onboarding call" data is Team-recorded (no AI extraction): the deal terms +
 //     approval criteria land via the Edit-contact form / the /tenant-status route.
-//   - Unit creation is API setup (no create-unit UI); publish → available; the handoff
-//     to Matching is "the unit appears in GET /api/units?status=available".
+//   - Unit creation is driven through the REAL "New property" form (opened from the
+//     landlord's Properties card, locked to that landlord); publish → available is an
+//     API seam; the handoff to Matching is "the unit appears in ?status=available".
 import { test } from '@playwright/test';
 import { Scenario, freshLandlord, type Landlord, type Unit } from '../../scenarios/steps.js';
 

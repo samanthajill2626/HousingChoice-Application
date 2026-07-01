@@ -889,12 +889,13 @@ export class Scenario {
   }
 
   /**
-   * [Team, MANUAL] Create (or update) the unit record under this landlord from the
-   * intake, then publish it. Pure setup → API (no create-unit UI). Fields default to
-   * a valid available property; `voucherSizeAccepted` may be omitted to model an
-   * intake still missing a field (Team then follows up + teamUpdatesUnit sets it).
-   * Publishes to 'available' ONLY when voucher_size_accepted is present (the diagram
-   * publishes after the record is complete). Returns the Unit for later assertions.
+   * [Team, MANUAL] Create the unit record under this landlord from the intake via the
+   * REAL "New property" form — opened from the landlord's Properties card, pre-filled +
+   * LOCKED to this landlord (dashboard/src/routes/listing/UnitCreateForm.tsx). Fields
+   * default to a valid property; `voucherSizeAccepted` may be omitted to model an intake
+   * still missing a field (Team then follows up + teamUpdatesUnit sets it). Publishes to
+   * 'available' ONLY when voucher_size_accepted is present (the diagram publishes after
+   * the record is complete) — publish stays an API seam. Returns the Unit for assertions.
    */
   teamCreatesUnitFromIntake(
     landlordId: string,
@@ -906,29 +907,49 @@ export class Scenario {
       jurisdiction?: string;
     },
   ): Promise<Unit> {
-    return step('Team creates the unit record under the landlord', async () => {
+    return step('Team creates the unit under the landlord (New-property form)', async () => {
       seq += 1;
       const addressLine1 = `${300 + seq} Landlord Row NW`;
-      const created = await this.page.request.post(`${NEXT}/api/units`, {
-        data: {
-          landlordId,
-          jurisdiction: opts.jurisdiction ?? 'atlanta_housing',
-          beds: opts.beds,
-          baths: opts.baths ?? 2,
-          rent_min: 1400,
-          rent_max: 1500,
-          listing_link: opts.listingLink ?? 'https://www.zillow.com/homedetails/example',
-          ...(opts.voucherSizeAccepted !== undefined && {
-            voucher_size_accepted: opts.voucherSizeAccepted,
-          }),
-          address: { line1: addressLine1, city: 'Atlanta', state: 'GA', zip: '30314' },
-        },
-      });
-      expect(created.ok()).toBeTruthy();
-      const unitId = ((await created.json()) as { unit: { unitId: string } }).unit.unitId;
+
+      // Open the "New property" dialog from the landlord's Properties card — the form
+      // is pre-filled + locked to this landlord (no owning-landlord picker to fill).
+      await this.page.goto(`${NEXT}/contacts/${landlordId}`);
+      await this.page.getByRole('button', { name: 'Add a property for this landlord' }).click();
+      const dialog = this.page.getByRole('dialog', { name: 'New property' });
+      await expect(dialog).toBeVisible();
+
+      // Fill the intake fields.
+      await dialog.getByLabel('Housing authority').fill(opts.jurisdiction ?? 'atlanta_housing');
+      await dialog.getByLabel('Beds').fill(String(opts.beds));
+      await dialog.getByLabel('Baths').fill(String(opts.baths ?? 2));
+      await dialog.getByLabel('Rent min').fill('1400');
+      await dialog.getByLabel('Rent max').fill('1500');
+      await dialog
+        .getByLabel('Public listing link')
+        .fill(opts.listingLink ?? 'https://www.zillow.com/homedetails/example');
+      if (opts.voucherSizeAccepted !== undefined) {
+        await dialog.getByLabel('Voucher size accepted').fill(String(opts.voucherSizeAccepted));
+      }
+      await dialog.getByLabel('Street address').fill(addressLine1);
+      await dialog.getByLabel('City').fill('Atlanta');
+      await dialog.getByLabel('State').fill('GA');
+      await dialog.getByLabel('ZIP').fill('30314');
+
+      // Create → the app navigates to the new property's detail page (/listings/:id).
+      await dialog.getByRole('button', { name: /^Create$/ }).click();
+      await this.page.waitForURL(/\/listings\/[^/]+$/);
+      const unitId = decodeURIComponent(this.page.url().split('/listings/')[1]!);
+
+      // Publish → available ONLY when the record is complete (voucher present),
+      // mirroring the diagram. Publish stays an API seam (listing-status route).
       if (opts.voucherSizeAccepted !== undefined) {
         await this.publishUnit(unitId);
       }
+
+      // Return to the landlord's thread (the app left us on the new property's page
+      // after create) so the flow can continue with landlord comms — as a real user
+      // would navigate back.
+      await this.page.goto(`${NEXT}/contacts/${landlordId}`);
       return { unitId, addressLine1 };
     });
   }

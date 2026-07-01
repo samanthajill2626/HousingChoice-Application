@@ -39,6 +39,7 @@ import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
+import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
@@ -65,6 +66,8 @@ export function ContactDetail(): React.JSX.Element {
   const [managingPhones, setManagingPhones] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this (tenant) contact.
   const [startingPlacement, setStartingPlacement] = useState(false);
+  // The "New property" dialog, pre-filled+locked to this (landlord) contact.
+  const [addingProperty, setAddingProperty] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -343,6 +346,7 @@ export function ContactDetail(): React.JSX.Element {
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
+                onAddProperty={() => setAddingProperty(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -415,6 +419,17 @@ export function ContactDetail(): React.JSX.Element {
           onCreated={(p) => {
             setStartingPlacement(false);
             void navigate('/placements/' + p.placementId);
+          }}
+        />
+      ) : null}
+
+      {addingProperty ? (
+        <UnitCreateForm
+          landlordId={contact.contactId}
+          onClose={() => setAddingProperty(false)}
+          onCreated={(u) => {
+            setAddingProperty(false);
+            void navigate('/listings/' + u.unitId);
           }}
         />
       ) : null}

@@ -8,6 +8,14 @@
    * gutters). No max-width cap — this nav page spans the whole window. */
 }
 
+/* Heading row: the title on the left, the "New property" action on the right. */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
 .title {
   margin: 0;
   font-size: var(--fs-xl);

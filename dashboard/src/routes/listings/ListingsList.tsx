@@ -5,20 +5,21 @@
 // (shortAddress / statusLabel / formatBedsBaths / formatRent). Not the final
 // visual design — deliberately low-risk.
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
   type UnitItem,
   type UnitStatus,
 } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import {
   formatBedsBaths,
   formatRent,
   shortAddress,
   statusLabel,
 } from '../listing/listingFormat.js';
+import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { useListings } from './useListings.js';
 import styles from './ListingsList.module.css';
 
@@ -69,7 +70,10 @@ const VIEW_TABS: { deleted: boolean; label: string; to: string }[] = [
 ];
 
 export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.Element {
+  const navigate = useNavigate();
   const { status, units } = useListings(deleted);
+  // The "New property" dialog (Active view only) with an empty landlord picker.
+  const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   // Multi-select of housing authorities (unit.jurisdiction). EMPTY = no filter →
@@ -113,7 +117,14 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>{deleted ? 'Deleted properties' : 'Properties'}</h1>
+      <div className={styles.header}>
+        <h1 className={styles.title}>{deleted ? 'Deleted properties' : 'Properties'}</h1>
+        {!deleted ? (
+          <Button variant="primary" size="sm" type="button" onClick={() => setCreating(true)}>
+            + New property
+          </Button>
+        ) : null}
+      </div>
       <p className={styles.sub}>
         {deleted
           ? 'Soft-deleted properties. Open one to restore it.'
@@ -234,6 +245,16 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               : 'No properties match the selected filters.'}
           </p>
         )
+      ) : null}
+
+      {creating ? (
+        <UnitCreateForm
+          onClose={() => setCreating(false)}
+          onCreated={(u) => {
+            setCreating(false);
+            void navigate('/listings/' + u.unitId);
+          }}
+        />
       ) : null}
     </div>
   );

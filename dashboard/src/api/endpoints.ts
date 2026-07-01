@@ -302,6 +302,15 @@ export function retryMessage(
   );
 }
 
+/** POST /api/units � create a unit (property) under a landlord. The body carries
+ *  the owning landlordId plus the writable unit fields; the server validates them
+ *  against a strict allowlist + types and stamps the initial status ('setup').
+ *  Returns the created unit (unwrapped from { unit }). */
+export async function createUnit(body: Record<string, unknown>): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>('/api/units', { method: 'POST', body });
+  return res.unit;
+}
+
 /** GET /api/units � the unit records. The landlord file filters this by
  *  landlordId === contactId to show the landlord's own properties; the property
  *  page reuses it for "Related properties" (same landlord). `deleted: true` returns

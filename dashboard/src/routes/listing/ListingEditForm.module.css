@@ -92,6 +92,18 @@
   flex: 0 0 auto;
 }
 
+/* A locked (read-only) field value — e.g. the owning landlord on the create form,
+ * pre-filled and not editable. Mirrors PlacementCreateForm's locked side. */
+.locked {
+  width: 100%;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface-raised);
+}
+
 .error {
   margin: 0;
   color: var(--c-danger);

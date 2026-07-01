@@ -3,7 +3,7 @@ id: unit-create-and-mms-media-ui
 title: No dashboard UI to create a unit under a landlord, or to attach inbound MMS media to a unit
 type: improvement
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-06-30
 refs: dashboard/src/routes/contact/LandlordFile.tsx, dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listing/ListingDetail.tsx, app/src/routes/units.ts:270
@@ -57,3 +57,20 @@ page, (2) attaching inbound MMS media to a unit. No product code was added for e
   [[inbound-media-attach-to-unit]].** Note the product decision: that attach is **manual/
   user-driven**, NOT an automatic "every inbound media lands on the unit."
 - Sending media outbound is a separate capability tracked in [[outbound-mms-send-path]].
+
+**Resolved (2026-07-01) — create-unit UI shipped.** Built a "New property" create dialog
+(`dashboard/src/routes/listing/UnitCreateForm.tsx`) modelled on `PlacementCreateForm`
+(locked/editable owning party) + reusing the `ListingEditForm` field set + CSS. Entry points:
+- **Primary:** an "**+ Add a property**" action on the landlord contact page's **Properties**
+  card (`LandlordFile` → `ContactDetail`), which opens the form **pre-filled + locked** to that
+  landlord (the property-intake use case). On create → navigates to the new `/listings/:unitId`.
+- **Secondary:** a "**+ New property**" button on the Properties list (`ListingsList`, Active
+  view) that opens the same form with an **empty landlord picker** (`ContactSearchField`).
+
+Wiring: added `createUnit()` to the dashboard API (`POST /api/units`). No backend change needed
+— `POST /api/units` already accepts `landlordId` + the writable field allowlist and stamps the
+initial `status: 'setup'` (publish stays the separate listing-status route). Verified with
+component tests (`UnitCreateForm.test.tsx`, RED→GREEN) **and** the landlord-onboarding e2e suite:
+the `teamCreatesUnitFromIntake` verb now drives the **real form** end-to-end (the earlier "API
+setup, defer UI" deferral is **resolved**). Concern #2 (MMS-media → unit attach) remains open in
+its own issue [[inbound-media-attach-to-unit]].

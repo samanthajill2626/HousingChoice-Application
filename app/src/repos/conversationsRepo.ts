@@ -125,8 +125,20 @@ export interface ConversationItem {
    * the landlord-leg target (placement→unit.primary_voice_contact) and the
    * failed-send escalation flag the right placement. Set when a relay is provisioned
    * FROM a placement; absent on 1:1 threads and standalone (test-scaffold) relays.
+   *
+   * LEGACY: superseded by `owner` (Task 5 generalization). `owner` is the
+   * canonical field for new code; `placementId` is kept for back-compat with
+   * existing rows and callers. `getOwner(conv)` falls back to this when `owner`
+   * is absent.
    */
   placementId?: string;
+  /**
+   * Generic owner reference (Task 5): the entity this relay_group thread belongs
+   * to. `{type:'placement', id}` mirrors the legacy placementId; `{type:'tour',
+   * id}` is a tour-owned thread; `{type:null}` or absent means standalone/unowned.
+   * NOT in any key/GSI — owner is metadata only (same rule as placementId).
+   */
+  owner?: { type: 'tour' | 'placement' | null; id?: string };
   created_at: string;
   /** Circuit-breaker minute bucket (`YYYY-MM-DDTHH:mm`, UTC). */
   outbound_minute_bucket?: string;
@@ -147,6 +159,36 @@ export interface ConversationItem {
     { contactId?: string; phone?: string; name?: string; at: string }
   >;
   [key: string]: unknown;
+}
+
+/**
+ * Generalized owner of a relay_group conversation (Task 5).
+ * `type: null` means standalone/unowned.
+ */
+export type RelayOwner = { type: 'tour' | 'placement'; id: string } | { type: null };
+
+/**
+ * Resolve the canonical owner of a relay_group conversation (Task 5).
+ * New rows carry `owner`; legacy placement-backed rows carry only `placementId`.
+ * Falls back so existing rows keep working without a migration.
+ *
+ * PII (doc §9): returns IDs only — never a phone or display name.
+ */
+export function getOwner(conv: ConversationItem): RelayOwner {
+  if (conv.owner !== undefined) {
+    if (conv.owner.type === 'tour' && typeof conv.owner.id === 'string') {
+      return { type: 'tour', id: conv.owner.id };
+    }
+    if (conv.owner.type === 'placement' && typeof conv.owner.id === 'string') {
+      return { type: 'placement', id: conv.owner.id };
+    }
+    return { type: null };
+  }
+  // Legacy fallback: placementId present → placement-owned.
+  if (typeof conv.placementId === 'string' && conv.placementId.length > 0) {
+    return { type: 'placement', id: conv.placementId };
+  }
+  return { type: null };
 }
 
 /**
@@ -312,14 +354,30 @@ export interface ConversationsRepo {
    * the field comment) so the inbox row renders, and is written to
    * pool_number for the byPoolNumber GSI. `tag` is an optional placement
    * label stored for operators. Returns the created item.
+   *
+   * Task 5: `owner` is the generalized ownership field; `placementId` is kept
+   * for back-compat and is still written when `owner` is absent — both paths
+   * call `getOwner()` to read it.
    */
   createRelayGroup(input: {
     poolNumber: string;
     members: ConversationParticipant[];
     tag?: string;
-    /** The placement this relay is the thread for (M1.10 back-reference). */
+    /** Legacy back-reference (M1.10). Prefer `owner` for new callers. */
     placementId?: string;
+    /** Generalized owner (Task 5). Takes precedence over `placementId`. */
+    owner?: RelayOwner;
   }): Promise<ConversationItem>;
+  /**
+   * Re-parent a relay_group conversation to a new owner (Task 5).
+   * Preserves the pool number and member roster — ONLY the owner metadata is
+   * updated. `newOwner` may be `{type:'tour'|'placement', id}` or `{type:null}`
+   * (unowned). Returns the post-update item (ALL_NEW). Throws
+   * ConditionalCheckFailedException for unknown conversations.
+   *
+   * PII (doc §9): logs conversationId + owner type only — never an id in a log.
+   */
+  rebindOwner(conversationId: string, newOwner: RelayOwner): Promise<ConversationItem>;
   /**
    * Resolve a pool number to its active relay_group via the byPoolNumber GSI
    * (the inbound-webhook routing key). Expect 0 or 1 — one ACTIVE relay per
@@ -833,10 +891,19 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
     },
 
-    // --- Relay groups (M1.7) -----------------------------------------------
+    // --- Relay groups (M1.7 / Task 5 owner generalization) ----------------
 
-    async createRelayGroup({ poolNumber, members, tag, placementId }) {
+    async createRelayGroup({ poolNumber, members, tag, placementId, owner }) {
       const now = new Date().toISOString();
+      // Resolve canonical owner: explicit `owner` wins; fall back to legacy
+      // `placementId`; fall back to standalone (unowned).
+      const resolvedOwner: RelayOwner =
+        owner !== undefined
+          ? owner
+          : typeof placementId === 'string' && placementId.length > 0
+            ? { type: 'placement', id: placementId }
+            : { type: null };
+
       const item: ConversationItem = {
         conversationId: `conv-${randomUUID()}`,
         // Synthetic participant_phone: relay threads route on pool_number, but
@@ -854,7 +921,11 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         participants: members,
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
-        ...(placementId !== undefined && { placementId }),
+        // Legacy back-compat: write placementId when the owner IS a placement
+        // (so existing code that reads placementId directly still works).
+        ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
+        // Canonical owner field (new rows always carry this).
+        ...(resolvedOwner.type !== null && { owner: resolvedOwner }),
       };
       await doc.send(
         new PutCommand({
@@ -990,6 +1061,49 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         }),
       );
       log.info({ conversationId, memberKey }, 'relay member opt-out cleared on conversation');
+    },
+
+    async rebindOwner(conversationId, newOwner) {
+      // Re-parent the relay_group to a new owner — ONLY metadata changes.
+      // Pool number + member roster are PRESERVED (not touched).
+      // PII (doc §9): log type only, never the owner id.
+      let updateExpression: string;
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+
+      if (newOwner.type === null) {
+        // Clear owner + legacy placementId (unowned).
+        updateExpression = 'REMOVE #owner, #pid';
+        names['#owner'] = 'owner';
+        names['#pid'] = 'placementId';
+      } else if (newOwner.type === 'placement') {
+        // Placement-owned: write both `owner` + legacy `placementId` for back-compat.
+        updateExpression = 'SET #owner = :owner, #pid = :pid';
+        names['#owner'] = 'owner';
+        names['#pid'] = 'placementId';
+        values[':owner'] = newOwner;
+        values[':pid'] = newOwner.id;
+      } else {
+        // Tour-owned: write `owner`; REMOVE legacy `placementId` (no longer applicable).
+        updateExpression = 'SET #owner = :owner REMOVE #pid';
+        names['#owner'] = 'owner';
+        names['#pid'] = 'placementId';
+        values[':owner'] = newOwner;
+      }
+
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: updateExpression,
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeNames: names,
+          ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ conversationId, ownerType: newOwner.type }, 'relay group owner rebound');
+      return Attributes as ConversationItem;
     },
   };
 }

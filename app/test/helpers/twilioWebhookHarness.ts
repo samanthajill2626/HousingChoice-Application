@@ -332,9 +332,16 @@ export function createFakeWorld(): FakeWorld {
       return 1; // breaker untested here (covered by sendMessage.test.ts)
     },
 
-    // --- Relay groups (M1.7) ---
-    async createRelayGroup({ poolNumber, members, tag, placementId }) {
+    // --- Relay groups (M1.7 / Task 5 owner generalization) ---
+    async createRelayGroup({ poolNumber, members, tag, placementId, owner }) {
       const now = new Date().toISOString();
+      // Resolve owner (mirrors conversationsRepo.ts logic).
+      const resolvedOwner: { type: 'tour' | 'placement' | null; id?: string } =
+        owner !== undefined
+          ? owner
+          : typeof placementId === 'string' && placementId.length > 0
+            ? { type: 'placement', id: placementId }
+            : { type: null };
       const item: ConversationItem = {
         conversationId: `conv-${++convCounter}`,
         participant_phone: poolNumber,
@@ -346,7 +353,8 @@ export function createFakeWorld(): FakeWorld {
         participants: members,
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
-        ...(placementId !== undefined && { placementId }),
+        ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
+        ...(resolvedOwner.type !== null && { owner: resolvedOwner }),
       };
       conversations.set(item.conversationId, item);
       return item;
@@ -408,6 +416,21 @@ export function createFakeWorld(): FakeWorld {
         const { [memberKey]: _removed, ...rest } = conv.relay_opted_out_members;
         conv.relay_opted_out_members = rest;
       }
+    },
+    async rebindOwner(conversationId, newOwner) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`rebindOwner: no conversation ${conversationId}`);
+      if (newOwner.type === null) {
+        delete conv.owner;
+        delete conv.placementId;
+      } else if (newOwner.type === 'placement') {
+        conv.owner = newOwner;
+        conv.placementId = newOwner.id;
+      } else {
+        conv.owner = newOwner;
+        delete conv.placementId;
+      }
+      return conv;
     },
   };
 

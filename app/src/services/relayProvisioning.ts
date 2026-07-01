@@ -22,6 +22,7 @@ import type {
   ConversationItem,
   ConversationParticipant,
   ConversationsRepo,
+  RelayOwner,
 } from '../repos/conversationsRepo.js';
 import type { PoolNumbersService } from './poolNumbers.js';
 
@@ -37,8 +38,15 @@ export interface ProvisionRelayInput {
   members: ConversationParticipant[];
   /** Operator placement label (mirrored onto the pool number). */
   tag?: string;
-  /** The placement this relay is the thread for (M1.10 back-reference). */
+  /** Legacy back-reference (M1.10). Prefer `owner` for new callers. */
   placementId?: string;
+  /**
+   * Generalized owner (Task 5). When provided, overrides `placementId`.
+   * `{type:'tour', id}` creates a tour-owned thread; `{type:'placement', id}`
+   * is equivalent to providing `placementId`; `{type:null}` creates an
+   * unowned (standalone) thread.
+   */
+  owner?: RelayOwner;
   /** Acting user for the audit (byActor GSI key). */
   actor?: string;
 }
@@ -55,7 +63,16 @@ export async function provisionRelayGroup(
   input: ProvisionRelayInput,
 ): Promise<ConversationItem> {
   const { conversationsRepo, poolNumbersService, auditRepo, events, logger } = deps;
-  const { members, tag, placementId, actor } = input;
+  const { members, tag, placementId, owner, actor } = input;
+
+  // Resolve canonical owner: explicit `owner` wins; fall back to legacy
+  // `placementId`; fall back to standalone (unowned).
+  const resolvedOwner: RelayOwner =
+    owner !== undefined
+      ? owner
+      : typeof placementId === 'string' && placementId.length > 0
+        ? { type: 'placement', id: placementId }
+        : { type: null };
 
   // Provision the pool number first (lazy reclaim → reuse → fresh). The
   // conversation is created AFTER the number is claimed, under a provisional id,
@@ -68,7 +85,7 @@ export async function provisionRelayGroup(
     poolNumber,
     members,
     ...(tag !== undefined && { tag }),
-    ...(placementId !== undefined && { placementId }),
+    owner: resolvedOwner,
   });
   mergeContext({ conversationId: conversation.conversationId });
 
@@ -88,7 +105,8 @@ export async function provisionRelayGroup(
     actor,
     memberCount: members.length,
     ...(tag !== undefined && { tag }),
-    ...(placementId !== undefined && { placementId }),
+    // PII (doc §9): log owner type + id only (never a phone).
+    ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
   });
 
   // Intro: throttle-send to each member (names everyone connected). A failure to
@@ -108,7 +126,8 @@ export async function provisionRelayGroup(
       conversationId: conversation.conversationId,
       memberCount: members.length,
       actor,
-      ...(placementId !== undefined && { placementId }),
+      // PII (doc §9): log owner type + id only (never a phone).
+      ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
     },
     'relay group provisioned',
   );

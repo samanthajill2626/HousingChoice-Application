@@ -120,7 +120,7 @@ function makeFakes(
       fakes.counterValue += 1;
       return fakes.counterValue;
     },
-    // Relay groups (M1.7) — unused by the send service:
+    // Relay groups (M1.7 / Task 5) — unused by the send service:
     createRelayGroup: async () => conversation,
     getByPoolNumber: async () => undefined,
     addMember: async () => conversation,
@@ -128,6 +128,7 @@ function makeFakes(
     setRelayStatus: async () => conversation,
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
+    rebindOwner: async () => conversation,
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,

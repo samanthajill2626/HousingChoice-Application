@@ -150,6 +150,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     setRelayStatus: async () => conversation,
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
+    rebindOwner: async () => conversation,
   };
 
   const auditRepo: AuditRepo = {

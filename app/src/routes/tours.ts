@@ -7,6 +7,7 @@
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                     → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
+//   POST  /api/tours/:tourId/relay  { members }                      → 201 { tour, conversation }
 //
 // PATCH supports:
 //   - Reschedule: { scheduledAt } — allowed only when canReschedule(current status)
@@ -16,6 +17,11 @@
 //   - Exit gate: { outcome, moveForward } — records the navigator decision; sets
 //     convertible:true when moveForward is true. Does NOT create a placement or
 //     touch tenant status (conversion is a downstream feature).
+//
+// POST /api/tours/:tourId/relay provisions a masked relay group thread for a tour
+// (Task 5). One thread per tour is supported; the groupThreadId is stored on the
+// tour. Multi-concurrent-tour numbering/UX is OUT OF SCOPE (one thread per tour;
+// see docs/issues/group-threads-across-multiple-tours.md).
 //
 // Validation is a strict field allowlist (unknown fields → 400). Mirror of
 // units.ts idioms: error shapes, 404 codes, createXRouter(deps) factory.
@@ -39,6 +45,23 @@ import {
 } from '../repos/toursRepo.js';
 import { armTourReminders, cancelTourReminders } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import type { AuthedRequest } from '../middleware/auth.js';
+import { appEvents, type EventBus } from '../lib/events.js';
+import {
+  createConversationsRepo,
+  type ConversationParticipant,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import {
+  createPoolNumbersService,
+  RelayProvisioningDisabledError,
+  type PoolNumbersService,
+} from '../services/poolNumbers.js';
+import { provisionRelayGroup } from '../services/relayProvisioning.js';
+import { VoiceCapabilityError } from '../adapters/messaging.js';
+import { normalizeToE164 } from '../lib/phone.js';
+import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /** The three valid tour types. */
 const TOUR_TYPES: readonly TourType[] = ['self_guided', 'landlord_led', 'pm_team'];
@@ -66,9 +89,15 @@ const POST_ALLOWED = new Set(['tenantId', 'unitId', 'scheduledAt', 'tourType']);
 const PATCH_ALLOWED = new Set(['scheduledAt', 'status', 'outcome', 'moveForward']);
 
 export interface ToursRouterDeps {
+  config?: AppConfig;
   logger?: Logger;
   toursRepo?: ToursRepo;
   tourRemindersRepo?: TourRemindersRepo;
+  /** For relay provisioning (Task 5). */
+  conversationsRepo?: ConversationsRepo;
+  auditRepo?: AuditRepo;
+  poolNumbersService?: PoolNumbersService;
+  events?: EventBus;
   /**
    * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
    * Tests inject this to assert exact dueAt values; production omits it.
@@ -78,8 +107,15 @@ export interface ToursRouterDeps {
 
 export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
+  const config = deps.config ?? loadConfig();
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const conversations =
+    deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const poolNumbers =
+    deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const events = deps.events ?? appEvents;
   const getNow = deps.now ?? (() => new Date().toISOString());
 
   const router = Router();
@@ -299,6 +335,100 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');
     res.json({ tour });
+  });
+
+  // POST /api/tours/:tourId/relay — provision a masked relay group thread for a
+  // tour (Task 5). Stores the relay conversationId back on the tour as
+  // groupThreadId. One thread per tour; the request body must supply members.
+  //
+  // Body: { members: [{ phone, contactId?, name? }, …] }
+  // Returns: 201 { tour, conversation }
+  //
+  // PII (doc §9): log ids only (never member phones in log lines).
+  router.post('/:tourId/relay', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const actor = (req as AuthedRequest).user?.userId;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    // Validate members.
+    if (!Array.isArray(body['members']) || (body['members'] as unknown[]).length === 0) {
+      res.status(400).json({ error: 'members (non-empty array) is required' });
+      return;
+    }
+
+    // Fetch the tour; 404 when missing.
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+
+    // Parse + normalize members (reuse the same mini-validator as relayGroups.ts).
+    const members: ConversationParticipant[] = [];
+    const seenPhones = new Set<string>();
+    for (const raw of body['members'] as unknown[]) {
+      if (typeof raw !== 'object' || raw === null) {
+        res.status(400).json({ error: 'each member must be an object' });
+        return;
+      }
+      const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
+      if (typeof m.phone !== 'string' || m.phone.length === 0) {
+        res.status(400).json({ error: 'member.phone is required' });
+        return;
+      }
+      const phone = normalizeToE164(m.phone);
+      if (phone === undefined) {
+        res.status(400).json({ error: `member.phone is not a valid phone: ${m.phone}` });
+        return;
+      }
+      if (seenPhones.has(phone)) continue; // de-dupe
+      seenPhones.add(phone);
+      const contactId =
+        typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
+      const name =
+        typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
+      members.push({ phone, contactId, ...(name !== undefined && { name }) });
+    }
+
+    // Provision the relay group owned by this tour.
+    let conversation;
+    try {
+      conversation = await provisionRelayGroup(
+        {
+          conversationsRepo: conversations,
+          poolNumbersService: poolNumbers,
+          auditRepo: audit,
+          events,
+          logger: log,
+        },
+        {
+          members,
+          owner: { type: 'tour', id: tourId },
+          ...(actor !== undefined && { actor }),
+        },
+      );
+    } catch (err) {
+      if (err instanceof RelayProvisioningDisabledError) {
+        log.warn({ err: { name: err.name }, tourId }, 'tour relay create: number provisioning disabled');
+        res.status(503).json({ error: 'relay_provisioning_disabled', message: (err as Error).message });
+        return;
+      }
+      if (err instanceof VoiceCapabilityError) {
+        log.error({ err: { name: err.name }, tourId }, 'tour relay create: no voice-capable pool number available');
+        res.status(503).json({ error: 'relay_provisioning_failed', message: (err as Error).message });
+        return;
+      }
+      throw err;
+    }
+
+    // Stamp the groupThreadId back on the tour.
+    const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
+
+    log.info(
+      { tourId, conversationId: conversation.conversationId, memberCount: members.length },
+      'tour relay group provisioned',
+    );
+    res.status(201).json({ tour: updatedTour, conversation });
   });
 
   return router;

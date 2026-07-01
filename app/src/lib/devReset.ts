@@ -8,7 +8,7 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
-import { seedAll, seedInboundVoiceLineFromFounderCell } from './seedData.js';
+import { seedAll, seedInboundVoiceLineHolder } from './seedData.js';
 import { tableName, type AppConfig } from './config.js';
 import { createDynamoClient, createDocumentClient } from './dynamo.js';
 import { TABLES } from './tables.js';
@@ -62,11 +62,16 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
     await clearTable(doc, client, tableName(base));
   }
   const count = await seedAll(config.dynamodbEndpoint);
-  // Voice Phase 1 (spec §6): migrate FOUNDER_CELL → the inbound-voice-line
-  // holder on the data model (idempotent; no-op when founderCell is unset).
-  const stampedInboundLine = await seedInboundVoiceLineFromFounderCell(
+  // LOCAL dev/e2e convenience ONLY: stamp the founder/admin as the inbound-voice-line
+  // holder so inbound-bridge e2e tests pass without a manual UI assignment. The seed
+  // cell comes DIRECTLY from the raw `FOUNDER_CELL` dev env — resetLocalData is
+  // LOCAL-only (guarded above), so reading process.env here is fine. The hermetic
+  // scripts (scripts/dev.mjs, scripts/e2e-session.mjs) set FOUNDER_CELL=+15550000001
+  // for the stack. PRODUCTION has NO FOUNDER_CELL fallback (removed) and requires
+  // assigning an inbound-voice-line holder via the UI (the holder verifies first).
+  const stampedInboundLine = await seedInboundVoiceLineHolder(
     config.dynamodbEndpoint,
-    config.founderCell,
+    process.env.FOUNDER_CELL,
   );
   log.info(
     { tables: bases.length, seeded: count, inboundVoiceLineStamped: stampedInboundLine },

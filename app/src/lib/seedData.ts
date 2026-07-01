@@ -293,23 +293,27 @@ export async function seedAll(endpoint: string): Promise<number> {
 }
 
 /**
- * Voice Phase 1 (spec §6) FOUNDER_CELL → data-model migration. Idempotent: when
- * `founderCell` is set, stamp the founder/admin user's `cell` = founderCell,
- * `cell_verified_at` = seed time, and `inbound_voice_line` = true — moving the
- * inbound-line designation off the env var onto the user record. A no-op when
- * `founderCell` is unset or no admin user exists. `config.founderCell` is kept
- * as a deprecated fallback (Phase 2's inbound path prefers the holder).
+ * LOCAL dev/e2e convenience: stamp the founder/admin user as the inbound-voice-line
+ * HOLDER so inbound-bridge e2e tests pass without a manual UI assignment. Idempotent:
+ * when `cell` is set, stamp the founder/admin user's `cell` = cell,
+ * `cell_verified_at` = seed time, and point the HOLDER_POINTER_KEY sentinel at
+ * them. A no-op when `cell` is unset or no admin user exists.
+ *
+ * PRODUCTION has NO such seed and NO env-var fallback — inbound routing requires
+ * assigning an inbound-voice-line holder via the UI (the holder verifies their
+ * cell first). The local stack passes the cell from the raw `FOUNDER_CELL` dev
+ * env (see devReset.ts).
  *
  * The founder is resolved as the seeded `user-0001` when present, else the first
  * admin user found (a tiny scan of the bounded users table). Never logs the
  * cell (PII, §9).
  */
-export async function seedInboundVoiceLineFromFounderCell(
+export async function seedInboundVoiceLineHolder(
   endpoint: string,
-  founderCell: string | undefined,
+  cell: string | undefined,
   at: string = new Date().toISOString(),
 ): Promise<boolean> {
-  if (founderCell === undefined || founderCell.length === 0) return false;
+  if (cell === undefined || cell.length === 0) return false;
   const doc = createDocumentClient({ endpoint });
   try {
     const usersTable = tableName('users');
@@ -327,7 +331,7 @@ export async function seedInboundVoiceLineFromFounderCell(
         TableName: usersTable,
         Key: { userId: founder.userId },
         UpdateExpression: 'SET cell = :cell, cell_verified_at = :at',
-        ExpressionAttributeValues: { ':cell': founderCell, ':at': at },
+        ExpressionAttributeValues: { ':cell': cell, ':at': at },
       }),
     );
     // ...then establish the HOLDER via the single authoritative pointer (the

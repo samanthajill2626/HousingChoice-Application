@@ -28,10 +28,16 @@ function fmtVerifiedAt(iso: string | undefined): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+/** True when `value` is a valid US E.164 number (e.g. "+14045550100"). */
+function isE164(value: string): boolean {
+  return /^\+1\d{10}$/.test(value);
+}
+
 export function VoiceSection(): React.JSX.Element {
   const { status, me, refresh, setMe } = useMe();
   const [cell, setCell] = useState('');
   const [code, setCode] = useState('');
+  const [cellError, setCellError] = useState<string | null>(null);
 
   const verify = useCellVerify({
     onVerified: (cellVerifiedAt) => {
@@ -52,7 +58,16 @@ export function VoiceSection(): React.JSX.Element {
 
   async function onSend(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    await verify.sendCode(cell.trim());
+    const trimmed = cell.trim();
+    // Require E.164 before sending — the backend rejects anything else with a
+    // 400 invalid_cell. Surface the error client-side to avoid a round trip and
+    // give the user clear guidance. Example valid input: +14045550100.
+    if (!isE164(trimmed)) {
+      setCellError("Enter a number in E.164 format, e.g. +14045550100.");
+      return;
+    }
+    setCellError(null);
+    await verify.sendCode(trimmed);
   }
 
   async function onConfirm(e: React.FormEvent): Promise<void> {
@@ -63,6 +78,7 @@ export function VoiceSection(): React.JSX.Element {
   function startOver(): void {
     verify.reset();
     setCode('');
+    setCellError(null);
   }
 
   return (
@@ -165,16 +181,16 @@ export function VoiceSection(): React.JSX.Element {
                   type="tel"
                   inputMode="tel"
                   autoComplete="tel"
-                  placeholder="(404) 555-0100"
+                  placeholder="+14045550100"
                   required
                   value={cell}
                   disabled={verify.busy}
-                  onChange={(e) => setCell(e.target.value)}
+                  onChange={(e) => { setCell(e.target.value); setCellError(null); }}
                 />
               </label>
-              {verify.error !== null ? (
+              {(cellError ?? verify.error) !== null ? (
                 <p role="alert" className={styles.error}>
-                  {verify.error}
+                  {cellError ?? verify.error}
                 </p>
               ) : null}
               <div className={styles.actions}>

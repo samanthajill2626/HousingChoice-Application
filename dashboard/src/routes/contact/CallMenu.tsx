@@ -137,12 +137,13 @@ export function CallMenu({
         aria-expanded={open}
         disabled={triggerDisabled}
         title={voiceOptOut ? 'Do not call — this contact opted out of calls' : undefined}
+        aria-describedby={voiceOptOut ? 'call-dnc-note' : undefined}
         onClick={() => setOpen((v) => !v)}
       >
         📞 Call{defaultPhone ? ` ${formatPhone(defaultPhone.phone)} ▾` : ''}
       </button>
       {voiceOptOut ? (
-        <span className={styles.dncNote} role="note">
+        <span id="call-dnc-note" className={styles.dncNote} role="status">
           Do not call
         </span>
       ) : null}
@@ -161,7 +162,12 @@ export function CallMenu({
                 {p.label ? <span className={styles.label}>{p.label}</span> : null}
                 {p.primary ? <span className={styles.primary}>primary</span> : null}
               </button>
-              <button type="button" className={styles.copy} onClick={() => copy(p.phone)}>
+              <button
+                type="button"
+                className={styles.copy}
+                aria-label={`Copy ${formatPhone(p.phone)}`}
+                onClick={() => copy(p.phone)}
+              >
                 {copied === p.phone ? 'Copied ✓' : 'Copy'}
               </button>
             </div>

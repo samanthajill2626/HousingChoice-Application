@@ -5,6 +5,7 @@
 // message inline.
 //
 // FUTURE: no delete/deactivate in v1 (no backend for it) — see the design spec.
+import { useAuth } from '../../app/AuthContext.js';
 import { useTeam } from './useTeam.js';
 import { UserRow } from './UserRow.js';
 import { InviteForm } from './InviteForm.js';
@@ -14,6 +15,7 @@ import styles from './TeamSection.module.css';
 
 export function TeamSection(): React.JSX.Element {
   const { status, users, retry, invite, changeRole, assignVoiceLine, clearVoiceLine } = useTeam();
+  const { isAdmin } = useAuth();
   const isMobile = useIsMobile();
 
   return (
@@ -47,6 +49,7 @@ export function TeamSection(): React.JSX.Element {
                   onAssignVoiceLine={assignVoiceLine}
                   onClearVoiceLine={clearVoiceLine}
                   variant="card"
+                  viewerIsAdmin={isAdmin}
                 />
               ))}
             </ul>
@@ -83,6 +86,7 @@ export function TeamSection(): React.JSX.Element {
                     onAssignVoiceLine={assignVoiceLine}
                     onClearVoiceLine={clearVoiceLine}
                     variant="table"
+                    viewerIsAdmin={isAdmin}
                   />
                 ))}
               </tbody>

@@ -1,7 +1,8 @@
 // TeamSection tests — the admin team surface. Covers the roster render (mocked
 // listUsers), the idempotent invite (created / created:false), and the OPTIMISTIC
 // role change that reverts on a 409 lockout guard (cannot_demote_last_admin /
-// cannot_demote_self) with the inline message.
+// cannot_demote_self) with the inline message. Also covers the non-admin (VA)
+// viewer read-only path (spec §6: "Non-admins see state read-only").
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +25,17 @@ vi.mock('../../api/index.js', async () => {
     clearInboundVoiceLine: (...a: unknown[]) => clearInboundVoiceLine(...a),
   };
 });
+
+// Track the viewer's admin flag so tests can flip it.
+let viewerIsAdmin = true;
+vi.mock('../../app/AuthContext.js', () => ({
+  useAuth: () => ({
+    status: 'authenticated',
+    me: { userId: 'viewer', email: 'viewer@example.com', role: viewerIsAdmin ? 'admin' : 'va' },
+    isAdmin: viewerIsAdmin,
+    refresh: vi.fn(),
+  }),
+}));
 
 import { TeamSection } from './TeamSection.js';
 
@@ -59,6 +71,7 @@ function stubDesktop(): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  viewerIsAdmin = true; // default: admin viewer for existing tests
   stubDesktop();
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -289,5 +302,43 @@ describe('TeamSection — inbound voice line (single holder)', () => {
     expect(setUserRole).toHaveBeenCalledWith('b', 'admin');
     // No inline error on success.
     expect(within(screen.getByRole('table')).queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('TeamSection — non-admin (VA) viewer read-only', () => {
+  // Spec §6: "Non-admins see state read-only" — the inbound-voice-line badge is
+  // shown but Assign/Clear buttons must NOT be rendered when the viewer is a VA.
+  it('hides Assign/Clear buttons for a non-admin viewer while still showing badge and cell state', async () => {
+    viewerIsAdmin = false;
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+      }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    // The "Inbound voice line" badge is still visible (read-only state).
+    expect(screen.getByText('Inbound voice line')).toBeInTheDocument();
+    // Cell and verification badges are shown (at least one Verified ✓ badge).
+    expect(screen.getAllByText('Verified ✓').length).toBeGreaterThanOrEqual(1);
+
+    // Assign and Clear action buttons must NOT appear for a non-admin viewer.
+    expect(
+      screen.queryByRole('button', { name: /Assign the inbound voice line/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Clear the inbound voice line/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -52,12 +52,13 @@ describe('VoiceSection — cell verification', () => {
     confirmCellVerify.mockResolvedValue({ ok: true, cell_verified_at: '2026-07-01T00:00:00.000Z' });
     render(<VoiceSection />);
 
-    // Enter a cell and send the code.
+    // Enter a valid E.164 cell (the backend requires E.164; the component now
+    // validates client-side before POST — bare 10-digit inputs are rejected).
     const cellInput = await screen.findByLabelText(/Your mobile number/i);
-    await user.type(cellInput, '4040100001');
+    await user.type(cellInput, '+14040100001');
     await user.click(screen.getByRole('button', { name: 'Send code' }));
 
-    expect(startCellVerify).toHaveBeenCalledWith('4040100001');
+    expect(startCellVerify).toHaveBeenCalledWith('+14040100001');
     // The code step appears.
     const codeInput = await screen.findByLabelText(/Verification code/i);
     await user.type(codeInput, '123456');
@@ -67,6 +68,23 @@ describe('VoiceSection — cell verification', () => {
     expect(await screen.findByText(/You can now place masked calls/i)).toBeInTheDocument();
   });
 
+  it('rejects a bare 10-digit number with a client-side E.164 error (no POST)', async () => {
+    const user = userEvent.setup();
+    getVoiceMe.mockResolvedValue(me());
+    render(<VoiceSection />);
+
+    const cellInput = await screen.findByLabelText(/Your mobile number/i);
+    // Type a bare 10-digit number — the backend would 400 invalid_cell; the
+    // component must catch this client-side so no POST is attempted.
+    await user.type(cellInput, '4040100001');
+    await user.click(screen.getByRole('button', { name: 'Send code' }));
+
+    // Inline error shown; no API call attempted.
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/E\.164/i);
+    expect(startCellVerify).not.toHaveBeenCalled();
+  });
+
   it('surfaces an invalid_code error inline (role=alert) without advancing', async () => {
     const user = userEvent.setup();
     getVoiceMe.mockResolvedValue(me());
@@ -74,7 +92,7 @@ describe('VoiceSection — cell verification', () => {
     confirmCellVerify.mockRejectedValue(new ApiError(400, 'invalid_code', 'bad code'));
     render(<VoiceSection />);
 
-    await user.type(await screen.findByLabelText(/Your mobile number/i), '4040100001');
+    await user.type(await screen.findByLabelText(/Your mobile number/i), '+14040100001');
     await user.click(screen.getByRole('button', { name: 'Send code' }));
     await user.type(await screen.findByLabelText(/Verification code/i), '000000');
     await user.click(screen.getByRole('button', { name: 'Verify' }));
@@ -92,7 +110,7 @@ describe('VoiceSection — cell verification', () => {
     startCellVerify.mockRejectedValue(new ApiError(503, 'sms_unavailable', 'down'));
     render(<VoiceSection />);
 
-    await user.type(await screen.findByLabelText(/Your mobile number/i), '4040100001');
+    await user.type(await screen.findByLabelText(/Your mobile number/i), '+14040100001');
     await user.click(screen.getByRole('button', { name: 'Send code' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/temporarily unavailable/i);

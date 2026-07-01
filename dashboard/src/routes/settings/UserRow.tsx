@@ -20,6 +20,11 @@ export interface UserRowProps {
   onClearVoiceLine: (userId: string) => Promise<VoiceLineResult>;
   /** Desktop table cell layout vs mobile stacked card. */
   variant: 'table' | 'card';
+  /** Whether the current VIEWER is an admin. Non-admins see the voice-line
+   *  badge + cell read-only (no Assign/Clear controls). Defaults to true so
+   *  the component is safe even if the prop is omitted (the Team tab is
+   *  admin-only via route guard, but defense-in-depth). */
+  viewerIsAdmin?: boolean;
 }
 
 /** Friendly "last login" — a localized date, or "Never" when unset. */
@@ -54,6 +59,7 @@ export function UserRow({
   onAssignVoiceLine,
   onClearVoiceLine,
   variant,
+  viewerIsAdmin = true,
 }: UserRowProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -112,32 +118,35 @@ export function UserRow({
   );
 
   // Inbound-voice-line badge + assign/clear control. Assigning is only offered
-  // for a verified cell (else the server 409s cell_not_verified).
+  // for a verified cell (else the server 409s cell_not_verified). Non-admins
+  // see the badge read-only (spec §6: "Non-admins see state read-only").
   const voiceLineCell = (
     <span className={styles.voiceLine}>
       {holdsLine ? <span className={styles.lineBadge}>Inbound voice line</span> : null}
-      {holdsLine ? (
-        <button
-          type="button"
-          className={styles.voiceBtn}
-          disabled={voiceBusy}
-          onClick={() => void onVoiceLine(false)}
-          aria-label={`Clear the inbound voice line from ${user.email}`}
-        >
-          Clear
-        </button>
-      ) : (
-        <button
-          type="button"
-          className={styles.voiceBtn}
-          disabled={voiceBusy || !verified}
-          title={verified ? undefined : 'Needs a verified cell first'}
-          onClick={() => void onVoiceLine(true)}
-          aria-label={`Assign the inbound voice line to ${user.email}`}
-        >
-          Assign
-        </button>
-      )}
+      {viewerIsAdmin ? (
+        holdsLine ? (
+          <button
+            type="button"
+            className={styles.voiceBtn}
+            disabled={voiceBusy}
+            onClick={() => void onVoiceLine(false)}
+            aria-label={`Clear the inbound voice line from ${user.email}`}
+          >
+            Clear
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.voiceBtn}
+            disabled={voiceBusy || !verified}
+            title={verified ? undefined : 'Needs a verified cell first'}
+            onClick={() => void onVoiceLine(true)}
+            aria-label={`Assign the inbound voice line to ${user.email}`}
+          >
+            Assign
+          </button>
+        )
+      ) : null}
     </span>
   );
 

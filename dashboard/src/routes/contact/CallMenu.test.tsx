@@ -62,9 +62,30 @@ describe('CallMenu — masked originate', () => {
 
   it('is disabled with a "do not call" note for a voice_opt_out contact', () => {
     render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} voiceOptOut />);
-    expect(screen.getByRole('button', { name: /Call/i })).toBeDisabled();
-    expect(screen.getByText(/Do not call/i)).toBeInTheDocument();
+    const callBtn = screen.getByRole('button', { name: /Call/i });
+    expect(callBtn).toBeDisabled();
+    const dncNote = screen.getByText(/Do not call/i);
+    expect(dncNote).toBeInTheDocument();
+    // The disabled button must be programmatically linked to the DNC note so
+    // AT users know WHY it is disabled (spec §5 / review finding I-2).
+    expect(callBtn).toHaveAttribute('aria-describedby', dncNote.id);
+    expect(dncNote.id).toBe('call-dnc-note');
     expect(originateCall).not.toHaveBeenCalled();
+  });
+
+  it('Copy buttons each have a distinguishing aria-label (M-1)', async () => {
+    const user = userEvent.setup();
+    originateCall.mockResolvedValue({ callSid: 'CA123' });
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} />);
+    await user.click(screen.getByRole('button', { name: /Call/i }));
+    // Each Copy button is labelled with the formatted phone so AT users can
+    // tell them apart when multiple numbers are listed.
+    expect(
+      screen.getByRole('button', { name: /Copy \(404\) 010-0001/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Copy \(404\) 010-0002/i }),
+    ).toBeInTheDocument();
   });
 
   it('prompts to set a cell (no dial) when the navigator has no verified cell', async () => {

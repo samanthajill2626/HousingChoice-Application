@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours (Tours feature)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -33,6 +33,7 @@ describe('tables.ts — the table contract', () => {
       'broadcasts',
       'activity_events',
       'listing_sends',
+      'tours',
     ]);
   });
 
@@ -176,6 +177,25 @@ describe('tables.ts — the table contract', () => {
     expect(t.hashKey.name).toBe('entityKey');
     expect(t.rangeKey?.name).toBe('ts');
     expect(gsiNames(t)).toEqual(['byActor']);
+  });
+
+  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse, _schedPartition + scheduledAt); no stream/TTL', () => {
+    const t = spec('tours');
+    expect(t.hashKey.name).toBe('tourId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byScheduledAt']);
+    const byTenant = t.gsis.find((g) => g.indexName === 'byTenant');
+    expect(byTenant?.hashKey.name).toBe('tenantId');
+    expect(byTenant?.rangeKey).toBeUndefined();
+    const byUnit = t.gsis.find((g) => g.indexName === 'byUnit');
+    expect(byUnit?.hashKey.name).toBe('unitId');
+    expect(byUnit?.rangeKey).toBeUndefined();
+    const byScheduledAt = t.gsis.find((g) => g.indexName === 'byScheduledAt');
+    expect(byScheduledAt?.hashKey.name).toBe('_schedPartition');
+    expect(byScheduledAt?.rangeKey?.name).toBe('scheduledAt');
+    expect(byScheduledAt?.sparse).toBe(true);
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('only messages and placements have streams; only matches has TTL', () => {

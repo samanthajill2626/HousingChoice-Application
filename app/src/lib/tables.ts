@@ -334,6 +334,34 @@ export const TABLES: readonly TableSpec[] = [
       },
     ],
   },
+  {
+    // NEW in Tours feature (NOT in the doc §5 9-table model — README deviation):
+    // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
+    // from placements — a tenant stays `searching`; no touring stage. Three read
+    // directions share the GSIs: byTenant (all a tenant's tours), byUnit (all
+    // tours for a property), byScheduledAt (windowed time queries — "tours today",
+    // reminder/no-show clocks). A fixed global partition key ('tours') on
+    // byScheduledAt makes a datetime-range Query possible without a scatter-gather
+    // Scan; keep it sparse so items without a scheduledAt never index there.
+    baseName: 'tours',
+    hashKey: { name: 'tourId', type: 'S' },
+    gsis: [
+      // All tours for a tenant — powers the contact-file tours card.
+      { indexName: 'byTenant', hashKey: { name: 'tenantId', type: 'S' } },
+      // All tours for a unit — powers the property-file tours card.
+      { indexName: 'byUnit', hashKey: { name: 'unitId', type: 'S' } },
+      // Time-windowed tour queries (today's tours, no-show sweep, reminder job).
+      // Hash partition is the constant string 'tours' (all live tours share one
+      // partition); range key is scheduledAt (ISO 8601) so BETWEEN/>=/<= works.
+      // Sparse: items without scheduledAt never appear here.
+      {
+        indexName: 'byScheduledAt',
+        hashKey: { name: '_schedPartition', type: 'S' },
+        rangeKey: { name: 'scheduledAt', type: 'S' },
+        sparse: true,
+      },
+    ],
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

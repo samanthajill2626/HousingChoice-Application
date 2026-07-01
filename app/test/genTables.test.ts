@@ -9,7 +9,7 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4) + tours (Tours feature), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'activity_events',
       'audit_events',
@@ -23,6 +23,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'placements',
       'pool_numbers',
       'settings',
+      'tours',
       'units',
       'users',
     ]);
@@ -104,6 +105,31 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     });
   });
 
+  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse); no stream/TTL', () => {
+    expect(tables['tours']).toEqual({
+      hash_key: { name: 'tourId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byTenant',
+          hash_key: { name: 'tenantId', type: 'S' },
+        },
+        {
+          index_name: 'byUnit',
+          hash_key: { name: 'unitId', type: 'S' },
+        },
+        {
+          // Sparse time-window GSI: fixed partition '_schedPartition' + range
+          // 'scheduledAt'. Sparse flag is a data convention only (not in tfvars).
+          index_name: 'byScheduledAt',
+          hash_key: { name: '_schedPartition', type: 'S' },
+          range_key: { name: 'scheduledAt', type: 'S' },
+        },
+      ],
+      stream: false,
+      pitr: true,
+    });
+  });
+
   it('carries the contractual GSI names per table', () => {
     const gsiNames = (base: string) => tables[base]?.gsis.map((g) => g.index_name);
     expect(gsiNames('contacts')).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
@@ -125,6 +151,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(gsiNames('invoices')).toEqual(['byLandlord', 'byStatus']);
     expect(gsiNames('users')).toEqual(['byEmail']);
     expect(gsiNames('audit_events')).toEqual(['byActor']);
+    expect(gsiNames('tours')).toEqual(['byTenant', 'byUnit', 'byScheduledAt']);
   });
 
   it('keys and GSI keys carry name+type; optional range keys are omitted', () => {

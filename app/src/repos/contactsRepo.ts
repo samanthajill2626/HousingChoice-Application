@@ -87,6 +87,14 @@ export interface ContactItem {
    * satisfied). Porting lives on the TENANT, never as a placement stage.
    */
   porting?: boolean;
+  /**
+   * Landlord lead lifecycle (docs/issues/landlord-lead-status-and-park.md): the
+   * free-text reason captured when a landlord contact is moved to the terminal
+   * `parked` status (declined / not-a-fit / never-signed). Written by the
+   * transition service on the `parked` move (from the supplied `reason`); unset
+   * on non-parked contacts. Tenants never set it.
+   */
+  park_reason?: string;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */
   phone?: string;
   /**

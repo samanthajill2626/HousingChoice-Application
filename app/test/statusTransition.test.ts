@@ -359,6 +359,38 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
   });
 });
 
+// Landlord lead lifecycle (docs/issues/landlord-lead-status-and-park.md): the
+// shared setter (all contact types route through setTenantStatus) persists
+// `park_reason` when the target status is `parked`, from the supplied reason.
+describe('statusTransition — park_reason on the move to parked', () => {
+  let world: FakeWorld;
+  let svc: StatusTransitionService;
+
+  beforeEach(() => {
+    world = createFakeWorld();
+    svc = makeService(world);
+  });
+
+  it('persists park_reason on the contact when a landlord is moved to parked', async () => {
+    await world.contactsRepo.create({ contactId: 'll-park', type: 'landlord', status: 'interested' });
+    const updated = await svc.setTenantStatus('ll-park', {
+      toStatus: 'parked',
+      source: 'manual',
+      reason: 'never signed the contract',
+    });
+    expect(updated.status).toBe('parked');
+    expect(updated.park_reason).toBe('never signed the contract');
+    expect((await world.contactsRepo.getById('ll-park'))!.park_reason).toBe('never signed the contract');
+  });
+
+  it('does NOT set park_reason on a non-parked move (a tenant on_hold leaves park_reason untouched)', async () => {
+    await world.contactsRepo.create({ contactId: 't-hold', type: 'tenant', status: 'onboarding' });
+    const updated = await svc.setTenantStatus('t-hold', { toStatus: 'on_hold', source: 'manual', reason: 'paused' });
+    expect(updated.status).toBe('on_hold');
+    expect(updated).not.toHaveProperty('park_reason');
+  });
+});
+
 describe('statusTransition — inspection_outcome on the inspection-complete move (§4)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;

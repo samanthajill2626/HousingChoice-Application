@@ -19,7 +19,12 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
-import { TENANT_STATUSES } from '../lib/statusModel.js';
+import {
+  LANDLORD_STATUSES,
+  NON_TENANT_STATUSES,
+  statusAllowlistFor,
+  TENANT_STATUSES,
+} from '../lib/statusModel.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -108,24 +113,11 @@ function isContactType(value: unknown): value is ContactType {
   return typeof value === 'string' && (CONTACT_TYPES as readonly string[]).includes(value);
 }
 
-/**
- * Allowed `status` values for a NON-TENANT contact (landlord/team_member/
- * unknown — they have no lifecycle): 'needs_review' (auto-capture stub) →
- * 'active' (resolved). Triage previously accepted ANY string, which polluted
- * the byTypeStatus GSI (the human-triage queue keys on (type, status)). An
- * unknown status is a 400.
- */
-const NON_TENANT_STATUSES: readonly string[] = ['needs_review', 'active'] as const;
-
-/**
- * Type-aware status allowlist (status-model unification): a TENANT carries its
- * single §5 lifecycle on `status` (TENANT_STATUSES); every other type carries
- * the simple needs_review|active. Tenant lifecycle values live in the
- * type='tenant' partition, so they never reach the triage queue.
- */
-function statusAllowlistFor(type: ContactType | undefined): readonly string[] {
-  return type === 'tenant' ? (TENANT_STATUSES as readonly string[]) : NON_TENANT_STATUSES;
-}
+// The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
+// lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
+// (statusAllowlistFor) so BOTH status-setting paths — this generic PATCH and the
+// /tenant-status transition route — share ONE source of truth. NON_TENANT_STATUSES
+// (needs_review|active) is imported for the "no explicit type" fallback union.
 
 // --- M1.5 list pagination + cursor -----------------------------------------
 const DEFAULT_PAGE_LIMIT = 50;
@@ -275,7 +267,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     const patchType = patch['type'];
     const allow = isContactType(patchType)
       ? statusAllowlistFor(patchType)
-      : ([...TENANT_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
+      : ([...TENANT_STATUSES, ...LANDLORD_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
     if (typeof v !== 'string' || !allow.includes(v)) {
       return { error: `status must be one of: ${allow.join(', ')}` };
     }

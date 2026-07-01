@@ -644,6 +644,9 @@ export interface Contact {
   status?: string;
   /** Tenant portability flag (a SEPARATE boolean, never a status value). */
   porting?: boolean;
+  /** Landlord lead lifecycle: the reason captured when a landlord is moved to
+   *  the terminal `parked` status (declined / not-a-fit / never-signed). */
+  park_reason?: string;
   phone?: string;
   firstName?: string;
   lastName?: string;

@@ -142,6 +142,59 @@ describe('status-model transition routes', () => {
       expect((await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'placing', source: 'robot' })).status).toBe(400);
       expect((await authedPatch('/api/contacts/c-ghost/tenant-status', { toStatus: 'placing', source: 'manual' })).status).toBe(404);
     });
+
+    // A tenant still accepts its full §5 lifecycle — the type-scoped guard must
+    // NOT regress the tenant path (on_hold/inactive stay valid tenant statuses).
+    it('a TENANT still accepts on_hold/inactive (no regression from the type-scoped guard)', async () => {
+      const held = await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'on_hold', source: 'manual' });
+      expect(held.status).toBe(200);
+      expect(held.body.contact.status).toBe('on_hold');
+      const gone = await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+      expect(gone.status).toBe(200);
+      expect(gone.body.contact.status).toBe('inactive');
+    });
+
+    // Landlord lead lifecycle (docs/issues/landlord-lead-status-and-park.md):
+    // a landlord validates against LANDLORD_STATUSES on this route (the leak was
+    // that it only checked isTenantStatus, so a landlord wrongly took on_hold/
+    // inactive and rejected parked).
+    describe('landlord lead lifecycle', () => {
+      beforeEach(async () => {
+        await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'needs_review' });
+      });
+
+      it('accepts interested / active / needs_review for a landlord', async () => {
+        for (const toStatus of ['interested', 'active', 'needs_review'] as const) {
+          const res = await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus, source: 'manual' });
+          expect(res.status, toStatus).toBe(200);
+          expect(res.body.contact.status, toStatus).toBe(toStatus);
+        }
+      });
+
+      it('moves a landlord to parked and persists the supplied reason as park_reason', async () => {
+        const res = await authedPatch('/api/contacts/ll-1/tenant-status', {
+          toStatus: 'parked',
+          source: 'manual',
+          reason: 'declined — rent above payment standard',
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.contact.status).toBe('parked');
+        expect(res.body.contact.park_reason).toBe('declined — rent above payment standard');
+        // Persisted on the stored contact, not just echoed.
+        expect((await world.contactsRepo.getById('ll-1'))!.park_reason).toBe('declined — rent above payment standard');
+      });
+
+      it('REJECTS tenant-only statuses (on_hold/inactive/searching) for a landlord with 400', async () => {
+        for (const toStatus of ['on_hold', 'inactive', 'searching'] as const) {
+          const res = await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus, source: 'manual' });
+          expect(res.status, toStatus).toBe(400);
+        }
+      });
+
+      it('REJECTS an unknown status for a landlord with 400', async () => {
+        expect((await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus: 'bogus', source: 'manual' })).status).toBe(400);
+      });
+    });
   });
 
   describe('PATCH /api/units/:unitId/listing-status', () => {

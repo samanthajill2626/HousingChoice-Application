@@ -756,3 +756,98 @@ access key every ~90 days: `aws iam create-access-key` → update the profile �
   the account is 938565869261**. `AWS_PROFILE=housingchoice` is also forced into every child
   process (terraform, aws CLI, docker login), so the default chain is never consulted. Belt,
   braces, and the profile is additionally pinned inside the Terraform backend/provider HCL.
+
+## Cleaning up a merged feature (branches, worktrees & docs)
+
+When a feature branch has landed on `main`, retire it with the steps below. Two rules make
+this safe and keep the repo honest: **(1) verify it's actually merged BEFORE deleting
+anything**, and **(2) reconcile the docs in the same pass** so nothing lingers claiming
+"in-flight / not merged / pending". The shared checkout is worked by concurrent agents, so
+every step is written to avoid stepping on parallel work (see Concurrency guardrails below).
+
+### 1. Verify it's actually merged (never delete on a claim alone)
+
+```powershell
+$b = "feat/<branch>"
+git merge-base --is-ancestor (git rev-parse $b) main   # exit 0 = fully merged
+git rev-list --count main..$b                            # must be 0 (no commits missing from main)
+git log --oneline main..$b                               # sanity: should be empty
+```
+
+If `--is-ancestor` is non-zero **or** the count is > 0, the branch has work not in `main`.
+**STOP — do not delete it.** Report the unmerged commits. Only proceed to a force-delete if
+the owner explicitly confirms the branch is abandoned (see "Abandoned branches" below).
+
+### 2. Remove the worktree, branch, and leftover directory
+
+```powershell
+git worktree remove "W:\tmp\<worktree-dir>" --force   # --force: build artifacts (node_modules/dist) make it "not empty"
+git worktree prune
+git branch -d $b                                       # SAFE delete — git refuses if not merged (a feature, not a bug)
+Remove-Item -LiteralPath "W:\tmp\<worktree-dir>" -Recurse -Force   # clean the leftover dir
+```
+
+- `git worktree remove` usually errors `Directory not empty` on Windows (leftover
+  `node_modules`/`dist`); that's expected — `prune` + the `Remove-Item` finish the job.
+- If `Remove-Item` fails with **"being used by another process"**, a dev stack (esbuild/vite/
+  node) is still holding the dir as its working directory. The git state is already correct
+  (worktree deregistered, branch gone) — the empty dir is harmless. Retry later; **do NOT
+  kill processes** that may belong to a concurrent agent's running stack.
+
+### 3. Reconcile the docs & tracking notes (flip to historical)
+
+- **Find the feature's design/plan docs:** `docs/superpowers/{specs,plans}/*<feature>*`.
+- **Stamp completed + merged design/plan docs as HISTORICAL** — prepend this idempotent
+  banner to the very top (guard on the `<!-- HISTORICAL-RECORD -->` marker so re-runs skip),
+  and **leave the body untouched** (it's the point-in-time record):
+
+  ```markdown
+  <!-- HISTORICAL-RECORD -->
+  > ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (YYYY-MM-DD).** This document
+  > describes how this work was *designed/planned at the time of writing*. The work shipped to
+  > `main` and its feature branch + worktree were deleted. **This file is NOT current
+  > documentation, and the live code may have drifted from it. Do not treat it as authoritative
+  > guidance on how the system should be built or behaves today.** For current truth read the
+  > code and the living docs (`RUNBOOK.md`, `e2e/README.md`, `documentation/GLOSSARY.md`).
+  ```
+
+  **Never stamp** a doc that self-declares "LIVING DOC", or work that is still in-flight
+  (another worktree/branch open for it). If a merged doc is superseded by a living doc, point
+  the banner at that living doc as the source of truth.
+- **Update living status docs** that referenced the branch as in-flight → mark merged: e.g.
+  a milestone ledger, a "still unbuilt" list, a design's `**Status:**` header.
+- **If the feature resolved a tracked issue** (`docs/issues/`), set it `status: resolved` +
+  add a `**Resolution.**` note, and run `npm run issues`.
+- **Do NOT rewrite historical execution-plan bodies** — dated plans are records; the banner is
+  the only touch they get.
+
+### 4. Commit the cleanup (concurrency-safe)
+
+- Stage **only your files, explicitly by path** (`git add <paths>`), then review
+  `git diff --cached` — it must contain ONLY your banner/status changes. The working tree is
+  shared; never sweep another agent's uncommitted work into your commit.
+- Commit as its own focused commit on `main` (e.g. `docs(superpowers): stamp merged <feature>
+  design as historical`). Do NOT switch branches or move `main`'s HEAD to do this.
+
+### Abandoned (unmerged) branches
+
+If a branch is confirmed abandoned (a duplicate effort, superseded work), and the owner has
+said so explicitly: record the tip SHA first (recoverable from reflog), then force-delete.
+
+```powershell
+git rev-parse $b                # note this SHA — reflog recovery if ever needed
+git worktree remove "W:\tmp\<worktree-dir>" --force
+git worktree prune
+git branch -D $b                # -D (force) because -d refuses unmerged work
+```
+
+There are no docs to flip to historical for abandoned work (nothing shipped); if a design/plan
+doc exists, leave it unstamped or delete it per the owner's call.
+
+### Concurrency guardrails (why the steps look paranoid)
+
+The checkout at the repo root is shared with parallel agents committing to `main` as
+"Cameron Abt". So: never move `main`'s HEAD / never switch branches in the shared checkout;
+stage only your own files and verify `git diff --cached` before committing; and never delete or
+kill a directory/process that might belong to another agent's live work. Feature work happens
+in worktrees under `W:\tmp` for exactly this reason.

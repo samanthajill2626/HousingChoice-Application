@@ -633,7 +633,10 @@ export interface ContactVocabulary {
   fieldLabels: string[];
 }
 
-/** POST /api/contacts — create a brand-new contact record. */
+/** POST /api/contacts — create a brand-new contact record. The optional
+ *  `consent_*` fields let staff record text consent at create time (CONTRACT 4);
+ *  `consent_method` is a HUMAN value only (the server stamps consent_captured_by).
+ *  Left blank → nothing sent (the just-in-time gate catches it later). */
 export interface ContactCreate {
   type: ContactType;
   firstName?: string;
@@ -644,6 +647,12 @@ export interface ContactCreate {
   role?: string;
   relationships?: Relationship[];
   customFields?: CustomField[];
+  /** A2P/CTIA consent captured at create time — a HUMAN method only. */
+  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  /** When consent was obtained (ISO 8601). */
+  consent_at?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
 }
 
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------

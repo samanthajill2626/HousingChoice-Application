@@ -15,8 +15,9 @@ import { DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
 import {
   GetQueryResultsCommand,
   StartQueryCommand,
+  StopQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createCloudWatchClient,
   OOM_APP_INSIGHTS_FILTER,
@@ -184,14 +185,81 @@ describe('cloudwatch adapter — queryInsights', () => {
     expect(startCmd.input.logGroupNames).toEqual(['/hc/dev/app', '/hc/dev/worker']);
   });
 
-  it('returns [] when StartQuery returns no queryId', async () => {
+  it('rejects when StartQuery returns no queryId (degrade, not silent empty)', async () => {
     const sinceMs = Date.parse('2026-07-01T00:00:00.000Z');
     const send = vi.fn().mockResolvedValueOnce({}); // no queryId
     const logs = { send };
     const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
 
-    const events = await seam.queryInsights(['/hc/dev/app'], PINO_ERROR_INSIGHTS_FILTER, sinceMs, 25);
-    expect(events).toEqual([]);
+    await expect(seam.queryInsights(['/hc/dev/app'], PINO_ERROR_INSIGHTS_FILTER, sinceMs, 25)).rejects.toThrow(
+      'Insights StartQuery returned no queryId',
+    );
+  });
+
+  it('rejects when GetQueryResults returns status Cancelled', async () => {
+    const sinceMs = Date.parse('2026-07-01T00:00:00.000Z');
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ queryId: 'q-cancelled' })
+      .mockResolvedValueOnce({ status: 'Cancelled', results: [] });
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    await expect(seam.queryInsights(['/hc/dev/app'], PINO_ERROR_INSIGHTS_FILTER, sinceMs, 25)).rejects.toThrow(
+      'status: Cancelled',
+    );
+  });
+
+  it('rejects and sends StopQuery when poll budget is exhausted (always Running)', async () => {
+    const sinceMs = Date.parse('2026-07-01T00:00:00.000Z');
+    // StartQuery resolves; every GetQueryResults call returns Running forever.
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ queryId: 'q-running' })
+      .mockResolvedValue({ status: 'Running', results: [] });
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    vi.useFakeTimers();
+    try {
+      // Drive timers and await the rejection concurrently — avoids an unhandled
+      // rejection if we advance timers before attaching the .rejects handler.
+      const [rejection] = await Promise.all([
+        expect(
+          seam.queryInsights(['/hc/dev/app'], PINO_ERROR_INSIGHTS_FILTER, sinceMs, 25),
+        ).rejects.toThrow('did not complete within'),
+        vi.runAllTimersAsync(),
+      ]);
+      void rejection; // assertion already captured above
+
+      // StopQuery should have been called exactly once (best-effort cleanup)
+      const stopCalls = send.mock.calls.filter((c) => c[0] instanceof StopQueryCommand);
+      expect(stopCalls).toHaveLength(1);
+      expect((stopCalls[0]![0] as StopQueryCommand).input.queryId).toBe('q-running');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('StartQuery endTime is in epoch SECONDS, not milliseconds', async () => {
+    const sinceMs = Date.parse('2026-07-01T00:00:00.000Z');
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ queryId: 'q-secs' })
+      .mockResolvedValueOnce({ status: 'Complete', results: [] });
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    await seam.queryInsights(['/hc/dev/app'], PINO_ERROR_INSIGHTS_FILTER, sinceMs, 25);
+
+    const startCmd = send.mock.calls[0]![0] as StartQueryCommand;
+    const { startTime, endTime } = startCmd.input;
+    // An ms timestamp would be ~1000× larger than Date.now()/1000 (~1.7B seconds).
+    // If these were ms they'd be ~1.75 trillion — well above Date.now().
+    expect(endTime).toBeLessThan(Date.now()); // seconds value << ms Date.now()
+    expect(endTime).toBeGreaterThanOrEqual(startTime!); // endTime ≥ startTime
+    // startTime should equal sinceMs converted to seconds
+    expect(startTime).toBe(Math.floor(sinceMs / 1000));
   });
 
   it('Insights filter constants contain the expected terms', () => {

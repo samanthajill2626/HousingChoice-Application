@@ -223,7 +223,7 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       );
 
       const queryId = startOut.queryId;
-      if (!queryId) return [];
+      if (!queryId) throw new Error('Insights StartQuery returned no queryId');
 
       // Poll until Complete, Failed/Cancelled/Timeout, or budget exhausted.
       for (let poll = 0; poll < INSIGHTS_MAX_POLLS; poll++) {

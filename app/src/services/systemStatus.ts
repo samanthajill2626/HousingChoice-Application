@@ -18,6 +18,8 @@
 import {
   classifyCloudWatchError,
   createCloudWatchClient,
+  OOM_APP_FILTER_PATTERN,
+  OOM_SYSTEM_FILTER_PATTERN,
   type AlarmView,
   type CloudWatchClientSeam,
   type ErrorEventView,
@@ -37,6 +39,10 @@ const WINDOW_MS: Readonly<Record<SystemErrorWindow, number>> = {
 
 /** Newest-first error projection cap (doc §6). */
 export const ERROR_EVENT_LIMIT = 25;
+
+/** Synthesized (PII-safe) labels for OOM events — never derived from raw log text. */
+const OOM_SYSTEM_LABEL = 'Kernel OOM-kill';
+const OOM_APP_LABEL = 'V8 heap out of memory';
 
 /**
  * The messaging driver as DISPLAYED in System Status: `twilio` | `console` |
@@ -164,11 +170,29 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       }
       const sinceMs = Date.now() - WINDOW_MS[window];
       try {
-        const events = await cloudwatch.filterErrorEvents(
-          config.errorLogGroupName,
-          sinceMs,
-          ERROR_EVENT_LIMIT,
-        );
+        const [appErrors, appOom, workerOom, systemOom] = await Promise.all([
+          cloudwatch.filterErrorEvents(config.errorLogGroupName, sinceMs, ERROR_EVENT_LIMIT),
+          cloudwatch.filterEventsByPattern(config.errorLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_APP_FILTER_PATTERN),
+          cloudwatch.filterEventsByPattern(config.workerLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_APP_FILTER_PATTERN),
+          cloudwatch.filterEventsByPattern(config.systemLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_SYSTEM_FILTER_PATTERN),
+        ]);
+        // Relabel OOM events with synthesized, PII-safe messages based on which
+        // query found them — never from the raw log text (which projectErrorEvent
+        // already collapses to "(unparseable log line)" for kernel/V8 OOM lines).
+        const relabeledSystemOom = systemOom.map((e) => ({ ...e, message: OOM_SYSTEM_LABEL }));
+        const relabeledAppOom = appOom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
+        const relabeledWorkerOom = workerOom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
+        // Merge, dedup by timestamp+message, sort newest-first, cap at limit.
+        const seen = new Set<string>();
+        const events = [...appErrors, ...relabeledAppOom, ...relabeledWorkerOom, ...relabeledSystemOom]
+          .filter((e) => {
+            const key = `${e.timestamp}|${e.message}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
+          .slice(0, ERROR_EVENT_LIMIT);
         log.info({ window, errorCount: events.length }, 'system status: errors read');
         return { available: true, events };
       } catch (err) {

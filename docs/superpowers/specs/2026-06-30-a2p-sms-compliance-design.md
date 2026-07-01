@@ -163,7 +163,7 @@ Messaging Service so recipients don't get double confirmations (operator step).
 
 1. Founder confirms brand (§1) — copy strings follow.
 2. Founder re-files the campaign (links=Yes may trigger re-vetting → gates live SMS).
-3. Operator: Twilio Advanced Opt-Out auto-reply OFF; keep `SMS_SENDING_ENABLED`
-   the go-live switch.
+3. ~~Twilio Advanced Opt-Out auto-reply OFF~~ — **confirmed OFF 2026-07-01.**
+   `SMS_SENDING_ENABLED` stays the go-live switch.
 4. Ship app changes → verify via e2e → flip `SMS_SENDING_ENABLED=true` after the
    re-filed campaign is approved.

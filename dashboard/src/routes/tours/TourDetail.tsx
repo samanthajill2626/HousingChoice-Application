@@ -258,7 +258,7 @@ export function TourDetail(): React.JSX.Element {
       {showExitGate ? (
         <form onSubmit={handleExitGate} aria-label="Exit gate form">
           <fieldset>
-            <legend>Moving forward with this home?</legend>
+            <legend>Moving forward with this property?</legend>
             <label>
               <input
                 type="radio"

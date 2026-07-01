@@ -147,7 +147,7 @@ describe('TourDetail', () => {
 
     // The exit gate form appears
     expect(screen.getByRole('form', { name: /Exit gate form/i })).toBeInTheDocument();
-    expect(screen.getByRole('group', { name: /Moving forward with this home/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /Moving forward with this property/i })).toBeInTheDocument();
 
     // Pick "Yes — move forward"
     await user.click(screen.getByRole('radio', { name: /Yes — move forward/i }));

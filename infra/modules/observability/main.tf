@@ -20,6 +20,15 @@ resource "aws_cloudwatch_log_group" "proc" {
   retention_in_days = var.log_retention_days
 }
 
+# Host/system log (rsyslog /var/log/messages, shipped by the CloudWatch agent):
+# kernel OOM-killer lines etc. STANDALONE — deliberately NOT in local.log_groups,
+# so the pino OrphanLogs/ErrorLogs metric filters do NOT run on it (non-JSON
+# kernel lines would otherwise trip OrphanLogs). System Status reads it for OOM.
+resource "aws_cloudwatch_log_group" "system" {
+  name              = "/hc/${var.env}/system"
+  retention_in_days = var.log_retention_days
+}
+
 # --- Metric filters -------------------------------------------------------
 
 resource "aws_cloudwatch_log_metric_filter" "orphan_logs" {

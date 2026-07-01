@@ -21,14 +21,20 @@ export const APP_NUMBER = '+15550009999';
 /** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */
 const SEEDED_LANDLORD = 'contact-landlord-0001';
 
-export interface Tenant {
+/** A fresh contact (any role) the scenarios drive. Modelled with the SAME inbound
+ *  machinery regardless of role (the fake persona registry is role-agnostic for
+ *  send-as-party); `firstName` is the unique, space-free handle used to locate the
+ *  contact's row (e.g. a broadcast audience preview shows the FIRST name only). */
+export interface Contact {
   phone: string;
   name: string;
-  /** Unique, space-free first name — used to locate the tenant's broadcast row
-   *  (the audience preview shows the FIRST name only). */
   firstName: string;
   lastName: string;
 }
+
+/** Role-reading aliases over {@link Contact} — same shape, clearer at call sites. */
+export type Tenant = Contact;
+export type Landlord = Contact;
 
 /** An available property the team can send to a tenant (sending-unit scenarios). */
 export interface Unit {
@@ -46,7 +52,7 @@ export function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
  *  is always a well-formed NANP number (accepted by normalizeToE164 + the fake
  *  persona registry) and never truncates or collides within a run. */
 let seq = 0;
-export function freshTenant(label: string): Tenant {
+export function freshContact(label: string): Contact {
   const stamp = `${Date.now()}`.slice(-5);
   seq += 1;
   const phone = `+1555${stamp}${String(seq).padStart(2, '0')}`;
@@ -55,6 +61,12 @@ export function freshTenant(label: string): Tenant {
   const firstName = `${label}${stamp}${seq}`;
   return { phone, firstName, lastName: 'Tester', name: `${label} ${stamp}-${seq}` };
 }
+
+/** Role-reading aliases over {@link freshContact} — identical behavior; they read as
+ *  the role at the call site (freshLandlord('Landlord'), freshTenant('Caller'), …).
+ *  freshTenant is kept so the existing tenant/sending-unit specs need no change. */
+export const freshTenant = freshContact;
+export const freshLandlord = freshContact;
 
 /** E.164 +1NXXNXXXXXX → "(NXX) NXX-XXXX" — how the dashboard displays a US number,
  *  so a nameless unknown row can be located by its visible (formatted) phone. */
@@ -237,11 +249,17 @@ export class Scenario {
     });
   }
 
+  /** @deprecated Alias of {@link teamCreatesTenant} — kept for the tenant/sending-unit
+   *  specs that predate the rename. */
+  teamCreatesContact(...args: Parameters<Scenario['teamCreatesTenant']>): Promise<void> {
+    return this.teamCreatesTenant(...args);
+  }
+
   /**
    * [Team] Housing-fair in-person path: create a brand-new Tenant via the New-contact
    * dialog (no prior number). Sets the active contact.
    */
-  teamCreatesContact(fields: {
+  teamCreatesTenant(fields: {
     firstName: string;
     lastName: string;
     voucherSize?: number;
@@ -633,7 +651,398 @@ export class Scenario {
     });
   }
 
+  // ==== Landlord-onboarding verbs (documentation/landlord-onboarding-sequence.mermaid) ====
+  // A landlord is modelled with the SAME contact machinery as a tenant (inbound via the
+  // fake persona registry, triage/edit via the real dashboard), differing only by
+  // `type=landlord`, the landlord lead lifecycle (needs_review|interested|active|parked),
+  // and the structured deal-terms card ("Landlord onboarding"). Audited live against the
+  // running e2e:session stack (2026-06-30): selectors match the Task-6 audited list.
+
+  /**
+   * [Team] Housing-fair / sourced-lead path: create a brand-new Landlord via the
+   * New-contact dialog (kind "Landlord"). Models the diagram's "[MANUAL] Create the
+   * landlord contact from the sourced lead" (the cold call is not app-placed in Phase 1).
+   * Sets the active contact + party, mirroring teamCreatesContact.
+   */
+  teamCreatesLandlord(fields: { firstName: string; lastName: string; phone?: string }): Promise<void> {
+    return step('Team creates a new Landlord contact (sourced lead)', async () => {
+      await this.page.goto(`${NEXT}/contacts`);
+      await this.page.getByRole('button', { name: 'New contact' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /New contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog
+        .getByRole('group', { name: 'Contact kind' })
+        .getByRole('button', { name: 'Landlord' })
+        .click();
+      await dialog.getByLabel('First name').fill(fields.firstName);
+      await dialog.getByLabel('Last name').fill(fields.lastName);
+      if (fields.phone) await dialog.getByLabel('Phone').fill(fields.phone);
+      await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(this.page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
+      this.activeContactId = await this.readActiveContactId();
+      this.activeFirstName = fields.firstName;
+      this.activeTenant = {
+        phone: fields.phone ?? '',
+        name: `${fields.firstName} ${fields.lastName}`,
+        firstName: fields.firstName,
+        lastName: fields.lastName,
+      };
+    });
+  }
+
+  /** [Landlord→App] Inbound SMS from the landlord (API seam). Alias over tenantTexts —
+   *  the fake persona registry is role-agnostic for send-as-party. Sets active party. */
+  landlordTexts(l: Landlord, body: string): Promise<void> {
+    return this.tenantTexts(l, body);
+  }
+
+  /** [Landlord→App] A follow-up inbound from the already-active landlord. */
+  landlordAnswers(body: string): Promise<void> {
+    return this.tenantAnswers(body);
+  }
+
+  /**
+   * [Team] Triage the captured unknown → Landlord via the contact page ("Mark as
+   * Landlord"). Mirrors teamTriagesUnknownToTenant.
+   */
+  teamTriagesUnknownToLandlord(l: Landlord): Promise<void> {
+    return step('Team triages the unknown → Landlord', async () => {
+      await this.openActiveContact(l);
+      await this.page.getByRole('button', { name: 'Mark as Landlord' }).click();
+      await expect(this.page.getByRole('button', { name: 'Mark as Landlord' })).toHaveCount(0, {
+        timeout: 10_000,
+      });
+    });
+  }
+
+  /** [Team] Set the landlord lead status → Interested (the diagram's "set lead status
+   *  to interested"). A landlord STATUS move via the edit-form Status select. */
+  teamMarksLeadInterested(): Promise<void> {
+    return step('Team marks the lead → Interested', async () => {
+      await this.setLandlordStatus('Interested');
+    });
+  }
+
+  /** [App] The lead is `interested` (raw status via API + the Details "Status" row,
+   *  which renders the LABEL "Interested" — not the raw value). */
+  expectLeadInterested(): Promise<void> {
+    return step('App: landlord lead is interested', async () => {
+      await this.assertStatus('interested');
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Interested')).toBeVisible();
+    });
+  }
+
+  /** [Team] Record the DocuSign contract as signed (contract_status → signed). The
+   *  signing itself is an external channel; Team records the outcome on the record. */
+  teamRecordsContractSigned(): Promise<void> {
+    return step('Team records the contract as signed', async () => {
+      await this.openEditDialog();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await dialog.getByLabel('Contract status').selectOption({ label: 'Signed' });
+      await this.saveEditDialog(dialog);
+    });
+  }
+
+  /**
+   * [Team] Save the onboarding-call deal terms (expected rent + the operational
+   * criteria + a soft-terms note). One edit session. Approval criteria is recorded
+   * SEPARATELY (teamRecordsApprovalCriteria) so it doesn't overwrite Notes.
+   */
+  teamRecordsLandlordOnboarding(o: {
+    expectedRent: number;
+    registeredLandlord: boolean;
+    rta48h: boolean;
+    inspectionFirstTry: boolean;
+    softTermsNote?: string;
+  }): Promise<void> {
+    return step('Team records the landlord onboarding details', async () => {
+      await this.openEditDialog();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await dialog.getByLabel('Expected rent').fill(String(o.expectedRent));
+      if (o.registeredLandlord) await dialog.getByLabel('Registered landlord').check();
+      if (o.rta48h) await dialog.getByLabel('Submits RTA within 48h').check();
+      if (o.inspectionFirstTry) await dialog.getByLabel('Passes inspection first try').check();
+      if (o.softTermsNote !== undefined) await dialog.getByLabel('Notes').fill(o.softTermsNote);
+      await this.saveEditDialog(dialog);
+    });
+  }
+
+  /**
+   * [Team] Save the approval criteria in a SEPARATE edit session — income rule (the
+   * voucher counts as income) + a free-form criteria narrative recorded as a custom
+   * field so it doesn't clobber the onboarding Notes.
+   */
+  teamRecordsApprovalCriteria(o: { incomeIncludesVoucher: boolean; criteriaNote: string }): Promise<void> {
+    return step('Team records the approval criteria', async () => {
+      await this.openEditDialog();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      if (o.incomeIncludesVoucher) await dialog.getByLabel('Voucher counts as income').check();
+      await dialog.getByRole('button', { name: /\+ Add custom field/ }).click();
+      await dialog.getByLabel('Field label 1').fill('Approval criteria');
+      await dialog.getByLabel('Field value 1').fill(o.criteriaNote);
+      await this.saveEditDialog(dialog);
+    });
+  }
+
+  /**
+   * [App] The onboarding details + approval criteria persisted on the landlord (API)
+   * AND Team can SEE them in the scoped "Landlord onboarding" card. Only the supplied
+   * fields are checked.
+   */
+  expectLandlordOnboardingRecorded(o: {
+    contractSigned: boolean;
+    expectedRent: number;
+    registeredLandlord: boolean;
+    rta48h: boolean;
+    inspectionFirstTry: boolean;
+    incomeIncludesVoucher: boolean;
+  }): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: landlord onboarding details recorded', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
+      expect(res.ok()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: Record<string, unknown> };
+      expect(contact['contract_status']).toBe(o.contractSigned ? 'signed' : 'unsigned');
+      expect(contact['expected_rent']).toBe(o.expectedRent);
+      expect(contact['registered_landlord']).toBe(o.registeredLandlord);
+      expect(contact['rta_within_48h']).toBe(o.rta48h);
+      expect(contact['pass_inspection_first_try']).toBe(o.inspectionFirstTry);
+      expect(contact['income_includes_voucher']).toBe(o.incomeIncludesVoucher);
+
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Landlord onboarding' }) });
+      await expect(card).toBeVisible();
+      await expect(card.getByText('Contract status')).toBeVisible();
+      await expect(card.getByText(o.contractSigned ? 'Signed' : 'Unsigned')).toBeVisible();
+      await expect(card.getByText('Expected rent')).toBeVisible();
+      await expect(card.getByText(String(o.expectedRent), { exact: true })).toBeVisible();
+      await expect(card.getByText('Registered landlord')).toBeVisible();
+      await expect(card.getByText('Submits RTA within 48h')).toBeVisible();
+      await expect(card.getByText('Passes inspection first try')).toBeVisible();
+      await expect(card.getByText('Voucher counts as income')).toBeVisible();
+      // Boolean VALUES render (Yes/No) — assert by count (each true boolean row shows
+      // "Yes"), scoped to the card so a bare getByText('Yes') can't multi-match/collide.
+      const yesCount = [o.registeredLandlord, o.rta48h, o.inspectionFirstTry, o.incomeIncludesVoucher].filter(
+        Boolean,
+      ).length;
+      if (yesCount > 0) await expect(card.getByText('Yes', { exact: true })).toHaveCount(yesCount);
+    });
+  }
+
+  /** [Team] Log a reason + park the lead (the diagram's "[MANUAL] Log the reason. Park
+   *  the lead"). Driven through the REAL edit form (mostly-UI fidelity, mirroring
+   *  teamRecordsContractSigned): set Status → Parked + fill the Park reason. For a
+   *  landlord both the status change and park_reason persist via the generic
+   *  PATCH /api/contacts/:id in ONE Save. */
+  teamParksLead(reason: string): Promise<void> {
+    return step(`Team parks the lead (${reason})`, async () => {
+      await this.openEditDialog();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await dialog.getByRole('combobox', { name: 'Status', exact: true }).selectOption({ label: 'Parked' });
+      await dialog.getByLabel('Park reason').fill(reason);
+      await this.saveEditDialog(dialog);
+    });
+  }
+
+  /** [App] The lead is `parked` with park_reason (API) AND Team SEES the "Park reason"
+   *  row in the "Landlord onboarding" card (which only appears when parked). */
+  expectLeadParked(reason: string): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step(`App: landlord lead parked (${reason})`, async () => {
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
+      expect(res.ok()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: { status?: string; park_reason?: string } };
+      expect(contact.status).toBe('parked');
+      expect(contact.park_reason).toBe(reason);
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Landlord onboarding' }) });
+      await expect(card.getByText('Park reason')).toBeVisible();
+      await expect(card.getByText(reason)).toBeVisible();
+    });
+  }
+
+  /**
+   * [Landlord→App] Property intake, often via text/MMS — the diagram's "Property
+   * details plus photos or video (MMS)". Inbound from the active landlord, optionally
+   * carrying media (exercises the MMS attach path).
+   */
+  landlordTextsProperty(details: string, mediaUrls?: string[]): Promise<void> {
+    const l = this.requireActiveTenant();
+    return step(`Landlord texts property details: "${details}"`, async () => {
+      await this.ensureParty(l);
+      await sendAsParty(this.request, {
+        from: l.phone,
+        to: APP_NUMBER,
+        body: details,
+        ...(mediaUrls !== undefined && { mediaUrls }),
+      });
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Create (or update) the unit record under this landlord from the
+   * intake, then publish it. Pure setup → API (no create-unit UI). Fields default to
+   * a valid available property; `voucherSizeAccepted` may be omitted to model an
+   * intake still missing a field (Team then follows up + teamUpdatesUnit sets it).
+   * Publishes to 'available' ONLY when voucher_size_accepted is present (the diagram
+   * publishes after the record is complete). Returns the Unit for later assertions.
+   */
+  teamCreatesUnitFromIntake(
+    landlordId: string,
+    opts: {
+      beds: number;
+      baths?: number;
+      voucherSizeAccepted?: number;
+      listingLink?: string;
+      jurisdiction?: string;
+    },
+  ): Promise<Unit> {
+    return step('Team creates the unit record under the landlord', async () => {
+      seq += 1;
+      const addressLine1 = `${300 + seq} Landlord Row NW`;
+      const created = await this.page.request.post(`${NEXT}/api/units`, {
+        data: {
+          landlordId,
+          jurisdiction: opts.jurisdiction ?? 'atlanta_housing',
+          beds: opts.beds,
+          baths: opts.baths ?? 2,
+          rent_min: 1400,
+          rent_max: 1500,
+          listing_link: opts.listingLink ?? 'https://www.zillow.com/homedetails/example',
+          ...(opts.voucherSizeAccepted !== undefined && {
+            voucher_size_accepted: opts.voucherSizeAccepted,
+          }),
+          address: { line1: addressLine1, city: 'Atlanta', state: 'GA', zip: '30314' },
+        },
+      });
+      expect(created.ok()).toBeTruthy();
+      const unitId = ((await created.json()) as { unit: { unitId: string } }).unit.unitId;
+      if (opts.voucherSizeAccepted !== undefined) {
+        await this.publishUnit(unitId);
+      }
+      return { unitId, addressLine1 };
+    });
+  }
+
+  /** [Team, MANUAL] Update the unit record with a previously-missing field (the
+   *  intake follow-up iteration). Pure setup → API PATCH. */
+  teamUpdatesUnit(unit: Unit, patch: { voucherSizeAccepted?: number }): Promise<void> {
+    return step('Team updates the unit record (missing field)', async () => {
+      const data: Record<string, unknown> = {};
+      if (patch.voucherSizeAccepted !== undefined) data['voucher_size_accepted'] = patch.voucherSizeAccepted;
+      const res = await this.page.request.patch(`${NEXT}/api/units/${unit.unitId}`, { data });
+      expect(res.ok()).toBeTruthy();
+    });
+  }
+
+  /** [Team, MANUAL] Publish the unit → available (pure setup → API listing-status). */
+  teamPublishesUnit(unit: Unit): Promise<void> {
+    return step('Team publishes the unit (available)', async () => {
+      await this.publishUnit(unit.unitId);
+    });
+  }
+
+  /** [App] The unit's voucher_size_accepted is set (API) — the missing-field follow-up
+   *  landed on the record. */
+  expectUnitVoucherSizeAccepted(unit: Unit, expected: number): Promise<void> {
+    return step(`App: unit voucher_size_accepted = ${expected}`, async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+      expect(res.ok()).toBeTruthy();
+      const { unit: u } = (await res.json()) as { unit: { voucher_size_accepted?: number } };
+      expect(u.voucher_size_accepted).toBe(expected);
+    });
+  }
+
+  /**
+   * [App] Onboarding complete: the unit is available, its public flyer is live (the
+   * "[AUTO] Listing link generated and shareable"), AND Team SEES it Available with the
+   * "Voucher size accepted" row on the property detail.
+   */
+  expectUnitAvailableWithListingLink(unit: Unit): Promise<void> {
+    return step('App: unit available + flyer live + shown on property detail', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+      expect(res.ok()).toBeTruthy();
+      const { unit: u } = (await res.json()) as { unit: { status?: string } };
+      expect(u.status).toBe('available');
+
+      const flyer = await this.page.request.get(`${NEXT}/public/units/${unit.unitId}/flyer`);
+      expect(flyer.ok()).toBeTruthy();
+
+      await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Property details' }) });
+      await expect(details.getByText('Voucher size accepted')).toBeVisible();
+      await expect(this.page.getByText('Available', { exact: true }).first()).toBeVisible();
+    });
+  }
+
+  /**
+   * [App] Hand off to Property Sharing & Matching — the unit is `available` and appears
+   * in GET /api/units?status=available (the surface the Sending-Unit sequence browses).
+   */
+  expectHandoffToMatching(unit: Unit): Promise<void> {
+    return step('App: unit hands off to Matching (available list)', async () => {
+      await expect
+        .poll(
+          async () => {
+            const res = await this.page.request.get(`${NEXT}/api/units?status=available&limit=100`);
+            if (!res.ok()) return false;
+            const { units } = (await res.json()) as { units: Array<{ unitId: string }> };
+            return units.some((u) => u.unitId === unit.unitId);
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+    });
+  }
+
+  /** The active contact id — landlord scenarios need it to create a unit under the landlord. */
+  landlordId(): string {
+    return this.requireActiveContactId();
+  }
+
   // ---- internal helpers ---------------------------------------------------
+
+  /** Set the landlord lead status via the edit-form Status select (exact:true — a
+   *  loose /Status/ also matches "Contract status"). */
+  private async setLandlordStatus(label: string): Promise<void> {
+    await this.openEditDialog();
+    const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+    await dialog.getByRole('combobox', { name: 'Status', exact: true }).selectOption({ label });
+    await this.saveEditDialog(dialog);
+  }
+
+  /** Open the Edit-contact dialog on the active contact (navigating to it first). */
+  private async openEditDialog(): Promise<void> {
+    await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+    await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+    const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+    await expect(dialog).toBeVisible();
+  }
+
+  /** Save the Edit-contact dialog and wait for it to close. */
+  private async saveEditDialog(dialog: import('@playwright/test').Locator): Promise<void> {
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+  }
+
+  /** Publish a unit to `available` via the listing-status route. */
+  private async publishUnit(unitId: string): Promise<void> {
+    const res = await this.page.request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+      data: { toStatus: 'available', source: 'manual' },
+    });
+    expect(res.ok()).toBeTruthy();
+  }
 
   private requireActiveFirstName(): string {
     if (!this.activeFirstName)

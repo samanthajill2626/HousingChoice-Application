@@ -24,6 +24,7 @@ import {
   STAGE_STUCK_THRESHOLDS,
   TERMINAL_STAGES,
   type InspectionOutcome,
+  type LandlordStatus,
   type ListingStatus,
   type LostReason,
   type PlacementStage,
@@ -77,8 +78,22 @@ export interface TransitionPlacementInput {
 }
 
 export interface SetTenantStatusInput {
-  toStatus: TenantStatus;
+  /**
+   * The target contact status. Despite the route/method name, this setter is the
+   * ONE explicit contact-status write for ALL contact types — a tenant's §5
+   * lifecycle (TenantStatus) OR a landlord's lead lifecycle (LandlordStatus,
+   * e.g. interested/parked). The ROUTE validates the value against the stored
+   * contact's type-scoped allowlist (statusModel.statusAllowlistFor) before it
+   * reaches here; this setter writes it generically onto the unified `status`.
+   */
+  toStatus: TenantStatus | LandlordStatus;
   source: TransitionSource;
+  /**
+   * Free-text reason for the change. Audit-logged for every move; ALSO persisted
+   * onto the contact as `park_reason` when `toStatus === 'parked'` (a landlord
+   * decline/not-a-fit/never-signed terminal — docs/issues/landlord-lead-status-
+   * and-park.md).
+   */
   reason?: string;
   /** Update the porting flag in the same write (an informational §5 flag — never a gate). */
   porting?: boolean;
@@ -358,6 +373,11 @@ export function createStatusTransitionService(
         status_source: source,
       };
       if (porting !== undefined) patch.porting = porting === true;
+      // park_reason (docs/issues/landlord-lead-status-and-park.md): the move to
+      // the terminal `parked` (a landlord decline/not-a-fit/never-signed) captures
+      // the supplied reason as a first-class field on the contact. Only written on
+      // the `parked` move — other statuses leave any existing park_reason untouched.
+      if (toStatus === 'parked' && reason !== undefined) patch.park_reason = reason;
       const updated = await contactsRepo.update(contactId, patch);
 
       await auditRepo.append(`contacts#${contactId}`, 'tenant_status_changed', {

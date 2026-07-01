@@ -4,7 +4,9 @@
 // Group texts · Media. Properties + Placements are REAL (from /api/units + /api/placements);
 // Preferences + Group texts + Media are pending until their backend slices land.
 import {
+  LANDLORD_STATUS_LABELS,
   STAGE_LABELS,
+  type LandlordStatus,
   type PlacementItem,
   type Contact,
   type ContactPhone,
@@ -20,10 +22,11 @@ import {
   PendingPanel,
   Row,
 } from './Card.js';
+import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordPlacements, landlordUnits } from './buildContactFile.js';
-import { formatAddress, formatPhone } from './format.js';
+import { formatAddress, formatPhone, humanize } from './format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 
 export interface LandlordFileProps {
@@ -38,6 +41,13 @@ export interface LandlordFileProps {
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
+}
+
+/** The landlord lead status as its display LABEL (mirrors StatusBadge's label
+ *  resolution for tenants), falling back to a humanized form for an off-list value
+ *  so the row never renders a raw snake_case token. */
+function landlordStatusLabel(status: string): string {
+  return LANDLORD_STATUS_LABELS[status as LandlordStatus] ?? humanize(status);
 }
 
 /** A unit row label: "address · NBR" when both are known. */
@@ -95,8 +105,10 @@ export function LandlordFile({
             </>
           }
         />
-        <KV k="Status" v={contact.status ?? '—'} />
+        <KV k="Status" v={contact.status ? landlordStatusLabel(contact.status) : '—'} />
       </Card>
+
+      <LandlordOnboardingCard contact={contact} />
 
       <Card
         title="Preferences & notes"

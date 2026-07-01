@@ -41,7 +41,7 @@ export async function registerParty(
 
 export async function sendAsParty(
   request: APIRequestContext,
-  input: { from: string; body?: string; to?: string },
+  input: { from: string; body?: string; to?: string; mediaUrls?: string[] },
 ): Promise<string> {
   const res = await request.post(`${FAKE_BASE}/control/send-as-party`, { data: input });
   if (!res.ok()) throw new Error(`send-as-party failed: ${res.status()}`);

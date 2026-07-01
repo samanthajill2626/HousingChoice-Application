@@ -343,6 +343,23 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
   inactive: 'Inactive',
 };
 
+// --- Landlord lead lifecycle (type=landlord) --------------------------------
+// A landlord contact carries its own lead lifecycle on the SAME `status` field
+// tenants use (type-scoped — MIRRORS app/src/lib/statusModel.ts LANDLORD_STATUSES).
+// `needs_review` is the triage front door; a lead worth pursuing is `interested`;
+// an onboarded landlord is `active`; a declined/not-a-fit/never-signed lead is the
+// terminal `parked` (with a `park_reason` captured on the move).
+export const LANDLORD_STATUSES = ['needs_review', 'interested', 'active', 'parked'] as const;
+
+export type LandlordStatus = (typeof LANDLORD_STATUSES)[number];
+
+export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = {
+  needs_review: 'Needs review',
+  interested: 'Interested',
+  active: 'Active',
+  parked: 'Parked',
+};
+
 // --- Property lifecycle (coarse, mostly derived) -----------------------------
 export const LISTING_STATUSES = [
   'setup',
@@ -644,6 +661,9 @@ export interface Contact {
   status?: string;
   /** Tenant portability flag (a SEPARATE boolean, never a status value). */
   porting?: boolean;
+  /** Landlord lead lifecycle: the reason captured when a landlord is moved to
+   *  the terminal `parked` status (declined / not-a-fit / never-signed). */
+  park_reason?: string;
   phone?: string;
   firstName?: string;
   lastName?: string;
@@ -668,6 +688,16 @@ export interface Contact {
   evictions?: string;
   tenure?: string;
   lifEligible?: boolean;
+  /** Structured landlord deal terms + approval criteria (onboarding call). First-class
+   *  optional fields; not type-gated. `contract_status` records whether the external
+   *  DocuSign contract was signed. */
+  contract_status?: 'unsigned' | 'signed';
+  /** Expected contract rent (dollars, >= 0). */
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -695,6 +725,15 @@ export interface ContactPatch {
   evictions?: string;
   tenure?: string;
   lifEligible?: boolean;
+  /** Structured landlord deal terms + approval criteria (onboarding call). */
+  contract_status?: 'unsigned' | 'signed';
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
+  /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
+  park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */
   address?: Address;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -767,6 +806,10 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. */
   same_day_rta?: boolean;
+  /** Landlord-onboarding: the voucher (bedroom) size this unit ACCEPTS — a
+   *  stored number, DISTINCT from `beds` and from the derived read-only
+   *  voucher_size. Feeds matching. Internal (not on the public flyer). */
+  voucher_size_accepted?: number;
   /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
    *  single `landlordId` for a one-row roster. */
   contacts?: UnitContact[];

@@ -21,8 +21,8 @@ import {
   isListingStatus,
   isLostReasonCategory,
   isPlacementStage,
-  isTenantStatus,
   isTransitionSource,
+  statusAllowlistFor,
 } from '../lib/statusModel.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -192,8 +192,8 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
     mergeContext({ contactId });
     const b = (req.body ?? {}) as Record<string, unknown>;
 
-    if (!isTenantStatus(b['toStatus'])) {
-      res.status(400).json({ error: 'toStatus must be a known tenant status' });
+    if (typeof b['toStatus'] !== 'string') {
+      res.status(400).json({ error: 'toStatus must be a string' });
       return;
     }
     if (!isTransitionSource(b['source'])) {
@@ -209,9 +209,26 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       return;
     }
 
+    // TYPE-SCOPED status guard (docs/issues/landlord-lead-status-and-park.md):
+    // this route handles ALL contact types, so validate `toStatus` against the
+    // STORED contact's own allowlist — a tenant's §5 lifecycle, a landlord's lead
+    // lifecycle (LANDLORD_STATUSES), else needs_review|active. Previously it only
+    // checked isTenantStatus, so a landlord wrongly accepted tenant-only on_hold/
+    // inactive and rejected `parked`. 404 an unknown contact (the setter would).
+    const stored = await contacts.getById(contactId);
+    if (!stored) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const allow = statusAllowlistFor(stored.type);
+    if (!allow.includes(b['toStatus'])) {
+      res.status(400).json({ error: `toStatus must be one of: ${allow.join(', ')}` });
+      return;
+    }
+
     try {
       const updated = await service.setTenantStatus(contactId, {
-        toStatus: b['toStatus'],
+        toStatus: b['toStatus'] as import('../lib/statusModel.js').TenantStatus,
         source: b['source'],
         ...(typeof b['reason'] === 'string' && { reason: b['reason'] }),
         ...(typeof b['porting'] === 'boolean' && { porting: b['porting'] }),

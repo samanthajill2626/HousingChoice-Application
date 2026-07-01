@@ -19,7 +19,12 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
-import { TENANT_STATUSES } from '../lib/statusModel.js';
+import {
+  LANDLORD_STATUSES,
+  NON_TENANT_STATUSES,
+  statusAllowlistFor,
+  TENANT_STATUSES,
+} from '../lib/statusModel.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -109,23 +114,30 @@ function isContactType(value: unknown): value is ContactType {
 }
 
 /**
- * Allowed `status` values for a NON-TENANT contact (landlord/team_member/
- * unknown — they have no lifecycle): 'needs_review' (auto-capture stub) →
- * 'active' (resolved). Triage previously accepted ANY string, which polluted
- * the byTypeStatus GSI (the human-triage queue keys on (type, status)). An
- * unknown status is a 400.
+ * Structured landlord deal-term fields (onboarding call). First-class optional
+ * fields validated only when supplied — NOT type-gated (they mirror how
+ * voucherSize/pets are plain optional fields). snake_case names are contractual:
+ * the dashboard + e2e suite read them verbatim.
  */
-const NON_TENANT_STATUSES: readonly string[] = ['needs_review', 'active'] as const;
-
-/**
- * Type-aware status allowlist (status-model unification): a TENANT carries its
- * single §5 lifecycle on `status` (TENANT_STATUSES); every other type carries
- * the simple needs_review|active. Tenant lifecycle values live in the
- * type='tenant' partition, so they never reach the triage queue.
- */
-function statusAllowlistFor(type: ContactType | undefined): readonly string[] {
-  return type === 'tenant' ? (TENANT_STATUSES as readonly string[]) : NON_TENANT_STATUSES;
+const CONTRACT_STATUSES = ['unsigned', 'signed'] as const;
+type ContractStatus = (typeof CONTRACT_STATUSES)[number];
+function isContractStatus(value: unknown): value is ContractStatus {
+  return typeof value === 'string' && (CONTRACT_STATUSES as readonly string[]).includes(value);
 }
+
+/** The landlord boolean deal terms / approval criteria (all optional). */
+const LANDLORD_BOOLEAN_FIELDS = [
+  'registered_landlord',
+  'rta_within_48h',
+  'pass_inspection_first_try',
+  'income_includes_voucher',
+] as const;
+
+// The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
+// lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
+// (statusAllowlistFor) so BOTH status-setting paths — this generic PATCH and the
+// /tenant-status transition route — share ONE source of truth. NON_TENANT_STATUSES
+// (needs_review|active) is imported for the "no explicit type" fallback union.
 
 // --- M1.5 list pagination + cursor -----------------------------------------
 const DEFAULT_PAGE_LIMIT = 50;
@@ -275,7 +287,7 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     const patchType = patch['type'];
     const allow = isContactType(patchType)
       ? statusAllowlistFor(patchType)
-      : ([...TENANT_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
+      : ([...TENANT_STATUSES, ...LANDLORD_STATUSES, ...NON_TENANT_STATUSES] as readonly string[]);
     if (typeof v !== 'string' || !allow.includes(v)) {
       return { error: `status must be one of: ${allow.join(', ')}` };
     }
@@ -287,6 +299,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     if (typeof v !== 'string') return { error: 'notes must be a string' };
     patch['notes'] = v;
     changedFields.push('notes');
+  }
+  // Landlord park reason (edit form). Free text captured when a landlord lead is
+  // moved to `parked`. Normally written by the /tenant-status route on the parked
+  // move; also settable here so the edit form can persist it alongside a status
+  // change. Empty string clears it.
+  if ('park_reason' in b) {
+    const v = b['park_reason'];
+    if (typeof v !== 'string') return { error: 'park_reason must be a string' };
+    patch['park_reason'] = v;
+    changedFields.push('park_reason');
   }
   // Landlord company name (edit form). Free text; empty string clears it.
   if ('company' in b) {
@@ -360,6 +382,34 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('lifEligible');
   }
 
+  // Structured landlord deal terms + approval criteria (onboarding call). Like the
+  // tenant intake fields above, these are first-class optional fields validated only
+  // when supplied — NOT type-gated (mirrors voucherSize/pets).
+  if ('contract_status' in b) {
+    const v = b['contract_status'];
+    if (!isContractStatus(v)) {
+      return { error: `contract_status must be one of: ${CONTRACT_STATUSES.join(', ')}` };
+    }
+    patch['contract_status'] = v;
+    changedFields.push('contract_status');
+  }
+  if ('expected_rent' in b) {
+    const v = b['expected_rent'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return { error: 'expected_rent must be a non-negative number' };
+    }
+    patch['expected_rent'] = v;
+    changedFields.push('expected_rent');
+  }
+  for (const key of LANDLORD_BOOLEAN_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
+      patch[key] = v;
+      changedFields.push(key);
+    }
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
@@ -425,6 +475,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     if (typeof b['notes'] !== 'string') return { error: 'notes must be a string' };
     item.notes = b['notes'];
   }
+  if ('park_reason' in b) {
+    if (typeof b['park_reason'] !== 'string') return { error: 'park_reason must be a string' };
+    item.park_reason = b['park_reason'];
+  }
   if ('status' in b) {
     const v = b['status'];
     const allow = statusAllowlistFor(item.type);
@@ -476,6 +530,29 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     const v = b['lifEligible'];
     if (typeof v !== 'boolean') return { error: 'lifEligible must be a boolean' };
     item.lifEligible = v;
+  }
+
+  // Structured landlord deal terms + approval criteria (see parseTriageBody).
+  if ('contract_status' in b) {
+    const v = b['contract_status'];
+    if (!isContractStatus(v)) {
+      return { error: `contract_status must be one of: ${CONTRACT_STATUSES.join(', ')}` };
+    }
+    item.contract_status = v;
+  }
+  if ('expected_rent' in b) {
+    const v = b['expected_rent'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return { error: 'expected_rent must be a non-negative number' };
+    }
+    item.expected_rent = v;
+  }
+  for (const key of LANDLORD_BOOLEAN_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
+      item[key] = v;
+    }
   }
 
   // A manual create asserts identity (past the front door, not needs_review).

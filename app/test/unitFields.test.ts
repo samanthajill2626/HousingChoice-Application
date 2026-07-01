@@ -58,6 +58,37 @@ describe('validateUnitBody — new public-flyer fields', () => {
   });
 });
 
+describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () => {
+  // A writable, STORED voucher size the unit accepts — DISTINCT from the derived
+  // read-only voucher_size (which projects from beds). A 3bd unit may accept a
+  // 2BR voucher, so this is its own number field feeding matching.
+  it('accepts voucher_size_accepted (a number >= 0)', () => {
+    expect(validateUnitBody({ voucher_size_accepted: 2 }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: 2 },
+    });
+    // 0 is allowed (an efficiency/SRO voucher).
+    expect(validateUnitBody({ voucher_size_accepted: 0 }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: 0 },
+    });
+  });
+
+  it('rejects a non-number voucher_size_accepted', () => {
+    expect(validateUnitBody({ voucher_size_accepted: 'two' }, 'update')).toEqual({
+      ok: false,
+      error: 'voucher_size_accepted must be a number',
+    });
+  });
+
+  it('rejects a negative voucher_size_accepted', () => {
+    expect(validateUnitBody({ voucher_size_accepted: -1 }, 'update')).toEqual({
+      ok: false,
+      error: 'voucher_size_accepted must be >= 0',
+    });
+  });
+});
+
 describe('toUnitFlyerDetails — the reveal allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.

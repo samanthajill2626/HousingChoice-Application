@@ -11,6 +11,8 @@ import { useState } from 'react';
 import {
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
+  LANDLORD_STATUSES,
+  LANDLORD_STATUS_LABELS,
   setTenantStatus,
   updateContact,
   type Address,
@@ -23,7 +25,8 @@ import {
 } from '../../api/index.js';
 
 // The valid status values, per contact type. Tenants use the 7-value tenant
-// lifecycle; everyone else uses the coarse needs_review|active lifecycle.
+// lifecycle; landlords use the 4-value lead lifecycle; everyone else uses the
+// coarse needs_review|active lifecycle.
 const NON_TENANT_STATUS_VALUES = ['needs_review', 'active'] as const;
 type NonTenantStatus = (typeof NON_TENANT_STATUS_VALUES)[number];
 
@@ -35,19 +38,29 @@ function isNonTenantStatus(v: string): v is NonTenantStatus {
   return (NON_TENANT_STATUS_VALUES as readonly string[]).includes(v);
 }
 
+function isLandlordStatus(v: string): boolean {
+  return (LANDLORD_STATUSES as readonly string[]).includes(v);
+}
+
 /** The set of valid status values for a given type. */
 function validStatusesForType(type: ContactType): readonly string[] {
-  return type === 'tenant' ? TENANT_STATUSES : NON_TENANT_STATUS_VALUES;
+  if (type === 'tenant') return TENANT_STATUSES;
+  if (type === 'landlord') return LANDLORD_STATUSES;
+  return NON_TENANT_STATUS_VALUES;
 }
 
 /** The status to start with (and to reset to) for a type, given the contact's
  *  stored status. Keeps the selection VALID for the type: a stored value that's
  *  off-list for the type falls back to that type's front door � tenant ?
+ *  'needs_review'; landlord ? keep the stored lead value if valid, else
  *  'needs_review'; non-tenant ? keep 'active' if that's what was stored, else
  *  'needs_review'. Never surfaces an off-list value as a selectable option. */
 function defaultStatusForType(type: ContactType, storedStatus: string): string {
   if (type === 'tenant') {
     return isTenantStatus(storedStatus) ? storedStatus : 'needs_review';
+  }
+  if (type === 'landlord') {
+    return isLandlordStatus(storedStatus) ? storedStatus : 'needs_review';
   }
   return isNonTenantStatus(storedStatus) ? storedStatus : 'needs_review';
 }
@@ -79,13 +92,21 @@ const NON_TENANT_STATUSES: { value: string; label: string }[] = [
 
 /** The selectable status options for a type (no off-list value ever prepended). */
 function statusOptionsForType(type: ContactType): { value: string; label: string }[] {
-  return type === 'tenant' ? TENANT_STATUS_OPTIONS : NON_TENANT_STATUSES;
+  if (type === 'tenant') return TENANT_STATUS_OPTIONS;
+  if (type === 'landlord') return LANDLORD_STATUS_OPTIONS;
+  return NON_TENANT_STATUSES;
 }
 
 // Tenants use the 7-value tenant lifecycle (the status model).
 const TENANT_STATUS_OPTIONS: { value: string; label: string }[] = TENANT_STATUSES.map((s) => ({
   value: s,
   label: TENANT_STATUS_LABELS[s],
+}));
+
+// Landlords use the 4-value lead lifecycle (needs_review|interested|active|parked).
+const LANDLORD_STATUS_OPTIONS: { value: string; label: string }[] = LANDLORD_STATUSES.map((s) => ({
+  value: s,
+  label: LANDLORD_STATUS_LABELS[s],
 }));
 
 function str(v: unknown): string {
@@ -124,6 +145,20 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '',
   );
   const [company, setCompany] = useState(str(contact['company']));
+  // Landlord onboarding deal terms + approval criteria (edit form). contract_status
+  // as a select (''=unset); expected_rent as a numeric string ('' = unset); the four
+  // criteria as booleans; park_reason as free text.
+  const [contractStatus, setContractStatus] = useState(str(contact.contract_status));
+  const [expectedRent, setExpectedRent] = useState(
+    typeof contact.expected_rent === 'number' ? String(contact.expected_rent) : '',
+  );
+  const [registeredLandlord, setRegisteredLandlord] = useState(contact.registered_landlord === true);
+  const [rtaWithin48h, setRtaWithin48h] = useState(contact.rta_within_48h === true);
+  const [passInspection, setPassInspection] = useState(contact.pass_inspection_first_try === true);
+  const [incomeIncludesVoucher, setIncomeIncludesVoucher] = useState(
+    contact.income_includes_voucher === true,
+  );
+  const [parkReason, setParkReason] = useState(str(contact.park_reason));
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
   const [pets, setPets] = useState(str(contact['pets']));
   const [evictions, setEvictions] = useState(str(contact['evictions']));
@@ -199,6 +234,36 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     }
     if (notes !== str(contact.notes)) patch.notes = notes;
     if (isLandlord && company !== str(contact['company'])) patch.company = company;
+
+    // Landlord onboarding deal terms + approval criteria — dirty-tracked, only the
+    // changed fields ride the PATCH (the server SET-merges).
+    if (isLandlord) {
+      if (contractStatus !== str(contact.contract_status) && contractStatus !== '') {
+        patch.contract_status = contractStatus === 'signed' ? 'signed' : 'unsigned';
+      }
+      const initialRent =
+        typeof contact.expected_rent === 'number' ? String(contact.expected_rent) : '';
+      if (expectedRent !== initialRent && expectedRent !== '') {
+        const n = Number(expectedRent);
+        if (!Number.isFinite(n) || n < 0) {
+          return { error: 'Expected rent must be a non-negative number.' };
+        }
+        patch.expected_rent = n;
+      }
+      if (registeredLandlord !== (contact.registered_landlord === true)) {
+        patch.registered_landlord = registeredLandlord;
+      }
+      if (rtaWithin48h !== (contact.rta_within_48h === true)) {
+        patch.rta_within_48h = rtaWithin48h;
+      }
+      if (passInspection !== (contact.pass_inspection_first_try === true)) {
+        patch.pass_inspection_first_try = passInspection;
+      }
+      if (incomeIncludesVoucher !== (contact.income_includes_voucher === true)) {
+        patch.income_includes_voucher = incomeIncludesVoucher;
+      }
+      if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
+    }
 
     // Relationships � only send if the normalized form changed.
     const normRel = normalizeRelationships(relRows);
@@ -505,6 +570,78 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               autoComplete="off"
             />
           </label>
+        ) : null}
+
+        {isLandlord ? (
+          <div className={styles.fieldset}>
+            <span className={styles.label}>Landlord onboarding</span>
+            <label className={styles.field}>
+              <span className={styles.label}>Contract status</span>
+              <select
+                className={styles.input}
+                value={contractStatus}
+                onChange={(e) => setContractStatus(e.target.value)}
+              >
+                <option value="">—</option>
+                <option value="unsigned">Unsigned</option>
+                <option value="signed">Signed</option>
+              </select>
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Expected rent</span>
+              <input
+                className={styles.input}
+                type="number"
+                min={0}
+                step={1}
+                value={expectedRent}
+                onChange={(e) => setExpectedRent(e.target.value)}
+                placeholder="e.g. 1450"
+              />
+            </label>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={registeredLandlord}
+                onChange={(e) => setRegisteredLandlord(e.target.checked)}
+              />
+              <span className={styles.label}>Registered landlord</span>
+            </label>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={rtaWithin48h}
+                onChange={(e) => setRtaWithin48h(e.target.checked)}
+              />
+              <span className={styles.label}>Submits RTA within 48h</span>
+            </label>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={passInspection}
+                onChange={(e) => setPassInspection(e.target.checked)}
+              />
+              <span className={styles.label}>Passes inspection first try</span>
+            </label>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={incomeIncludesVoucher}
+                onChange={(e) => setIncomeIncludesVoucher(e.target.checked)}
+              />
+              <span className={styles.label}>Voucher counts as income</span>
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Park reason</span>
+              <textarea
+                className={styles.textarea}
+                value={parkReason}
+                onChange={(e) => setParkReason(e.target.value)}
+                rows={2}
+                placeholder="Why the lead was parked (declined / not a fit / never signed)"
+              />
+            </label>
+          </div>
         ) : null}
 
         <label className={styles.field}>

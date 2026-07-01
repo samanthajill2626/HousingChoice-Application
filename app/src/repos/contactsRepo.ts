@@ -87,6 +87,14 @@ export interface ContactItem {
    * satisfied). Porting lives on the TENANT, never as a placement stage.
    */
   porting?: boolean;
+  /**
+   * Landlord lead lifecycle (docs/issues/landlord-lead-status-and-park.md): the
+   * free-text reason captured when a landlord contact is moved to the terminal
+   * `parked` status (declined / not-a-fit / never-signed). Written by the
+   * transition service on the `parked` move (from the supplied `reason`); unset
+   * on non-parked contacts. Tenants never set it.
+   */
+  park_reason?: string;
   /** E.164 (byPhone GSI) — the PRIMARY number (back-compat scalar). */
   phone?: string;
   /**
@@ -129,6 +137,20 @@ export interface ContactItem {
   /** Time at current address (free text, e.g. "3 years"). */
   tenure?: string;
   lifEligible?: boolean;
+  /**
+   * Structured landlord deal terms + approval criteria (onboarding call —
+   * docs/issues/landlord-onboarding-record-fields.md). First-class optional
+   * fields, NOT type-gated: set/returned via the contact API, validated only
+   * when supplied. `contract_status` records whether the (external) DocuSign
+   * contract was signed; the booleans capture registration + approval criteria.
+   */
+  contract_status?: 'unsigned' | 'signed';
+  /** Expected contract rent (dollars, >= 0). */
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
   [key: string]: unknown;
 }
 

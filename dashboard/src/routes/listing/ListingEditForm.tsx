@@ -52,6 +52,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   // reveal. video URL (text) + application fee (number) + same-day RTA (boolean).
   const [videoUrl, setVideoUrl] = useState(str(unit.video_url));
   const [applicationFee, setApplicationFee] = useState(numStr(unit.application_fee));
+  // Accepted voucher size (bedroom count the voucher covers) — distinct from beds.
+  const [voucherSize, setVoucherSize] = useState(numStr(unit.voucher_size_accepted));
   const [sameDayRta, setSameDayRta] = useState(unit.same_day_rta === true);
 
   // Address parts (a structured object, or a legacy string folded into line1).
@@ -128,6 +130,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     }
     if (!addNumber(patch, 'deposit', deposit, numStr(unit.deposit), 'Deposit')) return null;
     if (!addNumber(patch, 'application_fee', applicationFee, numStr(unit.application_fee), 'Application fee')) {
+      return null;
+    }
+    if (!addNumber(patch, 'voucher_size_accepted', voucherSize, numStr(unit.voucher_size_accepted), 'Voucher size accepted')) {
       return null;
     }
 
@@ -412,6 +417,18 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             step={1}
             value={applicationFee}
             onChange={(e) => setApplicationFee(e.target.value)}
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Voucher size accepted</span>
+          <input
+            className={styles.input}
+            type="number"
+            min={0}
+            step={1}
+            value={voucherSize}
+            onChange={(e) => setVoucherSize(e.target.value)}
           />
         </label>
 

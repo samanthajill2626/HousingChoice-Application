@@ -65,6 +65,7 @@ const READY: ListingState = {
     pets: 'Cats only',
     application_fee: 25,
     same_day_rta: true,
+    voucher_size_accepted: 2,
     video_url: 'https://example.com/tour.mp4',
     accepted_programs: ['Housing Choice Voucher (HCV)', 'Section 8', 'VASH'],
     tour_process: 'Text the landlord to arrange access.',
@@ -172,6 +173,9 @@ describe('ListingDetail', () => {
     expect(screen.getByText('Application fee')).toBeInTheDocument();
     expect(screen.getByText('$25')).toBeInTheDocument();
     expect(screen.getByText('Same-day RTA')).toBeInTheDocument();
+    // The accepted voucher size (distinct from beds) surfaces as a detail row.
+    expect(screen.getByText('Voucher size accepted')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Watch video' })).toHaveAttribute(
       'href',
       'https://example.com/tour.mp4',
@@ -179,6 +183,13 @@ describe('ListingDetail', () => {
     const list = screen.getByRole('list', { name: /Accepted vouchers/i });
     const items = within(list).getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
+  });
+
+  it('omits the "Voucher size accepted" detail row when it is unset', () => {
+    const { voucher_size_accepted: _omit, ...rest } = READY.unit!;
+    useListing.mockReturnValue({ ...READY, unit: rest });
+    renderAt();
+    expect(screen.queryByText('Voucher size accepted')).not.toBeInTheDocument();
   });
 
   it('does not render a video link for a non-http(s) (javascript:) URL — XSS guard', () => {

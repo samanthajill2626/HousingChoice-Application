@@ -241,10 +241,12 @@ describe('ContactEditForm', () => {
     expect(within(tenantSelect).getByRole('option', { name: 'Searching' })).toBeInTheDocument();
     expect(within(tenantSelect).getByRole('option', { name: 'On hold' })).toBeInTheDocument();
 
-    // A landlord → the coarse needs_review|active lifecycle (2 options).
+    // A landlord → the 4-value lead lifecycle (needs_review|interested|active|parked).
     render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
     const landlordSelect = screen.getAllByRole('combobox', { name: /Status/i }).at(-1)!;
-    expect(within(landlordSelect).getAllByRole('option')).toHaveLength(2);
+    expect(within(landlordSelect).getAllByRole('option')).toHaveLength(4);
+    expect(within(landlordSelect).getByRole('option', { name: 'Interested' })).toBeInTheDocument();
+    expect(within(landlordSelect).getByRole('option', { name: 'Parked' })).toBeInTheDocument();
   });
 
   it('shows a porting checkbox for a tenant only', () => {
@@ -301,7 +303,7 @@ describe('ContactEditForm', () => {
     render(
       <ContactEditForm contact={{ ...LANDLORD, status: 'needs_review' }} onClose={vi.fn()} onSaved={vi.fn()} />,
     );
-    await user.selectOptions(screen.getByRole('combobox', { name: /Status/i }), 'active');
+    await user.selectOptions(screen.getByRole('combobox', { name: /^Status$/i }), 'active');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { status: 'active' }));
     expect(setTenantStatus).not.toHaveBeenCalled();
@@ -364,6 +366,85 @@ describe('ContactEditForm', () => {
     for (const call of setTenantStatus.mock.calls) {
       expect((call[1] as { toStatus: string }).toStatus).not.toBe('active');
     }
+  });
+
+  // --- Landlord onboarding inputs (Task 4b) ---------------------------------
+
+  it('shows the landlord onboarding inputs for a landlord only', () => {
+    const { unmount } = render(
+      <ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/^Contract status$/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Expected rent$/i)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /^Registered landlord$/i })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /^Submits RTA within 48h$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('checkbox', { name: /^Passes inspection first try$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('checkbox', { name: /^Voucher counts as income$/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Park reason$/i)).toBeInTheDocument();
+    unmount();
+
+    // None of these show for a tenant.
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByLabelText(/^Contract status$/i)).toBeNull();
+    expect(screen.queryByLabelText(/^Expected rent$/i)).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /^Registered landlord$/i })).toBeNull();
+    expect(screen.queryByLabelText(/^Park reason$/i)).toBeNull();
+  });
+
+  it('PATCHes changed landlord onboarding fields', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD });
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    await user.selectOptions(screen.getByLabelText(/^Contract status$/i), 'signed');
+    fireEvent.change(screen.getByLabelText(/^Expected rent$/i), { target: { value: '1450' } });
+    await user.click(screen.getByRole('checkbox', { name: /^Registered landlord$/i }));
+    await user.click(screen.getByRole('checkbox', { name: /^Submits RTA within 48h$/i }));
+    await user.click(screen.getByRole('checkbox', { name: /^Voucher counts as income$/i }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(patch).toMatchObject({
+      contract_status: 'signed',
+      expected_rent: 1450,
+      registered_landlord: true,
+      rta_within_48h: true,
+      income_includes_voucher: true,
+    });
+    // Untouched booleans aren't sent.
+    expect('pass_inspection_first_try' in patch).toBe(false);
+  });
+
+  it('PATCHes a park_reason for a landlord', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD });
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/^Park reason$/i), 'Declined the program');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('L1', { park_reason: 'Declined the program' }),
+    );
+  });
+
+  it('moves a landlord to Parked via the Status select (plain PATCH)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD, status: 'parked' });
+    render(
+      <ContactEditForm
+        contact={{ ...LANDLORD, status: 'interested' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    await user.selectOptions(screen.getByRole('combobox', { name: /^Status$/i }), 'parked');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { status: 'parked' }));
+    expect(setTenantStatus).not.toHaveBeenCalled();
   });
 
   it('only changing the name does NOT include role/relationships/customFields in the patch', async () => {

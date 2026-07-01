@@ -6,12 +6,14 @@ import { describe, expect, it } from 'vitest';
 import {
   deriveStatuses,
   isListingOverrideStatus,
+  isLandlordStatus,
   isListingStatus,
   isLostReasonCategory,
   isPlacementStage,
   isTenantOverrideStatus,
   isTenantStatus,
   isTransitionSource,
+  LANDLORD_STATUSES,
   LISTING_OVERRIDE_STATES,
   LISTING_STATUSES,
   LOST_REASON_CATEGORIES,
@@ -135,6 +137,19 @@ describe('statusModel — guards reject junk', () => {
     expect(isListingStatus('available')).toBe(true);
     expect(isListingStatus('searching')).toBe(false);
     expect(isListingStatus('placed')).toBe(false); // not a listing status (occupied)
+  });
+
+  it('isLandlordStatus: the landlord lead lifecycle only (rejects tenant-only + junk)', () => {
+    for (const s of LANDLORD_STATUSES) {
+      expect(isLandlordStatus(s)).toBe(true);
+    }
+    expect([...LANDLORD_STATUSES].sort()).toEqual(['active', 'interested', 'needs_review', 'parked']);
+    // Tenant-only lifecycle values are NOT landlord statuses (the leak we close).
+    expect(isLandlordStatus('on_hold')).toBe(false);
+    expect(isLandlordStatus('inactive')).toBe(false);
+    expect(isLandlordStatus('searching')).toBe(false);
+    expect(isLandlordStatus('bogus')).toBe(false);
+    expect(isLandlordStatus(undefined)).toBe(false);
   });
 
   it('isLostReasonCategory / isTransitionSource', () => {

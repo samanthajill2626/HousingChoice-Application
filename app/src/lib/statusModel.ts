@@ -161,6 +161,49 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
   inactive: 'Inactive',
 };
 
+// --- Landlord lead lifecycle (type=landlord) --------------------------------
+// A landlord contact carries its own lead lifecycle on the SAME `status` field
+// tenants use (type-scoped — STATUS-MODEL §5 / docs/issues/landlord-lead-status-
+// and-park.md). `needs_review` is the auto-capture/triage front door; a lead
+// worth pursuing is `interested`; an onboarded landlord is `active`; a declined/
+// not-a-fit/never-signed lead is the terminal `parked` (with a `park_reason`
+// captured on the move). Landlord statuses are DISJOINT from tenant-only values
+// (on_hold/inactive/searching/…): a landlord must never be pushed into a tenant
+// lifecycle state (the `/tenant-status` type-guard leak this set closes).
+export const LANDLORD_STATUSES = ['needs_review', 'interested', 'active', 'parked'] as const;
+
+export type LandlordStatus = (typeof LANDLORD_STATUSES)[number];
+
+const LANDLORD_STATUS_SET: ReadonlySet<string> = new Set(LANDLORD_STATUSES);
+
+export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = {
+  needs_review: 'Needs review',
+  interested: 'Interested',
+  active: 'Active',
+  parked: 'Parked',
+};
+
+/**
+ * Status allowlist for contact types WITHOUT a lifecycle (team_member/unknown):
+ * the simple `needs_review` (auto-capture stub) → `active` (resolved). Tenant and
+ * landlord have their own richer lifecycles above; see {@link statusAllowlistFor}.
+ */
+export const NON_TENANT_STATUSES = ['needs_review', 'active'] as const;
+
+/**
+ * The single source of truth for the type-scoped status allowlist. A TENANT
+ * carries its §5 lifecycle (TENANT_STATUSES); a LANDLORD carries the lead
+ * lifecycle (LANDLORD_STATUSES); every other type (team_member/unknown) carries
+ * the simple needs_review|active. Used by BOTH status-setting paths (the generic
+ * contact PATCH and the `/tenant-status` transition route) so a landlord can
+ * never be pushed into a tenant-only state.
+ */
+export function statusAllowlistFor(type: string | undefined): readonly string[] {
+  if (type === 'tenant') return TENANT_STATUSES;
+  if (type === 'landlord') return LANDLORD_STATUSES;
+  return NON_TENANT_STATUSES;
+}
+
 // --- Property lifecycle (coarse, mostly derived; §6) -------------------------
 export const LISTING_STATUSES = [
   'setup',
@@ -351,6 +394,10 @@ export function isPlacementStage(x: unknown): x is PlacementStage {
 
 export function isTenantStatus(x: unknown): x is TenantStatus {
   return typeof x === 'string' && TENANT_STATUS_SET.has(x);
+}
+
+export function isLandlordStatus(x: unknown): x is LandlordStatus {
+  return typeof x === 'string' && LANDLORD_STATUS_SET.has(x);
 }
 
 export function isListingStatus(x: unknown): x is ListingStatus {

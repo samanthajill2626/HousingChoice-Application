@@ -712,7 +712,8 @@ export class Scenario {
     });
   }
 
-  /** [App] The lead is `interested` (API + the Details "Status" row). */
+  /** [App] The lead is `interested` (raw status via API + the Details "Status" row,
+   *  which renders the LABEL "Interested" — not the raw value). */
   expectLeadInterested(): Promise<void> {
     return step('App: landlord lead is interested', async () => {
       await this.assertStatus('interested');
@@ -720,7 +721,7 @@ export class Scenario {
       const details = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
-      await expect(details.getByText('interested')).toBeVisible();
+      await expect(details.getByText('Interested')).toBeVisible();
     });
   }
 
@@ -814,19 +815,27 @@ export class Scenario {
       await expect(card.getByText('Submits RTA within 48h')).toBeVisible();
       await expect(card.getByText('Passes inspection first try')).toBeVisible();
       await expect(card.getByText('Voucher counts as income')).toBeVisible();
+      // Boolean VALUES render (Yes/No) — assert by count (each true boolean row shows
+      // "Yes"), scoped to the card so a bare getByText('Yes') can't multi-match/collide.
+      const yesCount = [o.registeredLandlord, o.rta48h, o.inspectionFirstTry, o.incomeIncludesVoucher].filter(
+        Boolean,
+      ).length;
+      if (yesCount > 0) await expect(card.getByText('Yes', { exact: true })).toHaveCount(yesCount);
     });
   }
 
   /** [Team] Log a reason + park the lead (the diagram's "[MANUAL] Log the reason. Park
-   *  the lead"). A landlord STATUS move → parked with the reason persisted as park_reason.
-   *  Via the /tenant-status route (the edit-form Status select doesn't carry a reason). */
+   *  the lead"). Driven through the REAL edit form (mostly-UI fidelity, mirroring
+   *  teamRecordsContractSigned): set Status → Parked + fill the Park reason. For a
+   *  landlord both the status change and park_reason persist via the generic
+   *  PATCH /api/contacts/:id in ONE Save. */
   teamParksLead(reason: string): Promise<void> {
-    const id = this.requireActiveContactId();
     return step(`Team parks the lead (${reason})`, async () => {
-      const res = await this.page.request.patch(`${NEXT}/api/contacts/${id}/tenant-status`, {
-        data: { toStatus: 'parked', source: 'manual', reason },
-      });
-      expect(res.ok()).toBeTruthy();
+      await this.openEditDialog();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await dialog.getByRole('combobox', { name: 'Status', exact: true }).selectOption({ label: 'Parked' });
+      await dialog.getByLabel('Park reason').fill(reason);
+      await this.saveEditDialog(dialog);
     });
   }
 

@@ -205,11 +205,12 @@ test('property intake · missing field → follow-up → set → published → h
   await flow.teamRecordsContractSigned();
   const landlordId = flow.landlordId();
 
-  // Property intake via MMS (photos), but voucher_size_accepted is missing → the unit
-  // record is created NOT-yet-published (the loop's "Until the unit record is complete").
+  // Property intake, but voucher_size_accepted is missing → the unit record is created
+  // NOT-yet-published (the loop's "Until the unit record is complete"). Text-only: the
+  // diagram's MMS photos attach to the unit, but that's a deferred gap
+  // (docs/issues/unit-create-and-mms-media-ui.md), so we don't send media here.
   await flow.landlordTextsProperty(
     'Property: 55 Elm Ct NW, 3bd/2ba, fits a king bed, https://www.zillow.com/homedetails/elm-ct',
-    ['https://example.com/mms/photo-front.jpg'],
   );
   const unit: Unit = await flow.teamCreatesUnitFromIntake(landlordId, {
     beds: 3,

@@ -20,6 +20,24 @@ export interface DevLoginResult {
   role: UserRole;
 }
 
+/** GET /api/users/me → { user } (Voice Phase 1 §7). The self view the current
+ *  navigator reads to know whether they have a VERIFIED cell (their outbound
+ *  bridge leg) — a superset of `Me` with the voice fields. MIRRORS the app's
+ *  self-user projection; keep in sync. `cell`/`cell_verified_at` are absent until
+ *  set/verified; `inbound_voice_line` is true only on the single holder. */
+export interface MeUser {
+  userId: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  /** The user's OWN cell (E.164), their outbound bridge leg. Absent until set. */
+  cell?: string;
+  /** ISO 8601 when `cell` passed verification; absent = unverified (never dialed). */
+  cell_verified_at?: string;
+  /** True when this user holds the single inbound voice line. */
+  inbound_voice_line?: boolean;
+}
+
 // --- Settings: Team (admin user management) ---------------------------------
 // MIRRORS app/src/routes/adminUsers.ts `toAdminUserView` — the admin-list
 // projection of a user (NO google_sub / push_subscriptions). The dashboard is a

@@ -1,0 +1,82 @@
+---
+title: Housing Choice — Landlord & Unit Onboarding (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor L as Landlord
+    participant A as Housing Choice App
+    participant S as Team
+    Note over L,S: The app owns the phone number. Every call/text flows between Landlord and Team through the app (both directions).<br/>Notes marked [AUTO] are app automation. [MANUAL] is a person (Team) acting. Email/DocuSign are a SEPARATE channel, outside the app.
+    Note over S,L: Sales-first — prove the value, sign the contract, THEN onboard the landlord and unit.
+
+    alt First touch — outbound cold call
+        Note over S,L: Team sourced a lead on affordablehousing.com — a number, maybe a name or company, and a property address.
+        S->>A: Place an outbound call to the landlord
+        A->>L: Deliver the call (from the app's number)
+        Note over S,L: Cold-call spiel — non-exclusive tenant-finding, and the voucher-holder demand she can bring (e.g. 45 four-bed holders).
+        alt Landlord is interested
+            L->>A: Yes — interested
+            A->>S: Relay interest
+            Note over A: [MANUAL] Create the landlord contact from the sourced lead — set lead status to interested
+        else Landlord declines
+            L->>A: No thanks (e.g. commission too high, or a PM not the owner)
+            A->>S: Relay the decline
+            Note over A: [MANUAL] Log the decline reason. Park the lead
+            Note over S,L: Stop here — parked
+        end
+    else First touch — inbound text
+        L->>A: Text — can you help fill my unit?
+        Note over A: [AUTO] Log inbound text. Create an unknown contact
+        A->>S: Relay the new landlord lead
+        S->>A: Ask for the property address (qualify — is it worth the time?)
+        A->>L: Deliver the question
+        L->>A: Property address
+        A->>S: Relay the address
+        alt Worth pursuing
+            Note over A: [MANUAL] Triage the contact to Landlord — set lead status to interested
+        else Not a fit
+            Note over A: [MANUAL] Log the reason. Park the lead
+            Note over S,L: Stop here — parked
+        end
+    end
+
+    Note over S,L: Schedule the ~10-min onboarding call (asked on the cold call, or after qualifying an inbound lead).
+    S->>A: Ask for a good time for the onboarding call
+    A->>L: Deliver the scheduling ask
+    L->>A: Confirms a time
+    A->>S: Relay the confirmation
+
+    Note over S,L: Welcome and contract — a SEPARATE channel (email + DocuSign), Team-run outside the app in Phase 1.
+    S->>L: Send the welcome email + DocuSign contract (external tools)
+    alt Contract signed
+        L->>S: Reviews and signs (DocuSign)
+        Note over A: [MANUAL] Record the contract as signed on the landlord record
+    else Never signs
+        Note over A: [MANUAL] Record the contract as not signed. Park the lead
+        Note over S,L: Stop here — parked
+    end
+
+    Note over S,L: Onboarding call (~10 min) — Team-led. Data is captured from the call (Phase 1 — Team records it).
+    S->>A: Place the onboarding call
+    A->>L: Deliver the call
+    Note over S,L: Team works the checklist live.
+    L->>A: Voucher size needed, expected rent, utilities on tenant,<br/>hold fee / deposit / LIF, tour logistics, comms prefs (text and group text),<br/>registered landlord, will submit RTA within 48h, will pass inspection first try
+    A->>S: Relay the answers
+    L->>A: Approval criteria — how they treat evictions, utility debt, credit, references,<br/>and income rules (the voucher itself counts as income)
+    A->>S: Relay the criteria
+    Note over A: [MANUAL] Save the onboarding details and approval criteria to the landlord record
+
+    Note over L,S: Property and unit intake — often via text/MMS, but can also come on the call. Phase 1 — Team records it.
+    loop Until the unit record is complete
+        L->>A: Property details plus photos or video (MMS) — address, beds/baths,<br/>does a bedroom fit a king bed, Zillow link, voucher size accepted (e.g. 3bd/2ba takes a 2BR voucher)
+        Note over A: [AUTO] Log the inbound. Attach the media
+        A->>S: Relay the property info
+        Note over A: [MANUAL] Create or update the unit record under this landlord
+        opt Something is missing
+            S->>A: Ask for the missing field(s)
+            A->>L: Deliver the follow-up
+        end
+    end
+    Note over A: [MANUAL] Publish the unit (mark it available).<br/>[AUTO] Listing link generated and shareable (address, beds/baths, sq ft, w/d, app fee, qualifications, photos or video, exterior photo)
+
+    Note over L,S: Onboarding complete — the unit is available.<br/>Hand off to Property Sharing and Matching — the unit surfaces to qualifying tenants (the Sending Unit sequence).<br/>Next contact with the landlord — Tours (separate).

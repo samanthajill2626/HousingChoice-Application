@@ -206,6 +206,24 @@ data "aws_iam_policy_document" "app" {
       "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
     ]
   }
+  # System Status "recent errors" uses CloudWatch Logs Insights (StartQuery +
+  # GetQueryResults) to return the NEWEST matching events in newest-first order —
+  # FilterLogEvents can only page oldest-first, so it drops the newest matches on
+  # wide windows. StartQuery IS resource-scopable to this env's groups;
+  # GetQueryResults + StopQuery do NOT support resource-level permissions ("*").
+  statement {
+    sid       = "SystemStatusInsightsStart"
+    actions   = ["logs:StartQuery"]
+    resources = [
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*",
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
+    ]
+  }
+  statement {
+    sid       = "SystemStatusInsightsResults"
+    actions   = ["logs:GetQueryResults", "logs:StopQuery"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "app" {

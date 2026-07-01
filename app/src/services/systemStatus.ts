@@ -3,7 +3,7 @@
 //
 //   getFlags()         go-live readiness from runtime config — NO AWS call
 //   getAlarms()        CloudWatch DescribeAlarms (prefix hc-<env>-), ALARM-first
-//   getErrors(window)  CloudWatch Logs FilterLogEvents (pino level ≥ 50, ≤25)
+//   getErrors(window)  CloudWatch Logs Insights (newest-first, ≤25)
 //
 // GRACEFUL LOCAL DEGRADATION: the alarms/errors reads short-circuit to
 // { available: false, reason: 'unavailable_local' } WITHOUT an SDK call when
@@ -18,8 +18,9 @@
 import {
   classifyCloudWatchError,
   createCloudWatchClient,
-  OOM_APP_FILTER_PATTERN,
-  OOM_SYSTEM_FILTER_PATTERN,
+  OOM_APP_INSIGHTS_FILTER,
+  OOM_SYSTEM_INSIGHTS_FILTER,
+  PINO_ERROR_INSIGHTS_FILTER,
   type AlarmView,
   type CloudWatchClientSeam,
   type ErrorEventView,
@@ -170,21 +171,23 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       }
       const sinceMs = Date.now() - WINDOW_MS[window];
       try {
-        const [appErrors, appOom, workerOom, systemOom] = await Promise.all([
-          cloudwatch.filterErrorEvents(config.errorLogGroupName, sinceMs, ERROR_EVENT_LIMIT),
-          cloudwatch.filterEventsByPattern(config.errorLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_APP_FILTER_PATTERN),
-          cloudwatch.filterEventsByPattern(config.workerLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_APP_FILTER_PATTERN),
-          cloudwatch.filterEventsByPattern(config.systemLogGroupName, sinceMs, ERROR_EVENT_LIMIT, OOM_SYSTEM_FILTER_PATTERN),
+        // Three Insights queries in parallel:
+        //   appErrors    — pino level≥50 lines in the app log group
+        //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
+        //   systemOom    — kernel OOM-killer lines in the system log group
+        const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
+          cloudwatch.queryInsights([config.errorLogGroupName], PINO_ERROR_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
+          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
+          cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);
         // Relabel OOM events with synthesized, PII-safe messages based on which
         // query found them — never from the raw log text (which projectErrorEvent
         // already collapses to "(unparseable log line)" for kernel/V8 OOM lines).
-        const relabeledSystemOom = systemOom.map((e) => ({ ...e, message: OOM_SYSTEM_LABEL }));
-        const relabeledAppOom = appOom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
-        const relabeledWorkerOom = workerOom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
+        const relabeledV8 = appWorkerV8Oom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
+        const relabeledSystem = systemOom.map((e) => ({ ...e, message: OOM_SYSTEM_LABEL }));
         // Merge, dedup by timestamp+message, sort newest-first, cap at limit.
         const seen = new Set<string>();
-        const events = [...appErrors, ...relabeledAppOom, ...relabeledWorkerOom, ...relabeledSystemOom]
+        const events = [...appErrors, ...relabeledV8, ...relabeledSystem]
           .filter((e) => {
             const key = `${e.timestamp}|${e.message}`;
             if (seen.has(key)) return false;
@@ -198,7 +201,7 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       } catch (err) {
         log.error(
           { window, kind: classifyCloudWatchError(err), err: (err as Error).message },
-          'system status: FilterLogEvents failed',
+          'system status: Logs Insights query failed',
         );
         return { available: false, reason: 'cloudwatch_error' };
       }

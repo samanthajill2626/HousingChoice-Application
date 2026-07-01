@@ -64,6 +64,31 @@ spec → build). Prioritized:
 - **Voice/outbound calling:** separate track (A2P is SMS-only). Manual click-to-dial
   + inbound bridge = lighter regime than SMS; obligations are DNC-style (honor
   "don't call me"), calling hours, recording disclosure. See design session.
+- **Missed-call auto-text — texts a caller with no prior *text* consent (accepted
+  2026-07-01).** The zero-tap missed-call auto-text (`settingsRepo.ts`
+  `missedCallAutoText`, sent by `jobs/missedCallAutoText.ts`, `automated: true`) is
+  deliberately EXEMPT from the just-in-time consent gate (the gate fires only on
+  *staff-initiated proactive* 1:1 sends — `services/sendMessage.ts`, `automated ===
+  false`). A first-time caller never texted us, so they have no `consent_method`,
+  yet we send them one SMS. **Why this is acceptable:** the message is
+  *informational/transactional* (the person just phoned us about housing — customer-
+  initiated contact), it is a single auto-reply (not recurring marketing), and after
+  this build it carries the business identity + "Reply STOP to opt out"
+  (`DEFAULT_MISSED_CALL_AUTOTEXT`), with the template-validation floor
+  (`templateHasOptOutLanguage`, enforced in `routes/settings.ts`) guaranteeing the
+  STOP language can't be edited away. The basis rests entirely on the message
+  staying informational and always carrying opt-out — do NOT repurpose this path for
+  promotional content. Note it does NOT stamp `consent_method` (a courtesy reply
+  doesn't "launder" a caller into consented status): a later staff *proactive* text
+  still correctly hits the JIT gate. Founder legal-basis sign-off recorded.
+- **Relay opt-out enforcement + surfacing (2026-07-01).** Relay fan-out/intro send
+  straight to the messaging adapter, bypassing the 1:1 `sendMessage` opt-out gate,
+  so a STOP'd member kept receiving relayed messages. Fixed: `jobs/relayFanOut.ts`
+  now checks `sms_opt_out` per member before each send and skips the opted-out one
+  (marking the recipient slot `failed`/`contact_opted_out`; fails CLOSED on a read
+  error). Only that member is suppressed, not the group. Being surfaced to staff (an
+  opted-out relay member is shown as "not receiving — opted out" on the thread and as
+  a Today attention item, so staff can investigate or remove them from the group).
 
 Full audit findings + calibrated scorecard captured in the design session
 (2026-06-30). Filed to record good-faith, documented progress toward compliance.

@@ -113,6 +113,35 @@ describe('POST /api/units — create', () => {
     expect(world.auditEvents).toHaveLength(0);
   });
 
+  it('accepts voucher_size_accepted (a stored number, distinct from beds) and GET returns it', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      // A 3bd unit that accepts a 2BR voucher — voucher_size_accepted ≠ beds.
+      .send({ landlordId: 'contact-ll-1', beds: 3, voucher_size_accepted: 2 });
+    expect(res.status).toBe(201);
+    expect(res.body.unit.voucher_size_accepted).toBe(2);
+
+    const got = await request(app)
+      .get(`/api/units/${res.body.unit.unitId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(got.status).toBe(200);
+    expect(got.body.unit.voucher_size_accepted).toBe(2);
+  });
+
+  it('rejects a non-number voucher_size_accepted with 400', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-1', voucher_size_accepted: 'two' });
+    expect(res.status).toBe(400);
+  });
+
   it('accepts the per-unit internal fields incl. primary_voice_contact (CO1)', async () => {
     const { app } = makeWebhookHarness();
     const res = await request(app)
@@ -291,6 +320,33 @@ describe('PATCH /api/units/:unitId', () => {
     expect(world.auditEvents).toContainEqual(
       expect.objectContaining({ entityKey: 'units#unit-1', event_type: 'unit_updated' }),
     );
+  });
+
+  it('PATCH accepts voucher_size_accepted; GET returns it; a non-number is 400', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-vsa', { beds: 3 });
+
+    const ok = await request(app)
+      .patch('/api/units/unit-vsa')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: 2 });
+    expect(ok.status).toBe(200);
+    expect(ok.body.unit.voucher_size_accepted).toBe(2);
+    expect(ok.body.unit.beds).toBe(3); // untouched — distinct from beds
+
+    const got = await request(app)
+      .get('/api/units/unit-vsa')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(got.body.unit.voucher_size_accepted).toBe(2);
+
+    const bad = await request(app)
+      .patch('/api/units/unit-vsa')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: 'two' });
+    expect(bad.status).toBe(400);
   });
 
   it('REFUSES status and final_rent via CRUD PATCH (§8: status routes through listing-status; final_rent is service-only)', async () => {

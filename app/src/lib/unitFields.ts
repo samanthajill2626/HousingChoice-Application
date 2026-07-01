@@ -58,6 +58,11 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   video_url: 'string',
   application_fee: 'number',
   same_day_rta: 'boolean',
+  // Landlord-onboarding: the voucher size the unit ACCEPTS — a stored, writable
+  // number (>= 0), DISTINCT from `beds` and from the derived read-only
+  // `voucher_size` flyer projection (a 3bd unit may accept a 2BR voucher). Feeds
+  // matching. INTERNAL for Phase-1 (NOT on the flyer projection).
+  voucher_size_accepted: 'number',
   tour_process: 'string',
   application_process: 'string',
   primary_voice_contact: 'string',

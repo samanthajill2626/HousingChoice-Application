@@ -164,6 +164,13 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. Shareable. */
   same_day_rta?: boolean;
+  /**
+   * Landlord-onboarding: the voucher size (bedroom size) this unit ACCEPTS —
+   * a stored, writable number (>= 0), DISTINCT from `beds` and from the DERIVED
+   * read-only `voucher_size` flyer projection (a 3bd unit may accept a 2BR
+   * voucher). Feeds matching. INTERNAL — NOT exposed on the public flyer.
+   */
+  voucher_size_accepted?: number;
   /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
   /** The never-standardized per-unit application process (free text). INTERNAL. */

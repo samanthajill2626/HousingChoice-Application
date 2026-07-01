@@ -787,6 +787,10 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. */
   same_day_rta?: boolean;
+  /** Landlord-onboarding: the voucher (bedroom) size this unit ACCEPTS — a
+   *  stored number, DISTINCT from `beds` and from the derived read-only
+   *  voucher_size. Feeds matching. Internal (not on the public flyer). */
+  voucher_size_accepted?: number;
   /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
    *  single `landlordId` for a one-row roster. */
   contacts?: UnitContact[];

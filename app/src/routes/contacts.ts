@@ -1113,6 +1113,42 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ contact: withPhones({ ...existing, sms_opt_out: optOut }) });
   });
 
+  // POST /api/contacts/:contactId/voice-opt-out { optOut: boolean } → 200 { contact }
+  // (Voice Phase 1, spec §8). The company DO-NOT-CALL toggle — honored by every
+  // outbound originate path (409 contact_voice_opted_out) and the CallMenu.
+  // INDEPENDENT of sms_opt_out (someone may allow texts but not calls). Mirrors
+  // the sms opt-out route above.
+  router.post('/:contactId/voice-opt-out', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b['optOut'] !== 'boolean') {
+      res.status(400).json({ error: 'optOut (boolean) is required' });
+      return;
+    }
+    const optOut = b['optOut'];
+
+    const existing = await contacts.getById(contactId);
+    if (!existing || existing.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    if (optOut) {
+      await contacts.setFlag(contactId, 'voice_opt_out');
+    } else {
+      await contacts.clearFlag(contactId, 'voice_opt_out');
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_voice_opt_out_changed', {
+      optOut,
+      actor: req.user?.userId,
+    });
+    log.info({ contactId, optOut, actor: req.user?.userId }, 'contact voice_opt_out toggled');
+    res.json({ contact: withPhones({ ...existing, voice_opt_out: optOut }) });
+  });
+
   // DELETE /api/contacts/:contactId → 200 { contact }. SOFT delete: stamps
   // deleted_at so the record + ALL its data are retained (POST .../restore brings
   // it back), but it's hidden from the contact lists, inbox, today, and broadcast

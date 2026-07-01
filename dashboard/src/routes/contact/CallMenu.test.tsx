@@ -1,8 +1,24 @@
+// CallMenu tests — the masked-originate control (Voice Phase 1 §5). The API layer
+// is MOCKED (originateCall) so these don't depend on the backend. Covers: POSTs
+// the originate on click + shows the "calling your cell" state; disabled (with a
+// note) for a voice_opt_out contact; prompts to set a cell when the navigator has
+// none (both the local gate AND a 409 cell_not_verified from the server).
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
-import { CallMenu } from './CallMenu.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../../api/index.js';
 import type { ContactPhone } from '../../api/index.js';
+
+const originateCall = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    originateCall: (...a: unknown[]) => originateCall(...a),
+  };
+});
+
+import { CallMenu } from './CallMenu.js';
 
 const A = '+14040100001';
 const B = '+14040100002';
@@ -11,26 +27,86 @@ const PHONES: ContactPhone[] = [
   { phone: B, primary: false, label: 'work' },
 ];
 
-describe('CallMenu', () => {
+beforeEach(() => vi.clearAllMocks());
+afterEach(() => vi.restoreAllMocks());
+
+describe('CallMenu — masked originate', () => {
   it('is disabled when the contact has no number', () => {
-    render(<CallMenu phones={[]} />);
+    render(<CallMenu contactId="c1" phones={[]} />);
     expect(screen.getByRole('button', { name: /Call/i })).toBeDisabled();
   });
 
-  it('opens a popover with a tel: dial link per number', async () => {
+  it('POSTs the originate on click and shows the calling state', async () => {
     const user = userEvent.setup();
-    render(<CallMenu phones={PHONES} defaultPhone={PHONES[0]} />);
+    originateCall.mockResolvedValue({ callSid: 'CA123' });
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} />);
+
     await user.click(screen.getByRole('button', { name: /Call/i }));
-    const links = screen.getAllByRole('menuitem');
-    expect(links).toHaveLength(2);
-    expect(links[0]).toHaveAttribute('href', `tel:${A}`);
-    expect(links[1]).toHaveAttribute('href', `tel:${B}`);
+    // One dial button per number (real buttons, not tel: links now).
+    const dialButtons = screen.getAllByRole('menuitem');
+    expect(dialButtons).toHaveLength(2);
+
+    await user.click(dialButtons[0]!);
+    expect(originateCall).toHaveBeenCalledWith('c1', { phone: A });
+    expect(await screen.findByText(/Calling your cell/i)).toBeInTheDocument();
   });
 
-  it('is honest that dialing is device-side until masked calling lands', async () => {
+  it('passes the chosen number when a non-primary is dialed', async () => {
     const user = userEvent.setup();
-    render(<CallMenu phones={PHONES} defaultPhone={PHONES[0]} />);
+    originateCall.mockResolvedValue({ callSid: 'CA124' });
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} />);
     await user.click(screen.getByRole('button', { name: /Call/i }));
-    expect(screen.getByText(/Dials from your device/i)).toBeInTheDocument();
+    await user.click(screen.getAllByRole('menuitem')[1]!);
+    expect(originateCall).toHaveBeenCalledWith('c1', { phone: B });
+  });
+
+  it('is disabled with a "do not call" note for a voice_opt_out contact', () => {
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} voiceOptOut />);
+    expect(screen.getByRole('button', { name: /Call/i })).toBeDisabled();
+    expect(screen.getByText(/Do not call/i)).toBeInTheDocument();
+    expect(originateCall).not.toHaveBeenCalled();
+  });
+
+  it('prompts to set a cell (no dial) when the navigator has no verified cell', async () => {
+    const user = userEvent.setup();
+    const onSetUpCell = vi.fn();
+    render(
+      <CallMenu
+        contactId="c1"
+        phones={PHONES}
+        defaultPhone={PHONES[0]}
+        navigatorHasVerifiedCell={false}
+        onSetUpCell={onSetUpCell}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /Call/i }));
+    await user.click(screen.getAllByRole('menuitem')[0]!);
+
+    // No originate attempted; a set-cell prompt appears with a deep-link.
+    expect(originateCall).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/Set up your cell/i);
+    await user.click(screen.getByRole('button', { name: /Set up my cell/i }));
+    expect(onSetUpCell).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompts to set a cell on a 409 cell_not_verified from the server', async () => {
+    const user = userEvent.setup();
+    originateCall.mockRejectedValue(new ApiError(409, 'cell_not_verified', 'no verified cell'));
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} onSetUpCell={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: /Call/i }));
+    await user.click(screen.getAllByRole('menuitem')[0]!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Set up your cell/i);
+  });
+
+  it('handles a 409 contact_voice_opted_out gracefully', async () => {
+    const user = userEvent.setup();
+    originateCall.mockRejectedValue(
+      new ApiError(409, 'contact_voice_opted_out', 'do not call'),
+    );
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} />);
+    await user.click(screen.getByRole('button', { name: /Call/i }));
+    await user.click(screen.getAllByRole('menuitem')[0]!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/do not call/i);
   });
 });

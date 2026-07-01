@@ -31,10 +31,19 @@
   align-items: baseline;
   gap: var(--sp-2);
   min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
   text-decoration: none;
   color: var(--c-text);
   border-radius: var(--radius-sm);
   padding: var(--sp-2) var(--sp-3);
+}
+
+.dial:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .dial:hover {
@@ -86,4 +95,52 @@
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
   line-height: 1.4;
+}
+
+.dncNote {
+  display: inline-block;
+  margin-left: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.calling {
+  margin: var(--sp-2) var(--sp-2) var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--c-success);
+  line-height: 1.4;
+}
+
+.needCell {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
+}
+
+.callError {
+  margin: var(--sp-2) var(--sp-2) var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+  line-height: 1.4;
+}
+
+.setupLink {
+  margin: 0 var(--sp-2) var(--sp-1);
+  background: transparent;
+  border: none;
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  text-decoration: underline;
+}
+
+.setupLink:hover {
+  background: var(--c-surface-2);
+}
+
+.setupLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -1px;
 }

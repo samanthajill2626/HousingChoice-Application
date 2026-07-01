@@ -213,9 +213,9 @@ export function UnitCreateForm({
         <div className={styles.field}>
           <span className={styles.label}>Owning landlord</span>
           {landlordLocked ? (
-            <div className={styles.locked} role="group" aria-label="Owning landlord">
-              {lockedLandlordLabel ?? landlordId}
-            </div>
+            // Read-only display of the pre-filled owner — the visible label span
+            // above provides its name; no landmark role (it groups no controls).
+            <div className={styles.locked}>{lockedLandlordLabel ?? landlordId}</div>
           ) : (
             <ContactSearchField
               value={landlordPick}

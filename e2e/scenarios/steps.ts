@@ -938,7 +938,10 @@ export class Scenario {
       // Create → the app navigates to the new property's detail page (/listings/:id).
       await dialog.getByRole('button', { name: /^Create$/ }).click();
       await this.page.waitForURL(/\/listings\/[^/]+$/);
-      const unitId = decodeURIComponent(this.page.url().split('/listings/')[1]!);
+      // Extract the id defensively (exclude any query/hash), mirroring readActiveContactId.
+      const match = /\/listings\/([^/?#]+)/.exec(this.page.url());
+      if (!match) throw new Error('teamCreatesUnitFromIntake: expected a /listings/:id URL after create');
+      const unitId = decodeURIComponent(match[1]!);
 
       // Publish → available ONLY when the record is complete (voucher present),
       // mirroring the diagram. Publish stays an API seam (listing-status route).

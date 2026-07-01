@@ -20,6 +20,7 @@ import {
   PendingPanel,
   Row,
 } from './Card.js';
+import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordPlacements, landlordUnits } from './buildContactFile.js';
@@ -97,6 +98,8 @@ export function LandlordFile({
         />
         <KV k="Status" v={contact.status ?? '—'} />
       </Card>
+
+      <LandlordOnboardingCard contact={contact} />
 
       <Card
         title="Preferences & notes"

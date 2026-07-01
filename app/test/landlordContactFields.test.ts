@@ -127,3 +127,62 @@ describe('structured landlord fields', () => {
     expect(created.body.contact.income_includes_voucher).toBe(true);
   });
 });
+
+// Task 4a: park_reason is settable via the generic PATCH (today it's only written
+// by the /tenant-status route on a `parked` move). The edit form persists a park
+// reason alongside a status change, so the generic PATCH must accept it.
+describe('park_reason via the generic PATCH', () => {
+  it('PATCH persists park_reason and GET returns it', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', firstName: 'Dana', lastName: 'Owner' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ park_reason: 'Declined the program' })
+      .expect(200);
+
+    const got = await request(app)
+      .get(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+    expect(got.body.contact.park_reason).toBe('Declined the program');
+  });
+
+  it('rejects a non-string park_reason', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ park_reason: 42 })
+      .expect(400);
+  });
+
+  it('POST create accepts park_reason', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', park_reason: 'Never signed' })
+      .expect(201);
+    expect(created.body.contact.park_reason).toBe('Never signed');
+  });
+});

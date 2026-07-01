@@ -343,6 +343,23 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
   inactive: 'Inactive',
 };
 
+// --- Landlord lead lifecycle (type=landlord) --------------------------------
+// A landlord contact carries its own lead lifecycle on the SAME `status` field
+// tenants use (type-scoped — MIRRORS app/src/lib/statusModel.ts LANDLORD_STATUSES).
+// `needs_review` is the triage front door; a lead worth pursuing is `interested`;
+// an onboarded landlord is `active`; a declined/not-a-fit/never-signed lead is the
+// terminal `parked` (with a `park_reason` captured on the move).
+export const LANDLORD_STATUSES = ['needs_review', 'interested', 'active', 'parked'] as const;
+
+export type LandlordStatus = (typeof LANDLORD_STATUSES)[number];
+
+export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = {
+  needs_review: 'Needs review',
+  interested: 'Interested',
+  active: 'Active',
+  parked: 'Parked',
+};
+
 // --- Property lifecycle (coarse, mostly derived) -----------------------------
 export const LISTING_STATUSES = [
   'setup',
@@ -715,6 +732,8 @@ export interface ContactPatch {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
+  park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */
   address?: Address;
   /** Contact's role within the organisation (e.g. case manager, property manager). */

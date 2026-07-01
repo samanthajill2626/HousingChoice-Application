@@ -300,6 +300,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['notes'] = v;
     changedFields.push('notes');
   }
+  // Landlord park reason (edit form). Free text captured when a landlord lead is
+  // moved to `parked`. Normally written by the /tenant-status route on the parked
+  // move; also settable here so the edit form can persist it alongside a status
+  // change. Empty string clears it.
+  if ('park_reason' in b) {
+    const v = b['park_reason'];
+    if (typeof v !== 'string') return { error: 'park_reason must be a string' };
+    patch['park_reason'] = v;
+    changedFields.push('park_reason');
+  }
   // Landlord company name (edit form). Free text; empty string clears it.
   if ('company' in b) {
     const v = b['company'];
@@ -464,6 +474,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   if ('notes' in b) {
     if (typeof b['notes'] !== 'string') return { error: 'notes must be a string' };
     item.notes = b['notes'];
+  }
+  if ('park_reason' in b) {
+    if (typeof b['park_reason'] !== 'string') return { error: 'park_reason must be a string' };
+    item.park_reason = b['park_reason'];
   }
   if ('status' in b) {
     const v = b['status'];

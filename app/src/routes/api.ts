@@ -76,6 +76,8 @@ import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
+import { createToursRouter } from './tours.js';
+import { type ToursRepo } from '../repos/toursRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
@@ -141,6 +143,8 @@ export interface ApiRouterDeps {
   unitsRepo?: UnitsRepo;
   /** M1.10 boards/placements — injected in tests; default to the real repo. */
   placementsRepo?: PlacementsRepo;
+  /** Tours — injected in tests; default to the real repo. */
+  toursRepo?: ToursRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -339,6 +343,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       activityEventsRepo: activityEvents,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+    }),
+  );
+  // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).
+  router.use(
+    '/tours',
+    createToursRouter({
+      logger: deps.logger,
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

@@ -76,6 +76,11 @@ import {
   type BroadcastStats,
   zeroStats,
 } from '../../src/repos/broadcastsRepo.js';
+import {
+  ConditionalCheckFailedException as TourConditionalCheckFailedException,
+  type TourItem,
+  type ToursRepo,
+} from '../../src/repos/toursRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import {
   type PushNotification,
@@ -181,6 +186,9 @@ export interface FakeWorld {
   pushService: PushService;
   adapter: MessagingAdapter;
   mediaStore: MediaStore;
+  /** In-memory tours (Tours feature), keyed by tourId. */
+  toursMap: Map<string, TourItem>;
+  toursRepo: ToursRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1405,6 +1413,59 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory tours (Tours feature): mirror the repo's contractual semantics —
+  // generate-id create, get, listByTenant/listByUnit/listByScheduledRange GSI
+  // queries, and SET-merge patch with conditional-check on existence.
+  const toursMap = new Map<string, TourItem>();
+  let tourCounter = 0;
+  const toursRepo: ToursRepo = {
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: TourItem = {
+        ...input,
+        tourId: input.tourId ?? `tour-${++tourCounter}`,
+        _schedPartition: 'tours',
+        status: input.status ?? 'scheduled',
+        createdAt: typeof input.createdAt === 'string' ? input.createdAt : now,
+        updatedAt: now,
+      };
+      if (toursMap.has(item.tourId)) {
+        throw new TourConditionalCheckFailedException({ message: `create: tour ${item.tourId} exists`, $metadata: {} });
+      }
+      toursMap.set(item.tourId, { ...item });
+      return { ...item };
+    },
+    async get(tourId) {
+      const t = toursMap.get(tourId);
+      return t ? { ...t } : undefined;
+    },
+    async listByTenant(tenantId) {
+      return [...toursMap.values()].filter((t) => t.tenantId === tenantId).map((t) => ({ ...t }));
+    },
+    async listByUnit(unitId) {
+      return [...toursMap.values()].filter((t) => t.unitId === unitId).map((t) => ({ ...t }));
+    },
+    async listByScheduledRange(from, to) {
+      return [...toursMap.values()]
+        .filter((t) => t.scheduledAt >= from && t.scheduledAt <= to)
+        .map((t) => ({ ...t }));
+    },
+    async patch(tourId, updates) {
+      const t = toursMap.get(tourId);
+      if (!t) {
+        throw new TourConditionalCheckFailedException({ message: `patch: no tour ${tourId}`, $metadata: {} });
+      }
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === undefined) continue;
+        if (value === null) delete t[key];
+        else t[key] = value;
+      }
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return { ...t };
+    },
+  };
+
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
@@ -1515,6 +1576,8 @@ export function createFakeWorld(): FakeWorld {
     pushService,
     adapter,
     mediaStore,
+    toursMap,
+    toursRepo,
   };
 }
 
@@ -1610,6 +1673,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       activityEventsRepo: world.activityEventsRepo,
       listingSendsRepo: world.listingSendsRepo,
       broadcastsRepo: world.broadcastsRepo,
+      toursRepo: world.toursRepo,
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

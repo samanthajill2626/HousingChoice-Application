@@ -8,6 +8,7 @@
 // in M1.9 (the voice/call-triage milestone). See repos/settingsRepo.ts.
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { templateHasOptOutLanguage } from '../lib/smsCompliance.js';
 import { requireRole, type AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -52,6 +53,12 @@ function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string }
     if (typeof v !== 'string' || v.length === 0 || v.length > MAX_TEMPLATE_CHARS) {
       return { error: `missedCallAutoText must be a 1..${MAX_TEMPLATE_CHARS}-char string` };
     }
+    // do-not-remove — A2P/CTIA compliance floor. A first-contact template MUST
+    // keep opt-out language ("Reply STOP…") — an admin must never be able to
+    // strip it, or the app would text people with no documented way to opt out.
+    if (!templateHasOptOutLanguage(v)) {
+      return { error: 'missing_opt_out_language' };
+    }
     patch.missedCallAutoText = v;
   }
   if ('missedCallAutoTextEnabled' in b) {
@@ -95,6 +102,11 @@ function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string }
       patch.welcomeText = null;
     } else if (typeof v !== 'string' || v.length === 0 || v.length > MAX_TEMPLATE_CHARS) {
       return { error: `welcomeText must be a 1..${MAX_TEMPLATE_CHARS}-char string` };
+    } else if (!templateHasOptOutLanguage(v)) {
+      // do-not-remove — A2P/CTIA compliance floor. The welcome is a first-contact
+      // template: its override must keep opt-out language (clearing to null,
+      // handled above, is fine — it reverts to the compliant WELCOME_SMS default).
+      return { error: 'missing_opt_out_language' };
     } else {
       patch.welcomeText = v;
     }

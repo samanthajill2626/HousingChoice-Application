@@ -31,6 +31,7 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createMessagesRepo,
   relayMemberKey,
@@ -199,9 +200,33 @@ export interface RelayFanOutJobDeps {
   adapter?: MessagingAdapter;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
+  contactsRepo?: ContactsRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   logger?: Logger;
+}
+
+/**
+ * Opt-out suppression for a relay recipient (spec §6 / doc §7.1). Relay sends
+ * go STRAIGHT to the adapter — the 1:1 `sendMessage` opt-out gate targets the
+ * thread's participant_phone (the pool number), not the individual member, so
+ * it never fires here. STOP suppression MUST therefore be re-enforced at this
+ * seam or an opted-out member would keep receiving relayed messages. A member
+ * who STOP'd carries contact-level `sms_opt_out` (the same signal the 1:1 +
+ * broadcast gates read). Resolves the member's contact by id (phone fallback).
+ * Deliberately NOT wrapped in try/catch: a repo failure propagates so the caller
+ * fails CLOSED (no send, job redelivers) — we never text a possibly-opted-out
+ * number on a transient read error.
+ */
+async function isMemberSuppressed(
+  contacts: ContactsRepo,
+  member: ConversationParticipant,
+): Promise<boolean> {
+  const contact =
+    typeof member.contactId === 'string' && member.contactId.length > 0
+      ? await contacts.getById(member.contactId)
+      : await contacts.findByPhone(member.phone);
+  return contact?.sms_opt_out === true;
 }
 
 export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): void {
@@ -210,12 +235,14 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   let adapter = deps.adapter;
   let conversations = deps.conversationsRepo;
   let messages = deps.messagesRepo;
+  let contacts = deps.contactsRepo;
 
   defineJobHandler(RELAY_FANOUT_JOB, async (rawPayload) => {
     const payload = parseRelayFanOutPayload(rawPayload);
     adapter ??= createMessagingAdapter({ logger: deps.logger });
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
+    contacts ??= createContactsRepo({ logger: deps.logger });
 
     // Whole-job duplicate-delivery guard (existing pattern): conditionally
     // mark this envelope jobId executed BEFORE any send. A redelivery resolves
@@ -288,6 +315,23 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       const priorSlot = sourceMessage.delivery_recipients?.[key];
       if (isTerminal(priorSlot?.status)) {
         continue; // already delivered/sent/failed — never double-send
+      }
+
+      // Opt-out suppression: relay bypasses the 1:1 sendMessage opt-out gate, so
+      // enforce STOP here — an opted-out member is NEVER relayed to. Mark the
+      // slot failed/contact_opted_out (terminal → a continuation skips it, no
+      // retry) so the thread + Today attention surface can show the member is
+      // suppressed. A repo failure propagates (fail CLOSED → job redelivers).
+      if (await isMemberSuppressed(contacts, member)) {
+        await markRecipient(messages, payload, key, {
+          status: 'failed',
+          errorCode: 'contact_opted_out',
+        });
+        log.info(
+          { conversationId: payload.relayConversationId, memberKey: key },
+          'relayFanOut: recipient opted out (sms_opt_out) — skipped, not sent',
+        );
+        continue;
       }
 
       // A2P meter (FIX 6): ONE token per real outbound SMS — acquired here,
@@ -398,6 +442,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     adapter ??= createMessagingAdapter({ logger: deps.logger });
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
+    contacts ??= createContactsRepo({ logger: deps.logger });
 
     const jobId = getContext()?.jobId;
     if (typeof jobId === 'string' && jobId.length > 0) {
@@ -420,6 +465,16 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     for (const member of roster) {
       await deps.tokenBucket?.acquire(1);
       try {
+        // Opt-out suppression: skip an opted-out member (the intro is a
+        // first-contact send — never text a STOP'd number). A repo error is
+        // caught below and skips this member (fail CLOSED for the intro).
+        if (await isMemberSuppressed(contacts, member)) {
+          log.info(
+            { conversationId: payload.relayConversationId, memberKey: relayMemberKey(member) },
+            'relayIntro: member opted out (sms_opt_out) — intro skipped',
+          );
+          continue;
+        }
         await adapter.sendMessage({ to: member.phone, from: poolNumber, body });
         sentCount += 1;
       } catch (err) {

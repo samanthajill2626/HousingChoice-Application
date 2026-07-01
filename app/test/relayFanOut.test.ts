@@ -96,6 +96,7 @@ describe('relay.fanOut (M1.7)', () => {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     // The delay refactor routes the <=12min transient continuation (5/10/20s)
@@ -138,6 +139,44 @@ describe('relay.fanOut (M1.7)', () => {
 
     // A relaysid pointer was written per recipient (delivery-callback routing).
     expect(world.relaySidPointers.size).toBe(2);
+  });
+
+  it('does NOT relay to an opted-out member — marks the slot failed/contact_opted_out, still sends the others', async () => {
+    seedRelay(world);
+    // Bob STOP'd — contact-level sms_opt_out set. Relay must skip him.
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    // Carol receives; Bob (opted out) NEVER does.
+    const recipients = world.sent.map((s: SendMessageParams) => s.to);
+    expect(recipients).toEqual([CAROL]);
+    expect(world.sent.some((s) => s.to === BOB)).toBe(false);
+
+    // Bob's slot is recorded failed/contact_opted_out so the thread + Today
+    // attention surface can show he is suppressed (not a silent drop).
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(stored.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+    });
+    expect(stored.delivery_recipients?.['c-carol']?.status).toBe('queued');
+  });
+
+  it('relay intro skips an opted-out member', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+
+    const recipients = world.sent.map((s: SendMessageParams) => s.to).sort();
+    expect(recipients).toEqual([ALICE, CAROL].sort()); // Bob skipped
+    expect(world.sent.some((s) => s.to === BOB)).toBe(false);
   });
 
   it('uses a neutral label (never the phone) when the sender has no name', async () => {

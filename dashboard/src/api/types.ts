@@ -527,6 +527,20 @@ export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
 export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
 
+/**
+ * A2P/CTIA consent method (spec §2). MIRROR of the app's
+ * lib/smsCompliance.ts ConsentMethod — the dashboard can't import from app/, so
+ * keep the two in sync by hand. web_form/inbound_text are stamped automatically;
+ * the other four are only ever set by a human.
+ */
+export type ConsentMethod =
+  | 'web_form'
+  | 'inbound_text'
+  | 'verbal_phone'
+  | 'verbal_in_person'
+  | 'paper_form'
+  | 'imported';
+
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
 
@@ -657,6 +671,17 @@ export interface Contact {
   capture_source?: string;
   captured_at?: string;
   created_at?: string;
+  /** A2P/CTIA consent model (spec §2) — all optional. "Has SMS consent" =
+   *  a non-empty `consent_method`. */
+  consent_method?: ConsentMethod;
+  /** When consent was obtained (ISO 8601) — may differ from created_at. */
+  consent_at?: string;
+  /** The disclosure version shown on the web form (e.g. `ctia-2026-06`). */
+  consent_version?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
+  /** Actor userId when staff-entered; unset for automatic methods. */
+  consent_captured_by?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
   /** Landlord/PM company name (editable). */

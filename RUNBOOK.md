@@ -34,8 +34,9 @@ a **read-only** `secrets:check <env>` and **aborts on drift** — i.e. a key pre
 but not yet pushed to `/hc/<env>/app/`, the Parameter Store path the instance hydrates `/opt/hc/.env`
 from on every roll. On drift it prints the per-key table + the reconcile command and builds/rolls
 nothing; the gate never writes SSM. This is the guard against the "edited `.env`, forgot
-`secrets:push`, shipped a missing key" footgun (it caught a missing `FOUNDER_CELL` that had silently
-disabled founder call-triage on dev). Bypass with `--skip-secrets` only when you know SSM is already
+`secrets:push`, shipped a missing key" footgun (it once caught a missing `FOUNDER_CELL` that had
+silently disabled founder call-triage on dev — `FOUNDER_CELL` has since been removed; inbound routing
+now uses the assigned inbound-voice-line holder's verified cell). Bypass with `--skip-secrets` only when you know SSM is already
 correct — e.g. `.env.<env>` isn't on this machine. To clear a real drift, just
 `npm run secrets:push -- <env>` then re-run the deploy.
 
@@ -232,13 +233,24 @@ must hold or messages silently stop flowing:
   arrive.
 - **The phone number must sit in the live A2P campaign's sender pool** of that Messaging Service —
   a number outside the pool can't send campaign traffic.
-- **Voice URLs on the number** stay configured on the number itself (calls are not handled by the
-  app yet; the number-level voice config is what answers).
+- **Voice URLs on the number** — calls ARE handled by the app now (Voice Phase 1: inbound
+  founder-bridge + outbound masked calling). On the number's Voice configuration:
+  - **"A call comes in"** → `https://<canonical>/webhooks/twilio/voice` (HTTP **POST**)
+  - **"Call status changes"** → `https://<canonical>/webhooks/twilio/voice/status`
+
+  Use the canonical custom-domain host (e.g. `https://dev.app.housingchoice.org/webhooks/twilio/voice`).
 
 The env keys that feed the app live in the gitignored `.env.<env>` and reach Parameter Store via
 `npm run secrets:push -- <env>` (then a deploy to go live — see [Secrets](#secrets)):
 `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` (REST), `TWILIO_AUTH_TOKEN`
 (webhook signature validation ONLY), `TWILIO_MESSAGING_SERVICE_SID`, and `OUR_PHONE_NUMBERS`.
+
+**Inbound voice routing has NO env var.** An inbound call to a business number bridges to the
+assigned **inbound-voice-line holder's verified cell** — assigned in **Settings ▸ Team** (the holder
+must verify their cell first). There is no `FOUNDER_CELL` fallback (removed). With **NO holder
+configured**, an inbound call is **NOT bridged**: the app emits an ERROR log (→ the
+`hc-<env>-error-logs` alarm, so ops is notified) and the caller hears the "please send us a text
+message" greeting.
 
 **`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
 defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing
@@ -332,11 +344,13 @@ action>` summary — driving the app's **real** voice webhooks end-to-end. Every
 (ids from a counter, timing on an injected clock, outcome from a scripted scenario). The fake-phones
 **voice UI is a separate future plan** — not built here; today's surface is the control API below.
 
-**Founder triage is fully enabled** in the mock/e2e stack via a hermetic placeholder `FOUNDER_CELL`
-(`+15550000001`) plus the existing business number (`OUR_PHONE_NUMBERS=+15550009999`), so an inbound
-call to the business number runs the full founder bridge (whisper → press-1 → answer →
-record-to-MinIO → transcribe) rather than degrading to the "text us" fallback; a no-answer scenario
-fires the real missed-call push + autotext job.
+**Founder triage is fully enabled** in the mock/e2e stack because the reseed **seeds the founder/admin
+as the inbound-voice-line holder** with a verified cell (`+15550000001`) — the hermetic scripts
+(`scripts/dev.mjs`, `scripts/e2e-session.mjs`) pass that value in `FOUNDER_CELL` purely as the LOCAL
+seed source (there is NO `FOUNDER_CELL` fallback in the app itself). With that holder plus the
+business number (`OUR_PHONE_NUMBERS=+15550009999`), an inbound call to the business number runs the
+full founder bridge (whisper → press-1 → answer → record-to-MinIO → transcribe) rather than degrading
+to the "text us" fallback; a no-answer scenario fires the real missed-call push + autotext job.
 
 **Voice control API (port 8889)** — drives the `CallEngine`:
 

@@ -52,7 +52,6 @@ describe('GET /api/system/flags', () => {
       env: 'local',
       smsSendingEnabled: true,
       relayLiveProvisioning: true,
-      founderCellSet: false,
       pushConfigured: false,
       messagingDriver: 'console',
     });
@@ -111,7 +110,6 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
       env: 'dev',
       smsSendingEnabled: false,
       relayLiveProvisioning: false,
-      founderCellSet: true,
       pushConfigured: true,
       messagingDriver: 'twilio',
     }),

@@ -21,8 +21,6 @@ import {
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
-const FOUNDER = '+15555550911';
-
 /** A local config (the default test env: console driver, appEnv local). */
 function localConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return { ...loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: 'x' }), ...overrides };
@@ -52,8 +50,8 @@ function makeService(deps: Partial<SystemStatusServiceDeps> & { config: AppConfi
 }
 
 describe('systemStatus.getFlags', () => {
-  it('projects booleans/enums/strings ONLY — and NEVER the founder number', () => {
-    const config = deployedConfig({ founderCell: FOUNDER, smsSendingEnabled: false, relayLiveProvisioning: false });
+  it('projects booleans/enums/strings ONLY — no nested objects or secrets', () => {
+    const config = deployedConfig({ smsSendingEnabled: false, relayLiveProvisioning: false });
     const service = makeService({ config, cloudwatch: fakeSeam() });
 
     const flags = service.getFlags();
@@ -61,22 +59,13 @@ describe('systemStatus.getFlags', () => {
       env: 'dev',
       smsSendingEnabled: false,
       relayLiveProvisioning: false,
-      founderCellSet: true, // a BOOLEAN — the number itself never appears
       pushConfigured: false,
       messagingDriver: 'twilio',
     });
-    // The secret number must not leak anywhere in the projection.
-    expect(JSON.stringify(flags)).not.toContain(FOUNDER);
     // Every value is a primitive (boolean/string) — no nested objects/secrets.
     for (const v of Object.values(flags)) {
       expect(['boolean', 'string']).toContain(typeof v);
     }
-  });
-
-  it('founderCellSet is false when no founder cell is configured', () => {
-    const config = deployedConfig({ founderCell: undefined });
-    const flags = makeService({ config, cloudwatch: fakeSeam() }).getFlags();
-    expect(flags.founderCellSet).toBe(false);
   });
 
   it('messagingDriver shows "mock" when the twilio driver is redirected to a fake host', () => {

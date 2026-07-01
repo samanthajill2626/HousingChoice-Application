@@ -5,7 +5,7 @@
 //     that place NO call;
 //   - the outbound-bridge whisper → (press-1) <Dial> the target with
 //     callerId=business + record-from-answer-dual, target ONLY inside <Number>;
-//   - inbound dials the HOLDER's cell (not FOUNDER_CELL) + text-us fallback w/o holder;
+//   - inbound dials the HOLDER's verified cell (no env-var fallback) + text-us fallback w/o holder;
 //   - self cell verify-start/confirm (success/expired/mismatch/too-many);
 //   - inbound-line assign single-holder + 409 on unverified;
 //   - the voice_opt_out route;
@@ -408,7 +408,7 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// C. Inbound change — ring the holder's cell, not FOUNDER_CELL (spec §6)
+// C. Inbound change — ring the holder's verified cell (no env-var fallback) (spec §6)
 // ---------------------------------------------------------------------------
 describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)', () => {
   const CALLER = '+15550177777';
@@ -427,10 +427,9 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     };
   }
 
-  it('dials the HOLDER\'s verified cell (not FOUNDER_CELL) and pushes the holder', async () => {
+  it('dials the HOLDER\'s verified cell and pushes the holder', async () => {
     const world = createFakeWorld();
-    // A DIFFERENT FOUNDER_CELL is set — we prove the holder's cell wins.
-    const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL: '+15559990000' } });
+    const harness = makeWebhookHarness({ world });
     const holder = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     holder.cell = HOLDER_CELL;
     holder.cell_verified_at = '2026-07-01T00:00:00.000Z';
@@ -440,7 +439,6 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     expect(res.status).toBe(200);
     const xml = res.text;
     expect(xml).toContain(HOLDER_CELL); // the holder's cell is dialed
-    expect(xml).not.toContain('+15559990000'); // NOT the FOUNDER_CELL env
     expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
     // Pre-ring push targets the holder.
     expect(world.pushSends).toHaveLength(1);
@@ -448,9 +446,9 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     expect(world.pushSends[0]!.notification.kind).toBe('pre_ring');
   });
 
-  it('no holder (and no FOUNDER_CELL) → text-us fallback, NO bridge, NO push, NO leak', async () => {
+  it('no holder (no env-var fallback) → ERROR log + text-us fallback, NO bridge, NO push, NO leak', async () => {
     const world = createFakeWorld();
-    const harness = makeWebhookHarness({ world }); // no FOUNDER_CELL, no holder
+    const harness = makeWebhookHarness({ world }); // no holder assigned
     const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
     expect(res.status).toBe(200);
     const xml = res.text;
@@ -459,11 +457,18 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     expect(xml).toContain('text message');
     expect(xml).not.toContain(CALLER);
     expect(world.pushSends).toHaveLength(0);
+    // The misconfig is observable: an ERROR-level (50) log, PII-free.
+    const noHolder = harness.capture.atLevel(50).find((l) =>
+      String(l['msg']).includes('NO inbound-voice-line holder with a verified cell'),
+    );
+    expect(noHolder, 'expected an ERROR log for the no-holder misconfig').toBeDefined();
+    expect(noHolder!['hasVerifiedHolder']).toBe(false);
+    expect(JSON.stringify(noHolder)).not.toContain(CALLER);
   });
 
-  it('holder cell is UNVERIFIED → falls back to FOUNDER_CELL, no holder push', async () => {
+  it('holder cell is UNVERIFIED → text-us fallback (never dialed), NO bridge, NO push', async () => {
     const world = createFakeWorld();
-    const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL: '+15559991111' } });
+    const harness = makeWebhookHarness({ world });
     const holder = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     holder.cell = HOLDER_CELL; // present but NOT verified
     await harness.fakeUsers.repo.assignInboundVoiceLine(holder.userId); // via the pointer
@@ -471,9 +476,10 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
     expect(res.status).toBe(200);
     const xml = res.text;
-    expect(xml).toContain('+15559991111'); // the deprecated FOUNDER_CELL fallback
+    // No env-var fallback: an unverified holder cell means NO bridge at all.
+    expect(xml).not.toContain('<Dial');
     expect(xml).not.toContain(HOLDER_CELL); // an unverified cell is never dialed
-    // No holder-cell dial → the fallback path pushes nobody.
+    expect(xml).toContain('text message');
     expect(world.pushSends).toHaveLength(0);
   });
 });

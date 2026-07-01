@@ -23,7 +23,6 @@ function flags(overrides: Partial<SystemFlags> = {}): SystemFlags {
     env: 'dev',
     smsSendingEnabled: true,
     relayLiveProvisioning: true,
-    founderCellSet: true,
     pushConfigured: true,
     messagingDriver: 'twilio',
     ...overrides,
@@ -52,12 +51,10 @@ describe('FlagPills', () => {
     expect(screen.queryByText('Off · pre-A2P')).not.toBeInTheDocument();
   });
 
-  it('shows founder-cell Set/Not set and push Configured/Not configured by text', async () => {
-    getSystemFlags.mockResolvedValue(flags({ founderCellSet: false, pushConfigured: false }));
+  it('shows push Configured/Not configured by text', async () => {
+    getSystemFlags.mockResolvedValue(flags({ pushConfigured: false }));
     render(<FlagPills />);
-    await waitFor(() => expect(screen.getByText('Not set')).toBeInTheDocument());
-    expect(screen.getByText('Not configured')).toBeInTheDocument();
-    expect(screen.getByText('Founder cell')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Not configured')).toBeInTheDocument());
     expect(screen.getByText('Push notifications')).toBeInTheDocument();
   });
 

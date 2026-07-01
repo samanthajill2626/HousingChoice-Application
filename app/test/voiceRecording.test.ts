@@ -29,10 +29,12 @@ import {
   OUR_NUMBER,
   type FakeWorld,
 } from './helpers/twilioWebhookHarness.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { TEST_SESSION_COOKIE, TEST_ADMIN_USER } from './helpers/authSession.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
-const FOUNDER_CELL = '+15550160000';
+// The inbound-voice-line HOLDER's verified cell — the number inbound calls ring
+// (there is no env-var fallback; the harness assigns a verified holder).
+const HOLDER_CELL = '+15550160000';
 const POOL = '+15550109000';
 const ALICE = '+15550100001';
 const BOB = '+15550100002';
@@ -81,7 +83,16 @@ function transcriptionParams(over: Record<string, string> = {}): Record<string, 
 }
 
 function founderHarness(world: FakeWorld) {
-  return makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+  const harness = makeWebhookHarness({ world });
+  // Voice Phase 1 (spec §6): inbound bridges to the inbound-voice-line HOLDER's
+  // verified cell — assign the seeded admin as the holder so the bridge forms.
+  const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId);
+  if (admin) {
+    admin.cell = HOLDER_CELL;
+    admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
+    void harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId);
+  }
+  return harness;
 }
 
 /** Run the inbound founder bridge once so a ringing founder-bridge call exists. */
@@ -478,7 +489,7 @@ describe('GET /api/calls/:callId/recording (M1.9c, authed)', () => {
 
   it('never logs the recording content/key bytes on the serving path (PII)', async () => {
     const world = createFakeWorld();
-    const { app, capture } = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+    const { app, capture } = founderHarness(world);
     world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
     await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
     await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());

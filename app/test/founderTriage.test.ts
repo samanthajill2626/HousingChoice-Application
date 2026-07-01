@@ -43,6 +43,9 @@ import { TEST_ADMIN_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
+// The inbound-voice-line HOLDER's verified cell — the number inbound calls ring.
+// (Named FOUNDER_CELL for continuity with this legacy suite; it is now purely the
+// holder's cell, NOT an env var — there is no env-var fallback anymore.)
 const FOUNDER_CELL = '+15550160000';
 
 /** A standard inbound voice webhook to the BUSINESS number (non-pool To). */
@@ -61,15 +64,14 @@ function bizVoiceParams(over: Record<string, string> = {}): Record<string, strin
 
 /**
  * Build a harness with the inbound bridge wired. Voice Phase 1 (spec §6): the
- * dialed cell + pre-ring push now come from the INBOUND-VOICE-LINE HOLDER's
- * verified cell, not FOUNDER_CELL. So we assign the seeded ADMIN user as the
- * holder with a verified cell == FOUNDER_CELL — the dialed cell stays FOUNDER_CELL
- * and the pre-ring push targets the admin, keeping this legacy suite's assertions
- * valid under the new holder model. (FOUNDER_CELL is still set in env as the
- * deprecated fallback for the no-holder tests.)
+ * dialed cell + pre-ring push come from the INBOUND-VOICE-LINE HOLDER's verified
+ * cell (there is NO env-var fallback). So we assign the seeded ADMIN user as the
+ * holder with a verified cell == FOUNDER_CELL — the dialed cell is that holder's
+ * cell and the pre-ring push targets the admin. No-holder behavior is covered by
+ * the dedicated "no verified holder" test below.
  */
 function founderHarness(world: FakeWorld) {
-  const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+  const harness = makeWebhookHarness({ world });
   const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId);
   if (admin) {
     admin.cell = FOUNDER_CELL;
@@ -239,19 +241,33 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(world.pushSends).toHaveLength(0);
   });
 
-  it('no FOUNDER_CELL configured → minimal greeting + hangup, NO bridge, NO number leak', async () => {
+  it('no verified inbound-voice-line holder → ERROR log + text-us greeting, NO bridge, NO push, NO leak', async () => {
     const world = createFakeWorld();
-    // No FOUNDER_CELL in env → cannot bridge.
-    const { app } = makeWebhookHarness({ world });
+    // No holder assigned (and no env-var fallback exists) → cannot bridge. This is
+    // an operator misconfiguration: the handler emits an ERROR (pino level 50 →
+    // the error-logs alarm) and answers the caller with the text-us greeting.
+    const { app, capture } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(200); // never a 5xx (Twilio would retry forever)
     const xml = res.text;
     expect(xml).not.toContain('<Dial');
     expect(xml).toContain('<Hangup');
+    expect(xml).toContain('send us a text message'); // the graceful text-us fallback
     expect(xml).not.toContain(CALLER);
     // No pre-ring push when we cannot bridge.
     expect(world.pushSends).toHaveLength(0);
+
+    // The "we know" signal: an ERROR-level (50) log line naming the misconfig,
+    // with the diagnostic booleans and NO raw phone number.
+    const errors = capture.atLevel(50);
+    const noHolder = errors.find((l) =>
+      String(l['msg']).includes('NO inbound-voice-line holder with a verified cell'),
+    );
+    expect(noHolder, 'expected an ERROR log for the no-holder misconfig').toBeDefined();
+    expect(noHolder!['hasBusinessNumber']).toBe(true);
+    expect(noHolder!['hasVerifiedHolder']).toBe(false);
+    expect(JSON.stringify(noHolder)).not.toContain(CALLER);
   });
 
   it('FIX 2: a SLOW (never-resolving) pre-ring push does NOT gate the bridge TwiML', async () => {
@@ -272,7 +288,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
       },
     };
     world.pushService = neverResolving;
-    const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+    const harness = makeWebhookHarness({ world });
     const { app } = harness;
     // Voice Phase 1 (spec §6): the pre-ring push targets the inbound-voice-line
     // holder — assign the admin (verified cell == FOUNDER_CELL) so the push fires.

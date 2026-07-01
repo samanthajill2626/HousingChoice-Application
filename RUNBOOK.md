@@ -657,15 +657,19 @@ from the Quick Reference table above. For prod use `/hc/prod/system` as the log 
 (dev uses `/hc/dev/system`).
 
 ```powershell
-# Step 1: install rsyslog + agent, enable rsyslog.
+# Step 1: install rsyslog + agent, enable rsyslog. $installCmd is plain JSON (single-quoted,
+# real double-quotes preserved). Backtick-escaped quotes build the --parameters JSON safely.
 $installCmd = '["dnf install -y rsyslog amazon-cloudwatch-agent","systemctl enable --now rsyslog"]'
-aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{\"commands\":$installCmd}" --comment "install rsyslog+CWAgent" --no-cli-pager
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{`"commands`":$installCmd}" --comment "install rsyslog+CWAgent" --no-cli-pager
 
-# Step 2: write the agent config and start the agent.
-# printf '%s' writes the JSON literally (no heredoc, no shell expansion inside single quotes).
-$cfg = '{\"agent\":{\"metrics_collection_interval\":60,\"run_as_user\":\"root\"},\"metrics\":{\"namespace\":\"CWAgent\",\"append_dimensions\":{\"InstanceId\":\"${aws:InstanceId}\"},\"metrics_collected\":{\"mem\":{\"measurement\":[\"mem_used_percent\"]},\"disk\":{\"measurement\":[\"disk_used_percent\"],\"resources\":[\"/\"],\"drop_device\":true}}},\"logs\":{\"logs_collected\":{\"files\":{\"collect_list\":[{\"file_path\":\"/var/log/messages\",\"log_group_name\":\"/hc/dev/system\",\"log_stream_name\":\"{instance_id}\"}]}}}}'
-$configCmd = "[\"printf '%s' '$cfg' > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json\",\"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json\"]"
-aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{\"commands\":$configCmd}" --comment "write CWAgent config + start" --no-cli-pager
+# Step 2: write the agent config + start the agent. The JSON is base64-encoded locally, then
+# decoded on the instance — base64 has no quotes/backslashes/shell-special chars, so it embeds
+# cleanly with zero escaping hazard. $json is single-quoted so its real double-quotes and the
+# literal ${aws:InstanceId} placeholder (the agent expands it at runtime) are preserved as-is.
+$json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+$configCmd = "[`"echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`",`"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`"]"
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{`"commands`":$configCmd}" --comment "write CWAgent config + start" --no-cli-pager
 ```
 
 > **Why two separate SSM commands?** SSM Run Command executes all `commands` array elements in
@@ -673,13 +677,14 @@ aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <
 > separately lets you verify Step 1 completes before writing the config. Check command status
 > with `aws ssm list-command-invocations --command-id <id> --details --profile housingchoice --region us-east-1 --no-cli-pager`.
 
-> **Escaping rationale.** The `$cfg` variable embeds the agent JSON with `\"` for each double
-> quote — that is the JSON-string encoding for the `--parameters` payload. The shell on the
-> instance sees the JSON with literal `"` inside a single-quoted `printf '%s'` argument, which
-> is fully literal (no shell expansion). This avoids heredoc nesting (which requires exact
-> newline placement inside SSM's JSON transport) and is safe to paste on Windows PowerShell.
+> **Why base64.** The agent JSON is base64-encoded in PowerShell and decoded on the instance
+> (`base64 -d`). base64 output is only `[A-Za-z0-9+/=]` — no quotes, backslashes, heredocs, or
+> shell-special characters — so it passes through the PowerShell layer and SSM's JSON transport
+> with zero escaping hazard. `$json` is single-quoted, so its double-quotes and the literal
+> `${aws:InstanceId}` placeholder (expanded by the agent at runtime) are preserved verbatim. The
+> `--parameters` JSON uses PowerShell's backtick quote-escape (`` `" ``), the correct PS escape.
 
-> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$cfg` before running
+> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$json` before running
 > against the prod instance at M1.11 cutover.
 
 ## Costs

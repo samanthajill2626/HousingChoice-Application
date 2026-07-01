@@ -26,6 +26,7 @@ import { SettingsPage } from './routes/settings/SettingsPage.js';
 import { TeamSection } from './routes/settings/TeamSection.js';
 import { TemplatesSection } from './routes/settings/TemplatesSection.js';
 import { NotificationsSection } from './routes/settings/NotificationsSection.js';
+import { VoiceSection } from './routes/settings/VoiceSection.js';
 import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
@@ -162,6 +163,9 @@ function AuthedApp(): React.JSX.Element {
               />
               <Route path="templates" element={<TemplatesSection />} />
               <Route path="notifications" element={<NotificationsSection />} />
+              {/* Voice: self cell verification — reachable by any logged-in
+                  user (NOT admin-guarded). */}
+              <Route path="voice" element={<VoiceSection />} />
               <Route
                 path="system"
                 element={

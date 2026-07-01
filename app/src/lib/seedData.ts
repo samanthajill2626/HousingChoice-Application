@@ -7,9 +7,10 @@
 // Fixed IDs + plain PutItem = safe to re-run forever (same items overwrite
 // themselves; no duplicates). Data is realistic-but-fake (+1555 phones,
 // example.com emails). Targets DYNAMODB_ENDPOINT — never AWS.
-import { PutCommand } from '@aws-sdk/lib-dynamodb';
+import { PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createDocumentClient } from './dynamo.js';
 import { tableName } from './config.js';
+import { HOLDER_POINTER_KEY, type UserItem } from '../repos/usersRepo.js';
 
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
 
@@ -289,4 +290,61 @@ export async function seedAll(endpoint: string): Promise<number> {
     doc.destroy();
   }
   return count;
+}
+
+/**
+ * Voice Phase 1 (spec §6) FOUNDER_CELL → data-model migration. Idempotent: when
+ * `founderCell` is set, stamp the founder/admin user's `cell` = founderCell,
+ * `cell_verified_at` = seed time, and `inbound_voice_line` = true — moving the
+ * inbound-line designation off the env var onto the user record. A no-op when
+ * `founderCell` is unset or no admin user exists. `config.founderCell` is kept
+ * as a deprecated fallback (Phase 2's inbound path prefers the holder).
+ *
+ * The founder is resolved as the seeded `user-0001` when present, else the first
+ * admin user found (a tiny scan of the bounded users table). Never logs the
+ * cell (PII, §9).
+ */
+export async function seedInboundVoiceLineFromFounderCell(
+  endpoint: string,
+  founderCell: string | undefined,
+  at: string = new Date().toISOString(),
+): Promise<boolean> {
+  if (founderCell === undefined || founderCell.length === 0) return false;
+  const doc = createDocumentClient({ endpoint });
+  try {
+    const usersTable = tableName('users');
+    // Bounded scan of the tiny users table — pick the seeded founder if present,
+    // else the first admin (defensive: filter to items that carry a role).
+    const { Items } = await doc.send(new ScanCommand({ TableName: usersTable }));
+    const users = (Items as UserItem[] | undefined) ?? [];
+    const founder =
+      users.find((u) => u.userId === 'user-0001') ??
+      users.find((u) => u.role === 'admin');
+    if (!founder) return false;
+    // SET the founder's verified cell on their user item...
+    await doc.send(
+      new UpdateCommand({
+        TableName: usersTable,
+        Key: { userId: founder.userId },
+        UpdateExpression: 'SET cell = :cell, cell_verified_at = :at',
+        ExpressionAttributeValues: { ':cell': founderCell, ':at': at },
+      }),
+    );
+    // ...then establish the HOLDER via the single authoritative pointer (the
+    // HOLDER_POINTER_KEY sentinel row) rather than a per-user boolean. Idempotent
+    // (last-writer-wins on one field); mirrors usersRepo.assignInboundVoiceLine.
+    await doc.send(
+      new UpdateCommand({
+        TableName: usersTable,
+        Key: { userId: HOLDER_POINTER_KEY },
+        UpdateExpression: 'SET holder_user_id = :uid',
+        ExpressionAttributeValues: { ':uid': founder.userId },
+      }),
+    );
+    // userId only — never the cell (PII).
+    console.log(`  seeded   inbound_voice_line holder: ${founder.userId}`);
+    return true;
+  } finally {
+    doc.destroy();
+  }
 }

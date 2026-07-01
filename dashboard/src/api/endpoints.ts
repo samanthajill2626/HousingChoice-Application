@@ -33,6 +33,7 @@ import type {
   ListingStatus,
   LostReason,
   Me,
+  MeUser,
   Message,
   RelatedUnit,
   SendMessageResult,
@@ -570,6 +571,39 @@ export async function setContactOptOut(contactId: string, optOut: boolean): Prom
   return res.contact;
 }
 
+/** POST /api/contacts/:id/voice-opt-out (Voice Phase 1 §8) — set/clear the
+ *  company do-not-CALL flag. INDEPENDENT of the SMS opt-out above (someone may
+ *  allow texts but not calls). Returns the updated contact (unwrapped). */
+export async function setContactVoiceOptOut(contactId: string, optOut: boolean): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/voice-opt-out`,
+    { method: 'POST', body: { optOut } },
+  );
+  return res.contact;
+}
+
+// --- Voice: outbound masked calling (Voice Phase 1 §5) ----------------------
+// The dashboard-initiated masked-call originate. The session identifies the
+// CALLING navigator → their verified cell rings first, then bridges to the
+// target with the business caller ID (the contact never sees the navigator's
+// cell). Throws ApiError on the guards: 409 cell_not_verified (the navigator has
+// no verified cell → prompt them to set one), 409 contact_voice_opted_out (the
+// contact is do-not-call), 404 contact_not_found, 400 invalid_phone.
+
+/** POST /api/contacts/:contactId/call { phone? } → { callSid }. `phone` picks
+ *  WHICH of the contact's numbers to dial (defaults to the primary server-side).
+ *  Throws ApiError — the caller branches on `.code` (cell_not_verified /
+ *  contact_voice_opted_out / …). */
+export async function originateCall(
+  contactId: string,
+  opts: { phone?: string } = {},
+): Promise<{ callSid: string }> {
+  return request<{ callSid: string }>(`/api/contacts/${encodeURIComponent(contactId)}/call`, {
+    method: 'POST',
+    body: { ...(opts.phone !== undefined && { phone: opts.phone }) },
+  });
+}
+
 /** DELETE /api/contacts/:id � SOFT-delete the contact (stamp deleted_at). The
  *  record + all data are retained; it's hidden from lists/inbox/today and can be
  *  restored. Returns the updated (deleted) contact. */
@@ -782,6 +816,69 @@ export function setUserRole(
     `/api/users/${encodeURIComponent(userId)}/role`,
     { method: 'PATCH', body: { role } },
   );
+}
+
+// --- Voice: inbound-voice-line assignment (admin, Voice Phase 1 §6) ----------
+// The single "Inbound voice line" holder — exactly one user at a time. Assigning
+// MOVES it (the server clears any prior holder). The user must have a VERIFIED
+// cell (else 409 cell_not_verified). Both return the updated user (unwrapped).
+
+/** POST /api/users/:userId/inbound-voice-line (admin) — make this user the single
+ *  inbound-voice-line holder (moves it off any prior holder). 409 cell_not_verified
+ *  when the user has no verified cell. Returns the updated user (unwrapped). */
+export async function assignInboundVoiceLine(userId: string): Promise<AdminUserView> {
+  const res = await request<{ user: AdminUserView }>(
+    `/api/users/${encodeURIComponent(userId)}/inbound-voice-line`,
+    { method: 'POST' },
+  );
+  return res.user;
+}
+
+/** DELETE /api/users/:userId/inbound-voice-line (admin) — clear the holder (no
+ *  inbound line, inbound degrades to the "text us" fallback). Returns the
+ *  updated user (unwrapped). */
+export async function clearInboundVoiceLine(userId: string): Promise<AdminUserView> {
+  const res = await request<{ user: AdminUserView }>(
+    `/api/users/${encodeURIComponent(userId)}/inbound-voice-line`,
+    { method: 'DELETE' },
+  );
+  return res.user;
+}
+
+// --- Voice: self cell verification (Voice Phase 1 §7) -----------------------
+// Self-service: any logged-in user attaches + verifies their OWN cell (their
+// outbound bridge leg). An unverified cell is never dialed. The self view carries
+// the voice fields (cell/cell_verified_at/inbound_voice_line) the CLI/auth `Me`
+// does not.
+
+/** GET /api/users/me → { user } — the current navigator's self view WITH the
+ *  voice fields (cell/cell_verified_at/inbound_voice_line). Unwrapped from
+ *  { user }. */
+export async function getVoiceMe(signal?: AbortSignal): Promise<MeUser> {
+  const res = await request<{ user: MeUser }>('/api/users/me', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.user;
+}
+
+/** POST /api/users/me/cell/verify-start { cell } → { ok:true } — send a 6-digit
+ *  code by SMS to the entered cell. Throws ApiError 400 invalid_cell / 503
+ *  sms_unavailable. */
+export function startCellVerify(cell: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/api/users/me/cell/verify-start', {
+    method: 'POST',
+    body: { cell },
+  });
+}
+
+/** POST /api/users/me/cell/verify-confirm { code } → { ok:true, cell_verified_at }
+ *  — confirm the code, stamping cell_verified_at on success. Throws ApiError 400
+ *  invalid_code / 410 code_expired / 429 too_many_attempts. */
+export function confirmCellVerify(code: string): Promise<{ ok: true; cell_verified_at: string }> {
+  return request<{ ok: true; cell_verified_at: string }>('/api/users/me/cell/verify-confirm', {
+    method: 'POST',
+    body: { code },
+  });
 }
 
 // --- Settings ▸ Templates (/api/settings) -----------------------------------

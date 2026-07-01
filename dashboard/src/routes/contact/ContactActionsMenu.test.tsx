@@ -6,6 +6,7 @@ import { ContactActionsMenu } from './ContactActionsMenu.js';
 function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> = {}) {
   const onEdit = props.onEdit ?? vi.fn();
   const onToggleOptOut = props.onToggleOptOut ?? vi.fn();
+  const onToggleVoiceOptOut = props.onToggleVoiceOptOut ?? vi.fn();
   const onDelete = props.onDelete ?? vi.fn();
   const onRestore = props.onRestore ?? vi.fn();
   render(
@@ -13,14 +14,17 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
       onEdit={onEdit}
       optedOut={props.optedOut ?? false}
       onToggleOptOut={onToggleOptOut}
+      voiceOptedOut={props.voiceOptedOut ?? false}
+      onToggleVoiceOptOut={onToggleVoiceOptOut}
       deleted={props.deleted ?? false}
       onDelete={onDelete}
       onRestore={onRestore}
       {...(props.optOutBusy !== undefined && { optOutBusy: props.optOutBusy })}
+      {...(props.voiceOptOutBusy !== undefined && { voiceOptOutBusy: props.voiceOptOutBusy })}
       {...(props.deleteBusy !== undefined && { deleteBusy: props.deleteBusy })}
     />,
   );
-  return { onEdit, onToggleOptOut, onDelete, onRestore };
+  return { onEdit, onToggleOptOut, onToggleVoiceOptOut, onDelete, onRestore };
 }
 
 describe('ContactActionsMenu', () => {
@@ -59,6 +63,24 @@ describe('ContactActionsMenu', () => {
     setup({ optOutBusy: true });
     await user.click(screen.getByRole('button', { name: /More actions/i }));
     expect(screen.getByRole('menuitem', { name: /Mark Do-Not-Contact/i })).toBeDisabled();
+  });
+
+  it('offers an independent Do-Not-Call (voice_opt_out) toggle and fires it', async () => {
+    const user = userEvent.setup();
+    const { onToggleVoiceOptOut } = setup();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    const item = screen.getByRole('menuitem', { name: /Mark Do-Not-Call/i });
+    await user.click(item);
+    expect(onToggleVoiceOptOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('reflects the voice opt-out state (offers to clear it)', async () => {
+    const user = userEvent.setup();
+    setup({ voiceOptedOut: true });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(
+      screen.getByRole('menuitem', { name: /Allow calls \(clear do-not-call\)/i }),
+    ).toBeInTheDocument();
   });
 
   it('shows Delete (not Restore) for a live contact and fires onDelete', async () => {

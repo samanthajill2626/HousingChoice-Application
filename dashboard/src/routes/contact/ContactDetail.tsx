@@ -26,6 +26,7 @@ import {
   retryMessage,
   sendMessage,
   setContactOptOut,
+  setContactVoiceOptOut,
   updateContact,
   type Contact,
   type ContactType,
@@ -43,6 +44,8 @@ import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
+import { useMe } from '../../app/useMe.js';
+import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
 import { ConsentCaptureModal } from './ConsentCaptureModal.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
@@ -72,6 +75,7 @@ export function ContactDetail(): React.JSX.Element {
   // The "New property" dialog, pre-filled+locked to this (landlord) contact.
   const [addingProperty, setAddingProperty] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
+  const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
@@ -88,6 +92,9 @@ export function ContactDetail(): React.JSX.Element {
   >(null);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
+  // The current navigator's voice self-view — gates the masked-call control on
+  // "has a verified cell" (the CallMenu prompts them to set one otherwise).
+  const { hasVerifiedCell } = useMe();
   const timeline = useContactTimeline(contactId);
   const file = useContactFile(contactId);
   // Viewing the contact page (while the tab is visible) marks its comms read —
@@ -221,6 +228,18 @@ export function ContactDetail(): React.JSX.Element {
       })
       .finally(() => setOptOutBusy(false));
   };
+  // Voice do-not-call (voice_opt_out) — INDEPENDENT of the SMS opt-out above.
+  const voiceOptedOut = contact.voice_opt_out === true;
+  const onToggleVoiceOptOut = (): void => {
+    if (voiceOptOutBusy) return;
+    setVoiceOptOutBusy(true);
+    void setContactVoiceOptOut(contact.contactId, !voiceOptedOut)
+      .then((updated) => setContact(updated))
+      .catch(() => {
+        /* leave the flag as-is; a transient failure just no-ops the toggle */
+      })
+      .finally(() => setVoiceOptOutBusy(false));
+  };
   const onTriage = (type: ContactType): void => {
     if (triaging) return;
     setTriaging(true);
@@ -278,6 +297,9 @@ export function ContactDetail(): React.JSX.Element {
             {optedOut ? (
               <span className={styles.doNotContact}>⛔ Do Not Contact</span>
             ) : null}
+            {voiceOptedOut ? (
+              <span className={styles.doNotContact}>📵 Do Not Call</span>
+            ) : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
@@ -292,12 +314,23 @@ export function ContactDetail(): React.JSX.Element {
               Restore
             </button>
           ) : null}
-          <CallMenu phones={phones} {...(target !== undefined && { defaultPhone: target })} triggerClassName={styles.callBtn} />
+          <CallMenu
+            contactId={contact.contactId}
+            phones={phones}
+            {...(target !== undefined && { defaultPhone: target })}
+            voiceOptOut={voiceOptedOut}
+            navigatorHasVerifiedCell={hasVerifiedCell}
+            onSetUpCell={() => void navigate(VOICE_TAB_PATH)}
+            triggerClassName={styles.callBtn}
+          />
           <ContactActionsMenu
             onEdit={() => setEditing(true)}
             optedOut={optedOut}
             onToggleOptOut={onToggleOptOut}
             optOutBusy={optOutBusy}
+            voiceOptedOut={voiceOptedOut}
+            onToggleVoiceOptOut={onToggleVoiceOptOut}
+            voiceOptOutBusy={voiceOptOutBusy}
             deleted={deleted}
             onDelete={() => setConfirmingDelete(true)}
             onRestore={onRestore}

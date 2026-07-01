@@ -11,27 +11,29 @@ import {
 } from './settingsTabs.js';
 
 describe('settingsTabs', () => {
-  it('the model carries all four sections in order, with the admin-only flags', () => {
+  it('the model carries all sections in order, with the admin-only flags', () => {
     expect(SETTINGS_TABS.map((t) => t.id)).toEqual([
       'team',
       'templates',
       'notifications',
+      'voice',
       'system',
     ]);
     expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system']);
   });
 
-  it('visibleTabs(true) returns all four tabs (admin sees Team + System)', () => {
+  it('visibleTabs(true) returns all tabs (admin sees Team + System)', () => {
     expect(visibleTabs(true).map((t) => t.id)).toEqual([
       'team',
       'templates',
       'notifications',
+      'voice',
       'system',
     ]);
   });
 
-  it('visibleTabs(false) returns only Templates + Notifications (no Team, no System)', () => {
-    expect(visibleTabs(false).map((t) => t.id)).toEqual(['templates', 'notifications']);
+  it('visibleTabs(false) returns Templates + Notifications + Voice (no Team, no System)', () => {
+    expect(visibleTabs(false).map((t) => t.id)).toEqual(['templates', 'notifications', 'voice']);
   });
 
   it('defaultTabPath lands an admin on Team and a VA on Templates', () => {

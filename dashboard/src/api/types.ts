@@ -20,6 +20,24 @@ export interface DevLoginResult {
   role: UserRole;
 }
 
+/** GET /api/users/me → { user } (Voice Phase 1 §7). The self view the current
+ *  navigator reads to know whether they have a VERIFIED cell (their outbound
+ *  bridge leg) — a superset of `Me` with the voice fields. MIRRORS the app's
+ *  self-user projection; keep in sync. `cell`/`cell_verified_at` are absent until
+ *  set/verified; `inbound_voice_line` is true only on the single holder. */
+export interface MeUser {
+  userId: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  /** The user's OWN cell (E.164), their outbound bridge leg. Absent until set. */
+  cell?: string;
+  /** ISO 8601 when `cell` passed verification; absent = unverified (never dialed). */
+  cell_verified_at?: string;
+  /** True when this user holds the single inbound voice line. */
+  inbound_voice_line?: boolean;
+}
+
 // --- Settings: Team (admin user management) ---------------------------------
 // MIRRORS app/src/routes/adminUsers.ts `toAdminUserView` — the admin-list
 // projection of a user (NO google_sub / push_subscriptions). The dashboard is a
@@ -37,6 +55,15 @@ export interface AdminUserView {
   status: string | null;
   created_at: string;
   last_login_at: string | null;
+  /** Voice Phase 1 (spec §4): the user's OWN verified cell (E.164) — their
+   *  outbound bridge leg. Absent until set. MIRRORS UserItem.cell. */
+  cell?: string;
+  /** Voice Phase 1: ISO 8601 when `cell` passed verification; absent = unverified
+   *  (never dialed). MIRRORS UserItem.cell_verified_at. */
+  cell_verified_at?: string;
+  /** Voice Phase 1 (spec §6): true on the single inbound-voice-line holder.
+   *  MIRRORS UserItem.inbound_voice_line. */
+  inbound_voice_line?: boolean;
 }
 
 // --- Settings: OrgSettings (founder-editable call-triage templates) ----------
@@ -709,6 +736,9 @@ export interface Contact {
   notes?: string;
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
+   *  sms_opt_out. MIRRORS ContactItem.voice_opt_out. */
+  voice_opt_out?: boolean;
   /** Soft-delete marker (ISO 8601). Present → the contact is "deleted": hidden
    *  from the normal lists/inbox/today but fully retained (restore clears it). */
   deleted_at?: string;

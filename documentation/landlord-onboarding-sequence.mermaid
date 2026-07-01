@@ -11,13 +11,15 @@ sequenceDiagram
 
     alt First touch — outbound cold call
         Note over S,L: Team sourced a lead on affordablehousing.com — a number, maybe a name or company, and a property address.
-        S->>A: Place an outbound call to the landlord
-        A->>L: Deliver the call (from the app's number)
+        Note over A: [MANUAL] Create the landlord lead contact from the sourced lead (needs_review) — the masked call is placed FROM the contact.
+        S->>A: Place a masked outbound call to the landlord (from the contact)
+        Note over A: [AUTO] Masked outbound call (Voice Phase 1) — the app rings the Team member's verified cell, then bridges to the landlord from the app's number; the landlord never sees the personal cell. Recorded.
+        A->>L: Deliver the call (caller ID = the app's number)
         Note over S,L: Cold-call spiel — non-exclusive tenant-finding, and the voucher-holder demand she can bring (e.g. 45 four-bed holders).
         alt Landlord is interested
             L->>A: Yes — interested
             A->>S: Relay interest
-            Note over A: [MANUAL] Create the landlord contact from the sourced lead — set lead status to interested
+            Note over A: [MANUAL] Set the landlord lead status to interested
         else Landlord declines
             L->>A: No thanks (e.g. commission too high, or a PM not the owner)
             A->>S: Relay the decline

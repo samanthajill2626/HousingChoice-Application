@@ -1,19 +1,21 @@
 // useContactFile — fetches the data the contact detail right pane needs from
-// EXISTING endpoints (/api/placements, /api/units) plus the C4/C5 slices that may not
-// be live yet (listings-sent, media). Placements/units always load; the C4/C5 calls
-// resolve to a 'pending' marker on a 404 so their panels render an honest
-// "arrives with the backend" state rather than an error. The page derives the
-// per-pane lists with buildContactFile's pure helpers.
+// EXISTING endpoints (/api/placements, /api/units, /api/tours) plus the C4/C5
+// slices that may not be live yet (listings-sent, media). Placements/units/tours
+// always load; the C4/C5 calls resolve to a 'pending' marker on a 404 so their
+// panels render an honest "arrives with the backend" state rather than an error.
+// The page derives the per-pane lists with buildContactFile's pure helpers.
 import { useEffect, useState } from 'react';
 import {
   ApiError,
   getPlacements,
   getContactListingsSent,
   getContactMedia,
+  getTours,
   getUnits,
-  type PlacementItem,
   type ContactMediaItem,
   type ListingSendRow,
+  type PlacementItem,
+  type Tour,
   type UnitItem,
 } from '../../api/index.js';
 
@@ -28,6 +30,10 @@ export interface ContactFileState {
   status: 'loading' | 'ready' | 'error';
   placements: PlacementItem[];
   units: UnitItem[];
+  /** Tours for this contact — tenant tours (tenantId=contactId) OR landlord tours
+   *  fetched per-unit (unitId=...) from /api/tours. An empty array while loading
+   *  or when there are no tours. */
+  tours: Tour[];
   listingsSent: Slice<ListingSendRow>;
   // TODO(contact-file-dead-media-slice): `media` is no longer read by any consumer. The contact
   // file's "Media from comms" gallery now derives from the LIVE timeline
@@ -58,11 +64,25 @@ const FILE_LOADING: ContactFileState = {
   status: 'loading',
   placements: [],
   units: [],
+  tours: [],
   listingsSent: { status: 'loading' },
   media: { status: 'loading' },
 };
 
-export function useContactFile(contactId: string): ContactFileState {
+/**
+ * Options for useContactFile. Pass `contactType` to enable the tours fetch:
+ * - `'tenant'` → GET /api/tours?tenantId=contactId
+ * - `'landlord'` → tours are fetched per owned unit after units load; pass
+ *   an empty array until the unit IDs are known (the landlord case is deferred
+ *   to a follow-up — file loads units first, then a useEffect re-fetches tours).
+ * - `undefined` → tours are not fetched (unknown file type or not yet known).
+ */
+export interface UseContactFileOpts {
+  /** Contact type hint — drives which tours query to use. */
+  contactType?: 'tenant' | 'landlord' | 'unknown' | string;
+}
+
+export function useContactFile(contactId: string, opts: UseContactFileOpts = {}): ContactFileState {
   // `forId` records which contactId the committed state describes. On an id
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
@@ -89,10 +109,39 @@ export function useContactFile(contactId: string): ContactFileState {
           loadSlice((s) => getContactMedia(contactId, s), signal),
         ]);
         if (signal.aborted) return;
+
+        // Fetch tours based on contact type.
+        // Tenant: GET /api/tours?tenantId= (all tours for this tenant).
+        // Landlord: GET /api/tours?unitId= per owned unit, then concatenate.
+        //   We have the units at this point so we can fan out.
+        // Unknown / other: no tours fetch (empty).
+        let tours: import('../../api/index.js').Tour[] = [];
+        if (opts.contactType === 'tenant') {
+          try {
+            tours = await getTours({ tenantId: contactId }, signal);
+          } catch {
+            // Best-effort — tours degrade to empty if the API is unavailable
+          }
+        } else if (opts.contactType === 'landlord') {
+          const myUnitIds = units.units
+            .filter((u) => u.landlordId === contactId)
+            .map((u) => u.unitId);
+          try {
+            const tourArrays = await Promise.all(
+              myUnitIds.map((uid) => getTours({ unitId: uid }, signal)),
+            );
+            tours = tourArrays.flat();
+          } catch {
+            // Best-effort
+          }
+        }
+
+        if (signal.aborted) return;
         setState({
           status: 'ready',
           placements: placements.placements,
           units: units.units,
+          tours,
           listingsSent,
           media,
           forId: contactId,
@@ -104,7 +153,8 @@ export function useContactFile(contactId: string): ContactFileState {
     })();
 
     return () => controller.abort();
-  }, [contactId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contactId, opts.contactType]);
 
   // Committed state is for the previous contactId → the new fetch is in flight.
   if (state.forId !== contactId) return FILE_LOADING;

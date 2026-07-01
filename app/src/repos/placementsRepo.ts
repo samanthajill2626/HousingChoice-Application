@@ -75,14 +75,9 @@ export function isPlacementDeadlineType(x: unknown): x is PlacementDeadlineType 
   return typeof x === 'string' && PLACEMENT_DEADLINE_TYPE_SET.has(x);
 }
 
-/** A scheduled tour, current or historical. */
-export interface PlacementTour {
-  /** YYYY-MM-DD (the byTourDate key shape when this is the current tour). */
-  date: string;
-  /** Free-form outcome once the tour happens (e.g. 'attended', 'no_show'). */
-  outcome?: string;
-  notes?: string;
-}
+// PlacementTour has been removed — tours are now first-class entities in the
+// `tours` table (see toursRepo.ts). The placement.tours[] field had no real
+// data and is retired with no migration needed.
 
 /** Escalation flag (doc §7.1): a failed send on an ACTIVE placement → a human calls. */
 export interface PlacementAttention {
@@ -125,8 +120,6 @@ export interface PlacementItem {
   group_thread?: string;
   /** Operator label, mirrored onto the relay pool number (poolNumbers tag). */
   placement_tag?: string;
-  /** Tour history (the current tour is also reflected in tour_date). */
-  tours?: PlacementTour[];
   /** The four-rung application ladder — free-form object (doc §5). */
   application?: Record<string, unknown>;
   /** RTA/approval data: inspection, rent_determined + tenant_portion, LIF, denial. */

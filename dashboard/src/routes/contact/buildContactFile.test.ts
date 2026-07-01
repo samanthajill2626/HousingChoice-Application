@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { landlordPlacements, landlordUnits, tenantPlacements, tenantTours } from './buildContactFile.js';
+import { landlordPlacements, landlordUnits, tenantPlacements } from './buildContactFile.js';
 import type { PlacementItem, UnitItem } from '../../api/index.js';
 
 function placementOf(p: Partial<PlacementItem> & Pick<PlacementItem, 'placementId'>): PlacementItem {
@@ -17,31 +17,6 @@ describe('tenantPlacements', () => {
       placementOf({ placementId: 'c', tenantId: 'k1' }),
     ];
     expect(tenantPlacements(placements, 'k1').map((c) => c.placementId)).toEqual(['a', 'c']);
-  });
-});
-
-describe('tenantTours', () => {
-  it('aggregates tours across the tenant placements, newest first, with the unit', () => {
-    const placements = [
-      placementOf({
-        placementId: 'a',
-        tenantId: 'k1',
-        unitId: 'u1',
-        tours: [
-          { date: '2026-06-05', outcome: 'No-show' },
-          { date: '2026-06-13', outcome: 'Toured' },
-        ],
-      }),
-      placementOf({ placementId: 'b', tenantId: 'other', unitId: 'u9', tours: [{ date: '2026-06-20' }] }),
-    ];
-    const tours = tenantTours(placements, 'k1');
-    expect(tours.map((t) => t.date)).toEqual(['2026-06-13', '2026-06-05']);
-    expect(tours[0]?.unitId).toBe('u1');
-    expect(tours[0]?.outcome).toBe('Toured');
-  });
-
-  it('tolerates placements without tours', () => {
-    expect(tenantTours([placementOf({ placementId: 'a', tenantId: 'k1' })], 'k1')).toEqual([]);
   });
 });
 

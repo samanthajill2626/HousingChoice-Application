@@ -33,6 +33,7 @@ import { allNavTargets } from './app/nav.js';
 import { PublicLayout } from './routes/public/PublicLayout.js';
 import { FlyerFunnel } from './routes/public/FlyerFunnel.js';
 import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
+import { TourDetail } from './routes/tours/TourDetail.js';
 
 /** /settings index → the first tab visible for the viewer's role (admin → Team,
  *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
@@ -178,6 +179,9 @@ function AuthedApp(): React.JSX.Element {
               .map(({ to, label }) => (
                 <Route key={to} path={to.slice(1)} element={<Placeholder title={label} />} />
               ))}
+
+            {/* Tour detail page — /tours/:tourId. The static paths above rank first. */}
+            <Route path="tours/:tourId" element={<TourDetail />} />
 
             {/* The tenant + landlord detail page (one shell). The static
                 /contacts/* list routes above rank above this dynamic segment. */}

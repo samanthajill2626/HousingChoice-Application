@@ -43,6 +43,11 @@ import type {
   TenantStatus,
   TodayResponse,
   TransitionSource,
+  Tour,
+  TourOutcome,
+  TourStatus,
+  TourType,
+  ToursPage,
   UnitItem,
   UnitsPage,
 } from './types.js';
@@ -872,4 +877,83 @@ export function getSystemErrors(
     query: { since },
     ...(signal !== undefined && { signal }),
   });
+}
+
+// --- Tours (/api/tours) -------------------------------------------------------
+// First-class Tour entity (Tours feature). Tours are separate from placements —
+// scheduling a tour does NOT change tenant status or create a placement.
+// The exit gate (PATCH { outcome, moveForward }) records the navigator decision;
+// tour becomes `convertible` when moveForward is true. Conversion is downstream.
+
+/** POST /api/tours — schedule a new tour. Status defaults to 'scheduled'.
+ *  Returns the created tour (unwrapped from { tour }). */
+export async function createTour(body: {
+  tenantId: string;
+  unitId: string;
+  scheduledAt: string;
+  tourType: TourType;
+}): Promise<Tour> {
+  const res = await request<{ tour: Tour }>('/api/tours', { method: 'POST', body });
+  return res.tour;
+}
+
+/** GET /api/tours/:tourId — one tour record. Throws ApiError(404) when not found.
+ *  Returns the tour (unwrapped from { tour }). */
+export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tour> {
+  const res = await request<{ tour: Tour }>(`/api/tours/${encodeURIComponent(tourId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.tour;
+}
+
+/** GET /api/tours?tenantId=&unitId=&from=&to= — list tours by filter.
+ *  Exactly one of tenantId / unitId / (from+to) must be provided (server enforces).
+ *  Returns the tours array (unwrapped from { tours }). */
+export async function getTours(
+  params: { tenantId?: string; unitId?: string; from?: string; to?: string },
+  signal?: AbortSignal,
+): Promise<Tour[]> {
+  const res = await request<ToursPage>('/api/tours', {
+    query: {
+      ...(params.tenantId !== undefined && { tenantId: params.tenantId }),
+      ...(params.unitId !== undefined && { unitId: params.unitId }),
+      ...(params.from !== undefined && { from: params.from }),
+      ...(params.to !== undefined && { to: params.to }),
+    },
+    ...(signal !== undefined && { signal }),
+  });
+  return res.tours;
+}
+
+/** PATCH /api/tours/:tourId — partial update: reschedule, change status, or
+ *  record the exit-gate decision (outcome + moveForward). Sending
+ *  { outcome, moveForward } closes the tour and sets convertible.
+ *  Returns the updated tour (unwrapped from { tour }). */
+export async function patchTour(
+  tourId: string,
+  patch: {
+    scheduledAt?: string;
+    status?: TourStatus;
+    outcome?: TourOutcome;
+    moveForward?: boolean;
+  },
+): Promise<Tour> {
+  const res = await request<{ tour: Tour }>(`/api/tours/${encodeURIComponent(tourId)}`, {
+    method: 'PATCH',
+    body: patch,
+  });
+  return res.tour;
+}
+
+/** POST /api/tours/:tourId/relay { members } — provision a masked relay group
+ *  thread for the tour. Stamps groupThreadId back on the tour.
+ *  Returns the updated tour + the new conversation (unwrapped). */
+export async function createTourRelay(
+  tourId: string,
+  members: Array<{ phone: string; contactId?: string; name?: string }>,
+): Promise<{ tour: Tour; conversation: unknown }> {
+  return request<{ tour: Tour; conversation: unknown }>(
+    `/api/tours/${encodeURIComponent(tourId)}/relay`,
+    { method: 'POST', body: { members } },
+  );
 }

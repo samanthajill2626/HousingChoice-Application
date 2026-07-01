@@ -62,7 +62,6 @@ import {
 import {
   TERMINAL_STAGES,
   type PlacementItem,
-  type PlacementTour,
 } from '../repos/placementsRepo.js';
 import { isPlacementStage, STAGE_LABELS } from '../lib/statusModel.js';
 
@@ -99,24 +98,6 @@ function stageLabel(stage: string): string {
     .join(' ');
 }
 
-/**
- * Count tours that carry a (non-empty) outcome. A tour gaining an outcome
- * (count increases) is the `tour_took_place` signal.
- */
-function outcomeTourCount(tours: PlacementTour[] | undefined): number {
-  if (!Array.isArray(tours)) return 0;
-  return tours.filter((t) => typeof t?.outcome === 'string' && t.outcome.length > 0).length;
-}
-
-/** The newest tour outcome (for the tour_took_place label), or undefined. */
-function latestTourOutcome(tours: PlacementTour[] | undefined): string | undefined {
-  if (!Array.isArray(tours)) return undefined;
-  for (let i = tours.length - 1; i >= 0; i--) {
-    const o = tours[i]?.outcome;
-    if (typeof o === 'string' && o.length > 0) return o;
-  }
-  return undefined;
-}
 
 /** Resolved "First Last" from a contact, or undefined (never a guess). */
 function nameFromContact(contact: ContactItem | undefined): string | undefined {
@@ -583,17 +564,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       ) {
         await recordPlacementMilestone(tenantId, 'tour_scheduled', `Tour scheduled · ${item.tour_date}`, placementId);
       }
-      // A tour gained an OUTCOME (the count of outcome-bearing tours rose) →
-      // tour_took_place (label incl. the new outcome).
-      if (outcomeTourCount(item.tours) > outcomeTourCount(before.tours)) {
-        const outcome = latestTourOutcome(item.tours);
-        await recordPlacementMilestone(
-          tenantId,
-          'tour_took_place',
-          outcome !== undefined ? `Tour took place · ${stageLabel(outcome)}` : 'Tour took place',
-          placementId,
-        );
-      }
+      // NOTE: tour_took_place milestone was derived from placement.tours[], which
+      // is retired. When re-implemented against the first-class tours API,
+      // restore this milestone from a tour-status change event.
     }
 
     events.emit('placement.updated', toPlacementUpdatedEvent(item));

@@ -259,22 +259,15 @@ describe('placements API — BE2/C2 activity milestones', () => {
     expect(ev[0]!.label).toContain('2026-07-02');
   });
 
-  it('a tour gaining an outcome emits tour_took_place (and NOT before the outcome lands)', async () => {
-    const c = await world.placementsRepo.create({
-      tenantId: 'c-t',
-      unitId: 'u',
-      stage: 'awaiting_inspection',
-      tours: [{ date: '2026-07-02' }],
-    });
-    // PATCH a tour WITHOUT an outcome yet → no tour_took_place.
-    await authedPatch(`/api/placements/${c.placementId}`, { tours: [{ date: '2026-07-02' }] });
+  // NOTE: the tour_took_place milestone was previously derived from placement.tours[],
+  // which is retired (Tours are now first-class entities in the tours table; the field
+  // had no real data). The milestone will be re-implemented against the tours API
+  // (listening to tour status changes) in a downstream task.
+  it('tour_took_place is a no-op after placement.tours[] retirement (downstream re-implementation pending)', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 'c-t', unitId: 'u', stage: 'awaiting_inspection' });
+    // PATCHing tours (now a no-op flexible-doc attribute) never emits tour_took_place.
+    await authedPatch(`/api/placements/${c.placementId}`, { note_for_future: 'tours now come from /api/tours' });
     expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(0);
-
-    // Now the tour gains an outcome → tour_took_place.
-    await authedPatch(`/api/placements/${c.placementId}`, { tours: [{ date: '2026-07-02', outcome: 'attended' }] });
-    const ev = world.activityEvents.filter((e) => e.type === 'tour_took_place');
-    expect(ev).toHaveLength(1);
-    expect(ev[0]!.label).toContain('Attended');
   });
 });
 

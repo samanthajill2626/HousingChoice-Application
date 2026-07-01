@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import type { CommsMediaItem } from './media.js';
-import type { PlacementItem, Contact, UnitItem, ListingSendRow } from '../../api/index.js';
+import type { PlacementItem, Contact, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -20,7 +20,15 @@ const TENANT_CASE: PlacementItem = {
   tenantId: 'T1',
   unitId: 'u1',
   stage: 'schedule_inspection',
-  tours: [{ date: '2026-06-13', outcome: 'Toured' }],
+};
+
+const TOUR: Tour = {
+  tourId: 'tour-1',
+  tenantId: 'T1',
+  unitId: 'u1',
+  scheduledAt: '2026-06-13T14:00:00Z',
+  tourType: 'self_guided',
+  status: 'scheduled',
 };
 
 describe('TenantFile', () => {
@@ -37,6 +45,7 @@ describe('TenantFile', () => {
       listingsSentPending?: boolean;
       listingsSent?: ListingSendRow[];
       media?: CommsMediaItem[];
+      tours?: Tour[];
     } = {},
   ) {
     return render(
@@ -45,6 +54,7 @@ describe('TenantFile', () => {
           contact={contact}
           phones={[{ phone: '+14040100007', primary: true }]}
           placements={[TENANT_CASE]}
+          tours={opts.tours ?? []}
           units={[UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
           listingsSent={opts.listingsSent ?? []}
@@ -61,12 +71,31 @@ describe('TenantFile', () => {
     expect(screen.getByText('Active')).toBeInTheDocument();
   });
 
-  it('renders REAL placements + tours linking to the placement route', () => {
+  it('renders REAL placements linking to the placement route', () => {
     renderIt();
     const placementLinks = screen.getAllByRole('link', { name: /1450 Joseph Blvd/ });
     expect(placementLinks.length).toBeGreaterThan(0);
-    expect(placementLinks[0]).toHaveAttribute('href', '/placements/k1');
-    expect(screen.getByText('Toured')).toBeInTheDocument();
+    // The placements card links to /placements/:placementId
+    const placementLink = placementLinks.find((a) => a.getAttribute('href') === '/placements/k1');
+    expect(placementLink).toBeDefined();
+  });
+
+  it('renders the Tours card with "No tours yet." when empty', () => {
+    renderIt({ tours: [] });
+    expect(screen.getByText('No tours yet.')).toBeInTheDocument();
+  });
+
+  it('renders tours from the tours API — one row per tour with status + scheduledAt, linking to tour detail', () => {
+    renderIt({ tours: [TOUR] });
+    // Should NOT say "No tours yet."
+    expect(screen.queryByText('No tours yet.')).not.toBeInTheDocument();
+    // Find the tour link by href (multiple links may have the same address text as placements)
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-1');
+    expect(tourDetailLink).toBeDefined();
+    // Shows the status label "Scheduled" (may also appear elsewhere, so check at least once)
+    const statusCells = screen.getAllByText('Scheduled');
+    expect(statusCells.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows the pending state for listings-sent until the backend lands', () => {
@@ -81,7 +110,7 @@ describe('TenantFile', () => {
         { contactId: 'T1', unitId: 'u1', response: 'no_reply', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' },
       ],
     });
-    // The sent row links to the LISTING route (placements/tours link to /placements/*),
+    // The sent row links to the LISTING route (placements/tours link to /placements/* or /tours/*),
     // so a /listings/u1 link uniquely identifies the Properties-sent row.
     const sentLink = screen.getAllByRole('link').find((a) => a.getAttribute('href') === '/listings/u1');
     expect(sentLink).toBeDefined();
@@ -118,13 +147,14 @@ describe('LandlordFile', () => {
     company: 'Porter Properties',
   };
 
-  function renderIt() {
+  function renderIt(opts: { tours?: Tour[] } = {}) {
     return render(
       <MemoryRouter>
         <LandlordFile
           contact={contact}
           phones={[{ phone: '+14042220190', primary: true }]}
           placements={[{ ...TENANT_CASE, unitId: 'u1' }]}
+          tours={opts.tours ?? []}
           units={[UNIT, PLACED_UNIT]}
           media={[]}
         />
@@ -150,5 +180,28 @@ describe('LandlordFile', () => {
     renderIt();
     const placementLink = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA Schedule inspection/i });
     expect(placementLink).toHaveAttribute('href', '/placements/k1');
+  });
+
+  it('renders the Tours card with "No tours on these properties yet." when empty', () => {
+    renderIt({ tours: [] });
+    expect(screen.getByText('No tours on these properties yet.')).toBeInTheDocument();
+  });
+
+  it('renders property tours from the tours API — one row per tour with status + date, linking to tour detail', () => {
+    const landlordTour: Tour = {
+      tourId: 'tour-L1',
+      tenantId: 'T1',
+      unitId: 'u1',
+      scheduledAt: '2026-07-01T10:00:00Z',
+      tourType: 'landlord_led',
+      status: 'confirmed',
+    };
+    renderIt({ tours: [landlordTour] });
+    expect(screen.queryByText('No tours on these properties yet.')).not.toBeInTheDocument();
+    // Find the tour link by href (multiple links may have the same address text)
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L1');
+    expect(tourDetailLink).toBeDefined();
+    expect(screen.getByText('Confirmed')).toBeInTheDocument();
   });
 });

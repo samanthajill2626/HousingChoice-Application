@@ -89,7 +89,7 @@ export function ContactDetail(): React.JSX.Element {
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   const timeline = useContactTimeline(contactId);
-  const file = useContactFile(contactId);
+  const file = useContactFile(contactId, { contactType: contact?.type });
   // Viewing the contact page (while the tab is visible) marks its comms read —
   // so the Inbox unread badge clears once you've actually seen the messages here.
   useMarkContactRead(contactId);
@@ -371,6 +371,7 @@ export function ContactDetail(): React.JSX.Element {
                 contact={contact}
                 phones={phones}
                 placements={file.placements}
+                tours={file.tours}
                 units={file.units}
                 media={media}
                 mediaLoading={mediaLoading}
@@ -404,6 +405,7 @@ export function ContactDetail(): React.JSX.Element {
                 contact={contact}
                 phones={phones}
                 placements={file.placements}
+                tours={file.tours}
                 units={file.units}
                 listingsSentPending={file.listingsSent.status !== 'ready'}
                 listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}

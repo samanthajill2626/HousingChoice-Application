@@ -446,12 +446,82 @@ export type PlacementDeadlineType =
   | 'stuck_placement'
   | 'follow_up';
 
-/** A scheduled tour on a placement, current or historical. */
-export interface PlacementTour {
-  /** YYYY-MM-DD. */
-  date: string;
-  outcome?: string;
-  notes?: string;
+// NOTE: PlacementTour is retired — placement.tours[] has no real data and is
+// being removed. Use the first-class Tour entity (Tour / getTours / getTour etc.)
+// for all tour data going forward.
+
+// --- First-class Tour entity (Tours feature) ---------------------------------
+
+/** The three valid tour types (mirrors app/src/repos/toursRepo.ts TourType). */
+export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
+
+/** Human-readable labels for tour types (staff-facing). */
+export const TOUR_TYPE_LABELS: Readonly<Record<TourType, string>> = {
+  self_guided: 'Self-guided',
+  landlord_led: 'Landlord-led',
+  pm_team: 'PM team',
+};
+
+/** Tour status values (mirrors app/src/lib/toursModel.ts TOUR_STATUSES). */
+export type TourStatus =
+  | 'scheduled'
+  | 'confirmed'
+  | 'toured'
+  | 'no_show'
+  | 'canceled'
+  | 'closed';
+
+/** Human-readable labels for tour statuses (staff-facing). */
+export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
+  scheduled: 'Scheduled',
+  confirmed: 'Confirmed',
+  toured: 'Toured',
+  no_show: 'No show',
+  canceled: 'Canceled',
+  closed: 'Closed',
+};
+
+/** Exit-gate outcome (mirrors app/src/lib/toursModel.ts TourOutcome). */
+export type TourOutcome = 'move_forward' | 'not_a_fit';
+
+/** Human-readable labels for tour outcomes (staff-facing). */
+export const TOUR_OUTCOME_LABELS: Readonly<Record<TourOutcome, string>> = {
+  move_forward: 'Move forward',
+  not_a_fit: 'Not a fit',
+};
+
+/**
+ * A first-class Tour entity (GET /api/tours/:tourId → { tour }).
+ * Tours are separate from placements — scheduling a tour does NOT change tenant
+ * status or create a placement. The exit gate (outcome + moveForward) records the
+ * navigator decision; conversion is a downstream step.
+ */
+export interface Tour {
+  tourId: string;
+  /** The tenant this tour is for. */
+  tenantId: string;
+  /** The unit being toured. */
+  unitId: string;
+  /** ISO 8601 datetime the tour is scheduled for. */
+  scheduledAt: string;
+  tourType: TourType;
+  status: TourStatus;
+  /** The relay-group conversationId, set when POST /api/tours/:tourId/relay is called. */
+  groupThreadId?: string;
+  /** Exit-gate decision (set via PATCH { outcome, moveForward }). */
+  outcome?: TourOutcome;
+  /** True when the navigator decided to move forward after the tour. */
+  moveForward?: boolean;
+  /** True when outcome+moveForward have been set and moveForward is true. */
+  convertible?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/tours response. */
+export interface ToursPage {
+  tours: Tour[];
 }
 
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
@@ -488,8 +558,6 @@ export interface PlacementItem {
   group_thread?: string;
   /** Operator label, mirrored onto the relay pool number. */
   placement_tag?: string;
-  /** Tour history (the current tour is also reflected in tour_date). */
-  tours?: PlacementTour[];
   /** The four-rung application ladder — free-form object. */
   application?: Record<string, unknown>;
   /** RTA/approval data — free-form object. */

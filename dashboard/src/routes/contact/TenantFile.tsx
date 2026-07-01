@@ -1,15 +1,17 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
 // status) · Preferences & notes · Properties sent (C4) · Tours · Placements · Group
-// texts · Media (C5). Placements + Tours are REAL (derived from /api/placements);
-// Properties-sent + Media render a "pending backend" state until BE4/BE5 land;
-// Preferences are manual-now (pending until the gleaning slice). Each list row
-// links to its detail route.
+// texts · Media (C5). Placements + Tours are REAL (placements from /api/placements,
+// tours from /api/tours?tenantId=); Properties-sent + Media render a "pending backend"
+// state until BE4/BE5 land; Preferences are manual-now (pending until the gleaning
+// slice). Each list row links to its detail route.
 import {
   STAGE_LABELS,
+  TOUR_STATUS_LABELS,
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type Tour,
   type UnitItem,
   type ListingSendRow,
   type ListingResponse,
@@ -29,13 +31,16 @@ import {
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
-import { tenantPlacements, tenantTours } from './buildContactFile.js';
+import { tenantPlacements } from './buildContactFile.js';
 import { formatAddress, formatPhone } from './format.js';
 
 export interface TenantFileProps {
   contact: Contact;
   phones: ContactPhone[];
   placements: PlacementItem[];
+  /** Tours for this tenant — loaded via GET /api/tours?tenantId= by the caller.
+   *  Pass an empty array while loading or when none exist. */
+  tours: Tour[];
   units: UnitItem[];
   /** C4 listings-sent slice status (panel degrades to pending on 404). */
   listingsSentPending: boolean;
@@ -52,6 +57,8 @@ export interface TenantFileProps {
   /** Open the "New placement" dialog pre-filled+locked to this tenant (Placements
    *  card "+ Start placement"). Only the tenant view wires this. */
   onStartPlacement?: () => void;
+  /** Open the "Schedule tour" dialog (Tours card "+ Schedule"). */
+  onScheduleTour?: () => void;
 }
 
 /** A unit's address line (or its id as a last resort), for a row label. */
@@ -72,6 +79,7 @@ export function TenantFile({
   contact,
   phones,
   placements,
+  tours,
   units,
   listingsSentPending,
   listingsSent,
@@ -80,10 +88,10 @@ export function TenantFile({
   onEdit,
   onManagePhones,
   onStartPlacement,
+  onScheduleTour,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myPlacements = tenantPlacements(placements, contact.contactId);
-  const tours = tenantTours(placements, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
   const housingAuthority = contact.housingAuthority ?? '—';
@@ -179,16 +187,32 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Tours" aside={tours.length > 0 ? String(tours.length) : undefined}>
+      <Card
+        title="Tours"
+        aside={
+          onScheduleTour ? (
+            <>
+              {tours.length > 0 ? (
+                <span className={responseClass.muted}>{tours.length} · </span>
+              ) : null}
+              <CardAction onClick={onScheduleTour} label="Schedule a tour">
+                + Schedule
+              </CardAction>
+            </>
+          ) : tours.length > 0 ? (
+            String(tours.length)
+          ) : undefined
+        }
+      >
         {tours.length === 0 ? (
           <EmptyRow>No tours yet.</EmptyRow>
         ) : (
           tours.map((t) => (
             <Row
-              key={`${t.placementId}:${t.date}`}
-              to={`/placements/${t.placementId}`}
-              label={`${unitLabel(unitMap, t.unitId)} · ${t.date}`}
-              right={<span className={responseClass.muted}>{t.outcome ?? 'Scheduled'}</span>}
+              key={t.tourId}
+              to={`/tours/${t.tourId}`}
+              label={`${unitLabel(unitMap, t.unitId)} · ${new Date(t.scheduledAt).toLocaleDateString()}`}
+              right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
             />
           ))
         )}

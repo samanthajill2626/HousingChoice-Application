@@ -1,15 +1,18 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) ·
-// Preferences · Properties (their units, with status) · Placements on their units ·
-// Group texts · Media. Properties + Placements are REAL (from /api/units + /api/placements);
-// Preferences + Group texts + Media are pending until their backend slices land.
+// Preferences · Properties (their units, with status) · Tours on their properties ·
+// Placements on their units · Group texts · Media. Properties + Placements + Tours
+// are REAL (from /api/units + /api/placements + /api/tours?unitId=); Preferences +
+// Group texts + Media are pending until their backend slices land.
 import {
   LANDLORD_STATUS_LABELS,
   STAGE_LABELS,
+  TOUR_STATUS_LABELS,
   type LandlordStatus,
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type Tour,
   type UnitItem,
 } from '../../api/index.js';
 import { StatusBadge } from '../../ui/index.js';
@@ -21,6 +24,7 @@ import {
   KV,
   PendingPanel,
   Row,
+  responseClass,
 } from './Card.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
@@ -33,6 +37,9 @@ export interface LandlordFileProps {
   contact: Contact;
   phones: ContactPhone[];
   placements: PlacementItem[];
+  /** Tours on this landlord's properties — loaded via GET /api/tours?unitId= for
+   *  each owned unit by the caller. Pass an empty array while loading or when none exist. */
+  tours: Tour[];
   units: UnitItem[];
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
@@ -63,6 +70,7 @@ export function LandlordFile({
   contact,
   phones,
   placements,
+  tours,
   units,
   media,
   mediaLoading,
@@ -151,6 +159,25 @@ export function LandlordFile({
               right={<StatusBadge kind="listing" status={u.status} />}
             />
           ))
+        )}
+      </Card>
+
+      <Card title="Tours on their properties" aside={tours.length > 0 ? String(tours.length) : undefined}>
+        {tours.length === 0 ? (
+          <EmptyRow>No tours on these properties yet.</EmptyRow>
+        ) : (
+          tours.map((t) => {
+            const unit = unitMap.get(t.unitId);
+            const addr = unit ? formatAddress(unit.address) || t.unitId : t.unitId;
+            return (
+              <Row
+                key={t.tourId}
+                to={`/tours/${t.tourId}`}
+                label={`${addr} · ${new Date(t.scheduledAt).toLocaleDateString()}`}
+                right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
+              />
+            );
+          })
         )}
       </Card>
 

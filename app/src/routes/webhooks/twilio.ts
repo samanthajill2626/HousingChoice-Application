@@ -587,6 +587,29 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
       const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
 
+      // Spec §3.2: ANY customer-initiated inbound confers inbound_text consent,
+      // so a later staff reply is never JIT-gated ("a reply in a contact-started
+      // conversation is always allowed"). A brand-new unknown phone is already
+      // stamped when its stub is minted (services/contactCapture.ts); the gap this
+      // closes is an EXISTING contact (e.g. one added via the contact form with no
+      // consent) who then texts in — stamp them here too. Restricted to a PLAIN
+      // inbound: an opt-out is a revocation (don't stamp), and the opt-in branch
+      // below does its own primary-number-scoped stamp. Idempotent — only when
+      // consent_method is absent (never overwrites a web_form/verbal record).
+      // Rides the same best-effort try as the rest of keyword handling.
+      if (
+        effectiveContact &&
+        !effectiveContact.consent_method &&
+        !isHelp &&
+        !optedOut &&
+        !optedIn
+      ) {
+        await contacts.update(effectiveContact.contactId, {
+          consent_method: 'inbound_text',
+          consent_at: new Date().toISOString(),
+        });
+      }
+
       if (isHelp) {
         // HELP: no suppression change. Reply the filed HELP copy (declares no
         // phone number — verified in lib/smsCompliance.ts + its test).

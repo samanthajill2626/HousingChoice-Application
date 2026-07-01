@@ -705,6 +705,61 @@ describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, s
     expect(contact.consent_method).toBe('web_form'); // unchanged
   });
 
+  it('a PLAIN inbound from an EXISTING no-consent contact stamps inbound_text (spec §3.2 — reply never JIT-gated)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // An existing contact with NO consent (e.g. added via the contact form) who
+    // now texts in. A brand-new stub is stamped at mint time; this closes the
+    // gap for an EXISTING contact so a later staff reply isn't JIT-blocked.
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'hi there, is the place still open?', MessageSid: 'SMplaininbound' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(twimlMessage(res.text)).toBeUndefined(); // a plain inbound gets NO keyword reply
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('inbound_text');
+    expect(typeof contact.consent_at).toBe('string');
+    // Not an opt-out — suppression untouched.
+    expect(world.flagWrites).toEqual([]);
+  });
+
+  it('a PLAIN inbound does NOT overwrite an existing consent_method (idempotent)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-T',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      consent_method: 'verbal_phone',
+    });
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'thanks!', MessageSid: 'SMplain2' }),
+    );
+
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('verbal_phone'); // unchanged
+  });
+
+  it('an opt-out (STOP) from a no-consent contact does NOT stamp consent (revocation, not opt-in)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP', MessageSid: 'SMplainstop' }),
+    );
+
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBeUndefined(); // a STOP never confers consent
+  });
+
   it('honors the NEW opt-out keywords OPTOUT and REVOKE (STOP_CONFIRMATION reply + suppression)', async () => {
     for (const keyword of ['OPTOUT', 'REVOKE', 'optout', 'Revoke']) {
       const { app, world } = makeWebhookHarness();

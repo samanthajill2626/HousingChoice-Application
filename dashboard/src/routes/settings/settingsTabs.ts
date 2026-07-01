@@ -18,8 +18,15 @@ export const SETTINGS_TABS: SettingsTab[] = [
   { id: 'team', label: 'Team', path: '/settings/team', adminOnly: true },
   { id: 'templates', label: 'Templates', path: '/settings/templates', adminOnly: false },
   { id: 'notifications', label: 'Notifications', path: '/settings/notifications', adminOnly: false },
+  // Voice: self-service cell verification (Voice Phase 1 §7) — reachable by ANY
+  // logged-in user (not admin-only), so a VA can set + verify their own cell.
+  { id: 'voice', label: 'Voice', path: '/settings/voice', adminOnly: false },
   { id: 'system', label: 'System status', path: '/settings/system', adminOnly: true },
 ];
+
+/** The self cell-verification tab path — the CallMenu deep-links here when the
+ *  navigator has no verified cell. */
+export const VOICE_TAB_PATH = '/settings/voice';
 
 /** The tabs visible to a viewer of this role (admin sees all; a VA sees only the
  *  non-admin-only ones). */

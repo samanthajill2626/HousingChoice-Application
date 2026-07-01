@@ -56,6 +56,7 @@ import {
   type MessagesRepo,
   type CallOutcome,
   type DeliveryStatus,
+  type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 
 export interface ContactTimelineRouterDeps {
@@ -90,6 +91,11 @@ interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string;
+  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message.
+   *  Surfaces the "N member(s) opted out" note. (relay_group threads are
+   *  excluded from THIS server timeline today, so this is carried for
+   *  completeness + future-proofing; the client fallback is the live path.) */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
 }
 interface TimelineCall extends TimelineBase {
   kind: 'call';
@@ -216,6 +222,7 @@ function toTimelineMessage(
     delivery_status: m.delivery_status,
     ...(m.error_code !== undefined && { error_code: m.error_code }),
     ...(m.retry_of !== undefined && { retry_of: m.retry_of }),
+    ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
   };

@@ -424,6 +424,16 @@ a.pill:focus-visible {
   font-weight: var(--fw-medium);
 }
 
+/* Relay group (M1.7): a subtle within-bubble note on a relay SOURCE message when
+ * one or more members opted out and weren't relayed to. Muted (not an error —
+ * the message DID relay to everyone else); real text, never color-only. */
+.relayOptOutNote {
+  margin-top: var(--sp-1);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  font-style: italic;
+}
+
 .replyBox {
   width: 100%;
   /* One line by default (rows=1); useAutoGrowTextarea grows it to fit the draft

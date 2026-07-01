@@ -544,6 +544,21 @@ export type ConsentMethod =
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
 
+/**
+ * Per-recipient delivery slot on a relay-group source message (M1.7). MIRRORS
+ * app/src/repos/messagesRepo.ts `RelayRecipientDelivery` — the dashboard can't
+ * import from app/, so keep it in sync by hand. Keyed by member key
+ * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map;
+ * a `status:'failed'` + `errorCode:'contact_opted_out'` slot means that member
+ * opted out and was NOT relayed to (surfaced as a subtle Timeline note). */
+export interface RelayRecipientDelivery {
+  status: DeliveryStatus;
+  sid?: string;
+  errorCode?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+}
+
 /** GET /api/events 'conversation.updated' payload. */
 export interface ConversationUpdatedEvent {
   conversationId: string;
@@ -855,6 +870,9 @@ export interface Message {
   provider_ts: string;
   delivery_status: DeliveryStatus;
   error_code?: string;
+  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
+   *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
   // --- Voice call — present only on a type:'call' entry --------------------
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -915,6 +933,11 @@ export interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string; // which number this used
+  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
+   *  keyed by member key. A `contact_opted_out` failed slot means that member
+   *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
+   *  on 1:1 messages. */
+  delivery_recipients?: Record<string, RelayRecipientDelivery>;
 }
 export interface TimelineCall extends TimelineBase {
   kind: 'call';

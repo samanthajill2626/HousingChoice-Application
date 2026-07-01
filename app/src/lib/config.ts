@@ -49,6 +49,10 @@ export interface AppConfig {
    * The System Status errors endpoint runs FilterLogEvents against it (M1.4).
    */
   errorLogGroupName: string;
+  /** The worker log group for THIS env — `/hc/<appEnv>/worker`. */
+  workerLogGroupName: string;
+  /** The host/system log group for THIS env — `/hc/<appEnv>/system` (rsyslog: kernel OOM etc.). */
+  systemLogGroupName: string;
   /** DynamoDB Local endpoint for local dev (M0.3). Unset in AWS. */
   dynamodbEndpoint?: string;
   /**
@@ -286,6 +290,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const appEnv = resolveAppEnv(env);
   const alarmNamePrefix = `hc-${appEnv}-`;
   const errorLogGroupName = `/hc/${appEnv}/app`;
+  const workerLogGroupName = `/hc/${appEnv}/worker`;
+  const systemLogGroupName = `/hc/${appEnv}/system`;
 
   // Dev-only endpoints (dev-login, outbox, reseed in later phases) are gated
   // behind this flag. It must NEVER be set in production; if it is, refuse to
@@ -609,6 +615,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     appEnv,
     alarmNamePrefix,
     errorLogGroupName,
+    workerLogGroupName,
+    systemLogGroupName,
     dynamodbEndpoint: env.DYNAMODB_ENDPOINT,
     tablePrefix: env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX,
     otelExporterOtlpEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,

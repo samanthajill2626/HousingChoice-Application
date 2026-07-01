@@ -77,6 +77,13 @@ export interface BroadcastStats {
   failed: number;
   /** Recipients skipped at send time for opt-out/unreachable (no token spent). */
   skipped_opted_out: number;
+  /**
+   * A2P/CTIA (spec §4): recipients skipped because they have NO recorded SMS
+   * consent (no token spent, no send). Surfaced separately from
+   * skipped_opted_out so the results view can prompt staff to record consent
+   * (which re-includes them on a re-send).
+   */
+  skipped_no_consent: number;
   /** Recipients still queued (pre-send seed / transient deferral). */
   queued: number;
 }
@@ -131,7 +138,15 @@ export interface ListBroadcastsOpts {
 
 /** Zero-valued stats for a fresh draft. */
 export function zeroStats(): BroadcastStats {
-  return { audience: 0, sent: 0, delivered: 0, failed: 0, skipped_opted_out: 0, queued: 0 };
+  return {
+    audience: 0,
+    sent: 0,
+    delivered: 0,
+    failed: 0,
+    skipped_opted_out: 0,
+    skipped_no_consent: 0,
+    queued: 0,
+  };
 }
 
 /** Create input: created_by + body_template + audience_filter are required. */

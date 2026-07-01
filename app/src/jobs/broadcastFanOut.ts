@@ -54,6 +54,7 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createActivityEventsRepo,
@@ -252,6 +253,19 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped' });
         await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 });
         skippedCount += 1;
+        continue;
+      }
+
+      // A2P/CTIA consent fence (spec §4): a broadcast can't pop a JIT modal
+      // mid-fan-out, so a no-consent recipient is EXCLUDED here (no token, no
+      // send) and counted separately (skipped_no_consent) so the results view
+      // can prompt staff to record consent (re-including them on a re-send). The
+      // composer preview already annotated + excluded these; this is the fence.
+      if (!hasSmsConsent(contact)) {
+        await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: 'no_consent' });
+        await broadcasts.bumpStats(payload.broadcastId, { skipped_no_consent: 1, queued: -1 });
+        skippedCount += 1;
+        log.info({ broadcastId: payload.broadcastId, contactKey }, 'broadcastFanOut: recipient has no recorded consent — skipped');
         continue;
       }
 

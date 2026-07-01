@@ -19,6 +19,7 @@
 // (the send job + the authed preview need them) but the service itself logs
 // only the resolved count.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
 import {
   createContactsRepo,
   type ContactItem,
@@ -35,6 +36,13 @@ export interface ResolvedContact {
   voucherSize?: number;
   /** The administering housing authority — for the preview row display. */
   housingAuthority?: string;
+  /**
+   * A2P/CTIA (spec §4, LOCKED CONTRACT 3): whether this contact has recorded SMS
+   * consent (hasSmsConsent). The composer preview surfaces "consent not
+   * recorded" for `false`, and the broadcast fan-out EXCLUDES them. Kept as a
+   * per-candidate flag (not a pre-exclusion) so staff can see + fix them.
+   */
+  has_consent: boolean;
 }
 
 export interface ResolvedAudience {
@@ -136,6 +144,9 @@ export function createAudienceResolutionService(
           ...(firstName !== undefined && { firstName }),
           ...(voucherSize !== undefined && { voucherSize }),
           ...(housingAuthority !== undefined && { housingAuthority }),
+          // A2P/CTIA: per-candidate consent flag (spec §4). NOT a pre-exclusion
+          // here — the preview surfaces it and the fan-out fences on it.
+          has_consent: hasSmsConsent(contact),
         });
       }
 

@@ -31,6 +31,7 @@ import {
   type ContactType,
   type ListContactsOpts,
 } from '../repos/contactsRepo.js';
+import { HUMAN_CONSENT_METHODS, type ConsentMethod } from '../lib/smsCompliance.js';
 import {
   createConversationsRepo,
   type ConversationsRepo,
@@ -106,6 +107,53 @@ const CONTACT_TYPES: readonly ContactType[] = [
 
 function isContactType(value: unknown): value is ContactType {
   return typeof value === 'string' && (CONTACT_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * A2P/CTIA consent capture (spec §3.3 / §3.4). Validate + extract the
+ * client-supplied consent fields from a create/patch body into `out`. Only the
+ * four HUMAN consent methods are accepted from these human paths — a client may
+ * NOT set web_form/inbound_text (those are stamped automatically by the public
+ * form / inbound-text seams). `consent_captured_by` is NEVER read from the
+ * client here — the route stamps it from the session user server-side. Returns
+ * `{ hasConsent }` on success (whether a consent_method was supplied) or
+ * `{ error }` on a bad value (never silently dropped). Absent fields are a
+ * no-op (consent is optional on both paths).
+ */
+function applyConsentFields(
+  b: Record<string, unknown>,
+  out: Record<string, unknown>,
+): { hasConsent: boolean } | { error: string } {
+  let hasConsent = false;
+  if ('consent_method' in b && b['consent_method'] !== undefined && b['consent_method'] !== null) {
+    const m = b['consent_method'];
+    if (typeof m !== 'string' || !HUMAN_CONSENT_METHODS.has(m as ConsentMethod)) {
+      return {
+        error: `consent_method must be one of: ${[...HUMAN_CONSENT_METHODS].join(', ')}`,
+      };
+    }
+    out['consent_method'] = m;
+    hasConsent = true;
+  }
+  if ('consent_at' in b && b['consent_at'] !== undefined && b['consent_at'] !== null) {
+    const at = b['consent_at'];
+    if (typeof at !== 'string' || Number.isNaN(Date.parse(at))) {
+      return { error: 'consent_at must be an ISO 8601 date string' };
+    }
+    out['consent_at'] = at;
+  }
+  if ('consent_note' in b && b['consent_note'] !== undefined && b['consent_note'] !== null) {
+    const note = b['consent_note'];
+    if (typeof note !== 'string') return { error: 'consent_note must be a string' };
+    out['consent_note'] = note;
+  }
+  // A client-supplied consent_captured_by is IGNORED (never trusted) — the route
+  // stamps it from the session. Guardrail: reject it loudly so the client learns
+  // the field is server-owned rather than silently seeing it dropped.
+  if ('consent_captured_by' in b && b['consent_captured_by'] !== undefined) {
+    return { error: 'consent_captured_by is set by the server, not the client' };
+  }
+  return { hasConsent };
 }
 
 /**
@@ -207,6 +255,8 @@ interface TriagePatch {
   patch: Record<string, unknown>;
   /** The fields actually changed (for the audit event). */
   changedFields: string[];
+  /** True when this patch records SMS consent (route stamps consent_captured_by). */
+  consentCaptured?: boolean;
 }
 
 /**
@@ -360,10 +410,19 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('lifEligible');
   }
 
+  // A2P/CTIA consent (spec §3.4): the JIT record-consent PATCH carries the four
+  // HUMAN consent fields. Validated here; consent_captured_by is stamped by the
+  // route (session user), never trusted from the client.
+  const consent = applyConsentFields(b, patch);
+  if ('error' in consent) return { error: consent.error };
+  if ('consent_method' in patch) changedFields.push('consent_method');
+  if ('consent_at' in patch) changedFields.push('consent_at');
+  if ('consent_note' in patch) changedFields.push('consent_note');
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
-  return { patch, changedFields };
+  return { patch, changedFields, ...(consent.hasConsent && { consentCaptured: true }) };
 }
 
 /** A validated manual-create contact body (the fields actually persisted). */
@@ -372,6 +431,8 @@ interface CreateContactResult {
   item: Partial<ContactItem> & { type: ContactType };
   /** Normalized E.164 phone (the dedupe key), when one was supplied. */
   phone?: string;
+  /** True when the body records SMS consent (route stamps consent_captured_by). */
+  consentCaptured?: boolean;
 }
 
 /**
@@ -495,7 +556,20 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     item.status = item.type === 'tenant' ? 'onboarding' : 'active';
   }
 
-  return { item, ...(phone !== undefined && { phone }) };
+  // A2P/CTIA consent (spec §3.3): the optional "Consent to text" section on the
+  // add-contact form. Only the four HUMAN methods are accepted here (never
+  // web_form/inbound_text — those are automatic seams). consent_captured_by is
+  // stamped by the route from the session, not read from the client.
+  const consentOut: Record<string, unknown> = {};
+  const consent = applyConsentFields(b, consentOut);
+  if ('error' in consent) return { error: consent.error };
+  Object.assign(item, consentOut);
+
+  return {
+    item,
+    ...(phone !== undefined && { phone }),
+    ...(consent.hasConsent && { consentCaptured: true }),
+  };
 }
 
 export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
@@ -604,6 +678,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         res.status(409).json({ error: 'contact_exists', contact: existing });
         return;
       }
+    }
+
+    // A2P/CTIA: when the create body records consent, stamp consent_captured_by
+    // from the SESSION user server-side (never trusted from the client).
+    if (parsed.consentCaptured === true) {
+      parsed.item.consent_captured_by = req.user?.userId;
     }
 
     const contact = await contacts.create(parsed.item);
@@ -827,6 +907,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         parsed.patch['status'] = newType === 'unknown' ? 'needs_review' : 'active';
         parsed.changedFields.push('status');
       }
+    }
+
+    // A2P/CTIA: when this PATCH records consent, stamp consent_captured_by from
+    // the SESSION user server-side (never a client-supplied value — the parser
+    // rejects one). This is the JIT modal's record-consent write.
+    if (parsed.consentCaptured === true) {
+      parsed.patch['consent_captured_by'] = req.user?.userId;
+      parsed.changedFields.push('consent_captured_by');
     }
 
     let updated;

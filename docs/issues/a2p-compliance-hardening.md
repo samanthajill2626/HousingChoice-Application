@@ -89,6 +89,19 @@ spec → build). Prioritized:
   error). Only that member is suppressed, not the group. Being surfaced to staff (an
   opted-out relay member is shown as "not receiving — opted out" on the thread and as
   a Today attention item, so staff can investigate or remove them from the group).
+- **Relay intro + fan-out — transactional consent exemption (accepted 2026-07-01).**
+  Relay intro (`jobs/relayFanOut.ts` `composeIntroBody`) and member-to-member fan-out
+  are deliberately EXEMPT from the JIT / broadcast *consent* gate — they enforce
+  `sms_opt_out` (see the opt-out decision above) but do NOT check `hasSmsConsent`.
+  **Why acceptable:** a relay group is created to coordinate a specific in-flight
+  placement between parties (tenant ↔ landlord/team) who have ALREADY been in contact
+  — a group relay is never someone's first contact, so relay members always have a
+  prior conversation (hence a consent basis). The messaging is informational/
+  transactional coordination, not proactive marketing, and the intro carries business
+  identity + "Reply STOP to opt out" (`RELAY_INTRO_IDENTITY`). Same precedent as the
+  missed-call auto-text above; do NOT repurpose relay for promotional content. Raised
+  by the adversarial review (2026-07-01) as a missing consent check — confirmed
+  working-as-designed and documented here rather than gated.
 
 Full audit findings + calibrated scorecard captured in the design session
 (2026-06-30). Filed to record good-faith, documented progress toward compliance.

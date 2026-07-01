@@ -235,13 +235,12 @@ resource "aws_cloudwatch_metric_alarm" "status_check_failed" {
   }
 }
 
-# Root-volume disk usage. NOTE: data arrives only once the CloudWatch agent
-# is installed/configured on the instance (M0.5/M0.6) — until then the metric
-# is missing and treat_missing_data keeps the alarm quietly OK. Dimensions
-# must match the agent config when it lands (path "/", xfs on AL2023).
+# Root-volume disk usage. The CloudWatch agent is installed via EC2 user_data
+# (Task 1); treat_missing_data keeps the alarm quietly OK if the agent dies.
+# Dimensions match the agent config (path "/", xfs on AL2023, drop_device:true).
 resource "aws_cloudwatch_metric_alarm" "disk_used" {
   alarm_name          = "${var.name_prefix}disk-used"
-  alarm_description   = "Root volume above ${var.disk_used_alarm_threshold}% (CloudWatch agent metric; agent arrives M0.5/M0.6)."
+  alarm_description   = "Root volume above ${var.disk_used_alarm_threshold}% (CWAgent disk_used_percent; agent installed via EC2 user_data)."
   namespace           = "CWAgent"
   metric_name         = "disk_used_percent"
   statistic           = "Maximum"
@@ -257,6 +256,51 @@ resource "aws_cloudwatch_metric_alarm" "disk_used" {
     InstanceId = var.instance_id
     path       = "/"
     fstype     = "xfs"
+  }
+}
+
+# Host memory. Two-tier, both → the alerts SNS topic:
+#   warn:     mem_used_percent > 80% sustained 15 min (3 x 5-min) — slow leak/creep.
+#   critical: mem_used_percent > 90% for 5 min (1 x 5-min)        — acute near-OOM spike.
+# Data arrives once the CloudWatch agent is installed (Task 1); notBreaching keeps
+# them quiet before that / if the agent dies. On a 2 GB t4g.small the app+worker
+# Node containers make memory the real pressure point (OOM survived by
+# restart:unless-stopped; these alarms are the leading-indicator warning).
+resource "aws_cloudwatch_metric_alarm" "mem_used" {
+  alarm_name          = "${var.name_prefix}mem-used"
+  alarm_description   = "Memory above ${var.mem_used_warn_threshold}% sustained 15 min (CWAgent mem_used_percent)."
+  namespace           = "CWAgent"
+  metric_name         = "mem_used_percent"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 3
+  threshold           = var.mem_used_warn_threshold
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    InstanceId = var.instance_id
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "mem_used_critical" {
+  alarm_name          = "${var.name_prefix}mem-used-critical"
+  alarm_description   = "Memory above ${var.mem_used_critical_threshold}% for 5 min (CWAgent mem_used_percent) — acute near-OOM."
+  namespace           = "CWAgent"
+  metric_name         = "mem_used_percent"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = var.mem_used_critical_threshold
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    InstanceId = var.instance_id
   }
 }
 
@@ -330,7 +374,7 @@ resource "aws_cloudwatch_dashboard" "stack" {
       {
         type = "metric", x = 12, y = 6, width = 12, height = 6
         properties = {
-          title  = "Disk used % (root) — populates once CW agent ships (M0.5/M0.6)"
+          title  = "Disk used % (root)"
           region = data.aws_region.current.region
           stat   = "Maximum"
           period = 300
@@ -350,6 +394,18 @@ resource "aws_cloudwatch_dashboard" "stack" {
             [local.metric_namespace, "WebhookSignatureRejections"],
             [local.metric_namespace, "SendThrottled"],
             [local.metric_namespace, "DeliveryFailures"],
+          ]
+        }
+      },
+      {
+        type = "metric", x = 12, y = 12, width = 12, height = 6
+        properties = {
+          title  = "Memory used %"
+          region = data.aws_region.current.region
+          stat   = "Maximum"
+          period = 300
+          metrics = [
+            ["CWAgent", "mem_used_percent", "InstanceId", var.instance_id],
           ]
         }
       },

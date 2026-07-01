@@ -737,6 +737,13 @@ export interface ContactPatch {
   relationships?: Relationship[];
   /** Operator-defined custom fields stored on this record. */
   customFields?: CustomField[];
+  /** A2P/CTIA consent capture (CONTRACT 2) — a HUMAN method only. Sent by the
+   *  just-in-time consent-capture modal; the server stamps consent_captured_by. */
+  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  /** When consent was obtained (ISO 8601). */
+  consent_at?: string;
+  /** Optional free-text note ("said OK to texts at fair"). */
+  consent_note?: string;
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the

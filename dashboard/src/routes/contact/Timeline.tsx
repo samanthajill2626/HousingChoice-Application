@@ -33,6 +33,11 @@ import styles from './Timeline.module.css';
 function sendFailureMessage(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.code) {
+      case 'contact_no_consent':
+        // A2P/CTIA just-in-time gate: the parent (ContactDetail) intercepts this
+        // 409 and opens the consent-capture modal. We restore the draft (throwing
+        // reaches here) but show NO inline error — the modal is the UI.
+        return '';
       case 'contact_opted_out':
         return 'This contact is on the Do-Not-Contact list — texting is disabled. Clear the opt-out from the ⋯ menu to message them.';
       case 'manual_mode':

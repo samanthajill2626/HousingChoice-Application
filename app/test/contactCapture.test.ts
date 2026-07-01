@@ -182,8 +182,12 @@ describe('contactCapture — unknown phone', () => {
       status: 'needs_review',
       phone: PHONE,
       capture_source: 'inbound_sms',
+      // A2P/CTIA (spec §3.2): a first inbound text IS the consent basis —
+      // customer-initiated contact stamps inbound_text so replies never JIT-gate.
+      consent_method: 'inbound_text',
     });
     expect(typeof contact.captured_at).toBe('string');
+    expect(typeof contact.consent_at).toBe('string');
     expect(contact.contactId).toMatch(/^contact-/);
     expect(f.conversation.participants).toEqual([{ contactId: contact.contactId, phone: PHONE }]);
     expect(f.auditEvents).toEqual([

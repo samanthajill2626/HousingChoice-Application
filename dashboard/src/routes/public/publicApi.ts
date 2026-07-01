@@ -47,7 +47,10 @@ export interface PublicFlyerDetails extends PublicFlyer {
   same_day_rta: boolean | null;
 }
 
-/** Intake payload — first/last/phone required, voucher + unit optional. */
+/** Intake payload — first/last/phone required, voucher + unit optional.
+ *  `smsConsent` is the REQUIRED A2P/CTIA consent flag: the client sends `true`
+ *  only when the required consent checkbox is checked (the server rejects a
+ *  missing/false value with 400 { error: 'consent_required' }). */
 export interface HousingFairInput {
   firstName: string;
   lastName: string;
@@ -55,6 +58,9 @@ export interface HousingFairInput {
   voucherSize?: number;
   /** When present (and a shareable unit), the signup is attributed to the home. */
   unitId?: string;
+  /** do-not-remove — A2P/CTIA consent gate (client-side; server also enforces).
+   *  True once the required consent checkbox is checked. */
+  smsConsent: boolean;
 }
 
 /** GET the teaser flyer. Throws ApiError (status 404) when unavailable. */
@@ -79,12 +85,17 @@ export async function getFlyerDetails(
 }
 
 /** POST the housing-fair intake. Omits unitId/voucherSize when not supplied so
- *  the body matches the backend's optional-field contract. */
+ *  the body matches the backend's optional-field contract. ALWAYS sends
+ *  `smsConsent` — the server requires it and rejects a missing/false value with
+ *  400 { error: 'consent_required' }.
+ *
+ *  do-not-remove — A2P/CTIA consent gate (client-side; server also enforces). */
 export async function submitHousingFair(input: HousingFairInput): Promise<void> {
   const body: Record<string, unknown> = {
     firstName: input.firstName,
     lastName: input.lastName,
     phone: input.phone,
+    smsConsent: input.smsConsent,
   };
   if (input.voucherSize !== undefined) body['voucherSize'] = input.voucherSize;
   if (input.unitId !== undefined) body['unitId'] = input.unitId;

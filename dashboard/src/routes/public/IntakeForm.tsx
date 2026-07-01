@@ -8,6 +8,11 @@
 import { useState, type FormEvent } from 'react';
 import styles from './IntakeForm.module.css';
 import type { HousingFairInput } from './publicApi.js';
+import {
+  WEB_FORM_CONSENT_LABEL,
+  PRIVACY_POLICY_URL,
+  TERMS_URL,
+} from '../../lib/consentCopy.js';
 
 export interface IntakeFormProps {
   /** Submit handler — resolves on success, throws on failure. The parent decides
@@ -22,6 +27,9 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
   const [voucher, setVoucher] = useState('');
+  // do-not-remove — A2P/CTIA consent gate (client-side; server also enforces).
+  // REQUIRED, unchecked by default. Submit is blocked until this is true.
+  const [smsConsent, setSmsConsent] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +53,12 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
       setError('Please enter your phone number.');
       return;
     }
+    // do-not-remove — A2P/CTIA consent gate (client-side; server also enforces).
+    // Submit is blocked until the required consent checkbox is checked.
+    if (!smsConsent) {
+      setError('Please agree to receive texts to continue.');
+      return;
+    }
     setError(null);
     setPending(true);
     try {
@@ -53,12 +67,40 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         phone: phone.trim(),
+        smsConsent: true,
         ...(voucherSize !== undefined && Number.isFinite(voucherSize) && { voucherSize }),
       });
     } catch {
       setError("Sorry, we couldn't send that. Please try again.");
       setPending(false);
     }
+  }
+
+  // Render the FILED CTIA disclosure (WEB_FORM_CONSENT_LABEL) VERBATIM, turning
+  // the words "Privacy Policy" and "Terms" into links WITHOUT altering any other
+  // character. We slice the single source-of-truth string around those two link
+  // phrases so the visible text can never drift from the filed copy.
+  // do-not-remove — A2P/CTIA consent copy (verbatim from lib/consentCopy.ts).
+  function consentLabel(): React.ReactNode {
+    const label = WEB_FORM_CONSENT_LABEL;
+    const ppIdx = label.indexOf('Privacy Policy');
+    const termsIdx = label.indexOf('Terms', ppIdx);
+    const prefix = label.slice(0, ppIdx); // "…See our "
+    const between = label.slice(ppIdx + 'Privacy Policy'.length, termsIdx); // " and "
+    const suffix = label.slice(termsIdx + 'Terms'.length); // "."
+    return (
+      <>
+        {prefix}
+        <a href={PRIVACY_POLICY_URL} target="_blank" rel="noreferrer">
+          Privacy Policy
+        </a>
+        {between}
+        <a href={TERMS_URL} target="_blank" rel="noreferrer">
+          Terms
+        </a>
+        {suffix}
+      </>
+    );
   }
 
   // The error element id — referenced by every required field's aria-describedby
@@ -143,6 +185,31 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           onChange={onField(setVoucher)}
           disabled={pending}
         />
+      </div>
+
+      {/* do-not-remove — A2P/CTIA consent gate (client-side; server also
+          enforces). REQUIRED, unchecked by default; submit is blocked until it
+          is checked. The label text is the FILED CTIA disclosure (verbatim,
+          from lib/consentCopy.ts) — "Privacy Policy" and "Terms" are rendered as
+          links (new tab, rel="noreferrer"). */}
+      <div className={styles.consentField}>
+        <label className={styles.consentLabel} htmlFor="intake-consent">
+          <input
+            id="intake-consent"
+            className={styles.consentBox}
+            type="checkbox"
+            checked={smsConsent}
+            onChange={(e) => {
+              if (error !== null) setError(null);
+              setSmsConsent(e.target.checked);
+            }}
+            aria-required="true"
+            aria-invalid={error !== null && !smsConsent}
+            aria-describedby={describedBy}
+            disabled={pending}
+          />
+          <span className={styles.consentText}>{consentLabel()}</span>
+        </label>
       </div>
 
       {error !== null && (

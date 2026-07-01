@@ -48,8 +48,13 @@ const ORIGINATE_STATUS: Record<OriginateRefusedError['code'], number> = {
 /**
  * The SELF view of a user (contract 3): userId/email/name/role + the Voice
  * Phase 1 cell fields. NEVER any secret (google_sub, push subs, the code hash).
+ *
+ * `inbound_voice_line` is DERIVED from the single authoritative holder pointer:
+ * the caller passes the current holder's id and the flag appears only when this
+ * user IS that holder. The repo no longer stores the boolean; the JSON contract
+ * is unchanged.
  */
-export function toSelfUserView(u: UserItem): Record<string, unknown> {
+export function toSelfUserView(u: UserItem, holderUserId?: string): Record<string, unknown> {
   return {
     userId: u.userId,
     email: u.email,
@@ -58,7 +63,7 @@ export function toSelfUserView(u: UserItem): Record<string, unknown> {
     ...(typeof u.cell === 'string' && u.cell.length > 0 && { cell: u.cell }),
     ...(typeof u.cell_verified_at === 'string' &&
       u.cell_verified_at.length > 0 && { cell_verified_at: u.cell_verified_at }),
-    ...(u.inbound_voice_line === true && { inbound_voice_line: true }),
+    ...(u.userId === holderUserId && { inbound_voice_line: true }),
   };
 }
 
@@ -174,7 +179,9 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
       res.status(401).json({ error: 'unauthorized' });
       return;
     }
-    res.json({ user: toSelfUserView(user) });
+    // Derive the badge from the single holder pointer (fetch the holder id once).
+    const holderId = (await users.getInboundVoiceLineHolder())?.userId;
+    res.json({ user: toSelfUserView(user, holderId) });
   });
 
   // POST /api/users/me/cell/verify-start { cell } → 200 { ok:true } (contract 2).

@@ -37,8 +37,14 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * The admin-list projection of a user: NO google_sub, NO push_subscriptions
  * (a device's push endpoints are not admin-relevant and are not someone
  * else's business). Exactly the fields the brief names.
+ *
+ * The `inbound_voice_line` badge is DERIVED from the single authoritative holder
+ * pointer (usersRepo): the caller passes `holderUserId` (the current holder's
+ * id, fetched once) and this view emits `inbound_voice_line: true` only for that
+ * user. The repo never stores the boolean anymore — the JSON contract is
+ * unchanged (the flag still appears on the holder's view; absent otherwise).
  */
-function toAdminUserView(u: UserItem): Record<string, unknown> {
+function toAdminUserView(u: UserItem, holderUserId?: string): Record<string, unknown> {
   return {
     userId: u.userId,
     email: u.email,
@@ -53,7 +59,7 @@ function toAdminUserView(u: UserItem): Record<string, unknown> {
     ...(typeof u.cell === 'string' && u.cell.length > 0 && { cell: u.cell }),
     ...(typeof u.cell_verified_at === 'string' &&
       u.cell_verified_at.length > 0 && { cell_verified_at: u.cell_verified_at }),
-    ...(u.inbound_voice_line === true && { inbound_voice_line: true }),
+    ...(u.userId === holderUserId && { inbound_voice_line: true }),
   };
 }
 
@@ -71,7 +77,9 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
   // comments the tradeoff); secrets are stripped in the projection.
   router.get('/', async (_req, res) => {
     const all = await users.listAll();
-    res.json({ users: all.map(toAdminUserView) });
+    // Fetch the single holder ONCE, then derive each user's badge from it.
+    const holderId = (await users.getInboundVoiceLineHolder())?.userId;
+    res.json({ users: all.map((u) => toAdminUserView(u, holderId)) });
   });
 
   // POST /api/users { email, role } — invite (idempotent).
@@ -205,7 +213,8 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
     });
     log.info({ userId, actor: req.user?.userId }, 'inbound voice line assigned via API');
     const updated = await users.findById(userId);
-    res.json({ user: toAdminUserView(updated ?? target) });
+    // This user is now the holder — derive the badge with holderId = userId.
+    res.json({ user: toAdminUserView(updated ?? target, userId) });
   });
 
   // DELETE /api/users/:userId/inbound-voice-line — unassign (spec §6). 200 { user }.
@@ -222,6 +231,7 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
     });
     log.info({ userId, actor: req.user?.userId }, 'inbound voice line cleared via API');
     const updated = await users.findById(userId);
+    // Just cleared — this user is no longer the holder (holderId undefined ⇒ no badge).
     res.json({ user: toAdminUserView(updated ?? target) });
   });
 

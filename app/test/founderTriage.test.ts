@@ -74,7 +74,10 @@ function founderHarness(world: FakeWorld) {
   if (admin) {
     admin.cell = FOUNDER_CELL;
     admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
-    admin.inbound_voice_line = true;
+    // Establish the holder via the authoritative pointer. The fake's assign sets
+    // its in-memory pointer SYNCHRONOUSLY (no awaited work before the write), so
+    // this fire-and-forget call is settled before the harness is used.
+    void harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId);
   }
   return harness;
 }
@@ -276,7 +279,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     admin.cell = FOUNDER_CELL;
     admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
-    admin.inbound_voice_line = true;
+    await harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId); // holder via pointer
 
     // The request resolves (does NOT hang on the push). A failure here would
     // surface as a test timeout rather than an assertion.

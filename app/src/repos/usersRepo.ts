@@ -110,10 +110,12 @@ export interface UserItem {
   /** Voice Phase 1: ISO 8601 stamped when `cell` passed verification (§7). Unverified = never dialed. */
   cell_verified_at?: string;
   /**
-   * Voice Phase 1 (spec §6): the single "Inbound voice line" designation —
-   * EXACTLY ONE user holds it at a time (assignInboundVoiceLine enforces the
-   * single-holder invariant). That holder's verified `cell` is what inbound
-   * calls ring, replacing the `FOUNDER_CELL` env var.
+   * Voice Phase 1 (spec §6): the single "Inbound voice line" designation. The
+   * holder is now stored as ONE authoritative pointer (the HOLDER_POINTER_KEY
+   * sentinel row) and this boolean is DERIVED in the views for the dashboard
+   * mirror — the repo NEVER writes it. That holder's verified `cell` is what
+   * inbound calls ring, replacing the `FOUNDER_CELL` env var. Kept on the type
+   * only so the derived view JSON has a home.
    */
   inbound_voice_line?: boolean;
   /**
@@ -290,22 +292,47 @@ export interface UsersRepo {
 
   // --- Voice Phase 1: single inbound-voice-line holder (spec §6) ------------
   /**
-   * Assign the single inbound-voice-line holder to `userId`: clears
-   * `inbound_voice_line` on EVERY other user that currently holds it, then SETs
-   * it on the target (single-holder invariant). Does NOT enforce the
-   * verified-cell precondition — the CALLER (Phase 2 route) must ensure the
-   * target has a verified cell (it returns 409 otherwise) before assigning.
-   * Throws if the target user does not exist.
+   * Assign the single inbound-voice-line holder to `userId`: one unconditional
+   * write to the authoritative sentinel pointer (last-writer-wins). Because the
+   * holder is ONE field, at most one holder ever exists — two concurrent assigns
+   * can't both win (the single-holder invariant is structural, not enforced by a
+   * scan). Does NOT enforce the verified-cell precondition — the CALLER (Phase 2
+   * route) must ensure the target has a verified cell (it returns 409 otherwise)
+   * before assigning.
    */
   assignInboundVoiceLine(userId: string): Promise<void>;
-  /** Unassign: REMOVE `inbound_voice_line` on `userId`. Throws if the user does not exist. */
+  /**
+   * Unassign: REMOVE the pointer ONLY IF `userId` is the current holder
+   * (conditional) — clearing a non-holder is a no-op, so it never clobbers a
+   * concurrent reassignment.
+   */
   clearInboundVoiceLine(userId: string): Promise<void>;
   /**
-   * The single user holding `inbound_voice_line === true`, or undefined when
-   * none is set. If (invariant-violation) more than one holds it, returns the
-   * first and logs a warning with userIds ONLY — never PII.
+   * The single user the pointer designates, or undefined when none is set (or
+   * the pointer dangles at a deleted user). Reads the pointer, then findById —
+   * no scan, no invariant-violation branch (one field ⇒ one holder).
    */
   getInboundVoiceLineHolder(): Promise<UserItem | undefined>;
+}
+
+/**
+ * Voice Phase 1 (spec §6): the inbound-voice-line holder is stored as ONE
+ * authoritative pointer — a sentinel singleton row in the users table keyed by
+ * this reserved id. Real user ids are `usr_<hash>` (userIdForEmail), so this
+ * sentinel can never collide with a user. The pointer item is
+ * `{ userId: HOLDER_POINTER_KEY, holder_user_id?: string }`; at most one user
+ * is ever the holder because there is exactly one field. The per-user
+ * `inbound_voice_line` boolean is DERIVED in the views from this pointer — the
+ * repo never writes it (single field ⇒ the two-concurrent-assigns race is
+ * structurally impossible). listAll() filters this row out so no user-list
+ * consumer ever sees it.
+ */
+export const HOLDER_POINTER_KEY = 'singleton#inbound_voice_line';
+
+/** The sentinel pointer item shape (users table). */
+interface HolderPointerItem {
+  userId: string;
+  holder_user_id?: string;
 }
 
 export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
@@ -503,8 +530,11 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       } while (exclusiveStartKey !== undefined);
       // The byEmail GSI's claim-style items don't exist for users (users have
       // no claim pattern) — every base-table item is a real user. Filter to
-      // items that actually carry a role, defensively.
-      return items.filter((u) => isUserRole(u.role));
+      // items that actually carry a role, defensively. Also exclude the
+      // inbound-voice-line sentinel pointer row (HOLDER_POINTER_KEY) — it is
+      // repo-internal bookkeeping, not a user, and must never appear in any
+      // user list (listByRole, resolveFounders, the admin GET /api/users route).
+      return items.filter((u) => u.userId !== HOLDER_POINTER_KEY && isUserRole(u.role));
     },
 
     async listByRole(role) {
@@ -647,61 +677,55 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
     },
 
     // --- Voice Phase 1: single inbound-voice-line holder (spec §6) ---------
+    // The holder is ONE authoritative pointer (the HOLDER_POINTER_KEY sentinel
+    // row's holder_user_id). A single field means at most one holder ever — two
+    // concurrent assigns can't both "win" a boolean; the race is gone by design.
     async assignInboundVoiceLine(userId) {
-      // Single-holder: clear the flag on every OTHER current holder, then set it
-      // on the target. listAll() scans the tiny, bounded users table (same
-      // economy as listByRole). NOTE: the CALLER must ensure the target has a
-      // verified cell (the Phase 2 route 409s otherwise) — not enforced here.
-      const all = await repo.listAll();
-      for (const u of all) {
-        if (u.inbound_voice_line === true && u.userId !== userId) {
-          await doc.send(
-            new UpdateCommand({
-              TableName: table,
-              Key: { userId: u.userId },
-              UpdateExpression: 'REMOVE inbound_voice_line',
-              ConditionExpression: 'attribute_exists(userId)',
-            }),
-          );
-          log.info({ userId: u.userId }, 'inbound voice line cleared (reassigned)');
-        }
-      }
+      // ONE unconditional write to the pointer (last-writer-wins). No scan, no
+      // per-user boolean. NOTE: the CALLER must ensure the target has a verified
+      // cell (the Phase 2 route 409s otherwise) — not enforced here.
       await doc.send(
         new UpdateCommand({
           TableName: table,
-          Key: { userId },
-          UpdateExpression: 'SET inbound_voice_line = :true',
-          ConditionExpression: 'attribute_exists(userId)',
-          ExpressionAttributeValues: { ':true': true },
+          Key: { userId: HOLDER_POINTER_KEY },
+          UpdateExpression: 'SET holder_user_id = :uid',
+          ExpressionAttributeValues: { ':uid': userId },
         }),
       );
       log.info({ userId }, 'inbound voice line assigned');
     },
 
     async clearInboundVoiceLine(userId) {
-      await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { userId },
-          UpdateExpression: 'REMOVE inbound_voice_line',
-          ConditionExpression: 'attribute_exists(userId)',
-        }),
-      );
-      log.info({ userId }, 'inbound voice line cleared');
+      // REMOVE the pointer ONLY when `userId` is the current holder — clearing a
+      // non-holder is a no-op (conditional guards against clobbering someone
+      // else's assignment). A failed condition just means the target wasn't the
+      // holder; swallow it.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { userId: HOLDER_POINTER_KEY },
+            UpdateExpression: 'REMOVE holder_user_id',
+            ConditionExpression: 'holder_user_id = :uid',
+            ExpressionAttributeValues: { ':uid': userId },
+          }),
+        );
+        log.info({ userId }, 'inbound voice line cleared');
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return; // not the holder — no-op
+        throw err;
+      }
     },
 
     async getInboundVoiceLineHolder() {
-      const all = await repo.listAll();
-      const holders = all.filter((u) => u.inbound_voice_line === true);
-      if (holders.length === 0) return undefined;
-      if (holders.length > 1) {
-        // Invariant violation — return the first but flag it. userIds ONLY (PII).
-        log.warn(
-          { holderUserIds: holders.map((u) => u.userId) },
-          'more than one inbound-voice-line holder — single-holder invariant violated',
-        );
-      }
-      return holders[0];
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { userId: HOLDER_POINTER_KEY } }),
+      );
+      const holderUserId = (Item as HolderPointerItem | undefined)?.holder_user_id;
+      if (typeof holderUserId !== 'string' || holderUserId.length === 0) return undefined;
+      // Resolve the pointer to the live user. A dangling pointer (user deleted)
+      // degrades gracefully to undefined rather than a phantom holder.
+      return repo.findById(holderUserId);
     },
   };
 

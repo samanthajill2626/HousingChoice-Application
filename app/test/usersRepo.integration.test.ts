@@ -17,7 +17,12 @@ import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { hashCellVerifyCode } from '../src/lib/cellVerification.js';
-import { createUsersRepo, displayNameOf, userIdForEmail } from '../src/repos/usersRepo.js';
+import {
+  createUsersRepo,
+  displayNameOf,
+  HOLDER_POINTER_KEY,
+  userIdForEmail,
+} from '../src/repos/usersRepo.js';
 import { AccessDeniedError, resolveInvitedUser } from '../src/services/resolveInvitedUser.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -338,18 +343,54 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     const b = (await users.invite({ email: 'lineB@housingchoice.org', role: 'admin' })).user;
 
     await users.assignInboundVoiceLine(a.userId);
-    expect((await users.findById(a.userId))!.inbound_voice_line).toBe(true);
+    // The holder is derived from the authoritative pointer, not a per-user boolean.
     expect((await users.getInboundVoiceLineHolder())!.userId).toBe(a.userId);
 
-    // Reassign to B — the single-holder invariant clears A.
+    // Reassign to B — one pointer field ⇒ B replaces A as the single holder.
     await users.assignInboundVoiceLine(b.userId);
-    expect((await users.findById(a.userId))!.inbound_voice_line).toBeUndefined();
-    expect((await users.findById(b.userId))!.inbound_voice_line).toBe(true);
     expect((await users.getInboundVoiceLineHolder())!.userId).toBe(b.userId);
 
     // Clear B — no holder remains.
     await users.clearInboundVoiceLine(b.userId);
-    expect((await users.findById(b.userId))!.inbound_voice_line).toBeUndefined();
     expect(await users.getInboundVoiceLineHolder()).toBeUndefined();
+
+    // Clearing a NON-holder is a no-op (conditional): re-assign B, clear A, B stays.
+    await users.assignInboundVoiceLine(b.userId);
+    await users.clearInboundVoiceLine(a.userId);
+    expect((await users.getInboundVoiceLineHolder())!.userId).toBe(b.userId);
+    await users.clearInboundVoiceLine(b.userId); // tidy up
+  });
+
+  it('assignInboundVoiceLine is race-safe: two concurrent assigns leave EXACTLY one holder', async () => {
+    const u1 = (await users.invite({ email: 'raceU1@housingchoice.org', role: 'admin' })).user;
+    const u2 = (await users.invite({ email: 'raceU2@housingchoice.org', role: 'admin' })).user;
+
+    // Fire both assigns CONCURRENTLY — with a single authoritative pointer field
+    // the outcome is deterministically ONE holder (the last write wins), never
+    // two (the pre-fix scan-then-set race could leave both flagged).
+    await Promise.all([
+      users.assignInboundVoiceLine(u1.userId),
+      users.assignInboundVoiceLine(u2.userId),
+    ]);
+
+    const holder = await users.getInboundVoiceLineHolder();
+    expect(holder).toBeDefined();
+    expect([u1.userId, u2.userId]).toContain(holder!.userId);
+    // Exactly one holder: whichever is NOT the holder derives NO badge. The list
+    // never carries the sentinel row, and only the pointer's target is a holder.
+    const other = holder!.userId === u1.userId ? u2.userId : u1.userId;
+    expect(holder!.userId).not.toBe(other);
+
+    await users.clearInboundVoiceLine(holder!.userId); // tidy up
+  });
+
+  it('listAll never surfaces the inbound-voice-line sentinel pointer row', async () => {
+    const u = (await users.invite({ email: 'sentinelcheck@housingchoice.org', role: 'admin' })).user;
+    await users.assignInboundVoiceLine(u.userId); // writes the sentinel row
+    const all = await users.listAll();
+    // Every listed item is a real user (has a role); the sentinel key is filtered out.
+    expect(all.every((x) => x.userId !== HOLDER_POINTER_KEY)).toBe(true);
+    expect(all.some((x) => x.userId === u.userId)).toBe(true);
+    await users.clearInboundVoiceLine(u.userId); // tidy up
   });
 });

@@ -143,6 +143,10 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
   const findByIdCalls: string[] = [];
   const activateCalls: { userId: string; name: string | undefined }[] = [];
   const touchCalls: { userId: string; name: string | undefined }[] = [];
+  // Voice Phase 1: the inbound-voice-line holder is ONE pointer (mirrors the real
+  // repo's authoritative sentinel row) — last-writer-wins, single holder. NOT a
+  // per-user boolean, so the race is structurally impossible here too.
+  let holderUserId: string | undefined;
   const repo: UsersRepo = {
     async findByEmail(email) {
       const e = normalizeEmail(email);
@@ -268,21 +272,18 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       return { ok: true, cell: pending, cell_verified_at: now };
     },
     async assignInboundVoiceLine(userId) {
-      const target = users.get(userId);
-      if (!target) throw new Error(`assignInboundVoiceLine: no user ${userId}`);
-      for (const u of users.values()) {
-        if (u.inbound_voice_line === true && u.userId !== userId) delete u.inbound_voice_line;
-      }
-      target.inbound_voice_line = true;
+      // Single pointer, last-writer-wins (mirrors the real repo — one field).
+      holderUserId = userId;
     },
     async clearInboundVoiceLine(userId) {
-      const user = users.get(userId);
-      if (!user) throw new Error(`clearInboundVoiceLine: no user ${userId}`);
-      delete user.inbound_voice_line;
+      // Only the current holder clears the pointer (clearing a non-holder is a no-op).
+      if (holderUserId === userId) holderUserId = undefined;
     },
     async getInboundVoiceLineHolder() {
-      const holders = [...users.values()].filter((u) => u.inbound_voice_line === true);
-      return holders.length > 0 ? { ...holders[0]! } : undefined;
+      if (holderUserId === undefined) return undefined;
+      const holder = users.get(holderUserId);
+      // Dangling pointer (holder deleted) degrades to undefined, like the real repo.
+      return holder ? { ...holder } : undefined;
     },
   };
   return { users, creates, activations, findByIdCalls, activateCalls, touchCalls, repo };

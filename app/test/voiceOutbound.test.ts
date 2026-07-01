@@ -434,7 +434,7 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     const holder = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     holder.cell = HOLDER_CELL;
     holder.cell_verified_at = '2026-07-01T00:00:00.000Z';
-    holder.inbound_voice_line = true;
+    await harness.fakeUsers.repo.assignInboundVoiceLine(holder.userId); // via the pointer
 
     const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
     expect(res.status).toBe(200);
@@ -466,7 +466,7 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
     const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL: '+15559991111' } });
     const holder = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     holder.cell = HOLDER_CELL; // present but NOT verified
-    holder.inbound_voice_line = true;
+    await harness.fakeUsers.repo.assignInboundVoiceLine(holder.userId); // via the pointer
 
     const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice', bizVoiceParams());
     expect(res.status).toBe(200);
@@ -616,8 +616,9 @@ describe('inbound-voice-line assignment (admin, spec §6)', () => {
       created_at: '2026-06-01T00:00:00.000Z',
       cell: '+15550166666',
       cell_verified_at: '2026-07-01T00:00:00.000Z',
-      inbound_voice_line: true, // currently holds it
     });
+    // usr_other currently holds it — establish via the authoritative pointer.
+    await harness.fakeUsers.repo.assignInboundVoiceLine('usr_other');
     const target = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
 
     // Target has NO verified cell → 409.
@@ -628,7 +629,8 @@ describe('inbound-voice-line assignment (admin, spec §6)', () => {
       .send({});
     expect(denied.status).toBe(409);
     expect(denied.body.error).toBe('cell_not_verified');
-    expect(target.inbound_voice_line).not.toBe(true);
+    // The target did NOT become the holder (usr_other still holds it).
+    expect((await harness.fakeUsers.repo.getInboundVoiceLineHolder())!.userId).toBe('usr_other');
 
     // Verify the target's cell, then assign → 200, and the prior holder is cleared.
     target.cell = '+15550167777';
@@ -639,9 +641,11 @@ describe('inbound-voice-line assignment (admin, spec §6)', () => {
       .set('cookie', TEST_ADMIN_COOKIE)
       .send({});
     expect(ok.status).toBe(200);
-    expect(ok.body.user.inbound_voice_line).toBe(true);
-    expect(harness.fakeUsers.users.get('usr_other')!.inbound_voice_line).not.toBe(true);
-    expect(target.inbound_voice_line).toBe(true);
+    expect(ok.body.user.inbound_voice_line).toBe(true); // the view still derives the badge
+    // Single-holder: the pointer now designates the target, not usr_other.
+    expect((await harness.fakeUsers.repo.getInboundVoiceLineHolder())!.userId).toBe(
+      TEST_ADMIN_USER.userId,
+    );
   });
 
   it('DELETE unassigns the holder (200)', async () => {
@@ -650,14 +654,15 @@ describe('inbound-voice-line assignment (admin, spec §6)', () => {
     const target = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     target.cell = '+15550167777';
     target.cell_verified_at = '2026-07-01T00:00:00.000Z';
-    target.inbound_voice_line = true;
+    await harness.fakeUsers.repo.assignInboundVoiceLine(target.userId); // holder via pointer
 
     const res = await request(harness.app)
       .delete(`/api/users/${TEST_ADMIN_USER.userId}/inbound-voice-line`)
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE);
     expect(res.status).toBe(200);
-    expect(target.inbound_voice_line).not.toBe(true);
+    // No holder remains after the clear.
+    expect(await harness.fakeUsers.repo.getInboundVoiceLineHolder()).toBeUndefined();
   });
 
   it('a VA cannot assign the inbound-voice-line (403)', async () => {
@@ -677,7 +682,7 @@ describe('inbound-voice-line assignment (admin, spec §6)', () => {
     const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
     admin.cell = '+15550168888';
     admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
-    admin.inbound_voice_line = true;
+    await harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId); // holder via pointer
     const res = await request(harness.app)
       .get('/api/users')
       .set('x-origin-verify', SECRET)

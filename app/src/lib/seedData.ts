@@ -10,7 +10,7 @@
 import { PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createDocumentClient } from './dynamo.js';
 import { tableName } from './config.js';
-import type { UserItem } from '../repos/usersRepo.js';
+import { HOLDER_POINTER_KEY, type UserItem } from '../repos/usersRepo.js';
 
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
 
@@ -321,13 +321,24 @@ export async function seedInboundVoiceLineFromFounderCell(
       users.find((u) => u.userId === 'user-0001') ??
       users.find((u) => u.role === 'admin');
     if (!founder) return false;
+    // SET the founder's verified cell on their user item...
     await doc.send(
       new UpdateCommand({
         TableName: usersTable,
         Key: { userId: founder.userId },
-        UpdateExpression:
-          'SET cell = :cell, cell_verified_at = :at, inbound_voice_line = :true',
-        ExpressionAttributeValues: { ':cell': founderCell, ':at': at, ':true': true },
+        UpdateExpression: 'SET cell = :cell, cell_verified_at = :at',
+        ExpressionAttributeValues: { ':cell': founderCell, ':at': at },
+      }),
+    );
+    // ...then establish the HOLDER via the single authoritative pointer (the
+    // HOLDER_POINTER_KEY sentinel row) rather than a per-user boolean. Idempotent
+    // (last-writer-wins on one field); mirrors usersRepo.assignInboundVoiceLine.
+    await doc.send(
+      new UpdateCommand({
+        TableName: usersTable,
+        Key: { userId: HOLDER_POINTER_KEY },
+        UpdateExpression: 'SET holder_user_id = :uid',
+        ExpressionAttributeValues: { ':uid': founder.userId },
       }),
     );
     // userId only — never the cell (PII).

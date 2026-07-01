@@ -331,4 +331,12 @@ describe('relay body/intro composition (M1.7)', () => {
     // No names → a neutral count phrasing.
     expect(composeIntroBody([undefined, undefined])).toMatch(/connected with 1 other person/);
   });
+
+  it('A2P/CTIA (spec §5): the intro is PREPENDED with business identity + opt-out', () => {
+    // Every intro (named or count-phrasing) leads with the registered brand + STOP.
+    for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
+      const body = composeIntroBody(names);
+      expect(body.startsWith('Tenant Place LLC. Reply STOP to opt out.')).toBe(true);
+    }
+  });
 });

@@ -37,6 +37,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import { RELAY_INTRO_IDENTITY, SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
@@ -62,9 +63,11 @@ const ANONYMOUS_SENDER_LABEL = 'A member';
 /**
  * FIX 2 — neutral team label prefixed on a TEAM-authored relay message (a
  * teammate posting into the thread from the dashboard). There is no member
- * sender, so the prefix must be this team label — NEVER a phone number.
+ * sender, so the prefix must be this team label — NEVER a phone number. A2P
+ * (spec §5): the SMS-facing sender label is the registered brand (single source
+ * of truth), never the internal "HousingChoice" name.
  */
-export const TEAM_SENDER_LABEL = 'Housing Choice';
+export const TEAM_SENDER_LABEL = SMS_BRAND_NAME;
 
 /**
  * FIX 2 — senderKey sentinel for a TEAM message: it matches no member key, so
@@ -146,25 +149,35 @@ export function composeRelayBody(senderName: string | undefined, body: string): 
 /**
  * Intro body naming everyone connected (M1.7). Uses member display names where
  * known, a neutral count phrasing otherwise — NEVER a phone number (PII). E.g.
- * "You're connected with Alice, Bob, and Carol on this number."
+ * "Tenant Place LLC. Reply STOP to opt out. You're connected with Alice, Bob,
+ * and Carol on this number."
+ *
+ * A2P (spec §5): the intro is a first-contact message, so it is PREPENDED with
+ * RELAY_INTRO_IDENTITY (business identity + "Reply STOP to opt out.") — today's
+ * intro carried neither. The identity comes from the single source of truth.
  */
 export function composeIntroBody(memberNames: (string | undefined)[]): string {
   const named = memberNames
     .map((n) => (n && n.trim().length > 0 ? n.trim() : undefined))
     .filter((n): n is string => n !== undefined);
-  if (named.length === 0) {
-    const others = Math.max(memberNames.length - 1, 0);
-    return others > 0
-      ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
-      : `You're now connected on this number. Reply here and the group sees it.`;
-  }
-  const list =
-    named.length === 1
-      ? named[0]
-      : named.length === 2
-        ? `${named[0]} and ${named[1]}`
-        : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
-  return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
+  const connection =
+    named.length === 0
+      ? (() => {
+          const others = Math.max(memberNames.length - 1, 0);
+          return others > 0
+            ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
+            : `You're now connected on this number. Reply here and the group sees it.`;
+        })()
+      : (() => {
+          const list =
+            named.length === 1
+              ? named[0]
+              : named.length === 2
+                ? `${named[0]} and ${named[1]}`
+                : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
+          return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
+        })();
+  return `${RELAY_INTRO_IDENTITY} ${connection}`;
 }
 
 export interface RelayIntroPayload {

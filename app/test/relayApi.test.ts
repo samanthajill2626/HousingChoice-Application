@@ -451,8 +451,8 @@ describe('relay-group API (M1.7)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
     expect(world.sent.some((s) => s.to === poolNumber)).toBe(false);
-    // Neutral team label prefix, NEVER a phone.
-    expect(world.sent.every((s) => s.body === 'Housing Choice: Showing is at 4pm')).toBe(true);
+    // Neutral team label prefix (the registered A2P brand — spec §5), NEVER a phone.
+    expect(world.sent.every((s) => s.body === 'Tenant Place LLC: Showing is at 4pm')).toBe(true);
   });
 
   it('FIX 2: POST a message to a CLOSED relay group → 409', async () => {

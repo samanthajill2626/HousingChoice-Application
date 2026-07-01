@@ -78,6 +78,7 @@ import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
 import { type ToursRepo } from '../repos/toursRepo.js';
+import { type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
@@ -145,6 +146,8 @@ export interface ApiRouterDeps {
   placementsRepo?: PlacementsRepo;
   /** Tours — injected in tests; default to the real repo. */
   toursRepo?: ToursRepo;
+  /** Tour reminders — injected in tests; default to the real repo. */
+  tourRemindersRepo?: TourRemindersRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -351,6 +354,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     createToursRouter({
       logger: deps.logger,
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

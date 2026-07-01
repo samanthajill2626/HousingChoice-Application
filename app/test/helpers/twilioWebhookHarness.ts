@@ -81,6 +81,7 @@ import {
   type TourItem,
   type ToursRepo,
 } from '../../src/repos/toursRepo.js';
+import { type TourReminderItem, type TourRemindersRepo } from '../../src/repos/tourRemindersRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import {
   type PushNotification,
@@ -189,6 +190,9 @@ export interface FakeWorld {
   /** In-memory tours (Tours feature), keyed by tourId. */
   toursMap: Map<string, TourItem>;
   toursRepo: ToursRepo;
+  /** In-memory tour reminders (Tours feature, Task 4), keyed by reminderId. */
+  tourRemindersMap: Map<string, TourReminderItem>;
+  tourRemindersRepo: TourRemindersRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1466,6 +1470,50 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  const tourRemindersMap = new Map<string, TourReminderItem>();
+  let reminderCounter = 0;
+  const tourRemindersRepo: TourRemindersRepo = {
+    async create(input) {
+      const now = new Date().toISOString();
+      const item: TourReminderItem = {
+        reminderId: `reminder-${++reminderCounter}`,
+        tourId: input.tourId,
+        kind: input.kind,
+        dueAt: input.dueAt,
+        _reminderPartition: 'reminders',
+        createdAt: now,
+      };
+      tourRemindersMap.set(item.reminderId, { ...item });
+      return { ...item };
+    },
+    async listByTour(tourId) {
+      return [...tourRemindersMap.values()]
+        .filter((r) => r.tourId === tourId)
+        .map((r) => ({ ...r }));
+    },
+    async listDue(now) {
+      return [...tourRemindersMap.values()]
+        .filter((r) => r.dueAt <= now && r.sentAt === undefined && r.canceledAt === undefined)
+        .map((r) => ({ ...r }));
+    },
+    async markSent(reminderId, sentAt) {
+      const r = tourRemindersMap.get(reminderId);
+      if (r && r.sentAt === undefined) {
+        r.sentAt = sentAt;
+        tourRemindersMap.set(reminderId, r);
+      }
+    },
+    async cancelForTour(tourId) {
+      const now = new Date().toISOString();
+      for (const r of tourRemindersMap.values()) {
+        if (r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined) {
+          r.canceledAt = now;
+          tourRemindersMap.set(r.reminderId, r);
+        }
+      }
+    },
+  };
+
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
@@ -1578,6 +1626,8 @@ export function createFakeWorld(): FakeWorld {
     mediaStore,
     toursMap,
     toursRepo,
+    tourRemindersMap,
+    tourRemindersRepo,
   };
 }
 
@@ -1674,6 +1724,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       listingSendsRepo: world.listingSendsRepo,
       broadcastsRepo: world.broadcastsRepo,
       toursRepo: world.toursRepo,
+      tourRemindersRepo: world.tourRemindersRepo,
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

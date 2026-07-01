@@ -335,6 +335,24 @@ export const TABLES: readonly TableSpec[] = [
     ],
   },
   {
+    // NEW in Tours feature (Tasks 4+): durable reminder rows for the
+    // tour-reminder poll job. The poll queries byDueAt (fixed 'reminders'
+    // partition, range=dueAt) for rows due at or before now; byTour lets
+    // cancel-for-tour enumerate all a tour's rows efficiently.
+    baseName: 'tourReminders',
+    hashKey: { name: 'reminderId', type: 'S' },
+    gsis: [
+      { indexName: 'byTour', hashKey: { name: 'tourId', type: 'S' } },
+      {
+        // Poll query: all pending reminders due at or before now.
+        // Fixed partition 'reminders' so a single-partition Query covers all rows.
+        indexName: 'byDueAt',
+        hashKey: { name: '_reminderPartition', type: 'S' },
+        rangeKey: { name: 'dueAt', type: 'S' },
+      },
+    ],
+  },
+  {
     // NEW in Tours feature (NOT in the doc §5 9-table model — README deviation):
     // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
     // from placements — a tenant stays `searching`; no touring stage. Three read

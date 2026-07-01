@@ -37,6 +37,8 @@ import {
   type ToursRepo,
   type TourType,
 } from '../repos/toursRepo.js';
+import { armTourReminders, cancelTourReminders } from '../jobs/tourReminders.js';
+import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 
 /** The three valid tour types. */
 const TOUR_TYPES: readonly TourType[] = ['self_guided', 'landlord_led', 'pm_team'];
@@ -66,11 +68,13 @@ const PATCH_ALLOWED = new Set(['scheduledAt', 'status', 'outcome', 'moveForward'
 export interface ToursRouterDeps {
   logger?: Logger;
   toursRepo?: ToursRepo;
+  tourRemindersRepo?: TourRemindersRepo;
 }
 
 export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -117,6 +121,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       scheduledAt: b['scheduledAt'] as string,
       tourType: b['tourType'] as TourType,
     });
+
+    // Arm the reminder ladder (best-effort side effect).
+    await armTourReminders(tour, new Date().toISOString(), { tourRemindersRepo: reminders, logger: log });
 
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
     res.status(201).json({ tour });
@@ -272,6 +279,16 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         return;
       }
       throw err;
+    }
+
+    // Reminder side effects after a successful patch.
+    if (newScheduledAt !== undefined) {
+      // Reschedule: cancel old reminders and re-arm with the new scheduledAt.
+      await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
+      await armTourReminders(tour, new Date().toISOString(), { tourRemindersRepo: reminders, logger: log });
+    } else if (patch['status'] === 'canceled' || patch['status'] === 'closed') {
+      // Terminal status: cancel all pending reminders.
+      await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
     }
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');

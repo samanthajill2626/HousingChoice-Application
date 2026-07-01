@@ -88,6 +88,36 @@ runWithContext(bootContext, () => {
   );
 });
 
+// Tour-reminder poll: runs every 60s, stateless (state is the DynamoDB rows).
+// Dynamic imports mirror the SQS consumer pattern above — DynamoDB client is
+// created lazily (at first poll) so the worker boots fast and errors surface
+// at poll time, not boot time. The setInterval is .unref()'d so it doesn't
+// prevent process exit on shutdown.
+{
+  const { createTourRemindersRepo } = await import('./repos/tourRemindersRepo.js');
+  const { createToursRepo } = await import('./repos/toursRepo.js');
+  const { createContactsRepo } = await import('./repos/contactsRepo.js');
+  const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createSendMessageService } = await import('./services/sendMessage.js');
+  const { runDueTourReminders } = await import('./jobs/tourReminders.js');
+
+  const tourReminderDeps = {
+    tourRemindersRepo: createTourRemindersRepo({ logger }),
+    toursRepo: createToursRepo({ logger }),
+    contactsRepo: createContactsRepo({ logger }),
+    conversationsRepo: createConversationsRepo({ logger }),
+    sendMessageService: createSendMessageService({ config, logger }),
+    logger,
+  };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runDueTourReminders(now, tourReminderDeps).catch((err: unknown) => {
+      logger.error({ err }, 'tour reminder poll error');
+    });
+  }, 60_000).unref();
+}
+
 // Keep the process alive until a shutdown signal arrives (also covers the
 // local mode where no poll loop is running).
 const keepAlive = setInterval(() => {

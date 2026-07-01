@@ -262,8 +262,8 @@ resource "aws_cloudwatch_metric_alarm" "disk_used" {
 # Host memory. Two-tier, both → the alerts SNS topic:
 #   warn:     mem_used_percent > 80% sustained 15 min (3 x 5-min) — slow leak/creep.
 #   critical: mem_used_percent > 90% for 5 min (1 x 5-min)        — acute near-OOM spike.
-# Data arrives once the CloudWatch agent is installed (Task 1); notBreaching keeps
-# them quiet before that / if the agent dies. On a 2 GB t4g.small the app+worker
+# The CloudWatch agent (installed via EC2 user_data) feeds mem_used_percent;
+# notBreaching keeps these quiet if the agent ever dies. On a 2 GB t4g.small the app+worker
 # Node containers make memory the real pressure point (OOM survived by
 # restart:unless-stopped; these alarms are the leading-indicator warning).
 resource "aws_cloudwatch_metric_alarm" "mem_used" {

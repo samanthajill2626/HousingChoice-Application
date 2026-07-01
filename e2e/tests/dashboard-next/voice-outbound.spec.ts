@@ -21,7 +21,15 @@
 //     the persisted `call` timeline entry (answered + recorded), and PII: no raw
 //     navigator/target phone in any stored label or leg URL.
 //
+// §9.8 (regression guard I-1): an outbound call where the target never answers
+// must NOT fire the missed-call auto-text nor push a missed-call to founders.
+// The /status handler guards this with `fresh.direction !== 'outbound'`. We
+// exercise it by directly POSTing a DialCallStatus=no-answer for the outbound
+// callSid (signature validation is disabled in the local e2e stack — the app
+// logs a warning but proceeds).
+//
 // Unique phones per case (helper below) so cases never collide within a run.
+import { createHmac } from 'node:crypto';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import {
   placeCall,
@@ -32,6 +40,53 @@ import {
 } from '../../fixtures/fakeVoice.js';
 import { getOutbox } from '../../fixtures/outbox.js';
 import { reseed } from '../../fixtures/reseed.js';
+
+// The app's real address (not the dashboard proxy — webhooks go direct to the app).
+const APP_URL = process.env['E2E_APP_URL'] ?? 'http://localhost:8080';
+const APP_PUBLIC_BASE_URL = process.env['PUBLIC_BASE_URL'] ?? 'http://localhost:5173';
+const TWILIO_AUTH_TOKEN = process.env['TWILIO_AUTH_TOKEN'] ?? 'hermetic-shared-twilio-token';
+const ORIGIN_SECRET = process.env['CF_ORIGIN_SECRET'] ?? 'dev-placeholder-not-a-secret';
+
+/** Sign X-Twilio-Signature exactly as Twilio does (matches fakeTwilio.ts / signer.ts). */
+function signVoiceWebhook(path: string, params: Record<string, string>): string {
+  const url = `${APP_PUBLIC_BASE_URL}${path}`;
+  const keys = Object.keys(params).sort();
+  let data = url;
+  for (const k of keys) data += k + params[k];
+  return createHmac('sha1', TWILIO_AUTH_TOKEN).update(Buffer.from(data, 'utf-8')).digest('base64');
+}
+
+/**
+ * POST the /voice/status webhook directly to the app for the given callSid,
+ * simulating a terminal <Dial action> summary from Twilio. Used by the §9.8
+ * regression guard to inject a DialCallStatus=no-answer for an outbound call
+ * without going through the fake engine's auto-run (which always answered).
+ */
+async function postVoiceStatusCallback(
+  request: APIRequestContext,
+  callSid: string,
+  dialCallStatus: string,
+  dialCallDuration: string = '0',
+): Promise<number> {
+  const path = '/webhooks/twilio/voice/status';
+  const params: Record<string, string> = {
+    CallSid: callSid,
+    CallStatus: dialCallStatus,
+    DialCallStatus: dialCallStatus,
+    DialCallDuration: dialCallDuration,
+    ApiVersion: '2010-04-01',
+  };
+  const signature = signVoiceWebhook(path, params);
+  const res = await request.post(`${APP_URL}${path}`, {
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      'x-twilio-signature': signature,
+      'x-origin-verify': ORIGIN_SECRET,
+    },
+    form: params,
+  });
+  return res.status();
+}
 
 const NEXT = 'http://localhost:5174';
 
@@ -265,11 +320,12 @@ test('§9.3 do-not-call contact → 409 contact_voice_opted_out (no call) and th
   expect((await listCalls(api)).length).toBe(before);
 
   // UI guard: the Call control is DISABLED with a "Do not call" note.
+  // The note uses role="status" (<span role="status">) in CallMenu.tsx.
   await page.goto(`${NEXT}/contacts/${contactId}`);
   await expect(page.getByRole('heading', { name: 'Details' })).toBeVisible();
   const callBtn = page.getByRole('button', { name: /Call/i });
   await expect(callBtn).toBeDisabled();
-  await expect(page.getByRole('note').filter({ hasText: /Do not call/i })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: /Do not call/i })).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
@@ -449,4 +505,82 @@ test('§9.7 PII: the target appears only as a dialed <Number> leg — never in a
   const calls = await callTimeline(api, contactId);
   const serialized = JSON.stringify(calls);
   expect(serialized).not.toContain(navCell);
+});
+
+// ---------------------------------------------------------------------------
+// §9.8 — Outbound-missed regression guard (fix I-1)
+//
+// An outbound call where the target NEVER answers must NOT:
+//   • send the contact a "we missed your call" auto-text, AND
+//   • push a missed-call notification to the inbound-line holders.
+//
+// Root cause: the /status handler's `onFounderBridgeMissed` was previously
+// keyed only on `masked:false + terminal miss`, which incorrectly fired for
+// outbound calls too. The fix adds `direction !== 'outbound'`. This test
+// exercises the guarded path by:
+//   1. Originating a real call → callSid + outbound DB entry with direction:outbound.
+//   2. Injecting DialCallStatus=no-answer directly via the signed /voice/status
+//      webhook (signature validation is disabled in the local e2e stack — the
+//      handler still processes it, logs a warning, and proceeds).
+//   3. Asserting the handler returned 200 (it ran) AND /__dev/outbox records
+//      NO outbound text to the contact's phone after the miss.
+//
+// Why direct-POST rather than the fake engine: the engine's `pressDigit` on
+// an outbound call drives the full bridge chain synchronously and always marks
+// the target answered (no per-leg whisper to gate the target). The only way to
+// produce a DialCallStatus=no-answer for an outbound call in the engine would
+// be to use `hangup()` (navigator never presses 1), which resolves the pre-dial
+// gate locally WITHOUT posting the /status webhook — so the handler never fires
+// at all, and the regression is untestable via the fake. Direct-POSTing the
+// webhook exercises the exact code path that was broken before the fix.
+// ---------------------------------------------------------------------------
+test('§9.8 outbound-missed regression guard (I-1): a no-answer outbound call must NOT fire the missed-call auto-text or founder push', async ({
+  page,
+}) => {
+  const api = page.request;
+  await devLoginAs(page, 'va@example.com');
+
+  // Verify the navigator's cell so the originate route doesn't refuse.
+  const navCell = uniquePhone();
+  await verifyCell(api, navCell);
+
+  // A fresh contact to call (with a distinct phone for outbox disambiguation).
+  const targetPhone = uniquePhone();
+  const { contactId } = await createContact(api, { phone: targetPhone });
+
+  // Record a timestamp BEFORE the call so the `since` filter excludes any
+  // pre-existing outbox entries for this phone.
+  const callStartedAt = new Date().toISOString();
+
+  // Originate the call → callSid + outbound DB entry with callStatus:ringing.
+  const originateRes = await api.post(`${NEXT}/api/contacts/${contactId}/call`, { data: {} });
+  expect(originateRes.status(), await originateRes.text()).toBe(200);
+  const { callSid } = (await originateRes.json()) as { callSid: string };
+  expect(typeof callSid).toBe('string');
+  expect(callSid.length).toBeGreaterThan(0);
+
+  // Inject a terminal no-answer <Dial action> summary directly. This is the
+  // scenario that used to trigger `onFounderBridgeMissed` before the fix: a
+  // terminal miss for a masked:false call entry. The `direction !== 'outbound'`
+  // guard in voice.ts must block it now. The /status handler processes the
+  // webhook synchronously before responding, so the app has fully handled the
+  // miss before this call returns.
+  const statusCode = await postVoiceStatusCallback(api, callSid, 'no-answer', '0');
+  // The handler must ack (200 with valid TwiML) regardless of direction.
+  // A non-200 here means the webhook was rejected (misconfiguration), not that
+  // the auto-text fired — but it would also mean the test is inconclusive.
+  expect(statusCode).toBe(200);
+
+  // THE REGRESSION INVARIANT: /__dev/outbox must NOT have sent the contact any
+  // text since the call started. The `since` filter is RFC-3339 compatible so it
+  // excludes any noise from prior tests.
+  // Allow a brief moment for any fire-and-forget async work to settle before
+  // asserting the absence of a text (the prior missed-call auto-text was queued
+  // as a job — this gap lets a broken implementation betray itself).
+  await new Promise((r) => setTimeout(r, 2_000));
+  const outboxAfter = await getOutbox(api, { to: targetPhone, since: callStartedAt });
+  expect(
+    outboxAfter,
+    'BUG REGRESSION (I-1): a missed outbound call fired the "we missed you" auto-text — the `direction !== "outbound"` guard in /voice/status is broken',
+  ).toHaveLength(0);
 });

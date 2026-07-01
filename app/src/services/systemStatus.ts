@@ -64,8 +64,6 @@ export interface SystemFlags {
   smsSendingEnabled: boolean;
   /** A2P kill-switch: relay number provisioning enabled (false = expected pre-A2P). */
   relayLiveProvisioning: boolean;
-  /** Whether a founder cell is configured — boolean ONLY, never the number. */
-  founderCellSet: boolean;
   /** Whether Web Push (VAPID) is configured in this env. */
   pushConfigured: boolean;
   /** The outbound messaging driver as displayed (twilio | console | mock). */
@@ -128,7 +126,6 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         env: config.appEnv,
         smsSendingEnabled: config.smsSendingEnabled,
         relayLiveProvisioning: config.relayLiveProvisioning,
-        founderCellSet: config.founderCell !== undefined,
         pushConfigured: isPushConfigured(config),
         messagingDriver: messagingDriverDisplay(config),
       };

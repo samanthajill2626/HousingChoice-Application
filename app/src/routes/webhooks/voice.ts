@@ -275,21 +275,17 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const businessCallerId = config.ourPhoneNumbers[0];
 
   // Boot readiness signal (PII-safe — booleans only, never the cell itself):
-  // founder call-triage needs BOTH a business number (caller ID) and a founder
-  // cell to dial. Missing either makes every inbound business call degrade to
-  // the "text us" fallback (see handleFounderTriage) — log it loudly at startup
-  // so a missing/unpushed FOUNDER_CELL is obvious without a live test call.
-  const founderTriageReady = businessCallerId !== undefined && config.founderCell !== undefined;
+  // inbound call-triage bridges to the assigned inbound-voice-line HOLDER's
+  // verified cell — that holder is RUNTIME DATA (a user record), not boot config,
+  // so it can't be checked at startup. What IS boot config is the business number
+  // used as caller ID; without it every inbound business call degrades to the
+  // "text us" fallback (see handleFounderTriage). Log it so a missing
+  // OUR_PHONE_NUMBERS[0] is obvious without a live test call.
   log.info(
-    {
-      founderTriage: founderTriageReady ? 'enabled' : 'disabled',
-      hasBusinessNumber: businessCallerId !== undefined,
-      hasFounderCell: config.founderCell !== undefined,
-    },
-    founderTriageReady
-      ? 'voice: founder call-triage ENABLED'
-      : 'voice: founder call-triage DISABLED — inbound business calls will play the text-us fallback ' +
-          '(needs OUR_PHONE_NUMBERS[0] + FOUNDER_CELL; push to SSM + redeploy)',
+    { hasBusinessNumber: businessCallerId !== undefined },
+    `voice: business number ${
+      businessCallerId !== undefined ? 'configured' : 'NOT configured (OUR_PHONE_NUMBERS[0])'
+    }; inbound bridges to the assigned inbound-voice-line holder's verified cell`,
   );
 
   const router = Router();
@@ -383,15 +379,15 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     const { CallSid, From } = call;
 
     // Voice Phase 1 (spec §6): the dialed cell is the INBOUND-VOICE-LINE holder's
-    // VERIFIED cell, replacing the FOUNDER_CELL env — which stays a DEPRECATED
-    // runtime fallback when no holder is set (or the holder's cell is unverified).
-    // Resolving the holder is best-effort: a lookup hiccup falls back to
-    // config.founderCell so a transient users-table read never breaks inbound.
+    // VERIFIED cell — ONLY that. There is no env-var fallback: if no holder is
+    // assigned (or the holder's cell is unverified) we DO NOT bridge. Resolving
+    // the holder is best-effort — a users-table read hiccup is treated as "no
+    // holder" and flows into the error + text-us path below.
     let holder: UserItem | undefined;
     try {
       holder = await users.getInboundVoiceLineHolder();
     } catch (err) {
-      log.error({ err, callSid: CallSid }, 'founder triage: resolving the inbound-voice-line holder failed — falling back to FOUNDER_CELL');
+      log.error({ err, callSid: CallSid }, 'inbound voice: resolving the inbound-voice-line holder failed — treating as no holder configured');
     }
     const holderCell =
       holder !== undefined &&
@@ -399,21 +395,21 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       typeof holder.cell === 'string' && holder.cell.length > 0
         ? holder.cell
         : undefined;
-    const dialedCell = holderCell ?? config.founderCell;
 
-    // No business number to use as caller ID, or no cell to dial → we CANNOT
-    // bridge without leaking the caller's From / having a target. Degrade to a
-    // minimal masked greeting (never a 5xx, never a number leak). Operator step:
-    // set OUR_PHONE_NUMBERS + assign an inbound-voice-line holder (or FOUNDER_CELL).
-    if (businessCallerId === undefined || dialedCell === undefined) {
-      log.warn(
+    // No business number to use as caller ID, or no verified holder to dial → we
+    // CANNOT bridge (no target, or would leak the caller's From). This is an
+    // OPERATOR MISCONFIGURATION, not a normal degrade: emit an ERROR (pino ≥50 →
+    // the hc-<env>-error-logs alarm fires, so ops is notified) and answer the
+    // caller with the graceful text-us greeting. NEVER a 5xx (Twilio would retry
+    // the webhook forever) and NEVER a raw number in the log (PII, §9).
+    if (businessCallerId === undefined || holderCell === undefined) {
+      log.error(
         {
           callSid: CallSid,
           hasBusinessNumber: businessCallerId !== undefined,
-          hasHolderCell: holderCell !== undefined,
-          hasFounderCell: config.founderCell !== undefined,
+          hasVerifiedHolder: holderCell !== undefined,
         },
-        'founder triage: no business caller ID / dialed cell configured — minimal greeting, no bridge',
+        'inbound voice: NO inbound-voice-line holder with a verified cell is configured — inbound call NOT bridged. Assign an inbound voice line in Settings > Team (the user must verify their cell first).',
       );
       sendTwiml(
         res,
@@ -423,6 +419,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       );
       return;
     }
+    // Past the guard: the dialed cell is the holder's verified cell (narrowed to
+    // a defined string — there is no env-var fallback).
+    const dialedCell = holderCell;
 
     // SELF-CALL GUARD: the caller IS the dialed cell (the holder dialing the
     // business line, or a test placed from their own phone). Bridging them to
@@ -515,10 +514,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // The push (holder's own device) surfaces the caller's number when the
     // caller is UNKNOWN; the stored entry above keeps the masked callerLabel.
     // Voice Phase 1 (spec §6): the pre-ring targets the HOLDER (the user whose
-    // cell is ringing), not all admins. When no holder is set (the deprecated
-    // FOUNDER_CELL fallback path), there is no user to push — the bridge still
-    // forms; the missed-call handling covers the rest.
-    if (holder !== undefined && holderCell !== undefined) {
+    // cell is ringing), not all admins. By here holderCell is defined (the
+    // no-holder path returned above), so `holder` is defined too — the guard is
+    // belt-and-braces to keep the type narrow.
+    if (holder !== undefined) {
       const holderUserId = holder.userId;
       void sendPreRingPush(
         holderUserId,
@@ -528,11 +527,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       ).catch((err: unknown) => {
         log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
       });
-    } else {
-      // No holder whose VERIFIED cell we're dialing (the deprecated FOUNDER_CELL
-      // fallback path) → there is no user device to pre-ring. The bridge still
-      // forms; the missed-call handling covers the rest.
-      log.info({ callSid: CallSid }, 'founder triage: not dialing a holder cell — no pre-ring push (FOUNDER_CELL fallback)');
     }
 
     // Build the founder-bridge TwiML. callerId is ALWAYS the business number,

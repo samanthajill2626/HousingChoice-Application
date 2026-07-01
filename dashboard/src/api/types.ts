@@ -109,8 +109,6 @@ export interface SystemFlags {
   smsSendingEnabled: boolean;
   /** A2P kill-switch: relay number provisioning enabled (false = expected pre-A2P). */
   relayLiveProvisioning: boolean;
-  /** Whether a founder cell is configured (boolean only — never the number). */
-  founderCellSet: boolean;
   /** Whether Web Push (VAPID) is configured in this env. */
   pushConfigured: boolean;
   /** Outbound messaging driver as displayed. `mock` = the twilio driver

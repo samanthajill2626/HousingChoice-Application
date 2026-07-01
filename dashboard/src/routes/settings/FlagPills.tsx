@@ -3,8 +3,8 @@
 // alone). The two A2P kill-switches (smsSendingEnabled, relayLiveProvisioning),
 // when OFF, show an amber "Off · pre-A2P" pill — the EXPECTED pre-launch state,
 // deliberately distinct from a red/error pill and clearly labeled. The
-// founder-cell + push flags read on/off; env + driver are info pills. Flags
-// always load (no AWS call).
+// the push flag reads on/off; env + driver are info pills. Flags always load
+// (no AWS call).
 import { useSystemFlags } from './useSystemStatus.js';
 import { Button, Spinner } from '../../ui/index.js';
 import styles from './SystemStatusSection.module.css';
@@ -63,11 +63,6 @@ export function FlagPills(): React.JSX.Element {
             label="Relay provisioning"
             state={flags.relayLiveProvisioning ? 'On' : 'Off · pre-A2P'}
             tone={flags.relayLiveProvisioning ? 'on' : 'preA2p'}
-          />
-          <Pill
-            label="Founder cell"
-            state={flags.founderCellSet ? 'Set' : 'Not set'}
-            tone={flags.founderCellSet ? 'on' : 'off'}
           />
           <Pill
             label="Push notifications"

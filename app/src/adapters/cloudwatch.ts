@@ -61,6 +61,11 @@ function boundedClientConfig(region: string): {
 const ERROR_SCAN_MAX_PAGES = 5;
 const ERROR_SCAN_MAX_EVENTS = 500;
 
+/** CloudWatch filter patterns for OOM lines (unstructured — NOT pino JSON, so the
+ *  `{ $.level >= 50 }` error query never matches them). `?term` = OR match. */
+export const OOM_APP_FILTER_PATTERN = '?"JavaScript heap out of memory" ?"Reached heap limit"';
+export const OOM_SYSTEM_FILTER_PATTERN = '?"Out of memory: Killed process" ?"oom-kill:" ?"oom_reaper"';
+
 /** One alarm, projected to the view the dashboard renders. */
 export interface AlarmView {
   name: string;
@@ -92,6 +97,12 @@ export interface CloudWatchClientSeam {
    * NEWEST `limit` PII-safe projections, NEWEST-FIRST.
    */
   filterErrorEvents(logGroup: string, sinceMs: number, limit: number): Promise<ErrorEventView[]>;
+  /**
+   * FilterLogEvents on `logGroup` with an ARBITRARY `filterPattern` since `sinceMs`,
+   * newest-first, capped at `limit`. Same bounded paged scan as filterErrorEvents.
+   * Used to surface OOM lines (raw text) that the pino level>=50 query misses.
+   */
+  filterEventsByPattern(logGroup: string, sinceMs: number, limit: number, filterPattern: string): Promise<ErrorEventView[]>;
 }
 
 /** Map a CloudWatch StateValue to the three-value view enum. */
@@ -168,6 +179,48 @@ export interface CreateCloudWatchClientDeps {
 }
 
 /**
+ * Bounded paged scan shared by both filterErrorEvents and filterEventsByPattern.
+ * Pages through FilterLogEvents without an SDK-side limit (FilterLogEvents returns
+ * oldest-first per page, so a small limit would surface the oldest events and miss
+ * the newest). Accumulates up to the scan budget, then sorts newest-first and
+ * slices to `limit`. The scan budget caps the cost: at most ERROR_SCAN_MAX_PAGES
+ * pages OR ERROR_SCAN_MAX_EVENTS events, whichever comes first.
+ */
+async function scanFiltered(
+  logs: CloudWatchLogsClient,
+  logGroup: string,
+  sinceMs: number,
+  limit: number,
+  filterPattern: string,
+): Promise<ErrorEventView[]> {
+  const projected: ErrorEventView[] = [];
+  let nextToken: string | undefined;
+  let pages = 0;
+  do {
+    const out = await logs.send(
+      new FilterLogEventsCommand({
+        logGroupName: logGroup,
+        startTime: sinceMs,
+        filterPattern,
+        nextToken,
+      }),
+    );
+    for (const e of out.events ?? []) {
+      projected.push(projectErrorEvent(e.message ?? '', e.timestamp ?? Date.now()));
+    }
+    nextToken = out.nextToken;
+    pages += 1;
+  } while (
+    nextToken !== undefined &&
+    pages < ERROR_SCAN_MAX_PAGES &&
+    projected.length < ERROR_SCAN_MAX_EVENTS
+  );
+  // Newest-first, then the newest `limit`.
+  projected.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
+  return projected.slice(0, limit);
+}
+
+/**
  * Construct the CloudWatch seam over the two SDK clients. The clients use
  * `region: config.awsRegion` and the ambient (instance-role) credentials when
  * deployed; tests inject fakes so neither AWS nor credential resolution is
@@ -190,37 +243,13 @@ export function createCloudWatchClient(deps: CreateCloudWatchClientDeps): CloudW
       }));
     },
 
-    async filterErrorEvents(logGroup, sinceMs, limit) {
-      // Bounded wider scan: page through FilterLogEvents WITHOUT a small SDK-side
-      // `limit` (it returns oldest-first per page, so a 25-cap would surface the
-      // 25 *oldest* in-window events and miss the newest). Accumulate up to the
-      // scan budget, then sort descending + slice the newest `limit` locally.
-      const projected: ErrorEventView[] = [];
-      let nextToken: string | undefined;
-      let pages = 0;
-      do {
-        const out = await logs.send(
-          new FilterLogEventsCommand({
-            logGroupName: logGroup,
-            startTime: sinceMs,
-            // pino stamps a numeric `level`; ≥ 50 is error/fatal.
-            filterPattern: '{ $.level >= 50 }',
-            nextToken,
-          }),
-        );
-        for (const e of out.events ?? []) {
-          projected.push(projectErrorEvent(e.message ?? '', e.timestamp ?? Date.now()));
-        }
-        nextToken = out.nextToken;
-        pages += 1;
-      } while (
-        nextToken !== undefined &&
-        pages < ERROR_SCAN_MAX_PAGES &&
-        projected.length < ERROR_SCAN_MAX_EVENTS
-      );
-      // Newest-first, then the newest `limit`.
-      projected.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
-      return projected.slice(0, limit);
+    filterErrorEvents(logGroup, sinceMs, limit) {
+      // pino stamps a numeric `level`; ≥ 50 is error/fatal.
+      return scanFiltered(logs, logGroup, sinceMs, limit, '{ $.level >= 50 }');
+    },
+
+    filterEventsByPattern(logGroup, sinceMs, limit, filterPattern) {
+      return scanFiltered(logs, logGroup, sinceMs, limit, filterPattern);
     },
   };
 }

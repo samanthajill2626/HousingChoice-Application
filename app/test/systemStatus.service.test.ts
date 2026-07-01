@@ -13,7 +13,7 @@ import {
   isSystemErrorWindow,
   type SystemStatusServiceDeps,
 } from '../src/services/systemStatus.js';
-import { type CloudWatchClientSeam } from '../src/adapters/cloudwatch.js';
+import { type CloudWatchClientSeam, OOM_APP_FILTER_PATTERN, OOM_SYSTEM_FILTER_PATTERN } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
 const FOUNDER = '+15555550911';
@@ -29,13 +29,18 @@ function deployedConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return { ...base, appEnv: 'dev', messagingDriver: 'twilio', ...overrides };
 }
 
-/** A fake seam whose two reads are independently controllable spies. */
+/** A fake seam whose reads are independently controllable spies. */
 function fakeSeam(
   impl: Partial<CloudWatchClientSeam> = {},
-): CloudWatchClientSeam & { describeAlarms: ReturnType<typeof vi.fn>; filterErrorEvents: ReturnType<typeof vi.fn> } {
+): CloudWatchClientSeam & {
+  describeAlarms: ReturnType<typeof vi.fn>;
+  filterErrorEvents: ReturnType<typeof vi.fn>;
+  filterEventsByPattern: ReturnType<typeof vi.fn>;
+} {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
     filterErrorEvents: vi.fn(impl.filterErrorEvents ?? (async () => [])),
+    filterEventsByPattern: vi.fn(impl.filterEventsByPattern ?? (async () => [])),
   };
 }
 
@@ -230,6 +235,94 @@ describe('systemStatus.getErrors — degradation + window', () => {
     await service.getErrors('7d');
     expect(seam.filterErrorEvents.mock.calls[1]![1]).toBe(now - 7 * 24 * 60 * 60 * 1000);
     vi.restoreAllMocks();
+  });
+
+  it('merges pino errors + OOM (app/worker V8 + system kernel), newest-first, synthesized labels', async () => {
+    // System OOM (from systemLogGroupName) → "Kernel OOM-kill"
+    // App/worker OOM (OOM_APP_FILTER_PATTERN) → "V8 heap out of memory"
+    // Pino error → keeps its real projected message
+    const config = deployedConfig();
+    const seam = fakeSeam({
+      filterErrorEvents: async () => [
+        { timestamp: '2026-07-01T00:00:01Z', level: 50, message: 'pino error', correlationId: 'c1' },
+      ],
+      filterEventsByPattern: async (group, _sinceMs, _limit, pattern) => {
+        if (group === config.systemLogGroupName) {
+          return [{ timestamp: '2026-07-01T00:00:03Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+        }
+        if (pattern === OOM_APP_FILTER_PATTERN) {
+          return [{ timestamp: '2026-07-01T00:00:02Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+        }
+        return [];
+      },
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    // Newest-first; system OOM → "Kernel OOM-kill"; app/worker OOM → "V8 heap out of memory"; pino error unchanged.
+    expect(result.events.map((e) => e.message)).toEqual([
+      'Kernel OOM-kill',        // 03Z — newest
+      'V8 heap out of memory',  // 02Z — app OOM (or worker, same pattern)
+      'pino error',             // 01Z — pino, unchanged
+    ]);
+    // All 4 queries were issued (Promise.all): filterErrorEvents once + filterEventsByPattern 3×
+    expect(seam.filterErrorEvents).toHaveBeenCalledTimes(1);
+    expect(seam.filterEventsByPattern).toHaveBeenCalledTimes(3);
+    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.errorLogGroupName, expect.any(Number), 25, OOM_APP_FILTER_PATTERN);
+    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.workerLogGroupName, expect.any(Number), 25, OOM_APP_FILTER_PATTERN);
+    expect(seam.filterEventsByPattern).toHaveBeenCalledWith(config.systemLogGroupName, expect.any(Number), 25, OOM_SYSTEM_FILTER_PATTERN);
+  });
+
+  it('OOM events from the worker group carry the V8 synthesized label', async () => {
+    const config = deployedConfig();
+    const seam = fakeSeam({
+      filterEventsByPattern: async (group, _sinceMs, _limit, pattern) => {
+        if (group === config.workerLogGroupName && pattern === OOM_APP_FILTER_PATTERN) {
+          return [{ timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null }];
+        }
+        return [];
+      },
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.message).toBe('V8 heap out of memory');
+  });
+
+  it('deduplicates OOM events that appear in both app and worker groups (same timestamp+label)', async () => {
+    const config = deployedConfig();
+    const dup = { timestamp: '2026-07-01T00:01:00Z', level: 50, message: '(unparseable log line)', correlationId: null };
+    const seam = fakeSeam({
+      filterEventsByPattern: async (_group, _sinceMs, _limit, pattern) => {
+        if (pattern === OOM_APP_FILTER_PATTERN) return [dup];
+        return [];
+      },
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    // Both app and worker OOM queries return an event with the same synthesized label+timestamp → deduped to 1.
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.message).toBe('V8 heap out of memory');
+  });
+
+  it('local env: unavailable_local WITH NO filterEventsByPattern call (OOM queries also skipped)', async () => {
+    const seam = fakeSeam();
+    const result = await makeService({ config: localConfig(), cloudwatch: seam }).getErrors();
+    expect(result).toEqual({ available: false, reason: 'unavailable_local' });
+    expect(seam.filterErrorEvents).not.toHaveBeenCalled();
+    expect(seam.filterEventsByPattern).not.toHaveBeenCalled();
+  });
+
+  it('deployed + any OOM query throws → cloudwatch_error (degrade-safe, no exception escapes)', async () => {
+    const seam = fakeSeam({
+      filterEventsByPattern: async () => {
+        throw new Error('ThrottlingException');
+      },
+    });
+    const result = await makeService({ config: deployedConfig(), cloudwatch: seam }).getErrors('1h');
+    expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
   });
 });
 

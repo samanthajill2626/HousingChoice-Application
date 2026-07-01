@@ -25,6 +25,18 @@ variable "disk_used_alarm_threshold" {
   default     = 80
 }
 
+variable "mem_used_warn_threshold" {
+  description = "mem_used_percent (CloudWatch agent) that trips the WARNING memory alarm (sustained 15 min). 2 GB t4g.small runs the app+worker Node containers."
+  type        = number
+  default     = 80
+}
+
+variable "mem_used_critical_threshold" {
+  description = "mem_used_percent (CloudWatch agent) that trips the CRITICAL memory alarm (5 min) — near-OOM acute spike."
+  type        = number
+  default     = 90
+}
+
 # --- Messaging delivery alarms (doc §9 "Webhook failures" / "Send failures") ---
 # Defaults carry the operating thresholds so the env stack does NOT pass them.
 

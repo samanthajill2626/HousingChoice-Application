@@ -45,3 +45,15 @@ landlord-onboarding e2e suite models unit creation as **API setup** (`teamCreate
 inbound MMS from a disallowed host logs `MediaFetchRefusedError`). Both UI builds remain
 UNBUILT and this issue stays **open**: (1) a "New unit for this landlord" form on the landlord
 page, (2) attaching inbound MMS media to a unit. No product code was added for either.
+
+**Scope sharpened (2026-07-01).** Confirmed against the code, and the two halves are now split:
+- **This issue = the create-unit-UI gap (concern #1).** Precise state: a properties **list**
+  (`ListingsList`), property **detail + edit** (`ListingDetail`/`ListingEditForm`), the
+  **landlord-creation** dialog (New contact → Landlord), and the **placement-creation** form all
+  exist — the *only* gap is a **create/originate a new unit** entry point (no "New property"
+  button, no `/listings/new`, no "Add a unit" on the landlord page). `POST /api/units` is the
+  sole path today.
+- **Concern #2 (attach inbound MMS media to a unit) is broken out to
+  [[inbound-media-attach-to-unit]].** Note the product decision: that attach is **manual/
+  user-driven**, NOT an automatic "every inbound media lands on the unit."
+- Sending media outbound is a separate capability tracked in [[outbound-mms-send-path]].

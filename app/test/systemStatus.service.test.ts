@@ -29,13 +29,14 @@ function deployedConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return { ...base, appEnv: 'dev', messagingDriver: 'twilio', ...overrides };
 }
 
-/** A fake seam whose two reads are independently controllable spies. */
+/** A fake seam whose reads are independently controllable spies. */
 function fakeSeam(
   impl: Partial<CloudWatchClientSeam> = {},
 ): CloudWatchClientSeam & { describeAlarms: ReturnType<typeof vi.fn>; filterErrorEvents: ReturnType<typeof vi.fn> } {
   return {
     describeAlarms: vi.fn(impl.describeAlarms ?? (async () => [])),
     filterErrorEvents: vi.fn(impl.filterErrorEvents ?? (async () => [])),
+    filterEventsByPattern: vi.fn(impl.filterEventsByPattern ?? (async () => [])),
   };
 }
 

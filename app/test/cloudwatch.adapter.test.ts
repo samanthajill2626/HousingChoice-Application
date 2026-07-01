@@ -14,7 +14,11 @@
 import { DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
 import { FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { describe, expect, it, vi } from 'vitest';
-import { createCloudWatchClient } from '../src/adapters/cloudwatch.js';
+import {
+  createCloudWatchClient,
+  OOM_APP_FILTER_PATTERN,
+  OOM_SYSTEM_FILTER_PATTERN,
+} from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
 const CONFIG: AppConfig = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: 'x' });
@@ -237,5 +241,64 @@ describe('cloudwatch adapter — filterErrorEvents', () => {
     const events = await seam.filterErrorEvents('/hc/dev/app', 0, 25);
     expect(events[0]!.message).toBe('aliased');
     expect(events[0]!.correlationId).toBeNull();
+  });
+});
+
+describe('cloudwatch adapter — filterEventsByPattern + OOM constants', () => {
+  it('filterEventsByPattern passes the pattern through and projects raw (non-JSON) OOM lines to default level 50', async () => {
+    const sent: unknown[] = [];
+    const logs = {
+      send: vi.fn(async (cmd: { input: unknown }) => {
+        sent.push(cmd.input);
+        return {
+          events: [
+            { message: 'Out of memory: Killed process 1234 (node)', timestamp: 1000 },
+          ],
+        };
+      }),
+    };
+    const seam = createCloudWatchClient({
+      config: CONFIG,
+      logs: logs as never,
+      cloudwatch: fakeCw({}) as never,
+    });
+
+    const events = await seam.filterEventsByPattern('/hc/dev/system', 0, 25, OOM_SYSTEM_FILTER_PATTERN);
+
+    // The pattern was passed through to the SDK request.
+    expect((sent[0] as { filterPattern: string }).filterPattern).toBe(OOM_SYSTEM_FILTER_PATTERN);
+    expect(events).toHaveLength(1);
+    // Non-JSON OOM lines degrade to the safe placeholder (PII-safety rule: raw text never surfaced).
+    // The projector still assigns level 50 as the default for non-JSON lines.
+    expect(events[0]!.message).toBe('(unparseable log line)');
+    expect(events[0]!.level).toBe(50);
+  });
+
+  it('filterErrorEvents still uses the pino level>=50 JSON pattern', async () => {
+    const sent: unknown[] = [];
+    const logs = {
+      send: vi.fn(async (cmd: { input: unknown }) => {
+        sent.push(cmd.input);
+        return { events: [] };
+      }),
+    };
+    const seam = createCloudWatchClient({
+      config: CONFIG,
+      logs: logs as never,
+      cloudwatch: fakeCw({}) as never,
+    });
+    await seam.filterErrorEvents('/hc/dev/app', 0, 25);
+    expect((sent[0] as { filterPattern: string }).filterPattern).toBe('{ $.level >= 50 }');
+  });
+
+  it('OOM_APP_FILTER_PATTERN covers JS heap OOM terms', () => {
+    expect(OOM_APP_FILTER_PATTERN).toContain('JavaScript heap out of memory');
+    expect(OOM_APP_FILTER_PATTERN).toContain('Reached heap limit');
+  });
+
+  it('OOM_SYSTEM_FILTER_PATTERN covers kernel OOM-killer terms', () => {
+    expect(OOM_SYSTEM_FILTER_PATTERN).toContain('Out of memory: Killed process');
+    expect(OOM_SYSTEM_FILTER_PATTERN).toContain('oom-kill:');
+    expect(OOM_SYSTEM_FILTER_PATTERN).toContain('oom_reaper');
   });
 });

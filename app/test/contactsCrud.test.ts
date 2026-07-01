@@ -185,3 +185,100 @@ describe('POST /api/contacts — manual create', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('POST /api/contacts — A2P/CTIA consent capture (spec §3.3)', () => {
+  const CONSENT_AT = '2026-06-29T12:00:00.000Z';
+
+  it('accepts a HUMAN consent_method + at + note and stamps consent_captured_by from the SESSION', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        type: 'tenant',
+        firstName: 'May',
+        phone: '(555) 010-7100',
+        consent_method: 'verbal_in_person',
+        consent_at: CONSENT_AT,
+        consent_note: 'said OK to texts at fair',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.contact).toMatchObject({
+      consent_method: 'verbal_in_person',
+      consent_at: CONSENT_AT,
+      consent_note: 'said OK to texts at fair',
+      // server-stamped, NOT client-supplied
+      consent_captured_by: 'usr_testva00000000000000000',
+    });
+    const stored = world.contacts.find((c) => c.contactId === res.body.contact.contactId)!;
+    expect(stored.consent_captured_by).toBe('usr_testva00000000000000000');
+  });
+
+  it('REJECTS an automatic consent_method (web_form / inbound_text) from the human create path', async () => {
+    const { app } = makeWebhookHarness();
+    for (const method of ['web_form', 'inbound_text', 'nonsense']) {
+      const res = await request(app)
+        .post('/api/contacts')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ type: 'tenant', consent_method: method });
+      expect(res.status, method).toBe(400);
+    }
+  });
+
+  it('REJECTS a client-supplied consent_captured_by (server-owned, never trusted)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', consent_method: 'paper_form', consent_captured_by: 'usr_someoneelse' });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)', () => {
+  const CONSENT_AT = '2026-06-29T12:00:00.000Z';
+
+  it('records consent (method + at + note) and stamps consent_captured_by from the session; retry then unblocks the send', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-jit', type: 'tenant', status: 'active', phone: '+15550107200' });
+
+    const res = await request(app)
+      .patch('/api/contacts/contact-jit')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ consent_method: 'verbal_phone', consent_at: CONSENT_AT, consent_note: 'confirmed by phone' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({
+      consent_method: 'verbal_phone',
+      consent_at: CONSENT_AT,
+      consent_note: 'confirmed by phone',
+      consent_captured_by: 'usr_testva00000000000000000',
+    });
+  });
+
+  it('REJECTS an automatic consent_method on the JIT PATCH', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-jit', type: 'tenant', status: 'active', phone: '+15550107201' });
+    const res = await request(app)
+      .patch('/api/contacts/contact-jit')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ consent_method: 'web_form' });
+    expect(res.status).toBe(400);
+  });
+
+  it('REJECTS a client-supplied consent_captured_by on the JIT PATCH', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-jit', type: 'tenant', status: 'active', phone: '+15550107202' });
+    const res = await request(app)
+      .patch('/api/contacts/contact-jit')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ consent_method: 'paper_form', consent_captured_by: 'usr_impostor' });
+    expect(res.status).toBe(400);
+  });
+});

@@ -52,6 +52,10 @@ export function buildTimelineFallback(
         ...(inbound ? { fromPhone: conv.participant_phone } : { toPhone: conv.participant_phone }),
         ...(m.body !== undefined && { body: m.body }),
         ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
+        // Relay group (M1.7): carry the per-recipient delivery map so a relay
+        // SOURCE message can surface the "N member(s) opted out" note (the note
+        // renders on the sender's contact page — this relay thread involves them).
+        ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
       };
       items.push(item);
     }

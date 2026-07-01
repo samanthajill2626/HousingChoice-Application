@@ -181,7 +181,11 @@ test('housing fair · Tenant self-serves → RTA in hand → handoff', async ({ 
   // The public self-serve portal captures name + voucher size (no housing-authority
   // field on POST /public/housing-fair), so we verify those — not housing authority.
   await flow.tenantSelfServes(tenant, { firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
-  await flow.expectDeliveredToTenant(tenant, /thanks for stopping by/i);
+  // The welcome now carries opt-out language (the filed WELCOME_SMS default OR an
+  // operator override — both must keep "Reply STOP" per the A2P template floor).
+  // Assert that compliance invariant rather than a specific override copy so this
+  // no longer couples to whichever welcomeText another spec last set.
+  await flow.expectDeliveredToTenant(tenant, /Reply STOP/i);
   await flow.login();
   await flow.openSelfServedContact(tenant);
   await flow.expectTypedTenant();

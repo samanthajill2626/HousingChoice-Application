@@ -23,6 +23,10 @@ describe('GET /api/settings', () => {
     expect(res.body.settings).toEqual(DEFAULT_ORG_SETTINGS);
     expect(res.body.settings.missedCallAutoTextEnabled).toBe(true);
     expect(res.body.settings.quickReplies).toEqual(['Please text me', "I'll call you back soon"]);
+    // A2P/CTIA (spec §5): the default first-contact template carries brand
+    // identity + opt-out language (the compliant DEFAULT_MISSED_CALL_AUTOTEXT).
+    expect(res.body.settings.missedCallAutoText).toContain('Tenant Place LLC');
+    expect(res.body.settings.missedCallAutoText).toMatch(/Reply STOP to opt out\./);
   });
 
   it('401s without a session', async () => {
@@ -49,16 +53,16 @@ describe('PUT /api/settings — admin only', () => {
       .put('/api/settings')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE)
-      .send({ missedCallAutoText: 'New auto-text', missedCallAutoTextEnabled: false });
+      .send({ missedCallAutoText: 'New auto-text. Reply STOP to opt out.', missedCallAutoTextEnabled: false });
 
     expect(res.status).toBe(200);
     expect(res.body.settings).toMatchObject({
-      missedCallAutoText: 'New auto-text',
+      missedCallAutoText: 'New auto-text. Reply STOP to opt out.',
       missedCallAutoTextEnabled: false,
       // quickReplies untouched (field-level merge).
       quickReplies: DEFAULT_ORG_SETTINGS.quickReplies,
     });
-    expect(world.settings.missedCallAutoText).toBe('New auto-text');
+    expect(world.settings.missedCallAutoText).toBe('New auto-text. Reply STOP to opt out.');
 
     const audit = world.auditEvents.find((e) => e.event_type === 'settings_updated');
     expect(audit).toBeDefined();
@@ -145,7 +149,8 @@ describe('PUT /api/settings — admin only', () => {
 describe('PUT /api/settings — welcomeText (admin only)', () => {
   it('an admin can set welcomeText; it persists, rides the GET, and is audited', async () => {
     const { app, world } = makeWebhookHarness();
-    const custom = 'Hi {firstName}, welcome from the HousingChoice team!';
+    // First-contact template: MUST keep opt-out language (A2P/CTIA floor).
+    const custom = 'Hi {firstName}, welcome from the HousingChoice team! Reply STOP to opt out.';
     const put = await request(app)
       .put('/api/settings')
       .set('x-origin-verify', SECRET)
@@ -168,9 +173,12 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
     expect(get.body.settings.welcomeText).toBe(custom);
   });
 
-  it('accepts the boundary lengths 1 and 320', async () => {
+  it('accepts the shortest-compliant and max-length (320) first-contact templates', async () => {
     const { app, world } = makeWebhookHarness();
-    for (const v of ['a', 'x'.repeat(320)]) {
+    // The A2P/CTIA floor requires opt-out language, so the smallest accepted
+    // welcomeText carries "STOP"; the max stays the 320-char boundary (with STOP).
+    const prefix = 'Reply STOP to opt out. ';
+    for (const v of ['Reply STOP to opt out.', `${prefix}${'x'.repeat(320 - prefix.length)}`]) {
       const res = await request(app)
         .put('/api/settings')
         .set('x-origin-verify', SECRET)
@@ -180,6 +188,21 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
       expect(res.body.settings.welcomeText).toBe(v);
       expect(world.settings.welcomeText).toBe(v);
     }
+  });
+
+  it('400s missing_opt_out_language when a first-contact template drops opt-out copy (A2P floor)', async () => {
+    const { app, world } = makeWebhookHarness();
+    for (const field of ['welcomeText', 'missedCallAutoText'] as const) {
+      const res = await request(app)
+        .put('/api/settings')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_ADMIN_COOKIE)
+        .send({ [field]: 'Hi there — no way to opt out here.' });
+      expect(res.status, field).toBe(400);
+      expect(res.body).toEqual({ error: 'missing_opt_out_language' });
+    }
+    // Nothing was written (the floor rejects BEFORE the repo).
+    expect(world.settings.welcomeText).toBeUndefined();
   });
 
   it('400s an empty string, an over-320-char string, and a non-string (but NOT null — that CLEARS)', async () => {
@@ -197,7 +220,7 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
 
   it('an admin can CLEAR welcomeText with null — the attribute is removed and a welcome falls back to the default', async () => {
     const { app, world } = makeWebhookHarness();
-    const custom = 'Hi {firstName}, custom welcome!';
+    const custom = 'Hi {firstName}, custom welcome! Reply STOP to opt out.';
 
     // First set a custom welcomeText...
     const set = await request(app)

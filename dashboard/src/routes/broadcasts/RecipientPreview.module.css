@@ -88,6 +88,9 @@
 .rowAlready {
   background: var(--c-evt-amber-bg);
 }
+.rowNoConsent {
+  background: var(--c-danger-surface, var(--c-evt-amber-bg));
+}
 .rowLabel {
   display: flex;
   align-items: center;
@@ -129,6 +132,15 @@
   border-radius: var(--radius-sm);
   background: var(--c-brand-soft);
   color: var(--c-brand-hover);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+.noConsentTag {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-danger-surface, var(--c-evt-amber-border));
+  color: var(--c-danger);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
 }
@@ -184,6 +196,12 @@
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-warning);
+}
+.noConsentCount {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-danger);
 }
 .addNote {
   margin: calc(-1 * var(--sp-2)) 0 0;

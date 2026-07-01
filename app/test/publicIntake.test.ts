@@ -18,9 +18,10 @@ const SECRET = ORIGIN_SECRET;
 const FAIR = '/public/housing-fair';
 
 // A representative signup body. The phone is unformatted on purpose — the route
-// must normalize it.
+// must normalize it. smsConsent:true satisfies the A2P server-side consent gate
+// (spec §3.1) — the consent-gate tests below drop it explicitly.
 function signupBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { firstName: 'Keisha', lastName: 'Jones', phone: '(555) 010-2000', ...overrides };
+  return { firstName: 'Keisha', lastName: 'Jones', phone: '(555) 010-2000', smsConsent: true, ...overrides };
 }
 
 describe('POST /public/housing-fair — intake + auto welcome text', () => {
@@ -32,14 +33,18 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     // No internal IDs / PII leak — exactly { ok: true }.
     expect(res.body).toEqual({ ok: true });
 
-    // A tenant contact was captured for the normalized phone, to the triage queue.
+    // A tenant contact was captured for the normalized phone, to the triage queue,
+    // stamped with the web_form consent (spec §3.1) + the disclosure version.
     const contact = world.contacts.find((c) => c.phone === '+15550102000');
     expect(contact).toMatchObject({
       type: 'tenant',
       status: 'needs_review',
       firstName: 'Keisha',
       capture_source: 'housing_fair',
+      consent_method: 'web_form',
+      consent_version: 'ctia-2026-06',
     });
+    expect(typeof contact?.consent_at).toBe('string');
 
     // Exactly one welcome text went out, to that phone, with the rendered body.
     expect(world.sent).toHaveLength(1);
@@ -79,9 +84,9 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     for (const body of [
       signupBody({ phone: 'not-a-phone' }),
       signupBody({ phone: '12345' }),
-      { lastName: 'Jones', phone: '5550102000' }, // no firstName
-      { firstName: 'Keisha', phone: '5550102000' }, // no lastName
-      { firstName: 'Keisha', lastName: 'Jones' }, // no phone
+      { lastName: 'Jones', phone: '5550102000', smsConsent: true }, // no firstName
+      { firstName: 'Keisha', phone: '5550102000', smsConsent: true }, // no lastName
+      { firstName: 'Keisha', lastName: 'Jones', smsConsent: true }, // no phone
       signupBody({ voucherSize: 99 }), // out of range
     ]) {
       const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(body);
@@ -97,7 +102,7 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     await request(app)
       .post(FAIR)
       .set('x-origin-verify', SECRET)
-      .send({ firstName: 'Unique1stName', lastName: 'Unique2ndName', phone: '+15550103333' });
+      .send({ firstName: 'Unique1stName', lastName: 'Unique2ndName', phone: '+15550103333', smsConsent: true });
 
     const serialized = JSON.stringify(capture.lines);
     expect(serialized).not.toContain('Unique1stName');
@@ -172,6 +177,44 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     expect(res.status).toBe(200); // signup still succeeds
     expect(res.body).toEqual({ ok: true });
     expect(world.sent).toHaveLength(0); // refused — no text sent
+  });
+});
+
+describe('POST /public/housing-fair — A2P/CTIA consent gate (server-side)', () => {
+  it('rejects a submit MISSING smsConsent with 400 consent_required (no capture, no send)', async () => {
+    const { app, world } = makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send({ firstName: 'Keisha', lastName: 'Jones', phone: '(555) 010-2000' }); // no smsConsent
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'consent_required' });
+    expect(world.contacts).toHaveLength(0);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('rejects smsConsent that is not exactly `true` (false / "true" string) with consent_required', async () => {
+    const { app, world } = makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+    for (const bad of [false, 'true', 1, null]) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ smsConsent: bad }));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body).toEqual({ error: 'consent_required' });
+    }
+    expect(world.contacts).toHaveLength(0);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('on success stamps web_form consent + version on the created contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    expect(res.status).toBe(200);
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact?.consent_method).toBe('web_form');
+    expect(contact?.consent_version).toBe('ctia-2026-06');
+    expect(typeof contact?.consent_at).toBe('string');
   });
 });
 

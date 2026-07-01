@@ -18,6 +18,8 @@ import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
 import { normalizeRelationships, normalizeCustomFields } from './contactProfile.js';
 import { Modal } from './Modal.js';
+import { ConsentFields, type ConsentValue } from './ConsentFields.js';
+import { consentAtFromDate, todayISODate } from '../../lib/consentCopy.js';
 import styles from './ContactCreateForm.module.css';
 
 export interface ContactCreateFormProps {
@@ -48,6 +50,14 @@ export function ContactCreateForm({
   // Collapsible editors: track whether the user has opted in
   const [showRelationships, setShowRelationships] = useState(false);
   const [showCustomFields, setShowCustomFields] = useState(false);
+  // Optional "Consent to text" section (§3.3). Collapsed by default; left blank →
+  // nothing sent (the just-in-time gate catches it later). `when` defaults today.
+  const [showConsent, setShowConsent] = useState(false);
+  const [consent, setConsent] = useState<ConsentValue>({
+    method: '',
+    when: todayISODate(),
+    note: '',
+  });
 
   // Editor rows
   const [relationships, setRelationships] = useState<Relationship[]>([]);
@@ -115,6 +125,16 @@ export function ContactCreateForm({
     const validCustomFields = normalizeCustomFields(customFields);
     if (validCustomFields.length > 0) {
       body['customFields'] = validCustomFields;
+    }
+
+    // Optional consent — include the consent fields ONLY when a method is chosen
+    // (CONTRACT 4: consent_method is a HUMAN value; the server stamps
+    // consent_captured_by). Blank → send nothing; the JIT gate catches it later.
+    if (consent.method !== '') {
+      body['consent_method'] = consent.method;
+      body['consent_at'] = consentAtFromDate(consent.when);
+      const trimmedNote = consent.note.trim();
+      if (trimmedNote) body['consent_note'] = trimmedNote;
     }
 
     try {
@@ -266,6 +286,20 @@ export function ContactCreateForm({
         ) : (
           <Button variant="secondary" size="sm" type="button" onClick={handleShowCustomFields}>
             + Add custom field
+          </Button>
+        )}
+
+        {/* Optional "Consent to text" section — collapsed behind a button. When
+            a method is chosen, the create payload carries consent_method +
+            consent_at (+ consent_note). Left blank sends nothing. */}
+        {showConsent ? (
+          <div className={styles.section}>
+            <span className={styles.sectionLabel}>Consent to text</span>
+            <ConsentFields value={consent} onChange={setConsent} idPrefix="create" />
+          </div>
+        ) : (
+          <Button variant="secondary" size="sm" type="button" onClick={() => setShowConsent(true)}>
+            + Record text consent
           </Button>
         )}
 

@@ -22,6 +22,18 @@
 // a STOP'd contact compounds the TCPA harm; retrying a tripped breaker fights
 // the safety valve).
 //
+// A2P/CTIA CONSENT BASIS (accepted 2026-07-01): this auto-text is sent
+// `automated: true`, so it is EXEMPT from the just-in-time consent gate (which
+// fires only on staff-initiated PROACTIVE 1:1 sends). A first-time caller has no
+// recorded `consent_method`, yet we send one SMS — the basis is that the message
+// is informational/transactional (they just phoned us about housing = customer-
+// initiated), a single auto-reply (not recurring marketing), and it carries the
+// business identity + "Reply STOP to opt out" (DEFAULT_MISSED_CALL_AUTOTEXT, kept
+// intact by the template-validation floor). It deliberately does NOT stamp
+// consent — a courtesy reply must not "launder" a caller into consented status, so
+// a later staff proactive text still hits the JIT gate. Full rationale +
+// founder sign-off: docs/issues/a2p-compliance-hardening.md (Decisions).
+//
 // PII (doc §9): NEVER the caller's phone/name or the body — callSid /
 // conversationId / IDs only, correlated via the pino mixin.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';

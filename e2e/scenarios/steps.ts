@@ -136,8 +136,12 @@ export class Scenario {
   }): Promise<void> {
     return step('Tenant self-serves via the public portal', async () => {
       this.activeTenant = t;
+      // A2P/CTIA (spec §3.1): the public form now REQUIRES the consent checkbox;
+      // the server rejects a submit missing `smsConsent:true` with 400
+      // consent_required. The self-serve portal always sends it (the UI gates on
+      // the checked box).
       const res = await this.page.request.post(`${NEXT}/public/housing-fair`, {
-        data: { ...fields, phone: t.phone },
+        data: { ...fields, phone: t.phone, smsConsent: true },
       });
       expect(res.ok()).toBeTruthy();
     });
@@ -265,6 +269,10 @@ export class Scenario {
     voucherSize?: number;
     housingAuthority?: string;
     phone?: string;
+    /** A2P/CTIA (spec §3.3): record verbal consent in the optional "Consent to
+     *  text" section so the contact is textable (broadcast/1:1) without hitting
+     *  the JIT gate later. Defaults to verbal_in_person (a fair walk-in). */
+    consent?: boolean;
   }): Promise<void> {
     return step('Team creates a new Tenant contact (housing fair)', async () => {
       await this.page.goto(`${NEXT}/contacts`);
@@ -278,6 +286,12 @@ export class Scenario {
       await dialog.getByLabel('First name').fill(fields.firstName);
       await dialog.getByLabel('Last name').fill(fields.lastName);
       if (fields.phone) await dialog.getByLabel('Phone').fill(fields.phone);
+      // Record verbal text consent (the optional collapsed section) so the tenant
+      // is textable. A VA recording a fair walk-in captures this on the spot.
+      if (fields.consent !== false) {
+        await dialog.getByRole('button', { name: '+ Record text consent' }).click();
+        await dialog.getByLabel('How did they consent?').selectOption('verbal_in_person');
+      }
       await dialog.getByRole('button', { name: 'Create', exact: true }).click();
       await expect(dialog).toHaveCount(0);
       await expect(this.page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });

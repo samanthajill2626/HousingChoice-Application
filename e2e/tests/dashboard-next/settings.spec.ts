@@ -59,7 +59,9 @@ test.describe('Settings — admin path', () => {
     await page.getByRole('tab', { name: 'Templates' }).click();
     await expect(page).toHaveURL(/\/settings\/templates$/);
     const autoText = page.getByLabel(/^Missed-call auto-text/i);
-    const newAutoText = `Sorry I missed you — e2e ${Date.now()}.`;
+    // A2P/CTIA template floor (spec §5): a first-contact template edit that drops
+    // the opt-out line is rejected (400 missing_opt_out_language) → keep "Reply STOP".
+    const newAutoText = `Sorry I missed you — e2e ${Date.now()}. Reply STOP to opt out.`;
     await autoText.fill(newAutoText);
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('Saved')).toBeVisible();
@@ -68,7 +70,9 @@ test.describe('Settings — admin path', () => {
     await expect(page.getByLabel(/^Missed-call auto-text/i)).toHaveValue(newAutoText);
 
     // --- Welcome-text edit → reflected in a subsequent housing-fair welcome ---
-    const welcomeBody = `Welcome {firstName}! e2e settings check ${Date.now()}.`;
+    // Keep the opt-out line — the welcome is a first-contact template subject to the
+    // A2P/CTIA floor (an override without "Reply STOP" is rejected 400).
+    const welcomeBody = `Welcome {firstName}! e2e settings check ${Date.now()}. Reply STOP to opt out.`;
     await page.getByLabel(/Housing-fair welcome text/i).fill(welcomeBody);
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('Saved')).toBeVisible();
@@ -92,7 +96,7 @@ test.describe('Settings — admin path', () => {
     const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
     const expectedWelcome = welcomeBody.replace('{firstName}', firstName);
     const submit = await page.request.post(`${NEXT}/public/housing-fair`, {
-      data: { firstName, lastName: 'Person', phone, voucherSize: 2 },
+      data: { firstName, lastName: 'Person', phone, voucherSize: 2, smsConsent: true },
     });
     expect(submit.ok()).toBeTruthy();
 
@@ -144,7 +148,11 @@ test.describe('Settings — admin path', () => {
     // name appears) stay green. The form can't UNSET welcomeText (empty = "leave
     // default", never PUT), so we overwrite with a benign default-like string. ---
     await page.getByRole('tab', { name: 'Templates' }).click();
-    await page.getByLabel(/Housing-fair welcome text/i).fill('Hi {firstName}, thanks for stopping by!');
+    // Keep "Reply STOP" so the A2P/CTIA floor accepts it; keep "thanks for stopping
+    // by" so tenant-onboarding.spec's self-serve welcome assertion still matches.
+    await page
+      .getByLabel(/Housing-fair welcome text/i)
+      .fill('Hi {firstName}, thanks for stopping by! Reply STOP to opt out.');
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('Saved')).toBeVisible();
   });

@@ -125,6 +125,32 @@ describe('buildTimelineFallback', () => {
     expect((items[0] as TimelineMessage).tsMsgId).toBe('sms');
   });
 
+  it('carries delivery_recipients through (so a relay source message can show the opted-out note)', () => {
+    const conversations = [convOf({ conversationId: 'c-relay', type: 'relay_group' })];
+    const messagesByConvId = new Map<string, Message[]>([
+      [
+        'c-relay',
+        [
+          msgOf({
+            conversationId: 'c-relay',
+            tsMsgId: 'src',
+            body: 'is the unit available?',
+            delivery_recipients: {
+              'c-bob': { status: 'failed', errorCode: 'contact_opted_out' },
+              'c-carol': { status: 'delivered' },
+            },
+          }),
+        ],
+      ],
+    ]);
+
+    const item = buildTimelineFallback(conversations, messagesByConvId)[0] as TimelineMessage;
+    expect(item.delivery_recipients?.['c-bob']).toEqual({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+    });
+  });
+
   it('tolerates a conversation with no messages in the map', () => {
     const conversations = [convOf({ conversationId: 'c1' }), convOf({ conversationId: 'c2' })];
     const messagesByConvId = new Map<string, Message[]>([

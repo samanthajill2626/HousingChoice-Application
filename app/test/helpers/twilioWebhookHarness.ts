@@ -383,6 +383,20 @@ export function createFakeWorld(): FakeWorld {
       else conv.pool_number = poolNumber;
       return conv;
     },
+    async setRelayMemberOptedOut(conversationId, memberKey, entry) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setRelayMemberOptedOut: no conversation ${conversationId}`);
+      // Merge one slot without clobbering the others (mirrors the targeted SET).
+      conv.relay_opted_out_members = { ...(conv.relay_opted_out_members ?? {}), [memberKey]: entry };
+    },
+    async clearRelayMemberOptedOut(conversationId, memberKey) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`clearRelayMemberOptedOut: no conversation ${conversationId}`);
+      if (conv.relay_opted_out_members !== undefined) {
+        const { [memberKey]: _removed, ...rest } = conv.relay_opted_out_members;
+        conv.relay_opted_out_members = rest;
+      }
+    },
   };
 
   const findBySid = (sid: string): MessageItem | undefined =>

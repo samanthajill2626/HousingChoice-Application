@@ -13,6 +13,7 @@ import type { MessagesRepo, NewMessage } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
 import {
   CircuitBreakerOpenError,
+  ContactNoConsentError,
   ContactOptedOutError,
   ConversationNotFoundError,
   ManualModeError,
@@ -60,7 +61,15 @@ function makeFakes(
   const contact: ContactItem | undefined =
     overrides.contact === null
       ? undefined
-      : (overrides.contact ?? { contactId: 'contact-1', type: 'tenant', phone: '+15550100001' });
+      : (overrides.contact ?? {
+          contactId: 'contact-1',
+          type: 'tenant',
+          phone: '+15550100001',
+          // Default: a contact WITH recorded consent (a real 1:1 partner) so the
+          // happy-path human sends aren't JIT-gated. The JIT-gate tests override
+          // with a no-consent contact.
+          consent_method: 'inbound_text',
+        });
 
   const fakes = {
     conversation,
@@ -117,6 +126,8 @@ function makeFakes(
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
+    setRelayMemberOptedOut: async () => {},
+    clearRelayMemberOptedOut: async () => {},
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
@@ -284,6 +295,52 @@ describe('sendMessage service', () => {
     const f = makeFakes({ contact: null });
     await expect(f.service({ conversationId: 'conv-1', body: 'x' })).resolves.toMatchObject({
       providerSid: 'SMfake-1',
+    });
+  });
+
+  describe('JIT consent gate (A2P/CTIA — proactive human 1:1 send)', () => {
+    it('BLOCKS a HUMAN proactive send to a contact with NO consent (nothing sent/persisted)', async () => {
+      const f = makeFakes({
+        contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001' }, // no consent_method
+      });
+      await expect(f.service({ conversationId: 'conv-1', body: 'x', automated: false })).rejects.toBeInstanceOf(
+        ContactNoConsentError,
+      );
+      expect(f.sent).toHaveLength(0);
+      expect(f.appended).toHaveLength(0);
+      expect(f.emitted).toHaveLength(0);
+    });
+
+    it('ALLOWS a human send when the contact HAS consent (inbound_text)', async () => {
+      const f = makeFakes({
+        contact: {
+          contactId: 'contact-1',
+          type: 'tenant',
+          phone: '+15550100001',
+          consent_method: 'inbound_text',
+        },
+      });
+      await expect(f.service({ conversationId: 'conv-1', body: 'x', automated: false })).resolves.toMatchObject({
+        providerSid: 'SMfake-1',
+      });
+    });
+
+    it('does NOT gate an AUTOMATED send to a no-consent contact (welcome/missed-call/reminders)', async () => {
+      const f = makeFakes({
+        contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001' }, // no consent
+      });
+      await expect(f.service({ conversationId: 'conv-1', body: 'x', automated: true })).resolves.toMatchObject({
+        providerSid: 'SMfake-1',
+      });
+    });
+
+    it('opt-out gate still beats the consent gate (a no-consent + opted-out contact is ContactOptedOutError)', async () => {
+      const f = makeFakes({
+        contact: { contactId: 'contact-1', type: 'tenant', phone: '+15550100001', sms_opt_out: true },
+      });
+      await expect(f.service({ conversationId: 'conv-1', body: 'x', automated: false })).rejects.toBeInstanceOf(
+        ContactOptedOutError,
+      );
     });
   });
 

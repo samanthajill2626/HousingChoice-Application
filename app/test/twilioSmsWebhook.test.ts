@@ -5,6 +5,11 @@
 // STOP/START recording, and MMS mirroring.
 import { describe, expect, it } from 'vitest';
 import { ContactOptedOutError, createSendMessageService } from '../src/services/sendMessage.js';
+import {
+  HELP_REPLY,
+  STOP_CONFIRMATION,
+  WELCOME_SMS,
+} from '../src/lib/smsCompliance.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -607,6 +612,180 @@ describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () 
     world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'please stop by the unit at 5' }));
     expect(world.flagWrites).toHaveLength(0);
+  });
+});
+
+describe('POST /webhooks/twilio/sms — A2P/CTIA keyword replies (WE own them, spec §6)', () => {
+  // Extract + un-escape the TwiML <Message> body so we can compare against the
+  // (un-escaped) filed copy. The handler XML-escapes ' & < > " into entities.
+  function twimlMessage(xml: string): string | undefined {
+    const m = /<Message>([\s\S]*?)<\/Message>/.exec(xml);
+    if (!m) return undefined;
+    return m[1]!
+      .replace(/&apos;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&');
+  }
+
+  it('STOP → TwiML STOP_CONFIRMATION reply (NOT via the gated send wrapper — reaches the opted-out number)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP', MessageSid: 'SMkwstop' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(twimlMessage(res.text)).toBe(STOP_CONFIRMATION);
+    // The confirmation did NOT go through the opt-out-gated sendMessage wrapper.
+    expect(world.sent).toHaveLength(0);
+    // Suppression still recorded.
+    expect(world.flagWrites).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: true }]);
+  });
+
+  it('HELP → TwiML HELP_REPLY reply, no suppression change, and the body carries NO phone number (digits)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'HELP', MessageSid: 'SMkwhelp' }));
+
+    expect(res.status).toBe(200);
+    const body = twimlMessage(res.text)!;
+    expect(body).toBe(HELP_REPLY);
+    expect(/\d/.test(body)).toBe(false); // no phone number in HELP (campaign: phone=No)
+    // HELP never changes suppression.
+    expect(world.flagWrites).toHaveLength(0);
+    expect(world.optOutSets).toHaveLength(0);
+  });
+
+  it('opt-in (START) → clears suppression, stamps inbound_text consent when absent, replies WELCOME_SMS', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Contact opted out earlier, and (deliberately) has NO consent recorded.
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, sms_opt_out: true });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'START', OptOutType: 'START', MessageSid: 'SMkwstart' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(twimlMessage(res.text)).toBe(WELCOME_SMS);
+    // Suppression cleared.
+    expect(world.flagWrites).toContainEqual({ contactId: 'contact-T', flag: 'sms_opt_out', value: false });
+    // Consent stamped (keyword opt-in is a documented affirmative opt-in).
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('inbound_text');
+    expect(typeof contact.consent_at).toBe('string');
+  });
+
+  it('opt-in does NOT overwrite an EXISTING consent_method (e.g. web_form)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-T',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      sms_opt_out: true,
+      consent_method: 'web_form',
+      consent_version: 'ctia-2026-06',
+    });
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'JOIN', MessageSid: 'SMkwjoin' }),
+    );
+
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('web_form'); // unchanged
+  });
+
+  it('a PLAIN inbound from an EXISTING no-consent contact stamps inbound_text (spec §3.2 — reply never JIT-gated)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // An existing contact with NO consent (e.g. added via the contact form) who
+    // now texts in. A brand-new stub is stamped at mint time; this closes the
+    // gap for an EXISTING contact so a later staff reply isn't JIT-blocked.
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'hi there, is the place still open?', MessageSid: 'SMplaininbound' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(twimlMessage(res.text)).toBeUndefined(); // a plain inbound gets NO keyword reply
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('inbound_text');
+    expect(typeof contact.consent_at).toBe('string');
+    // Not an opt-out — suppression untouched.
+    expect(world.flagWrites).toEqual([]);
+  });
+
+  it('a PLAIN inbound does NOT overwrite an existing consent_method (idempotent)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-T',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      consent_method: 'verbal_phone',
+    });
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'thanks!', MessageSid: 'SMplain2' }),
+    );
+
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBe('verbal_phone'); // unchanged
+  });
+
+  it('an opt-out (STOP) from a no-consent contact does NOT stamp consent (revocation, not opt-in)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
+    await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ Body: 'STOP', OptOutType: 'STOP', MessageSid: 'SMplainstop' }),
+    );
+
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBeUndefined(); // a STOP never confers consent
+  });
+
+  it('honors the NEW opt-out keywords OPTOUT and REVOKE (STOP_CONFIRMATION reply + suppression)', async () => {
+    for (const keyword of ['OPTOUT', 'REVOKE', 'optout', 'Revoke']) {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+      const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: keyword, MessageSid: `SM-${keyword}` }));
+      expect(twimlMessage(res.text), keyword).toBe(STOP_CONFIRMATION);
+      expect(world.flagWrites, keyword).toEqual([{ contactId: 'contact-T', flag: 'sms_opt_out', value: true }]);
+    }
+  });
+
+  it('honors the NEW opt-in keywords JOIN and HOME (WELCOME_SMS reply)', async () => {
+    for (const keyword of ['JOIN', 'HOME', 'join', 'Home']) {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, sms_opt_out: true });
+      const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: keyword, MessageSid: `SM-${keyword}` }));
+      expect(twimlMessage(res.text), keyword).toBe(WELCOME_SMS);
+    }
+  });
+
+  it('an ordinary message returns empty TwiML (no <Message> reply)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'is the unit still available?' }));
+    expect(res.text).toContain('<Response/>');
+    expect(twimlMessage(res.text)).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
   });
 });
 

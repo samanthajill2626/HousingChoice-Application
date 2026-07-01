@@ -154,7 +154,21 @@ describe('audience resolution (M1.8a)', () => {
     const items = [tenant({ contactId: 'c-1', firstName: 'Ann', phone: '+15551230001' })];
     const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
     const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
-    expect(out.contacts).toEqual([{ contactId: 'c-1', phone: '+15551230001', firstName: 'Ann' }]);
+    // has_consent:false here — this tenant has no recorded consent (A2P §4).
+    expect(out.contacts).toEqual([
+      { contactId: 'c-1', phone: '+15551230001', firstName: 'Ann', has_consent: false },
+    ]);
+  });
+
+  it('annotates each candidate with has_consent (A2P/CTIA — LOCKED CONTRACT 3)', async () => {
+    const items = [
+      tenant({ contactId: 'with', phone: '+15551230001', consent_method: 'inbound_text' }),
+      tenant({ contactId: 'without', phone: '+15551230002' }), // no consent
+    ];
+    const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
+    const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
+    const byId = Object.fromEntries(out.contacts.map((c) => [c.contactId, c.has_consent]));
+    expect(byId).toEqual({ with: true, without: false });
   });
 
   it('combines housing_authority + bedroomSize', async () => {

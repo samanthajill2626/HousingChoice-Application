@@ -383,6 +383,39 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
       warnIfCapped('conversations', page.items.length);
       for (const conv of page.items) {
+        // A2P — relay opt-out attention: a relay_group carrying opted-out members
+        // surfaces ONE needs_you_now item PER still-opted-out member, linking to
+        // that member's contact page (where staff investigate/remove them). This
+        // is independent of unread (a relay thread's unread is pool-number noise),
+        // so it runs BEFORE the unread gate. Each entry is LIVE-CONFIRMED against
+        // the contact (sms_opt_out still true, not deleted) so an opt-back-in /
+        // removal auto-resolves the item without extra wiring.
+        if (conv.type === 'relay_group' && conv.relay_opted_out_members !== undefined) {
+          for (const entry of Object.values(conv.relay_opted_out_members)) {
+            const memberContactId = entry.contactId;
+            // No contactId → we can't link OR live-confirm; skip (honesty rule).
+            if (typeof memberContactId !== 'string' || memberContactId.length === 0) continue;
+            const memberContact = await getContact(memberContactId);
+            // Skip if the member opted back in, or their contact is gone/deleted —
+            // the flag on the conversation is stale; auto-resolve silently.
+            if (!memberContact || memberContact.sms_opt_out !== true) continue;
+            if (isDeleted(memberContact)) continue;
+            const memberWho =
+              nameFromContact(memberContact) ?? entry.name ?? entry.phone ?? memberContactId;
+            needsYouNow.push({
+              item: {
+                group: 'needs_you_now',
+                refType: 'contact',
+                refId: memberContactId,
+                who: memberWho,
+                why: 'Opted out of a group text — not receiving messages',
+                tag: 'Group text',
+                attention: true,
+              },
+              at: now,
+            });
+          }
+        }
         const unread = typeof conv.unread_count === 'number' ? conv.unread_count : 0;
         if (unread <= 0) continue; // only inbound-last (unread) threads are actionable
         const who = whoOfConversation(conv);

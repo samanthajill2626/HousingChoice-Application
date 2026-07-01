@@ -20,12 +20,14 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
+  ApiError,
   deleteContact,
   restoreContact,
   retryMessage,
   sendMessage,
   setContactOptOut,
   updateContact,
+  type Contact,
   type ContactType,
   type TimelineMessage,
 } from '../../api/index.js';
@@ -41,6 +43,7 @@ import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
+import { ConsentCaptureModal } from './ConsentCaptureModal.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
 import { useContactTimeline } from './useContactTimeline.js';
@@ -77,6 +80,12 @@ export function ContactDetail(): React.JSX.Element {
   // Which number's thread the reply box sends into (null = use the default). Set
   // by the reply-target picker for multi-number contacts.
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
+  // Just-in-time consent gate (§3.4): when a proactive send is refused with a 409
+  // `contact_no_consent`, we hold the pending send here + open the hard-block
+  // modal. On confirm we PATCH consent then RETRY this exact send.
+  const [pendingConsentSend, setPendingConsentSend] = useState<
+    { conversationId: string; body: string; replyToPhone?: string } | null
+  >(null);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   const timeline = useContactTimeline(contactId);
@@ -154,10 +163,11 @@ export function ContactDetail(): React.JSX.Element {
   // On success, stamp the real tsMsgId + status so the SSE refetch reconciles by
   // id and the bubble advances Sending… → Sent → Delivered. On failure, drop the
   // optimistic bubble and rethrow so the Timeline restores the draft + shows why.
-  const onSend = (body: string): Promise<void> => {
-    if (!sendConvId) return Promise.resolve();
-    const tempId = timeline.addOptimistic(sendConvId, body, replyToPhone);
-    return sendMessage(sendConvId, { body })
+  // The core optimistic POST into a specific conversation. Shared by the reply
+  // box's onSend AND the just-in-time consent retry (after consent is recorded).
+  const postSend = (conversationId: string, body: string, toPhone?: string): Promise<void> => {
+    const tempId = timeline.addOptimistic(conversationId, body, toPhone);
+    return sendMessage(conversationId, { body })
       .then((result) => {
         timeline.resolveOptimistic(tempId, result);
       })
@@ -165,6 +175,26 @@ export function ContactDetail(): React.JSX.Element {
         timeline.failOptimistic(tempId);
         throw err;
       });
+  };
+  const onSend = (body: string): Promise<void> => {
+    if (!sendConvId) return Promise.resolve();
+    const convId = sendConvId;
+    const toPhone = replyToPhone;
+    return postSend(convId, body, toPhone).catch((err: unknown) => {
+      // A2P/CTIA just-in-time gate: a proactive send to a no-consent contact is
+      // refused with 409 `contact_no_consent`. Open the hard-block consent modal
+      // (holding the pending send) instead of surfacing a generic error, and
+      // rethrow so the Timeline restores the draft (the message stays in the box
+      // for the retry / Cancel).
+      if (err instanceof ApiError && err.status === 409 && err.code === 'contact_no_consent') {
+        setPendingConsentSend({
+          conversationId: convId,
+          body,
+          ...(toPhone !== undefined && { replyToPhone: toPhone }),
+        });
+      }
+      throw err;
+    });
   };
   // Retry a failed outbound message. The server re-reads the original by its
   // provider SID (so body AND media resend correctly) and stamps `retry_of`, so
@@ -430,6 +460,24 @@ export function ContactDetail(): React.JSX.Element {
           onCreated={(u) => {
             setAddingProperty(false);
             void navigate('/listings/' + u.unitId);
+          }}
+        />
+      ) : null}
+
+      {pendingConsentSend !== null ? (
+        <ConsentCaptureModal
+          contactId={contact.contactId}
+          contactName={name}
+          onCancel={() => setPendingConsentSend(null)}
+          onRecorded={(updated: Contact) => {
+            // Apply the consent in place so the contact now reads as opted-in, then
+            // RETRY the exact send that was blocked. Clear the modal first.
+            const retry = pendingConsentSend;
+            setContact(updated);
+            setPendingConsentSend(null);
+            if (retry !== null) {
+              void postSend(retry.conversationId, retry.body, retry.replyToPhone);
+            }
           }}
         />
       ) : null}

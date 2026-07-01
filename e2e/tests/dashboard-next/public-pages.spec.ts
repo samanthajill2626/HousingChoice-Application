@@ -120,6 +120,9 @@ async function fillIntake(
   await page.getByLabel('Last name').fill(lastName);
   await page.getByLabel('Phone number').fill(phone);
   if (voucher !== undefined) await page.getByLabel(/Voucher size/).fill(voucher);
+  // A2P/CTIA (spec §3.1): the required, unchecked-by-default consent checkbox gates
+  // submit (client + server). Check it so the intake can proceed.
+  await page.getByRole('checkbox', { name: /I agree to receive/i }).check();
 }
 
 test.describe('Public pages — the unauthenticated flyer funnel + /join', () => {

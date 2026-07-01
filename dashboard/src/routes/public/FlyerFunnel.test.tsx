@@ -80,12 +80,20 @@ describe('FlyerFunnel', () => {
     await user.type(screen.getByLabelText(/first name/i), 'Ada');
     await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
     await user.type(phone, '4045551234');
+    // A2P/CTIA consent gate — the required checkbox must be checked to submit.
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
     await user.click(screen.getByRole('button', { name: /get the full details/i }));
 
-    // Submitted WITH the unitId.
+    // Submitted WITH the unitId AND the consent flag.
     await waitFor(() => expect(submitHousingFair).toHaveBeenCalled());
     expect(submitHousingFair).toHaveBeenCalledWith(
-      expect.objectContaining({ firstName: 'Ada', lastName: 'Lovelace', phone: '4045551234', unitId: 'unit-1' }),
+      expect.objectContaining({
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        phone: '4045551234',
+        unitId: 'unit-1',
+        smsConsent: true,
+      }),
     );
 
     // → reveal (full details).
@@ -133,6 +141,7 @@ describe('FlyerFunnel', () => {
     await user.type(screen.getByLabelText(/first name/i), 'Ada');
     await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
     await user.type(screen.getByLabelText(/phone number/i), '4045551234');
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
     await user.click(screen.getByRole('button', { name: /get the full details/i }));
 
     expect(await screen.findByText(/you're all set/i)).toBeInTheDocument();

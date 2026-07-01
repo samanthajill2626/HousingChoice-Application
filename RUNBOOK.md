@@ -612,7 +612,7 @@ purpose** — it never shows up as drift.
 
 ## Alarms
 
-10 alarms (5 per env), all notifying SNS `hc-<env>-alerts` (email) on both ALARM and OK.
+14 alarms (7 per env), all notifying SNS `hc-<env>-alerts` (email) on both ALARM and OK.
 
 > **SNS subscription note:** email subscriptions need a one-time confirmation click.
 > `hc-dev-alerts` is confirmed; **`hc-prod-alerts` is still `PendingConfirmation`** as of
@@ -627,7 +627,60 @@ purpose** — it never shows up as drift.
 | `hc-dev-error-logs` / `hc-prod-error-logs` | `ErrorLogs` sum >= 5 over 5 min | App/worker emitting error/fatal (pino level >= 50) at volume | Insights query (b) for the stacks; every error line carries a `correlationId` — pivot to query (a)/(d) for the full story. Roll back (`-- --tag <previous>`) if a deploy caused it. |
 | `hc-dev-status-check-failed` / `hc-prod-status-check-failed` | EC2 `StatusCheckFailed` >= 1 (missing data = breaching) | Instance or underlying AWS hardware/network problem — also fires if the instance stops reporting entirely | Check SSM: `aws ssm describe-instance-information --profile housingchoice --region us-east-1`. If unreachable, reboot **via CLI** (console stays read-only): `aws ec2 reboot-instances --instance-ids <id> --profile housingchoice --region us-east-1`. Containers restart on boot (`restart: unless-stopped`). If the instance is truly dead, `npm run plan/apply -- <env>` will recreate it; then re-deploy the current `DEPLOYED_TAG`. |
 | `hc-dev-jobs-dlq-depth` / `hc-prod-jobs-dlq-depth` | `ApproximateNumberOfMessagesVisible` > 0 on `hc-<env>-jobs-dlq` | A job envelope failed all 5 worker dispatch attempts and was dead-lettered — reminders/follow-ups are revenue-critical (doc §9 "Job/DLQ depth") | Worker ERROR logs first: Insights query (b) — the `job failed` lines carry `jobName`, stack, and the originating request's correlation IDs. Peek the DLQ to see the stuck envelopes, fix the handler/data (deploy), then redrive — exact one-liners in [Jobs](#jobs-async-delivery-path). The alarm clears once the DLQ drains. |
-| `hc-dev-disk-used` / `hc-prod-disk-used` | `disk_used_percent` (root) > 80% | 10 GB root volume filling — usually Docker images/layers | Inspect via SSM Run Command (no SSH): `docker system df`, then `docker image prune -af` (safe: the running containers' images are in use). **Caveat:** this metric comes from the CloudWatch agent, which is NOT installed yet — the alarm currently sees no data and `notBreaching` keeps it quietly OK. It cannot actually fire until the agent ships (tracked: `docs/issues/cloudwatch-agent-disk-metric.md`). The deploy's prune-on-success keeps disk in check meanwhile (post-deploy: 26% used). |
+| `hc-dev-disk-used` / `hc-prod-disk-used` | `disk_used_percent` (root, CWAgent) > 80% | 10 GB root volume filling — usually Docker images/layers | Inspect via SSM Run Command (no SSH): `docker system df`, then `docker image prune -af` (safe: the running containers' images are in use). The deploy's prune-on-success keeps disk in check during normal operations (post-deploy: ~26% used). |
+| `hc-dev-mem-used` / `hc-prod-mem-used` | `mem_used_percent` (CWAgent) > 80% sustained 15 min (3 × 5-min) | Host memory pressure on the 2 GB t4g.small — slow leak or gradual creep in the app/worker Node containers | Via SSM Run Command: `free -m` (current totals) and `docker stats --no-stream` (per-container breakdown). Check app and worker logs for memory-leak symptoms (growing heap, GC pressure). The box survives a container OOM kill via `restart: unless-stopped`; this alarm is the leading-indicator warning before OOM. |
+| `hc-dev-mem-used-critical` / `hc-prod-mem-used-critical` | `mem_used_percent` (CWAgent) > 90% for 5 min (1 × 5-min) | Acute near-OOM spike on the 2 GB t4g.small — container(s) likely imminently OOM | Via SSM Run Command: `free -m` and `docker stats --no-stream`. Identify the leaking container; the box survives a kill via `restart: unless-stopped` but an OOM loop will degrade service. Check app/worker for a memory leak and redeploy a fix. If the box is unresponsive, reboot via CLI: `aws ec2 reboot-instances --instance-ids <id> --profile housingchoice --region us-east-1`. |
+
+### CloudWatch agent
+
+The CloudWatch agent collects two host metrics that the log-derived metrics cannot see:
+
+- **`disk_used_percent`** — root volume (`/`) usage; `drop_device:true` so the alarm
+  dimensions are `InstanceId`, `path`, `fstype` (no device node, which varies by instance).
+- **`mem_used_percent`** — total host memory (RSS + buffers + cached), reported as a percent
+  of the 2 GB t4g.small total.
+
+The agent config lives on the instance at
+`/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json` and is written by the EC2 `user_data`
+script at first-boot. rsyslog ships `/var/log/messages` (kernel ring buffer, OOM-killer lines)
+to the CloudWatch log group `/hc/<env>/system`; the agent ships those log lines alongside the
+metrics. The System Status page surfaces OOM events from `/hc/<env>/system` in two flavors:
+
+- **Kernel OOM-kill** — lines matching `Out of memory: Killed process` in the
+  `/hc/<env>/system` log group (written by rsyslog from `/var/log/messages`).
+- **V8 heap OOM** — lines matching `FATAL ERROR: Reached heap limit` emitted by Node in the
+  `/hc/<env>/app` and `/hc/<env>/worker` log groups.
+
+**One-time install for an already-running instance** (EC2 `user_data` runs only at first boot;
+use this when the instance pre-dates the agent config). Fill `<instance-id>` with the real ID
+from the Quick Reference table above. For prod use `/hc/prod/system` as the log group name
+(dev uses `/hc/dev/system`).
+
+```powershell
+# Step 1: install rsyslog + agent, enable rsyslog.
+$installCmd = '["dnf install -y rsyslog amazon-cloudwatch-agent","systemctl enable --now rsyslog"]'
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{\"commands\":$installCmd}" --comment "install rsyslog+CWAgent" --no-cli-pager
+
+# Step 2: write the agent config and start the agent.
+# printf '%s' writes the JSON literally (no heredoc, no shell expansion inside single quotes).
+$cfg = '{\"agent\":{\"metrics_collection_interval\":60,\"run_as_user\":\"root\"},\"metrics\":{\"namespace\":\"CWAgent\",\"append_dimensions\":{\"InstanceId\":\"${aws:InstanceId}\"},\"metrics_collected\":{\"mem\":{\"measurement\":[\"mem_used_percent\"]},\"disk\":{\"measurement\":[\"disk_used_percent\"],\"resources\":[\"/\"],\"drop_device\":true}}},\"logs\":{\"logs_collected\":{\"files\":{\"collect_list\":[{\"file_path\":\"/var/log/messages\",\"log_group_name\":\"/hc/dev/system\",\"log_stream_name\":\"{instance_id}\"}]}}}}'
+$configCmd = "[\"printf '%s' '$cfg' > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json\",\"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json\"]"
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{\"commands\":$configCmd}" --comment "write CWAgent config + start" --no-cli-pager
+```
+
+> **Why two separate SSM commands?** SSM Run Command executes all `commands` array elements in
+> a single shell script, but Step 1 installs packages (longer; can take 30–60 s). Running them
+> separately lets you verify Step 1 completes before writing the config. Check command status
+> with `aws ssm list-command-invocations --command-id <id> --details --profile housingchoice --region us-east-1 --no-cli-pager`.
+
+> **Escaping rationale.** The `$cfg` variable embeds the agent JSON with `\"` for each double
+> quote — that is the JSON-string encoding for the `--parameters` payload. The shell on the
+> instance sees the JSON with literal `"` inside a single-quoted `printf '%s'` argument, which
+> is fully literal (no shell expansion). This avoids heredoc nesting (which requires exact
+> newline placement inside SSM's JSON transport) and is safe to paste on Windows PowerShell.
+
+> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$cfg` before running
+> against the prod instance at M1.11 cutover.
 
 ## Costs
 

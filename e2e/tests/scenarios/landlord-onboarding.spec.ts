@@ -8,8 +8,11 @@
 // per-test reseed.
 //
 // Phase-1 realities encoded here:
-//   - The cold call is NOT app-placed — it's modelled as Team creating the landlord
-//     contact from the sourced lead (teamCreatesLandlord).
+//   - The cold call IS app-placed (Voice Phase 1 masked outbound): Team creates the
+//     landlord lead from the sourced lead (teamCreatesLandlord), then places a masked
+//     outbound call FROM the contact (teamMaskedCallsLandlord) — the app rings the
+//     navigator's verified cell and bridges to the landlord from the app's number, so
+//     the landlord never sees the personal cell. Only the two cold-call tests do this.
 //   - Welcome email + DocuSign are an external channel; we assert only the recorded
 //     contract_status ("signed"/"unsigned"), never the signing itself.
 //   - "Onboarding call" data is Team-recorded (no AI extraction): the deal terms +
@@ -94,12 +97,15 @@ test('cold call → interested → signed → onboarded → unit available → h
   const landlord = freshLandlord('Landlord');
 
   await flow.login();
-  // Cold call (not app-placed in Phase 1): Team creates the landlord from the sourced lead.
+  // Cold call (Voice Phase 1, app-placed masked): create the landlord lead from the
+  // sourced lead, THEN place the masked outbound cold call FROM the contact (the app
+  // rings the navigator's verified cell, bridges to the landlord from the app's number).
   await flow.teamCreatesLandlord({
     firstName: landlord.firstName,
     lastName: landlord.lastName,
     phone: landlord.phone,
   });
+  await flow.teamMaskedCallsLandlord();
   await flow.teamMarksLeadInterested();
   await flow.expectLeadInterested();
 
@@ -138,11 +144,14 @@ test('cold call → declines → parked (reason)', async ({ page, request }) => 
   const landlord = freshLandlord('Landlord');
 
   await flow.login();
+  // Cold call (Voice Phase 1, app-placed masked): create the landlord lead, then place
+  // the masked outbound cold call FROM the contact BEFORE the decline branch.
   await flow.teamCreatesLandlord({
     firstName: landlord.firstName,
     lastName: landlord.lastName,
     phone: landlord.phone,
   });
+  await flow.teamMaskedCallsLandlord();
   // No thanks — a PM, not the owner. Log the decline reason + park.
   await flow.teamParksLead('Declined — a property manager, not the owner');
   await flow.expectLeadParked('Declined — a property manager, not the owner');

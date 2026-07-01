@@ -77,3 +77,19 @@ unavailable), so issues live in-repo, in **two tiers**. Full reference:
   agents grep directly: `rg -l "^status: open$" docs/issues/ -g '!_*'`. Never hand-maintain a list —
   it's derived, which is what keeps concurrent issue-filing conflict-free.
 - **RUNBOOK.md is operational only** — bugs/gaps/deferrals go in `docs/issues/`, not there.
+
+## Branch hygiene — sync with `main` before declaring done
+
+`main` moves fast: multiple agents merge in parallel, so a branch cut a day ago is
+often several features behind. A branch that is green on a **stale base** can conflict
+with — or silently revert — work that landed on `main` after you branched (this has
+bitten us at review time more than once).
+
+- **Before declaring a branch done / requesting review or merge:** merge the latest
+  `main` into your branch (`git merge main`, or rebase), resolve any conflicts keeping
+  BOTH sides' intent, then re-run the full suite (`npm test` + `npm run e2e`) green on
+  the updated base. "Green" only counts against current `main`.
+- **If that surfaces conflicts, or you're unsure whether to sync mid-build, ASK first** —
+  e.g. "`main` has advanced N commits since I branched; should I merge it in before I
+  continue / before I finish?" Don't silently finish on a stale base.
+- Never merge your branch INTO `main` without explicit human approval.

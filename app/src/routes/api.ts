@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
+import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { isInlineMediaType } from '../lib/mediaTypes.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
@@ -64,6 +65,7 @@ import {
 import { type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { type AudienceResolutionService } from '../services/audienceResolution.js';
 import { createAdminUsersRouter } from './adminUsers.js';
+import { createUsersMeRouter, createVoiceCallRouter } from './voiceApi.js';
 import { createBroadcastsRouter } from './broadcasts.js';
 import { createPlacementsRouter } from './placements.js';
 import { createContactsRouter } from './contacts.js';
@@ -138,6 +140,12 @@ export interface ApiRouterDeps {
   contactVocabularyRepo?: ContactVocabularyRepo;
   usersRepo?: UsersRepo;
   pushService?: PushService;
+  /**
+   * Messaging adapter (Voice Phase 1): the originate route (initiateCall) + the
+   * self cell verify-start (adapter.sendMessage directly) use it. Injected in
+   * tests (the world fake); defaults to the real adapter.
+   */
+  adapter?: MessagingAdapter;
   /** M1.4 System Status — injected in tests (fake, no AWS); defaults to the real service. */
   systemStatusService?: SystemStatusService;
   /** M1.5 records & intake — injected in tests; default to the real repo. */
@@ -242,6 +250,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
+  // Voice Phase 1: the originate route + self cell verify-start need a messaging
+  // adapter (initiateCall / adapter.sendMessage). Shared across those sub-routers.
+  const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
   const events = deps.events ?? appEvents;
   const sseHeartbeatMs = deps.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
   const sendMessage =
@@ -278,7 +289,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
-  // Admin user-management (requireRole admin on every route).
+  // Self cell verification + self view (Voice Phase 1, spec §7) — mounted at
+  // /users BEFORE the admin router so the literal `me` segment is owned here
+  // (requireAuth only; a VA verifies their OWN cell) and is never captured as a
+  // :userId by the admin router's requireRole('admin') routes below.
+  router.use(
+    '/users',
+    createUsersMeRouter({
+      config,
+      logger: deps.logger,
+      adapter,
+      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
+    }),
+  );
+  // Admin user-management (requireRole admin on every route) + the inbound-voice-
+  // line assignment (spec §6).
   router.use(
     '/users',
     createAdminUsersRouter({
@@ -331,6 +356,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
       config,
+    }),
+  );
+  // Outbound masked calling (Voice Phase 1, spec §5) — mounted at /contacts so it
+  // owns POST /contacts/:contactId/call (a distinct segment from the contacts CRUD
+  // routes above; requireAuth via the /api mount — VAs place calls, no admin gate).
+  router.use(
+    '/contacts',
+    createVoiceCallRouter({
+      config,
+      logger: deps.logger,
+      adapter,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      events,
+      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
     }),
   );
   // Units CRUD (M1.5; requireAuth — VAs maintain properties, no admin gate).

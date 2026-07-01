@@ -8,7 +8,7 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
-import { seedAll } from './seedData.js';
+import { seedAll, seedInboundVoiceLineFromFounderCell } from './seedData.js';
 import { tableName, type AppConfig } from './config.js';
 import { createDynamoClient, createDocumentClient } from './dynamo.js';
 import { TABLES } from './tables.js';
@@ -62,5 +62,14 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
     await clearTable(doc, client, tableName(base));
   }
   const count = await seedAll(config.dynamodbEndpoint);
-  log.info({ tables: bases.length, seeded: count }, 'resetLocalData: cleared + reseeded');
+  // Voice Phase 1 (spec §6): migrate FOUNDER_CELL → the inbound-voice-line
+  // holder on the data model (idempotent; no-op when founderCell is unset).
+  const stampedInboundLine = await seedInboundVoiceLineFromFounderCell(
+    config.dynamodbEndpoint,
+    config.founderCell,
+  );
+  log.info(
+    { tables: bases.length, seeded: count, inboundVoiceLineStamped: stampedInboundLine },
+    'resetLocalData: cleared + reseeded',
+  );
 }

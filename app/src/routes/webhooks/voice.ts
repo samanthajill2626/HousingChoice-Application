@@ -54,19 +54,25 @@ import {
   type ConversationItem,
   type ConversationParticipant,
   type ConversationsRepo,
-  type ConversationType,
 } from '../../repos/conversationsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../../repos/placementsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../../repos/unitsRepo.js';
 import {
   createMessagesRepo,
   type CallStatus,
-  type MessageAuthor,
   type MessageItem,
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../../repos/settingsRepo.js';
 import { createUsersRepo, type UserItem, type UsersRepo } from '../../repos/usersRepo.js';
+import {
+  authorForContact,
+  conversationTypeFor,
+  contactShortName,
+  maskedCallerLabel,
+  roleWordForContact,
+  UNKNOWN_CALLER_LABEL,
+} from '../../lib/voiceMasking.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { enqueueImmediate } from '../../jobs/jobs.js';
 import { MISSED_CALL_AUTOTEXT_JOB } from '../../jobs/missedCallAutoText.js';
@@ -107,69 +113,11 @@ function maskedPartyLabel(member: ConversationParticipant | undefined, contact: 
 }
 
 /**
- * Author of the call entry = the INITIATOR's role (same honesty rule as the
- * messaging paths: only a reviewed tenant/landlord contact claims a role;
- * everything else is `unknown`).
+ * The MASKED caller/contact label + the honesty-rule role/author/conversation-
+ * type mapping now live in lib/voiceMasking.ts (shared with the OUTBOUND
+ * originate path) — imported above. `maskedPartyLabel` below stays local (it
+ * labels a roster MEMBER by its cached display name, a relay-only concern).
  */
-function authorForContact(contact: ContactItem | undefined): MessageAuthor {
-  return contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown';
-}
-
-/** The 1:1 conversation type for a (reviewed) contact — mirrors the SMS path. */
-function conversationTypeFor(contact: ContactItem | undefined): ConversationType {
-  switch (contact?.type) {
-    case 'landlord':
-      return 'landlord_1to1';
-    case 'tenant':
-      return 'tenant_1to1';
-    default:
-      return 'unknown_1to1';
-  }
-}
-
-/**
- * A MASKED, abbreviated display name from a contact's resolved fields for the
- * founder-bridge — "First L." (initial-only surname keeps the founder-facing
- * label terse and a touch more private), else just "First", else undefined.
- * HONEST: never invents a name. PII (doc §9): the NAME is founder-facing
- * context (fine in a push/label to the founder); the raw PHONE is NEVER used.
- */
-function contactShortName(contact: ContactItem | undefined): string | undefined {
-  const first = typeof contact?.firstName === 'string' ? contact.firstName.trim() : '';
-  const last = typeof contact?.lastName === 'string' ? contact.lastName.trim() : '';
-  if (first.length === 0 && last.length === 0) return undefined;
-  if (first.length === 0) return last; // surname only
-  if (last.length === 0) return first; // given name only
-  return `${first} ${last.charAt(0)}.`;
-}
-
-/** The masked ROLE word for the caller's reviewed contact type, else undefined. */
-function roleWordForContact(contact: ContactItem | undefined): string | undefined {
-  if (contact?.type === 'tenant') return 'Tenant';
-  if (contact?.type === 'landlord') return 'Landlord';
-  return undefined;
-}
-
-/** The sentinel label for a caller we couldn't resolve to a contact. */
-const UNKNOWN_CALLER_LABEL = 'Unknown caller';
-
-/**
- * The MASKED caller label for the founder-bridge timeline entry (STORED) + the
- * pushes' base: the contact's role + abbreviated name when known ("Tenant
- * (Jane D.)"), the role alone, the name alone, else "Unknown caller". NEVER the
- * raw From (PII, doc §9) — this value is persisted on the call entity. Distinct
- * from the relay maskedPartyLabel() (which labels a roster MEMBER by its cached
- * display name); the founder-bridge labels the CALLER by the freshly-resolved
- * contact.
- */
-function maskedCallerLabel(contact: ContactItem | undefined): string {
-  const role = roleWordForContact(contact);
-  const name = contactShortName(contact);
-  if (role !== undefined && name !== undefined) return `${role} (${name})`;
-  if (role !== undefined) return role;
-  if (name !== undefined) return name;
-  return UNKNOWN_CALLER_LABEL;
-}
 
 /**
  * The PUSH-ONLY caller label. For a KNOWN caller it's the masked role/name (as
@@ -434,19 +382,38 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   ): Promise<void> {
     const { CallSid, From } = call;
 
-    // No business number to use as caller ID, or no founder cell to dial → we
-    // CANNOT bridge without leaking the caller's From / having a target. Degrade
-    // to a minimal masked greeting (never a 5xx, never a number leak). Operator
-    // step: set OUR_PHONE_NUMBERS + FOUNDER_CELL to enable live bridging.
-    const founderCell = config.founderCell;
-    if (businessCallerId === undefined || founderCell === undefined) {
+    // Voice Phase 1 (spec §6): the dialed cell is the INBOUND-VOICE-LINE holder's
+    // VERIFIED cell, replacing the FOUNDER_CELL env — which stays a DEPRECATED
+    // runtime fallback when no holder is set (or the holder's cell is unverified).
+    // Resolving the holder is best-effort: a lookup hiccup falls back to
+    // config.founderCell so a transient users-table read never breaks inbound.
+    let holder: UserItem | undefined;
+    try {
+      holder = await users.getInboundVoiceLineHolder();
+    } catch (err) {
+      log.error({ err, callSid: CallSid }, 'founder triage: resolving the inbound-voice-line holder failed — falling back to FOUNDER_CELL');
+    }
+    const holderCell =
+      holder !== undefined &&
+      typeof holder.cell_verified_at === 'string' && holder.cell_verified_at.length > 0 &&
+      typeof holder.cell === 'string' && holder.cell.length > 0
+        ? holder.cell
+        : undefined;
+    const dialedCell = holderCell ?? config.founderCell;
+
+    // No business number to use as caller ID, or no cell to dial → we CANNOT
+    // bridge without leaking the caller's From / having a target. Degrade to a
+    // minimal masked greeting (never a 5xx, never a number leak). Operator step:
+    // set OUR_PHONE_NUMBERS + assign an inbound-voice-line holder (or FOUNDER_CELL).
+    if (businessCallerId === undefined || dialedCell === undefined) {
       log.warn(
         {
           callSid: CallSid,
           hasBusinessNumber: businessCallerId !== undefined,
-          hasFounderCell: founderCell !== undefined,
+          hasHolderCell: holderCell !== undefined,
+          hasFounderCell: config.founderCell !== undefined,
         },
-        'founder triage: no business caller ID / founder cell configured — minimal greeting, no bridge',
+        'founder triage: no business caller ID / dialed cell configured — minimal greeting, no bridge',
       );
       sendTwiml(
         res,
@@ -457,14 +424,14 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
 
-    // SELF-CALL GUARD: the caller IS the founder cell (the founder dialing the
-    // business line, or a test placed from the founder's own phone). Bridging
-    // the founder to their own number is nonsensical, and with answerOnBridge it
-    // leaves the caller leg unanswered → a VoIP client can loop on it. Refuse to
-    // bridge — a brief greeting + hangup, no self-dial, no bogus call entry/push.
-    // (The masked relay path already has the equivalent dialPhone !== From guard.)
-    if (From === founderCell) {
-      log.info({ callSid: CallSid }, 'founder triage: caller is the founder cell — not bridging to self');
+    // SELF-CALL GUARD: the caller IS the dialed cell (the holder dialing the
+    // business line, or a test placed from their own phone). Bridging them to
+    // their own number is nonsensical, and with answerOnBridge it leaves the
+    // caller leg unanswered → a VoIP client can loop on it. Refuse to bridge — a
+    // brief greeting + hangup, no self-dial, no bogus call entry/push. (The
+    // masked relay path already has the equivalent dialPhone !== From guard.)
+    if (From === dialedCell) {
+      log.info({ callSid: CallSid }, 'founder triage: caller is the dialed cell — not bridging to self');
       sendTwiml(
         res,
         maskedSayHangup(
@@ -545,13 +512,28 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // unexpected throw can never become an unhandled rejection). PII (doc §9):
     // masked label only, never the raw From; the send never blocks/fails the
     // bridge.
-    // The push (founder's own device) surfaces the caller's number when the
+    // The push (holder's own device) surfaces the caller's number when the
     // caller is UNKNOWN; the stored entry above keeps the masked callerLabel.
-    void sendPreRingPush(conversation.conversationId, CallSid, pushCallerLabel(callerLabel, From)).catch(
-      (err: unknown) => {
+    // Voice Phase 1 (spec §6): the pre-ring targets the HOLDER (the user whose
+    // cell is ringing), not all admins. When no holder is set (the deprecated
+    // FOUNDER_CELL fallback path), there is no user to push — the bridge still
+    // forms; the missed-call handling covers the rest.
+    if (holder !== undefined && holderCell !== undefined) {
+      const holderUserId = holder.userId;
+      void sendPreRingPush(
+        holderUserId,
+        conversation.conversationId,
+        CallSid,
+        pushCallerLabel(callerLabel, From),
+      ).catch((err: unknown) => {
         log.error({ err, callSid: CallSid }, 'founder triage: pre-ring push failed (fire-and-forget)');
-      },
-    );
+      });
+    } else {
+      // No holder whose VERIFIED cell we're dialing (the deprecated FOUNDER_CELL
+      // fallback path) → there is no user device to pre-ring. The bridge still
+      // forms; the missed-call handling covers the rest.
+      log.info({ callSid: CallSid }, 'founder triage: not dialing a holder cell — no pre-ring push (FOUNDER_CELL fallback)');
+    }
 
     // Build the founder-bridge TwiML. callerId is ALWAYS the business number,
     // NEVER From (the guardrail). The <Pause> is what makes the push land first.
@@ -617,11 +599,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         statusCallbackEvent: ['ringing'],
         statusCallbackMethod: 'POST',
       },
-      founderCell,
+      dialedCell,
     );
     log.info(
-      { callSid: CallSid, callerIdIsBusiness: true, masked: false, recording: true, preRingPauseSeconds },
-      'founder triage: pre-ring push sent, bridging to founder cell (callerId = business number, record-from-answer-dual, whisper+gate)',
+      { callSid: CallSid, callerIdIsBusiness: true, masked: false, recording: true, preRingPauseSeconds, hasHolder: holder !== undefined },
+      'founder triage: pre-ring push sent, bridging to the inbound-line cell (callerId = business number, record-from-answer-dual, whisper+gate)',
     );
     sendTwiml(res, vr);
   }
@@ -643,20 +625,20 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   }
 
   /**
-   * Send the PRE-RING push to every founder (admin user). kind 'pre_ring';
-   * the body is the MASKED caller label (e.g. "Incoming call — Tenant (Jane
-   * D.)") — NEVER the raw From (PII, doc §9). Best-effort: a push failure for
-   * one founder never blocks the bridge or the others.
+   * Send the PRE-RING push to the inbound-voice-line HOLDER (the user whose cell
+   * is ringing — spec §6). kind 'pre_ring'; the body is the MASKED caller label
+   * (e.g. "Incoming call — Tenant (Jane D.)") — NEVER the raw From (PII, doc §9).
+   * Best-effort: a push failure never blocks the bridge.
    */
-  async function sendPreRingPush(conversationId: string, callSid: string, callerLabel: string): Promise<void> {
-    const founders = await resolveFounders();
-    if (founders.length === 0) {
-      log.info({ callSid }, 'founder triage: no admin users to pre-ring push');
-      return;
-    }
+  async function sendPreRingPush(
+    holderUserId: string,
+    conversationId: string,
+    callSid: string,
+    callerLabel: string,
+  ): Promise<void> {
     // Payload shape the service worker expects (dashboard/public/sw.js):
     // { title, body, kind, callId, conversationId } — pre_ring carries no
-    // actions (the founder is about to be rung; the actions are on the missed
+    // actions (the holder is about to be rung; the actions are on the missed
     // push). The deep link is the conversation (sw.js routes pre_ring by
     // conversationId since it isn't a missed_call).
     const payload = {
@@ -666,12 +648,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       callId: callSid,
       conversationId,
     };
-    for (const founder of founders) {
-      try {
-        await pushService.sendToUser(founder.userId, { kind: 'pre_ring', payload });
-      } catch (err) {
-        log.warn({ err, callSid, userId: founder.userId }, 'founder triage: pre-ring push failed for a founder — continuing');
-      }
+    try {
+      await pushService.sendToUser(holderUserId, { kind: 'pre_ring', payload });
+    } catch (err) {
+      log.warn({ err, callSid, userId: holderUserId }, 'founder triage: pre-ring push failed — continuing');
     }
   }
 
@@ -910,6 +890,79 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     sendTwiml(res, vr);
   }
 
+  /**
+   * Resolve the OUTBOUND target from an opaque conversationId (spec §5/§6): the
+   * conversation's participant_phone is the target number, and the freshly-
+   * resolved contact gives the masked label. The raw target phone is NEVER read
+   * from the URL — only the conversationId is. Returns undefined when the
+   * conversation is missing / carries no participant phone (the caller then
+   * refuses to bridge). PII: the returned label is a role/name, never a phone.
+   */
+  async function resolveOutboundTarget(
+    conversationId: string,
+  ): Promise<{ targetPhone: string; label: string } | undefined> {
+    if (conversationId.length === 0) return undefined;
+    const conversation = await conversations.getById(conversationId);
+    const targetPhone =
+      typeof conversation?.participant_phone === 'string' && conversation.participant_phone.length > 0
+        ? conversation.participant_phone
+        : undefined;
+    if (conversation === undefined || targetPhone === undefined) return undefined;
+    const contact = await contacts.findByPhone(targetPhone);
+    return { targetPhone, label: maskedCallerLabel(contact) };
+  }
+
+  // ---------------------------------------------------------------------
+  // Outbound bridge — POST /voice/outbound-bridge (Voice Phase 1, spec §5).
+  // Runs on the NAVIGATOR leg when they answer the originated call. Resolves the
+  // target SERVER-SIDE from ?conversationId (NEVER a phone in the URL), then
+  // returns the SAME whisper + press-1 gate the founder/relay legs use — REUSING
+  // /voice/whisper's machinery/copy. The gate URL carries the opaque
+  // conversationId + an outbound=1 marker; on press-1 the whisper-gate's OUTBOUND
+  // branch dials the target FROM the business number.
+  // ---------------------------------------------------------------------
+  router.post('/outbound-bridge', verifySignature, async (req, res) => {
+    const params = asParams(req.body);
+    const q = req.query as Record<string, string | undefined>;
+    const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
+    const parentCallSid =
+      typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
+    if (conversationId.length > 0) mergeContext({ conversationId });
+
+    const target = await resolveOutboundTarget(conversationId);
+    if (target === undefined) {
+      // The conversation is gone / has no target — refuse cleanly (never a leak,
+      // never a 5xx). The navigator hears a brief note + hangup.
+      log.warn({ callSid: parentCallSid }, 'outbound bridge: target unresolved from conversationId — hanging up');
+      sendTwiml(
+        res,
+        maskedSayHangup('Sorry, this Housing Choice call is no longer available. Goodbye.'),
+      );
+      return;
+    }
+
+    // The whisper + press-1 gate on the NAVIGATOR leg (mirrors /voice/whisper).
+    // We build the SAME <Gather numDigits=1 timeout=8 action=<gate>> + <Hangup>
+    // shape; the gate URL carries the opaque conversationId (+ outbound=1). The
+    // announced label is the masked contact (role/name) — NEVER a phone.
+    const gateUrl =
+      `${baseUrl}/webhooks/twilio/voice/whisper-gate` +
+      `?conversationId=${encodeURIComponent(conversationId)}` +
+      `&parentCallSid=${encodeURIComponent(parentCallSid)}` +
+      `&outbound=1`;
+    const vr = new VoiceResponse();
+    const gather = vr.gather({ numDigits: 1, timeout: 8, action: gateUrl, method: 'POST' });
+    gather.say(`Calling ${target.label}. Press 1 to connect.`);
+    // No input within the timeout → hang up (never auto-bridge — press-1 is the
+    // explicit accept that blocks the navigator's carrier voicemail).
+    vr.hangup();
+    log.info(
+      { callSid: parentCallSid, outbound: true },
+      'outbound bridge: whisper played on navigator leg (press-1 to connect)',
+    );
+    sendTwiml(res, vr);
+  });
+
   // ---------------------------------------------------------------------
   // Whisper — POST /voice/whisper. Runs on the CALLEE leg (the <Number url>).
   // A terse masked announcement + a press-1 gate (Gather → /voice/whisper-gate).
@@ -980,9 +1033,66 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // team to escape to — it falls through to hangup (→ MISSED → the status
     // handler fires the missed-call push + auto-text).
     const isFounderLeg = q['leg'] === 'founder';
+    // Outbound-bridge leg (Voice Phase 1, spec §5): the navigator's press-1
+    // ORIGINATES the leg to the target (a <Dial>), rather than accepting an
+    // already-dialed inbound leg (a <Pause>). Marked by outbound=1 on the gate.
+    const isOutboundLeg = q['outbound'] === '1';
     if (conversationId.length > 0) mergeContext({ conversationId });
 
     const vr = new VoiceResponse();
+    if (digits === '1' && isOutboundLeg) {
+      // OUTBOUND accept: resolve the target AGAIN from the opaque conversationId
+      // (never from the URL — no phone in the URL), then <Dial> it FROM the
+      // BUSINESS number (the masking invariant: the target sees the business
+      // number, NEVER the navigator's cell). record-from-answer-dual so the
+      // outbound call RECORDS like the founder-bridge; the <Dial action> reports
+      // the terminal outcome to /voice/status by the PARENT (originated) CallSid.
+      const target = await resolveOutboundTarget(conversationId);
+      const businessCallerId = config.ourPhoneNumbers[0];
+      if (target === undefined || businessCallerId === undefined) {
+        vr.hangup();
+        log.warn(
+          { callSid: parentCallSid, outbound: true },
+          'outbound whisper gate: target/business number unresolved — hanging up',
+        );
+        sendTwiml(res, vr);
+        return;
+      }
+      // Mark the bridge accepted NOW (press-1 is the authoritative "answered"
+      // signal, same as the inbound legs). Best-effort.
+      if (parentCallSid.length > 0) {
+        try {
+          await messages.updateCallStatus(parentCallSid, {
+            callStatus: 'in-progress',
+            answeredAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          log.warn(
+            { err, callSid: parentCallSid },
+            'outbound whisper gate: marking the bridge accepted failed (best-effort) — continuing',
+          );
+        }
+      }
+      const dial = vr.dial({
+        callerId: businessCallerId,
+        record: 'record-from-answer-dual',
+        recordingStatusCallback: `${baseUrl}/webhooks/twilio/voice/recording`,
+        recordingStatusCallbackEvent: ['completed'],
+        recordingStatusCallbackMethod: 'POST',
+        answerOnBridge: true,
+        action: `${baseUrl}/webhooks/twilio/voice/status`,
+        method: 'POST',
+      });
+      // The target rides ONLY inside <Number> — never a TwiML URL. No per-leg
+      // whisper on the target (the navigator already accepted).
+      dial.number(target.targetPhone);
+      log.info(
+        { callSid: parentCallSid, gate: 'accept', outbound: true, callerIdIsBusiness: true, recording: true },
+        'outbound whisper gate: accepted (1) — dialing target from the business number',
+      );
+      sendTwiml(res, vr);
+      return;
+    }
     if (digits === '1') {
       // Accept: returning <Pause> (not an empty doc) keeps the bridged leg on
       // the line so Twilio bridges it to the caller. The bridge proceeds.
@@ -1015,7 +1125,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       sendTwiml(res, vr);
       return;
     }
-    if (digits === '0' && !isFounderLeg) {
+    if (digits === '0' && !isFounderLeg && !isOutboundLeg) {
       // Press-0 escape (masked relay only): dial the team. callerId stays a
       // number we own (the first configured business number) — NEVER the
       // original caller's From (PII).
@@ -1203,7 +1313,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         // terminal miss returns true — a redelivered/stale callback never
         // re-triggers (and the auto-text job is ALSO CallSid-idempotent as a
         // second layer).
-        if (isMissed && fresh.type === 'call' && fresh.masked !== true) {
+        if (isMissed && fresh.type === 'call' && fresh.masked !== true && fresh.direction !== 'outbound') {
           await onFounderBridgeMissed(entryCallSid, fresh.conversationId);
         }
       }

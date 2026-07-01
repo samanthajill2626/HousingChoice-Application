@@ -5,6 +5,7 @@
 // message inline.
 //
 // FUTURE: no delete/deactivate in v1 (no backend for it) — see the design spec.
+import { useAuth } from '../../app/AuthContext.js';
 import { useTeam } from './useTeam.js';
 import { UserRow } from './UserRow.js';
 import { InviteForm } from './InviteForm.js';
@@ -13,7 +14,8 @@ import { Button, Spinner } from '../../ui/index.js';
 import styles from './TeamSection.module.css';
 
 export function TeamSection(): React.JSX.Element {
-  const { status, users, retry, invite, changeRole } = useTeam();
+  const { status, users, retry, invite, changeRole, assignVoiceLine, clearVoiceLine } = useTeam();
+  const { isAdmin } = useAuth();
   const isMobile = useIsMobile();
 
   return (
@@ -40,7 +42,15 @@ export function TeamSection(): React.JSX.Element {
           ) : isMobile ? (
             <ul className={styles.cards}>
               {users.map((u) => (
-                <UserRow key={u.userId} user={u} onChangeRole={changeRole} variant="card" />
+                <UserRow
+                  key={u.userId}
+                  user={u}
+                  onChangeRole={changeRole}
+                  onAssignVoiceLine={assignVoiceLine}
+                  onClearVoiceLine={clearVoiceLine}
+                  variant="card"
+                  viewerIsAdmin={isAdmin}
+                />
               ))}
             </ul>
           ) : (
@@ -54,6 +64,12 @@ export function TeamSection(): React.JSX.Element {
                     Role
                   </th>
                   <th className={styles.th} scope="col">
+                    Cell
+                  </th>
+                  <th className={styles.th} scope="col">
+                    Voice line
+                  </th>
+                  <th className={styles.th} scope="col">
                     Status
                   </th>
                   <th className={styles.th} scope="col">
@@ -63,7 +79,15 @@ export function TeamSection(): React.JSX.Element {
               </thead>
               <tbody>
                 {users.map((u) => (
-                  <UserRow key={u.userId} user={u} onChangeRole={changeRole} variant="table" />
+                  <UserRow
+                    key={u.userId}
+                    user={u}
+                    onChangeRole={changeRole}
+                    onAssignVoiceLine={assignVoiceLine}
+                    onClearVoiceLine={clearVoiceLine}
+                    variant="table"
+                    viewerIsAdmin={isAdmin}
+                  />
                 ))}
               </tbody>
             </table>

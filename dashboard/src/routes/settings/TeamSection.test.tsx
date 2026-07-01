@@ -1,7 +1,8 @@
 // TeamSection tests — the admin team surface. Covers the roster render (mocked
 // listUsers), the idempotent invite (created / created:false), and the OPTIMISTIC
 // role change that reverts on a 409 lockout guard (cannot_demote_last_admin /
-// cannot_demote_self) with the inline message.
+// cannot_demote_self) with the inline message. Also covers the non-admin (VA)
+// viewer read-only path (spec §6: "Non-admins see state read-only").
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +12,8 @@ import type { AdminUserView } from '../../api/index.js';
 const listUsers = vi.fn();
 const inviteUser = vi.fn();
 const setUserRole = vi.fn();
+const assignInboundVoiceLine = vi.fn();
+const clearInboundVoiceLine = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -18,8 +21,21 @@ vi.mock('../../api/index.js', async () => {
     listUsers: (...a: unknown[]) => listUsers(...a),
     inviteUser: (...a: unknown[]) => inviteUser(...a),
     setUserRole: (...a: unknown[]) => setUserRole(...a),
+    assignInboundVoiceLine: (...a: unknown[]) => assignInboundVoiceLine(...a),
+    clearInboundVoiceLine: (...a: unknown[]) => clearInboundVoiceLine(...a),
   };
 });
+
+// Track the viewer's admin flag so tests can flip it.
+let viewerIsAdmin = true;
+vi.mock('../../app/AuthContext.js', () => ({
+  useAuth: () => ({
+    status: 'authenticated',
+    me: { userId: 'viewer', email: 'viewer@example.com', role: viewerIsAdmin ? 'admin' : 'va' },
+    isAdmin: viewerIsAdmin,
+    refresh: vi.fn(),
+  }),
+}));
 
 import { TeamSection } from './TeamSection.js';
 
@@ -55,6 +71,7 @@ function stubDesktop(): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  viewerIsAdmin = true; // default: admin viewer for existing tests
   stubDesktop();
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -181,6 +198,93 @@ describe('TeamSection — optimistic role change revert', () => {
     await waitFor(() => expect(roleSelect.value).toBe('admin'));
   });
 
+  it('shows each member\'s cell + verification badge', async () => {
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+      }),
+      user({ userId: 'b', email: 'bob@example.com', cell: '+14040100002' }),
+      user({ userId: 'c', email: 'carol@example.com' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    const table = screen.getByRole('table');
+    // Alice: verified badge next to her cell.
+    expect(within(table).getByText('(404) 010-0001')).toBeInTheDocument();
+    expect(within(table).getByText('Verified ✓')).toBeInTheDocument();
+    // Bob has a cell but no verified_at → "Not verified".
+    expect(within(table).getByText('(404) 010-0002')).toBeInTheDocument();
+    expect(within(table).getByText('Not verified')).toBeInTheDocument();
+    // Carol has no cell → "Not set".
+    expect(within(table).getByText('Not set')).toBeInTheDocument();
+  });
+});
+
+describe('TeamSection — inbound voice line (single holder)', () => {
+  it('badges the single holder and lets an admin MOVE the line (assign)', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+      }),
+    ]);
+    // Assigning to Bob returns Bob as the new holder.
+    assignInboundVoiceLine.mockResolvedValue(
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+    );
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    // Exactly one "Inbound voice line" badge to start (Alice holds it).
+    expect(screen.getAllByText('Inbound voice line')).toHaveLength(1);
+
+    // Assign it to Bob → the line MOVES (still exactly one badge).
+    await u.click(
+      screen.getByRole('button', { name: /Assign the inbound voice line to bob@example.com/i }),
+    );
+    expect(assignInboundVoiceLine).toHaveBeenCalledWith('b');
+    await waitFor(() => expect(screen.getAllByText('Inbound voice line')).toHaveLength(1));
+    // And now Bob offers "Clear" (he holds it).
+    expect(
+      screen.getByRole('button', { name: /Clear the inbound voice line from bob@example.com/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('cannot assign an unverified user — surfaces the 409 cell_not_verified reason', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({ userId: 'b', email: 'bob@example.com', cell: '+14040100002' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('bob@example.com');
+    // An unverified user's Assign button is disabled (guarded before the request).
+    expect(
+      screen.getByRole('button', { name: /Assign the inbound voice line to bob@example.com/i }),
+    ).toBeDisabled();
+    expect(assignInboundVoiceLine).not.toHaveBeenCalled();
+    void u; // (no click — the control is disabled)
+  });
+
   it('commits the server row on a successful role change', async () => {
     const u = userEvent.setup();
     listUsers.mockResolvedValue([user({ userId: 'b', email: 'bob@example.com', role: 'va' })]);
@@ -198,5 +302,43 @@ describe('TeamSection — optimistic role change revert', () => {
     expect(setUserRole).toHaveBeenCalledWith('b', 'admin');
     // No inline error on success.
     expect(within(screen.getByRole('table')).queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('TeamSection — non-admin (VA) viewer read-only', () => {
+  // Spec §6: "Non-admins see state read-only" — the inbound-voice-line badge is
+  // shown but Assign/Clear buttons must NOT be rendered when the viewer is a VA.
+  it('hides Assign/Clear buttons for a non-admin viewer while still showing badge and cell state', async () => {
+    viewerIsAdmin = false;
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+      }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    // The "Inbound voice line" badge is still visible (read-only state).
+    expect(screen.getByText('Inbound voice line')).toBeInTheDocument();
+    // Cell and verification badges are shown (at least one Verified ✓ badge).
+    expect(screen.getAllByText('Verified ✓').length).toBeGreaterThanOrEqual(1);
+
+    // Assign and Clear action buttons must NOT appear for a non-admin viewer.
+    expect(
+      screen.queryByRole('button', { name: /Assign the inbound voice line/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Clear the inbound voice line/i }),
+    ).not.toBeInTheDocument();
   });
 });

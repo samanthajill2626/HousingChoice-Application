@@ -53,18 +53,18 @@ afterEach(() => {
 describe('SettingsPage — role gating (desktop tabs)', () => {
   beforeEach(() => stubMatchMedia(false)); // desktop → the tab row
 
-  it('an admin sees all four tabs including Team + System status', () => {
+  it('an admin sees all tabs including Team + System status', () => {
     isAdmin = true;
     renderPage();
     const tabNames = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabNames).toEqual(['Team', 'Templates', 'Notifications', 'System status']);
+    expect(tabNames).toEqual(['Team', 'Templates', 'Notifications', 'Voice', 'System status']);
   });
 
-  it('a VA sees only Templates + Notifications (no Team, no System)', () => {
+  it('a VA sees Templates + Notifications + Voice (no Team, no System)', () => {
     isAdmin = false;
     renderPage();
     const tabNames = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabNames).toEqual(['Templates', 'Notifications']);
+    expect(tabNames).toEqual(['Templates', 'Notifications', 'Voice']);
     expect(screen.queryByRole('tab', { name: 'Team' })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'System status' })).not.toBeInTheDocument();
   });
@@ -91,6 +91,6 @@ describe('SettingsPage — responsive switch', () => {
     renderPage();
     const select = screen.getByRole('combobox', { name: 'Settings section' });
     const options = within(select).getAllByRole('option').map((o) => o.textContent);
-    expect(options).toEqual(['Templates', 'Notifications']);
+    expect(options).toEqual(['Templates', 'Notifications', 'Voice']);
   });
 });

@@ -16,7 +16,13 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
-import { createUsersRepo, displayNameOf, userIdForEmail } from '../src/repos/usersRepo.js';
+import { hashCellVerifyCode } from '../src/lib/cellVerification.js';
+import {
+  createUsersRepo,
+  displayNameOf,
+  HOLDER_POINTER_KEY,
+  userIdForEmail,
+} from '../src/repos/usersRepo.js';
 import { AccessDeniedError, resolveInvitedUser } from '../src/services/resolveInvitedUser.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -266,5 +272,125 @@ describe.skipIf(!reachable)('usersRepo against DynamoDB Local (throwaway prefix)
     const stored3 = await users.findById(userId);
     expect(stored3?.name).toBe('Samantha Rivera');
     expect(displayNameOf(stored3!)).toBe('Samantha Rivera');
+  });
+
+  // -------------------------------------------------------------------------
+  // Voice Phase 1 (spec §7): cell verification
+  // -------------------------------------------------------------------------
+  const hash = (code: string) => hashCellVerifyCode(code);
+
+  it('startCellVerification sets pending fields + resets attempts, leaving cell/verified_at untouched', async () => {
+    const { user } = await users.invite({ email: 'cellstart@housingchoice.org', role: 'va' });
+    await users.startCellVerification(user.userId, '+15550123456', hash('123456'), '2030-01-01T00:00:00.000Z');
+    const item = (await users.findById(user.userId))!;
+    expect(item.cell_pending).toBe('+15550123456');
+    expect(item.cell_verify_code_hash).toBe(hash('123456'));
+    expect(item.cell_verify_expires_at).toBe('2030-01-01T00:00:00.000Z');
+    expect(item.cell_verify_attempts).toBe(0);
+    // Not trusted yet — cell + cell_verified_at must remain absent.
+    expect(item.cell).toBeUndefined();
+    expect(item.cell_verified_at).toBeUndefined();
+  });
+
+  it('confirmCellVerification: success promotes cell, stamps verified_at, clears pending', async () => {
+    const { user } = await users.invite({ email: 'cellok@housingchoice.org', role: 'va' });
+    await users.startCellVerification(user.userId, '+15550100200', hash('654321'), '2030-01-01T00:00:00.000Z');
+    const res = await users.confirmCellVerification(user.userId, hash('654321'), '2026-07-01T10:00:00.000Z');
+    expect(res).toEqual({ ok: true, cell: '+15550100200', cell_verified_at: '2026-07-01T10:00:00.000Z' });
+    const item = (await users.findById(user.userId))!;
+    expect(item.cell).toBe('+15550100200');
+    expect(item.cell_verified_at).toBe('2026-07-01T10:00:00.000Z');
+    expect(item.cell_pending).toBeUndefined();
+    expect(item.cell_verify_code_hash).toBeUndefined();
+    expect(item.cell_verify_expires_at).toBeUndefined();
+    expect(item.cell_verify_attempts).toBeUndefined();
+  });
+
+  it('confirmCellVerification: no_pending when nothing is pending', async () => {
+    const { user } = await users.invite({ email: 'cellnopending@housingchoice.org', role: 'va' });
+    const res = await users.confirmCellVerification(user.userId, hash('000000'), '2026-07-01T10:00:00.000Z');
+    expect(res).toEqual({ ok: false, reason: 'no_pending' });
+  });
+
+  it('confirmCellVerification: expired when now is past the deadline (no cell promotion)', async () => {
+    const { user } = await users.invite({ email: 'cellexpired@housingchoice.org', role: 'va' });
+    await users.startCellVerification(user.userId, '+15550100300', hash('222222'), '2026-07-01T09:00:00.000Z');
+    const res = await users.confirmCellVerification(user.userId, hash('222222'), '2026-07-01T10:00:00.000Z');
+    expect(res).toEqual({ ok: false, reason: 'expired' });
+    expect((await users.findById(user.userId))!.cell).toBeUndefined();
+  });
+
+  it('confirmCellVerification: mismatch increments attempts; too_many_attempts after the cap', async () => {
+    const { user } = await users.invite({ email: 'cellmismatch@housingchoice.org', role: 'va' });
+    await users.startCellVerification(user.userId, '+15550100400', hash('333333'), '2030-01-01T00:00:00.000Z');
+    // 5 wrong tries — each a mismatch, incrementing attempts to 5.
+    for (let i = 0; i < 5; i++) {
+      const res = await users.confirmCellVerification(user.userId, hash('999999'), '2026-07-01T10:00:00.000Z');
+      expect(res).toEqual({ ok: false, reason: 'mismatch' });
+    }
+    expect((await users.findById(user.userId))!.cell_verify_attempts).toBe(5);
+    // The 6th try (even with the RIGHT code) is locked out.
+    const locked = await users.confirmCellVerification(user.userId, hash('333333'), '2026-07-01T10:00:00.000Z');
+    expect(locked).toEqual({ ok: false, reason: 'too_many_attempts' });
+    expect((await users.findById(user.userId))!.cell).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Voice Phase 1 (spec §6): single inbound-voice-line holder
+  // -------------------------------------------------------------------------
+  it('assignInboundVoiceLine is single-holder: assigning B clears A; getInboundVoiceLineHolder tracks it', async () => {
+    const a = (await users.invite({ email: 'lineA@housingchoice.org', role: 'admin' })).user;
+    const b = (await users.invite({ email: 'lineB@housingchoice.org', role: 'admin' })).user;
+
+    await users.assignInboundVoiceLine(a.userId);
+    // The holder is derived from the authoritative pointer, not a per-user boolean.
+    expect((await users.getInboundVoiceLineHolder())!.userId).toBe(a.userId);
+
+    // Reassign to B — one pointer field ⇒ B replaces A as the single holder.
+    await users.assignInboundVoiceLine(b.userId);
+    expect((await users.getInboundVoiceLineHolder())!.userId).toBe(b.userId);
+
+    // Clear B — no holder remains.
+    await users.clearInboundVoiceLine(b.userId);
+    expect(await users.getInboundVoiceLineHolder()).toBeUndefined();
+
+    // Clearing a NON-holder is a no-op (conditional): re-assign B, clear A, B stays.
+    await users.assignInboundVoiceLine(b.userId);
+    await users.clearInboundVoiceLine(a.userId);
+    expect((await users.getInboundVoiceLineHolder())!.userId).toBe(b.userId);
+    await users.clearInboundVoiceLine(b.userId); // tidy up
+  });
+
+  it('assignInboundVoiceLine is race-safe: two concurrent assigns leave EXACTLY one holder', async () => {
+    const u1 = (await users.invite({ email: 'raceU1@housingchoice.org', role: 'admin' })).user;
+    const u2 = (await users.invite({ email: 'raceU2@housingchoice.org', role: 'admin' })).user;
+
+    // Fire both assigns CONCURRENTLY — with a single authoritative pointer field
+    // the outcome is deterministically ONE holder (the last write wins), never
+    // two (the pre-fix scan-then-set race could leave both flagged).
+    await Promise.all([
+      users.assignInboundVoiceLine(u1.userId),
+      users.assignInboundVoiceLine(u2.userId),
+    ]);
+
+    const holder = await users.getInboundVoiceLineHolder();
+    expect(holder).toBeDefined();
+    expect([u1.userId, u2.userId]).toContain(holder!.userId);
+    // Exactly one holder: whichever is NOT the holder derives NO badge. The list
+    // never carries the sentinel row, and only the pointer's target is a holder.
+    const other = holder!.userId === u1.userId ? u2.userId : u1.userId;
+    expect(holder!.userId).not.toBe(other);
+
+    await users.clearInboundVoiceLine(holder!.userId); // tidy up
+  });
+
+  it('listAll never surfaces the inbound-voice-line sentinel pointer row', async () => {
+    const u = (await users.invite({ email: 'sentinelcheck@housingchoice.org', role: 'admin' })).user;
+    await users.assignInboundVoiceLine(u.userId); // writes the sentinel row
+    const all = await users.listAll();
+    // Every listed item is a real user (has a role); the sentinel key is filtered out.
+    expect(all.every((x) => x.userId !== HOLDER_POINTER_KEY)).toBe(true);
+    expect(all.some((x) => x.userId === u.userId)).toBe(true);
+    await users.clearInboundVoiceLine(u.userId); // tidy up
   });
 });

@@ -206,6 +206,24 @@ data "aws_iam_policy_document" "app" {
       "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
     ]
   }
+  # System Status "recent errors" uses CloudWatch Logs Insights (StartQuery +
+  # GetQueryResults) to return the NEWEST matching events in newest-first order —
+  # FilterLogEvents can only page oldest-first, so it drops the newest matches on
+  # wide windows. StartQuery IS resource-scopable to this env's groups;
+  # GetQueryResults + StopQuery do NOT support resource-level permissions ("*").
+  statement {
+    sid       = "SystemStatusInsightsStart"
+    actions   = ["logs:StartQuery"]
+    resources = [
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*",
+      "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",
+    ]
+  }
+  statement {
+    sid       = "SystemStatusInsightsResults"
+    actions   = ["logs:GetQueryResults", "logs:StopQuery"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "app" {
@@ -257,6 +275,45 @@ resource "aws_instance" "app" {
       "https://github.com/docker/compose/releases/download/${var.compose_version}/docker-compose-linux-aarch64"
     chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
     mkdir -p /opt/hc
+
+    # --- Host observability (M0.5/M0.6, finished 2026-07-01) ---------------
+    # rsyslog so kernel/system messages (incl. the OOM killer's
+    # "Out of memory: Killed process ...") land in /var/log/messages — AL2023 is
+    # journald-only by default and the CloudWatch agent tails FILES, not journald.
+    dnf install -y rsyslog
+    systemctl enable --now rsyslog
+    # CloudWatch agent: host disk + memory metrics, and ship /var/log/messages
+    # (OOM lines) to /hc/${var.env}/system. IAM already grants PutMetricData
+    # (CWAgent namespace) + logs on /hc/${var.env}/*.
+    dnf install -y amazon-cloudwatch-agent
+    cat > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json <<'CWCONFIG'
+    {
+      "agent": { "metrics_collection_interval": 60, "run_as_user": "root" },
+      "metrics": {
+        "namespace": "CWAgent",
+        "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+        "metrics_collected": {
+          "mem": { "measurement": ["mem_used_percent"] },
+          "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true }
+        }
+      },
+      "logs": {
+        "logs_collected": {
+          "files": {
+            "collect_list": [
+              {
+                "file_path": "/var/log/messages",
+                "log_group_name": "/hc/${var.env}/system",
+                "log_stream_name": "{instance_id}"
+              }
+            ]
+          }
+        }
+      }
+    }
+    CWCONFIG
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json
   EOT
 
   # The AMI is resolved from the rolling "latest AL2023" SSM alias at first

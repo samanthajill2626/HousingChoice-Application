@@ -143,6 +143,10 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
   const findByIdCalls: string[] = [];
   const activateCalls: { userId: string; name: string | undefined }[] = [];
   const touchCalls: { userId: string; name: string | undefined }[] = [];
+  // Voice Phase 1: the inbound-voice-line holder is ONE pointer (mirrors the real
+  // repo's authoritative sentinel row) — last-writer-wins, single holder. NOT a
+  // per-user boolean, so the race is structurally impossible here too.
+  let holderUserId: string | undefined;
   const repo: UsersRepo = {
     async findByEmail(email) {
       const e = normalizeEmail(email);
@@ -231,6 +235,55 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       const remaining = (user.push_subscriptions ?? []).filter((s) => s.endpoint !== endpoint);
       user.push_subscriptions = remaining;
       return remaining;
+    },
+    // --- Voice Phase 1: cell verification + inbound-voice-line (mirrors real) --
+    async startCellVerification(userId, cell, codeHash, expiresAt) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`startCellVerification: no user ${userId}`);
+      user.cell_pending = cell;
+      user.cell_verify_code_hash = codeHash;
+      user.cell_verify_expires_at = expiresAt;
+      user.cell_verify_attempts = 0;
+    },
+    async confirmCellVerification(userId, codeHash, now) {
+      const user = users.get(userId);
+      if (!user) throw new Error(`confirmCellVerification: no user ${userId}`);
+      const pending = user.cell_pending;
+      const storedHash = user.cell_verify_code_hash;
+      if (typeof pending !== 'string' || typeof storedHash !== 'string') {
+        return { ok: false, reason: 'no_pending' };
+      }
+      if (typeof user.cell_verify_expires_at === 'string' && now > user.cell_verify_expires_at) {
+        return { ok: false, reason: 'expired' };
+      }
+      const attempts =
+        typeof user.cell_verify_attempts === 'number' ? user.cell_verify_attempts : 0;
+      if (attempts >= 5) return { ok: false, reason: 'too_many_attempts' };
+      if (codeHash !== storedHash) {
+        user.cell_verify_attempts = attempts + 1;
+        return { ok: false, reason: 'mismatch' };
+      }
+      user.cell = pending;
+      user.cell_verified_at = now;
+      delete user.cell_pending;
+      delete user.cell_verify_code_hash;
+      delete user.cell_verify_expires_at;
+      delete user.cell_verify_attempts;
+      return { ok: true, cell: pending, cell_verified_at: now };
+    },
+    async assignInboundVoiceLine(userId) {
+      // Single pointer, last-writer-wins (mirrors the real repo — one field).
+      holderUserId = userId;
+    },
+    async clearInboundVoiceLine(userId) {
+      // Only the current holder clears the pointer (clearing a non-holder is a no-op).
+      if (holderUserId === userId) holderUserId = undefined;
+    },
+    async getInboundVoiceLineHolder() {
+      if (holderUserId === undefined) return undefined;
+      const holder = users.get(holderUserId);
+      // Dangling pointer (holder deleted) degrades to undefined, like the real repo.
+      return holder ? { ...holder } : undefined;
     },
   };
   return { users, creates, activations, findByIdCalls, activateCalls, touchCalls, repo };

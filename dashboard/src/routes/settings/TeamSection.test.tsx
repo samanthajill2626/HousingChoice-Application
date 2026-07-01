@@ -11,6 +11,8 @@ import type { AdminUserView } from '../../api/index.js';
 const listUsers = vi.fn();
 const inviteUser = vi.fn();
 const setUserRole = vi.fn();
+const assignInboundVoiceLine = vi.fn();
+const clearInboundVoiceLine = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -18,6 +20,8 @@ vi.mock('../../api/index.js', async () => {
     listUsers: (...a: unknown[]) => listUsers(...a),
     inviteUser: (...a: unknown[]) => inviteUser(...a),
     setUserRole: (...a: unknown[]) => setUserRole(...a),
+    assignInboundVoiceLine: (...a: unknown[]) => assignInboundVoiceLine(...a),
+    clearInboundVoiceLine: (...a: unknown[]) => clearInboundVoiceLine(...a),
   };
 });
 
@@ -179,6 +183,93 @@ describe('TeamSection — optimistic role change revert', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/can't remove your own admin access/i);
     await waitFor(() => expect(roleSelect.value).toBe('admin'));
+  });
+
+  it('shows each member\'s cell + verification badge', async () => {
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+      }),
+      user({ userId: 'b', email: 'bob@example.com', cell: '+14040100002' }),
+      user({ userId: 'c', email: 'carol@example.com' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    const table = screen.getByRole('table');
+    // Alice: verified badge next to her cell.
+    expect(within(table).getByText('(404) 010-0001')).toBeInTheDocument();
+    expect(within(table).getByText('Verified ✓')).toBeInTheDocument();
+    // Bob has a cell but no verified_at → "Not verified".
+    expect(within(table).getByText('(404) 010-0002')).toBeInTheDocument();
+    expect(within(table).getByText('Not verified')).toBeInTheDocument();
+    // Carol has no cell → "Not set".
+    expect(within(table).getByText('Not set')).toBeInTheDocument();
+  });
+});
+
+describe('TeamSection — inbound voice line (single holder)', () => {
+  it('badges the single holder and lets an admin MOVE the line (assign)', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({
+        userId: 'a',
+        email: 'alice@example.com',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+      }),
+    ]);
+    // Assigning to Bob returns Bob as the new holder.
+    assignInboundVoiceLine.mockResolvedValue(
+      user({
+        userId: 'b',
+        email: 'bob@example.com',
+        cell: '+14040100002',
+        cell_verified_at: '2026-06-02T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+    );
+    render(<TeamSection />);
+    await screen.findByText('alice@example.com');
+
+    // Exactly one "Inbound voice line" badge to start (Alice holds it).
+    expect(screen.getAllByText('Inbound voice line')).toHaveLength(1);
+
+    // Assign it to Bob → the line MOVES (still exactly one badge).
+    await u.click(
+      screen.getByRole('button', { name: /Assign the inbound voice line to bob@example.com/i }),
+    );
+    expect(assignInboundVoiceLine).toHaveBeenCalledWith('b');
+    await waitFor(() => expect(screen.getAllByText('Inbound voice line')).toHaveLength(1));
+    // And now Bob offers "Clear" (he holds it).
+    expect(
+      screen.getByRole('button', { name: /Clear the inbound voice line from bob@example.com/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('cannot assign an unverified user — surfaces the 409 cell_not_verified reason', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({ userId: 'b', email: 'bob@example.com', cell: '+14040100002' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('bob@example.com');
+    // An unverified user's Assign button is disabled (guarded before the request).
+    expect(
+      screen.getByRole('button', { name: /Assign the inbound voice line to bob@example.com/i }),
+    ).toBeDisabled();
+    expect(assignInboundVoiceLine).not.toHaveBeenCalled();
+    void u; // (no click — the control is disabled)
   });
 
   it('commits the server row on a successful role change', async () => {

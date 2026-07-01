@@ -5,6 +5,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  assignInboundVoiceLine,
+  clearInboundVoiceLine,
   inviteUser,
   listUsers,
   setUserRole,
@@ -25,6 +27,10 @@ export interface InviteResult {
  *  (the optimistic change has already been reverted by the hook). */
 export type RoleChangeResult = { ok: true } | { ok: false; error: string };
 
+/** The result of an inbound-voice-line assign/clear: ok, or a per-row error to
+ *  show inline (e.g. the user has no verified cell → can't hold the line). */
+export type VoiceLineResult = { ok: true } | { ok: false; error: string };
+
 export interface TeamState {
   status: TeamStatus;
   users: AdminUserView[];
@@ -34,6 +40,12 @@ export interface TeamState {
   /** Optimistically change a user's role; reverts + returns an error on a 409
    *  lockout guard. Never throws. */
   changeRole: (userId: string, role: UserRole) => Promise<RoleChangeResult>;
+  /** Assign the single inbound voice line to a user (MOVES it off any prior
+   *  holder — the hook flips the whole roster so only one badge shows). Returns
+   *  a friendly error on 409 cell_not_verified. Never throws. */
+  assignVoiceLine: (userId: string) => Promise<VoiceLineResult>;
+  /** Clear the inbound voice line from its current holder. Never throws. */
+  clearVoiceLine: (userId: string) => Promise<VoiceLineResult>;
 }
 
 /** Map the server's lockout `error` codes to a friendly inline message. */
@@ -123,5 +135,42 @@ export function useTeam(): TeamState {
     [],
   );
 
-  return { status, users, retry, invite, changeRole };
+  // Assign the single inbound voice line. On success the server returns the
+  // updated holder; we flip the WHOLE roster so exactly one user carries the
+  // flag (single-holder invariant reflected in the UI without a refetch).
+  const assignVoiceLine = useCallback(async (userId: string): Promise<VoiceLineResult> => {
+    try {
+      const updated = await assignInboundVoiceLine(userId);
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.userId === userId
+            ? { ...updated, inbound_voice_line: true }
+            : { ...u, inbound_voice_line: false },
+        ),
+      );
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'cell_not_verified') {
+        return {
+          ok: false,
+          error: 'This teammate needs a verified cell before holding the inbound line.',
+        };
+      }
+      return { ok: false, error: "Couldn't assign the inbound line — please try again." };
+    }
+  }, []);
+
+  const clearVoiceLine = useCallback(async (userId: string): Promise<VoiceLineResult> => {
+    try {
+      const updated = await clearInboundVoiceLine(userId);
+      setUsers((prev) =>
+        prev.map((u) => (u.userId === userId ? { ...updated, inbound_voice_line: false } : u)),
+      );
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Couldn't clear the inbound line — please try again." };
+    }
+  }, []);
+
+  return { status, users, retry, invite, changeRole, assignVoiceLine, clearVoiceLine };
 }

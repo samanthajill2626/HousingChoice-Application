@@ -158,6 +158,71 @@
   cursor: not-allowed;
 }
 
+/* --- Cell + verification / inbound voice line (Voice Phase 1) ------------- */
+.cellValue {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--c-text);
+}
+
+.verifiedBadge {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-success);
+}
+
+.unverifiedBadge {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.voiceLine {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.lineBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+.voiceBtn {
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  padding: var(--sp-1) var(--sp-2);
+  cursor: pointer;
+}
+
+.voiceBtn:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.voiceBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.voiceBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* --- Invite form --------------------------------------------------------- */
 .inviteForm {
   display: flex;

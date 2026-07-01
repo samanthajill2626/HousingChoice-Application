@@ -1,16 +1,23 @@
 // UserRow — one team member, rendered as a desktop table row OR a mobile stacked
 // card (the parent picks via CSS). Shows name + email, an inline role <select>
-// (→ optimistic PATCH), status, and last login. A per-row lockout error (409,
-// reverted by useTeam) renders inline next to this row.
+// (→ optimistic PATCH), the member's verified CELL + a verification badge, the
+// single "Inbound voice line" badge + an assign/clear action (Voice Phase 1 §6),
+// status, and last login. A per-row error (a reverted 409 role lockout OR a
+// voice-line failure like cell_not_verified) renders inline next to this row.
 import { useState } from 'react';
 import type { AdminUserView, UserRole } from '../../api/index.js';
-import type { RoleChangeResult } from './useTeam.js';
+import type { RoleChangeResult, VoiceLineResult } from './useTeam.js';
 import styles from './TeamSection.module.css';
 
 export interface UserRowProps {
   user: AdminUserView;
   /** Optimistic role change; resolves with a per-row error on a 409 lockout. */
   onChangeRole: (userId: string, role: UserRole) => Promise<RoleChangeResult>;
+  /** Assign the single inbound voice line to this user (MOVES it). Resolves with
+   *  a per-row error on 409 cell_not_verified. */
+  onAssignVoiceLine: (userId: string) => Promise<VoiceLineResult>;
+  /** Clear the inbound voice line from this user. */
+  onClearVoiceLine: (userId: string) => Promise<VoiceLineResult>;
   /** Desktop table cell layout vs mobile stacked card. */
   variant: 'table' | 'card';
 }
@@ -23,8 +30,33 @@ function formatLastLogin(iso: string | null): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-export function UserRow({ user, onChangeRole, variant }: UserRowProps): React.JSX.Element {
+/** Format a US E.164 cell as "(404) 555-0100"; pass others through. */
+function formatCell(e164: string | undefined): string {
+  if (!e164) return '';
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
+  if (!m) return e164;
+  return `(${m[1] ?? ''}) ${m[2] ?? ''}-${m[3] ?? ''}`;
+}
+
+/** True when the user has a cell that PASSED verification. */
+function isCellVerified(u: AdminUserView): boolean {
+  return (
+    typeof u.cell === 'string' &&
+    u.cell.length > 0 &&
+    typeof u.cell_verified_at === 'string' &&
+    u.cell_verified_at.length > 0
+  );
+}
+
+export function UserRow({
+  user,
+  onChangeRole,
+  onAssignVoiceLine,
+  onClearVoiceLine,
+  variant,
+}: UserRowProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function onRoleSelect(role: UserRole): Promise<void> {
@@ -34,6 +66,17 @@ export function UserRow({ user, onChangeRole, variant }: UserRowProps): React.JS
     const result = await onChangeRole(user.userId, role);
     if (!result.ok) setError(result.error);
     setBusy(false);
+  }
+
+  async function onVoiceLine(assign: boolean): Promise<void> {
+    if (voiceBusy) return;
+    setVoiceBusy(true);
+    setError(null);
+    const result = assign
+      ? await onAssignVoiceLine(user.userId)
+      : await onClearVoiceLine(user.userId);
+    if (!result.ok) setError(result.error);
+    setVoiceBusy(false);
   }
 
   const roleControl = (
@@ -51,6 +94,53 @@ export function UserRow({ user, onChangeRole, variant }: UserRowProps): React.JS
     </label>
   );
 
+  const verified = isCellVerified(user);
+  const holdsLine = user.inbound_voice_line === true;
+
+  // Cell + verification badge.
+  const cellCell = user.cell ? (
+    <span className={styles.cellValue}>
+      {formatCell(user.cell)}{' '}
+      {verified ? (
+        <span className={styles.verifiedBadge}>Verified ✓</span>
+      ) : (
+        <span className={styles.unverifiedBadge}>Not verified</span>
+      )}
+    </span>
+  ) : (
+    <span className={styles.unverifiedBadge}>Not set</span>
+  );
+
+  // Inbound-voice-line badge + assign/clear control. Assigning is only offered
+  // for a verified cell (else the server 409s cell_not_verified).
+  const voiceLineCell = (
+    <span className={styles.voiceLine}>
+      {holdsLine ? <span className={styles.lineBadge}>Inbound voice line</span> : null}
+      {holdsLine ? (
+        <button
+          type="button"
+          className={styles.voiceBtn}
+          disabled={voiceBusy}
+          onClick={() => void onVoiceLine(false)}
+          aria-label={`Clear the inbound voice line from ${user.email}`}
+        >
+          Clear
+        </button>
+      ) : (
+        <button
+          type="button"
+          className={styles.voiceBtn}
+          disabled={voiceBusy || !verified}
+          title={verified ? undefined : 'Needs a verified cell first'}
+          onClick={() => void onVoiceLine(true)}
+          aria-label={`Assign the inbound voice line to ${user.email}`}
+        >
+          Assign
+        </button>
+      )}
+    </span>
+  );
+
   const lastLogin = formatLastLogin(user.last_login_at);
   const statusText = user.status ?? '—';
 
@@ -63,6 +153,14 @@ export function UserRow({ user, onChangeRole, variant }: UserRowProps): React.JS
           <div className={styles.cardMetaRow}>
             <dt className={styles.cardMetaLabel}>Role</dt>
             <dd className={styles.cardMetaValue}>{roleControl}</dd>
+          </div>
+          <div className={styles.cardMetaRow}>
+            <dt className={styles.cardMetaLabel}>Cell</dt>
+            <dd className={styles.cardMetaValue}>{cellCell}</dd>
+          </div>
+          <div className={styles.cardMetaRow}>
+            <dt className={styles.cardMetaLabel}>Voice line</dt>
+            <dd className={styles.cardMetaValue}>{voiceLineCell}</dd>
           </div>
           <div className={styles.cardMetaRow}>
             <dt className={styles.cardMetaLabel}>Status</dt>
@@ -90,12 +188,14 @@ export function UserRow({ user, onChangeRole, variant }: UserRowProps): React.JS
           <div className={styles.email}>{user.email}</div>
         </td>
         <td className={styles.cell}>{roleControl}</td>
+        <td className={styles.cell}>{cellCell}</td>
+        <td className={styles.cell}>{voiceLineCell}</td>
         <td className={styles.cell}>{statusText}</td>
         <td className={styles.cell}>{lastLogin}</td>
       </tr>
       {error !== null ? (
         <tr>
-          <td className={styles.cellError} colSpan={4}>
+          <td className={styles.cellError} colSpan={6}>
             <p role="alert" className={styles.error}>
               {error}
             </p>

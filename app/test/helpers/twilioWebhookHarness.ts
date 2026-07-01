@@ -1599,6 +1599,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     // M1.4 surfaces (contacts triage, admin users) share the SAME world
     // contacts + the session user repo so triage/role tests run end-to-end.
     api: {
+      // Voice Phase 1: the originate route (initiateCall) + self cell verify-start
+      // (adapter.sendMessage) go through the SAME world adapter as the send
+      // service, so world.initiatedCalls / world.sent capture them (no network).
+      adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
       auditRepo: world.auditRepo,

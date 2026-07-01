@@ -280,7 +280,14 @@ export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
     res.status(204).end();
   });
 
-  // GET /auth/me — who am I (the dashboard shell's session probe).
+  // GET /auth/me — who am I (the dashboard shell's session probe). Returns the
+  // session claims { userId, email, role } ONLY — deliberately NOT a users-table
+  // read, so the session-epoch cache's read economy holds (one findById per TTL
+  // window). Voice Phase 1 (spec §5/§7): the navigator's cell verification state
+  // (cell / cell_verified_at / inbound_voice_line) is served by the DEDICATED
+  // GET /api/users/me self view — the dashboard's voice auth-context reads THAT
+  // for whether a masked call can be placed. Keeping the cell fields off this hot
+  // probe avoids an extra read on every session check.
   router.get('/me', sessionMw, (req: AuthedRequest, res) => {
     if (!req.user) {
       res.status(401).json({ error: 'unauthorized' });

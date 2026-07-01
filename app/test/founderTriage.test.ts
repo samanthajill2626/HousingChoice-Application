@@ -59,9 +59,24 @@ function bizVoiceParams(over: Record<string, string> = {}): Record<string, strin
   };
 }
 
-/** Build a harness with FOUNDER_CELL set so the bridge actually forms. */
+/**
+ * Build a harness with the inbound bridge wired. Voice Phase 1 (spec §6): the
+ * dialed cell + pre-ring push now come from the INBOUND-VOICE-LINE HOLDER's
+ * verified cell, not FOUNDER_CELL. So we assign the seeded ADMIN user as the
+ * holder with a verified cell == FOUNDER_CELL — the dialed cell stays FOUNDER_CELL
+ * and the pre-ring push targets the admin, keeping this legacy suite's assertions
+ * valid under the new holder model. (FOUNDER_CELL is still set in env as the
+ * deprecated fallback for the no-holder tests.)
+ */
 function founderHarness(world: FakeWorld) {
-  return makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+  const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+  const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId);
+  if (admin) {
+    admin.cell = FOUNDER_CELL;
+    admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
+    admin.inbound_voice_line = true;
+  }
+  return harness;
 }
 
 describe('founder call-triage — the inbound bridge (M1.9b)', () => {
@@ -254,7 +269,14 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
       },
     };
     world.pushService = neverResolving;
-    const { app } = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+    const harness = makeWebhookHarness({ world, env: { FOUNDER_CELL } });
+    const { app } = harness;
+    // Voice Phase 1 (spec §6): the pre-ring push targets the inbound-voice-line
+    // holder — assign the admin (verified cell == FOUNDER_CELL) so the push fires.
+    const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
+    admin.cell = FOUNDER_CELL;
+    admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
+    admin.inbound_voice_line = true;
 
     // The request resolves (does NOT hang on the push). A failure here would
     // surface as a test timeout rather than an assertion.

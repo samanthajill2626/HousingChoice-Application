@@ -148,6 +148,8 @@ export interface ApiRouterDeps {
   toursRepo?: ToursRepo;
   /** Tour reminders — injected in tests; default to the real repo. */
   tourRemindersRepo?: TourRemindersRepo;
+  /** Injected clock for tour-reminder arm/re-arm dueAt computation (tests only). */
+  toursNow?: () => string;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -355,6 +357,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      ...(deps.toursNow !== undefined && { now: deps.toursNow }),
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

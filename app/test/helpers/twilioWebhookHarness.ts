@@ -1496,12 +1496,14 @@ export function createFakeWorld(): FakeWorld {
         .filter((r) => r.dueAt <= now && r.sentAt === undefined && r.canceledAt === undefined)
         .map((r) => ({ ...r }));
     },
-    async markSent(reminderId, sentAt) {
+    async claimSend(reminderId, claimedAt) {
       const r = tourRemindersMap.get(reminderId);
-      if (r && r.sentAt === undefined) {
-        r.sentAt = sentAt;
-        tourRemindersMap.set(reminderId, r);
+      if (!r || r.sentAt !== undefined || r.canceledAt !== undefined) {
+        return false;
       }
+      r.sentAt = claimedAt;
+      tourRemindersMap.set(reminderId, r);
+      return true;
     },
     async cancelForTour(tourId) {
       const now = new Date().toISOString();
@@ -1660,6 +1662,11 @@ export interface HarnessOptions {
    * available:true alarms/errors route shape.
    */
   systemStatusService?: SystemStatusService;
+  /**
+   * Injected clock for tour-reminder arm/re-arm dueAt computation (tests that
+   * assert exact dueAt values). Omit to use the wall clock.
+   */
+  toursNow?: () => string;
 }
 
 export interface Harness {
@@ -1725,6 +1732,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       broadcastsRepo: world.broadcastsRepo,
       toursRepo: world.toursRepo,
       tourRemindersRepo: world.tourRemindersRepo,
+      ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

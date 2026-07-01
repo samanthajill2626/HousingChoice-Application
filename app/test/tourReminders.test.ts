@@ -6,6 +6,9 @@
 //   3. reschedule — cancel + re-arm, new dueAts
 //   4. cancelTourReminders — pending rows canceled
 //   5. same-day tour — day_before skipped (past), future rows armed
+//   6. listDue excludes sentAt/canceledAt rows
+//   7. [concurrency] two racing runDueTourReminders calls → exactly ONE send
+//   8. [concurrency] row canceled after listDue but before claim → zero sends
 //
 // Uses DynamoDB Local for tourRemindersRepo + toursRepo.
 // Uses the in-memory fakeWorld for contacts/conversations/sendMessage adapter.
@@ -273,7 +276,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Manually mark the confirmation row as sent (simulates one already fired).
     const rows = await tourReminders.listByTour(tour.tourId);
     const confirmRow = rows.find((r) => r.kind === 'confirmation');
-    await tourReminders.markSent(confirmRow!.reminderId, now0);
+    await tourReminders.claimSend(confirmRow!.reminderId, now0);
 
     // Now cancel.
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
@@ -349,12 +352,150 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(forThisTour1).toHaveLength(1);
     expect(forThisTour1[0]!.kind).toBe('confirmation');
 
-    // Mark the confirmation row as sent.
-    await tourReminders.markSent(forThisTour1[0]!.reminderId, now0);
+    // Mark the confirmation row as sent via claimSend (the production API).
+    await tourReminders.claimSend(forThisTour1[0]!.reminderId, now0);
 
     // Second listDue at the same time — no more due rows for this tour.
     const dueRows2 = await tourReminders.listDue(now0);
     const forThisTour2 = dueRows2.filter((r) => r.tourId === tour.tourId);
     expect(forThisTour2).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 7 — [concurrency] two racing runDueTourReminders → exactly ONE send
+  // (RED until claim-before-send fix lands)
+  // ---------------------------------------------------------------------------
+  it('two concurrent runDueTourReminders calls over the same due row send exactly once', async () => {
+    // Fresh world so send counts are isolated.
+    const racingWorld = createFakeWorld();
+    const racingSend = createSendMessageService({
+      logger,
+      adapter: racingWorld.adapter,
+      conversationsRepo: racingWorld.conversationsRepo,
+      messagesRepo: racingWorld.messagesRepo,
+      contactsRepo: racingWorld.contactsRepo,
+      auditRepo: racingWorld.auditRepo,
+      events: racingWorld.events,
+    });
+
+    const phone = '+15550300001';
+    const contactId = 'contact-race-1';
+    const convId = 'conv-race-1';
+    const now0 = '2026-07-13T16:00:00.000Z';
+    const scheduledAt = '2026-07-15T16:00:00.000Z';
+
+    racingWorld.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone,
+      created_at: now0,
+    } as Parameters<typeof racingWorld.contacts.push>[0]);
+    racingWorld.conversations.set(convId, {
+      conversationId: convId,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: now0,
+      created_at: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: contactId,
+      unitId: 'unit-race-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    // Arm the confirmation row only (now0 as arm time).
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    const racingDeps = {
+      tourRemindersRepo: tourReminders,
+      toursRepo: tours,
+      contactsRepo: racingWorld.contactsRepo,
+      conversationsRepo: racingWorld.conversationsRepo,
+      sendMessageService: racingSend,
+      logger,
+    };
+
+    // Run two polls concurrently — they both see the same due row.
+    await Promise.all([
+      runDueTourReminders(now0, racingDeps),
+      runDueTourReminders(now0, racingDeps),
+    ]);
+
+    // Claim-before-send: exactly ONE send must have happened.
+    expect(racingWorld.sent).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 8 — [concurrency] row canceled after listDue but before claim → 0 sends
+  // (RED until claim-before-send fix lands; the claim condition includes canceledAt)
+  // ---------------------------------------------------------------------------
+  it('a row canceled between listDue and the claim step fires zero sends', async () => {
+    const cancelWorld = createFakeWorld();
+    const cancelSend = createSendMessageService({
+      logger,
+      adapter: cancelWorld.adapter,
+      conversationsRepo: cancelWorld.conversationsRepo,
+      messagesRepo: cancelWorld.messagesRepo,
+      contactsRepo: cancelWorld.contactsRepo,
+      auditRepo: cancelWorld.auditRepo,
+      events: cancelWorld.events,
+    });
+
+    const phone = '+15550400001';
+    const contactId = 'contact-cancel-race-1';
+    const convId = 'conv-cancel-race-1';
+    const now0 = '2026-07-13T17:00:00.000Z';
+    const scheduledAt = '2026-07-15T17:00:00.000Z';
+
+    cancelWorld.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone,
+      created_at: now0,
+    } as Parameters<typeof cancelWorld.contacts.push>[0]);
+    cancelWorld.conversations.set(convId, {
+      conversationId: convId,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: now0,
+      created_at: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: contactId,
+      unitId: 'unit-cancel-race-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    // List due rows (simulating what runDueTourReminders does internally) —
+    // then cancel the tour BEFORE the claim fires.
+    const dueRows = await tourReminders.listDue(now0);
+    const confirmRow = dueRows.find((r) => r.tourId === tour.tourId && r.kind === 'confirmation');
+    expect(confirmRow).toBeDefined();
+
+    // Cancel the tour's reminders (simulates PATCH /tours/:id { status: 'canceled' }).
+    await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
+
+    // Now attempt to run — the claim should fail for the canceled row → zero sends.
+    const cancelDeps = {
+      tourRemindersRepo: tourReminders,
+      toursRepo: tours,
+      contactsRepo: cancelWorld.contactsRepo,
+      conversationsRepo: cancelWorld.conversationsRepo,
+      sendMessageService: cancelSend,
+      logger,
+    };
+    await runDueTourReminders(now0, cancelDeps);
+
+    expect(cancelWorld.sent).toHaveLength(0);
   });
 });

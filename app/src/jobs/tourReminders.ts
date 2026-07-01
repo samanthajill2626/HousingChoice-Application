@@ -6,12 +6,19 @@
 //
 // cancelTourReminders — marks all pending (unsent) rows as canceled.
 //
-// runDueTourReminders — stateless poll: queries listDue(now), resolves the
-//   tenant contact + conversation, sends the canned reminder text, marks sentAt.
+// runDueTourReminders — stateless poll: queries listDue(now), then for each
+//   row: CLAIMS it (claimSend) BEFORE sending. Only sends when the claim
+//   succeeds — two concurrent poll ticks over the same row both see it in
+//   listDue but only the first to claim wins. A row canceled between listDue
+//   and the claim also loses (cancelForTour sets canceledAt; the claim
+//   condition requires attribute_not_exists(canceledAt)). This closes both
+//   the double-send window and the cancel-then-poll race in one atomic step,
+//   mirroring the missedCallAutoText putJobExecutionMarker pattern.
 //   Designed to be called by a setInterval in worker.ts.
 //
-// IDEMPOTENCY: listDue already filters out rows with sentAt set. The markSent
-// UpdateCommand adds a belt-suspenders conditional check on attribute_not_exists.
+// IDEMPOTENCY: listDue filters out rows with sentAt or canceledAt. claimSend
+// atomically stamps sentAt BEFORE the send; the conditional also blocks
+// canceledAt rows. Both conditions together = exactly-once delivery.
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -232,6 +239,23 @@ async function processReminderRow(
 
   const body = REMINDER_BODIES[row.kind];
 
+  // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two
+  // concurrent poll ticks both see the same due row but only the first to claim
+  // wins. The claim condition also blocks canceledAt rows, closing the
+  // cancel-then-poll TOCTOU race in one atomic step.
+  // If the claim fails (another tick or a cancelForTour won), skip silently —
+  // a benign no-op, NOT an error (mirrors missedCallAutoText's marker pattern).
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now);
+  if (!claimed) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder claim lost (concurrent tick or canceled) — skipping',
+    );
+    return;
+  }
+
+  // Claim succeeded — now send. A crash after this point drops this one
+  // reminder (same accepted tradeoff as missedCallAutoText's marker pattern).
   try {
     await deps.sendMessageService({
       conversationId: conv.conversationId,
@@ -239,15 +263,14 @@ async function processReminderRow(
       author: 'teammate',
       automated: true,
     });
-    await deps.tourRemindersRepo.markSent(row.reminderId, now);
     log.info(
       { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId, kind: row.kind },
       'tour reminder sent',
     );
   } catch (err) {
     if (err instanceof SendRefusedError) {
-      // By-design refusal (opt-out / breaker / manual mode): mark sent to
-      // prevent infinite retries. Same pattern as missedCallAutoText.
+      // By-design refusal (opt-out / breaker / manual mode): the claim is
+      // already stamped so no retry will fire. Same pattern as missedCallAutoText.
       log.warn(
         {
           reminderId: row.reminderId,
@@ -256,15 +279,16 @@ async function processReminderRow(
           kind: row.kind,
           refusal: err.code,
         },
-        'tour reminder refused (opt-out/breaker/manual) — marking sent, not retried',
+        'tour reminder refused (opt-out/breaker/manual) — claim already stamped, not retried',
       );
-      await deps.tourRemindersRepo.markSent(row.reminderId, now);
       return;
     }
-    // Non-refusal error: do NOT markSent so the next poll retries.
+    // Non-refusal error: the claim is already stamped (sentAt set), so this
+    // reminder will NOT retry on the next poll — accepted tradeoff (mirrors
+    // missedCallAutoText: a transient error after claim is not retried).
     log.error(
       { err, reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId, kind: row.kind },
-      'tour reminder send failed (non-refusal) — will retry next poll',
+      'tour reminder send failed (non-refusal) — claim already stamped, not retried',
     );
     throw err;
   }

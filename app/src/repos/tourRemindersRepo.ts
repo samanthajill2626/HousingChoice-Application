@@ -9,6 +9,7 @@
 //
 // PII: never log a phone number. Log only reminderId/tourId/tenantId/kind.
 import { randomUUID } from 'node:crypto';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   GetCommand,
   PutCommand,
@@ -54,7 +55,14 @@ export interface TourRemindersRepo {
   listByTour(tourId: string): Promise<TourReminderItem[]>;
   /** Returns pending reminders due at or before `now` (no sentAt, no canceledAt). */
   listDue(now: string): Promise<TourReminderItem[]>;
-  markSent(reminderId: string, sentAt: string): Promise<void>;
+  /**
+   * Atomically claim a reminder row BEFORE sending (claim-before-send pattern).
+   * Sets `sentAt` with a condition that neither `sentAt` NOR `canceledAt` already
+   * exists — so a concurrent poll tick or a race with cancelForTour both lose.
+   * Returns `true` if this call won the claim, `false` if already claimed/canceled
+   * (benign no-op; caller skips the send).
+   */
+  claimSend(reminderId: string, claimedAt: string): Promise<boolean>;
   /** Cancel all pending (not yet sent or canceled) reminders for this tour. */
   cancelForTour(tourId: string): Promise<void>;
 }
@@ -105,7 +113,9 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
     async listDue(now) {
       // Query the byDueAt GSI: all rows in the 'reminders' partition with dueAt <= now.
       // FilterExpression removes rows that already have sentAt or canceledAt.
-      const input: QueryCommandInput = {
+      // Paginate with LastEvaluatedKey so rows beyond the 1 MB DynamoDB page limit
+      // are not silently dropped (mirrors usersRepo.listAll / broadcastsRepo pattern).
+      const baseInput: QueryCommandInput = {
         TableName: table,
         IndexName: 'byDueAt',
         KeyConditionExpression: '#rp = :rp AND #dueAt <= :now',
@@ -121,30 +131,62 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
           ':now': now,
         },
       };
-      const { Items } = await doc.send(new QueryCommand(input));
-      return (Items ?? []) as TourReminderItem[];
+      const items: TourReminderItem[] = [];
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      do {
+        const page = await doc.send(
+          new QueryCommand({
+            ...baseInput,
+            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+          }),
+        );
+        items.push(...((page.Items as TourReminderItem[] | undefined) ?? []));
+        exclusiveStartKey = page.LastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+      return items;
     },
 
-    async markSent(reminderId, sentAt) {
-      await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { reminderId },
-          UpdateExpression: 'SET #sentAt = :sentAt',
-          // Belt+suspenders idempotency: only write if not already sent.
-          ConditionExpression: 'attribute_not_exists(#sentAt)',
-          ExpressionAttributeNames: { '#sentAt': 'sentAt' },
-          ExpressionAttributeValues: { ':sentAt': sentAt },
-        }),
-      );
-      log.info({ reminderId, sentAt }, 'tour reminder marked sent');
+    async claimSend(reminderId, claimedAt) {
+      // Atomically claim the row BEFORE sending (claim-before-send pattern).
+      // Condition: neither sentAt nor canceledAt may exist — so two concurrent
+      // poll ticks over the same row, and a cancel-then-poll race, both result in
+      // exactly one send. Returns true if this call won the claim, false (benign
+      // no-op) if the row was already claimed, already sent, or already canceled.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { reminderId },
+            UpdateExpression: 'SET #sentAt = :sentAt',
+            ConditionExpression:
+              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt)',
+            ExpressionAttributeNames: {
+              '#sentAt': 'sentAt',
+              '#canceledAt': 'canceledAt',
+            },
+            ExpressionAttributeValues: { ':sentAt': claimedAt },
+          }),
+        );
+        log.info({ reminderId, claimedAt }, 'tour reminder claimed for send');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // Benign: another poll tick or a cancel won the race. Not an error.
+          log.debug({ reminderId }, 'tour reminder claim lost (already claimed/canceled) — skipping');
+          return false;
+        }
+        throw err;
+      }
     },
 
     async cancelForTour(tourId) {
       const rows = await this.listByTour(tourId);
       const pending = rows.filter((r) => r.sentAt === undefined && r.canceledAt === undefined);
       const canceledAt = new Date().toISOString();
-      await Promise.all(
+      // Promise.allSettled so one lost conditional-update race (e.g., the poll
+      // claimed sentAt between listByTour and now) does not abort the remaining
+      // cancellations.
+      const results = await Promise.allSettled(
         pending.map((r) =>
           doc.send(
             new UpdateCommand({
@@ -161,7 +203,18 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
           ),
         ),
       );
-      log.info({ tourId, canceled: pending.length }, 'tour reminders canceled for tour');
+      // Log per-row races as debug (benign no-ops); rethrow unexpected errors.
+      let canceled = 0;
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          canceled++;
+        } else if (result.reason instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId }, 'tour reminder cancel: row already claimed/canceled — skipping');
+        } else {
+          log.error({ err: result.reason, tourId }, 'tour reminder cancel: unexpected error on row');
+        }
+      }
+      log.info({ tourId, canceled }, 'tour reminders canceled for tour');
     },
   };
 }

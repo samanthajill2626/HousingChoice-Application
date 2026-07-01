@@ -69,12 +69,18 @@ export interface ToursRouterDeps {
   logger?: Logger;
   toursRepo?: ToursRepo;
   tourRemindersRepo?: TourRemindersRepo;
+  /**
+   * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
+   * Tests inject this to assert exact dueAt values; production omits it.
+   */
+  now?: () => string;
 }
 
 export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const getNow = deps.now ?? (() => new Date().toISOString());
 
   const router = Router();
 
@@ -123,7 +129,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     });
 
     // Arm the reminder ladder (best-effort side effect).
-    await armTourReminders(tour, new Date().toISOString(), { tourRemindersRepo: reminders, logger: log });
+    await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
 
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
     res.status(201).json({ tour });
@@ -285,7 +291,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (newScheduledAt !== undefined) {
       // Reschedule: cancel old reminders and re-arm with the new scheduledAt.
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
-      await armTourReminders(tour, new Date().toISOString(), { tourRemindersRepo: reminders, logger: log });
+      await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
     } else if (patch['status'] === 'canceled' || patch['status'] === 'closed') {
       // Terminal status: cancel all pending reminders.
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });

@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours (Tours feature)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours + tourReminders (Tours feature)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -33,6 +33,7 @@ describe('tables.ts — the table contract', () => {
       'broadcasts',
       'activity_events',
       'listing_sends',
+      'tourReminders',
       'tours',
     ]);
   });

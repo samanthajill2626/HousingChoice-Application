@@ -367,6 +367,73 @@ describe('Exit gate: NO placement created, tenant status untouched', () => {
 });
 
 // ============================================================================
+// Injected clock — dueAt values are computed from the injected 'now'
+// (Fix #2: route-layer clock injection so tests can assert exact dueAts)
+// ============================================================================
+
+describe('Tour reminders — injected clock produces assertable dueAts', () => {
+  it('POST /api/tours arms reminders with dueAts relative to the injected now', async () => {
+    const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+    const SCHEDULED_AT = '2026-07-15T10:00:00.000Z';
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const res = await authed(app).post('/api/tours').send({
+      ...BASE_CREATE_BODY,
+      scheduledAt: SCHEDULED_AT,
+    });
+    expect(res.status).toBe(201);
+    const tourId = res.body.tour.tourId as string;
+
+    // All reminder rows for this tour should have dueAts computed from FIXED_NOW.
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // confirmation = FIXED_NOW
+    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // day_before = SCHEDULED_AT - 24h = '2026-07-14T10:00:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    // morning_of = 08:00 UTC on 2026-07-15 = '2026-07-15T08:00:00.000Z'
+    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // en_route = SCHEDULED_AT - 2h = '2026-07-15T08:00:00.000Z'
+    expect(byKind['en_route']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // no_show_checkin = SCHEDULED_AT + 30m = '2026-07-15T10:30:00.000Z'
+    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-15T10:30:00.000Z');
+  });
+
+  it('PATCH reschedule re-arms with dueAts relative to the injected now', async () => {
+    const FIXED_NOW = '2026-07-13T11:00:00.000Z';
+    const ORIG_SCHEDULED = '2026-07-15T11:00:00.000Z';
+    const NEW_SCHEDULED = '2026-07-20T14:00:00.000Z';
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app).post('/api/tours').send({
+      ...BASE_CREATE_BODY,
+      scheduledAt: ORIG_SCHEDULED,
+    });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // Reschedule — triggers cancel + re-arm.
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: NEW_SCHEDULED });
+    expect(res.status).toBe(200);
+
+    // New (uncanceled) rows should have dueAts relative to NEW_SCHEDULED and FIXED_NOW.
+    const allRows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    const newRows = allRows.filter((r) => r.canceledAt === undefined);
+    const byKind = Object.fromEntries(newRows.map((r) => [r.kind, r]));
+
+    // confirmation = FIXED_NOW (injected)
+    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // day_before = NEW_SCHEDULED - 24h = '2026-07-19T14:00:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
+    // no_show_checkin = NEW_SCHEDULED + 30m = '2026-07-20T14:30:00.000Z'
+    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+  });
+});
+
+// ============================================================================
 // Auth gate
 // ============================================================================
 

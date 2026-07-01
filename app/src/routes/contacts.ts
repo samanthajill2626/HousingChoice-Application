@@ -113,6 +113,26 @@ function isContactType(value: unknown): value is ContactType {
   return typeof value === 'string' && (CONTACT_TYPES as readonly string[]).includes(value);
 }
 
+/**
+ * Structured landlord deal-term fields (onboarding call). First-class optional
+ * fields validated only when supplied — NOT type-gated (they mirror how
+ * voucherSize/pets are plain optional fields). snake_case names are contractual:
+ * the dashboard + e2e suite read them verbatim.
+ */
+const CONTRACT_STATUSES = ['unsigned', 'signed'] as const;
+type ContractStatus = (typeof CONTRACT_STATUSES)[number];
+function isContractStatus(value: unknown): value is ContractStatus {
+  return typeof value === 'string' && (CONTRACT_STATUSES as readonly string[]).includes(value);
+}
+
+/** The landlord boolean deal terms / approval criteria (all optional). */
+const LANDLORD_BOOLEAN_FIELDS = [
+  'registered_landlord',
+  'rta_within_48h',
+  'pass_inspection_first_try',
+  'income_includes_voucher',
+] as const;
+
 // The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
 // lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
 // (statusAllowlistFor) so BOTH status-setting paths — this generic PATCH and the
@@ -352,6 +372,34 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('lifEligible');
   }
 
+  // Structured landlord deal terms + approval criteria (onboarding call). Like the
+  // tenant intake fields above, these are first-class optional fields validated only
+  // when supplied — NOT type-gated (mirrors voucherSize/pets).
+  if ('contract_status' in b) {
+    const v = b['contract_status'];
+    if (!isContractStatus(v)) {
+      return { error: `contract_status must be one of: ${CONTRACT_STATUSES.join(', ')}` };
+    }
+    patch['contract_status'] = v;
+    changedFields.push('contract_status');
+  }
+  if ('expected_rent' in b) {
+    const v = b['expected_rent'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return { error: 'expected_rent must be a non-negative number' };
+    }
+    patch['expected_rent'] = v;
+    changedFields.push('expected_rent');
+  }
+  for (const key of LANDLORD_BOOLEAN_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
+      patch[key] = v;
+      changedFields.push(key);
+    }
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
@@ -468,6 +516,29 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     const v = b['lifEligible'];
     if (typeof v !== 'boolean') return { error: 'lifEligible must be a boolean' };
     item.lifEligible = v;
+  }
+
+  // Structured landlord deal terms + approval criteria (see parseTriageBody).
+  if ('contract_status' in b) {
+    const v = b['contract_status'];
+    if (!isContractStatus(v)) {
+      return { error: `contract_status must be one of: ${CONTRACT_STATUSES.join(', ')}` };
+    }
+    item.contract_status = v;
+  }
+  if ('expected_rent' in b) {
+    const v = b['expected_rent'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return { error: 'expected_rent must be a non-negative number' };
+    }
+    item.expected_rent = v;
+  }
+  for (const key of LANDLORD_BOOLEAN_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
+      item[key] = v;
+    }
   }
 
   // A manual create asserts identity (past the front door, not needs_review).

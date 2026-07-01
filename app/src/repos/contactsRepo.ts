@@ -137,6 +137,20 @@ export interface ContactItem {
   /** Time at current address (free text, e.g. "3 years"). */
   tenure?: string;
   lifEligible?: boolean;
+  /**
+   * Structured landlord deal terms + approval criteria (onboarding call —
+   * docs/issues/landlord-onboarding-record-fields.md). First-class optional
+   * fields, NOT type-gated: set/returned via the contact API, validated only
+   * when supplied. `contract_status` records whether the (external) DocuSign
+   * contract was signed; the booleans capture registration + approval criteria.
+   */
+  contract_status?: 'unsigned' | 'signed';
+  /** Expected contract rent (dollars, >= 0). */
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
   [key: string]: unknown;
 }
 

@@ -671,6 +671,16 @@ export interface Contact {
   evictions?: string;
   tenure?: string;
   lifEligible?: boolean;
+  /** Structured landlord deal terms + approval criteria (onboarding call). First-class
+   *  optional fields; not type-gated. `contract_status` records whether the external
+   *  DocuSign contract was signed. */
+  contract_status?: 'unsigned' | 'signed';
+  /** Expected contract rent (dollars, >= 0). */
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -698,6 +708,13 @@ export interface ContactPatch {
   evictions?: string;
   tenure?: string;
   lifEligible?: boolean;
+  /** Structured landlord deal terms + approval criteria (onboarding call). */
+  contract_status?: 'unsigned' | 'signed';
+  expected_rent?: number;
+  registered_landlord?: boolean;
+  rta_within_48h?: boolean;
+  pass_inspection_first_try?: boolean;
+  income_includes_voucher?: boolean;
   /** Structured address; the server stores only the non-empty parts. */
   address?: Address;
   /** Contact's role within the organisation (e.g. case manager, property manager). */

@@ -6,12 +6,14 @@
 //   3. rebindOwner: tour-owned → placement → same pool number + members, new owner.
 //   4. REGRESSION: legacy placementId path creates/reads exactly as before.
 //   5. getOwner() accessor: new `owner` field + legacy `placementId` fallback.
+//   6. M2 (Task 5 fix wave): tour-owned thread relays with the MASKED pool number
+//      (fan-out send seam assertion — no DynamoDB needed).
 //
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT (default
 // http://localhost:8000) the suite is skipped so `npm test` stays green
 // without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -22,6 +24,24 @@ import {
   getOwner,
 } from '../src/repos/conversationsRepo.js';
 import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureJobsLogger,
+  configureOutboundQueue,
+  configureScheduler,
+  dispatchJob,
+  enqueueImmediate,
+} from '../src/jobs/jobs.js';
+import {
+  RELAY_FANOUT_JOB,
+  registerRelayFanOutJobHandler,
+} from '../src/jobs/relayFanOut.js';
+import { buildTsMsgId } from '../src/repos/messagesRepo.js';
+import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -307,5 +327,111 @@ describe('getOwner() — unit (no DynamoDB)', () => {
 
   it('returns {type:null} when owner.type is null', () => {
     expect(getOwner({ ...base, owner: { type: null } })).toEqual({ type: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2 (Task 5 fix wave): tour-owned thread relays with the MASKED pool number
+//
+// The brief's RED bullet asks to assert that a tour-owned relay group actually
+// relays with the masked pool number. This test drives a masked send through
+// the relay fan-out job (same seam as relayFanOut.test.ts) and asserts that
+// the fan-out sends FROM the pool number — proving tour ownership does not
+// break the fan-out's pool_number-based routing (which is owner-agnostic).
+// No DynamoDB is needed; the FakeWorld + in-process job machinery suffice.
+// ---------------------------------------------------------------------------
+describe('M2 (Task 5 fix wave): tour-owned relay thread — masked send uses the pool number', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('a tour-owned relay group fans out a masked send FROM the pool number (owner-agnostic routing)', async () => {
+    const POOL = '+15550109100';
+    const ALICE = '+15550200011';
+    const BOB = '+15550200012';
+    const TOUR_ID = `tour-${randomUUID()}`;
+
+    // Seed a tour-owned relay group directly into the fake world.
+    const now = new Date().toISOString();
+    const conv = {
+      conversationId: 'conv-tour-relay-m2',
+      participant_phone: POOL,
+      pool_number: POOL,
+      status: 'open' as const,
+      last_activity_at: now,
+      type: 'relay_group' as const,
+      ai_mode: 'manual' as const,
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+      // Tour-owned: owner set, placementId absent.
+      owner: { type: 'tour' as const, id: TOUR_ID },
+      created_at: now,
+    };
+    world.conversations.set(conv.conversationId, conv);
+
+    // Seed an inbound source message on the relay thread (sent by ALICE).
+    const providerTs = now;
+    const tsMsgId = buildTsMsgId(providerTs, 'SMtour-src-m2');
+    world.messages.push({
+      conversationId: conv.conversationId,
+      tsMsgId,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'unknown',
+      body: 'Tour starts in 10 mins!',
+      provider_sid: 'SMtour-src-m2',
+      provider_ts: providerTs,
+      delivery_status: 'delivered',
+      created_at: providerTs,
+      relay_sender_key: 'c-alice',
+      // Fan-out will fill in delivery recipients; seed the structure.
+      deliveryRecipients: undefined,
+    });
+
+    // Enqueue the fan-out job (mirrors what the webhook does on inbound).
+    // The RELAY_FANOUT_JOB payload uses relayConversationId + sourceTsMsgId.
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: conv.conversationId,
+      sourceTsMsgId: tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    // The fan-out ran in-process. Assert masked relay sends FROM the pool number.
+    // ALICE is the sender → fan-out sends only to BOB (not back to the sender).
+    expect(world.sent.length).toBeGreaterThan(0);
+
+    // All sends are FROM the pool number (masked send assertion).
+    expect(world.sent.every((s) => s.from === POOL)).toBe(true);
+
+    // The sender (ALICE) is not re-texted (relay does not echo to sender).
+    expect(world.sent.some((s) => s.to === ALICE)).toBe(false);
+
+    // The recipient (BOB) received the relayed message FROM the masked pool.
+    const toBob = world.sent.find((s) => s.to === BOB);
+    expect(toBob).toBeDefined();
+    expect(toBob!.from).toBe(POOL);
+
+    // The relayed body includes the sender prefix (masked sender label).
+    expect(toBob!.body).toContain('Tour starts in 10 mins!');
   });
 });

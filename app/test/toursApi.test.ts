@@ -1,15 +1,36 @@
-// Tours API tests — /api/tours (Task 3).
+// Tours API tests — /api/tours (Task 3 + Task 5 relay route).
 //
 //   POST  /api/tours  { tenantId, unitId, scheduledAt, tourType }  → 201 { tour }
 //   GET   /api/tours/:tourId                                        → { tour } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                    → { tours }
 //   PATCH /api/tours/:tourId                                        → { tour } | 404
+//   POST  /api/tours/:tourId/relay  { members }                     → 201 { tour, conversation }
 //
 // Mirrors unitsApi.test.ts: in-memory fakes via makeWebhookHarness, no DynamoDB.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureJobsLogger,
+  configureOutboundQueue,
+  configureScheduler,
+  dispatchJob,
+} from '../src/jobs/jobs.js';
+import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
+import { createLogger } from '../src/lib/logger.js';
+import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
+import {
+  RelayProvisioningDisabledError,
+  type PoolNumbersService,
+} from '../src/services/poolNumbers.js';
+import { VoiceCapabilityError } from '../src/adapters/messaging.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
-import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+import { createLogCapture } from './helpers/logCapture.js';
+import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -430,6 +451,238 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
     // no_show_checkin = NEW_SCHEDULED + 30m = '2026-07-20T14:30:00.000Z'
     expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+  });
+});
+
+// ============================================================================
+// POST /api/tours/:tourId/relay — provision a masked relay group (Task 5)
+// ============================================================================
+//
+// These tests wire the job machinery (relayFanOut intro) the same way
+// relayApi.test.ts and placementsRelay.test.ts do — so the intro enqueue
+// resolves in-process and we can assert the pool number used for sends.
+
+/** Minimal fake pool-numbers service: deterministic numbers, no Twilio. */
+function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provisioned: string[] } {
+  let counter = 0;
+  const released: string[] = [];
+  const provisioned: string[] = [];
+  const rec = (poolNumber: string): PoolNumberItem => ({
+    poolNumber,
+    lifecycle_state: 'assigned',
+    quarantine_until: '0000-00-00T00:00:00.000Z',
+    voice_capable: true,
+    sms_capable: true,
+    provisioned_at: new Date().toISOString(),
+  });
+  return {
+    released,
+    provisioned,
+    async provisionForPlacement() {
+      counter += 1;
+      const poolNumber = `+1555040${String(counter).padStart(4, '0')}`;
+      provisioned.push(poolNumber);
+      return { poolNumber, record: rec(poolNumber), provisioned: true };
+    },
+    async assignConversation() {},
+    async release(poolNumber) {
+      released.push(poolNumber);
+      return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    },
+  };
+}
+
+function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: number } {
+  let provisionAttempts = 0;
+  return {
+    get provisionAttempts() { return provisionAttempts; },
+    async provisionForPlacement() {
+      provisionAttempts += 1;
+      throw new RelayProvisioningDisabledError('set RELAY_LIVE_PROVISIONING=true after A2P approval');
+    },
+    async assignConversation() {},
+    async release(poolNumber) {
+      return {
+        poolNumber,
+        lifecycle_state: 'quarantined',
+        quarantine_until: '0000-00-00T00:00:00.000Z',
+        voice_capable: true,
+        sms_capable: true,
+        provisioned_at: new Date().toISOString(),
+      };
+    },
+  };
+}
+
+function makeVoiceCapabilityFailingPool(): PoolNumbersService {
+  return {
+    async provisionForPlacement() {
+      throw new VoiceCapabilityError('no voice-capable number available');
+    },
+    async assignConversation() {},
+    async release(poolNumber) {
+      return {
+        poolNumber,
+        lifecycle_state: 'quarantined',
+        quarantine_until: '0000-00-00T00:00:00.000Z',
+        voice_capable: false,
+        sms_capable: true,
+        provisioned_at: new Date().toISOString(),
+      };
+    },
+  };
+}
+
+describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('happy path: 201, creates relay group owned by the tour, stamps groupThreadId on the tour', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    // Create a tour first.
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // Provision the relay group.
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [
+        { phone: '+15550200001', contactId: 'c-alice', name: 'Alice' },
+        { phone: '+15550200002', contactId: 'c-bob', name: 'Bob' },
+      ],
+    });
+
+    expect(res.status).toBe(201);
+
+    // Response shape: { tour, conversation }.
+    const { tour, conversation } = res.body as { tour: Record<string, unknown>; conversation: Record<string, unknown> };
+    expect(tour).toBeDefined();
+    expect(conversation).toBeDefined();
+
+    // The conversation is a tour-owned relay group.
+    expect(conversation['type']).toBe('relay_group');
+    expect(conversation['pool_number']).toBe(pool.provisioned[0]);
+    expect((conversation['participants'] as unknown[]).length).toBe(2);
+
+    // The owner is the tour (not a placement).
+    const convOwner = conversation['owner'] as { type: string; id: string };
+    expect(convOwner.type).toBe('tour');
+    expect(convOwner.id).toBe(tourId);
+
+    // No placementId on a tour-owned thread.
+    expect(conversation['placementId']).toBeUndefined();
+
+    // The tour now has groupThreadId stamped.
+    expect(tour['tourId']).toBe(tourId);
+    expect(tour['groupThreadId']).toBe(conversation['conversationId']);
+
+    // The stored tour reflects the stamp too.
+    const storedTour = world.toursMap.get(tourId)!;
+    expect(storedTour.groupThreadId).toBe(conversation['conversationId']);
+
+    // The conversation is retrievable from the in-memory store.
+    const storedConv = world.conversations.get(conversation['conversationId'] as string);
+    expect(storedConv?.type).toBe('relay_group');
+    expect(storedConv?.owner).toMatchObject({ type: 'tour', id: tourId });
+
+    // The intro fanned out to both members FROM the pool number (proves relay sends).
+    expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550200001', '+15550200002'].sort());
+    expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
+  });
+
+  it('404 for a missing tour', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const res = await authed(app).post('/api/tours/no-such-tour/relay').send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('tour_not_found');
+    // No number was provisioned.
+    expect(pool.provisioned).toHaveLength(0);
+  });
+
+  it('400 for missing / empty members list', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const noMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noMembers.status).toBe(400);
+    expect(noMembers.body.error).toMatch(/members/);
+
+    const emptyMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({ members: [] });
+    expect(emptyMembers.status).toBe(400);
+    expect(emptyMembers.body.error).toMatch(/members/);
+
+    // No number was provisioned for any of the bad requests.
+    expect(pool.provisioned).toHaveLength(0);
+  });
+
+  it('503 relay_provisioning_disabled when the kill-switch is off', async () => {
+    const pool = makeDisabledPoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('relay_provisioning_disabled');
+    expect(res.body.message).toMatch(/RELAY_LIVE_PROVISIONING=true/);
+    expect(pool.provisionAttempts).toBe(1);
+    // No conversation created; tour groupThreadId NOT stamped.
+    expect([...world.conversations.values()]).toHaveLength(0);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
+  });
+
+  it('503 relay_provisioning_failed when no voice-capable number is available', async () => {
+    const pool = makeVoiceCapabilityFailingPool();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('relay_provisioning_failed');
+    // No conversation created; tour groupThreadId NOT stamped.
+    expect([...world.conversations.values()]).toHaveLength(0);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
   });
 });
 

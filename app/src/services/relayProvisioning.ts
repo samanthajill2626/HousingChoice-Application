@@ -107,6 +107,10 @@ export async function provisionRelayGroup(
     ...(tag !== undefined && { tag }),
     // PII (doc §9): log owner type + id only (never a phone).
     ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
+    // Backward-compat: also emit placementId for placement-owned threads so
+    // existing observability (Splunk/CloudWatch) is not silently broken by the
+    // ownerType/ownerId rename. Additive only — no placement logic changes.
+    ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
   });
 
   // Intro: throttle-send to each member (names everyone connected). A failure to

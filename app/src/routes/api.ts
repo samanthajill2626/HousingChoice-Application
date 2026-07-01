@@ -354,10 +354,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/tours',
     createToursRouter({
+      config,
       logger: deps.logger,
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.toursNow !== undefined && { now: deps.toursNow }),
+      // Relay provisioning deps (Task 5 — POST /api/tours/:tourId/relay).
+      conversationsRepo: conversations,
+      auditRepo: audit,
+      ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      events,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

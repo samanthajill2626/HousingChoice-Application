@@ -135,6 +135,7 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));

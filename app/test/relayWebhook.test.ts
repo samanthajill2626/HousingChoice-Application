@@ -85,6 +85,7 @@ describe('relay inbound webhook (M1.7)', () => {
       adapter: world.adapter,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
       logger,
     });
     configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));

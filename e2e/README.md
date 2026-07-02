@@ -75,8 +75,13 @@ ports. **No e2e run ever uses lane 0.** The lane resolver always returns a lane
 | Fake-Twilio | `9001 + L*100 + 20` | `:9121` |
 | Public base URL | `9001 + L*100 + 30` | `:9131` |
 
-Each lane gets its own DynamoDB table prefix (`hc-local-<L>-`) and S3 bucket
-(`hc-local-media-<L>`) — data never crosses between lanes.
+Each lane gets its own DynamoDB table prefix (`hc-local-<L>-`), its own S3 bucket
+(`hc-local-media-<L>`), **and its own DynamoDB Local *database* via a per-lane
+access key (`hclane<L>`)** — the shared container (no `-sharedDb`) keeps a
+separate store + write lock per (access key, region) pair, so lanes never share
+data OR write throughput. To inspect a lane's tables with the AWS CLI you must
+use ITS key (see `accessKeyId` in `e2e/.artifacts/lane.json`); the `local` key
+shows only the dev loop's store.
 
 ### How a lane is picked
 
@@ -119,7 +124,8 @@ starting children:
   "urls":  { "app": "http://127.0.0.1:9101", "dashboard": "http://127.0.0.1:9111",
               "fake": "http://127.0.0.1:9121", "publicBase": "http://127.0.0.1:9131" },
   "tablePrefix": "hc-local-1-",
-  "mediaBucket": "hc-local-media-1"
+  "mediaBucket": "hc-local-media-1",
+  "accessKeyId": "hclane1"
 }
 ```
 

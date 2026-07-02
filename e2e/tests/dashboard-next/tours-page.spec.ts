@@ -212,8 +212,8 @@ test.describe('Tours page', () => {
     // aria-label="Status: Requested". Use getByLabel (aria-label match) since
     // Playwright doesn't expose bare <dd> with aria-label via getByRole('definition').
     await expect(detail.getByLabel('Status: Requested')).toBeVisible();
-    // Scheduled time shows '—' (no time set).
-    await expect(detail.getByLabel('Scheduled: —')).toBeVisible();
+    // Scheduled row shows the timeless rendering (no time set).
+    await expect(detail.getByLabel('Scheduled: Not yet booked')).toBeVisible();
 
     // ── /tours page — "Needs booking" section lists the tour ──
     await page.goto(`${NEXT}/tours`);

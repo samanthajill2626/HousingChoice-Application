@@ -6,6 +6,11 @@
 //   npm run secrets:check -- <dev|prod>  READ-ONLY diff of .env.<env> vs
 //                                        Parameter Store: exit 0 all match,
 //                                        2 on drift (missing/differing), 1 error
+//   npm run secrets:prune -- <dev|prod>  DELETE SSM params under /hc/<env>/app/
+//                                        no longer in .env.<env> (nor Terraform/
+//                                        deploy-managed) — the orphans a removed
+//                                        key leaves behind (push never deletes).
+//                                        DRY RUN by default; pass --yes to delete.
 //
 // Rules:
 //   - account guard FIRST (assertHousingChoiceAccount) and AWS_PROFILE forced
@@ -32,19 +37,20 @@ import {
   STACK_ENVS,
 } from './lib/hcAws.mjs';
 import {
-  MANAGED_BY_OTHERS,
   diffKeySets,
   findDenylistedKeys,
+  findOrphanParams,
   maskValue,
   parseDotenv,
 } from './lib/secretsCore.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const USAGE = `usage: node scripts/secrets.mjs <push|check> <dev|prod>
-  (via npm: npm run secrets:push -- dev, npm run secrets:check -- prod)
+const USAGE = `usage: node scripts/secrets.mjs <push|check|prune> <dev|prod> [--yes]
+  (via npm: npm run secrets:push -- dev, npm run secrets:check -- prod, npm run secrets:prune -- dev)
   push   write every key in .env.<env> to SSM /hc/<env>/app/<KEY> as SecureString (overwrite)
-  check  read-only diff of .env.<env> vs Parameter Store — exit 0 all match, 2 drift, 1 error`;
+  check  read-only diff of .env.<env> vs Parameter Store — exit 0 all match, 2 drift, 1 error
+  prune  delete SSM params not in .env.<env> (nor Terraform/deploy-managed) — DRY RUN unless --yes`;
 
 function fail(message) {
   console.error(message);
@@ -54,9 +60,20 @@ function fail(message) {
 // --- argv ----------------------------------------------------------------------
 const args = process.argv.slice(2);
 const mode = args.shift();
-if (!['push', 'check'].includes(mode ?? '')) fail(USAGE);
+if (!['push', 'check', 'prune'].includes(mode ?? '')) fail(USAGE);
 const env = args.shift();
 if (!STACK_ENVS.includes(env ?? '')) fail(USAGE);
+
+// --yes is accepted ONLY by prune — it turns the default dry run into real
+// deletes. For push/check any extra token (including a stray --yes) still fails.
+let applyPrune = false;
+if (mode === 'prune') {
+  const yesIdx = args.indexOf('--yes');
+  if (yesIdx !== -1) {
+    applyPrune = true;
+    args.splice(yesIdx, 1);
+  }
+}
 if (args.length > 0) fail(`Unknown argument "${args[0]}".\n${USAGE}`);
 
 // --- child-process helpers (same shape as deploy.mjs) ----------------------------
@@ -140,8 +157,11 @@ if (existsSync(examplePath)) {
   }
 }
 
+// Empty values only matter to push (SSM can't store them); prune never writes
+// values, so it tolerates them — an empty-valued key still counts as present,
+// i.e. NOT an orphan.
 const emptyKeys = keys.filter((key) => entries[key] === '');
-if (emptyKeys.length > 0) {
+if (mode !== 'prune' && emptyKeys.length > 0) {
   fail(
     `[secrets] empty value(s) in ${envFileName}: ${emptyKeys.join(', ')} — SSM cannot store\n` +
       `an empty parameter. Fill them in (or delete the lines) and re-run.`,
@@ -196,7 +216,72 @@ ${rows.join('\n')}
   process.exit(0);
 }
 
-// --- 4b. check (read-only) -----------------------------------------------------------
+// --- 4b. prune (delete orphaned SSM params) ----------------------------------------
+// Orphans = params under /hc/<env>/app/ that are in SSM but NOT in .env.<env>
+// and NOT Terraform/deploy-managed — what a removed key leaves behind (push
+// never deletes). DRY RUN by default; --yes to delete. Safety: the .env.<env>
+// existence + non-empty-keyset checks above already ran, so a missing/blank file
+// hard-fails BEFORE we ever compute an orphan set — prune can never read "no
+// file" as "delete everything".
+if (mode === 'prune') {
+  const orphans = findOrphanParams([...ssmParams.keys()], keys);
+
+  if (orphans.length === 0) {
+    console.log(`
+==================== secrets prune (${env}) ====================
+  No orphans: every param under ${paramPath}/ is in ${envFileName} or Terraform/deploy-managed.
+  Nothing to prune.
+======================================================================`);
+    process.exit(0);
+  }
+
+  const orphanWidth = Math.max(...orphans.map((k) => k.length), 'KEY'.length);
+  const action = applyPrune ? 'deleted' : 'would delete';
+  const rows = orphans.map(
+    (key) => `  ${key.padEnd(orphanWidth)}  ${action.padEnd(12)}  ${maskValue(ssmParams.get(key).value)}`,
+  );
+
+  if (!applyPrune) {
+    console.log(`
+==================== secrets prune — DRY RUN (${env}) ====================
+  ${orphans.length} orphan param(s) under ${paramPath}/ (in SSM, not in ${envFileName}, not Terraform/deploy-managed):
+  ${'KEY'.padEnd(orphanWidth)}  ACTION        VALUE (masked)
+${rows.join('\n')}
+
+  DRY RUN — nothing was deleted. Re-run with --yes to delete:
+    npm run secrets:prune -- ${env} --yes
+======================================================================`);
+    process.exit(0);
+  }
+
+  // --yes: delete for real. ssm delete-parameters takes up to 10 names/call and
+  // reports names it did not find under InvalidParameters (exit 0) instead of
+  // erroring — so a concurrently-removed key is tolerated, not fatal.
+  const names = orphans.map((key) => `${paramPath}/${key}`);
+  const notFound = [];
+  for (let i = 0; i < names.length; i += 10) {
+    const chunk = names.slice(i, i + 10);
+    const out = aws(
+      ['ssm', 'delete-parameters', '--names', ...chunk],
+      `ssm delete-parameters (${chunk.length})`,
+    );
+    for (const bad of JSON.parse(out).InvalidParameters ?? []) notFound.push(bad.split('/').pop());
+  }
+
+  const deleted = orphans.length - notFound.length;
+  console.log(`
+==================== secrets prune (${env}) ====================
+  ${orphans.length} orphan param(s) under ${paramPath}/:
+  ${'KEY'.padEnd(orphanWidth)}  ACTION        VALUE (masked)
+${rows.join('\n')}
+
+  ${deleted} deleted${notFound.length > 0 ? `, ${notFound.length} already absent: ${notFound.join(', ')}` : ''}
+  next deploy re-hydrates ${paramPath}/* into /opt/hc/.env on the ${env} instance (these keys now gone)
+======================================================================`);
+  process.exit(0);
+}
+
+// --- 4c. check (read-only) -----------------------------------------------------------
 const rows = [];
 const counts = { matches: 0, differs: 0, missing: 0 };
 for (const key of keys) {
@@ -227,16 +312,16 @@ ${rows.join('\n')}
 
   ${counts.matches} match, ${counts.differs} differ, ${counts.missing} missing — ${keys.length} key(s) in ${envFileName}`);
 
-// Extra params under the path that are neither in the file nor managed by
-// Terraform/deploy — report-only (they never affect the exit code).
-const extras = [...ssmParams.keys()]
-  .filter((key) => !Object.hasOwn(entries, key) && !MANAGED_BY_OTHERS.includes(key))
-  .sort();
+// Orphan params under the path (in SSM, not in the file, not Terraform/deploy-
+// managed) — report-only here; they never affect check's exit code. The same
+// set `secrets:prune` deletes (both go through findOrphanParams).
+const extras = findOrphanParams([...ssmParams.keys()], keys);
 if (extras.length > 0) {
   console.log(`\n  extra params under ${paramPath}/ (not in ${envFileName}, not Terraform/deploy-managed):`);
   for (const key of extras) {
     console.log(`    ${key} = ${maskValue(ssmParams.get(key).value)}`);
   }
+  console.log(`  → delete these orphans with: npm run secrets:prune -- ${env}`);
 }
 console.log(`==========================================================================`);
 

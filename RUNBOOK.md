@@ -131,6 +131,7 @@ by script only. Nobody hand-runs `aws ssm put-parameter`:
 npm run secrets:sync -- dev       # mirror .env.dev to .env.dev.example (comments/structure), values kept
 npm run secrets:push -- dev       # .env.dev -> SecureString /hc/dev/app/<KEY> (account-guarded)
 npm run secrets:check -- prod     # read-only diff: exit 0 in sync, 2 drift, 1 error
+npm run secrets:prune -- dev      # delete SSM params no longer in .env.dev (DRY RUN; add --yes to delete)
 ```
 
 The flow: edit `.env.<env>` → `secrets:push` writes each key as SecureString under
@@ -142,6 +143,17 @@ Store, plus any unexpected extra params under the path (report-only). The **depl
 check as a gate** and aborts on drift (see [Deploy to dev](#deploy-to-dev)), so a forgotten push
 can't ship — but pushing then deploying is still the normal flow; the gate is the backstop, not the
 mechanism.
+
+**Removing a secret:** deleting a key from `.env.<env>` and re-running `secrets:push` does NOT remove
+it from Parameter Store — push only ever creates/updates, so the old value lingers under
+`/hc/<env>/app/` and keeps hydrating onto the box. `npm run secrets:prune -- <env>` deletes those
+orphans: everything under the path that is neither in `.env.<env>` nor Terraform/deploy-managed. It is
+a **dry run by default** (lists what it would delete, masked) and only deletes with `--yes`
+(`npm run secrets:prune -- <env> --yes`); `MANAGED_BY_OTHERS` params are never touched, and a
+missing/empty `.env.<env>` hard-fails before anything is computed (it can't read "no file" as "delete
+everything"). `secrets:check` reports the same orphans read-only (with a `→ secrets:prune` pointer)
+but never deletes and never fails on them. After a prune, deploy so the box re-hydrates without the
+removed key.
 
 Terraform/deploy-managed keys (`CF_ORIGIN_SECRET`, `JOBS_QUEUE_URL`, `LOG_LEVEL`, `MEDIA_BUCKET`,
 `NODE_ENV`, `PORT`, `PUBLIC_BASE_URL`, `SCHEDULER_ROLE_ARN`, `SCHEDULER_TARGET_ARN`,

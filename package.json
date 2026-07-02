@@ -42,6 +42,7 @@
     "deploy:prod": "node scripts/deploy.mjs prod",
     "secrets:push": "node scripts/secrets.mjs push",
     "secrets:check": "node scripts/secrets.mjs check",
+    "secrets:prune": "node scripts/secrets.mjs prune",
     "secrets:sync": "node scripts/secretsSync.mjs",
     "wipe:dev": "node scripts/wipe-dev-data.mjs",
     "user:invite": "node scripts/userInvite.mjs",

@@ -7,6 +7,7 @@ import {
   MANAGED_BY_OTHERS,
   diffKeySets,
   findDenylistedKeys,
+  findOrphanParams,
   maskValue,
   parseDotenv,
   syncEnvFromExample,
@@ -127,6 +128,36 @@ describe('findDenylistedKeys (Terraform/deploy-managed params)', () => {
 
   it('is case-sensitive like SSM param names (lowercase port is not the managed PORT)', () => {
     expect(findDenylistedKeys(['port'])).toEqual([]);
+  });
+});
+
+describe('findOrphanParams (SSM params no longer backed by .env.<env>)', () => {
+  it('returns SSM keys absent from the env file, sorted', () => {
+    // OLD_KEY and GONE were removed from .env.<env>; the Twilio key still lives there.
+    expect(
+      findOrphanParams(['TWILIO_API_KEY_SID', 'OLD_KEY', 'GONE'], ['TWILIO_API_KEY_SID']),
+    ).toEqual(['GONE', 'OLD_KEY']);
+  });
+
+  it('never returns a Terraform/deploy-managed key, even when absent from the env file', () => {
+    // SESSION_SECRET/DEPLOYED_TAG live in SSM by design and are never in .env — only STALE is an orphan.
+    expect(
+      findOrphanParams(['SESSION_SECRET', 'DEPLOYED_TAG', 'STALE'], ['TWILIO_API_KEY_SID']),
+    ).toEqual(['STALE']);
+  });
+
+  it('returns [] when every SSM key is either in the env file or Terraform/deploy-managed', () => {
+    expect(
+      findOrphanParams(['TWILIO_API_KEY_SID', 'PORT', 'SESSION_SECRET'], ['TWILIO_API_KEY_SID']),
+    ).toEqual([]);
+  });
+
+  it('returns [] when there are no SSM params under the path', () => {
+    expect(findOrphanParams([], ['TWILIO_API_KEY_SID'])).toEqual([]);
+  });
+
+  it('is case-sensitive like SSM param names (a lowercase "port" is an orphan, not the managed PORT)', () => {
+    expect(findOrphanParams(['port'], [])).toEqual(['port']);
   });
 });
 

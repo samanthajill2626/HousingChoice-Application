@@ -94,6 +94,24 @@ export function findDenylistedKeys(keys) {
 }
 
 /**
+ * SSM param keys under /hc/<env>/app/ that are no longer backed by .env.<env> —
+ * orphans left behind when a key is removed from the file (push only ever
+ * creates/updates, never deletes). Excludes Terraform/deploy-managed params
+ * (MANAGED_BY_OTHERS): those live in SSM by design and must NEVER be pruned.
+ * Returned sorted. This is the delete set for `secrets:prune` and the same set
+ * `secrets:check` reports under "extra params" (both call this — one source of
+ * truth for "what is an orphan").
+ *
+ * @param {string[]} ssmKeys keys present under the SSM path (basename only)
+ * @param {string[]} envKeys keys present in .env.<env>
+ * @returns {string[]} sorted keys in SSM but neither in the file nor managed
+ */
+export function findOrphanParams(ssmKeys, envKeys) {
+  const envSet = new Set(envKeys);
+  return ssmKeys.filter((key) => !envSet.has(key) && !MANAGED_BY_OTHERS.includes(key)).sort();
+}
+
+/**
  * Key-set drift between a real .env.<env> file and its committed
  * .env.<env>.example template (values are irrelevant — the template holds
  * placeholders). The example is the source of truth for STRUCTURE: new keys

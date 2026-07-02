@@ -5,6 +5,7 @@ export declare const MANAGED_BY_OTHERS: readonly string[];
 export declare function parseDotenv(text: string): Record<string, string>;
 export declare function maskValue(value: string): string;
 export declare function findDenylistedKeys(keys: string[]): string[];
+export declare function findOrphanParams(ssmKeys: string[], envKeys: string[]): string[];
 export declare function diffKeySets(
   realKeys: string[],
   exampleKeys: string[],

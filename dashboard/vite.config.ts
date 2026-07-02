@@ -35,12 +35,16 @@ function commitStampPlugin() {
 export default defineConfig({
   plugins: [react(), commitStampPlugin()],
   server: {
-    // In the e2e stack, PORT is set per-lane by e2e-session.mjs so each worktree
-    // gets an isolated dashboard port. In `npm run dev`, PORT is unset and we fall
-    // back to the lane-0 dev default (5174). strictPort ensures Vite exits with an
-    // error rather than silently drifting to a different port (which would make
-    // Playwright's webServer readiness probe poll the wrong address forever).
-    port: Number(process.env['PORT'] ?? 5174),
+    // In the e2e stack, DASHBOARD_PORT is set per-lane by e2e-session.mjs so each
+    // worktree gets an isolated dashboard port. In `npm run dev` it's unset and we
+    // fall back to the lane-0 dev default (5174). DELIBERATELY not the generic
+    // `PORT`: that is the APP's port variable (set in .env / by the app contract),
+    // and `npm run dev` passes ONE shared env to every child — reading PORT here
+    // made Vite bind the app's 8080 instead of 5174 (2026-07-02 regression).
+    // strictPort ensures Vite exits with an error rather than silently drifting
+    // to a different port (which would make Playwright's webServer readiness
+    // probe poll the wrong address forever).
+    port: Number(process.env['DASHBOARD_PORT'] ?? 5174),
     // Bind explicitly to IPv4 loopback so the health probe (127.0.0.1:<port>)
     // always reaches it. Without this, `localhost` on some systems resolves to
     // IPv6 ::1 and the 127.0.0.1 probe gets ERR_CONNECTION_REFUSED.

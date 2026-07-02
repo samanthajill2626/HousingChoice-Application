@@ -16,11 +16,16 @@
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT the suite skips.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type {
+  MessagingAdapter,
+  SendMessageParams,
+} from '../src/adapters/messaging.js';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
+import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -72,13 +77,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     events: world.events,
   });
 
-  // Shared deps for runDueTourReminders.
+  // Shared deps for runDueTourReminders. The adapter (group route) is a spy
+  // that must stay untouched here — these tours have no group thread.
   const runDeps = {
     tourRemindersRepo: tourReminders,
     toursRepo: tours,
     contactsRepo: world.contactsRepo,
     conversationsRepo: world.conversationsRepo,
     sendMessageService,
+    adapter: createAdapterSpy().adapter,
     logger,
   };
 
@@ -416,6 +423,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       contactsRepo: racingWorld.contactsRepo,
       conversationsRepo: racingWorld.conversationsRepo,
       sendMessageService: racingSend,
+      adapter: createAdapterSpy().adapter,
       logger,
     };
 
@@ -492,10 +500,537 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       contactsRepo: cancelWorld.contactsRepo,
       conversationsRepo: cancelWorld.conversationsRepo,
       sendMessageService: cancelSend,
+      adapter: createAdapterSpy().adapter,
       logger,
     };
     await runDueTourReminders(now0, cancelDeps);
 
     expect(cancelWorld.sent).toHaveLength(0);
+  });
+
+  // ===========================================================================
+  // Group-thread reminder routing (Task 2 — founder decision 2026-07-02):
+  // landlord_led / pm_team reminders go to the tour's masked GROUP thread via
+  // DIRECT per-member adapter sends FROM the pool number (the relay.intro
+  // precedent — sendMessageService refuses relay_group threads and the worker
+  // cannot enqueue jobs); self_guided stays tenant-1:1 even when a group
+  // exists; any unusable group (no groupThreadId / missing conversation /
+  // wrong type / closed) falls back to the tenant-1:1 path — a reminder must
+  // never be lost.
+  //
+  // These tests use their OWN August timeline (the earlier tests live on
+  // 2026-07-13..15) so leftover pending rows from other tests are never due
+  // at these polls, and fresh per-test worlds so send counts are isolated.
+  // ===========================================================================
+
+  const CONFIRMATION_BODY =
+    "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
+
+  /** Adapter spy for the GROUP route: records direct sends; never a network. */
+  function createAdapterSpy(opts: { failFor?: string[] } = {}): {
+    adapter: MessagingAdapter;
+    sends: SendMessageParams[];
+  } {
+    const sends: SendMessageParams[] = [];
+    let sidCounter = 0;
+    const adapter: MessagingAdapter = {
+      async sendMessage(params) {
+        if (opts.failFor?.includes(params.to)) {
+          throw new Error('adapter spy: injected send failure');
+        }
+        sends.push(params);
+        sidCounter += 1;
+        return {
+          providerSid: `SMspy-${sidCounter}`,
+          status: 'queued',
+          providerTs: new Date().toISOString(),
+        };
+      },
+      async getMediaStream() {
+        throw new Error('adapter spy: getMediaStream not expected');
+      },
+      async getRecordingStream() {
+        throw new Error('adapter spy: getRecordingStream not expected');
+      },
+      async provisionPhoneNumber() {
+        throw new Error('adapter spy: provisionPhoneNumber not expected');
+      },
+      async setVoiceWebhook() {
+        throw new Error('adapter spy: setVoiceWebhook not expected');
+      },
+      async initiateCall() {
+        throw new Error('adapter spy: initiateCall not expected');
+      },
+    };
+    return { adapter, sends };
+  }
+
+  /**
+   * Fresh world + full runDueTourReminders deps with a group-adapter spy.
+   * The 1:1 path sends via the world's own adapter (world.sent); the group
+   * path sends via the spy (groupSends) — so the two routes are separable.
+   */
+  function createGroupTestRig(opts: { failFor?: string[] } = {}) {
+    const world = createFakeWorld();
+    const spy = createAdapterSpy(opts);
+    const send = createSendMessageService({
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+      events: world.events,
+    });
+    const deps = {
+      tourRemindersRepo: tourReminders,
+      toursRepo: tours,
+      contactsRepo: world.contactsRepo,
+      conversationsRepo: world.conversationsRepo,
+      sendMessageService: send,
+      adapter: spy.adapter,
+      logger,
+    };
+    return { world, deps, groupSends: spy.sends };
+  }
+
+  function seedTenant(
+    world: ReturnType<typeof createFakeWorld>,
+    contactId: string,
+    phone: string,
+    convId: string,
+    now: string,
+  ): void {
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone,
+      created_at: now,
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(convId, {
+      conversationId: convId,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: now,
+      created_at: now,
+    });
+  }
+
+  function seedRelayGroup(
+    world: ReturnType<typeof createFakeWorld>,
+    opts: {
+      convId: string;
+      poolNumber: string;
+      status?: 'open' | 'closed';
+      participants: ConversationParticipant[];
+      now: string;
+    },
+  ): void {
+    world.conversations.set(opts.convId, {
+      conversationId: opts.convId,
+      // relay_group threads carry the pool number as the synthetic placeholder.
+      participant_phone: opts.poolNumber,
+      status: opts.status ?? 'open',
+      type: 'relay_group',
+      ai_mode: 'manual',
+      last_activity_at: opts.now,
+      created_at: opts.now,
+      pool_number: opts.poolNumber,
+      participants: opts.participants,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 9 — landlord_led + open group: every member texted FROM the pool number
+  // ---------------------------------------------------------------------------
+  it('landlord_led tour with an open group: reminder goes to EVERY member from the pool number, not the 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T10:00:00.000Z';
+    const scheduledAt = '2026-08-03T18:00:00.000Z';
+    const tenantPhone = '+15550500001';
+    const landlordPhone = '+15550500002';
+    const poolNumber = '+15550190001';
+    const groupConvId = 'conv-group-ll-1';
+
+    seedTenant(rig.world, 'contact-group-ll-1', tenantPhone, 'conv-1to1-ll-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-group-ll-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-group-ll-2', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-group-ll-1',
+      unitId: 'unit-group-ll-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    // Only the confirmation rung is due at now0.
+    await runDueTourReminders(now0, rig.deps);
+
+    // Group route: one direct adapter send PER member, FROM the pool number,
+    // carrying the same rung body.
+    expect(rig.groupSends).toHaveLength(2);
+    expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
+    for (const s of rig.groupSends) {
+      expect(s.from).toBe(poolNumber);
+      expect(s.body).toBe(CONFIRMATION_BODY);
+    }
+    // Nothing through the 1:1 send service.
+    expect(rig.world.sent).toHaveLength(0);
+
+    // Claim stamped — a second tick sends nothing more (exactly once per member).
+    const rows = await tourReminders.listByTour(tour.tourId);
+    expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeDefined();
+    await runDueTourReminders(now0, rig.deps);
+    expect(rig.groupSends).toHaveLength(2);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 10 — pm_team + open group: same group routing
+  // ---------------------------------------------------------------------------
+  it('pm_team tour with an open group routes reminders to the group', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T11:00:00.000Z';
+    const scheduledAt = '2026-08-03T19:00:00.000Z';
+    const tenantPhone = '+15550510001';
+    const pmPhone = '+15550510002';
+    const poolNumber = '+15550190002';
+    const groupConvId = 'conv-group-pm-1';
+
+    seedTenant(rig.world, 'contact-group-pm-1', tenantPhone, 'conv-1to1-pm-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-group-pm-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-group-pm-2', phone: pmPhone, name: 'Pat PM' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-group-pm-1',
+      unitId: 'unit-group-pm-1',
+      scheduledAt,
+      tourType: 'pm_team',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(2);
+    expect(rig.groupSends.every((s) => s.from === poolNumber)).toBe(true);
+    expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 11 — self_guided stays 1:1 EVEN IF a group thread exists (founder rule)
+  // ---------------------------------------------------------------------------
+  it('self_guided tour with a group thread set still sends the reminder to the tenant 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T12:00:00.000Z';
+    const scheduledAt = '2026-08-03T20:00:00.000Z';
+    const tenantPhone = '+15550520001';
+    const poolNumber = '+15550190003';
+    const groupConvId = 'conv-group-sg-1';
+
+    seedTenant(rig.world, 'contact-group-sg-1', tenantPhone, 'conv-1to1-sg-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-group-sg-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-group-sg-2', phone: '+15550520002', name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-group-sg-1',
+      unitId: 'unit-group-sg-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    // 1:1 route: sent via sendMessageService (world adapter), NOT the group spy.
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+    expect(rig.world.sent[0]!.body).toContain(CONFIRMATION_BODY);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 12 — landlord_led with NO groupThreadId: 1:1 fallback
+  // ---------------------------------------------------------------------------
+  it('landlord_led tour with no groupThreadId falls back to the tenant 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T13:00:00.000Z';
+    const scheduledAt = '2026-08-03T21:00:00.000Z';
+    const tenantPhone = '+15550530001';
+
+    seedTenant(rig.world, 'contact-nogroup-1', tenantPhone, 'conv-1to1-ng-1', now0);
+
+    const tour = await tours.create({
+      tenantId: 'contact-nogroup-1',
+      unitId: 'unit-nogroup-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 13 — groupThreadId → missing conversation: 1:1 fallback
+  // ---------------------------------------------------------------------------
+  it('landlord_led tour whose groupThreadId points at a missing conversation falls back to 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T14:00:00.000Z';
+    const scheduledAt = '2026-08-03T22:00:00.000Z';
+    const tenantPhone = '+15550540001';
+
+    seedTenant(rig.world, 'contact-missingconv-1', tenantPhone, 'conv-1to1-mc-1', now0);
+
+    const tour = await tours.create({
+      tenantId: 'contact-missingconv-1',
+      unitId: 'unit-missingconv-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: 'conv-does-not-exist' });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 14 — groupThreadId → a NON-relay_group conversation: 1:1 fallback
+  // ---------------------------------------------------------------------------
+  it('landlord_led tour whose groupThreadId points at a non-relay_group conversation falls back to 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T14:30:00.000Z';
+    const scheduledAt = '2026-08-03T22:30:00.000Z';
+    const tenantPhone = '+15550545001';
+
+    seedTenant(rig.world, 'contact-wrongtype-1', tenantPhone, 'conv-1to1-wt-1', now0);
+
+    const tour = await tours.create({
+      tenantId: 'contact-wrongtype-1',
+      unitId: 'unit-wrongtype-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    // Points at the tenant's own 1:1 thread — exists but is NOT a relay_group.
+    await tours.patch(tour.tourId, { groupThreadId: 'conv-1to1-wt-1' });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 15 — CLOSED group: 1:1 fallback
+  // ---------------------------------------------------------------------------
+  it('landlord_led tour with a CLOSED group thread falls back to 1:1', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T15:00:00.000Z';
+    const scheduledAt = '2026-08-03T23:00:00.000Z';
+    const tenantPhone = '+15550550001';
+    const poolNumber = '+15550190004';
+    const groupConvId = 'conv-group-closed-1';
+
+    seedTenant(rig.world, 'contact-closed-1', tenantPhone, 'conv-1to1-cl-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      status: 'closed',
+      participants: [
+        { contactId: 'contact-closed-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-closed-2', phone: '+15550550002', name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-closed-1',
+      unitId: 'unit-closed-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 16 — suppressed (sms_opt_out) member skipped; others still receive
+  // ---------------------------------------------------------------------------
+  it('an sms_opt_out group member is skipped while the other members receive the reminder', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T16:00:00.000Z';
+    const scheduledAt = '2026-08-04T18:00:00.000Z';
+    const tenantPhone = '+15550560001';
+    const landlordPhone = '+15550560002';
+    const poolNumber = '+15550190005';
+    const groupConvId = 'conv-group-sup-1';
+
+    seedTenant(rig.world, 'contact-sup-tenant', tenantPhone, 'conv-1to1-sup-1', now0);
+    // The landlord member's contact carries sms_opt_out (STOP'd) — suppressed.
+    rig.world.contacts.push({
+      contactId: 'contact-sup-landlord',
+      type: 'landlord',
+      phone: landlordPhone,
+      sms_opt_out: true,
+      created_at: now0,
+    } as Parameters<typeof rig.world.contacts.push>[0]);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-sup-tenant', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-sup-landlord', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-sup-tenant',
+      unitId: 'unit-sup-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    // Only the non-suppressed member receives; the STOP'd member is never texted.
+    expect(rig.groupSends).toHaveLength(1);
+    expect(rig.groupSends[0]!.to).toBe(tenantPhone);
+    expect(rig.groupSends[0]!.from).toBe(poolNumber);
+    expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 17 — [concurrency] two racing ticks over a group reminder: once per member
+  // ---------------------------------------------------------------------------
+  it('two concurrent ticks over the same group reminder send exactly once per member', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T17:00:00.000Z';
+    const scheduledAt = '2026-08-04T19:00:00.000Z';
+    const tenantPhone = '+15550570001';
+    const landlordPhone = '+15550570002';
+    const poolNumber = '+15550190006';
+    const groupConvId = 'conv-group-race-1';
+
+    seedTenant(rig.world, 'contact-grouprace-1', tenantPhone, 'conv-1to1-gr-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-grouprace-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-grouprace-2', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-grouprace-1',
+      unitId: 'unit-grouprace-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await Promise.all([
+      runDueTourReminders(now0, rig.deps),
+      runDueTourReminders(now0, rig.deps),
+    ]);
+
+    // Claim-before-send: each member texted exactly ONCE despite two ticks.
+    expect(rig.groupSends).toHaveLength(2);
+    expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 18 — per-member send failure: other members still receive; claim stays stamped
+  // ---------------------------------------------------------------------------
+  it('a per-member adapter failure does not block other members and the claim stays stamped', async () => {
+    const now0 = '2026-08-01T18:00:00.000Z';
+    const scheduledAt = '2026-08-04T20:00:00.000Z';
+    const tenantPhone = '+15550580001';
+    const landlordPhone = '+15550580002';
+    const poolNumber = '+15550190007';
+    const groupConvId = 'conv-group-fail-1';
+
+    // The FIRST member's send blows up; the second must still receive.
+    const rig = createGroupTestRig({ failFor: [tenantPhone] });
+
+    seedTenant(rig.world, 'contact-groupfail-1', tenantPhone, 'conv-1to1-gf-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-groupfail-1', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-groupfail-2', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-groupfail-1',
+      unitId: 'unit-groupfail-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    await runDueTourReminders(now0, rig.deps);
+
+    // The surviving member got the reminder.
+    expect(rig.groupSends).toHaveLength(1);
+    expect(rig.groupSends[0]!.to).toBe(landlordPhone);
+    // The claim is stamped (accepted tradeoff — same post-claim semantics as
+    // the 1:1 path): a second tick does NOT retry the failed member.
+    const rows = await tourReminders.listByTour(tour.tourId);
+    expect(rows.find((r) => r.kind === 'confirmation')?.sentAt).toBeDefined();
+    await runDueTourReminders(now0, rig.deps);
+    expect(rig.groupSends).toHaveLength(1);
+    // Never through the 1:1 service either.
+    expect(rig.world.sent).toHaveLength(0);
   });
 });

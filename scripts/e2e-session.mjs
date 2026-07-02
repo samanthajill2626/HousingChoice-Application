@@ -177,9 +177,11 @@ function startViteNext() {
   // port first guarantees the child we spawn owns it.
   const reaped = killPort(ports.dashboard);
   if (reaped.length) log(`reaped orphan(s) holding :${ports.dashboard} before start: ${reaped.join(', ')}`);
-  // Pass PORT so vite.config.ts can read it (dashboard/vite.config.ts reads process.env.PORT).
+  // DASHBOARD_PORT (not the generic PORT — that's the APP's variable, and a
+  // shared env would leak it into Vite: the 2026-07-02 `npm run dev` regression
+  // where Vite bound the app's 8080). vite.config.ts reads DASHBOARD_PORT.
   spawnNode('web-next', [viteBin], dashboardNextDir, {
-    PORT: String(ports.dashboard),
+    DASHBOARD_PORT: String(ports.dashboard),
     APP_PORT: String(ports.app),
   });
 }

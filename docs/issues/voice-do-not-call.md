@@ -3,10 +3,11 @@ id: voice-do-not-call
 title: Voice do-not-call opt-out + in-app masked outbound calling (GA) — DNC scrubbing later
 type: security
 severity: high
-status: open
+status: resolved
+resolved: 2026-07-02
 area: app
 created: 2026-06-30
-refs: app/src/adapters/messaging.ts:142, dashboard/src/routes/contact/CallMenu.tsx:5, app/src/routes/webhooks/voice.ts
+refs: app/src/services/originateCall.ts, dashboard/src/routes/contact/CallMenu.tsx, app/src/routes/voiceApi.ts
 ---
 
 **Problem.** GA needs **in-app masked outbound calling** (the originate route the
@@ -37,3 +38,19 @@ solicitation call. We therefore do **NOT** blanket-block cold outbound calls.
 **Suggested fix.** Add `voice_opt_out` (+ `dnc_status` stub) to the contact model;
 gate origination + CallMenu on it; build the originate route (recording OK under
 Georgia one-party consent). Automated DNC-list scrubbing is a later, separate slice.
+
+**Resolution (2026-07-02).** The GA scope shipped in Voice Phase 1 (merged 33bfab2):
+- `voice_opt_out` is on the contact model, staff-settable, and honored by BOTH the
+  originate service (`services/originateCall.ts` — 409 `contact_voice_opted_out`,
+  pre-dial, checked before phone resolution) and the CallMenu (disabled + "Do not
+  call" note). Independent of `sms_opt_out`.
+- In-app masked outbound calling is built end-to-end: `POST /api/contacts/:id/call`
+  rings the navigator's verified cell (whisper + press-1), bridges to the target
+  with the business number as caller ID, records + transcribes (Georgia one-party).
+  CallMenu's `tel:` link is gone.
+- Known narrow gap (already filed): `voice-bridge-dnc-recheck` (a contact marked
+  do-not-call mid-call isn't re-checked at press-1; seconds-wide, low).
+- Item 3 (National DNC Registry scrubbing) was NOT built — deliberately deferred;
+  spun out to its own tracked issue: `dnc-registry-scrubbing` (low, deferred). The
+  `dnc_status` stub field was also skipped (nothing consumes it yet; the scrubbing
+  issue owns adding it when built).

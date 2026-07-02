@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -348,5 +348,29 @@ describe('ContactCreateForm', () => {
     expect(body['consent_method']).toBe('verbal_phone');
     expect(typeof body['consent_at']).toBe('string');
     expect(body['consent_note']).toBe('said OK on the call');
+  });
+
+  it('offers "They texted or called us first" (client_inbound) and carries it in the body', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'c-ci', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Ines');
+    await user.click(screen.getByRole('button', { name: /Record text consent/i }));
+
+    // The client-initiated basis is a visible, labelled option…
+    const select = screen.getByLabelText(/How did they consent/i);
+    expect(
+      within(select).getByRole('option', { name: 'They texted or called us first' }),
+    ).toBeInTheDocument();
+
+    // …and selecting it sends consent_method='client_inbound'.
+    await user.selectOptions(select, 'client_inbound');
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['consent_method']).toBe('client_inbound');
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   contactDisplayName,
+  contactStatusLabel,
   dayKey,
   formatAddress,
   formatDuration,
@@ -17,6 +18,22 @@ describe('humanize', () => {
   it('capitalizes a single word and leaves empty empty', () => {
     expect(humanize('active')).toBe('Active');
     expect(humanize('')).toBe('');
+  });
+});
+
+describe('contactStatusLabel', () => {
+  it('uses the tenant vocabulary for tenants', () => {
+    expect(contactStatusLabel('tenant', 'needs_review')).toBe('Needs review');
+    expect(contactStatusLabel('tenant', 'on_hold')).toBe('On hold');
+  });
+  it('uses the landlord lead vocabulary for landlords', () => {
+    expect(contactStatusLabel('landlord', 'needs_review')).toBe('Needs review');
+    expect(contactStatusLabel('landlord', 'parked')).toBe('Parked');
+  });
+  it('humanizes for unknown/other types and off-list values (never raw snake_case)', () => {
+    expect(contactStatusLabel('unknown', 'needs_review')).toBe('Needs review');
+    expect(contactStatusLabel(undefined, 'active')).toBe('Active');
+    expect(contactStatusLabel('tenant', 'some_legacy_value')).toBe('Some legacy value');
   });
 });
 

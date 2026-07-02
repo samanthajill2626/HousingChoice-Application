@@ -1,5 +1,8 @@
 // fake-twilio/src/engine/types.ts
-export type Role = 'landlord' | 'tenant' | 'pm' | 'staff';
+// 'unknown' = an AUTO-REGISTERED party: an app send to a number with no persona
+// materializes one, labeled by the bare number (engine.recordOutboundFromApp).
+// Never offered in the ad-hoc dialog — a human minting a phone picks a real role.
+export type Role = 'landlord' | 'tenant' | 'pm' | 'staff' | 'unknown';
 
 export interface Persona {
   id: string;

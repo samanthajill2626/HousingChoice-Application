@@ -10,6 +10,9 @@ export type SettingsStatus = 'loading' | 'ready' | 'error';
 export interface SettingsState {
   status: SettingsStatus;
   settings: OrgSettings | undefined;
+  /** The read-only built-in welcome body (what a blank welcomeText sends) —
+   *  served alongside the settings so the UI can SHOW the default. */
+  welcomeTextDefault: string | undefined;
   retry: () => void;
   /** PUT only the changed fields; returns the merged settings. Throws ApiError
    *  (e.g. 400) so the caller can surface validation inline. `welcomeText: null`
@@ -20,6 +23,7 @@ export interface SettingsState {
 export function useSettings(): SettingsState {
   const [status, setStatus] = useState<SettingsStatus>('loading');
   const [settings, setSettings] = useState<OrgSettings | undefined>(undefined);
+  const [welcomeTextDefault, setWelcomeTextDefault] = useState<string | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -27,9 +31,10 @@ export function useSettings(): SettingsState {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const s = await getSettings(controller.signal);
+      const res = await getSettings(controller.signal);
       if (controller.signal.aborted) return;
-      setSettings(s);
+      setSettings(res.settings);
+      setWelcomeTextDefault(res.welcomeTextDefault);
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -52,10 +57,11 @@ export function useSettings(): SettingsState {
   }, [load]);
 
   const save = useCallback(async (patch: SettingsPatch): Promise<OrgSettings> => {
-    const updated = await putSettings(patch);
-    setSettings(updated);
-    return updated;
+    const res = await putSettings(patch);
+    setSettings(res.settings);
+    setWelcomeTextDefault(res.welcomeTextDefault);
+    return res.settings;
   }, []);
 
-  return { status, settings, retry, save };
+  return { status, settings, welcomeTextDefault, retry, save };
 }

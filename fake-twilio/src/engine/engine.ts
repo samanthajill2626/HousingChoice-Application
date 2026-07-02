@@ -223,6 +223,22 @@ export class FakeTwilioEngine {
    * status-callback progression for the active delivery profile. Returns the SID.
    */
   recordOutboundFromApp(input: { to: string; from?: string; body?: string; mediaUrls?: string[] }): string {
+    // AUTO-REGISTER (DX, 2026-07-02): an app send to a number with NO persona
+    // used to land in a thread the UI never shows (the fake-phones UI lists
+    // PERSONAS) — the app reported "sent" and the message silently vanished
+    // (this bit the founder-cell verify flow: the code SMS was invisible).
+    // Materialize an ad-hoc persona labeled by the bare number (no invented
+    // name) BEFORE appending, so persona.added reaches the UI first and the
+    // send pops up live, immediately usable (read a verify code, reply, STOP).
+    // Best-effort: a malformed/app-number `to` keeps the old record-only
+    // behavior rather than failing the app's messages.create.
+    if (this.registry.byNumber(input.to) === undefined) {
+      try {
+        this.addAdHoc({ label: input.to, role: 'unknown', number: input.to });
+      } catch {
+        /* app-number near-miss or non-E.164 — leave unregistered */
+      }
+    }
     // FIX 3 (defense-in-depth): the REST caller is less-trusted than the seed path;
     // drop any non-http(s) MediaUrl before storing/rendering it as an <img src> —
     // same isHttpUrl gate the inbound (sendAsParty) path enforces. Dropping (vs

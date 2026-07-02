@@ -22,6 +22,7 @@ import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
   deleteContact,
+  ensureContactConversation,
   restoreContact,
   retryMessage,
   sendMessage,
@@ -164,7 +165,10 @@ export function ContactDetail(): React.JSX.Element {
   // pick (the picker hides).
   const { targets: replyTargets, defaultConversationId } = buildReplyTargets(timeline.items, phones);
   const sendConvId = selectedConvId ?? defaultConversationId;
-  const canSend = sendConvId !== null;
+  // Sendable when a thread already resolves OR the contact has a number to start
+  // one with — a BRAND-NEW contact has no conversation yet, so the first send
+  // creates it (ensureContactConversation in onSend) instead of graying out.
+  const canSend = sendConvId !== null || target !== undefined;
   // The number shown in the reply box = the selected target's number (else the
   // default reply target).
   const replyToPhone =
@@ -186,9 +190,17 @@ export function ContactDetail(): React.JSX.Element {
         throw err;
       });
   };
-  const onSend = (body: string): Promise<void> => {
-    if (!sendConvId) return Promise.resolve();
-    const convId = sendConvId;
+  const onSend = async (body: string): Promise<void> => {
+    // No thread yet (a brand-new contact who has never messaged us): create-or-get
+    // the primary number's 1:1 conversation first, THEN send into it. Idempotent —
+    // a racing inbound resolves to the same thread. An ensure failure throws before
+    // any optimistic bubble, so the Timeline just restores the draft + shows why.
+    let resolvedId = sendConvId;
+    if (resolvedId === null) {
+      if (target === undefined) return; // no number to start a thread with
+      resolvedId = await ensureContactConversation(contact.contactId);
+    }
+    const convId = resolvedId;
     const toPhone = replyToPhone;
     return postSend(convId, body, toPhone).catch((err: unknown) => {
       // A2P/CTIA just-in-time gate: a proactive send to a no-consent contact is

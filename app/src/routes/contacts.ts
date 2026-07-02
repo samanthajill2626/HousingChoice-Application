@@ -1072,6 +1072,51 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   });
 
   // POST /api/contacts/:contactId/opt-out { optOut: boolean } → 200 { contact }.
+  // POST /api/contacts/:contactId/conversation → 200 { conversation }. Create-or-
+  // get the 1:1 thread for the contact's PRIMARY number, so the dashboard can text
+  // a BRAND-NEW contact that has never messaged us (no thread exists yet → the
+  // reply box had nothing to send into and stayed disabled). Idempotent — the repo
+  // primitive is the same one-active-conversation-per-phone claim every inbound
+  // path uses, so a racing inbound never creates a duplicate. The type mirrors the
+  // resolved-identity rule (tenant_1to1 / landlord_1to1, else unknown_1to1); the
+  // contact's display name is denormalized on so the inbox row shows the person.
+  router.post('/:contactId/conversation', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    const phones = contactPhones(contact);
+    const primary = phones.find((p) => p.primary) ?? phones[0];
+    if (!primary) {
+      res.status(400).json({ error: 'contact_has_no_phone' });
+      return;
+    }
+
+    const type = conversationTypeFor(contact.type) ?? 'unknown_1to1';
+    const conversation = await conversations.createOrGetByParticipantPhone(primary.phone, type);
+    mergeContext({ conversationId: conversation.conversationId });
+
+    // Denormalize the contact's name onto the thread (best-effort; the inbox
+    // falls back to the phone without it) — a NEW thread has no display name yet.
+    const displayName = displayNameOf(contact);
+    if (displayName !== null && conversation.participant_display_name !== displayName) {
+      try {
+        const fresh = await conversations.applyTriage(conversation.conversationId, { displayName });
+        events.emit('conversation.updated', toConversationUpdatedEvent(fresh));
+        res.json({ conversation: fresh });
+        return;
+      } catch (err) {
+        log.warn({ err, contactId }, 'contact conversation: name denorm failed (best-effort)');
+      }
+    }
+    res.json({ conversation });
+  });
+
   // Manually mark a contact Do-Not-Contact (sms_opt_out=true) or clear it. The
   // contact-level flag is authoritative for send suppression — the send wrapper
   // refuses on contact.sms_opt_out (sendMessage.ts gate) — so setting it here

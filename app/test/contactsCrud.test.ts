@@ -238,6 +238,75 @@ describe('POST /api/contacts — A2P/CTIA consent capture (spec §3.3)', () => {
   });
 });
 
+describe('POST /api/contacts/:id/conversation — start a thread with a new contact', () => {
+  it('creates the 1:1 thread for the primary number (typed by the contact) and denormalizes the name', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'c-new',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'Nora',
+      lastName: 'New',
+      phone: '+15550107300',
+    });
+
+    const res = await request(app)
+      .post('/api/contacts/c-new/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.conversation.participant_phone).toBe('+15550107300');
+    expect(res.body.conversation.type).toBe('tenant_1to1');
+    expect(res.body.conversation.participant_display_name).toBe('Nora New');
+  });
+
+  it('is idempotent — a second call returns the SAME conversation', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-new', type: 'landlord', status: 'active', phone: '+15550107301' });
+
+    const first = await request(app)
+      .post('/api/contacts/c-new/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const second = await request(app)
+      .post('/api/contacts/c-new/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.conversation.type).toBe('landlord_1to1');
+    expect(second.body.conversation.conversationId).toBe(first.body.conversation.conversationId);
+  });
+
+  it('an unresolved (unknown) contact gets an unknown_1to1 thread', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550107302' });
+    const res = await request(app)
+      .post('/api/contacts/c-unk/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.conversation.type).toBe('unknown_1to1');
+  });
+
+  it('400s when the contact has no phone; 404s when the contact does not exist', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-nophone', type: 'tenant', status: 'active' });
+    const noPhone = await request(app)
+      .post('/api/contacts/c-nophone/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(noPhone.status).toBe(400);
+    expect(noPhone.body.error).toBe('contact_has_no_phone');
+
+    const missing = await request(app)
+      .post('/api/contacts/nope/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(missing.status).toBe(404);
+  });
+});
+
 describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)', () => {
   const CONSENT_AT = '2026-06-29T12:00:00.000Z';
 

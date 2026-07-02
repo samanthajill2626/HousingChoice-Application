@@ -26,6 +26,8 @@ export interface LaneResult {
   tablePrefix: string;
   /** S3 / MinIO media bucket name, e.g. "hc-local-media-3" */
   mediaBucket: string;
+  /** DynamoDB Local access key = this lane's own local database, e.g. "hclane3" */
+  accessKeyId: string;
 }
 
 /** Injectable port-availability probe (default: net.createServer bind test). */
@@ -83,3 +85,9 @@ export function hashToLane(identity: string): number;
 
 /** djb2 hash: string → positive integer (Uint32). */
 export function djb2(s: string): number;
+
+/** Per-lane DynamoDB Local access key: "hclane<L>" (alphanumeric only). */
+export function laneAccessKeyId(lane: number): string;
+
+/** Per-worktree DynamoDB Local access key for Vitest runs: "hctest<base36>". */
+export function testAccessKeyId(): string;

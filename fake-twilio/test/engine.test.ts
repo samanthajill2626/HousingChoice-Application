@@ -56,6 +56,37 @@ describe('FakeTwilioEngine', () => {
     await expect(engine.sendAsParty({ from: '+15559999999', body: 'x' })).rejects.toThrow(/unknown/i);
   });
 
+  it('recordOutboundFromApp AUTO-REGISTERS a persona for an unknown recipient (pops up in the UI)', () => {
+    const { engine } = makeEngine();
+    const events: string[] = [];
+    engine.subscribe((e) => events.push(e.type));
+    engine.recordOutboundFromApp({ to: '+14045550137', from: '+15550009999', body: 'Your code is 123456' });
+    // The persona materializes: labeled by the BARE NUMBER (no invented name),
+    // role 'unknown', ad-hoc — so the send is visible + usable (read the code, reply).
+    const persona = engine.list().find((p) => p.number === '+14045550137');
+    expect(persona).toMatchObject({ label: '+14045550137', role: 'unknown', adHoc: true });
+    // persona.added must reach the UI BEFORE the message lands on its thread.
+    expect(events.indexOf('persona.added')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('persona.added')).toBeLessThan(events.indexOf('message.appended'));
+    const thread = engine.listThreads().find((t) => t.partyNumber === '+14045550137');
+    expect(thread?.messages[0]).toMatchObject({ direction: 'outbound', body: 'Your code is 123456' });
+  });
+
+  it('recordOutboundFromApp does NOT duplicate a persona for a known recipient', () => {
+    const { engine } = makeEngine();
+    const before = engine.list().length;
+    engine.recordOutboundFromApp({ to: '+15550100001', from: '+15550009999', body: 'hi' }); // seeded Tasha
+    expect(engine.list().length).toBe(before);
+  });
+
+  it('recordOutboundFromApp to a malformed number records the send without registering', () => {
+    const { engine } = makeEngine();
+    const before = engine.list().length;
+    const sid = engine.recordOutboundFromApp({ to: 'not-a-number', from: '+15550009999', body: 'hi' });
+    expect(sid).toMatch(/^SM/); // the send itself still succeeds (old behavior preserved)
+    expect(engine.list().length).toBe(before);
+  });
+
   it('a fresh engine starts SIDs above the low range, so a restarted fake cannot reuse a prior run\'s SIDs', async () => {
     // The dedup bug: fake-twilio used to mint SMfake00000001… from 0 on every process
     // start, so a restart re-emitted SIDs already persisted as sid# dedup pointers in a

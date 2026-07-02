@@ -5,7 +5,10 @@
 // package by design, so the shapes are re-declared here rather than imported.
 // If the engine types change, update BOTH places.
 
-export type Role = 'landlord' | 'tenant' | 'pm' | 'staff';
+// 'unknown' = a party the engine AUTO-REGISTERED (an app send to a number with
+// no persona), labeled by its bare number. Auto-only — the ad-hoc dialog does
+// not offer it.
+export type Role = 'landlord' | 'tenant' | 'pm' | 'staff' | 'unknown';
 
 export type DeliveryState = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
 

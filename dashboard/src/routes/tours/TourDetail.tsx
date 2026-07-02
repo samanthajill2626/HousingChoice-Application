@@ -23,8 +23,10 @@ import {
   type TourStatus,
 } from '../../api/index.js';
 
-/** Format a scheduledAt ISO datetime for human-readable display. */
-function formatScheduledAt(iso: string): string {
+/** Format a scheduledAt ISO datetime for human-readable display.
+ *  Returns '—' when the tour has no scheduled time (status 'requested'). */
+function formatScheduledAt(iso: string | undefined): string {
+  if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString('en-US', {

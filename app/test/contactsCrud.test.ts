@@ -215,9 +215,9 @@ describe('POST /api/contacts — A2P/CTIA consent capture (spec §3.3)', () => {
     expect(stored.consent_captured_by).toBe('usr_testva00000000000000000');
   });
 
-  it('REJECTS an automatic consent_method (web_form / inbound_text) from the human create path', async () => {
+  it('REJECTS an automatic consent_method (web_form / inbound_text / inbound_call) from the human create path', async () => {
     const { app } = makeWebhookHarness();
-    for (const method of ['web_form', 'inbound_text', 'nonsense']) {
+    for (const method of ['web_form', 'inbound_text', 'inbound_call', 'nonsense']) {
       const res = await request(app)
         .post('/api/contacts')
         .set('x-origin-verify', SECRET)
@@ -269,6 +269,21 @@ describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)',
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ consent_method: 'web_form' });
     expect(res.status).toBe(400);
+  });
+
+  it('accepts client_inbound (staff attests the client texted/called first) on the JIT PATCH', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-jit', type: 'tenant', status: 'active', phone: '+15550107205' });
+    const res = await request(app)
+      .patch('/api/contacts/contact-jit')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ consent_method: 'client_inbound', consent_at: CONSENT_AT, consent_note: 'they called us on 6/28' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({
+      consent_method: 'client_inbound',
+      consent_captured_by: 'usr_testva00000000000000000',
+    });
   });
 
   it('REJECTS a client-supplied consent_captured_by on the JIT PATCH', async () => {

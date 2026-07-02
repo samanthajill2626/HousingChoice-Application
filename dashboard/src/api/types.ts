@@ -647,14 +647,17 @@ export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
 
 /**
- * A2P/CTIA consent method (spec §2). MIRROR of the app's
- * lib/smsCompliance.ts ConsentMethod — the dashboard can't import from app/, so
- * keep the two in sync by hand. web_form/inbound_text are stamped automatically;
- * the other four are only ever set by a human.
+ * A2P/CTIA consent method (spec §2 + client_inbound/inbound_call). MIRROR of the
+ * app's lib/smsCompliance.ts ConsentMethod — the dashboard can't import from
+ * app/, so keep the two in sync by hand. web_form/inbound_text/inbound_call are
+ * stamped automatically; the rest are only ever set by a human (client_inbound =
+ * staff attests the client texted or called us first, historically).
  */
 export type ConsentMethod =
   | 'web_form'
   | 'inbound_text'
+  | 'inbound_call'
+  | 'client_inbound'
   | 'verbal_phone'
   | 'verbal_in_person'
   | 'paper_form'
@@ -782,7 +785,7 @@ export interface ContactCreate {
   relationships?: Relationship[];
   customFields?: CustomField[];
   /** A2P/CTIA consent captured at create time — a HUMAN method only. */
-  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  consent_method?: 'client_inbound' | 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
   /** When consent was obtained (ISO 8601). */
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */
@@ -898,7 +901,7 @@ export interface ContactPatch {
   customFields?: CustomField[];
   /** A2P/CTIA consent capture (CONTRACT 2) — a HUMAN method only. Sent by the
    *  just-in-time consent-capture modal; the server stamps consent_captured_by. */
-  consent_method?: 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
+  consent_method?: 'client_inbound' | 'verbal_phone' | 'verbal_in_person' | 'paper_form' | 'imported';
   /** When consent was obtained (ISO 8601). */
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */

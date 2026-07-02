@@ -38,26 +38,38 @@ export const TERMS_URL = 'https://tenant.place/terms';
 // revisit — marketing requires express WRITTEN consent.
 
 /**
- * How a contact's SMS consent was obtained (spec §2). Two methods are stamped
- * AUTOMATICALLY by the system (web_form, inbound_text); the other four are only
- * ever set by a HUMAN (the contact-create form or the just-in-time modal).
+ * How a contact's SMS consent was obtained (spec §2 + client_inbound, added
+ * 2026-07-02). Two methods are stamped AUTOMATICALLY by the system (web_form,
+ * inbound_text); the rest are only ever set by a HUMAN (the contact-create form
+ * or the just-in-time modal).
  */
 export type ConsentMethod =
   | 'web_form'
   | 'inbound_text'
+  | 'inbound_call'
+  | 'client_inbound'
   | 'verbal_phone'
   | 'verbal_in_person'
   | 'paper_form'
   | 'imported';
 
-/** Consent methods the SYSTEM stamps on its own (web form submit + inbound text). */
+/** Consent methods the SYSTEM stamps on its own: web form submit, inbound text,
+ *  and inbound voice call (the caller reaching out IS the customer-initiated
+ *  consent basis — same rationale as inbound_text, stamped by the voice webhook). */
 export const AUTOMATIC_CONSENT_METHODS: ReadonlySet<ConsentMethod> = new Set<ConsentMethod>([
   'web_form',
   'inbound_text',
+  'inbound_call',
 ]);
 
-/** Consent methods that ONLY a human may set (contact-create field or JIT modal). */
+/** Consent methods that ONLY a human may set (contact-create field or JIT modal).
+ *  `client_inbound` = staff attests the CLIENT reached out first (an inbound text
+ *  or voice call). Distinct from the automatic `inbound_text`/`inbound_call`
+ *  stamps: it covers HISTORICAL inbound contact nothing recorded at the time
+ *  (predates the auto-stamping, or arrived on a since-merged number) — keeping
+ *  system-stamped vs staff-attested provenance distinguishable in the audit trail. */
 export const HUMAN_CONSENT_METHODS: ReadonlySet<ConsentMethod> = new Set<ConsentMethod>([
+  'client_inbound',
   'verbal_phone',
   'verbal_in_person',
   'paper_form',

@@ -2,7 +2,8 @@
 // NODE_ENV !== 'production' (gated by lib/devRoutes.ts; config.ts fails fast if
 // the flag is ever set in production). Exposes a liveness probe and a dev-login
 // that mints a REAL session for a seeded user, mirroring the OAuth callback.
-// Also exposes the recorded-message outbox and reseed for e2e testing.
+// Also exposes the recorded-message outbox, reseed, and a deterministic
+// tour-reminder tick for e2e testing.
 import { Router, json } from 'express';
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
@@ -19,6 +20,13 @@ import {
 } from '../repos/usersRepo.js';
 import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessaging.js';
 import { resetLocalData } from '../lib/devReset.js';
+import { createMessagingAdapter } from '../adapters/messaging.js';
+import { createContactsRepo } from '../repos/contactsRepo.js';
+import { createConversationsRepo } from '../repos/conversationsRepo.js';
+import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import { createToursRepo } from '../repos/toursRepo.js';
+import { createSendMessageService } from '../services/sendMessage.js';
+import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
 
 export interface DevRouterDeps {
   logger?: Logger;
@@ -29,6 +37,9 @@ export interface DevRouterDeps {
    *  wiping + reseeding the users table (a stale cached epoch — e.g. one bumped by
    *  a prior sign-out — would otherwise reject a freshly-minted post-reseed session). */
   sessionEpochCache?: SessionEpochCache;
+  /** Poll deps for POST /__dev/tour-reminders/tick — injected in tests (the
+   *  world fakes); defaults to the worker's construction (worker.ts). */
+  tourReminderDeps?: RunDueTourRemindersDeps;
 }
 
 // Role assigned when dev-login auto-provisions a missing user. The seed
@@ -136,6 +147,48 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     // post-reseed dev-login session is rejected (cookie epoch ≠ stale cached epoch).
     deps.sessionEpochCache?.clear();
     res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/tour-reminders/tick { now? } — the deterministic e2e seam for
+  // the worker's 60s tour-reminder poll (worker.ts): one POST runs ONE
+  // runDueTourReminders(now) pass instead of waiting for the wall-clock
+  // setInterval. Hermetic-LOCAL-only: the dev router only loads behind the
+  // triple gate (lib/devRoutes.ts), so this is structurally absent in every
+  // deployed env. json() is scoped to this route only (mirrors dev-login).
+  //
+  // `now` (optional) must be a parseable ISO 8601 datetime; it is NORMALIZED
+  // via new Date(x).toISOString() because the reminder ladder compares ISO
+  // strings LEXICOGRAPHICALLY — '…00Z' vs '…00.000Z' inputs must collapse to
+  // the one canonical full-milliseconds form. Defaults to the wall clock.
+  let tickDeps = deps.tourReminderDeps;
+  const tourReminderDeps = (): RunDueTourRemindersDeps => {
+    // Built lazily on the first tick — mirrors worker.ts's tourReminderDeps
+    // construction exactly (createMessagingAdapter honors
+    // MESSAGING_RECORD_OUTBOX, so hermetic-e2e sends stay outbox-visible).
+    tickDeps ??= {
+      tourRemindersRepo: createTourRemindersRepo({ logger: log }),
+      toursRepo: createToursRepo({ logger: log }),
+      contactsRepo: createContactsRepo({ logger: log }),
+      conversationsRepo: createConversationsRepo({ logger: log }),
+      sendMessageService: createSendMessageService({ config, logger: log }),
+      adapter: createMessagingAdapter({ config, logger: log }),
+      logger: log,
+    };
+    return tickDeps;
+  };
+  router.post('/__dev/tour-reminders/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    await runDueTourReminders(nowIso, tourReminderDeps());
+    log.info({ now: nowIso }, 'dev tour-reminder tick ran');
+    res.status(200).json({ ok: true, now: nowIso });
   });
 
   return router;

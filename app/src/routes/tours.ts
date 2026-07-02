@@ -7,7 +7,7 @@
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                     → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
-//   POST  /api/tours/:tourId/relay  { members }                      → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/relay  { members? }                     → 201 { tour, conversation }
 //
 // POST: scheduledAt is OPTIONAL. Absent → the tour is created 'requested' (the
 // timeless coordination anchor; no scheduledAt attribute stored, no reminders).
@@ -25,8 +25,10 @@
 //     touch tenant status (conversion is a downstream feature).
 //
 // POST /api/tours/:tourId/relay provisions a masked relay group thread for a tour
-// (Task 5). One thread per tour is supported; the groupThreadId is stored on the
-// tour. Multi-concurrent-tour numbering/UX is OUT OF SCOPE (one thread per tour;
+// (Task 5). One thread per tour is ENFORCED: a tour that already carries a
+// groupThreadId is refused (409 relay_already_provisioned). members is OPTIONAL —
+// absent/empty auto-resolves [tenant, unit's landlord] from contacts.
+// Multi-concurrent-tour numbering/UX is OUT OF SCOPE (one thread per tour;
 // see docs/issues/group-threads-across-multiple-tours.md).
 //
 // Validation is a strict field allowlist (unknown fields → 400). Mirror of
@@ -58,7 +60,10 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { nameFromContact, resolveMemberName } from './relayGroups.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -103,6 +108,10 @@ export interface ToursRouterDeps {
   conversationsRepo?: ConversationsRepo;
   auditRepo?: AuditRepo;
   poolNumbersService?: PoolNumbersService;
+  /** Relay auto-membership: resolve the tour's tenant contact (phone + name). */
+  contactsRepo?: ContactsRepo;
+  /** Relay auto-membership: resolve the tour's unit → its landlord contact. */
+  unitsRepo?: UnitsRepo;
   events?: EventBus;
   /**
    * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
@@ -118,6 +127,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const conversations =
     deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
@@ -368,11 +379,69 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     res.json({ tour });
   });
 
+  /**
+   * Auto-resolve the tour's relay roster: [tenant contact, unit's landlord
+   * contact] — phones + display names from contacts. Returns a stable,
+   * dashboard-consumable detail string when any member is unresolvable (the
+   * route maps it to 400 relay_member_unresolvable).
+   */
+  async function resolveTourMembers(
+    tour: TourItem,
+  ): Promise<{ members: ConversationParticipant[] } | { unresolvable: string }> {
+    const tenant = await contacts.getById(tour.tenantId);
+    if (!tenant) return { unresolvable: 'tenant contact not found' };
+    const tenantPhone =
+      typeof tenant.phone === 'string' && tenant.phone.length > 0
+        ? normalizeToE164(tenant.phone)
+        : undefined;
+    if (tenantPhone === undefined) return { unresolvable: 'tenant contact has no phone' };
+
+    const unit = await units.getById(tour.unitId);
+    if (!unit) return { unresolvable: 'unit not found (cannot resolve landlord)' };
+    const landlordId =
+      typeof unit.landlordId === 'string' && unit.landlordId.length > 0
+        ? unit.landlordId
+        : undefined;
+    if (landlordId === undefined) {
+      return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
+    }
+    const landlord = await contacts.getById(landlordId);
+    if (!landlord) return { unresolvable: 'landlord contact not found' };
+    const landlordPhone =
+      typeof landlord.phone === 'string' && landlord.phone.length > 0
+        ? normalizeToE164(landlord.phone)
+        : undefined;
+    if (landlordPhone === undefined) return { unresolvable: 'landlord contact has no phone' };
+
+    const tenantName = nameFromContact(tenant);
+    const members: ConversationParticipant[] = [
+      { phone: tenantPhone, contactId: tour.tenantId, ...(tenantName !== undefined && { name: tenantName }) },
+    ];
+    // De-dupe on phone (mirrors the explicit path) — a tenant who is somehow
+    // also the landlord gets one roster slot.
+    if (landlordPhone !== tenantPhone) {
+      const landlordName = nameFromContact(landlord);
+      members.push({
+        phone: landlordPhone,
+        contactId: landlordId,
+        ...(landlordName !== undefined && { name: landlordName }),
+      });
+    }
+    return { members };
+  }
+
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a
   // tour (Task 5). Stores the relay conversationId back on the tour as
-  // groupThreadId. One thread per tour; the request body must supply members.
+  // groupThreadId. ONE thread per tour — an already-provisioned tour is refused
+  // (409) so a second click never buys a new pool number and orphans the first.
   //
-  // Body: { members: [{ phone, contactId?, name? }, …] }
+  // Body: { members?: [{ phone, contactId?, name? }, …] }
+  //   - members absent or empty → AUTO-RESOLVE the roster as [tenant contact,
+  //     unit's landlord contact] (phones + names from contacts); an
+  //     unresolvable member → 400 { error: 'relay_member_unresolvable', detail }
+  //     naming exactly which member/rung failed.
+  //   - explicit members are honored as before; a member carrying contactId
+  //     but no name gets the contact's display name (best-effort).
   // Returns: 201 { tour, conversation }
   //
   // PII (doc §9): log ids only (never member phones in log lines).
@@ -381,12 +450,6 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const actor = (req as AuthedRequest).user?.userId;
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    // Validate members.
-    if (!Array.isArray(body['members']) || (body['members'] as unknown[]).length === 0) {
-      res.status(400).json({ error: 'members (non-empty array) is required' });
-      return;
-    }
-
     // Fetch the tour; 404 when missing.
     const tour = await tours.get(tourId);
     if (!tour) {
@@ -394,31 +457,58 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    // Parse + normalize members (reuse the same mini-validator as relayGroups.ts).
-    const members: ConversationParticipant[] = [];
-    const seenPhones = new Set<string>();
-    for (const raw of body['members'] as unknown[]) {
-      if (typeof raw !== 'object' || raw === null) {
-        res.status(400).json({ error: 'each member must be an object' });
+    // One-thread-per-tour guard FIRST: a second provision would silently buy a
+    // new pool number and overwrite groupThreadId, orphaning the live thread.
+    if (typeof tour.groupThreadId === 'string' && tour.groupThreadId.length > 0) {
+      res.status(409).json({ error: 'relay_already_provisioned' });
+      return;
+    }
+
+    const rawMembers = body['members'];
+    if (rawMembers !== undefined && !Array.isArray(rawMembers)) {
+      res.status(400).json({ error: 'members must be an array' });
+      return;
+    }
+
+    let members: ConversationParticipant[];
+    if (rawMembers === undefined || rawMembers.length === 0) {
+      // AUTO-RESOLVE (founder flow): [tenant, unit's landlord] from contacts.
+      const resolved = await resolveTourMembers(tour);
+      if ('unresolvable' in resolved) {
+        res.status(400).json({ error: 'relay_member_unresolvable', detail: resolved.unresolvable });
         return;
       }
-      const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
-      if (typeof m.phone !== 'string' || m.phone.length === 0) {
-        res.status(400).json({ error: 'member.phone is required' });
-        return;
+      members = resolved.members;
+    } else {
+      // Parse + normalize explicit members (reuse the same mini-validator as
+      // relayGroups.ts); fill a missing name from contactId (best-effort).
+      members = [];
+      const seenPhones = new Set<string>();
+      for (const raw of rawMembers as unknown[]) {
+        if (typeof raw !== 'object' || raw === null) {
+          res.status(400).json({ error: 'each member must be an object' });
+          return;
+        }
+        const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
+        if (typeof m.phone !== 'string' || m.phone.length === 0) {
+          res.status(400).json({ error: 'member.phone is required' });
+          return;
+        }
+        const phone = normalizeToE164(m.phone);
+        if (phone === undefined) {
+          res.status(400).json({ error: `member.phone is not a valid phone: ${m.phone}` });
+          return;
+        }
+        if (seenPhones.has(phone)) continue; // de-dupe
+        seenPhones.add(phone);
+        const contactId =
+          typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
+        const name =
+          typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
+        members.push(
+          await resolveMemberName(contacts, { phone, contactId, ...(name !== undefined && { name }) }),
+        );
       }
-      const phone = normalizeToE164(m.phone);
-      if (phone === undefined) {
-        res.status(400).json({ error: `member.phone is not a valid phone: ${m.phone}` });
-        return;
-      }
-      if (seenPhones.has(phone)) continue; // de-dupe
-      seenPhones.add(phone);
-      const contactId =
-        typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
-      const name =
-        typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
-      members.push({ phone, contactId, ...(name !== undefined && { name }) });
     }
 
     // Provision the relay group owned by this tour.

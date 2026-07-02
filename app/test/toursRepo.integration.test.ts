@@ -193,8 +193,12 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const insideIds = result.map((t) => t.tourId);
     expect(insideIds).toContain(inside1.tourId);
     expect(insideIds).toContain(inside2.tourId);
-    // The tours outside the window must not appear
-    expect(result.every((t) => t.scheduledAt >= from && t.scheduledAt <= to)).toBe(true);
+    // The tours outside the window must not appear. (scheduledAt is optional
+    // on TourItem since the timeless create, but every row in the sparse
+    // byScheduledAt GSI carries one — assert it inline for the type.)
+    expect(
+      result.every((t) => t.scheduledAt !== undefined && t.scheduledAt >= from && t.scheduledAt <= to),
+    ).toBe(true);
   });
 
   it('listByScheduledRange boundary: BETWEEN is inclusive on both ends', async () => {

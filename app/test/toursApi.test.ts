@@ -4,7 +4,7 @@
 //   GET   /api/tours/:tourId                                        → { tour } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                    → { tours }
 //   PATCH /api/tours/:tourId                                        → { tour } | 404
-//   POST  /api/tours/:tourId/relay  { members }                     → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/relay  { members? }                    → 201 { tour, conversation }
 //
 // Mirrors unitsApi.test.ts: in-memory fakes via makeWebhookHarness, no DynamoDB.
 import request from 'supertest';
@@ -760,7 +760,202 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(pool.provisioned).toHaveLength(0);
   });
 
-  it('400 for missing / empty members list', async () => {
+  // Auto-membership (founder flow): members is OPTIONAL — absent/empty resolves
+  // the roster to [tenant contact, unit's landlord contact] from the world.
+  // (Supersedes the old 400-for-missing-members contract.)
+
+  /** Seed the tour's tenant + unit + landlord so auto-resolve can find them. */
+  function seedAutoResolveWorld(): void {
+    world.contacts.push({
+      contactId: 'contact-tenant-1',
+      type: 'tenant',
+      phone: '+15550200011',
+      firstName: 'Tina',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'll-relay-1',
+      type: 'landlord',
+      phone: '+15550200012',
+      firstName: 'Larry',
+      lastName: 'Lord',
+    });
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'll-relay-1',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  it('auto-resolves [tenant, landlord] with names when members is absent or empty', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // No members at all — the founder flow (one button click, no roster form).
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    const conversation = res.body.conversation as Record<string, unknown>;
+    const participants = conversation['participants'] as {
+      phone: string;
+      contactId: string;
+      name?: string;
+    }[];
+    expect(participants).toHaveLength(2);
+    const byPhone = Object.fromEntries(participants.map((p) => [p.phone, p]));
+    expect(byPhone['+15550200011']).toMatchObject({ contactId: 'contact-tenant-1', name: 'Tina Tenant' });
+    expect(byPhone['+15550200012']).toMatchObject({ contactId: 'll-relay-1', name: 'Larry Lord' });
+
+    // groupThreadId stamped back on the tour.
+    expect((res.body.tour as Record<string, unknown>)['groupThreadId']).toBe(conversation['conversationId']);
+
+    // The intro fanned out to BOTH auto-resolved members FROM the pool number.
+    expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550200011', '+15550200012']);
+    expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
+
+    // An EMPTY members array behaves identically (second tour — one thread per tour).
+    const created2 = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId2 = created2.body.tour.tourId as string;
+    const res2 = await authed(app).post(`/api/tours/${tourId2}/relay`).send({ members: [] });
+    expect(res2.status).toBe(201);
+    expect((res2.body.conversation as { participants: unknown[] }).participants).toHaveLength(2);
+  });
+
+  it('second relay POST → 409 relay_already_provisioned (one thread per tour)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const first = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(first.status).toBe(201);
+    const firstThreadId = (first.body.conversation as Record<string, unknown>)['conversationId'];
+
+    // A second POST must NOT provision a new number or overwrite groupThreadId —
+    // explicit members don't bypass the guard either.
+    const again = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: [{ phone: '+15550200099', name: 'Interloper' }] });
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: 'relay_already_provisioned' });
+    expect(pool.provisioned).toHaveLength(1);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBe(firstThreadId);
+  });
+
+  it('400 relay_member_unresolvable naming the tenant when the tenant contact has no phone', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    // Strip the tenant's phone (both scalar and phones[] are absent).
+    const tenant = world.contacts.find((c) => c.contactId === 'contact-tenant-1')!;
+    delete tenant.phone;
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'tenant contact has no phone',
+    });
+    expect(pool.provisioned).toHaveLength(0);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
+  });
+
+  it('400 relay_member_unresolvable names each missing rung of the resolution ladder', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // Nothing seeded → the tenant contact is the first unresolvable member.
+    const noTenant = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noTenant.status).toBe(400);
+    expect(noTenant.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'tenant contact not found',
+    });
+
+    // Tenant exists (with phone) but the unit doesn't.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant', phone: '+15550200011' });
+    const noUnit = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noUnit.status).toBe(400);
+    expect(noUnit.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'unit not found (cannot resolve landlord)',
+    });
+
+    // Unit exists but its landlord contact doesn't.
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'll-ghost',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+    const noLandlord = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noLandlord.status).toBe(400);
+    expect(noLandlord.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'landlord contact not found',
+    });
+
+    // Landlord contact exists but has no phone.
+    world.contacts.push({ contactId: 'll-ghost', type: 'landlord', firstName: 'Larry' });
+    const noLandlordPhone = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noLandlordPhone.status).toBe(400);
+    expect(noLandlordPhone.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'landlord contact has no phone',
+    });
+
+    // Nothing was ever provisioned along the way.
+    expect(pool.provisioned).toHaveLength(0);
+  });
+
+  it('explicit member with contactId and no name gets the contact display name', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    world.contacts.push({
+      contactId: 'c-carol',
+      type: 'landlord',
+      phone: '+15550200031',
+      firstName: 'Carol',
+      lastName: 'Vaughn',
+    });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [
+        { phone: '+15550200031', contactId: 'c-carol' }, // name resolves from the contact
+        { phone: '+15550200032', contactId: 'c-ghost' }, // unknown contact → passes through nameless
+        { phone: '+15550200033', name: 'Explicit Ed' }, // explicit name wins as before
+      ],
+    });
+    expect(res.status).toBe(201);
+    const participants = (res.body.conversation as {
+      participants: { phone: string; name?: string }[];
+    }).participants;
+    const byPhone = Object.fromEntries(participants.map((p) => [p.phone, p]));
+    expect(byPhone['+15550200031']?.name).toBe('Carol Vaughn');
+    expect(byPhone['+15550200032']?.name).toBeUndefined();
+    expect(byPhone['+15550200033']?.name).toBe('Explicit Ed');
+  });
+
+  it('still 400s for a present-but-invalid members array', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
 
@@ -768,13 +963,21 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    const noMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
-    expect(noMembers.status).toBe(400);
-    expect(noMembers.body.error).toMatch(/members/);
+    const missingPhone = await authed(app).post(`/api/tours/${tourId}/relay`).send({ members: [{}] });
+    expect(missingPhone.status).toBe(400);
+    expect(missingPhone.body.error).toBe('member.phone is required');
 
-    const emptyMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({ members: [] });
-    expect(emptyMembers.status).toBe(400);
-    expect(emptyMembers.body.error).toMatch(/members/);
+    const badPhone = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: [{ phone: 'not-a-phone' }] });
+    expect(badPhone.status).toBe(400);
+    expect(badPhone.body.error).toMatch(/not a valid phone/);
+
+    const notArray = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: 'nope' });
+    expect(notArray.status).toBe(400);
+    expect(notArray.body.error).toBe('members must be an array');
 
     // No number was provisioned for any of the bad requests.
     expect(pool.provisioned).toHaveLength(0);

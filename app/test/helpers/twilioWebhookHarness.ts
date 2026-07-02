@@ -5,7 +5,7 @@
 // real, never mocked out.
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import type { Express } from 'express';
+import type { Express, Router } from 'express';
 import request, { type Test } from 'supertest';
 import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
@@ -1691,6 +1691,12 @@ export interface HarnessOptions {
    * assert exact dueAt values). Omit to use the wall clock.
    */
   toursNow?: () => string;
+  /**
+   * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
+   * endpoints against the world fakes pass one in; mounted exactly like the
+   * composition root mounts it (before the origin-secret gate).
+   */
+  devRouter?: Router;
 }
 
 export interface Harness {
@@ -1738,6 +1744,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
     auth: { usersRepo: fakeUsers.repo },
+    // Dev-only endpoints (/__dev/*) — only when a test passes a pre-built router.
+    ...(opts.devRouter !== undefined && { devRouter: opts.devRouter }),
     // The /api router shares the same fakes + bus, so hub-API and SSE tests
     // can drive the FULL loop (webhook in → bus → SSE out) on one app. The
     // M1.4 surfaces (contacts triage, admin users) share the SAME world

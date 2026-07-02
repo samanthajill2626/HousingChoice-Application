@@ -56,13 +56,30 @@ export interface RelayGroupsRouterDeps {
   events?: EventBus;
 }
 
-/** Resolved display name from a contact's firstName/lastName, or undefined. */
-function nameFromContact(contact: ContactItem | undefined): string | undefined {
+/** Resolved display name from a contact's firstName/lastName, or undefined.
+ *  Exported for the tour relay route (tours.ts), which auto-resolves rosters. */
+export function nameFromContact(contact: ContactItem | undefined): string | undefined {
   if (!contact) return undefined;
   const first = typeof contact.firstName === 'string' ? contact.firstName : '';
   const last = typeof contact.lastName === 'string' ? contact.lastName : '';
   const joined = `${first} ${last}`.trim();
   return joined.length > 0 ? joined : undefined;
+}
+
+/** Resolve a member's display name: explicit > contact-derived > undefined.
+ *  Best-effort — an unknown contactId passes the member through nameless.
+ *  Shared with the tour relay route (tours.ts). */
+export async function resolveMemberName(
+  contacts: ContactsRepo,
+  member: ConversationParticipant,
+): Promise<ConversationParticipant> {
+  if (member.name !== undefined) return member;
+  if (member.contactId && member.contactId.length > 0) {
+    const contact = await contacts.getById(member.contactId);
+    const name = nameFromContact(contact);
+    if (name !== undefined) return { ...member, name };
+  }
+  return member;
 }
 
 /** Validate + normalize one member input. Returns the member or an error string. */
@@ -98,17 +115,6 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
 
   const router = Router();
 
-  /** Resolve a member's display name: explicit > contact-derived > undefined. */
-  async function resolveMemberName(member: ConversationParticipant): Promise<ConversationParticipant> {
-    if (member.name !== undefined) return member;
-    if (member.contactId && member.contactId.length > 0) {
-      const contact = await contacts.getById(member.contactId);
-      const name = nameFromContact(contact);
-      if (name !== undefined) return { ...member, name };
-    }
-    return member;
-  }
-
   // POST /api/relay-groups — create a relay group + provision a pool number +
   // send the intro to each member (throttled), return the conversation.
   router.post('/relay-groups', async (req, res) => {
@@ -130,7 +136,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       }
       if (seenPhones.has(parsed.phone)) continue; // de-dupe within the request
       seenPhones.add(parsed.phone);
-      members.push(await resolveMemberName(parsed));
+      members.push(await resolveMemberName(contacts, parsed));
     }
 
     // Provision via the shared primitive (provision pool → create relay → assign
@@ -193,7 +199,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(400).json({ error: parsed.error });
       return;
     }
-    const member = await resolveMemberName(parsed);
+    const member = await resolveMemberName(contacts, parsed);
     // addMember is idempotent on phone — capture whether this member was already
     // on the roster so we only emit added_to_group_text for a REAL add.
     const wasMember = (conversation.participants ?? []).some((p) => p.phone === member.phone);

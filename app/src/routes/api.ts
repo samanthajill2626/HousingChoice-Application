@@ -404,6 +404,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       auditRepo: audit,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      // Relay auto-membership: resolve [tenant, unit's landlord] from contacts + units.
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       events,
     }),
   );

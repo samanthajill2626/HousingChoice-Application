@@ -200,3 +200,84 @@ test.describe('Extensible contact creation', () => {
     await expect(page.getByRole('link', { name: 'Marcus Bell' })).toBeVisible();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Human-format phone entry (Task 4 / feat/flexible-phone-entry)
+//
+// The contact-create form normalizes the Phone field on blur (same rule as
+// VoiceSection): any parseable US format → `(NXX) NXX-XXXX`; an invalid
+// partial like "404" shows the inline error and blocks submit.
+// ---------------------------------------------------------------------------
+test.describe('Human-format phone entry in contact-create', () => {
+  test('create Tenant with (470) 555-0132 → field normalizes on blur, stored as E.164 +14705550132', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts`);
+
+    await page.getByRole('button', { name: 'New contact' }).click();
+    const dialog = page.getByRole('dialog', { name: /New contact/i });
+    await expect(dialog).toBeVisible();
+
+    // Select Tenant kind.
+    await dialog.getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Tenant' }).click();
+    await dialog.getByLabel('First name').fill('HumanPhone');
+    await dialog.getByLabel('Last name').fill('Tester');
+
+    // Type human-format phone and blur → field must snap to canonical display form.
+    const phoneInput = dialog.getByLabel('Phone');
+    await phoneInput.fill('(470) 555-0132');
+    await phoneInput.blur();
+    await expect(phoneInput).toHaveValue('(470) 555-0132');
+    // No error: it is a valid 10-digit US number.
+    await expect(dialog.getByRole('alert')).toHaveCount(0);
+
+    // Create → navigates to the new contact page.
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/);
+
+    // Stored value is E.164 — assert via the API.
+    const contactId = page.url().split('/').pop()!;
+    const res = await page.request.get(`${NEXT}/api/contacts/${contactId}`);
+    expect(res.ok()).toBeTruthy();
+    const { contact } = (await res.json()) as { contact: { phone?: string } };
+    // The primary phone stored in the DB must be the E.164 form.
+    expect(contact.phone).toBe('+14705550132');
+  });
+
+  test('invalid partial phone "404" shows the inline error and blocks submit', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts`);
+
+    await page.getByRole('button', { name: 'New contact' }).click();
+    const dialog = page.getByRole('dialog', { name: /New contact/i });
+    await expect(dialog).toBeVisible();
+
+    // Need a kind selected so Create is enabled and we can attempt submit.
+    await dialog.getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Tenant' }).click();
+    await dialog.getByLabel('First name').fill('Invalid');
+
+    // Type a clearly-invalid partial and blur → the inline error must appear.
+    const phoneInput = dialog.getByLabel('Phone');
+    await phoneInput.fill('404');
+    await phoneInput.blur();
+    // The exact error string the client gate shows (PHONE_ERROR constant in source).
+    await expect(dialog.getByRole('alert')).toContainText(
+      'Enter a 10-digit US number, or a full international number starting with +',
+    );
+
+    // Submit is blocked client-side: clicking Create with an invalid phone field
+    // sets the error and returns without calling the API — the dialog stays open.
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toBeVisible();
+    // Still on the contacts page — no navigation happened.
+    await expect(page).toHaveURL(/\/contacts$/);
+    // The error is still visible after the blocked submit.
+    await expect(dialog.getByRole('alert')).toContainText(
+      'Enter a 10-digit US number, or a full international number starting with +',
+    );
+  });
+});

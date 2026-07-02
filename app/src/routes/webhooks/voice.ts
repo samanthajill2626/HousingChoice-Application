@@ -444,6 +444,23 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the conversationId the pushes + auto-text key on). conversationTypeFor
     // mirrors the SMS path's honesty rule (unknown until a human reviews).
     const callerContact = await contacts.findByPhone(From);
+
+    // Spec §3.2 rationale, applied to VOICE: a customer-initiated inbound call
+    // confers consent (same basis as inbound_text — they reached out to us), so a
+    // follow-up text isn't JIT-gated. Idempotent — only when consent_method is
+    // absent (never overwrites a web_form/verbal/staff-attested record) — and
+    // best-effort: a stamp failure must never block the bridge.
+    if (callerContact && !callerContact.consent_method) {
+      try {
+        await contacts.update(callerContact.contactId, {
+          consent_method: 'inbound_call',
+          consent_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn({ err, callSid: CallSid }, 'inbound voice: consent stamp failed (best-effort) — bridging anyway');
+      }
+    }
+
     const conversation = await conversations.createOrGetByParticipantPhone(
       From,
       conversationTypeFor(callerContact),

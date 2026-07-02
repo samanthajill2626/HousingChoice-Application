@@ -7,7 +7,7 @@ import {
   twimlMessageBody,
   APP_NUMBER,
 } from '../../fixtures/fakeTwilio.js';
-import { tenantCallNoAnswer } from '../../fixtures/fakeVoice.js';
+import { callTimeline, uniqueVoicePhone, verifyCell } from '../../fixtures/voiceSetup.js';
 
 // A2P / SMS compliance (design §8) — end-to-end coverage of the front-of-lifecycle
 // consent hardening shipped in Phases 1–3, against the real hermetic stack (:5174
@@ -199,24 +199,28 @@ test.describe('A2P §8.2 — JIT consent gate', () => {
     await registerParty(request, { label: tenant.firstName, role: 'tenant', number: tenant.phone });
 
     // Establish a conversation the reply box can send into WITHOUT conferring
-    // consent: a MISSED CALL fires the app's missed-call auto-text (an AUTOMATED
-    // send — NOT JIT-gated) which lands an outbound in the 1:1 thread. That gives
-    // the reply box a conversation to send into, while the contact stays no-consent
-    // (the voice path stamps NO consent_method). This is the realistic proactive-
-    // first 1:1 setup (a voucher-holder called; we now text back).
-    await tenantCallNoAnswer(request, { from: tenant.phone, to: APP_NUMBER });
-    // Wait for the auto-text outbound to land (the thread now exists).
+    // consent. An INBOUND interaction can no longer do that — by design (the
+    // client-inbound consent basis), an inbound text stamps `inbound_text` and an
+    // inbound call stamps `inbound_call`. The one realistic no-consent
+    // thread-opener is an OUTBOUND masked call (staff call a manually-added
+    // contact first, then text): the originate route creates the 1:1 conversation
+    // BEFORE dialing and stamps NO consent_method. Verify the session navigator's
+    // cell (the originate route 409s without one), then place the call — no need
+    // to answer; the conversation + call entry persist at originate time.
+    await verifyCell(page.request, uniqueVoicePhone());
+    const call = await page.request.post(`${NEXT}/api/contacts/${tenant.contactId}/call`, {
+      data: {},
+    });
+    expect(call.status(), await call.text()).toBe(200);
+    // Wait for the call entry to land on the contact timeline (the reply box
+    // resolves its conversation from the timeline).
     await expect
-      .poll(
-        async () => {
-          const t = (await listThreads(request)).find((x) => x.partyNumber === tenant.phone);
-          return t?.messages.some((m) => m.direction === 'outbound') ?? false;
-        },
-        { timeout: 30_000 },
-      )
-      .toBe(true);
-    // Sanity: the contact still has NO consent (neither the call nor the automated
-    // auto-text stamps one) — so a HUMAN proactive send will hit the JIT gate.
+      .poll(async () => (await callTimeline(page.request, tenant.contactId)).length, {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0);
+    // Sanity: the contact STILL has no consent — an OUTBOUND call stamps none —
+    // so a HUMAN proactive text will hit the JIT gate.
     expect((await getContact(page.request, tenant.contactId))['consent_method']).toBeUndefined();
 
     await page.goto(`${NEXT}/contacts/${tenant.contactId}`);

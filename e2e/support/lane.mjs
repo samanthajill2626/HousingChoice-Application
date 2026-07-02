@@ -139,6 +139,36 @@ function hashToLane(identity) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-lane / per-worktree DynamoDB Local access keys
+// ---------------------------------------------------------------------------
+// Without -sharedDb, DynamoDB Local keeps a SEPARATE database (and SQLite
+// write lock) per (accessKeyId, region) pair — that is the whole isolation
+// mechanism (docs/issues/dynamodb-local-cross-worktree-test-contention.md).
+// Keys MUST be alphanumeric: once -sharedDb is off the key is validated and
+// '-' or '_' raise UnrecognizedClientException (verified 2026-07-02 against a
+// throwaway container). Lane 0 (npm run dev -- --local) is NOT named here —
+// it rides the 'local' credential fallback in app/src/lib/dynamo.ts.
+
+/**
+ * The DynamoDB Local access key for an e2e lane — its own local database.
+ * @param {number} lane
+ * @returns {string} e.g. "hclane3"
+ */
+export function laneAccessKeyId(lane) {
+  return `hclane${lane}`;
+}
+
+/**
+ * The DynamoDB Local access key for THIS worktree's Vitest integration runs —
+ * isolated from every e2e lane (different prefix) and from other worktrees
+ * (identity-hashed). Deterministic per worktree, alphanumeric (base36).
+ * @returns {string} e.g. "hctest1a2b3c"
+ */
+export function testAccessKeyId() {
+  return `hctest${djb2(worktreeIdentity()).toString(36)}`;
+}
+
+// ---------------------------------------------------------------------------
 // Free-probe
 // ---------------------------------------------------------------------------
 
@@ -186,7 +216,7 @@ async function isLaneFree(lane, host, probe) {
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {{ lane: number, ports: { app: number, dashboard: number, fake: number, publicBase: number }, tablePrefix: string, mediaBucket: string }} LaneResult
+ * @typedef {{ lane: number, ports: { app: number, dashboard: number, fake: number, publicBase: number }, tablePrefix: string, mediaBucket: string, accessKeyId: string }} LaneResult
  */
 
 /**
@@ -220,6 +250,7 @@ export async function resolveLane(opts = {}) {
       ports,
       tablePrefix: `hc-local-${n}-`,
       mediaBucket: `hc-local-media-${n}`,
+      accessKeyId: laneAccessKeyId(n),
     };
   }
 
@@ -238,6 +269,7 @@ export async function resolveLane(opts = {}) {
         ports,
         tablePrefix: `hc-local-${lane}-`,
         mediaBucket: `hc-local-media-${lane}`,
+        accessKeyId: laneAccessKeyId(lane),
       };
     }
   }

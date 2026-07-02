@@ -1,3 +1,5 @@
+// keep in sync with dashboard/src/lib/phone.ts (+ its test at dashboard/src/lib/phone.test.ts)
+//
 // Phone → E.164 normalizer (M1.5). The ONE place manual/public phone entry is
 // canonicalized before it touches the contacts byPhone GSI — auto-capture
 // (M1.2) trusts Twilio's already-E.164 `From`, but humans and the public

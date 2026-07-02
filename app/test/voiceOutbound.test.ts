@@ -488,6 +488,137 @@ describe('inbound founder-triage rings the inbound-voice-line holder (spec §6)'
 // D. Cell verification — self routes (spec §7)
 // ---------------------------------------------------------------------------
 describe('self cell verification (spec §7)', () => {
+  // D-flex: verify-start accepts human-format — normalizes and stores/sends E.164
+  describe('flexible phone entry (task 2)', () => {
+    it('verify-start: human-format "(404) 982-4978" → 200; stores +14049824978; SMS goes to +14049824978', async () => {
+      const world = createFakeWorld();
+      const harness = makeWebhookHarness({ world });
+
+      const start = await request(harness.app)
+        .post('/api/users/me/cell/verify-start')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ cell: '(404) 982-4978' });
+      expect(start.status).toBe(200);
+      expect(start.body.ok).toBe(true);
+
+      // SMS went to the NORMALIZED E.164 — not the raw string.
+      expect(world.sent).toHaveLength(1);
+      expect(world.sent[0]!.to).toBe('+14049824978');
+
+      // The pending cell stored on the user is also the NORMALIZED E.164.
+      const user = harness.fakeUsers.users.get(TEST_SESSION_USER.userId)!;
+      expect(user.cell_pending).toBe('+14049824978');
+    });
+
+    it('verify-start: "404" (too short) → 400 invalid_cell; nothing stored/sent', async () => {
+      const world = createFakeWorld();
+      const harness = makeWebhookHarness({ world });
+      const res = await request(harness.app)
+        .post('/api/users/me/cell/verify-start')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ cell: '404' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_cell');
+      expect(world.sent).toHaveLength(0);
+      const user = harness.fakeUsers.users.get(TEST_SESSION_USER.userId)!;
+      expect(user.cell_pending).toBeUndefined();
+    });
+
+    it('verify-start: "not a phone" → 400 invalid_cell; nothing stored/sent', async () => {
+      const world = createFakeWorld();
+      const harness = makeWebhookHarness({ world });
+      const res = await request(harness.app)
+        .post('/api/users/me/cell/verify-start')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ cell: 'not a phone' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_cell');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('verify-start: "+0123" (bad shape) → 400 invalid_cell; nothing stored/sent', async () => {
+      const world = createFakeWorld();
+      const harness = makeWebhookHarness({ world });
+      const res = await request(harness.app)
+        .post('/api/users/me/cell/verify-start')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ cell: '+0123' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_cell');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('originate: human-format number the contact OWNS → call placed to the E.164', async () => {
+      // Contact owns +14705550132; request sends "(470) 555-0132".
+      const world = createFakeWorld();
+      const contactId = 'c-flex-owned';
+      const ownedE164 = '+14705550132';
+      world.contacts.push({
+        contactId,
+        type: 'tenant',
+        phone: ownedE164,
+        firstName: 'Flex',
+        lastName: 'Test',
+      } as never);
+      const harness = makeWebhookHarness({ world });
+      seedNavigatorCell(harness);
+
+      const res = await request(harness.app)
+        .post(`/api/contacts/${contactId}/call`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: '(470) 555-0132' });
+      expect(res.status).toBe(200);
+      expect(typeof res.body.callSid).toBe('string');
+      // A call was placed.
+      expect(world.initiatedCalls).toHaveLength(1);
+    });
+
+    it('originate: human-format number the contact does NOT own → same refusal as before (invalid_phone / 400), no call', async () => {
+      // Contact owns +14705550132; request sends a different number in human format.
+      const world = createFakeWorld();
+      const contactId = 'c-flex-notowned';
+      world.contacts.push({
+        contactId,
+        type: 'tenant',
+        phone: '+14705550132',
+        firstName: 'Flex',
+        lastName: 'NotOwned',
+      } as never);
+      const harness = makeWebhookHarness({ world });
+      seedNavigatorCell(harness);
+
+      const res = await request(harness.app)
+        .post(`/api/contacts/${contactId}/call`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: '(404) 111-2222' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_phone');
+      expect(world.initiatedCalls).toHaveLength(0);
+    });
+
+    it('originate: garbage phone → 400 invalid_phone, no call', async () => {
+      const world = createFakeWorld();
+      const contactId = seedContact(world);
+      const harness = makeWebhookHarness({ world });
+      seedNavigatorCell(harness);
+
+      const res = await request(harness.app)
+        .post(`/api/contacts/${contactId}/call`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: 'not-a-phone' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('invalid_phone');
+      expect(world.initiatedCalls).toHaveLength(0);
+    });
+  });
+
   it('verify-start sends the code via the adapter + verify-confirm succeeds', async () => {
     const world = createFakeWorld();
     const harness = makeWebhookHarness({ world });

@@ -42,7 +42,7 @@ import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
-import { ScheduleTourDialog } from '../tours/ScheduleTourDialog.js';
+import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
@@ -493,7 +493,7 @@ export function ContactDetail(): React.JSX.Element {
       ) : null}
 
       {schedulingTour ? (
-        <ScheduleTourDialog
+        <ScheduleTourForm
           tenantId={contact.contactId}
           onClose={() => setSchedulingTour(false)}
           onCreated={(t) => {

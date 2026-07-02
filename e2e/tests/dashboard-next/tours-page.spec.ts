@@ -103,7 +103,7 @@ test.describe('Tours page', () => {
     await expect(dialog.getByRole('group', { name: 'Tenant' })).toContainText('Tasha Nguyen');
 
     // Pick the seeded unit (unit-0001 / 1450 Joseph E. Boone Blvd NW).
-    const propertyField = dialog.getByRole('combobox', { name: 'Property' });
+    const propertyField = dialog.getByRole('combobox', { name: 'Unit' });
     await propertyField.fill('Joseph');
     await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
 
@@ -115,7 +115,7 @@ test.describe('Tours page', () => {
 
     // Set a future date/time for TODAY.
     const futureTime = futureDatetimeLocal();
-    await dialog.getByLabel('Date & time').fill(futureTime);
+    await dialog.getByLabel('Date and time').fill(futureTime);
 
     // Submit.
     await dialog.getByRole('button', { name: 'Schedule' }).click();
@@ -181,15 +181,17 @@ test.describe('Tours page', () => {
     await expect(dialog).toBeVisible();
 
     // Pick the unit.
-    const propertyField = dialog.getByRole('combobox', { name: 'Property' });
+    const propertyField = dialog.getByRole('combobox', { name: 'Unit' });
     await propertyField.fill('Joseph');
     await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
 
-    // Leave Date & time EMPTY — the "No time yet" hint should be visible.
-    await expect(dialog.getByText(/No time yet/i)).toBeVisible();
+    // Leave Date and time EMPTY — the "book it later" hint should be visible.
+    await expect(
+      dialog.getByText('Leave empty to create the tour without a time — book it later.'),
+    ).toBeVisible();
 
-    // The Date & time input must be blank.
-    await expect(dialog.getByLabel('Date & time')).toHaveValue('');
+    // The Date and time input must be blank.
+    await expect(dialog.getByLabel('Date and time')).toHaveValue('');
 
     // Submit with no time.
     await dialog.getByRole('button', { name: 'Schedule' }).click();

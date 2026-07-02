@@ -5,7 +5,7 @@
 // real, never mocked out.
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import type { Express } from 'express';
+import type { Express, Router } from 'express';
 import request, { type Test } from 'supertest';
 import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
@@ -1479,9 +1479,9 @@ export function createFakeWorld(): FakeWorld {
       return [...toursMap.values()].filter((t) => t.unitId === unitId).map((t) => ({ ...t }));
     },
     async listByScheduledRange(from, to) {
+      // Sparse byScheduledAt GSI mirror: items without scheduledAt are never
+      // indexed (they are 'requested' tours with no time yet).
       return [...toursMap.values()]
-        // Mirror the sparse byScheduledAt GSI: items without scheduledAt never
-        // appear here (they are 'requested' tours with no time yet).
         .filter((t) => typeof t.scheduledAt === 'string' && t.scheduledAt >= from && t.scheduledAt <= to)
         .map((t) => ({ ...t }));
     },
@@ -1504,6 +1504,24 @@ export function createFakeWorld(): FakeWorld {
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
       return { ...t };
+    },
+    async claimGroupThread(tourId, value) {
+      // Mirror the conditional write: exists AND no groupThreadId yet.
+      const t = toursMap.get(tourId);
+      if (!t || t.groupThreadId !== undefined) {
+        throw new TourConditionalCheckFailedException({ message: `claim: slot taken or no tour ${tourId}`, $metadata: {} });
+      }
+      t.groupThreadId = value;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
+    async releaseGroupThreadClaim(tourId, value) {
+      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      const t = toursMap.get(tourId);
+      if (!t || t.groupThreadId !== value) return;
+      delete t.groupThreadId;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
     },
   };
 
@@ -1704,6 +1722,12 @@ export interface HarnessOptions {
    * assert exact dueAt values). Omit to use the wall clock.
    */
   toursNow?: () => string;
+  /**
+   * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
+   * endpoints against the world fakes pass one in; mounted exactly like the
+   * composition root mounts it (before the origin-secret gate).
+   */
+  devRouter?: Router;
 }
 
 export interface Harness {
@@ -1751,6 +1775,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
     auth: { usersRepo: fakeUsers.repo },
+    // Dev-only endpoints (/__dev/*) — only when a test passes a pre-built router.
+    ...(opts.devRouter !== undefined && { devRouter: opts.devRouter }),
     // The /api router shares the same fakes + bus, so hub-API and SSE tests
     // can drive the FULL loop (webhook in → bus → SSE out) on one app. The
     // M1.4 surfaces (contacts triage, admin users) share the SAME world

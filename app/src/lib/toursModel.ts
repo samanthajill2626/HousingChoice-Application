@@ -5,7 +5,7 @@
 // same idioms: a `as const` array → `type` → `Set` → guard → labels map.
 //
 // STATUS LIFECYCLE:
-//   requested → scheduled                     (time is set — the scheduling step)
+//   requested → scheduled                     (booking — the time is set)
 //   requested → canceled                      (canceled before a time is set)
 //   scheduled → confirmed → toured → closed   (normal happy path)
 //   * → canceled                               (pre-tour cancellation)
@@ -13,8 +13,10 @@
 //   canceled / no_show → scheduled            (reschedule — see canReschedule)
 //   toured + outcome set → closed             (exit gate)
 //
-// `requested` is the entry status for time-less tours (tenant wants a tour but
-// no scheduledAt yet). Setting scheduledAt transitions to `scheduled`.
+// `requested` is the timeless pre-scheduled state: the tour record exists as
+// the coordination anchor (it owns the group thread) before any time is set.
+// Booking = setting scheduledAt, which advances it to `scheduled` — only then
+// are reminders armed (a `requested` tour MUST have no reminder rows).
 //
 // `closed` is the terminal for a finished-and-decided tour. The `outcome`
 // field (TourOutcome) records the exit decision; `moveForward=true` marks
@@ -74,7 +76,7 @@ export function isTourOutcome(x: unknown): x is TourOutcome {
 
 // --- Reschedulability --------------------------------------------------------
 // A tour may be rescheduled (→ `scheduled`) from these statuses:
-//   - `requested`  — setting a time IS the scheduling step (no prior scheduledAt)
+//   - `requested`  — booking: the first time is set on a timeless tour
 //   - `scheduled`  — change of date/time before confirmation
 //   - `confirmed`  — late rescheduling after confirmation
 //   - `canceled`   — revived after cancellation

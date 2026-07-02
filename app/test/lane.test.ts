@@ -359,4 +359,41 @@ describe('lane.mjs', () => {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 9. Per-lane / per-worktree DynamoDB Local access keys
+  // -------------------------------------------------------------------------
+
+  describe('access keys (per-lane DynamoDB Local databases)', () => {
+    it('laneAccessKeyId is hclane<L> — alphanumeric only (DynamoDB Local rejects - and _)', async () => {
+      const { laneAccessKeyId, MAX_LANES } = await getLane();
+      for (let l = 1; l <= MAX_LANES; l++) {
+        const key = laneAccessKeyId(l);
+        expect(key).toBe(`hclane${l}`);
+        expect(key).toMatch(/^[A-Za-z0-9]+$/);
+      }
+    });
+
+    it('resolveLane returns accessKeyId matching the lane (E2E_LANE override branch)', async () => {
+      const { resolveLane } = await getLane();
+      process.env['E2E_LANE'] = '4';
+      const result = await resolveLane({ probe: allFreeProbe });
+      expect(result.accessKeyId).toBe('hclane4');
+    });
+
+    it('resolveLane returns accessKeyId matching the lane (free-probe branch)', async () => {
+      const { resolveLane } = await getLane();
+      delete process.env['E2E_LANE'];
+      const result = await resolveLane({ probe: allFreeProbe });
+      expect(result.accessKeyId).toBe(`hclane${result.lane}`);
+    });
+
+    it('testAccessKeyId is deterministic, alphanumeric, and never collides with a lane key', async () => {
+      const { testAccessKeyId } = await getLane();
+      const key = testAccessKeyId();
+      expect(testAccessKeyId()).toBe(key); // stable across calls
+      expect(key).toMatch(/^hctest[a-z0-9]+$/);
+      expect(key.startsWith('hclane')).toBe(false);
+    });
+  });
 });

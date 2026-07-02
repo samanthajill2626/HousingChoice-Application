@@ -48,8 +48,9 @@ describe('hasSmsConsent — the A2P/CTIA consent gate', () => {
 
 describe('consent method sets', () => {
   it('splits automatic vs human methods', () => {
-    expect([...AUTOMATIC_CONSENT_METHODS].sort()).toEqual(['inbound_text', 'web_form']);
+    expect([...AUTOMATIC_CONSENT_METHODS].sort()).toEqual(['inbound_call', 'inbound_text', 'web_form']);
     expect([...HUMAN_CONSENT_METHODS].sort()).toEqual([
+      'client_inbound',
       'imported',
       'paper_form',
       'verbal_in_person',

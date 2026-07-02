@@ -99,6 +99,7 @@ runWithContext(bootContext, () => {
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
+  const { createMessagingAdapter } = await import('./adapters/messaging.js');
   const { runDueTourReminders } = await import('./jobs/tourReminders.js');
 
   const tourReminderDeps = {
@@ -107,6 +108,15 @@ runWithContext(bootContext, () => {
     contactsRepo: createContactsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
     sendMessageService: createSendMessageService({ config, logger }),
+    // GROUP-route reminders (landlord_led/pm_team with a group thread) send
+    // directly per member from the pool number — same construction the relay
+    // handlers use (createMessagingAdapter honors MESSAGING_RECORD_OUTBOX, so
+    // hermetic-e2e group sends stay outbox-visible).
+    adapter: createMessagingAdapter({ config, logger }),
+    // Same shared A2P bucket every other worker send path meters through
+    // (relay fan-out/intro, broadcast) — the COMBINED outbound rate must stay
+    // under the registered tier; group reminder rungs are N member sends each.
+    tokenBucket: a2pBucket,
     logger,
   };
 

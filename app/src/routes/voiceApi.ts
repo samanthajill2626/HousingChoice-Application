@@ -17,7 +17,7 @@ import { createMessagingAdapter } from '../adapters/messaging.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
-import { isE164 } from '../lib/phone.js';
+import { normalizeToE164 } from '../lib/phone.js';
 import {
   CELL_VERIFY_TTL_MS,
   generateCellVerifyCode,
@@ -116,11 +116,12 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps = {}): Router {
     const body = (req.body ?? {}) as { phone?: unknown };
     let phone: string | undefined;
     if (body.phone !== undefined && body.phone !== null && body.phone !== '') {
-      if (typeof body.phone !== 'string' || !isE164(body.phone)) {
+      const normalized = typeof body.phone === 'string' ? normalizeToE164(body.phone) : undefined;
+      if (normalized === undefined) {
         res.status(400).json({ error: 'invalid_phone' });
         return;
       }
-      phone = body.phone;
+      phone = normalized;
     }
 
     try {
@@ -192,11 +193,11 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
       return;
     }
     const body = (req.body ?? {}) as { cell?: unknown };
-    if (typeof body.cell !== 'string' || !isE164(body.cell)) {
+    const cell = typeof body.cell === 'string' ? normalizeToE164(body.cell) : undefined;
+    if (cell === undefined) {
       res.status(400).json({ error: 'invalid_cell' });
       return;
     }
-    const cell = body.cell;
 
     // Generate + store the HASHED code with a TTL; RESET attempts (repo).
     const code = generateCellVerifyCode();

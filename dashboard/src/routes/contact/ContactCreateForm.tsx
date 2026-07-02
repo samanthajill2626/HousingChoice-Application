@@ -20,7 +20,10 @@ import { normalizeRelationships, normalizeCustomFields } from './contactProfile.
 import { Modal } from './Modal.js';
 import { ConsentFields, type ConsentValue } from './ConsentFields.js';
 import { consentAtFromDate, todayISODate } from '../../lib/consentCopy.js';
+import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import styles from './ContactCreateForm.module.css';
+
+const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number starting with +';
 
 export interface ContactCreateFormProps {
   candidates: Contact[];
@@ -44,6 +47,7 @@ export function ContactCreateForm({
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
+  const [phoneError, setPhoneError] = useState<string | null>(null);
   const [voucher, setVoucher] = useState('');
   const [company, setCompany] = useState('');
 
@@ -72,6 +76,18 @@ export function ContactCreateForm({
   const isTenant = resolvedType === 'tenant';
   const isLandlordOrPm = resolvedType === 'landlord';
   const canCreate = resolvedType !== null && !busy;
+
+  function onPhoneBlur(): void {
+    const raw = phone.trim();
+    if (raw === '') { setPhoneError(null); return; }
+    const e164 = normalizeToE164(raw);
+    if (e164) {
+      setPhone(formatPhoneDisplay(e164));
+      setPhoneError(null);
+    } else {
+      setPhoneError(PHONE_ERROR);
+    }
+  }
 
   function handleShowRelationships(): void {
     setShowRelationships(true);
@@ -103,7 +119,15 @@ export function ContactCreateForm({
     if (trimmedRole) body['role'] = trimmedRole;
     if (firstName.trim()) body['firstName'] = firstName.trim();
     if (lastName.trim()) body['lastName'] = lastName.trim();
-    if (phone.trim()) body['phone'] = phone.trim();
+    if (phone.trim()) {
+      const e164 = normalizeToE164(phone.trim());
+      if (!e164) {
+        setPhoneError(PHONE_ERROR);
+        setBusy(false);
+        return;
+      }
+      body['phone'] = e164;
+    }
 
     if (isTenant && voucher.trim()) {
       const n = Number(voucher.trim());
@@ -222,11 +246,17 @@ export function ContactCreateForm({
             className={styles.input}
             type="tel"
             value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            placeholder="e.g. +14041112222"
+            onChange={(e) => { setPhone(e.target.value); setPhoneError(null); }}
+            onBlur={onPhoneBlur}
+            placeholder="(404) 555-0123"
             autoComplete="off"
           />
         </label>
+        {phoneError !== null ? (
+          <p role="alert" className={styles.error}>
+            {phoneError}
+          </p>
+        ) : null}
 
         {isTenant ? (
           <label className={styles.field}>

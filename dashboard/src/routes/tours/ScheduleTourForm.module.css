@@ -1,4 +1,4 @@
-/* ScheduleTourDialog — stacked labelled fields. Mirrors PlacementCreateForm.module.css. Tokens only. */
+/* ScheduleTourForm — stacked labelled fields. Mirrors PlacementCreateForm.module.css. Tokens only. */
 
 .form {
   display: flex;
@@ -45,18 +45,11 @@
   background: var(--c-surface-raised);
 }
 
-/* The "no time yet" hint beneath the date/time input. */
+/* Informational helper copy under the optional date field. */
 .hint {
   margin: 0;
   font-size: var(--fs-xs);
   color: var(--c-text-muted);
-}
-
-/* Inline validation error for the date/time field. */
-.fieldError {
-  margin: 0;
-  font-size: var(--fs-xs);
-  color: var(--c-danger);
 }
 
 .error {

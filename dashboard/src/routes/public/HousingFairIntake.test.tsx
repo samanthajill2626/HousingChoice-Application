@@ -35,7 +35,7 @@ describe('HousingFairIntake (/join)', () => {
     expect(arg).toMatchObject({
       firstName: 'Grace',
       lastName: 'Hopper',
-      phone: '4045559999',
+      phone: '+14045559999', // normalized to E.164 on submit
       smsConsent: true,
     });
 

@@ -42,7 +42,7 @@ describe('PhoneManager', () => {
     expect(screen.getAllByRole('button', { name: /^Remove$/i })).toHaveLength(1);
   });
 
-  it('adds a number and applies the returned contact', async () => {
+  it('adds a number and applies the returned contact; sends E.164 to the API', async () => {
     const user = userEvent.setup();
     const updated = { ...CONTACT, phones: [...PHONES, { phone: '+14041112222', primary: false }] };
     addContactPhone.mockResolvedValue(updated);
@@ -52,8 +52,43 @@ describe('PhoneManager', () => {
     await user.type(screen.getByLabelText(/Label for the new number/i), 'home');
     await user.click(screen.getByRole('button', { name: /^Add$/i }));
 
-    expect(addContactPhone).toHaveBeenCalledWith('k1', '404-111-2222', 'home');
+    // The component normalizes the raw input to E.164 before calling addContactPhone.
+    expect(addContactPhone).toHaveBeenCalledWith('k1', '+14041112222', 'home');
     await waitFor(() => expect(onChanged).toHaveBeenCalledWith(updated));
+  });
+
+  it('phone blur snaps dashed 10-digit to display form', async () => {
+    const user = userEvent.setup();
+    setup();
+    const phoneInput = screen.getByLabelText(/New phone number/i);
+    await user.type(phoneInput, '404-982-4978');
+    await user.tab();
+    expect(phoneInput).toHaveValue('(404) 982-4978');
+  });
+
+  it('shows inline error and blocks Add when phone is invalid', async () => {
+    const user = userEvent.setup();
+    setup();
+    const phoneInput = screen.getByLabelText(/New phone number/i);
+    await user.type(phoneInput, '404'); // too short — unambiguously invalid
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Enter a 10-digit US number/i);
+    expect(addContactPhone).not.toHaveBeenCalled();
+  });
+
+  it('explicit +44 international passes through unchanged and submits as-is', async () => {
+    const user = userEvent.setup();
+    const updated = { ...CONTACT };
+    addContactPhone.mockResolvedValue(updated);
+    setup();
+
+    const phoneInput = screen.getByLabelText(/New phone number/i);
+    await user.type(phoneInput, '+442079460958');
+    await user.tab();
+    expect(phoneInput).toHaveValue('+442079460958');
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    expect(addContactPhone).toHaveBeenCalledWith('k1', '+442079460958', undefined);
   });
 
   it('promotes a non-primary number to primary', async () => {

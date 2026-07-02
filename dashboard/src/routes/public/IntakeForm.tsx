@@ -13,6 +13,9 @@ import {
   PRIVACY_POLICY_URL,
   TERMS_URL,
 } from '../../lib/consentCopy.js';
+import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
+
+const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number starting with +';
 
 export interface IntakeFormProps {
   /** Submit handler — resolves on success, throws on failure. The parent decides
@@ -32,6 +35,7 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
   const [smsConsent, setSmsConsent] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
 
   // Clear a standing validation error the moment the user edits any field, so a
   // corrected field stops reading as errored (the error re-evaluates on submit).
@@ -40,6 +44,24 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
       if (error !== null) setError(null);
       setter(e.target.value);
     };
+  }
+
+  function onPhoneChange(e: { target: { value: string } }): void {
+    if (error !== null) setError(null);
+    if (phoneError !== null) setPhoneError(null);
+    setPhone(e.target.value);
+  }
+
+  function onPhoneBlur(): void {
+    const raw = phone.trim();
+    if (raw === '') { setPhoneError(null); return; }
+    const e164 = normalizeToE164(raw);
+    if (e164) {
+      setPhone(formatPhoneDisplay(e164));
+      setPhoneError(null);
+    } else {
+      setPhoneError(PHONE_ERROR);
+    }
   }
 
   async function handleSubmit(e: FormEvent): Promise<void> {
@@ -51,6 +73,11 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
     }
     if (phone.trim() === '') {
       setError('Please enter your phone number.');
+      return;
+    }
+    const normalizedPhone = normalizeToE164(phone.trim());
+    if (!normalizedPhone) {
+      setPhoneError(PHONE_ERROR);
       return;
     }
     // do-not-remove — A2P/CTIA consent gate (client-side; server also enforces).
@@ -66,7 +93,7 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
       await onSubmit({
         firstName: firstName.trim(),
         lastName: lastName.trim(),
-        phone: phone.trim(),
+        phone: normalizedPhone,
         smsConsent: true,
         ...(voucherSize !== undefined && Number.isFinite(voucherSize) && { voucherSize }),
       });
@@ -163,13 +190,20 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           type="tel"
           inputMode="tel"
           value={phone}
-          onChange={onField(setPhone)}
+          onChange={onPhoneChange}
+          onBlur={onPhoneBlur}
+          placeholder="(404) 555-0123"
           autoComplete="tel"
           aria-required="true"
-          aria-invalid={error !== null}
-          aria-describedby={describedBy}
+          aria-invalid={error !== null || phoneError !== null}
+          aria-describedby={[describedBy, phoneError !== null ? 'intake-phone-error' : undefined].filter(Boolean).join(' ') || undefined}
           disabled={pending}
         />
+        {phoneError !== null ? (
+          <p id="intake-phone-error" className={styles.error} role="alert">
+            {phoneError}
+          </p>
+        ) : null}
       </div>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="intake-voucher">

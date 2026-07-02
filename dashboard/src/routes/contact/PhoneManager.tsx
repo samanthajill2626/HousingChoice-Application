@@ -16,7 +16,10 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from './Modal.js';
 import { formatPhone } from './format.js';
+import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import styles from './PhoneManager.module.css';
+
+const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number starting with +';
 
 export interface PhoneManagerProps {
   contact: Contact;
@@ -37,6 +40,7 @@ function friendlyError(err: unknown): string {
 export function PhoneManager({ contact, phones, onClose, onChanged }: PhoneManagerProps): React.JSX.Element {
   const [newPhone, setNewPhone] = useState('');
   const [newLabel, setNewLabel] = useState('');
+  const [phoneError, setPhoneError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,12 +58,30 @@ export function PhoneManager({ contact, phones, onClose, onChanged }: PhoneManag
     }
   }
 
+  function onNewPhoneBlur(): void {
+    const raw = newPhone.trim();
+    if (raw === '') { setPhoneError(null); return; }
+    const e164 = normalizeToE164(raw);
+    if (e164) {
+      setNewPhone(formatPhoneDisplay(e164));
+      setPhoneError(null);
+    } else {
+      setPhoneError(PHONE_ERROR);
+    }
+  }
+
   async function onAdd(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    const phone = newPhone.trim();
-    if (phone === '') return;
+    const raw = newPhone.trim();
+    if (raw === '') return;
+    const e164 = normalizeToE164(raw);
+    if (!e164) {
+      setPhoneError(PHONE_ERROR);
+      return;
+    }
+    setPhoneError(null);
     await run(async () => {
-      const updated = await addContactPhone(contact.contactId, phone, newLabel.trim() || undefined);
+      const updated = await addContactPhone(contact.contactId, e164, newLabel.trim() || undefined);
       setNewPhone('');
       setNewLabel('');
       return updated;
@@ -121,8 +143,9 @@ export function PhoneManager({ contact, phones, onClose, onChanged }: PhoneManag
             className={styles.input}
             type="tel"
             value={newPhone}
-            onChange={(e) => setNewPhone(e.target.value)}
-            placeholder="Add a number"
+            onChange={(e) => { setNewPhone(e.target.value); setPhoneError(null); }}
+            onBlur={onNewPhoneBlur}
+            placeholder="(404) 555-0123"
             aria-label="New phone number"
           />
           <input
@@ -137,6 +160,12 @@ export function PhoneManager({ contact, phones, onClose, onChanged }: PhoneManag
           </Button>
         </div>
       </form>
+
+      {phoneError !== null ? (
+        <p role="alert" className={styles.error}>
+          {phoneError}
+        </p>
+      ) : null}
 
       {error !== null ? (
         <p role="alert" className={styles.error}>

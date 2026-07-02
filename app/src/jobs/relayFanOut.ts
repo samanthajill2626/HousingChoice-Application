@@ -217,8 +217,12 @@ export interface RelayFanOutJobDeps {
  * Deliberately NOT wrapped in try/catch: a repo failure propagates so the caller
  * fails CLOSED (no send, job redelivers) — we never text a possibly-opted-out
  * number on a transient read error.
+ *
+ * Exported: the tour-reminder GROUP route (tourReminders.ts) sends direct
+ * per-member adapter messages exactly like relay.intro does, so it shares
+ * this suppression rule (one source of truth, no drift).
  */
-async function isMemberSuppressed(
+export async function isMemberSuppressed(
   contacts: ContactsRepo,
   member: ConversationParticipant,
 ): Promise<boolean> {

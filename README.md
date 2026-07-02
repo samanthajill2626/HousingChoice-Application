@@ -156,18 +156,18 @@ npm run dev -- --no-web   # backend only (skip the dashboard Vite server)
 
 **Live mode (default)** runs against the **real dev stack**: `hc-dev-*` DynamoDB tables in us-east-1 via the `housingchoice` profile (the account guard runs first and refuses any other account; `TABLE_PREFIX=hc-prod-` is refused outright). Caveats: inbound Twilio webhooks go to the *deployed* dev stack, never localhost; and local + deployed dev share the same tables. **Local Google login works** through the Vite proxy: `npm run dev` sets `PUBLIC_BASE_URL=http://localhost:5173` for the app so the OAuth callback rides the proxy (which stamps the origin-secret header a direct `:8080` hit lacks) — the one-time setup is registering `http://localhost:5173/auth/callback` as an authorized redirect URI on the **dev** Google OAuth client.
 
-**Hermetic mode** (`-- --local`, or whenever `DYNAMODB_ENDPOINT` is set) needs **Docker Desktop running** and (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-sharedDb -inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, then runs the same three processes. The integration test suite always uses DynamoDB Local.
+**Hermetic mode** (`-- --local`, or whenever `DYNAMODB_ENDPOINT` is set) needs **Docker Desktop running** and (1) starts (or creates) the `hc-dynamodb-local` container (`amazon/dynamodb-local`, port 8000, `-inMemory`), (2) creates the 9 tables (`hc-local-*`), (3) writes idempotent seed data, then runs the same three processes. The integration test suite always uses DynamoDB Local. The container runs **without `-sharedDb`**: each **(access key, region)** pair gets its own isolated database (and its own write lock) — the dev loop uses the `local` key, each e2e lane injects `hclane<L>`, and each worktree's vitest run injects `hctest<hash>`, so concurrent suites don't contend (see `docs/issues/dynamodb-local-cross-worktree-test-contention.md`).
 
 All modes load `.env` at the repo root if present (real environment variables win; template: [`.env.example`](./.env.example)). Ctrl-C stops all processes; the container (hermetic mode) stays up. Use `-- --no-web` for backend-only, or `npm run dev -w @housingchoice/dashboard` to run just the dashboard.
 
-Query DynamoDB Local from PowerShell (DynamoDB Local accepts any credentials — dummy values satisfy the CLI):
+Query DynamoDB Local from PowerShell. **The access key selects WHICH database you see** (no `-sharedDb`): `local` = the `npm run dev -- --local` loop; `hclane<L>` = e2e lane L (find your lane's key in `e2e/.artifacts/lane.json` under `accessKeyId`); a vitest store uses that worktree's `hctest<hash>` key. The secret's value never matters; the region must stay `us-east-1` (it is part of the store identity).
 
 ```powershell
-$env:AWS_ACCESS_KEY_ID = 'local'; $env:AWS_SECRET_ACCESS_KEY = 'local'
+$env:AWS_ACCESS_KEY_ID = 'local'; $env:AWS_SECRET_ACCESS_KEY = 'local'   # dev loop; use 'hclane<L>' for an e2e lane
 aws dynamodb scan --table-name hc-local-contacts --endpoint-url http://localhost:8000 --region us-east-1 --no-cli-pager
 ```
 
-(Or use a configured `--profile` instead of the env vars; the values never matter locally.)
+(A configured `--profile` also works, but remember: whatever key it carries picks the database — the wrong key shows an empty store, not an error.)
 
 **Data is in-memory:** stopping/restarting the container wipes all tables. `npm run dev` (or `npm run db:create && npm run db:seed`) rebuilds everything in seconds.
 

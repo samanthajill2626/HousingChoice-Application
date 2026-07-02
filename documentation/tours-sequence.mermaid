@@ -1,0 +1,83 @@
+---
+title: Housing Choice — Tours (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor T as Tenant
+    participant A as Housing Choice App
+    participant S as Team
+    actor L as Landlord/PM
+    Note over T,S: The app owns the phone number. Every call/text flows Tenant to Team and Landlord to Team THROUGH the app (both directions).<br/>Notes marked [AUTO] are app automation. [MANUAL] is a person (Team) acting.
+    Note over T,L: Picks up from Sending Unit — the tenant said YES to touring a specific unit. The tenant STAYS in searching (no placement yet). Tours are their own records (tenant and unit), separate from placements.
+
+    T->>A: I would like to tour this one
+    A->>S: Relay the tour interest
+    Note over S,A: [MANUAL] Create the tour record for this tenant and unit — NO tour time yet. The record is the anchor everything else hangs off. The unit tour_process (captured at landlord onboarding) decides how scheduling works.
+
+    alt Landlord-led — the landlord shows the unit
+        Note over S,A: [MANUAL] Open the masked relay group on this tour — Tenant, Landlord, Team (a pool number). Group threads are always set up by the Team by hand in Phase 1 — never auto-created.
+        A->>T: [AUTO] Intro message naming everyone connected
+        A->>L: [AUTO] Intro message naming everyone connected
+        loop Until a time is agreed — in the group thread
+            T->>A: Propose or counter a tour time
+            A->>L: Relay in the group (masked)
+            L->>A: Propose or counter a tour time
+            A->>T: Relay in the group (masked)
+        end
+    else PM-team — a property-management team shows the unit
+        Note over S,A: Same shape as landlord-led — [MANUAL] open the masked relay group on this tour, with the PM in place of the landlord. The slot may also live in the PM own scheduling system.
+        A->>T: [AUTO] Intro message naming everyone connected
+        A->>L: [AUTO] Intro message naming everyone connected
+        loop Until a time is agreed — in the group thread
+            T->>A: Propose or counter a tour time
+            A->>L: Relay in the group (masked)
+            L->>A: Propose or counter a tour time
+            A->>T: Relay in the group (masked)
+        end
+    else Self-guided — lockbox, no meeting to schedule
+        Note over S,L: Usually NO group thread — the admin may set one up by hand if coordination calls for it. The landlord provides the lockbox code to the Team ahead of time.
+        S->>A: Propose tour windows to the tenant (1 to 1 thread)
+        A->>T: Deliver the options
+        T->>A: Pick a window
+        A->>S: Relay the choice
+    end
+
+    Note over S,A: [MANUAL] Set the agreed date and time on the tour record — this is the booking (same-day possible)
+    Note over A: [AUTO] Booking arms the tour-reminder ladder off the booked time. Reminders go to the GROUP THREAD for landlord-led and PM tours — to the tenant 1 to 1 thread for self-guided. Re-arms on reschedule. Cancels if the tour is canceled or closed
+    A->>T: [AUTO] Booking-confirmation text
+    A-->>T: [AUTO] Day-before and morning-of reminders fire on schedule
+    A-->>L: [AUTO] Reminders land in the group thread too (landlord-led and PM tours)
+    A-->>T: [AUTO] En-route nudge — text us when you are on the way
+
+    Note over T,L: Tour day
+    opt Self-guided only — the ID gate, before access
+        S->>A: Ask the tenant for a photo ID ahead of the tour window
+        A->>T: Deliver the ID request
+        T->>A: Photo ID (picture message, MMS)
+        A->>S: Relay the ID — Team reviews it
+        Note over A: [MANUAL] Review the photo ID. NO ID, NO code — ever
+        S->>A: Send the lockbox access code in real time
+        A->>T: Deliver the access code
+    end
+    opt Tenant is on the way
+        T->>A: On my way
+        A->>S: Relay
+        A->>L: Heads-up in the group — tenant en route (landlord-led and PM tours)
+    end
+    Note over T,L: The tenant tours the unit — self-guided via the code, or the landlord/PM shows it.
+    Note over A: [MANUAL] Log the tour outcome on the tour record (toured)
+    Note over T,A: If the tenant does not show — [AUTO] a no-show check-in text asks if they want to reschedule. Team either reschedules ([AUTO] cancel and re-arm the reminders) or logs a no-show. Canceled and no-show tours are reschedulable.
+
+    Note over S,A: Post-tour — collect feedback (Phase 1 — Team-manual).
+    S->>A: What did you think? Want to move forward?
+    A->>T: Deliver the feedback ask
+    T->>A: Feedback
+    A->>S: Relay the feedback
+    Note over A: [MANUAL] Record the feedback and the exit-gate decision on the tour record
+    alt Yes — move forward
+        Note over A: [MANUAL] Exit gate — outcome move_forward. The tour becomes convertible. NO placement is created here and the tenant stays searching
+        Note over T,S: Hand off to Post-Tour and Application (separate) — the placement is created THERE from the convertible tour. This masked tour thread carries over on conversion. The REAL group text with visible phone numbers comes later, once the RTA is submitted (Track 6) — a different thing from this masked relay.
+    else No — not a fit
+        Note over A: [MANUAL] Exit gate — outcome not_a_fit. Close the tour
+        Note over T,L: Re-match — the tenant stays searching. Hand back to Sending Unit (share a new property, restart the loop)
+    end

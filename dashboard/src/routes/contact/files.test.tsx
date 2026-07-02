@@ -123,6 +123,24 @@ describe('TenantFile', () => {
     expect(screen.getByText('No properties sent yet.')).toBeInTheDocument();
   });
 
+  it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {
+    const requestedTour: Tour = {
+      tourId: 'tour-req',
+      tenantId: 'T1',
+      unitId: 'u1',
+      tourType: 'landlord_led',
+      status: 'requested',
+    };
+    renderIt({ tours: [requestedTour] });
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-req');
+    expect(tourDetailLink).toBeDefined();
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*·.*Not booked/);
+    expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
+    // The rendered status label, not the raw enum.
+    expect(screen.getByText('Requested')).toBeInTheDocument();
+  });
+
   it('shows "No media yet" when there is no comms media', () => {
     renderIt({ media: [] });
     expect(screen.getByText(/No media yet/i)).toBeInTheDocument();
@@ -203,5 +221,22 @@ describe('LandlordFile', () => {
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L1');
     expect(tourDetailLink).toBeDefined();
     expect(screen.getByText('Confirmed')).toBeInTheDocument();
+  });
+
+  it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {
+    const requestedTour: Tour = {
+      tourId: 'tour-L2',
+      tenantId: 'T1',
+      unitId: 'u1',
+      tourType: 'pm_team',
+      status: 'requested',
+    };
+    renderIt({ tours: [requestedTour] });
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L2');
+    expect(tourDetailLink).toBeDefined();
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*·.*Not booked/);
+    expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 });

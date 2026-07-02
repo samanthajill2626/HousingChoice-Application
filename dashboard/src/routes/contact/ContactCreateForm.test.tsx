@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -260,6 +260,55 @@ describe('ContactCreateForm', () => {
     expect('customFields' in body).toBe(false);
   });
 
+  // ── Phone normalize-on-blur ────────────────────────────────────────────────────
+  it('phone blur with dashed 10-digit snaps to display form; submit sends E.164', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'n1', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '404-982-4978');
+    await user.tab(); // blur
+    expect(phoneInput).toHaveValue('(404) 982-4978');
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['phone']).toBe('+14049824978');
+  });
+
+  it('phone blur with invalid number shows inline error; submit is blocked', async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '404'); // too short
+    await user.tab();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Enter a 10-digit US number/i);
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    expect(createContact).not.toHaveBeenCalled();
+  });
+
+  it('explicit +44 international phone passes through unchanged on submit', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'n2', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '+442079460958');
+    await user.tab();
+    expect(phoneInput).toHaveValue('+442079460958');
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['phone']).toBe('+442079460958');
+  });
+
   // ── Consent to text (§3.3): optional; sent only when a method is chosen ──────
   it('omits consent fields when the consent section is left untouched (optional)', async () => {
     const user = userEvent.setup();
@@ -299,5 +348,29 @@ describe('ContactCreateForm', () => {
     expect(body['consent_method']).toBe('verbal_phone');
     expect(typeof body['consent_at']).toBe('string');
     expect(body['consent_note']).toBe('said OK on the call');
+  });
+
+  it('offers "They texted or called us first" (client_inbound) and carries it in the body', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'c-ci', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Ines');
+    await user.click(screen.getByRole('button', { name: /Record text consent/i }));
+
+    // The client-initiated basis is a visible, labelled option…
+    const select = screen.getByLabelText(/How did they consent/i);
+    expect(
+      within(select).getByRole('option', { name: 'They texted or called us first' }),
+    ).toBeInTheDocument();
+
+    // …and selecting it sends consent_method='client_inbound'.
+    await user.selectOptions(select, 'client_inbound');
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['consent_method']).toBe('client_inbound');
   });
 });

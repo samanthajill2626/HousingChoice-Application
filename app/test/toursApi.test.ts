@@ -4,7 +4,7 @@
 //   GET   /api/tours/:tourId                                        → { tour } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                    → { tours }
 //   PATCH /api/tours/:tourId                                        → { tour } | 404
-//   POST  /api/tours/:tourId/relay  { members }                     → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/relay  { members? }                    → 201 { tour, conversation }
 //
 // Mirrors unitsApi.test.ts: in-memory fakes via makeWebhookHarness, no DynamoDB.
 import request from 'supertest';
@@ -81,7 +81,7 @@ describe('POST /api/tours — create', () => {
       {}, // nothing
       { unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no tenantId
       { tenantId: 't', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no unitId
-      { tenantId: 't', unitId: 'u', tourType: 'self_guided' }, // no scheduledAt
+      // NOTE: no-scheduledAt is NOT here — it's a valid timeless create (status 'requested').
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z' }, // no tourType
       { tenantId: 't', unitId: 'u', scheduledAt: 'not-a-date', tourType: 'self_guided' }, // bad date
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'bad_type' }, // bad tourType
@@ -220,6 +220,11 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
+    // The exit gate records a decision on a TOURED tour (guard added by the
+    // whole-branch review) — mark it toured first, as the dashboard does.
+    const toured = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(toured.status).toBe(200);
+
     // Record the exit gate.
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -245,6 +250,8 @@ describe('PATCH /api/tours/:tourId', () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
 
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -332,6 +339,162 @@ describe('PATCH /api/tours/:tourId', () => {
 });
 
 // ============================================================================
+// Whole-branch-review hardening — transition guards, effective-status reminder
+// side effects, scheduledAt canonicalization, exit-gate status coupling
+// ============================================================================
+
+describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
+  const TIMELESS_BODY = { tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'landlord_led' };
+
+  it("rejects moving any tour BACK to 'requested' (create-only state)", async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'requested' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('illegal_status_transition');
+  });
+
+  it("a requested tour can only be booked or canceled — confirmed/toured/no_show are 409", async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    for (const target of ['confirmed', 'toured', 'no_show', 'closed']) {
+      const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: target });
+      expect(res.status, `requested → ${target}`).toBe(409);
+      expect(res.body.error).toBe('illegal_status_transition');
+    }
+
+    // Canceling a requested lead is fine.
+    const canceled = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.tour.status).toBe('canceled');
+  });
+
+  it('the exit gate requires a toured tour (409 on scheduled, immutable once closed)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // On a scheduled tour: refused.
+    const early = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect(early.status).toBe(409);
+    expect(early.body.error).toBe('illegal_exit_gate');
+
+    // Record it properly, close, then try to rewrite the decision: refused —
+    // convertible must be immutable after closure (Post-Tour conversion trusts it).
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    await authed(app).patch(`/api/tours/${tourId}`).send({ outcome: 'not_a_fit', moveForward: false });
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' });
+    const rewrite = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect(rewrite.status).toBe(409);
+  });
+});
+
+describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
+  const pendingRows = (world: FakeWorld, tourId: string) =>
+    [...world.tourRemindersMap.values()].filter(
+      (r) => r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined,
+    );
+
+  it('PATCH {scheduledAt, status:canceled} cancels — it must NOT arm a ladder on a dead tour', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-08-01T15:00:00.000Z', status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('canceled');
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+  });
+
+  it("PATCH {status:'toured'} cancels the still-pending rungs (no 'missed your tour' after attending)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(res.status).toBe(200);
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+  });
+
+  it('bare {scheduledAt} on a canceled tour auto-advances to scheduled and re-arms', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-08-02T15:00:00.000Z' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled');
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+  });
+
+  it("status-only revival {status:'scheduled'} on a canceled tour re-arms off the stored time", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(200);
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+  });
+
+  it("status-only {status:'confirmed'} does NOT re-arm (no duplicate confirmation text)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const before = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    expect(res.status).toBe(200);
+    const after = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+    expect(after).toEqual(before); // same rows — nothing canceled, nothing re-armed
+  });
+});
+
+describe('scheduledAt is canonicalized (toISOString) at the route boundary', () => {
+  it('POST stores a canonical form for a ms-less UTC input', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: '2026-07-15T10:00:00Z' });
+    expect(res.status).toBe(201);
+    expect(res.body.tour.scheduledAt).toBe('2026-07-15T10:00:00.000Z');
+  });
+
+  it('PATCH canonicalizes a raw datetime-local value (dashboard Book/Reschedule shape)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const raw = '2026-08-03T14:30'; // zoneless datetime-local
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: raw });
+    expect(res.status).toBe(200);
+    // Whatever instant the server resolves the zoneless string to, the STORED
+    // value is the canonical toISOString() of it — lexicographically comparable
+    // in the sparse byScheduledAt GSI and unambiguous for computeDueAt.
+    expect(res.body.tour.scheduledAt).toBe(new Date(raw).toISOString());
+  });
+});
+
+// ============================================================================
 // Exit gate discipline — NO placement / NO tenant-status side effects
 // ============================================================================
 
@@ -367,7 +530,8 @@ describe('Exit gate: NO placement created, tenant status untouched', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    // Fire exit gate.
+    // Reach 'toured' first (the exit gate requires it), then fire the gate.
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({
       outcome: 'move_forward',
       moveForward: true,
@@ -451,6 +615,141 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
     // no_show_checkin = NEW_SCHEDULED + 30m = '2026-07-20T14:30:00.000Z'
     expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+  });
+});
+
+// ============================================================================
+// Timeless create ('requested') + booking arms the ladder
+// (tours sequence gap 1: the tour record precedes the time)
+// ============================================================================
+
+const TIMELESS_CREATE_BODY = {
+  tenantId: 'contact-tenant-1',
+  unitId: 'unit-abc',
+  tourType: 'landlord_led',
+};
+
+describe('POST /api/tours — timeless create (no scheduledAt → requested)', () => {
+  it('creates a requested tour with NO scheduledAt attribute and NO reminders armed', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+
+    expect(res.status).toBe(201);
+    expect(res.body.tour).toMatchObject({
+      tenantId: 'contact-tenant-1',
+      unitId: 'unit-abc',
+      tourType: 'landlord_led',
+      status: 'requested',
+    });
+    expect(res.body.tour.scheduledAt).toBeUndefined();
+
+    // The stored item must OMIT the attribute entirely (sparse byScheduledAt
+    // GSI: absent attribute = not indexed) — not store undefined/null.
+    const stored = world.toursMap.get(res.body.tour.tourId as string)!;
+    expect('scheduledAt' in stored).toBe(false);
+
+    // No reminder ladder armed for a timeless tour.
+    expect(world.tourRemindersMap.size).toBe(0);
+  });
+
+  it('still requires tenantId, unitId, and tourType on a timeless create', async () => {
+    const { app } = makeWebhookHarness();
+    const cases = [
+      { unitId: 'u', tourType: 'self_guided' }, // no tenantId
+      { tenantId: 't', tourType: 'self_guided' }, // no unitId
+      { tenantId: 't', unitId: 'u' }, // no tourType
+    ];
+    for (const body of cases) {
+      const res = await authed(app).post('/api/tours').send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+  });
+});
+
+describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
+  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+  const BOOKED_AT = '2026-07-15T10:00:00.000Z';
+
+  it('scheduledAt alone auto-advances requested → scheduled and arms the ladder off the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+    expect(world.tourRemindersMap.size).toBe(0); // nothing armed yet
+
+    // Booking = the patch carries scheduledAt; no explicit status.
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: BOOKED_AT });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled'); // auto-advanced
+    expect(res.body.tour.scheduledAt).toBe(BOOKED_AT);
+
+    // The ladder armed with dueAts computed from the injected clock (the
+    // pre-booking cancel is a safe no-op: no rows existed, so none canceled).
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // day_before = BOOKED_AT - 24h
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    // no_show_checkin = BOOKED_AT + 30m
+    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-15T10:30:00.000Z');
+  });
+
+  it('explicit { scheduledAt, status: "scheduled" } booking also works', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: BOOKED_AT, status: 'scheduled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled');
+    expect(res.body.tour.scheduledAt).toBe(BOOKED_AT);
+
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it('rejects { status: "scheduled" } with no time anywhere (patch or stored) → 400', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'scheduledAt is required to schedule this tour' });
+
+    // The tour is untouched and still unarmed.
+    expect(world.toursMap.get(tourId)?.status).toBe('requested');
+    expect(world.tourRemindersMap.size).toBe(0);
+  });
+
+  it('allows requested → canceled (no time needed to call it off)', async () => {
+    const { app } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('canceled');
+  });
+
+  it('closed stays terminal: closed → requested is rejected (409)', async () => {
+    const { app } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' });
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'requested' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('illegal_status_transition');
   });
 });
 
@@ -556,6 +855,43 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     _resetForTests();
   });
 
+  it('409 tour_not_active: a canceled tour cannot open a group thread (stale-page race)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('tour_not_active');
+    expect(pool.provisioned).toHaveLength(0); // nothing was bought
+  });
+
+  it('concurrent provisions: exactly one 201, the loser 409s BEFORE buying a number (atomic claim)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const body = { members: [{ phone: '+15550200001', name: 'Alice' }, { phone: '+15550200002', name: 'Bob' }] };
+    const [a, b] = await Promise.all([
+      authed(app).post(`/api/tours/${tourId}/relay`).send(body),
+      authed(app).post(`/api/tours/${tourId}/relay`).send(body),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([201, 409]);
+    const loser = a.status === 409 ? a : b;
+    expect(loser.body.error).toBe('relay_already_provisioned');
+    // The race loser never provisioned: exactly ONE pool number was bought,
+    // and the stored groupThreadId is the winner's conversation (no orphan).
+    expect(pool.provisioned).toHaveLength(1);
+    const winner = a.status === 201 ? a : b;
+    expect(world.toursMap.get(tourId)!.groupThreadId).toBe(winner.body.conversation.conversationId);
+  });
+
   it('happy path: 201, creates relay group owned by the tour, stamps groupThreadId on the tour', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
@@ -625,7 +961,202 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(pool.provisioned).toHaveLength(0);
   });
 
-  it('400 for missing / empty members list', async () => {
+  // Auto-membership (founder flow): members is OPTIONAL — absent/empty resolves
+  // the roster to [tenant contact, unit's landlord contact] from the world.
+  // (Supersedes the old 400-for-missing-members contract.)
+
+  /** Seed the tour's tenant + unit + landlord so auto-resolve can find them. */
+  function seedAutoResolveWorld(): void {
+    world.contacts.push({
+      contactId: 'contact-tenant-1',
+      type: 'tenant',
+      phone: '+15550200011',
+      firstName: 'Tina',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'll-relay-1',
+      type: 'landlord',
+      phone: '+15550200012',
+      firstName: 'Larry',
+      lastName: 'Lord',
+    });
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'll-relay-1',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  it('auto-resolves [tenant, landlord] with names when members is absent or empty', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // No members at all — the founder flow (one button click, no roster form).
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    const conversation = res.body.conversation as Record<string, unknown>;
+    const participants = conversation['participants'] as {
+      phone: string;
+      contactId: string;
+      name?: string;
+    }[];
+    expect(participants).toHaveLength(2);
+    const byPhone = Object.fromEntries(participants.map((p) => [p.phone, p]));
+    expect(byPhone['+15550200011']).toMatchObject({ contactId: 'contact-tenant-1', name: 'Tina Tenant' });
+    expect(byPhone['+15550200012']).toMatchObject({ contactId: 'll-relay-1', name: 'Larry Lord' });
+
+    // groupThreadId stamped back on the tour.
+    expect((res.body.tour as Record<string, unknown>)['groupThreadId']).toBe(conversation['conversationId']);
+
+    // The intro fanned out to BOTH auto-resolved members FROM the pool number.
+    expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550200011', '+15550200012']);
+    expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
+
+    // An EMPTY members array behaves identically (second tour — one thread per tour).
+    const created2 = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId2 = created2.body.tour.tourId as string;
+    const res2 = await authed(app).post(`/api/tours/${tourId2}/relay`).send({ members: [] });
+    expect(res2.status).toBe(201);
+    expect((res2.body.conversation as { participants: unknown[] }).participants).toHaveLength(2);
+  });
+
+  it('second relay POST → 409 relay_already_provisioned (one thread per tour)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const first = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(first.status).toBe(201);
+    const firstThreadId = (first.body.conversation as Record<string, unknown>)['conversationId'];
+
+    // A second POST must NOT provision a new number or overwrite groupThreadId —
+    // explicit members don't bypass the guard either.
+    const again = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: [{ phone: '+15550200099', name: 'Interloper' }] });
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: 'relay_already_provisioned' });
+    expect(pool.provisioned).toHaveLength(1);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBe(firstThreadId);
+  });
+
+  it('400 relay_member_unresolvable naming the tenant when the tenant contact has no phone', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    // Strip the tenant's phone (both scalar and phones[] are absent).
+    const tenant = world.contacts.find((c) => c.contactId === 'contact-tenant-1')!;
+    delete tenant.phone;
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'tenant contact has no phone',
+    });
+    expect(pool.provisioned).toHaveLength(0);
+    expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
+  });
+
+  it('400 relay_member_unresolvable names each missing rung of the resolution ladder', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // Nothing seeded → the tenant contact is the first unresolvable member.
+    const noTenant = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noTenant.status).toBe(400);
+    expect(noTenant.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'tenant contact not found',
+    });
+
+    // Tenant exists (with phone) but the unit doesn't.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant', phone: '+15550200011' });
+    const noUnit = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noUnit.status).toBe(400);
+    expect(noUnit.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'unit not found (cannot resolve landlord)',
+    });
+
+    // Unit exists but its landlord contact doesn't.
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'll-ghost',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+    const noLandlord = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noLandlord.status).toBe(400);
+    expect(noLandlord.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'landlord contact not found',
+    });
+
+    // Landlord contact exists but has no phone.
+    world.contacts.push({ contactId: 'll-ghost', type: 'landlord', firstName: 'Larry' });
+    const noLandlordPhone = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(noLandlordPhone.status).toBe(400);
+    expect(noLandlordPhone.body).toEqual({
+      error: 'relay_member_unresolvable',
+      detail: 'landlord contact has no phone',
+    });
+
+    // Nothing was ever provisioned along the way.
+    expect(pool.provisioned).toHaveLength(0);
+  });
+
+  it('explicit member with contactId and no name gets the contact display name', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    world.contacts.push({
+      contactId: 'c-carol',
+      type: 'landlord',
+      phone: '+15550200031',
+      firstName: 'Carol',
+      lastName: 'Vaughn',
+    });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [
+        { phone: '+15550200031', contactId: 'c-carol' }, // name resolves from the contact
+        { phone: '+15550200032', contactId: 'c-ghost' }, // unknown contact → passes through nameless
+        { phone: '+15550200033', name: 'Explicit Ed' }, // explicit name wins as before
+      ],
+    });
+    expect(res.status).toBe(201);
+    const participants = (res.body.conversation as {
+      participants: { phone: string; name?: string }[];
+    }).participants;
+    const byPhone = Object.fromEntries(participants.map((p) => [p.phone, p]));
+    expect(byPhone['+15550200031']?.name).toBe('Carol Vaughn');
+    expect(byPhone['+15550200032']?.name).toBeUndefined();
+    expect(byPhone['+15550200033']?.name).toBe('Explicit Ed');
+  });
+
+  it('still 400s for a present-but-invalid members array', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
 
@@ -633,13 +1164,21 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    const noMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
-    expect(noMembers.status).toBe(400);
-    expect(noMembers.body.error).toMatch(/members/);
+    const missingPhone = await authed(app).post(`/api/tours/${tourId}/relay`).send({ members: [{}] });
+    expect(missingPhone.status).toBe(400);
+    expect(missingPhone.body.error).toBe('member.phone is required');
 
-    const emptyMembers = await authed(app).post(`/api/tours/${tourId}/relay`).send({ members: [] });
-    expect(emptyMembers.status).toBe(400);
-    expect(emptyMembers.body.error).toMatch(/members/);
+    const badPhone = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: [{ phone: 'not-a-phone' }] });
+    expect(badPhone.status).toBe(400);
+    expect(badPhone.body.error).toMatch(/not a valid phone/);
+
+    const notArray = await authed(app)
+      .post(`/api/tours/${tourId}/relay`)
+      .send({ members: 'nope' });
+    expect(notArray.status).toBe(400);
+    expect(notArray.body.error).toBe('members must be an array');
 
     // No number was provisioned for any of the bad requests.
     expect(pool.provisioned).toHaveLength(0);

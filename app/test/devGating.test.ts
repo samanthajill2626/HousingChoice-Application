@@ -3,12 +3,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
+import type { Express } from 'express';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/lib/config.js';
+import { createLogger } from '../src/lib/logger.js';
 import { maybeLoadDevRouter } from '../src/lib/devRoutes.js';
 import { SESSION_COOKIE_NAME } from '../src/lib/sessionCookie.js';
 import { createDevRouter } from '../src/routes/dev.js';
 import { userIdForEmail, type UserItem, type UsersRepo } from '../src/repos/usersRepo.js';
+import { createSendMessageService } from '../src/services/sendMessage.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { createLogCapture } from './helpers/logCapture.js';
+import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -234,6 +240,167 @@ describe('dev gating — /auth/dev-login', () => {
       .post('/auth/dev-login')
       .set('x-origin-verify', SECRET)
       .send({ email: VA });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('dev tick — POST /__dev/tour-reminders/tick', () => {
+  // The deterministic e2e seam for the worker's 60s tour-reminder poll: one
+  // POST = one runDueTourReminders(now) pass over the SAME world fakes the
+  // /api/tours route armed.
+  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+  const SCHEDULED_AT = '2026-07-15T10:00:00.000Z';
+  const TENANT_PHONE = '+15550300001';
+  // Canned rung bodies (jobs/tourReminders.ts REMINDER_BODIES).
+  const CONFIRMATION_BODY = "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
+  const DAY_BEFORE_BODY = '[AUTO] Reminder: your property tour is tomorrow.';
+
+  /** Harness app + dev router sharing ONE world: /api/tours arms reminder rows
+   *  against the world fakes and the tick drains them through the SAME repos —
+   *  the 1:1 send lands on world.sent via the world adapter (the spy surface). */
+  function buildTickHarness(): { app: Express; world: FakeWorld } {
+    const world = createFakeWorld();
+    const capture = createLogCapture();
+    const logger = createLogger({ destination: capture.stream });
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      DEV_AUTH_ENABLED: '1',
+      CF_ORIGIN_SECRET: SECRET,
+      MESSAGING_DRIVER: 'console',
+    });
+    const sendMessageService = createSendMessageService({
+      config,
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+      events: world.events,
+    });
+    const devRouter = createDevRouter({
+      config,
+      logger,
+      // Same shape worker.ts builds — but wired to the world fakes.
+      tourReminderDeps: {
+        tourRemindersRepo: world.tourRemindersRepo,
+        toursRepo: world.toursRepo,
+        contactsRepo: world.contactsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendMessageService,
+        adapter: world.adapter,
+        logger,
+      },
+    });
+    const { app } = makeWebhookHarness({ world, toursNow: () => FIXED_NOW, devRouter });
+    return { app, world };
+  }
+
+  /** Seed tenant + 1:1 conversation, then arm a tour VIA THE ROUTE with the
+   *  injected clock (confirmation dueAt = FIXED_NOW, day_before = T-24h). */
+  async function armTourViaRoute(app: Express, world: FakeWorld): Promise<string> {
+    world.contacts.push({
+      contactId: 'contact-tick-tenant',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      created_at: FIXED_NOW,
+    });
+    world.conversations.set('conv-tick-1', {
+      conversationId: 'conv-tick-1',
+      participant_phone: TENANT_PHONE,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: FIXED_NOW,
+      created_at: FIXED_NOW,
+    });
+    const created = await request(app)
+      .post('/api/tours')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        tenantId: 'contact-tick-tenant',
+        unitId: 'unit-tick-1',
+        scheduledAt: SCHEDULED_AT,
+        tourType: 'self_guided',
+      });
+    expect(created.status).toBe(201);
+    return created.body.tour.tourId as string;
+  }
+
+  it('fires the due rows at the supplied now — and only those, exactly once', async () => {
+    const { app, world } = buildTickHarness();
+    await armTourViaRoute(app, world);
+
+    // At FIXED_NOW only the confirmation rung (dueAt = FIXED_NOW) is due.
+    const res = await request(app).post('/__dev/tour-reminders/tick').send({ now: FIXED_NOW });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]).toMatchObject({ to: TENANT_PHONE, body: CONFIRMATION_BODY });
+
+    // A later tick fires the NEXT rung once; the claimed row never re-sends.
+    const res2 = await request(app)
+      .post('/__dev/tour-reminders/tick')
+      .send({ now: '2026-07-14T10:01:00.000Z' });
+    expect(res2.status).toBe(200);
+    expect(world.sent).toHaveLength(2);
+    expect(world.sent[1]).toMatchObject({ to: TENANT_PHONE, body: DAY_BEFORE_BODY });
+  });
+
+  it('normalizes a milliseconds-less now to full toISOString() form', async () => {
+    const { app, world } = buildTickHarness();
+    await armTourViaRoute(app, world);
+
+    // The ladder compares ISO strings lexicographically — a '…00Z' input must
+    // collapse to '…00.000Z' so rows whose dueAt carries milliseconds fire.
+    const res = await request(app)
+      .post('/__dev/tour-reminders/tick')
+      .send({ now: '2026-07-14T10:01:00Z' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, now: '2026-07-14T10:01:00.000Z' });
+
+    // Both due rows (confirmation @ FIXED_NOW, day_before @ T-24h with .000
+    // milliseconds) fired against the normalized now.
+    expect(world.sent.map((s) => s.body).sort()).toEqual(
+      [CONFIRMATION_BODY, DAY_BEFORE_BODY].sort(),
+    );
+  });
+
+  it('defaults now to the wall clock when the body carries none', async () => {
+    const { app, world } = buildTickHarness();
+    await armTourViaRoute(app, world);
+
+    const res = await request(app).post('/__dev/tour-reminders/tick').send();
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // The echoed now is a full canonical ISO instant.
+    expect(typeof res.body.now).toBe('string');
+    expect(new Date(res.body.now as string).toISOString()).toBe(res.body.now);
+    // Nothing is due at the real wall clock (the ladder is armed in the future
+    // relative to this suite's fixed dates) — deterministic either way: the
+    // endpoint ran a poll pass without error.
+  });
+
+  it('rejects a malformed now with 400 (and runs no poll)', async () => {
+    const { app, world } = buildTickHarness();
+    await armTourViaRoute(app, world);
+
+    for (const bad of ['not-a-date', '', 123, { nested: true }]) {
+      const res = await request(app).post('/__dev/tour-reminders/tick').send({ now: bad });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body).toEqual({ error: 'now must be a valid ISO 8601 datetime' });
+    }
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('is absent when the dev router is not mounted', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const app = buildApp({ config }); // no devRouter
+    const res = await request(app)
+      .post('/__dev/tour-reminders/tick')
+      .set('x-origin-verify', SECRET)
+      .send({ now: FIXED_NOW });
     expect(res.status).toBe(404);
   });
 });

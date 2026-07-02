@@ -20,8 +20,10 @@
 //   - Preferences are the contact's free-form `notes` (the "Preferences & notes" card).
 //   - There is NO automated matcher — "find another match" = the team browses
 //     available properties; we assert a next listing CAN be sent, not a re-ranking.
-//   - Tours is a SEPARATE, unbuilt workflow; `searching` absorbs touring, so the
-//     handoff signal is "fitting unit sent + tenant stays searching".
+//   - Tours is now a BUILT first-class workflow (documentation/tours-sequence.mermaid):
+//     the handoff = the tenant asks to tour the fitting unit, Team creates the
+//     timeless tour record (the Tours diagram's first [MANUAL] step), and the
+//     tenant stays `searching` (touring never changes tenant status).
 import { test } from '@playwright/test';
 import { Scenario, freshTenant, type Tenant, type Unit } from '../../scenarios/steps.js';
 
@@ -86,10 +88,13 @@ test('shares preferences on a listing → saved + relayed + visible → next lis
   await flow.teamSavesPreferences(saved);
   await flow.expectPreferencesRecorded(saved);
 
-  // Find another match → next matching listing → it fits → hand off to Tours.
+  // Find another match → next matching listing → it fits → hand off to Tours:
+  // the tenant asks to tour it and Team creates the (timeless) tour record.
   await flow.teamFindsNextMatch(unitB);
   await flow.teamSendsListing(unitB);
   await flow.expectListingDelivered(tenant, unitB);
+  await flow.tenantAsksToTour(unitB);
+  await flow.teamCreatesTourFromInterest(unitB, 'Self-guided');
   await flow.expectHandoffToTours(unitB);
 });
 
@@ -106,9 +111,12 @@ test('shares NO preferences (opt skipped) → loop still advances → next listi
 
   // opt skipped — the tenant volunteers no preferences this round.
 
-  // The loop still advances: find another match → next listing → it fits → Tours.
+  // The loop still advances: find another match → next listing → it fits →
+  // Tours (tour interest → Team creates the timeless tour record).
   await flow.teamFindsNextMatch(unitB);
   await flow.teamSendsListing(unitB);
   await flow.expectListingDelivered(tenant, unitB);
+  await flow.tenantAsksToTour(unitB);
+  await flow.teamCreatesTourFromInterest(unitB, 'Self-guided');
   await flow.expectHandoffToTours(unitB);
 });

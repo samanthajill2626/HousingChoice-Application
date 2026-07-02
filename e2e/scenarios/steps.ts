@@ -13,6 +13,7 @@
 // the Task 4 conformance audit (.superpowers/sdd/task-4-audit.md).
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
+import { fakeUrl } from '../support/urls.js';
 import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
 import {
   verifyCell,
@@ -86,6 +87,90 @@ function formatUsPhone(e164: string): string {
   return `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6, 10)}`;
 }
 
+// ==== Tour scheduling + reminder-ladder vocabulary (tours-sequence) ==========
+
+/** Escape a literal string for embedding in a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** A contact's display name as the app resolves it for relay rosters/prefixes
+ *  (contactsRepo firstName+lastName via nameFromContact — NOT Contact.name,
+ *  which is a test-local label with a different shape). */
+function displayNameOf(c: Contact): string {
+  return `${c.firstName} ${c.lastName}`;
+}
+
+/** The reminder rungs the tour ladder arms at booking. */
+export type ReminderKind =
+  | 'confirmation'
+  | 'day_before'
+  | 'morning_of'
+  | 'en_route'
+  | 'no_show_checkin';
+
+/** VERBATIM rung bodies (app/src/jobs/tourReminders.ts REMINDER_BODIES) — the
+ *  test-pinned contract; asserted by exact body equality in the fake threads. */
+export const TOUR_REMINDER_BODIES: Record<ReminderKind, string> = {
+  confirmation: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
+  day_before: '[AUTO] Reminder: your property tour is tomorrow.',
+  morning_of: '[AUTO] Good morning! Your property tour is today.',
+  en_route: "[AUTO] Your tour is coming up soon. Text us when you're on the way!",
+  no_show_checkin: '[AUTO] Hi! We noticed you may have missed your tour. Want to reschedule?',
+};
+
+/** A booking time + the reminder-ladder dueAts the backend will arm off it. */
+export interface TourTimes {
+  /** The raw datetime-local value the Book/Reschedule forms send ('YYYY-MM-DDTHH:mm'). */
+  scheduledAtLocal: string;
+  /** dueAt of each pre-computed rung, full-ms ISO — feed `justAfter(x)` to the tick. */
+  dayBefore: string;
+  morningOf: string;
+  enRoute: string;
+  noShowCheckin: string;
+}
+
+/** Format a Date's LOCAL components as a datetime-local input value. */
+function toDatetimeLocal(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * Pick a tour time `hoursFromNow` out (default 48h — far enough that EVERY rung
+ * is in the future at booking, so the whole ladder arms; day_before = sched-24h
+ * must beat the wall clock) and pre-compute the rung dueAts EXACTLY as the
+ * backend does (tourReminders.ts computeDueAt): the dashboard forms send the raw
+ * datetime-local value and the app parses it with new Date() (host-local tz), so
+ * parsing the same string here yields byte-identical dueAt ISO strings.
+ * `confirmation` is not computed — its dueAt is the server's arm-time "now"
+ * (tick with no `now` fires it immediately).
+ */
+export function tourSchedule(hoursFromNow = 48): TourTimes {
+  const sched = new Date(Date.now() + hoursFromNow * 3_600_000);
+  sched.setSeconds(0, 0);
+  const scheduledAtLocal = toDatetimeLocal(sched);
+  const parsed = new Date(scheduledAtLocal); // mirror the backend's parse of the raw form value
+  const t = parsed.getTime();
+  return {
+    scheduledAtLocal,
+    dayBefore: new Date(t - 24 * 3_600_000).toISOString(),
+    morningOf: new Date(
+      Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 8, 0, 0, 0),
+    ).toISOString(),
+    enRoute: new Date(t - 2 * 3_600_000).toISOString(),
+    noShowCheckin: new Date(t + 30 * 60_000).toISOString(),
+  };
+}
+
+/** 1s past an ISO instant — a tick `now` that fires exactly the rungs due ≤ it. */
+export function justAfter(iso: string): string {
+  return new Date(Date.parse(iso) + 1_000).toISOString();
+}
+
+/** Masked relay pool numbers minted by the fake (+1555019xxxx). */
+const POOL_NUMBER_RE = /^\+1555019\d{4}$/;
+
 export class Scenario {
   private activeContactId: string | null = null;
   private activeTenant: Tenant | null = null;
@@ -94,6 +179,9 @@ export class Scenario {
   /** The navigator's VERIFIED cell for masked outbound calling — verified once per
    *  scenario (teamMaskedCallsLandlord), reused on any re-call. Null until verified. */
   private activeNavCell: string | null = null;
+  /** The tour the scenario is driving (set by teamCreatesTourFromInterest); the
+   *  group fields fill in when teamOpensTourGroup provisions the masked relay. */
+  private activeTour: { tourId: string; poolNumber?: string; groupThreadId?: string } | null = null;
   private readonly registered = new Set<string>();
 
   constructor(
@@ -476,23 +564,30 @@ export class Scenario {
   // Audited live against --mock --local (2026-06-30): "send a listing" is the
   // broadcast-to-tenants flow (no individual-send route); preferences are the
   // contact's free-form `notes`; there is NO automated matcher (the team browses
-  // available units); Tours is a SEPARATE, unbuilt workflow and `searching`
-  // absorbs touring (documentation/STATUS-MODEL.md), so the loop-exit signal that
-  // exists today is "the fitting unit was sent + tenant stays searching".
+  // available units); Tours is now a BUILT, first-class workflow (see the tour
+  // verbs below) — the loop-exit handoff creates a real timeless tour record
+  // while the tenant stays `searching` (touring never changes tenant status).
 
   /**
    * [Setup] Create an AVAILABLE property the team can send. Pure setup → API:
    * POST /api/units starts a property in 'setup', then PATCH …/listing-status
    * publishes it to 'available' (the only shareable status). beds defaults to the
    * tenant's voucher size so it lands in the broadcast's pre-filled audience.
+   * `landlordId` defaults to the seeded landlord; tour scenarios pass their own
+   * fresh landlord so the tour-relay auto-resolve finds a landlord WITH a phone.
    */
-  seedAvailableUnit(opts: { beds: number; jurisdiction?: string }): Promise<Unit> {
+  seedAvailableUnit(opts: { beds: number; jurisdiction?: string; landlordId?: string }): Promise<Unit> {
     return step(`Setup: an available ${opts.beds}-BR property to send`, async () => {
       seq += 1;
-      const addressLine1 = `${200 + seq} Sender Way NW`;
+      // Run-unique street number (same rationale as freshContact): `seq` alone
+      // resets when Playwright restarts the worker after a failure while the
+      // DB persists — a bare `${200+seq}` then re-mints a duplicate address and
+      // any address-based locator (Unit typeahead option, Tours-card row) hits
+      // a strict-mode collision. The timestamp keeps addresses unique per run.
+      const addressLine1 = `${`${Date.now()}`.slice(-5)}${seq} Sender Way NW`;
       const created = await this.page.request.post(`${NEXT}/api/units`, {
         data: {
-          landlordId: SEEDED_LANDLORD,
+          landlordId: opts.landlordId ?? SEEDED_LANDLORD,
           jurisdiction: opts.jurisdiction ?? 'atlanta_housing',
           beds: opts.beds,
           rent_min: 1500,
@@ -656,21 +751,41 @@ export class Scenario {
   }
 
   /**
-   * [App] Loop exit — a listing fits → hand off to the separate Tours workflow. Tours
-   * is NOT built in Phase 1 and `searching` absorbs touring (STATUS-MODEL.md), so the
-   * real, deterministic handoff signal is: the fitting unit was sent (listing_send) and
-   * the tenant stays `searching` (Tours-ready — not prematurely placed). Team sees the
-   * "Searching" status in Details.
+   * [App] Loop exit — a listing fits → hand off to the Tours workflow (a BUILT,
+   * first-class entity: documentation/tours-sequence.mermaid). The handoff signal
+   * is now a REAL tour record: a timeless ('requested') tour exists for this
+   * tenant + the fitting unit (GET /api/tours?tenantId=), Team SEES the row on
+   * the tenant's Tours card ('Not booked' + 'Requested'), and the tenant stays
+   * `searching` (touring never changes tenant status — no placement yet).
    */
   expectHandoffToTours(fittingUnit: Unit): Promise<void> {
     const id = this.requireActiveContactId();
-    return step('App: a listing fits → hand off to Tours (tenant stays searching)', async () => {
-      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}/listings-sent`);
+    return step('App: a listing fits → hand off to Tours (tour record, tenant stays searching)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/tours?tenantId=${encodeURIComponent(id)}`);
       expect(res.ok()).toBeTruthy();
-      const { sent } = (await res.json()) as { sent: Array<{ unitId: string }> };
-      expect(sent.some((s) => s.unitId === fittingUnit.unitId)).toBe(true);
+      const { tours } = (await res.json()) as { tours: Array<{ unitId: string; status: string }> };
+      const handoffTour = tours.find((t) => t.unitId === fittingUnit.unitId);
+      expect(handoffTour).toBeDefined();
+      // The tour anchor is TIMELESS at handoff — booked later, in the Tours sequence.
+      expect(handoffTour?.status).toBe('requested');
+      // The fitting unit was actually SENT (listing_send row) — the Sending-Unit
+      // half of the handoff contract.
+      const sentRes = await this.page.request.get(`${NEXT}/api/contacts/${id}/listings-sent`);
+      expect(sentRes.ok()).toBeTruthy();
+      const { sent } = (await sentRes.json()) as { sent: Array<{ unitId: string }> };
+      expect(sent.some((sRow) => sRow.unitId === fittingUnit.unitId)).toBe(true);
       await this.assertStatus('searching');
       await this.page.goto(`${NEXT}/contacts/${id}`);
+      // Team SEES the tour on the Tours card: the row reads "<address> · Not
+      // booked" with the status LABEL 'Requested' on the right (never raw enums).
+      const toursCard = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Tours' }) });
+      await expect(
+        toursCard.getByRole('link').filter({ hasText: fittingUnit.addressLine1 }),
+      ).toBeVisible({ timeout: 10_000 });
+      await expect(toursCard.getByText('Not booked')).toBeVisible();
+      await expect(toursCard.getByText('Requested')).toBeVisible();
       const details = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
@@ -1181,7 +1296,585 @@ export class Scenario {
     return this.requireActiveContactId();
   }
 
+  // ==== Tours verbs (documentation/tours-sequence.mermaid) ====================
+  // Audited live against the lane stack (2026-07-02). Structural rules encoded:
+  //   - The tour record is created at INTEREST, timeless ('requested'); booking
+  //     (setting the time) is what arms the reminder ladder.
+  //   - Masked groups are Team-created BY HAND (a TourDetail button click) —
+  //     never auto-created; reminders route to the GROUP for landlord_led/pm_team
+  //     tours with a group, and to the tenant 1:1 otherwise (incl. ALL self_guided).
+  //   - Group proof-of-send = the fake threads: every member receives from the
+  //     POOL number (+1555019xxxx), member messages arrive masked as "Name: body".
+  //   - The tick seam (POST /__dev/tour-reminders/tick) is GLOBAL — assertions
+  //     scope to THIS scenario's phones; the worker's 60s wall-clock poll may
+  //     also fire a due rung, so we assert ARRIVAL, never which trigger fired.
+  //   - Tours never create a placement or change tenant status (exit gate only
+  //     records outcome/moveForward/convertible; tenant stays `searching`).
+
+  /** [Setup] Precondition handed off from the UPSTREAM sequences (onboarding →
+   *  sending-unit): the tenant is already `searching` (RTA in hand). That gate
+   *  is the onboarding diagram's move, not this one's — pure setup → the API
+   *  tenant-status route. */
+  seedTenantSearching(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('Setup: tenant is searching (handed off from Sending Unit)', async () => {
+      const res = await this.page.request.patch(`${NEXT}/api/contacts/${id}/tenant-status`, {
+        data: { toStatus: 'searching', source: 'manual' },
+      });
+      expect(res.ok(), await res.text()).toBeTruthy();
+    });
+  }
+
+  /** [Tenant→App→Team] The tenant asks to tour a specific property; the app
+   *  relays it to Team (the inbound surfaces on the tenant's timeline). */
+  tenantAsksToTour(unit: Unit): Promise<void> {
+    const t = this.requireActiveTenant();
+    const id = this.requireActiveContactId();
+    return step(`Tenant texts: "I would like to tour this one" (${unit.addressLine1})`, async () => {
+      await this.ensureParty(t);
+      await sendAsParty(this.request, {
+        from: t.phone,
+        to: APP_NUMBER,
+        body: `I would like to tour this one — ${unit.addressLine1}`,
+      });
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(timeline.getByText(/would like to tour/i)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Create the tour record for this tenant + unit — NO tour time
+   * yet (the coordination anchor). Drives the REAL "Schedule a tour" dialog from
+   * the tenant page (Tours card '+ Schedule'); the date field is left EMPTY so
+   * the tour is created timeless → status 'Requested', nothing armed. On create
+   * the app navigates to /tours/:tourId; the tourId is captured for later verbs.
+   */
+  teamCreatesTourFromInterest(
+    unit: Unit,
+    tourType: 'Self-guided' | 'Landlord-led' | 'PM team',
+  ): Promise<string> {
+    const id = this.requireActiveContactId();
+    return step(`Team creates the tour record (${tourType}, no time yet)`, async () => {
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      await this.page.getByRole('button', { name: 'Schedule a tour' }).click();
+      const dialog = this.page.getByRole('dialog', { name: 'Schedule a tour' });
+      await expect(dialog).toBeVisible();
+      // The tenant side is pre-filled + LOCKED (the dialog was opened from the
+      // tenant's file); the unit side is a typeahead over the property roster.
+      await expect(dialog.getByRole('group', { name: 'Tenant' })).toBeVisible();
+      await dialog.getByRole('combobox', { name: 'Unit' }).fill(unit.addressLine1);
+      await dialog
+        .getByRole('option', { name: new RegExp(escapeRegExp(unit.addressLine1)) })
+        .click();
+      await dialog.getByLabel('Tour type').selectOption({ label: tourType });
+      // 'Date and time' stays EMPTY — "Leave empty to create the tour without a
+      // time — book it later." (the diagram's timeless create).
+      await dialog.getByRole('button', { name: 'Schedule', exact: true }).click();
+      await this.page.waitForURL(/\/tours\/[^/?#]+$/, { timeout: 10_000 });
+      const m = /\/tours\/([^/?#]+)/.exec(this.page.url());
+      if (!m) throw new Error('teamCreatesTourFromInterest: expected a /tours/:tourId URL after create');
+      const tourId = decodeURIComponent(m[1]!);
+      this.activeTour = { tourId };
+      // Requested + not booked — the rendered LABELS, never raw enums.
+      await expect(this.page.getByLabel('Status: Requested')).toBeVisible();
+      await expect(this.page.getByLabel('Scheduled: Not yet booked')).toBeVisible();
+      return tourId;
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Open the masked relay group ON the tour (TourDetail button —
+   * groups are always Team-created by hand in Phase 1). Members are auto-resolved
+   * server-side ([tenant, unit's landlord]); the 201 response is captured to
+   * record the pool number + groupThreadId for the group assertions.
+   */
+  teamOpensTourGroup(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('Team opens the masked relay group on the tour', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const [res] = await Promise.all([
+        this.page.waitForResponse(
+          (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
+        ),
+        this.page
+          .getByRole('button', { name: 'Open group thread' })
+          .click(),
+      ]);
+      expect(res.status(), await res.text()).toBe(201);
+      const { tour: updated, conversation } = (await res.json()) as {
+        tour: { groupThreadId?: string };
+        conversation: { conversationId: string; pool_number?: string };
+      };
+      expect(conversation.pool_number).toMatch(POOL_NUMBER_RE);
+      expect(updated.groupThreadId).toBe(conversation.conversationId);
+      tour.poolNumber = conversation.pool_number as string;
+      tour.groupThreadId = conversation.conversationId;
+      // The 'Group thread' row + link appear once the tour carries the thread
+      // id. exact:true — a loose 'Group thread' also matches the link text
+      // 'View group thread' (strict-mode violation, seen live).
+      await expect(this.page.getByText('Group thread', { exact: true })).toBeVisible();
+      await expect(
+        this.page.getByRole('link', { name: 'Open group thread in inbox' }),
+      ).toBeVisible();
+    });
+  }
+
+  /** [App→each member, AUTO] The intro message naming everyone connected reached
+   *  EVERY member's fake thread FROM the pool number. */
+  expectGroupIntros(members: Contact[]): Promise<void> {
+    const pool = this.requireActiveTourGroup().poolNumber;
+    return step('App sends the group intros (naming everyone connected)', async () => {
+      const names = members.map(displayNameOf);
+      for (const member of members) {
+        await expect
+          .poll(
+            async () => {
+              const threads = await listThreads(this.request);
+              const thread = threads.find((x) => x.partyNumber === member.phone);
+              return (
+                thread?.messages.some(
+                  (m) =>
+                    m.direction === 'outbound' &&
+                    m.from === pool &&
+                    /You're now connected with/.test(m.body ?? '') &&
+                    names.every((n) => (m.body ?? '').includes(n)),
+                ) ?? false
+              );
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      }
+    });
+  }
+
+  /** [Member→App] A party (tenant or landlord/PM) texts the GROUP: an inbound to
+   *  the tour's pool number via the fake seam. `role` labels the persona on the
+   *  fake registry (first registration wins; role-agnostic for send-as-party). */
+  partyProposesTimeInGroup(
+    party: Contact,
+    body: string,
+    role: 'tenant' | 'landlord' | 'pm' = 'tenant',
+  ): Promise<void> {
+    const pool = this.requireActiveTourGroup().poolNumber;
+    return step(`${displayNameOf(party)} texts the group: "${body}"`, async () => {
+      await this.ensureParty(party, role);
+      await sendAsParty(this.request, { from: party.phone, to: pool, body });
+    });
+  }
+
+  /** [App→member, AUTO] The group message was relayed MASKED to another member:
+   *  arrives FROM the pool number as "<Sender Name>: <body>" — never a phone. */
+  expectRelayedInGroup(recipient: Contact, sender: Contact, body: string): Promise<void> {
+    const pool = this.requireActiveTourGroup().poolNumber;
+    const masked = `${displayNameOf(sender)}: ${body}`;
+    return step(`App relays in the group (masked) → ${displayNameOf(recipient)}`, async () => {
+      await expect
+        .poll(
+          async () => {
+            const threads = await listThreads(this.request);
+            const thread = threads.find((x) => x.partyNumber === recipient.phone);
+            return (
+              thread?.messages.some(
+                (m) => m.direction === 'outbound' && m.from === pool && m.body === masked,
+              ) ?? false
+            );
+          },
+          { timeout: 15_000 },
+        )
+        .toBe(true);
+    });
+  }
+
+  /** [Team, MANUAL] Book the tour: set the agreed date/time on the 'requested'
+   *  tour via the TourDetail Book control. Booking auto-advances to 'Scheduled'
+   *  and arms the reminder ladder off the booked time (server-side). */
+  teamBooksTour(times: TourTimes): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`Team books the tour (${times.scheduledAtLocal})`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('button', { name: 'Book tour' }).click();
+      const form = this.page.getByRole('form', { name: 'Book tour form' });
+      await expect(form).toBeVisible();
+      // datetime-local input — fill takes the raw 'YYYY-MM-DDTHH:mm' value; the
+      // form sends it as-is (valid ISO for the backend's Date.parse).
+      await form.getByLabel('Date and time').fill(times.scheduledAtLocal);
+      await form.getByRole('button', { name: 'Confirm booking' }).click();
+      await expect(this.page.getByLabel('Status: Scheduled')).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App, AUTO — dev seam] One deterministic tour-reminder poll pass. Omitting
+   * `now` uses the server wall clock (fires the just-armed 'confirmation' rung);
+   * pass `justAfter(times.<rung>)` to fire a future rung. GLOBAL: fires every
+   * due row in the DB — callers assert arrival scoped to THEIR OWN phones only.
+   */
+  tickTourReminders(nowIso?: string): Promise<void> {
+    return step(`App: reminder poll ticks${nowIso !== undefined ? ` (now=${nowIso})` : ''}`, async () => {
+      const res = await this.page.request.post(`${NEXT}/__dev/tour-reminders/tick`, {
+        data: nowIso !== undefined ? { now: nowIso } : {},
+      });
+      expect(res.ok(), await res.text()).toBeTruthy();
+    });
+  }
+
+  /** [App→group, AUTO] A reminder rung landed in EVERY member's fake thread FROM
+   *  the pool number (the founder routing rule for landlord_led/pm_team tours). */
+  expectReminderInGroup(kind: ReminderKind, members: Contact[]): Promise<void> {
+    const pool = this.requireActiveTourGroup().poolNumber;
+    const body = TOUR_REMINDER_BODIES[kind];
+    return step(`App: '${kind}' reminder lands in the group (every member)`, async () => {
+      for (const member of members) {
+        await expect
+          .poll(
+            async () => {
+              const threads = await listThreads(this.request);
+              const thread = threads.find((x) => x.partyNumber === member.phone);
+              return (
+                thread?.messages.some(
+                  (m) => m.direction === 'outbound' && m.from === pool && m.body === body,
+                ) ?? false
+              );
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      }
+    });
+  }
+
+  /** [App→Tenant, AUTO] A reminder rung landed in the tenant's 1:1 thread FROM
+   *  the APP number (self_guided always; landlord_led with no group falls back).
+   *  `atLeast` supports the re-armed-ladder assert (a 2nd 'confirmation' copy). */
+  expectReminderTo1to1(kind: ReminderKind, t: Tenant, atLeast = 1): Promise<void> {
+    const body = TOUR_REMINDER_BODIES[kind];
+    return step(`App: '${kind}' reminder lands 1:1 with the tenant (×${atLeast})`, async () => {
+      await expect
+        .poll(
+          async () => {
+            const threads = await listThreads(this.request);
+            const thread = threads.find((x) => x.partyNumber === t.phone);
+            return (
+              thread?.messages.filter(
+                (m) => m.direction === 'outbound' && m.from === APP_NUMBER && m.body === body,
+              ).length ?? 0
+            );
+          },
+          { timeout: 15_000 },
+        )
+        .toBeGreaterThanOrEqual(atLeast);
+    });
+  }
+
+  /** [Tenant→App] "On my way" — the tenant texts the GROUP thread. */
+  tenantSendsOnMyWay(): Promise<void> {
+    const t = this.requireActiveTenant();
+    const pool = this.requireActiveTourGroup().poolNumber;
+    return step('Tenant texts the group: "On my way!"', async () => {
+      await this.ensureParty(t);
+      await sendAsParty(this.request, { from: t.phone, to: pool, body: 'On my way!' });
+    });
+  }
+
+  /** [App→Landlord, AUTO] The en-route heads-up reached the landlord/PM in the
+   *  group, masked ("<Tenant Name>: On my way!" from the pool number). */
+  expectOnMyWayInGroup(landlord: Contact): Promise<void> {
+    const t = this.requireActiveTenant();
+    return this.expectRelayedInGroup(landlord, t, 'On my way!');
+  }
+
+  /** [Team, MANUAL] Confirm the scheduled tour (TourDetail control). */
+  teamConfirmsTour(): Promise<void> {
+    return this.tourStatusAction('Confirm tour', 'Confirmed', 'Team confirms the tour');
+  }
+
+  /** [Team, MANUAL] Log the tour outcome: toured (TourDetail control) — this is
+   *  what makes the exit gate reachable. */
+  teamMarksToured(): Promise<void> {
+    return this.tourStatusAction('Mark toured', 'Toured', 'Team logs the tour outcome (toured)');
+  }
+
+  /** [Team, MANUAL] Log a no-show (TourDetail control). No-show tours stay
+   *  reschedulable. */
+  teamMarksNoShow(): Promise<void> {
+    return this.tourStatusAction('Mark no-show', 'No show', 'Team logs a no-show');
+  }
+
+  /** [Team, MANUAL] Reschedule the tour to a new time — cancels the pending
+   *  ladder and RE-ARMS it off the new time (asserted by a fresh confirmation). */
+  teamReschedulesTour(times: TourTimes): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`Team reschedules the tour (${times.scheduledAtLocal})`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('button', { name: 'Reschedule this tour' }).click();
+      const form = this.page.getByRole('form', { name: 'Reschedule tour form' });
+      await expect(form).toBeVisible();
+      await form.getByLabel('New date and time').fill(times.scheduledAtLocal);
+      await form.getByRole('button', { name: 'Confirm reschedule' }).click();
+      await expect(this.page.getByLabel('Status: Scheduled')).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [Team→App→Tenant] Self-guided scheduling: Team offers tour windows in the
+   *  tenant's 1:1 thread (no group — nothing mutual to negotiate). */
+  teamOffersTourWindows(windows: string): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step(`Team offers tour windows: "${windows}"`, async () => {
+      await this.teamTexts1to1(windows);
+      await this.expectDeliveredToTenant(t, new RegExp(escapeRegExp(windows)));
+    });
+  }
+
+  /** [Tenant→App→Team] The tenant picks a window; the app relays the choice
+   *  (surfaces on the tenant's timeline). */
+  tenantPicksWindow(choice: string): Promise<void> {
+    const t = this.requireActiveTenant();
+    const id = this.requireActiveContactId();
+    return step(`Tenant picks a window: "${choice}"`, async () => {
+      await this.ensureParty(t);
+      await sendAsParty(this.request, { from: t.phone, to: APP_NUMBER, body: choice });
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(timeline.getByText(new RegExp(escapeRegExp(choice)))).toBeVisible({
+        timeout: 10_000,
+      });
+    });
+  }
+
+  /** [Team→App→Tenant] The ID gate opens: ask for a photo ID ahead of the tour
+   *  window (self-guided only — NO ID, NO code, ever). */
+  teamRequestsPhotoId(): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step('Team asks for a photo ID ahead of the tour window', async () => {
+      await this.teamTexts1to1('Before your tour window, please text us a photo ID.');
+      await this.expectDeliveredToTenant(t, /photo ID/i);
+    });
+  }
+
+  /**
+   * [Tenant→App→Team] The tenant sends the photo ID and Team reviews it (= sees
+   * it on the timeline). Sent as a REAL MMS: the media URL is one of the fake's
+   * canned raster images (/canned/room.png, served from the fake's own host) —
+   * the app's inbound mirror allowlists the configured fake origin
+   * (TWILIO_API_BASE_URL) alongside api.twilio.com, so the attachment mirrors
+   * cleanly (verified live: no MediaFetchRefusedError / media errors in the app
+   * log). The invariant this suite asserts is the GATE ORDERING (no code before
+   * the ID), not media plumbing.
+   */
+  tenantSendsPhotoId(): Promise<void> {
+    const t = this.requireActiveTenant();
+    const id = this.requireActiveContactId();
+    return step('Tenant sends the photo ID (MMS) — Team reviews it', async () => {
+      await this.ensureParty(t);
+      await sendAsParty(this.request, {
+        from: t.phone,
+        to: APP_NUMBER,
+        body: 'Here is my photo ID',
+        mediaUrls: [`${fakeUrl}/canned/room.png`],
+      });
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(timeline.getByText(/Here is my photo ID/)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [App] GATE ORDERING: the access code has NOT been sent yet — the code
+   *  string appears NOWHERE in the tenant's outbound thread so far. */
+  expectNoLockboxCodeYet(code: string): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step('App: no lockbox code sent yet (NO ID, NO code)', async () => {
+      const threads = await listThreads(this.request);
+      const thread = threads.find((x) => x.partyNumber === t.phone);
+      const leaked =
+        thread?.messages.some(
+          (m) => m.direction === 'outbound' && (m.body ?? '').includes(code),
+        ) ?? false;
+      expect(leaked).toBe(false);
+    });
+  }
+
+  /** [Team→App→Tenant] ID reviewed → send the lockbox access code in real time. */
+  teamSendsLockboxCode(code: string): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step('Team sends the lockbox access code', async () => {
+      await this.teamTexts1to1(`ID looks good — lockbox code: ${code}`);
+      await this.expectDeliveredToTenant(t, new RegExp(escapeRegExp(code)));
+    });
+  }
+
+  /** [Team→App→Tenant] Post-tour feedback ask ("what did you think — want to
+   *  move forward?"), Team-manual in Phase 1. */
+  teamAsksFeedback(): Promise<void> {
+    const t = this.requireActiveTenant();
+    return step('Team asks for feedback (move forward?)', async () => {
+      await this.teamTexts1to1('What did you think — want to move forward with this one?');
+      await this.expectDeliveredToTenant(t, /move forward/i);
+    });
+  }
+
+  /** [App→Team] A tenant inbound was relayed to Team — it surfaces on the
+   *  tenant's contact timeline (the generic relay rule). */
+  expectInboundRelayedToTeam(re: RegExp): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App relays the tenant reply to Team (contact timeline)', async () => {
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(timeline.getByText(re)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [Team, MANUAL] Record the exit-gate decision on the toured tour (the
+   *  em-dash radio labels are part of the pinned contract). */
+  teamRecordsExitGate(decision: 'yes' | 'no'): Promise<void> {
+    const tour = this.requireActiveTour();
+    const radio = decision === 'yes' ? 'Yes — move forward' : 'No — not a fit';
+    const outcomeLabel = decision === 'yes' ? 'Move forward' : 'Not a fit';
+    return step(`Team records the exit gate → ${radio}`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('button', { name: 'Record exit gate decision' }).click();
+      const form = this.page.getByRole('form', { name: 'Exit gate form' });
+      await expect(form).toBeVisible();
+      await form.getByRole('radio', { name: radio }).check();
+      await form.getByRole('button', { name: 'Save decision' }).click();
+      // Wait for the form to CLOSE first (it closes only on a successful PATCH)
+      // — getByText substring-matches, so asserting the outcome label while the
+      // form is still open would match the radio's own text ('Yes — move
+      // forward') and pass BEFORE the save landed (a race seen live).
+      await expect(this.page.getByRole('form', { name: 'Exit gate form' })).toHaveCount(0, {
+        timeout: 10_000,
+      });
+      // The Outcome row renders the decision LABEL once saved.
+      const article = this.page.getByRole('article', { name: 'Tour details' });
+      await expect(article.getByText(outcomeLabel)).toBeVisible();
+    });
+  }
+
+  /** [App] Exit gate YES: the tour is CONVERTIBLE (API) and Team SEES the
+   *  convertible row — and NOTHING ELSE moved (no placement, tenant untouched
+   *  — asserted separately via expectNoPlacement/expectTenantStillSearching). */
+  expectTourConvertible(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('App: the tour is convertible (ready for Post-Tour & Application)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
+      expect(res.ok()).toBeTruthy();
+      const { tour: t } = (await res.json()) as {
+        tour: { convertible?: boolean; outcome?: string; moveForward?: boolean };
+      };
+      expect(t.outcome).toBe('move_forward');
+      expect(t.moveForward).toBe(true);
+      expect(t.convertible).toBe(true);
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await expect(
+        this.page.getByText('Yes — ready for placement (not yet converted)'),
+      ).toBeVisible();
+    });
+  }
+
+  /** [App] Exit gate NO: outcome not_a_fit, NOT convertible, tour closed
+   *  (terminal). The tenant re-enters the Sending-Unit loop unchanged. */
+  expectTourClosedNotAFit(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('App: tour closed as not-a-fit (re-match — back to Sending Unit)', async () => {
+      // The exit-gate NO save closed the tour in the SAME patch (diagram:
+      // "outcome not_a_fit. Close the tour") — no separate close step exists.
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
+      expect(res.ok()).toBeTruthy();
+      const { tour: t } = (await res.json()) as {
+        tour: { status?: string; outcome?: string; convertible?: boolean };
+      };
+      expect(t.status).toBe('closed');
+      expect(t.outcome).toBe('not_a_fit');
+      expect(t.convertible).not.toBe(true);
+      // Team SEES it closed.
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await expect(this.page.getByLabel('Status: Closed')).toBeVisible();
+    });
+  }
+
+  /** [App] The tenant is STILL `searching` — touring never changes tenant status
+   *  (Team sees 'Searching' in the Details card). */
+  expectTenantStillSearching(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: tenant stays searching (no status change from touring)', async () => {
+      await this.assertStatus('searching');
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Searching')).toBeVisible();
+    });
+  }
+
+  /** [App] NO placement was created by any tour move (conversion belongs to
+   *  Post-Tour & Application, a separate downstream sequence). */
+  expectNoPlacement(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: no placement exists for the tenant', async () => {
+      const res = await this.page.request.get(
+        `${NEXT}/api/placements?tenantId=${encodeURIComponent(id)}`,
+      );
+      expect(res.ok()).toBeTruthy();
+      const { placements } = (await res.json()) as { placements: unknown[] };
+      expect(placements).toHaveLength(0);
+    });
+  }
+
+  /** [App] NO group thread EXISTS for this tour (self-guided default — the
+   *  'Open group thread' button still shows because an admin MAY hand-create
+   *  one, so the assert is on existence: no groupThreadId + no intro reached
+   *  the tenant from any pool number). */
+  expectNoTourGroup(): Promise<void> {
+    const tour = this.requireActiveTour();
+    const t = this.requireActiveTenant();
+    return step('App: no group thread exists (self-guided default)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
+      expect(res.ok()).toBeTruthy();
+      const { tour: got } = (await res.json()) as { tour: { groupThreadId?: string } };
+      expect(got.groupThreadId).toBeUndefined();
+      const threads = await listThreads(this.request);
+      const thread = threads.find((x) => x.partyNumber === t.phone);
+      const introFromPool =
+        thread?.messages.some(
+          (m) => m.direction === 'outbound' && POOL_NUMBER_RE.test(m.from),
+        ) ?? false;
+      expect(introFromPool).toBe(false);
+    });
+  }
+
   // ---- internal helpers ---------------------------------------------------
+
+  /** Click a TourDetail status control and assert the new status LABEL renders. */
+  private tourStatusAction(buttonAria: string, newLabel: string, stepName: string): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(stepName, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('button', { name: buttonAria }).click();
+      await expect(this.page.getByLabel(`Status: ${newLabel}`)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** Team texts the ACTIVE tenant 1:1 from their contact page (the real reply box). */
+  private async teamTexts1to1(body: string): Promise<void> {
+    await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+    await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
+    await this.page.getByRole('button', { name: 'Send' }).click();
+    await expect(this.page.getByText(body)).toBeVisible();
+  }
+
+  private requireActiveTour(): { tourId: string; poolNumber?: string; groupThreadId?: string } {
+    if (!this.activeTour) throw new Error('no active tour — call teamCreatesTourFromInterest first');
+    return this.activeTour;
+  }
+
+  private requireActiveTourGroup(): { tourId: string; poolNumber: string; groupThreadId: string } {
+    const tour = this.requireActiveTour();
+    if (tour.poolNumber === undefined || tour.groupThreadId === undefined) {
+      throw new Error('no tour group — call teamOpensTourGroup first');
+    }
+    return tour as { tourId: string; poolNumber: string; groupThreadId: string };
+  }
 
   /** Set the landlord lead status via the edit-form Status select (exact:true — a
    *  loose /Status/ also matches "Contract status"). */
@@ -1230,10 +1923,12 @@ export class Scenario {
     return this.activeContactId;
   }
 
-  /** Register the tenant's number as an ad-hoc party once (send-as-party requires it). */
-  private async ensureParty(t: Tenant): Promise<void> {
+  /** Register the contact's number as an ad-hoc party once (send-as-party requires
+   *  it). `role` labels the persona on the fake registry (role-agnostic for
+   *  send-as-party; the FIRST registration for a number wins). */
+  private async ensureParty(t: Tenant, role: 'tenant' | 'landlord' | 'pm' | 'staff' = 'tenant'): Promise<void> {
     if (this.registered.has(t.phone)) return;
-    await registerParty(this.request, { label: t.name, role: 'tenant', number: t.phone });
+    await registerParty(this.request, { label: t.name, role, number: t.phone });
     this.registered.add(t.phone);
   }
 

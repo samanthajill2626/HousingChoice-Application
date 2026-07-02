@@ -498,6 +498,7 @@ export const TOUR_TYPE_LABELS: Readonly<Record<TourType, string>> = {
 
 /** Tour status values (mirrors app/src/lib/toursModel.ts TOUR_STATUSES). */
 export type TourStatus =
+  | 'requested'
   | 'scheduled'
   | 'confirmed'
   | 'toured'
@@ -507,6 +508,7 @@ export type TourStatus =
 
 /** Human-readable labels for tour statuses (staff-facing). */
 export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
+  requested: 'Requested',
   scheduled: 'Scheduled',
   confirmed: 'Confirmed',
   toured: 'Toured',
@@ -536,8 +538,8 @@ export interface Tour {
   tenantId: string;
   /** The unit being toured. */
   unitId: string;
-  /** ISO 8601 datetime the tour is scheduled for. */
-  scheduledAt: string;
+  /** ISO 8601 datetime the tour is scheduled for. Absent on a 'requested' (timeless) tour. */
+  scheduledAt?: string;
   tourType: TourType;
   status: TourStatus;
   /** The relay-group conversationId, set when POST /api/tours/:tourId/relay is called. */

@@ -97,6 +97,12 @@ export interface FakeThread {
   messages: Array<{
     sid: string;
     direction: 'inbound' | 'outbound';
+    /** Sender E.164 — the app/pool number for outbound, the party for inbound.
+     *  Always on the wire (fake-twilio ThreadMessage); surfaced so tour-group
+     *  assertions can prove a send came FROM the masked pool number. */
+    from: string;
+    /** Recipient E.164 — always on the wire (see `from`). */
+    to: string;
     body?: string;
     state: string;
     mediaUrls?: string[];

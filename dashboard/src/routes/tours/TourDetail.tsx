@@ -1,7 +1,10 @@
 // TourDetail — the detail page for a single tour (GET /api/tours/:tourId).
-// Shows: status, scheduled date/time, tour type, exit-gate feedback (the
-// "Moving forward?" question → PATCH { outcome, moveForward }), reschedule /
-// cancel controls, and a link to the tour's relay group thread.
+// Shows: status, scheduled date/time ('Not yet booked' for a timeless
+// 'requested' tour), tour type, exit-gate feedback (the "Moving forward?"
+// question → PATCH { outcome, moveForward }), book / reschedule / cancel /
+// confirm / mark-toured / mark-no-show controls, an 'Open group thread'
+// affordance (provisions the masked relay group; members auto-resolved
+// server-side), and a link to the tour's relay group thread once it exists.
 //
 // Tours are SEPARATE from placements. This page records the navigator decision
 // (exit gate) but does NOT create a placement or change tenant status. The exit
@@ -14,6 +17,7 @@ import { useParams, Link } from 'react-router-dom';
 import {
   getTour,
   patchTour,
+  createTourRelay,
   ApiError,
   TOUR_STATUS_LABELS,
   TOUR_OUTCOME_LABELS,
@@ -39,11 +43,14 @@ function formatScheduledAt(iso: string): string {
 
 /** The statuses from which a navigator can cancel (anything not already terminal). */
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'requested',
   'scheduled',
   'confirmed',
 ]);
 
-/** The statuses from which a navigator can reschedule (mirrors canReschedule in toursModel). */
+/** The statuses from which a navigator can RESCHEDULE. The backend's
+ *  canReschedule also allows 'requested' (booking rides the same guard), but in
+ *  the UI a requested tour uses the dedicated Book control, not Reschedule. */
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'scheduled',
   'confirmed',
@@ -62,6 +69,10 @@ export function TourDetail(): React.JSX.Element {
   // Reschedule form state
   const [showReschedule, setShowReschedule] = useState(false);
   const [newScheduledAt, setNewScheduledAt] = useState('');
+
+  // Book form state (a 'requested' tour has no time yet — booking sets one)
+  const [showBook, setShowBook] = useState(false);
+  const [bookScheduledAt, setBookScheduledAt] = useState('');
 
   // Exit gate form state
   const [showExitGate, setShowExitGate] = useState(false);
@@ -83,15 +94,72 @@ export function TourDetail(): React.JSX.Element {
     return () => controller.abort();
   }, [tourId]);
 
-  async function handleCancel() {
+  // A bare status transition (confirm / toured / no-show / cancel): PATCH the
+  // new status and apply the returned tour — inapplicable controls disappear.
+  async function handleStatus(status: TourStatus, failMessage: string) {
     if (!tour || submitting) return;
     setSubmitting(true);
     setActionError(null);
     try {
-      const updated = await patchTour(tour.tourId, { status: 'canceled' });
+      const updated = await patchTour(tour.tourId, { status });
       setTour(updated);
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Cancel failed');
+      setActionError(err instanceof ApiError ? err.message : failMessage);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Open a masked group thread for the tour. Members are omitted so the server
+  // auto-resolves [tenant, unit's landlord]. On success the returned tour
+  // carries the new groupThreadId, so the 'Group thread' row + link appear.
+  async function handleOpenGroup() {
+    if (!tour || submitting) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      const { tour: updated } = await createTourRelay(tour.tourId);
+      setTour(updated);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        // relay_member_unresolvable carries a human-readable `detail`
+        // (e.g. which member has no phone) — show that, not the raw code.
+        const detail =
+          err.body !== null && typeof err.body === 'object'
+            ? (err.body as { detail?: unknown }).detail
+            : undefined;
+        setActionError(
+          err.code === 'relay_member_unresolvable' && typeof detail === 'string'
+            ? detail
+            : err.message,
+        );
+      } else {
+        setActionError('Failed to open group thread');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Book a 'requested' (timeless) tour: setting scheduledAt + status 'scheduled'
+  // arms the reminder ladder server-side.
+  async function handleBook(e: React.FormEvent) {
+    e.preventDefault();
+    if (!tour || submitting || !bookScheduledAt) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      // Normalize the zoneless datetime-local value to a full ISO instant (the
+      // navigator's timezone, not the server's) — same rule as ScheduleTourForm.
+      const updated = await patchTour(tour.tourId, {
+        scheduledAt: new Date(bookScheduledAt).toISOString(),
+        status: 'scheduled',
+      });
+      setTour(updated);
+      setShowBook(false);
+      setBookScheduledAt('');
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Booking failed');
     } finally {
       setSubmitting(false);
     }
@@ -103,7 +171,11 @@ export function TourDetail(): React.JSX.Element {
     setSubmitting(true);
     setActionError(null);
     try {
-      const updated = await patchTour(tour.tourId, { scheduledAt: newScheduledAt, status: 'scheduled' });
+      // Normalize like handleBook — never send the raw zoneless string.
+      const updated = await patchTour(tour.tourId, {
+        scheduledAt: new Date(newScheduledAt).toISOString(),
+        status: 'scheduled',
+      });
       setTour(updated);
       setShowReschedule(false);
       setNewScheduledAt('');
@@ -120,9 +192,14 @@ export function TourDetail(): React.JSX.Element {
     setSubmitting(true);
     setActionError(null);
     try {
+      // The NO path CLOSES the tour in the same patch (diagram: "outcome
+      // not_a_fit. Close the tour") — the server's terminal branch also cancels
+      // any lingering reminder rungs. The YES path leaves it 'toured'
+      // (convertible; Post-Tour & Application closes it at conversion).
       const updated = await patchTour(tour.tourId, {
         outcome: exitOutcome,
         moveForward: exitMoveForward,
+        ...(exitMoveForward === false && { status: 'closed' as const }),
       });
       setTour(updated);
       setShowExitGate(false);
@@ -144,8 +221,21 @@ export function TourDetail(): React.JSX.Element {
 
   const statusLabel = TOUR_STATUS_LABELS[tour.status] ?? tour.status;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
+  // A timeless 'requested' tour has no scheduledAt yet — never "Invalid Date".
+  const scheduledDisplay =
+    tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not yet booked';
   const canCancel = CANCELABLE.has(tour.status as TourStatus);
   const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
+  // Book: only a 'requested' (timeless) tour is booked; afterwards Reschedule takes over.
+  const canBook = tour.status === 'requested';
+  // Status controls: Confirm only from 'scheduled'; attendance (toured /
+  // no-show) from 'scheduled' or 'confirmed'. Marking toured is what makes the
+  // exit gate reachable.
+  const canConfirm = tour.status === 'scheduled';
+  const canMarkAttendance = tour.status === 'scheduled' || tour.status === 'confirmed';
+  // Open group: only before a group exists, and never on a dead tour.
+  const canOpenGroup =
+    tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   // Exit gate: show when the tour has been toured but not yet decided
   const canRecord = tour.status === 'toured' && tour.outcome === undefined;
 
@@ -161,9 +251,7 @@ export function TourDetail(): React.JSX.Element {
           </div>
           <div>
             <dt>Scheduled</dt>
-            <dd aria-label={`Scheduled: ${formatScheduledAt(tour.scheduledAt)}`}>
-              {formatScheduledAt(tour.scheduledAt)}
-            </dd>
+            <dd aria-label={`Scheduled: ${scheduledDisplay}`}>{scheduledDisplay}</dd>
           </div>
           <div>
             <dt>Type</dt>
@@ -202,6 +290,35 @@ export function TourDetail(): React.JSX.Element {
 
       {actionError !== null ? <p role="alert">{actionError}</p> : null}
 
+      {/* Book — a 'requested' tour has no time yet; booking sets one and arms reminders. */}
+      {canBook && !showBook ? (
+        <button
+          type="button"
+          onClick={() => setShowBook(true)}
+          disabled={submitting}
+        >
+          Book tour
+        </button>
+      ) : null}
+      {showBook ? (
+        <form onSubmit={handleBook} aria-label="Book tour form">
+          <label htmlFor="tour-book-at">Date and time</label>
+          <input
+            id="tour-book-at"
+            type="datetime-local"
+            value={bookScheduledAt}
+            onChange={(e) => setBookScheduledAt(e.target.value)}
+            required
+          />
+          <button type="submit" disabled={submitting || !bookScheduledAt}>
+            Confirm booking
+          </button>
+          <button type="button" onClick={() => { setShowBook(false); setBookScheduledAt(''); }}>
+            Cancel
+          </button>
+        </form>
+      ) : null}
+
       {/* Reschedule */}
       {canReschedule && !showReschedule ? (
         <button
@@ -232,15 +349,56 @@ export function TourDetail(): React.JSX.Element {
         </form>
       ) : null}
 
+      {/* Status controls: confirm, then mark attendance (toured / no-show). */}
+      {canConfirm ? (
+        <button
+          type="button"
+          onClick={() => void handleStatus('confirmed', 'Confirm failed')}
+          disabled={submitting}
+        >
+          Confirm tour
+        </button>
+      ) : null}
+      {canMarkAttendance ? (
+        <>
+          <button
+            type="button"
+            onClick={() => void handleStatus('toured', 'Status update failed')}
+            disabled={submitting}
+          >
+            Mark toured
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleStatus('no_show', 'Status update failed')}
+            disabled={submitting}
+          >
+            Mark no-show
+          </button>
+        </>
+      ) : null}
+
       {/* Cancel */}
       {canCancel ? (
         <button
           type="button"
-          onClick={handleCancel}
+          onClick={() => void handleStatus('canceled', 'Cancel failed')}
           disabled={submitting}
           aria-label="Cancel this tour"
         >
           Cancel tour
+        </button>
+      ) : null}
+
+      {/* Open group thread — Team-created by hand (never auto-created). Members
+          are omitted so the server auto-resolves [tenant, unit's landlord]. */}
+      {canOpenGroup ? (
+        <button
+          type="button"
+          onClick={() => void handleOpenGroup()}
+          disabled={submitting}
+        >
+          Open group thread
         </button>
       ) : null}
 

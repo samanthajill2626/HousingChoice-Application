@@ -42,8 +42,8 @@ export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
 /** Tour status — string-typed for now; Task 2 adds the full enum + guards. */
 export type TourStatus = string;
 
-/** Post-tour outcome (set when the tour is completed). */
-export type TourOutcome = 'completed' | 'no_show' | 'cancelled';
+/** Exit-gate outcome (mirrors lib/toursModel.ts TOUR_OUTCOMES). */
+export type TourOutcome = 'move_forward' | 'not_a_fit';
 
 /**
  * One scheduled (or completed) tour: a tenant visiting a unit.
@@ -61,8 +61,12 @@ export interface TourItem {
   tenantId: string;
   /** byUnit GSI hash: the unit being toured. */
   unitId: string;
-  /** ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range. */
-  scheduledAt: string;
+  /**
+   * ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range.
+   * Absent on a `requested` (timeless) tour — the attribute is OMITTED, never
+   * written as undefined/null, so the sparse GSI does not index it.
+   */
+  scheduledAt?: string;
   /** Fixed constant 'tours' — byScheduledAt GSI hash partition key. */
   _schedPartition: 'tours';
   tourType: TourType;
@@ -83,13 +87,13 @@ export interface TourItem {
 
 /**
  * Input for creating a tour. tourId/createdAt/updatedAt/_schedPartition are
- * repo-generated. tenantId, unitId, scheduledAt, and tourType are required;
- * status defaults to 'scheduled' when not supplied.
+ * repo-generated. tenantId, unitId, and tourType are required; scheduledAt is
+ * optional (omitted for a timeless `requested` tour); status defaults to
+ * 'scheduled' when not supplied.
  */
 export type CreateTourInput = Partial<TourItem> & {
   tenantId: string;
   unitId: string;
-  scheduledAt: string;
   tourType: TourType;
 };
 
@@ -119,6 +123,20 @@ export interface ToursRepo {
    * Returns the post-patch item (ALL_NEW).
    */
   patch(tourId: string, updates: PatchTourInput): Promise<TourItem>;
+  /**
+   * Atomically CLAIM the tour's group-thread slot (relay provisioning): sets
+   * groupThreadId to `value` ONLY when none exists yet. Throws
+   * ConditionalCheckFailedException when the slot is already taken (or the
+   * tour is missing) — the atomic half of the one-thread-per-tour guard, so
+   * two concurrent provisions can never both buy a pool number.
+   */
+  claimGroupThread(tourId: string, value: string): Promise<void>;
+  /**
+   * Release a claim made by claimGroupThread when provisioning FAILS: removes
+   * groupThreadId ONLY while it still equals `value` (never clobbers a real
+   * conversation id written since). Best-effort — a lost condition is a no-op.
+   */
+  releaseGroupThreadClaim(tourId: string, value: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +264,46 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       );
       log.info({ tourId, fields: sets.length - 1 + removes.length }, 'tour patched');
       return Attributes as TourItem;
+    },
+
+    async claimGroupThread(tourId, value) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { tourId },
+          UpdateExpression: 'SET #gt = :v, #updatedAt = :now',
+          // Atomic one-thread-per-tour: only the FIRST claimant wins; a
+          // concurrent provision loses here BEFORE any pool number is bought.
+          ConditionExpression: 'attribute_exists(tourId) AND attribute_not_exists(#gt)',
+          ExpressionAttributeNames: { '#gt': 'groupThreadId', '#updatedAt': 'updatedAt' },
+          ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
+        }),
+      );
+      log.info({ tourId }, 'tour group-thread slot claimed');
+    },
+
+    async releaseGroupThreadClaim(tourId, value) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId },
+            UpdateExpression: 'REMOVE #gt SET #updatedAt = :now',
+            // Only release OUR claim — never clobber a real conversation id
+            // (or another claimant) written since.
+            ConditionExpression: '#gt = :v',
+            ExpressionAttributeNames: { '#gt': 'groupThreadId', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId }, 'group-thread claim release lost (superseded) — no-op');
+          return;
+        }
+        throw err;
+      }
+      log.info({ tourId }, 'tour group-thread claim released (provisioning failed)');
     },
   };
 }

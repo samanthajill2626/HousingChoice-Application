@@ -42,6 +42,7 @@ import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
+import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
@@ -72,6 +73,8 @@ export function ContactDetail(): React.JSX.Element {
   const [managingPhones, setManagingPhones] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this (tenant) contact.
   const [startingPlacement, setStartingPlacement] = useState(false);
+  // The "Schedule a tour" dialog, pre-filled+locked to this (tenant) contact.
+  const [schedulingTour, setSchedulingTour] = useState(false);
   // The "New property" dialog, pre-filled+locked to this (landlord) contact.
   const [addingProperty, setAddingProperty] = useState(false);
   const [optOutBusy, setOptOutBusy] = useState(false);
@@ -447,6 +450,7 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onStartPlacement={() => setStartingPlacement(true)}
+                onScheduleTour={() => setSchedulingTour(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -484,6 +488,17 @@ export function ContactDetail(): React.JSX.Element {
           onCreated={(p) => {
             setStartingPlacement(false);
             void navigate('/placements/' + p.placementId);
+          }}
+        />
+      ) : null}
+
+      {schedulingTour ? (
+        <ScheduleTourForm
+          tenantId={contact.contactId}
+          onClose={() => setSchedulingTour(false)}
+          onCreated={(t) => {
+            setSchedulingTour(false);
+            void navigate('/tours/' + t.tourId);
           }}
         />
       ) : null}

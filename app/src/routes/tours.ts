@@ -2,16 +2,22 @@
 // Mounted under /api/tours, behind requireAuth via the /api mount (app.ts).
 // VAs schedule and manage tours, so NO admin gate (same posture as contacts).
 //
-//   POST  /api/tours  { tenantId, unitId, scheduledAt, tourType }  → 201 { tour }
+//   POST  /api/tours  { tenantId, unitId, scheduledAt?, tourType } → 201 { tour }
 //   GET   /api/tours/:tourId                                         → { tour } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                     → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
-//   POST  /api/tours/:tourId/relay  { members }                      → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/relay  { members? }                     → 201 { tour, conversation }
+//
+// POST: scheduledAt is OPTIONAL. Absent → the tour is created 'requested' (the
+// timeless coordination anchor; no scheduledAt attribute stored, no reminders).
+// Present → status 'scheduled' and the reminder ladder arms immediately.
 //
 // PATCH supports:
 //   - Reschedule: { scheduledAt } — allowed only when canReschedule(current status)
-//     or when the status field brings the tour to 'scheduled'.
+//     or when the status field brings the tour to 'scheduled'. Booking: a
+//     scheduledAt patch on a 'requested' tour (no explicit status) auto-advances
+//     it to 'scheduled' in the same update.
 //   - Status change: { status } — allowlisted via isTourStatus; illegal transitions
 //     (e.g. closed → scheduled) are rejected 409.
 //   - Exit gate: { outcome, moveForward } — records the navigator decision; sets
@@ -19,8 +25,10 @@
 //     touch tenant status (conversion is a downstream feature).
 //
 // POST /api/tours/:tourId/relay provisions a masked relay group thread for a tour
-// (Task 5). One thread per tour is supported; the groupThreadId is stored on the
-// tour. Multi-concurrent-tour numbering/UX is OUT OF SCOPE (one thread per tour;
+// (Task 5). One thread per tour is ENFORCED: a tour that already carries a
+// groupThreadId is refused (409 relay_already_provisioned). members is OPTIONAL —
+// absent/empty auto-resolves [tenant, unit's landlord] from contacts.
+// Multi-concurrent-tour numbering/UX is OUT OF SCOPE (one thread per tour;
 // see docs/issues/group-threads-across-multiple-tours.md).
 //
 // Validation is a strict field allowlist (unknown fields → 400). Mirror of
@@ -52,7 +60,10 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { nameFromContact, resolveMemberName } from './relayGroups.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -97,6 +108,10 @@ export interface ToursRouterDeps {
   conversationsRepo?: ConversationsRepo;
   auditRepo?: AuditRepo;
   poolNumbersService?: PoolNumbersService;
+  /** Relay auto-membership: resolve the tour's tenant contact (phone + name). */
+  contactsRepo?: ContactsRepo;
+  /** Relay auto-membership: resolve the tour's unit → its landlord contact. */
+  unitsRepo?: UnitsRepo;
   events?: EventBus;
   /**
    * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
@@ -112,6 +127,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const conversations =
     deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
@@ -120,7 +137,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // POST /api/tours — create a tour. Status defaults to 'scheduled'.
+  // POST /api/tours — create a tour. With scheduledAt → 'scheduled' + armed
+  // ladder; without → 'requested' (timeless), nothing armed until booking.
   router.post('/', async (req, res) => {
     const body = req.body;
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -146,8 +164,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(400).json({ error: 'unitId is required' });
       return;
     }
-    // Required: scheduledAt (valid ISO datetime)
-    if (!isValidIso(b['scheduledAt'])) {
+    // Optional: scheduledAt (valid ISO datetime when present). Absent → the
+    // tour is created timeless ('requested') and no reminders are armed.
+    const scheduledAt = b['scheduledAt'];
+    if (scheduledAt !== undefined && !isValidIso(scheduledAt)) {
       res.status(400).json({ error: 'scheduledAt must be a valid ISO 8601 datetime' });
       return;
     }
@@ -157,15 +177,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
+    // Timeless create: OMIT scheduledAt entirely (never undefined/null) so the
+    // sparse byScheduledAt GSI stays sparse; status is 'requested' until booked.
+    // scheduledAt is CANONICALIZED to toISOString() at the boundary: a zoneless
+    // datetime-local string would otherwise be parsed in the SERVER's timezone
+    // by computeDueAt, and the byScheduledAt GSI compares range keys
+    // lexicographically — mixed canonical/raw forms mis-bucket range queries.
     const tour = await tours.create({
       tenantId: b['tenantId'] as string,
       unitId: b['unitId'] as string,
-      scheduledAt: b['scheduledAt'] as string,
       tourType: b['tourType'] as TourType,
+      ...(scheduledAt !== undefined
+        ? { scheduledAt: new Date(scheduledAt as string).toISOString() }
+        : { status: 'requested' satisfies TourStatus }),
     });
 
-    // Arm the reminder ladder (best-effort side effect).
-    await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+    // Arm the reminder ladder (best-effort side effect) — only once a time exists.
+    if (scheduledAt !== undefined) {
+      await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+    }
 
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
     res.status(201).json({ tour });
@@ -272,8 +302,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // --- Status transition guard ---
     // Rules:
     //   - 'closed' is terminal: no status change is allowed from 'closed'.
+    //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
+    //     it, and the only ways out are booking (→ scheduled, which requires a
+    //     time) or canceling — confirmed/toured/no_show all presuppose a time.
     //   - The only path back to 'scheduled' is via canReschedule() (i.e. from
-    //     scheduled/confirmed/canceled/no_show — NOT from toured or closed).
+    //     requested/scheduled/confirmed/canceled/no_show — NOT toured/closed).
     if (newStatus !== undefined) {
       const targetStatus = newStatus as TourStatus;
 
@@ -283,9 +316,36 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         return;
       }
 
+      if (targetStatus === 'requested') {
+        // requested is only ever set at create — a tour with (or past) a time
+        // cannot claim to be timeless again.
+        res.status(409).json({ error: 'illegal_status_transition', detail: `a tour cannot move back to requested (current: ${currentStatus})` });
+        return;
+      }
+
+      if (currentStatus === 'requested' && targetStatus !== 'scheduled' && targetStatus !== 'canceled') {
+        // Booking is the only forward path out of requested (the diagram's
+        // booking step is what advances the tour); confirmed/toured/no_show on
+        // a tour that never had a time would break booking semantics — e.g.
+        // an unreschedulable 'toured' dead end with no ladder ever armed.
+        res.status(409).json({ error: 'illegal_status_transition', detail: `a requested tour can only be booked (scheduled) or canceled (requested: ${targetStatus})` });
+        return;
+      }
+
       if (targetStatus === 'scheduled' && !canReschedule(currentStatus)) {
         // Only reschedulable statuses may go back to 'scheduled'.
         res.status(409).json({ error: 'illegal_status_transition', detail: `cannot reschedule from status: ${currentStatus}` });
+        return;
+      }
+
+      if (
+        targetStatus === 'scheduled' &&
+        newScheduledAt === undefined &&
+        current.scheduledAt === undefined
+      ) {
+        // 'scheduled' means a time exists — a tour that never had one (e.g.
+        // still 'requested') cannot be scheduled without a scheduledAt.
+        res.status(400).json({ error: 'scheduledAt is required to schedule this tour' });
         return;
       }
     }
@@ -300,11 +360,40 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       }
     }
 
+    // --- Exit gate guard ---
+    // The exit gate records the decision on a TOURED tour (diagram: outcome is
+    // logged after the visit). This also makes a closed tour's decision
+    // immutable — outcome-only patches used to bypass the closed-terminal 409,
+    // letting `convertible` flip after closure (the field downstream Post-Tour
+    // conversion trusts).
+    if ((newOutcome !== undefined || newMoveForward !== undefined) && currentStatus !== 'toured') {
+      res.status(409).json({ error: 'illegal_exit_gate', detail: `the exit gate records a decision on a toured tour (current: ${currentStatus})` });
+      return;
+    }
+
     // --- Build the patch ---
+    // scheduledAt is CANONICALIZED (toISOString) at the boundary — see the
+    // create route for why (server-TZ parsing in computeDueAt + lexicographic
+    // byScheduledAt GSI range compares).
     // Exit gate: outcome + moveForward → also set convertible.
     const patch: Record<string, unknown> = {};
-    if (newScheduledAt !== undefined) patch['scheduledAt'] = newScheduledAt;
+    const scheduledAtIso =
+      newScheduledAt !== undefined ? new Date(newScheduledAt as string).toISOString() : undefined;
+    if (scheduledAtIso !== undefined) patch['scheduledAt'] = scheduledAtIso;
     if (newStatus !== undefined) patch['status'] = newStatus;
+    // Booking / revival: a scheduledAt patch with no explicit status on a
+    // requested (booking), canceled, or no_show (revival) tour auto-advances to
+    // 'scheduled' in the same update — a fresh time on a dead-but-reschedulable
+    // tour must never leave it reading Canceled/No show with a live ladder.
+    // (confirmed keeps its status on a bare time change — a reschedule should
+    // not demote a confirmed tour.)
+    if (
+      scheduledAtIso !== undefined &&
+      newStatus === undefined &&
+      (currentStatus === 'requested' || currentStatus === 'canceled' || currentStatus === 'no_show')
+    ) {
+      patch['status'] = 'scheduled' satisfies TourStatus;
+    }
     if (newOutcome !== undefined) patch['outcome'] = newOutcome;
     if (newMoveForward !== undefined) {
       patch['moveForward'] = newMoveForward;
@@ -323,13 +412,29 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       throw err;
     }
 
-    // Reminder side effects after a successful patch.
-    if (newScheduledAt !== undefined) {
-      // Reschedule: cancel old reminders and re-arm with the new scheduledAt.
+    // Reminder side effects after a successful patch, keyed on the EFFECTIVE
+    // post-patch status — arming must never happen on a tour that is not live
+    // (e.g. PATCH {scheduledAt, status:'canceled'} must not text "Your tour is
+    // confirmed" at the whole group), and marking 'toured' must cancel the
+    // still-pending rungs (a tenant who showed up must never get the
+    // no_show_checkin "you may have missed your tour" text).
+    const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
+    const armable = effectiveStatus === 'scheduled' || effectiveStatus === 'confirmed';
+    // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
+    // status-only revival from canceled/no_show uses the stored time — its
+    // rungs were canceled and must come back). A status-only 'confirmed' patch
+    // does NOT re-arm (it would re-fire the confirmation rung).
+    const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
+    if (armable && rearmTrigger) {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
       await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
-    } else if (patch['status'] === 'canceled' || patch['status'] === 'closed') {
-      // Terminal status: cancel all pending reminders.
+    } else if (
+      effectiveStatus === 'canceled' ||
+      effectiveStatus === 'closed' ||
+      effectiveStatus === 'toured'
+    ) {
+      // Dead or completed: nothing left to remind. (no_show keeps its pending
+      // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
     }
 
@@ -337,11 +442,69 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     res.json({ tour });
   });
 
+  /**
+   * Auto-resolve the tour's relay roster: [tenant contact, unit's landlord
+   * contact] — phones + display names from contacts. Returns a stable,
+   * dashboard-consumable detail string when any member is unresolvable (the
+   * route maps it to 400 relay_member_unresolvable).
+   */
+  async function resolveTourMembers(
+    tour: TourItem,
+  ): Promise<{ members: ConversationParticipant[] } | { unresolvable: string }> {
+    const tenant = await contacts.getById(tour.tenantId);
+    if (!tenant) return { unresolvable: 'tenant contact not found' };
+    const tenantPhone =
+      typeof tenant.phone === 'string' && tenant.phone.length > 0
+        ? normalizeToE164(tenant.phone)
+        : undefined;
+    if (tenantPhone === undefined) return { unresolvable: 'tenant contact has no phone' };
+
+    const unit = await units.getById(tour.unitId);
+    if (!unit) return { unresolvable: 'unit not found (cannot resolve landlord)' };
+    const landlordId =
+      typeof unit.landlordId === 'string' && unit.landlordId.length > 0
+        ? unit.landlordId
+        : undefined;
+    if (landlordId === undefined) {
+      return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
+    }
+    const landlord = await contacts.getById(landlordId);
+    if (!landlord) return { unresolvable: 'landlord contact not found' };
+    const landlordPhone =
+      typeof landlord.phone === 'string' && landlord.phone.length > 0
+        ? normalizeToE164(landlord.phone)
+        : undefined;
+    if (landlordPhone === undefined) return { unresolvable: 'landlord contact has no phone' };
+
+    const tenantName = nameFromContact(tenant);
+    const members: ConversationParticipant[] = [
+      { phone: tenantPhone, contactId: tour.tenantId, ...(tenantName !== undefined && { name: tenantName }) },
+    ];
+    // De-dupe on phone (mirrors the explicit path) — a tenant who is somehow
+    // also the landlord gets one roster slot.
+    if (landlordPhone !== tenantPhone) {
+      const landlordName = nameFromContact(landlord);
+      members.push({
+        phone: landlordPhone,
+        contactId: landlordId,
+        ...(landlordName !== undefined && { name: landlordName }),
+      });
+    }
+    return { members };
+  }
+
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a
   // tour (Task 5). Stores the relay conversationId back on the tour as
-  // groupThreadId. One thread per tour; the request body must supply members.
+  // groupThreadId. ONE thread per tour — an already-provisioned tour is refused
+  // (409) so a second click never buys a new pool number and orphans the first.
   //
-  // Body: { members: [{ phone, contactId?, name? }, …] }
+  // Body: { members?: [{ phone, contactId?, name? }, …] }
+  //   - members absent or empty → AUTO-RESOLVE the roster as [tenant contact,
+  //     unit's landlord contact] (phones + names from contacts); an
+  //     unresolvable member → 400 { error: 'relay_member_unresolvable', detail }
+  //     naming exactly which member/rung failed.
+  //   - explicit members are honored as before; a member carrying contactId
+  //     but no name gets the contact's display name (best-effort).
   // Returns: 201 { tour, conversation }
   //
   // PII (doc §9): log ids only (never member phones in log lines).
@@ -350,12 +513,6 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const actor = (req as AuthedRequest).user?.userId;
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    // Validate members.
-    if (!Array.isArray(body['members']) || (body['members'] as unknown[]).length === 0) {
-      res.status(400).json({ error: 'members (non-empty array) is required' });
-      return;
-    }
-
     // Fetch the tour; 404 when missing.
     const tour = await tours.get(tourId);
     if (!tour) {
@@ -363,31 +520,85 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    // Parse + normalize members (reuse the same mini-validator as relayGroups.ts).
-    const members: ConversationParticipant[] = [];
-    const seenPhones = new Set<string>();
-    for (const raw of body['members'] as unknown[]) {
-      if (typeof raw !== 'object' || raw === null) {
-        res.status(400).json({ error: 'each member must be an object' });
+    // Dead tours don't get group threads: a stale page's button click must not
+    // buy a pool number + text [AUTO] intros for a canceled/closed tour (the
+    // UI hides the control, but the route is the guard).
+    if (tour.status === 'canceled' || tour.status === 'closed') {
+      res.status(409).json({ error: 'tour_not_active', detail: `cannot open a group thread on a ${tour.status} tour` });
+      return;
+    }
+
+    // One-thread-per-tour guard FIRST: a second provision would silently buy a
+    // new pool number and overwrite groupThreadId, orphaning the live thread.
+    if (typeof tour.groupThreadId === 'string' && tour.groupThreadId.length > 0) {
+      res.status(409).json({ error: 'relay_already_provisioned' });
+      return;
+    }
+
+    const rawMembers = body['members'];
+    if (rawMembers !== undefined && !Array.isArray(rawMembers)) {
+      res.status(400).json({ error: 'members must be an array' });
+      return;
+    }
+
+    let members: ConversationParticipant[];
+    if (rawMembers === undefined || rawMembers.length === 0) {
+      // AUTO-RESOLVE (founder flow): [tenant, unit's landlord] from contacts.
+      const resolved = await resolveTourMembers(tour);
+      if ('unresolvable' in resolved) {
+        res.status(400).json({ error: 'relay_member_unresolvable', detail: resolved.unresolvable });
         return;
       }
-      const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
-      if (typeof m.phone !== 'string' || m.phone.length === 0) {
-        res.status(400).json({ error: 'member.phone is required' });
+      members = resolved.members;
+    } else {
+      // Parse + normalize explicit members (reuse the same mini-validator as
+      // relayGroups.ts); fill a missing name from contactId (best-effort).
+      members = [];
+      const seenPhones = new Set<string>();
+      for (const raw of rawMembers as unknown[]) {
+        if (typeof raw !== 'object' || raw === null) {
+          res.status(400).json({ error: 'each member must be an object' });
+          return;
+        }
+        const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
+        if (typeof m.phone !== 'string' || m.phone.length === 0) {
+          res.status(400).json({ error: 'member.phone is required' });
+          return;
+        }
+        const phone = normalizeToE164(m.phone);
+        if (phone === undefined) {
+          res.status(400).json({ error: `member.phone is not a valid phone: ${m.phone}` });
+          return;
+        }
+        if (seenPhones.has(phone)) continue; // de-dupe
+        seenPhones.add(phone);
+        const contactId =
+          typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
+        const name =
+          typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
+        members.push(
+          await resolveMemberName(contacts, { phone, contactId, ...(name !== undefined && { name }) }),
+        );
+      }
+    }
+
+    // Atomically claim the group-thread slot BEFORE buying anything: the
+    // read-guard above is check-then-act, so two overlapping POSTs could both
+    // pass it, buy two pool numbers, and orphan the first thread. The claim's
+    // ConditionExpression (attribute_not_exists(groupThreadId)) makes the race
+    // loser 409 here, before any provisioning side effects. The sentinel is
+    // replaced by the real conversation id on success and released on failure;
+    // a crash inside this window leaves the sentinel behind (rare — clears by
+    // removing groupThreadId), which we prefer over the double-buy.
+    const claimSentinel = `provisioning:${tourId}`;
+    try {
+      await tours.claimGroupThread(tourId, claimSentinel);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(409).json({ error: 'relay_already_provisioned' });
         return;
       }
-      const phone = normalizeToE164(m.phone);
-      if (phone === undefined) {
-        res.status(400).json({ error: `member.phone is not a valid phone: ${m.phone}` });
-        return;
-      }
-      if (seenPhones.has(phone)) continue; // de-dupe
-      seenPhones.add(phone);
-      const contactId =
-        typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
-      const name =
-        typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
-      members.push({ phone, contactId, ...(name !== undefined && { name }) });
+      throw err;
     }
 
     // Provision the relay group owned by this tour.
@@ -408,6 +619,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         },
       );
     } catch (err) {
+      // Provisioning failed — release the claim so a retry can provision.
+      await tours.releaseGroupThreadClaim(tourId, claimSentinel);
       if (err instanceof RelayProvisioningDisabledError) {
         log.warn({ err: { name: err.name }, tourId }, 'tour relay create: number provisioning disabled');
         res.status(503).json({ error: 'relay_provisioning_disabled', message: (err as Error).message });
@@ -421,7 +634,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       throw err;
     }
 
-    // Stamp the groupThreadId back on the tour.
+    // Stamp the real groupThreadId over the claim sentinel.
     const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
 
     log.info(

@@ -90,9 +90,9 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       unitId: 'unit-optional-1',
       scheduledAt: '2026-07-16T14:00:00.000Z',
       tourType: 'landlord_led',
-      status: 'completed',
+      status: 'closed',
       groupThreadId: 'conv-group-xyz',
-      outcome: 'completed',
+      outcome: 'move_forward',
       moveForward: true,
       convertible: true,
     });
@@ -100,10 +100,29 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const read = await tours.get(tour.tourId);
     expect(read).toMatchObject({
       groupThreadId: 'conv-group-xyz',
-      outcome: 'completed',
+      outcome: 'move_forward',
       moveForward: true,
       convertible: true,
     });
+  });
+
+  it('create without scheduledAt omits the attribute entirely (sparse byScheduledAt GSI)', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-timeless-1',
+      unitId: 'unit-timeless-1',
+      tourType: 'landlord_led',
+      status: 'requested',
+    });
+
+    const read = await tours.get(tour.tourId);
+    expect(read).toBeDefined();
+    // The attribute must be truly ABSENT (not undefined/null) so the sparse
+    // byScheduledAt GSI never indexes the item.
+    expect(Object.keys(read!)).not.toContain('scheduledAt');
+
+    // A range query spanning all time must not surface the timeless tour.
+    const all = await tours.listByScheduledRange('0000-01-01T00:00:00.000Z', '9999-12-31T23:59:59.000Z');
+    expect(all.map((t) => t.tourId)).not.toContain(tour.tourId);
   });
 
   it('listByTenant returns all tours for a tenant and none for others', async () => {
@@ -174,8 +193,12 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const insideIds = result.map((t) => t.tourId);
     expect(insideIds).toContain(inside1.tourId);
     expect(insideIds).toContain(inside2.tourId);
-    // The tours outside the window must not appear
-    expect(result.every((t) => t.scheduledAt >= from && t.scheduledAt <= to)).toBe(true);
+    // The tours outside the window must not appear. (scheduledAt is optional
+    // on TourItem since the timeless create, but every row in the sparse
+    // byScheduledAt GSI carries one — assert it inline for the type.)
+    expect(
+      result.every((t) => t.scheduledAt !== undefined && t.scheduledAt >= from && t.scheduledAt <= to),
+    ).toBe(true);
   });
 
   it('listByScheduledRange boundary: BETWEEN is inclusive on both ends', async () => {
@@ -215,11 +238,11 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
 
     // Patch status and groupThreadId
     const patched = await tours.patch(tour.tourId, {
-      status: 'completed',
+      status: 'toured',
       groupThreadId: 'conv-group-patched',
     });
 
-    expect(patched.status).toBe('completed');
+    expect(patched.status).toBe('toured');
     expect(patched.groupThreadId).toBe('conv-group-patched');
     // Untouched fields survive the merge
     expect(patched.tourType).toBe('self_guided');
@@ -240,13 +263,13 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     });
 
     const patched = await tours.patch(tour.tourId, {
-      status: 'completed',
-      outcome: 'completed',
+      status: 'closed',
+      outcome: 'move_forward',
       moveForward: true,
       convertible: false,
     });
 
-    expect(patched.outcome).toBe('completed');
+    expect(patched.outcome).toBe('move_forward');
     expect(patched.moveForward).toBe(true);
     expect(patched.convertible).toBe(false);
   });

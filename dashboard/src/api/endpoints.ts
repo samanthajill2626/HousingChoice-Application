@@ -981,15 +981,22 @@ export function getSystemErrors(
 // The exit gate (PATCH { outcome, moveForward }) records the navigator decision;
 // tour becomes `convertible` when moveForward is true. Conversion is downstream.
 
-/** POST /api/tours — schedule a new tour. Status defaults to 'scheduled'.
+/** POST /api/tours — create a new tour. `scheduledAt` is OPTIONAL: with it the
+ *  tour is created 'scheduled' (reminder ladder arms server-side); without it
+ *  the tour is created timeless — status 'requested' — and booked later. The
+ *  key is OMITTED from the wire body when absent (never sent as undefined).
  *  Returns the created tour (unwrapped from { tour }). */
 export async function createTour(body: {
   tenantId: string;
   unitId: string;
-  scheduledAt: string;
+  scheduledAt?: string;
   tourType: TourType;
 }): Promise<Tour> {
-  const res = await request<{ tour: Tour }>('/api/tours', { method: 'POST', body });
+  const { scheduledAt, ...rest } = body;
+  const res = await request<{ tour: Tour }>('/api/tours', {
+    method: 'POST',
+    body: { ...rest, ...(scheduledAt !== undefined && { scheduledAt }) },
+  });
   return res.tour;
 }
 
@@ -1041,15 +1048,21 @@ export async function patchTour(
   return res.tour;
 }
 
-/** POST /api/tours/:tourId/relay { members } — provision a masked relay group
- *  thread for the tour. Stamps groupThreadId back on the tour.
- *  Returns the updated tour + the new conversation (unwrapped). */
+/** POST /api/tours/:tourId/relay — provision a masked relay group thread for
+ *  the tour. `members` is optional: when omitted the server auto-resolves
+ *  [tenant contact, unit's landlord contact] (phones + names). Stamps
+ *  groupThreadId back on the tour. Errors: 409 relay_already_provisioned when
+ *  the tour already has a group; 400 relay_member_unresolvable (with `detail`)
+ *  when a member can't resolve. Returns the updated tour + the new
+ *  conversation (unwrapped). */
 export async function createTourRelay(
   tourId: string,
-  members: Array<{ phone: string; contactId?: string; name?: string }>,
+  members?: Array<{ phone: string; contactId?: string; name?: string }>,
 ): Promise<{ tour: Tour; conversation: unknown }> {
   return request<{ tour: Tour; conversation: unknown }>(
     `/api/tours/${encodeURIComponent(tourId)}/relay`,
-    { method: 'POST', body: { members } },
+    // Omit the members key entirely when not given (server auto-resolves) —
+    // never send members: undefined.
+    { method: 'POST', body: members !== undefined ? { members } : {} },
   );
 }

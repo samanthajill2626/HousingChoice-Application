@@ -21,9 +21,14 @@
 // canceledAt rows. Both conditions together = exactly-once delivery.
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
+import type { MessagingAdapter } from '../adapters/messaging.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
-import type { ConversationsRepo } from '../repos/conversationsRepo.js';
+import type {
+  ConversationParticipant,
+  ConversationsRepo,
+} from '../repos/conversationsRepo.js';
+
 import {
   type ReminderKind,
   type TourReminderItem,
@@ -34,6 +39,7 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import { isMemberSuppressed } from './relayFanOut.js';
 
 // ---------------------------------------------------------------------------
 // Canned reminder text
@@ -105,8 +111,16 @@ export async function armTourReminders(
   const log = deps.logger ?? defaultLogger;
   const created: TourReminderItem[] = [];
 
+  // A timeless ('requested') tour has no scheduledAt to arm off — callers
+  // shouldn't get here, but guard anyway (booking arms the ladder later).
+  const scheduledAt = tour.scheduledAt;
+  if (typeof scheduledAt !== 'string') {
+    log.warn({ tourId: tour.tourId }, 'tour reminders not armed (no scheduledAt)');
+    return created;
+  }
+
   for (const kind of REMINDER_KINDS) {
-    const dueAt = computeDueAt(kind, tour.scheduledAt, now);
+    const dueAt = computeDueAt(kind, scheduledAt, now);
     // Skip rows that are already past (they would never be polled).
     // `confirmation` is always `now`, so it always passes this check.
     if (dueAt < now) {
@@ -153,12 +167,33 @@ export interface RunDueTourRemindersDeps {
   contactsRepo: ContactsRepo;
   conversationsRepo: ConversationsRepo;
   sendMessageService: SendMessageService;
+  /**
+   * Direct provider sends for the GROUP route (landlord_led / pm_team tours
+   * with a usable group thread). Named `adapter` to match the repo idiom
+   * (RelayFanOutJobDeps / SendMessageServiceDeps). The group route CANNOT go
+   * through sendMessageService — it throws RelaySendNotSupportedError for
+   * relay_group conversations — and the worker cannot enqueue relay.fanOut
+   * (no OutboundQueueAdapter in the worker process), so reminders mirror the
+   * relay.intro precedent: per-member adapter sends FROM the pool number.
+   */
+  adapter: MessagingAdapter;
+  /**
+   * Shared A2P pacing bucket (optional): group-route reminders send N member
+   * messages per rung through the raw adapter, so they must draw from the SAME
+   * combined-outbound-rate bucket the relay fan-out / intro paths use
+   * (relayFanOut.ts acquires before every adapter send). Left unset by the
+   * hermetic dev tick — the fake provider needs no pacing.
+   */
+  tokenBucket?: { acquire(n: number): Promise<void> };
   logger?: Logger;
 }
 
 /**
  * The stateless poll handler. Queries all pending reminders due at or before
- * `now`, then for each row: resolves the tour→contact→conversation→sends.
+ * `now`, then for each row: resolves the tour, routes to the tour's masked
+ * GROUP thread (landlord_led/pm_team with a usable group — direct per-member
+ * adapter sends from the pool number) or to the tenant's 1:1 conversation
+ * (self_guided, or any unusable group), and sends.
  *
  * Idempotent: listDue filters out rows with sentAt already set. On send
  * success, stamps sentAt so the row won't reappear.
@@ -204,6 +239,20 @@ async function processReminderRow(
   if (!tour) {
     log.warn({ reminderId: row.reminderId, tourId: row.tourId }, 'tour reminder: tour not found — skipping');
     return;
+  }
+
+  // Route decision (founder decision 2026-07-02): reminders for landlord_led /
+  // pm_team tours go to the tour's masked GROUP thread — the landlord/PM should
+  // see them too. self_guided stays tenant-1:1 EVEN IF a group thread exists.
+  // A non-self_guided tour with no USABLE group (no groupThreadId, conversation
+  // missing, not a relay_group, closed, or no pool/roster) falls back to the
+  // tenant-1:1 path below — a reminder must never be lost.
+  if (tour.tourType !== 'self_guided') {
+    const group = await resolveUsableGroup(tour, row, deps, log);
+    if (group) {
+      await sendGroupReminder(row, tour, group, now, deps, log);
+      return;
+    }
   }
 
   // Resolve the tenant contact.
@@ -264,7 +313,13 @@ async function processReminderRow(
       automated: true,
     });
     log.info(
-      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId, kind: row.kind },
+      {
+        reminderId: row.reminderId,
+        tourId: row.tourId,
+        tenantId: tour.tenantId,
+        kind: row.kind,
+        route: 'tenant_1to1',
+      },
       'tour reminder sent',
     );
   } catch (err) {
@@ -292,5 +347,145 @@ async function processReminderRow(
     );
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Group route (founder decision 2026-07-02)
+// ---------------------------------------------------------------------------
+
+interface UsableGroup {
+  conversationId: string;
+  poolNumber: string;
+  members: ConversationParticipant[];
+}
+
+/**
+ * Resolve the tour's group thread into a USABLE send target, pre-claim.
+ * Usable = groupThreadId set, the conversation exists, is a `relay_group`,
+ * is not closed, and carries a pool number + a non-empty member roster.
+ * Anything else returns undefined → the caller falls back to the tenant-1:1
+ * path (a reminder must never be lost).
+ */
+async function resolveUsableGroup(
+  tour: TourItem,
+  row: TourReminderItem,
+  deps: RunDueTourRemindersDeps,
+  log: Logger,
+): Promise<UsableGroup | undefined> {
+  const groupThreadId = tour.groupThreadId;
+  if (typeof groupThreadId !== 'string' || groupThreadId.length === 0) return undefined;
+
+  const conv = await deps.conversationsRepo.getById(groupThreadId);
+  if (!conv || conv.type !== 'relay_group' || conv.status === 'closed') {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, conversationId: groupThreadId, kind: row.kind },
+      'tour reminder: group thread unusable (missing/not relay_group/closed) — falling back to tenant 1:1',
+    );
+    return undefined;
+  }
+
+  const poolNumber = conv.pool_number;
+  const members = (conv.participants ?? []) as ConversationParticipant[];
+  if (typeof poolNumber !== 'string' || poolNumber.length === 0 || members.length === 0) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, conversationId: conv.conversationId, kind: row.kind },
+      'tour reminder: group thread has no pool number/members — falling back to tenant 1:1',
+    );
+    return undefined;
+  }
+
+  return { conversationId: conv.conversationId, poolNumber, members };
+}
+
+/**
+ * Log-safe member key (doc §9): the contactId when the member has one, else a
+ * redaction constant. NOT relayMemberKey() — its `phone#<E164>` fallback for
+ * contact-less members would put a raw phone number in the log line.
+ */
+function logSafeMemberKey(member: { contactId?: string }): string {
+  return member.contactId !== undefined && member.contactId.length > 0
+    ? member.contactId
+    : 'phone-only-member';
+}
+
+/**
+ * Send one reminder rung into the tour's masked group: claim ONCE, then a
+ * direct adapter send per member FROM the pool number — the relay.intro
+ * precedent (relayFanOut.ts). sendMessageService is unusable here (it throws
+ * RelaySendNotSupportedError for relay_group threads) and the worker cannot
+ * enqueue relay.fanOut (no OutboundQueueAdapter in the worker process).
+ *
+ * Deliberately NOT persisted as app messages: like the relay.intro
+ * announcement, a reminder is a system announcement FROM the app — there is
+ * no member-authored source message to relay, and the relay thread's storage
+ * model is one SOURCE message fanned out, never N outbound copies.
+ */
+async function sendGroupReminder(
+  row: TourReminderItem,
+  tour: TourItem,
+  group: UsableGroup,
+  now: string,
+  deps: RunDueTourRemindersDeps,
+  log: Logger,
+): Promise<void> {
+  const body = REMINDER_BODIES[row.kind];
+
+  // CLAIM-BEFORE-SEND (same atomic claim as the 1:1 path): claim ONCE for the
+  // whole group — losing the claim (concurrent tick / cancel) skips silently.
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now);
+  if (!claimed) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder claim lost (concurrent tick or canceled) — skipping',
+    );
+    return;
+  }
+
+  // Claim succeeded — send to each member. Per-member failures log and
+  // CONTINUE with the remaining members; the claim is already stamped, so a
+  // failed member is not retried (same accepted post-claim tradeoff as the
+  // 1:1 path). PII: log logSafeMemberKey (contactId or a redaction constant)
+  // — NEVER a phone number, and NOT relayMemberKey (phone#<E164> fallback).
+  let sentCount = 0;
+  for (const member of group.members) {
+    try {
+      // Opt-out suppression (mirrors relay.intro exactly — shared helper):
+      // direct adapter sends bypass the 1:1 opt-out gate, so STOP must be
+      // re-enforced here. A repo error is caught below and skips this member
+      // without sending (fail CLOSED — never text a possibly-opted-out number).
+      if (await isMemberSuppressed(deps.contactsRepo, member)) {
+        log.info(
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
+          'tour reminder: group member opted out (sms_opt_out) — skipped',
+        );
+        continue;
+      }
+      // A2P pacing: draw from the shared combined-rate bucket before every
+      // adapter send, exactly like the relay fan-out / intro loops.
+      await deps.tokenBucket?.acquire(1);
+      await deps.adapter.sendMessage({ to: member.phone, from: group.poolNumber, body });
+      sentCount += 1;
+    } catch (err) {
+      // One member's failure must not block the others (relay.intro precedent).
+      log.error(
+        { err, reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
+        'tour reminder: group send failed for a member — continuing',
+      );
+    }
+  }
+
+  log.info(
+    {
+      reminderId: row.reminderId,
+      tourId: row.tourId,
+      tenantId: tour.tenantId,
+      kind: row.kind,
+      route: 'group',
+      conversationId: group.conversationId,
+      memberCount: group.members.length,
+      sentCount,
+    },
+    'tour reminder sent',
+  );
 }
 

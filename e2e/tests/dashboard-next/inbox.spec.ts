@@ -27,8 +27,10 @@ test('Inbox: contact rows + filter tabs; a row opens its contact page', async ({
   await expect(page.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
 
   // The seeded tenant conversation renders as a contact row (one row per contact).
+  // First data-dependent wait: give the feed headroom under full-suite load (the
+  // default 5s races the inbox fetch when the whole suite shares the stack).
   const row = page.getByRole('link', { name: /Tasha Nguyen/ });
-  await expect(row).toBeVisible();
+  await expect(row).toBeVisible({ timeout: 15_000 });
 
   // Opening a row navigates to that contact's page (no parallel thread surface).
   await row.click();
@@ -44,7 +46,8 @@ test('Inbox: inline Assign to me → "Assigned · You" + Assigned-to-me filter; 
   await page.goto(`${NEXT}/inbox`);
 
   const row = page.getByRole('listitem').filter({ hasText: 'Tasha Nguyen' });
-  await expect(row).toBeVisible();
+  // Headroom under full-suite load (see the note in the first test).
+  await expect(row).toBeVisible({ timeout: 15_000 });
 
   // Inline action is hover-revealed on desktop — hover, then assign.
   await row.hover();

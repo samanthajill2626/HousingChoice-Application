@@ -105,6 +105,14 @@ export async function armTourReminders(
   const log = deps.logger ?? defaultLogger;
   const created: TourReminderItem[] = [];
 
+  // Invariant: armTourReminders must never be called for a time-less
+  // ('requested') tour. If scheduledAt is absent, return immediately so that
+  // no reminder rows are ever created (reminder-invariant guard).
+  if (typeof tour.scheduledAt !== 'string') {
+    log.info({ tourId: tour.tourId }, 'tour reminder arm skipped (no scheduledAt — requested tour)');
+    return created;
+  }
+
   for (const kind of REMINDER_KINDS) {
     const dueAt = computeDueAt(kind, tour.scheduledAt, now);
     // Skip rows that are already past (they would never be polled).

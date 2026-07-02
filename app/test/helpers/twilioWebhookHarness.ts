@@ -1441,20 +1441,26 @@ export function createFakeWorld(): FakeWorld {
   };
 
   // In-memory tours (Tours feature): mirror the repo's contractual semantics —
-  // generate-id create, get, listByTenant/listByUnit/listByScheduledRange GSI
-  // queries, and SET-merge patch with conditional-check on existence.
+  // generate-id create, get, listByTenant/listByUnit/listByScheduledRange/
+  // listByStatus GSI queries, and SET-merge patch with conditional-check on
+  // existence. scheduledAt is optional (absent → status 'requested').
   const toursMap = new Map<string, TourItem>();
   let tourCounter = 0;
   const toursRepo: ToursRepo = {
     async create(input) {
       const now = new Date().toISOString();
+      // Mirror the real repo: absent scheduledAt → 'requested', present → 'scheduled'.
+      const defaultStatus = typeof input.scheduledAt === 'string' ? 'scheduled' : 'requested';
+      const { scheduledAt: rawScheduledAt, ...restInput } = input;
       const item: TourItem = {
-        ...input,
+        ...restInput,
         tourId: input.tourId ?? `tour-${++tourCounter}`,
         _schedPartition: 'tours',
-        status: input.status ?? 'scheduled',
+        status: input.status ?? defaultStatus,
         createdAt: typeof input.createdAt === 'string' ? input.createdAt : now,
         updatedAt: now,
+        // Only include scheduledAt when it is a non-empty string (sparse GSI).
+        ...(typeof rawScheduledAt === 'string' ? { scheduledAt: rawScheduledAt } : {}),
       };
       if (toursMap.has(item.tourId)) {
         throw new TourConditionalCheckFailedException({ message: `create: tour ${item.tourId} exists`, $metadata: {} });
@@ -1474,7 +1480,15 @@ export function createFakeWorld(): FakeWorld {
     },
     async listByScheduledRange(from, to) {
       return [...toursMap.values()]
-        .filter((t) => t.scheduledAt >= from && t.scheduledAt <= to)
+        // Mirror the sparse byScheduledAt GSI: items without scheduledAt never
+        // appear here (they are 'requested' tours with no time yet).
+        .filter((t) => typeof t.scheduledAt === 'string' && t.scheduledAt >= from && t.scheduledAt <= to)
+        .map((t) => ({ ...t }));
+    },
+    async listByStatus(status) {
+      return [...toursMap.values()]
+        .filter((t) => t.status === status)
+        .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
     },
     async patch(tourId, updates) {

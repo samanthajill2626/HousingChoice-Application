@@ -2,11 +2,10 @@
 //
 // A Tour is a scheduled visit by a tenant to a unit. Tours are INDEPENDENT of
 // placements: a tenant stays `searching` during the touring process; no touring
-// stage. Tour status starts as 'scheduled' and evolves via the status model
-// (Task 2 adds the full enum + guards; for now the field is a plain string so
-// the repo compiles independently). The exit gate captures `outcome`,
-// `moveForward`, and `convertible` and leaves placement creation to the
-// operator.
+// stage. Tour status starts as 'scheduled' (if scheduledAt is provided) or
+// 'requested' (if scheduledAt is absent — a time-less tour request). The exit
+// gate captures `outcome`, `moveForward`, and `convertible` and leaves
+// placement creation to the operator.
 //
 // GSIs:
 //   byTenant      — all tours for a tenant (contact-file tours card)
@@ -15,6 +14,9 @@
 //                   Hash key is the constant '_schedPartition = "tours"' so a
 //                   datetime-range BETWEEN Query works without scatter-gather.
 //                   Sparse: items without scheduledAt never appear here.
+//   byStatus      — list all tours by status (e.g. all 'requested' tours for the
+//                   dashboard queue). Hash key is 'status', range key is
+//                   'created_at' (ISO 8601, newest-last for BETWEEN pagination).
 //
 // Mirror of unitsRepo.ts conventions: RepoDeps DI, tableName(), PutCommand with
 // existence guard, UpdateCommand SET/REMOVE loop, QueryCommand helpers.
@@ -39,11 +41,11 @@ import type { RepoDeps } from './conversationsRepo.js';
 /** The three ways a tour can be conducted. */
 export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
 
-/** Tour status — string-typed for now; Task 2 adds the full enum + guards. */
+/** Tour status — mirrors TOUR_STATUSES in lib/toursModel.ts. */
 export type TourStatus = string;
 
-/** Post-tour outcome (set when the tour is completed). */
-export type TourOutcome = 'completed' | 'no_show' | 'cancelled';
+/** Post-tour outcome (set when the tour is closed). */
+export type TourOutcome = string;
 
 /**
  * One scheduled (or completed) tour: a tenant visiting a unit.
@@ -54,6 +56,8 @@ export type TourOutcome = 'completed' | 'no_show' | 'cancelled';
  *   unitId           — byUnit GSI hash
  *   _schedPartition  — byScheduledAt GSI hash (constant 'tours')
  *   scheduledAt      — byScheduledAt GSI range (sparse: absent → not indexed)
+ *   status           — byStatus GSI hash
+ *   createdAt        — byStatus GSI range
  */
 export interface TourItem {
   tourId: string;
@@ -61,12 +65,15 @@ export interface TourItem {
   tenantId: string;
   /** byUnit GSI hash: the unit being toured. */
   unitId: string;
-  /** ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range. */
-  scheduledAt: string;
+  /**
+   * ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range.
+   * Optional: absent for 'requested' (time-less) tours.
+   */
+  scheduledAt?: string;
   /** Fixed constant 'tours' — byScheduledAt GSI hash partition key. */
   _schedPartition: 'tours';
   tourType: TourType;
-  /** Lifecycle status (string for now; Task 2 narrows to TourStatus enum). */
+  /** Lifecycle status. */
   status: TourStatus;
   /** Optional: the relay group conversationId for the tour thread. */
   groupThreadId?: string;
@@ -83,13 +90,14 @@ export interface TourItem {
 
 /**
  * Input for creating a tour. tourId/createdAt/updatedAt/_schedPartition are
- * repo-generated. tenantId, unitId, scheduledAt, and tourType are required;
- * status defaults to 'scheduled' when not supplied.
+ * repo-generated. tenantId, unitId, and tourType are required; scheduledAt is
+ * optional (absent → status 'requested'; present → status 'scheduled').
  */
 export type CreateTourInput = Partial<TourItem> & {
   tenantId: string;
   unitId: string;
-  scheduledAt: string;
+  /** Optional: absent → status defaults to 'requested'; present → 'scheduled'. */
+  scheduledAt?: string;
   tourType: TourType;
 };
 
@@ -112,6 +120,12 @@ export interface ToursRepo {
    * the byScheduledAt GSI. Powers "tours today", reminder sweeps, no-show checks.
    */
   listByScheduledRange(from: string, to: string): Promise<TourItem[]>;
+  /**
+   * All tours with the given status via the byStatus GSI (hash=status,
+   * range=createdAt). Returns all pages concatenated (no cursor — dashboard
+   * use; volumes are expected to remain low in Phase 1).
+   */
+  listByStatus(status: string): Promise<TourItem[]>;
   /**
    * SET-merge patch: only supplied fields are written; omitted fields are LEFT as
    * stored (no-overwrite contract). updatedAt is always bumped. Throws
@@ -151,13 +165,22 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
     async create(input) {
       const now = new Date().toISOString();
       const createdAt = typeof input.createdAt === 'string' ? input.createdAt : now;
+      // Default status: 'requested' when no scheduledAt is provided (time-less
+      // tour request); 'scheduled' when scheduledAt is supplied. A caller-supplied
+      // status always wins (repo tests may pass an explicit status for seeding).
+      const defaultStatus = typeof input.scheduledAt === 'string' ? 'scheduled' : 'requested';
+      // Build the item WITHOUT scheduledAt when it is absent so the sparse
+      // byScheduledAt GSI never indexes a 'requested' tour.
+      const { scheduledAt: rawScheduledAt, ...restInput } = input;
       const item: TourItem = {
-        ...input,
+        ...restInput,
         tourId: input.tourId ?? `tour-${randomUUID()}`,
         _schedPartition: 'tours',
-        status: input.status ?? 'scheduled',
+        status: input.status ?? defaultStatus,
         createdAt,
         updatedAt: now,
+        // Only include scheduledAt when it is a non-empty string.
+        ...(typeof rawScheduledAt === 'string' ? { scheduledAt: rawScheduledAt } : {}),
       };
       await doc.send(
         new PutCommand({
@@ -201,6 +224,27 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       };
       const { Items } = await doc.send(new QueryCommand(input));
       return (Items ?? []) as TourItem[];
+    },
+
+    async listByStatus(status) {
+      // Paginate the byStatus GSI (hash=status, range=createdAt). DynamoDB
+      // returns at most 1 MB per page; follow ExclusiveStartKey until exhausted.
+      const all: TourItem[] = [];
+      let lastKey: Record<string, unknown> | undefined;
+      do {
+        const input: QueryCommandInput = {
+          TableName: table,
+          IndexName: 'byStatus',
+          KeyConditionExpression: '#st = :st',
+          ExpressionAttributeNames: { '#st': 'status' },
+          ExpressionAttributeValues: { ':st': status },
+          ...(lastKey !== undefined && { ExclusiveStartKey: lastKey }),
+        };
+        const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
+        all.push(...((Items ?? []) as TourItem[]));
+        lastKey = LastEvaluatedKey as Record<string, unknown> | undefined;
+      } while (lastKey !== undefined);
+      return all;
     },
 
     async patch(tourId, updates) {

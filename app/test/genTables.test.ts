@@ -106,7 +106,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     });
   });
 
-  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse); no stream/TTL', () => {
+  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse), byStatus; no stream/TTL', () => {
     expect(tables['tours']).toEqual({
       hash_key: { name: 'tourId', type: 'S' },
       gsis: [
@@ -124,6 +124,13 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
           index_name: 'byScheduledAt',
           hash_key: { name: '_schedPartition', type: 'S' },
           range_key: { name: 'scheduledAt', type: 'S' },
+        },
+        {
+          // Status queue GSI: hash=status, range=createdAt. Powers
+          // listByStatus() for the dashboard queue (e.g. all 'requested' tours).
+          index_name: 'byStatus',
+          hash_key: { name: 'status', type: 'S' },
+          range_key: { name: 'createdAt', type: 'S' },
         },
       ],
       stream: false,
@@ -152,7 +159,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(gsiNames('invoices')).toEqual(['byLandlord', 'byStatus']);
     expect(gsiNames('users')).toEqual(['byEmail']);
     expect(gsiNames('audit_events')).toEqual(['byActor']);
-    expect(gsiNames('tours')).toEqual(['byTenant', 'byUnit', 'byScheduledAt']);
+    expect(gsiNames('tours')).toEqual(['byTenant', 'byUnit', 'byScheduledAt', 'byStatus']);
   });
 
   it('keys and GSI keys carry name+type; optional range keys are omitted', () => {

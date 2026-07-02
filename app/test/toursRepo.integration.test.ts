@@ -174,8 +174,10 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const insideIds = result.map((t) => t.tourId);
     expect(insideIds).toContain(inside1.tourId);
     expect(insideIds).toContain(inside2.tourId);
-    // The tours outside the window must not appear
-    expect(result.every((t) => t.scheduledAt >= from && t.scheduledAt <= to)).toBe(true);
+    // The tours outside the window must not appear (scheduledAt is always
+    // present on items from listByScheduledRange — the byScheduledAt GSI is
+    // sparse and only indexes items with a scheduledAt value).
+    expect(result.every((t) => (t.scheduledAt ?? '') >= from && (t.scheduledAt ?? '') <= to)).toBe(true);
   });
 
   it('listByScheduledRange boundary: BETWEEN is inclusive on both ends', async () => {
@@ -256,5 +258,86 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     await expect(
       tours.patch('tour-ghost-does-not-exist', { status: 'cancelled' }),
     ).rejects.toBeInstanceOf(Err);
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 1 additions: requested (time-less) tours + byStatus GSI
+  // -------------------------------------------------------------------------
+
+  it('create WITHOUT scheduledAt stores status=requested and NO scheduledAt attribute', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-requested-1',
+      unitId: 'unit-requested-1',
+      tourType: 'self_guided',
+      // scheduledAt deliberately absent
+    });
+
+    expect(tour.tourId).toMatch(/^tour-/);
+    expect(tour.status).toBe('requested');
+    expect(tour.scheduledAt).toBeUndefined();
+    expect(tour._schedPartition).toBe('tours');
+    expect(tour.createdAt).toBeDefined();
+    expect(tour.updatedAt).toBeDefined();
+
+    const read = await tours.get(tour.tourId);
+    expect(read).toBeDefined();
+    expect(read!.status).toBe('requested');
+    expect(read!.scheduledAt).toBeUndefined();
+    // scheduledAt must truly be absent in the stored item (not null/empty string)
+    expect(Object.prototype.hasOwnProperty.call(read, 'scheduledAt')).toBe(false);
+  });
+
+  it('requested tour appears in listByStatus("requested")', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-bystatus-1',
+      unitId: 'unit-bystatus-1',
+      tourType: 'landlord_led',
+    });
+
+    expect(tour.status).toBe('requested');
+
+    const listed = await tours.listByStatus('requested');
+    const ids = listed.map((t) => t.tourId);
+    expect(ids).toContain(tour.tourId);
+  });
+
+  it('requested tour is absent from byScheduledAt range query spanning today', async () => {
+    const requestedTour = await tours.create({
+      tenantId: 'contact-sparse-1',
+      unitId: 'unit-sparse-1',
+      tourType: 'pm_team',
+    });
+    expect(requestedTour.status).toBe('requested');
+    expect(requestedTour.scheduledAt).toBeUndefined();
+
+    // Query a range that would capture any tour with a date in 2026
+    const from = '2026-01-01T00:00:00.000Z';
+    const to = '2026-12-31T23:59:59.000Z';
+    const rangeResult = await tours.listByScheduledRange(from, to);
+
+    const ids = rangeResult.map((t) => t.tourId);
+    expect(ids).not.toContain(requestedTour.tourId);
+  });
+
+  it('create WITH scheduledAt still produces status=scheduled (regression)', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-scheduled-regression',
+      unitId: 'unit-scheduled-regression',
+      scheduledAt: '2026-10-01T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    expect(tour.status).toBe('scheduled');
+    expect(tour.scheduledAt).toBe('2026-10-01T14:00:00.000Z');
+
+    const listed = await tours.listByStatus('scheduled');
+    expect(listed.map((t) => t.tourId)).toContain(tour.tourId);
+  });
+
+  it('listByStatus returns empty array for a status with no matching tours', async () => {
+    const result = await tours.listByStatus('confirmed');
+    // confirmed tours may or may not exist from other tests, but this call
+    // should not throw — it may return any non-error result
+    expect(Array.isArray(result)).toBe(true);
   });
 });

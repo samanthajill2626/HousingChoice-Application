@@ -81,7 +81,7 @@ describe('POST /api/tours — create', () => {
       {}, // nothing
       { unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no tenantId
       { tenantId: 't', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no unitId
-      { tenantId: 't', unitId: 'u', tourType: 'self_guided' }, // no scheduledAt
+      // scheduledAt is now OPTIONAL — no-scheduledAt case is valid (→ requested)
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z' }, // no tourType
       { tenantId: 't', unitId: 'u', scheduledAt: 'not-a-date', tourType: 'self_guided' }, // bad date
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'bad_type' }, // bad tourType
@@ -683,6 +683,237 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     // No conversation created; tour groupThreadId NOT stamped.
     expect([...world.conversations.values()]).toHaveLength(0);
     expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// Task 1: requested (time-less) tours + byStatus GSI + ?status= filter
+// ============================================================================
+
+describe('POST /api/tours — requested (time-less) tours', () => {
+  it('creates a requested tour when scheduledAt is absent → 201 status=requested', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send({
+      tenantId: 'contact-tenant-req',
+      unitId: 'unit-req',
+      tourType: 'self_guided',
+      // scheduledAt deliberately absent
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.tour.status).toBe('requested');
+    expect(res.body.tour.scheduledAt).toBeUndefined();
+    expect(res.body.tour.tenantId).toBe('contact-tenant-req');
+    expect(world.toursMap.size).toBe(1);
+  });
+
+  it('POST without scheduledAt → ZERO reminder rows (reminder invariant)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send({
+      tenantId: 'contact-tenant-req2',
+      unitId: 'unit-req2',
+      tourType: 'landlord_led',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.tour.status).toBe('requested');
+
+    const tourId = res.body.tour.tourId as string;
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('POST with scheduledAt still defaults status to scheduled and arms reminders (regression)', async () => {
+    const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+    const SCHEDULED_AT = '2026-07-20T10:00:00.000Z';
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const res = await authed(app).post('/api/tours').send({
+      tenantId: 'contact-tenant-sched',
+      unitId: 'unit-sched',
+      scheduledAt: SCHEDULED_AT,
+      tourType: 'pm_team',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.tour.status).toBe('scheduled');
+    expect(res.body.tour.scheduledAt).toBe(SCHEDULED_AT);
+
+    const tourId = res.body.tour.tourId as string;
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it('returns 400 when scheduledAt is present but invalid', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send({
+      tenantId: 't',
+      unitId: 'u',
+      scheduledAt: 'not-a-date',
+      tourType: 'self_guided',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/scheduledAt/);
+  });
+
+  it('returns 400 for missing required fields (tenantId, unitId, tourType still required)', async () => {
+    const { app } = makeWebhookHarness();
+    const cases = [
+      { unitId: 'u', tourType: 'self_guided' },         // no tenantId
+      { tenantId: 't', tourType: 'self_guided' },         // no unitId
+      { tenantId: 't', unitId: 'u' },                     // no tourType
+    ];
+    for (const body of cases) {
+      const res = await authed(app).post('/api/tours').send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+  });
+});
+
+describe('PATCH /api/tours — requested → scheduled transition', () => {
+  it('PATCH sets scheduledAt on a requested tour → 200 status=scheduled + reminders armed', async () => {
+    const FIXED_NOW = '2026-07-13T12:00:00.000Z';
+    const NEW_SCHED = '2026-07-25T10:00:00.000Z';
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    // Create a requested (time-less) tour.
+    const created = await authed(app).post('/api/tours').send({
+      tenantId: 'contact-req-to-sched',
+      unitId: 'unit-req-to-sched',
+      tourType: 'landlord_led',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+
+    // Confirm zero reminder rows at this point.
+    const rowsBefore = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rowsBefore).toHaveLength(0);
+
+    // PATCH: set a scheduledAt → should auto-transition to scheduled.
+    const patch = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: NEW_SCHED });
+    expect(patch.status).toBe(200);
+    expect(patch.body.tour.status).toBe('scheduled');
+    expect(patch.body.tour.scheduledAt).toBe(NEW_SCHED);
+
+    // Reminder ladder should now be armed (rows exist with correct dueAts).
+    const rowsAfter = [...world.tourRemindersMap.values()].filter(
+      (r) => r.tourId === tourId && r.canceledAt === undefined,
+    );
+    expect(rowsAfter.length).toBeGreaterThan(0);
+
+    // Assert the dueAts are computed from FIXED_NOW / NEW_SCHED.
+    const byKind = Object.fromEntries(rowsAfter.map((r) => [r.kind, r]));
+    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T10:00:00.000Z'); // NEW_SCHED - 24h
+    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-25T10:30:00.000Z'); // NEW_SCHED + 30m
+  });
+
+  it('PATCH canceled from requested is allowed (requested → canceled)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send({
+      tenantId: 'contact-req-cancel',
+      unitId: 'unit-req-cancel',
+      tourType: 'self_guided',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+
+    const cancel = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.tour.status).toBe('canceled');
+
+    // No reminder rows (none were ever created).
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('closed → requested is illegal (closed stays terminal)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' });
+
+    const illegal = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'requested' });
+    expect(illegal.status).toBe(409);
+    expect(illegal.body.error).toBe('illegal_status_transition');
+  });
+
+  it('no placement created and tenant status untouched on requested tour create', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'tenant-req-gate', type: 'tenant', status: 'searching' });
+
+    const res = await authed(app).post('/api/tours').send({
+      tenantId: 'tenant-req-gate',
+      unitId: 'unit-some',
+      tourType: 'self_guided',
+    });
+    expect(res.status).toBe(201);
+
+    // No placement created.
+    expect(world.placements.size).toBe(0);
+
+    // Tenant status unchanged.
+    const tenant = world.contacts.find((c) => c.contactId === 'tenant-req-gate');
+    expect(tenant?.status).toBe('searching');
+  });
+});
+
+describe('GET /api/tours — ?status= filter', () => {
+  it('GET ?status=requested returns requested tours', async () => {
+    const { app } = makeWebhookHarness();
+
+    // Create one requested and one scheduled tour.
+    await authed(app).post('/api/tours').send({
+      tenantId: 'tenant-filter-a',
+      unitId: 'unit-filter-a',
+      tourType: 'self_guided',
+      // no scheduledAt → requested
+    });
+    await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+
+    const res = await authed(app).get('/api/tours?status=requested');
+    expect(res.status).toBe(200);
+    expect(res.body.tours).toBeDefined();
+    const statuses = (res.body.tours as { status: string }[]).map((t) => t.status);
+    expect(statuses).toContain('requested');
+    expect(statuses.every((s) => s === 'requested')).toBe(true);
+  });
+
+  it('GET ?status=scheduled returns scheduled tours', async () => {
+    const { app } = makeWebhookHarness();
+    await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+
+    const res = await authed(app).get('/api/tours?status=scheduled');
+    expect(res.status).toBe(200);
+    const tours = res.body.tours as { status: string }[];
+    expect(tours.every((t) => t.status === 'scheduled')).toBe(true);
+  });
+
+  it('GET ?status=bogus → 400', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app).get('/api/tours?status=bogus');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/status/);
+  });
+
+  it('GET with no filter still returns 400 (existing rule preserved)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app).get('/api/tours');
+    expect(res.status).toBe(400);
+  });
+
+  it('existing filters (tenantId, unitId, from+to) still work with new code (regression)', async () => {
+    const { app } = makeWebhookHarness();
+    await authed(app).post('/api/tours').send({ ...BASE_CREATE_BODY, tenantId: 'tenant-regression' });
+
+    const res = await authed(app).get('/api/tours?tenantId=tenant-regression');
+    expect(res.status).toBe(200);
+    expect(res.body.tours).toHaveLength(1);
+    expect(res.body.tours[0].tenantId).toBe('tenant-regression');
   });
 });
 

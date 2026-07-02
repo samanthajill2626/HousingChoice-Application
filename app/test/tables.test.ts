@@ -180,11 +180,11 @@ describe('tables.ts — the table contract', () => {
     expect(gsiNames(t)).toEqual(['byActor']);
   });
 
-  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse, _schedPartition + scheduledAt); no stream/TTL', () => {
+  it('tours (Tours feature): PK tourId; GSIs byTenant, byUnit, byScheduledAt (sparse), byStatus; no stream/TTL', () => {
     const t = spec('tours');
     expect(t.hashKey.name).toBe('tourId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byScheduledAt']);
+    expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byScheduledAt', 'byStatus']);
     const byTenant = t.gsis.find((g) => g.indexName === 'byTenant');
     expect(byTenant?.hashKey.name).toBe('tenantId');
     expect(byTenant?.rangeKey).toBeUndefined();
@@ -195,6 +195,11 @@ describe('tables.ts — the table contract', () => {
     expect(byScheduledAt?.hashKey.name).toBe('_schedPartition');
     expect(byScheduledAt?.rangeKey?.name).toBe('scheduledAt');
     expect(byScheduledAt?.sparse).toBe(true);
+    // byStatus: hash=status, range=createdAt — powers the dashboard queue.
+    const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
+    expect(byStatus?.hashKey.name).toBe('status');
+    expect(byStatus?.rangeKey?.name).toBe('createdAt');
+    expect(byStatus?.sparse).toBeUndefined(); // NOT sparse — every item has a status
     expect(t.stream).toBeUndefined();
     expect(t.ttlAttribute).toBeUndefined();
   });

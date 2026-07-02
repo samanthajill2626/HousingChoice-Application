@@ -5,11 +5,16 @@
 // same idioms: a `as const` array → `type` → `Set` → guard → labels map.
 //
 // STATUS LIFECYCLE:
+//   requested → scheduled                     (time is set — the scheduling step)
+//   requested → canceled                      (canceled before a time is set)
 //   scheduled → confirmed → toured → closed   (normal happy path)
 //   * → canceled                               (pre-tour cancellation)
 //   confirmed/scheduled → no_show             (tenant no-show)
 //   canceled / no_show → scheduled            (reschedule — see canReschedule)
 //   toured + outcome set → closed             (exit gate)
+//
+// `requested` is the entry status for time-less tours (tenant wants a tour but
+// no scheduledAt yet). Setting scheduledAt transitions to `scheduled`.
 //
 // `closed` is the terminal for a finished-and-decided tour. The `outcome`
 // field (TourOutcome) records the exit decision; `moveForward=true` marks
@@ -18,6 +23,7 @@
 
 // --- Tour statuses -----------------------------------------------------------
 export const TOUR_STATUSES = [
+  'requested',
   'scheduled',
   'confirmed',
   'toured',
@@ -31,6 +37,7 @@ export type TourStatus = (typeof TOUR_STATUSES)[number];
 const TOUR_STATUS_SET: ReadonlySet<string> = new Set(TOUR_STATUSES);
 
 export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
+  requested: 'Requested',
   scheduled: 'Scheduled',
   confirmed: 'Confirmed',
   toured: 'Toured',
@@ -67,6 +74,7 @@ export function isTourOutcome(x: unknown): x is TourOutcome {
 
 // --- Reschedulability --------------------------------------------------------
 // A tour may be rescheduled (→ `scheduled`) from these statuses:
+//   - `requested`  — setting a time IS the scheduling step (no prior scheduledAt)
 //   - `scheduled`  — change of date/time before confirmation
 //   - `confirmed`  — late rescheduling after confirmation
 //   - `canceled`   — revived after cancellation
@@ -75,6 +83,7 @@ export function isTourOutcome(x: unknown): x is TourOutcome {
 // A `toured` tour carries a real outcome and MUST be closed via the exit gate;
 // it cannot be recycled as a new appointment. A `closed` tour is terminal.
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'requested',
   'scheduled',
   'confirmed',
   'canceled',

@@ -13,7 +13,7 @@ import { Card, CardAction, CardInlineAction, Chips, EmptyRow, KV, PendingPanel, 
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
-import { formatAddress, formatPhone } from './format.js';
+import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
 import styles from './UnknownFile.module.css';
 
 export interface UnknownFileProps {
@@ -109,7 +109,7 @@ export function UnknownFile({
             </>
           }
         />
-        <KV k="Status" v={contact.status ?? '—'} />
+        <KV k="Status" v={contact.status ? contactStatusLabel(contact.type, contact.status) : '—'} />
       </Card>
 
       <Card

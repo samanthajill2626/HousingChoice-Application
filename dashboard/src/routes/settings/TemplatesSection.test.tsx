@@ -5,7 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { OrgSettings } from '../../api/index.js';
+import type { OrgSettings, SettingsResponse } from '../../api/index.js';
 
 const getSettings = vi.fn();
 const putSettings = vi.fn();
@@ -37,10 +37,18 @@ const SETTINGS: OrgSettings = {
   preRingPauseSeconds: 2,
 };
 
+/** The read-only built-in welcome body served alongside the settings. */
+const DEFAULT_WELCOME = 'Welcome to Tenant Place! Reply STOP to unsubscribe, HELP for help.';
+
+/** Wrap a settings record in the GET/PUT wire shape. */
+function wrap(settings: OrgSettings): SettingsResponse {
+  return { settings, welcomeTextDefault: DEFAULT_WELCOME };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   isAdmin = true;
-  getSettings.mockResolvedValue({ ...SETTINGS });
+  getSettings.mockResolvedValue(wrap({ ...SETTINGS }));
 });
 
 describe('TemplatesSection — admin edit', () => {
@@ -52,9 +60,17 @@ describe('TemplatesSection — admin edit', () => {
     expect(screen.queryByText(/Read-only/i)).not.toBeInTheDocument();
   });
 
+  it('shows the served default welcome body as the empty box placeholder', async () => {
+    render(<TemplatesSection />);
+    const welcome = await screen.findByLabelText(/Housing-fair welcome text/i);
+    // The admin can READ what "blank" sends — the actual default, not a vague hint.
+    expect(welcome).toHaveAttribute('placeholder', DEFAULT_WELCOME);
+    expect(welcome).toHaveValue('');
+  });
+
   it('Save sends ONLY the changed fields', async () => {
     const u = userEvent.setup();
-    putSettings.mockResolvedValue({ ...SETTINGS, missedCallAutoText: 'Updated text' });
+    putSettings.mockResolvedValue(wrap({ ...SETTINGS, missedCallAutoText: 'Updated text' }));
     render(<TemplatesSection />);
 
     const autoText = await screen.findByLabelText(/^Missed-call auto-text/i);
@@ -84,10 +100,10 @@ describe('TemplatesSection — admin edit', () => {
   it('preserves an edit made while a save is in flight (no lost concurrent edit)', async () => {
     const u = userEvent.setup();
     // A deferred save: resolve it AFTER the user edits a second field.
-    let resolveSave: (s: OrgSettings) => void = () => {};
+    let resolveSave: (s: SettingsResponse) => void = () => {};
     putSettings.mockImplementation(
       () =>
-        new Promise<OrgSettings>((resolve) => {
+        new Promise<SettingsResponse>((resolve) => {
           resolveSave = resolve;
         }),
     );
@@ -105,7 +121,7 @@ describe('TemplatesSection — admin edit', () => {
     await u.type(welcome, 'Edit B');
 
     // The save resolves with the merged record (which has A but not B).
-    resolveSave({ ...SETTINGS, missedCallAutoText: 'Edit A' });
+    resolveSave(wrap({ ...SETTINGS, missedCallAutoText: 'Edit A' }));
 
     // The in-flight edit to field B must SURVIVE — the post-save re-hydrate must
     // not clobber it.
@@ -118,8 +134,8 @@ describe('TemplatesSection — admin edit', () => {
 describe('TemplatesSection — welcomeText clear (revert to default)', () => {
   it('clearing a previously-SET welcomeText sends welcomeText: null', async () => {
     const u = userEvent.setup();
-    getSettings.mockResolvedValue({ ...SETTINGS, welcomeText: 'Custom welcome {firstName}' });
-    putSettings.mockResolvedValue({ ...SETTINGS });
+    getSettings.mockResolvedValue(wrap({ ...SETTINGS, welcomeText: 'Custom welcome {firstName}' }));
+    putSettings.mockResolvedValue(wrap({ ...SETTINGS }));
     render(<TemplatesSection />);
 
     const welcome = await screen.findByLabelText(/Housing-fair welcome text/i);
@@ -134,7 +150,7 @@ describe('TemplatesSection — welcomeText clear (revert to default)', () => {
   it('a never-set welcomeText that stays empty sends NO welcomeText key', async () => {
     const u = userEvent.setup();
     // welcomeText absent on the baseline (the field renders empty).
-    putSettings.mockResolvedValue({ ...SETTINGS, missedCallAutoText: 'Other change' });
+    putSettings.mockResolvedValue(wrap({ ...SETTINGS, missedCallAutoText: 'Other change' }));
     render(<TemplatesSection />);
 
     // Change an unrelated field so there IS something to save…

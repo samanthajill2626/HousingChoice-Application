@@ -95,6 +95,15 @@ export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
   welcomeText?: string | null;
 };
 
+/** GET/PUT /api/settings response. `welcomeTextDefault` rides alongside the
+ *  settings (read-only, never patchable): the exact welcome body the backend
+ *  sends when `welcomeText` is unset, so the UI can show the admin what "the
+ *  default" actually says. */
+export interface SettingsResponse {
+  settings: OrgSettings;
+  welcomeTextDefault: string;
+}
+
 // --- Settings: System Status (admin-only) -----------------------------------
 // MIRRORS app/src/services/systemStatus.ts (getFlags) + app/src/adapters/
 // cloudwatch.ts (AlarmView / ErrorEventView) + the /api/system route shapes.

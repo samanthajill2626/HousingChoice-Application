@@ -8,7 +8,7 @@
 // in M1.9 (the voice/call-triage milestone). See repos/settingsRepo.ts.
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { templateHasOptOutLanguage } from '../lib/smsCompliance.js';
+import { templateHasOptOutLanguage, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { requireRole, type AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -122,9 +122,13 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
   const router = Router();
 
   // GET /api/settings — VAs may view (requireAuth, mounted upstream).
+  // `welcomeTextDefault` rides ALONGSIDE the settings (not inside them — it is
+  // read-only, never patchable): the exact welcome body sent when welcomeText is
+  // unset, so the Settings UI can SHOW the admin what "the default" actually says
+  // instead of asking them to trust a blank box.
   router.get('/', async (_req, res) => {
     const current = await settings.getOrgSettings();
-    res.json({ settings: current });
+    res.json({ settings: current, welcomeTextDefault: WELCOME_SMS });
   });
 
   // PUT /api/settings — only admins may edit.
@@ -143,7 +147,7 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
       { actor: req.user?.userId, fields: Object.keys(parsed.patch) },
       'org settings updated via API',
     );
-    res.json({ settings: updated });
+    res.json({ settings: updated, welcomeTextDefault: WELCOME_SMS });
   });
 
   return router;

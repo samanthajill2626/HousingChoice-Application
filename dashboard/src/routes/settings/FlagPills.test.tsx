@@ -1,6 +1,6 @@
 // FlagPills tests — the go-live readiness pills (doc §6). State is conveyed by
 // TEXT (queryable), never colour alone: the two A2P kill-switches show an amber
-// "Off · pre-A2P" pill when OFF; founder-cell + push read on/off; env + driver
+// "Off · pre-A2P" pill when OFF; push reads on/off; env + driver
 // are info pills. Mocks the api layer's getSystemFlags.
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

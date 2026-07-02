@@ -44,9 +44,9 @@ import { createLogCapture } from './helpers/logCapture.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
 // The inbound-voice-line HOLDER's verified cell — the number inbound calls ring.
-// (Named FOUNDER_CELL for continuity with this legacy suite; it is now purely the
-// holder's cell, NOT an env var — there is no env-var fallback anymore.)
-const FOUNDER_CELL = '+15550160000';
+// Just this suite's fake holder cell; NOT an env var (there is no FOUNDER_CELL /
+// env-var fallback anymore — inbound rings the assigned holder's verified cell).
+const HOLDER_CELL = '+15550160000';
 
 /** A standard inbound voice webhook to the BUSINESS number (non-pool To). */
 function bizVoiceParams(over: Record<string, string> = {}): Record<string, string> {
@@ -66,7 +66,7 @@ function bizVoiceParams(over: Record<string, string> = {}): Record<string, strin
  * Build a harness with the inbound bridge wired. Voice Phase 1 (spec §6): the
  * dialed cell + pre-ring push come from the INBOUND-VOICE-LINE HOLDER's verified
  * cell (there is NO env-var fallback). So we assign the seeded ADMIN user as the
- * holder with a verified cell == FOUNDER_CELL — the dialed cell is that holder's
+ * holder with a verified cell == HOLDER_CELL — the dialed cell is that holder's
  * cell and the pre-ring push targets the admin. No-holder behavior is covered by
  * the dedicated "no verified holder" test below.
  */
@@ -74,7 +74,7 @@ function founderHarness(world: FakeWorld) {
   const harness = makeWebhookHarness({ world });
   const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId);
   if (admin) {
-    admin.cell = FOUNDER_CELL;
+    admin.cell = HOLDER_CELL;
     admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
     // Establish the holder via the authoritative pointer. The fake's assign sets
     // its in-memory pointer SYNCHRONOUSLY (no awaited work before the write), so
@@ -111,7 +111,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(pauseIdx).toBeGreaterThanOrEqual(0);
     expect(dialIdx).toBeGreaterThan(pauseIdx);
     // Bridges to the FOUNDER CELL behind the whisper + press-1 gate.
-    expect(xml).toContain(FOUNDER_CELL);
+    expect(xml).toContain(HOLDER_CELL);
     expect(xml).toContain('/webhooks/twilio/voice/whisper');
     expect(xml).toContain('leg=founder');
     // M1.9c (CO1): the founder bridge RECORDS (the masked relay stays
@@ -231,7 +231,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     const { app } = founderHarness(world);
     // The inbound From is the founder's own cell (founder dialing the business
     // line, or a test from the founder phone).
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams({ From: FOUNDER_CELL }));
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams({ From: HOLDER_CELL }));
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('<Dial'); // never bridges the founder to themselves
     expect(res.text).toContain('<Hangup');
@@ -291,9 +291,9 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     const harness = makeWebhookHarness({ world });
     const { app } = harness;
     // Voice Phase 1 (spec §6): the pre-ring push targets the inbound-voice-line
-    // holder — assign the admin (verified cell == FOUNDER_CELL) so the push fires.
+    // holder — assign the admin (verified cell == HOLDER_CELL) so the push fires.
     const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId)!;
-    admin.cell = FOUNDER_CELL;
+    admin.cell = HOLDER_CELL;
     admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
     await harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId); // holder via pointer
 
@@ -305,7 +305,7 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     // The full bridge TwiML is present even though the push never completed.
     expect(xml).toContain('<Pause');
     expect(xml).toContain('<Dial');
-    expect(xml).toContain(FOUNDER_CELL);
+    expect(xml).toContain(HOLDER_CELL);
     expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
     // The push WAS started (fire-and-forget), just not awaited.
     expect(pushStarted).toBe(true);

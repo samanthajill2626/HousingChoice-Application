@@ -293,6 +293,14 @@ export async function seedAll(endpoint: string): Promise<number> {
 }
 
 /**
+ * The inbound-voice-line holder cell the LOCAL dev/e2e stack seeds. A FAKE E.164
+ * that only means anything against fake-twilio — hardcoded here, with NO env var
+ * behind it (the deprecated `FOUNDER_CELL` was removed). The e2e specs reference
+ * this same value as the seeded holder cell.
+ */
+export const SEED_INBOUND_VOICE_CELL = '+15550000001';
+
+/**
  * LOCAL dev/e2e convenience: stamp the founder/admin user as the inbound-voice-line
  * HOLDER so inbound-bridge e2e tests pass without a manual UI assignment. Idempotent:
  * when `cell` is set, stamp the founder/admin user's `cell` = cell,
@@ -301,8 +309,7 @@ export async function seedAll(endpoint: string): Promise<number> {
  *
  * PRODUCTION has NO such seed and NO env-var fallback — inbound routing requires
  * assigning an inbound-voice-line holder via the UI (the holder verifies their
- * cell first). The local stack passes the cell from the raw `FOUNDER_CELL` dev
- * env (see devReset.ts).
+ * cell first). The local stack passes `SEED_INBOUND_VOICE_CELL` (see devReset.ts).
  *
  * The founder is resolved as the seeded `user-0001` when present, else the first
  * admin user found (a tiny scan of the bounded users table). Never logs the

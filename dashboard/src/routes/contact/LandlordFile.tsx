@@ -5,10 +5,8 @@
 // are REAL (from /api/units + /api/placements + /api/tours?unitId=); Preferences +
 // Group texts + Media are pending until their backend slices land.
 import {
-  LANDLORD_STATUS_LABELS,
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
-  type LandlordStatus,
   type PlacementItem,
   type Contact,
   type ContactPhone,
@@ -30,7 +28,7 @@ import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordPlacements, landlordUnits } from './buildContactFile.js';
-import { formatAddress, formatPhone, humanize } from './format.js';
+import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 
 export interface LandlordFileProps {
@@ -52,11 +50,10 @@ export interface LandlordFileProps {
   onAddProperty?: () => void;
 }
 
-/** The landlord lead status as its display LABEL (mirrors StatusBadge's label
- *  resolution for tenants), falling back to a humanized form for an off-list value
- *  so the row never renders a raw snake_case token. */
+/** The landlord lead status as its display LABEL — delegates to the shared
+ *  contactStatusLabel (format.ts), pinned to the landlord vocabulary. */
 function landlordStatusLabel(status: string): string {
-  return LANDLORD_STATUS_LABELS[status as LandlordStatus] ?? humanize(status);
+  return contactStatusLabel('landlord', status);
 }
 
 /** A unit row label: "address · NBR" when both are known. */

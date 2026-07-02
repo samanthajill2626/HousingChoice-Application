@@ -1,14 +1,19 @@
 // Small presentation helpers for the contact detail page — pure + tested in
 // isolation so the components stay declarative.
-import type { Address } from '../../api/index.js';
+import {
+  LANDLORD_STATUS_LABELS,
+  TENANT_STATUS_LABELS,
+  type Address,
+  type LandlordStatus,
+  type TenantStatus,
+} from '../../api/index.js';
+import { formatPhoneDisplay } from '../../lib/phone.js';
 
 /** Format a US E.164 number as "(404) 010-0007". Non-US / unparseable numbers
- *  are returned as-is (honest — never mangle an unexpected shape). */
+ *  are returned as-is (honest — never mangle an unexpected shape).
+ *  Delegates to the shared lib formatter — ONE formatter implementation. */
 export function formatPhone(e164: string | undefined): string {
-  if (!e164) return '';
-  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
-  if (!m) return e164;
-  return `(${m[1] ?? ''}) ${m[2] ?? ''}-${m[3] ?? ''}`;
+  return formatPhoneDisplay(e164);
 }
 
 /** A short clock label for a message instant, e.g. "9:14a" / "1:02p". */
@@ -72,6 +77,16 @@ export function humanize(value: string): string {
   if (!value) return '';
   const spaced = value.replace(/_/g, ' ');
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** The user-facing label for a CONTACT's status, picking the right vocabulary
+ *  for the contact's type: tenants get the tenant lifecycle map, landlords the
+ *  lead-lifecycle map, everything else (unknown/pm/coarse needs_review|active)
+ *  humanizes. NEVER render a raw snake_case status — route it through here. */
+export function contactStatusLabel(type: string | undefined, status: string): string {
+  if (type === 'tenant') return TENANT_STATUS_LABELS[status as TenantStatus] ?? humanize(status);
+  if (type === 'landlord') return LANDLORD_STATUS_LABELS[status as LandlordStatus] ?? humanize(status);
+  return humanize(status);
 }
 
 /** The display name for a contact, falling back to the phone, then "Unknown". */

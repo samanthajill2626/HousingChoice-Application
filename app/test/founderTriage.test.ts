@@ -135,6 +135,40 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(JSON.stringify(push.notification.payload)).not.toContain(CALLER);
   });
 
+  it('an inbound call from a known contact with NO consent stamps consent_method=inbound_call (customer-initiated)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    const caller = world.contacts.find((c) => c.contactId === 'c-caller');
+    expect(caller?.consent_method).toBe('inbound_call');
+    expect(typeof caller?.consent_at).toBe('string');
+  });
+
+  it('the inbound_call stamp NEVER overwrites an existing consent record (idempotent)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-caller',
+      type: 'tenant',
+      phone: CALLER,
+      firstName: 'Jane',
+      lastName: 'Doe',
+      consent_method: 'web_form',
+      consent_at: '2026-06-01T00:00:00.000Z',
+    });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    const caller = world.contacts.find((c) => c.contactId === 'c-caller');
+    expect(caller?.consent_method).toBe('web_form');
+    expect(caller?.consent_at).toBe('2026-06-01T00:00:00.000Z');
+  });
+
   it('the <Pause length> comes from the founder-editable OrgSettings preRingPauseSeconds', async () => {
     const world = createFakeWorld();
     // Founder edited the pause to 5s via the Settings panel (DB-backed setting).

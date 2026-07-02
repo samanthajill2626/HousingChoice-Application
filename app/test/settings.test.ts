@@ -6,6 +6,7 @@
 // settings_updated audit event.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import { WELCOME_SMS } from '../src/lib/smsCompliance.js';
 import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -27,6 +28,10 @@ describe('GET /api/settings', () => {
     // identity + opt-out language (the compliant DEFAULT_MISSED_CALL_AUTOTEXT).
     expect(res.body.settings.missedCallAutoText).toContain('Tenant Place LLC');
     expect(res.body.settings.missedCallAutoText).toMatch(/Reply STOP to opt out\./);
+    // The read-only built-in welcome body rides ALONGSIDE the settings (never
+    // inside them — it's not patchable) so the UI can show what "blank" sends.
+    expect(res.body.welcomeTextDefault).toBe(WELCOME_SMS);
+    expect(res.body.settings.welcomeTextDefault).toBeUndefined();
   });
 
   it('401s without a session', async () => {
@@ -158,6 +163,8 @@ describe('PUT /api/settings — welcomeText (admin only)', () => {
       .send({ welcomeText: custom });
     expect(put.status).toBe(200);
     expect(put.body.settings.welcomeText).toBe(custom);
+    // The default still rides alongside (an override doesn't hide what blank sends).
+    expect(put.body.welcomeTextDefault).toBe(WELCOME_SMS);
     expect(world.settings.welcomeText).toBe(custom);
 
     // The audit event lists welcomeText among the changed fields.

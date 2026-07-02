@@ -9,8 +9,8 @@ import type {
   BroadcastsPage,
   BroadcastStatus,
   PreviewResponse,
-  OrgSettings,
   SettingsPatch,
+  SettingsResponse,
   UserRole,
   PlacementItem,
   PlacementsPage,
@@ -889,23 +889,22 @@ export function confirmCellVerify(code: string): Promise<{ ok: true; cell_verifi
 // --- Settings ▸ Templates (/api/settings) -----------------------------------
 // VAs may VIEW (GET requireAuth); only admins EDIT (PUT requireRole('admin')).
 
-/** GET /api/settings — the founder-editable templates (unwrapped from { settings }). */
-export async function getSettings(signal?: AbortSignal): Promise<OrgSettings> {
-  const res = await request<{ settings: OrgSettings }>('/api/settings', {
+/** GET /api/settings — the founder-editable templates plus `welcomeTextDefault`
+ *  (the read-only built-in welcome body, shown so admins see what "blank" sends). */
+export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings', {
     ...(signal !== undefined && { signal }),
   });
-  return res.settings;
 }
 
 /** PUT /api/settings { ...patch } — admin-only edit; send ONLY changed fields.
- *  Returns the merged settings (unwrapped). 400 on a validation failure.
- *  `welcomeText: null` is an explicit CLEAR (revert to the built-in default). */
-export async function putSettings(patch: SettingsPatch): Promise<OrgSettings> {
-  const res = await request<{ settings: OrgSettings }>('/api/settings', {
+ *  Returns the merged settings (+ welcomeTextDefault). 400 on a validation
+ *  failure. `welcomeText: null` is an explicit CLEAR (revert to the default). */
+export function putSettings(patch: SettingsPatch): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/api/settings', {
     method: 'PUT',
     body: patch,
   });
-  return res.settings;
 }
 
 // --- Settings ▸ Notifications (/api/push) -----------------------------------

@@ -35,11 +35,13 @@ export const WEB_FORM_CONSENT_LABEL =
   'Msg & data rates may apply. Reply STOP to opt out, HELP for help. See our ' +
   'Privacy Policy and Terms.';
 
-/** The four HUMAN consent methods (staff-entered on the contact-create form and
- *  the just-in-time modal). The two automatic methods (web_form / inbound_text)
- *  are never chosen by a human, so they are NOT in this list. Values match the
- *  app's ConsentMethod union (mirrored in api/types.ts). */
+/** The HUMAN consent methods (staff-entered on the contact-create form and the
+ *  just-in-time modal). The two automatic methods (web_form / inbound_text) are
+ *  never chosen by a human, so they are NOT in this list. Values match the app's
+ *  ConsentMethod union (mirrored in api/types.ts). `client_inbound` is FIRST —
+ *  in the JIT flow, "they reached out to us first" is the most common basis. */
 export const HUMAN_CONSENT_METHODS = [
+  'client_inbound',
   'verbal_phone',
   'verbal_in_person',
   'paper_form',
@@ -50,6 +52,7 @@ export type HumanConsentMethod = (typeof HUMAN_CONSENT_METHODS)[number];
 
 /** Friendly labels for the human consent methods (the dropdown options). */
 export const HUMAN_CONSENT_METHOD_LABELS: Readonly<Record<HumanConsentMethod, string>> = {
+  client_inbound: 'They texted or called us first',
   verbal_phone: 'Verbal (phone)',
   verbal_in_person: 'Verbal (in person)',
   paper_form: 'Paper form',

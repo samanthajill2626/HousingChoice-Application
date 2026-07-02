@@ -76,7 +76,7 @@ function diff(form: FormState, base: OrgSettings): SettingsPatch {
 
 export function TemplatesSection(): React.JSX.Element {
   const { isAdmin } = useAuth();
-  const { status, settings, retry, save } = useSettings();
+  const { status, settings, welcomeTextDefault, retry, save } = useSettings();
 
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -220,7 +220,9 @@ export function TemplatesSection(): React.JSX.Element {
             />
           </div>
 
-          {/* Welcome text (housing-fair) */}
+          {/* Welcome text (housing-fair). The empty box shows the ACTUAL default
+              (served by the backend) greyed as the placeholder, so an admin can
+              read exactly what "blank" sends before deciding to override it. */}
           <label className={styles.field}>
             <span className={styles.fieldLabel}>Housing-fair welcome text</span>
             <textarea
@@ -229,12 +231,12 @@ export function TemplatesSection(): React.JSX.Element {
               maxLength={MAX_TEMPLATE_CHARS}
               value={form.welcomeText}
               disabled={disabled}
-              placeholder="Leave blank to use the default welcome message."
+              placeholder={welcomeTextDefault ?? 'Leave blank to use the default welcome message.'}
               onChange={(e) => update('welcomeText', e.target.value)}
             />
             <span className={styles.hint}>
-              Use <code>{'{firstName}'}</code> where the person's first name should go.
-              Blank uses the built-in default.
+              Use <code>{'{firstName}'}</code> where the person's first name should go. Blank
+              sends the default message shown greyed above.
             </span>
           </label>
 

@@ -53,7 +53,7 @@ import { useContact } from './useContact.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
-import { contactDisplayName } from './format.js';
+import { contactDisplayName, contactStatusLabel } from './format.js';
 import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.js';
 import { buildReplyTargets } from './replyTargets.js';
 import { messageSid } from './media.js';
@@ -587,7 +587,9 @@ export function ContactDetail(): React.JSX.Element {
     if (phones.length > 0) {
       parts.push(`${phones.length} number${phones.length === 1 ? '' : 's'}`);
     }
-    if (contact!.status) parts.push(contact!.status);
+    // The status rides the header facts as its DISPLAY label ("Needs review"),
+    // never the raw snake_case token.
+    if (contact!.status) parts.push(contactStatusLabel(contact!.type, contact!.status));
     return parts.join(' · ');
   }
 }

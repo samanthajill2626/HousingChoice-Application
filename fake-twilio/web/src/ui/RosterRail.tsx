@@ -1,5 +1,5 @@
 // RosterRail — the left rail of the fake-phones UI. Personas are grouped under
-// role headings (Landlord / Tenant / PM / Staff); each row is a button showing
+// role headings (Landlord / Tenant / PM / Staff / Unknown); each row is a button showing
 // the persona label, its number, and an unread badge. The selected row is
 // visually active and carries aria-current. A "＋ Ad-hoc number" button at the
 // bottom opens the AdHocDialog (the parent owns that state). Pure presentational:
@@ -16,12 +16,17 @@ export interface RosterRailProps {
   onAddAdHoc: () => void;
 }
 
-const ROLE_ORDER: ReadonlyArray<Role> = ['landlord', 'tenant', 'pm', 'staff'];
+// 'unknown' (auto-registered parties — an app send to an unregistered number)
+// groups LAST. It must be in ROLE_ORDER: the grouping FILTERS by these roles, so
+// omitting it would hide auto-registered phones from the rail entirely — the
+// exact invisibility auto-registration exists to fix.
+const ROLE_ORDER: ReadonlyArray<Role> = ['landlord', 'tenant', 'pm', 'staff', 'unknown'];
 const ROLE_HEADING: Record<Role, string> = {
   landlord: 'Landlord',
   tenant: 'Tenant',
   pm: 'PM',
   staff: 'Staff',
+  unknown: 'Unknown',
 };
 
 export function RosterRail({

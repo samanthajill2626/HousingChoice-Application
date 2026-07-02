@@ -1,5 +1,8 @@
-// keep in sync with dashboard/src/lib/phone.ts (+ its test at dashboard/src/lib/phone.test.ts)
-//
+// keep in sync with app/src/lib/phone.ts (+ its test at app/test/phone.test.ts)
+// Dashboard mirror of the backend normalizer.  Logic must stay byte-for-byte
+// identical with the app version; the pinned test table in
+// dashboard/src/lib/phone.test.ts is the drift alarm.
+
 // Phone → E.164 normalizer (M1.5). The ONE place manual/public phone entry is
 // canonicalized before it touches the contacts byPhone GSI — auto-capture
 // (M1.2) trusts Twilio's already-E.164 `From`, but humans and the public
@@ -61,17 +64,20 @@ export function isE164(value: string): boolean {
 }
 
 /**
- * Human-friendly display form of an E.164 number — for OUTBOUND-to-staff UI
- * only (e.g. a founder-triage push for an untriaged caller), NEVER for storage,
- * logs, or a Twilio caller ID. US/Canada (+1, 11 digits) → "(AAA) BBB-CCCC";
- * anything else is returned unchanged (we don't reformat unknown country
- * shapes). undefined/empty → undefined.
+ * Human-friendly display form of an E.164 number.  US/Canada (+1, 11 digits)
+ * → "(AAA) BBB-CCCC"; anything else is returned unchanged (we don't reformat
+ * unknown country shapes).  Falsy input → empty string (safe for JSX).
  *
  * - "+14049824978"  → "(404) 982-4978"
  * - "+442079460958" → "+442079460958" (non-NANP — left as-is)
+ * - undefined / ""  → ""
+ *
+ * NOTE: the app's equivalent (`app/src/lib/phone.ts` `formatPhoneForDisplay`)
+ * returns `string | undefined` for undefined input; this dashboard version
+ * returns "" so it can be used directly in JSX without a null-coalesce.
  */
-export function formatPhoneForDisplay(e164: string | undefined): string | undefined {
-  if (e164 === undefined || e164.length === 0) return undefined;
+export function formatPhoneDisplay(e164: string | undefined): string {
+  if (!e164) return '';
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : e164;
 }

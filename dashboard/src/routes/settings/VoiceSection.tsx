@@ -9,16 +9,9 @@
 import { useState } from 'react';
 import { useMe } from '../../app/useMe.js';
 import { Button, Spinner } from '../../ui/index.js';
+import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import { useCellVerify } from './useCellVerify.js';
 import styles from './VoiceSection.module.css';
-
-/** Format a US E.164 as "(404) 555-0100" for display; pass through others. */
-function fmtCell(e164: string | undefined): string {
-  if (!e164) return '';
-  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
-  if (!m) return e164;
-  return `(${m[1] ?? ''}) ${m[2] ?? ''}-${m[3] ?? ''}`;
-}
 
 /** Friendly verified-at date. */
 function fmtVerifiedAt(iso: string | undefined): string {
@@ -28,10 +21,7 @@ function fmtVerifiedAt(iso: string | undefined): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-/** True when `value` is a valid US E.164 number (e.g. "+14045550100"). */
-function isE164(value: string): boolean {
-  return /^\+1\d{10}$/.test(value);
-}
+const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number starting with +';
 
 export function VoiceSection(): React.JSX.Element {
   const { status, me, refresh, setMe } = useMe();
@@ -56,18 +46,27 @@ export function VoiceSection(): React.JSX.Element {
     typeof me?.cell_verified_at === 'string' &&
     me.cell_verified_at.length > 0;
 
+  function onCellBlur(): void {
+    const raw = cell.trim();
+    if (raw === '') return; // empty is not an error on blur
+    const e164 = normalizeToE164(raw);
+    if (e164) {
+      setCell(formatPhoneDisplay(e164));
+      setCellError(null);
+    } else {
+      setCellError(PHONE_ERROR);
+    }
+  }
+
   async function onSend(e: React.FormEvent): Promise<void> {
     e.preventDefault();
-    const trimmed = cell.trim();
-    // Require E.164 before sending — the backend rejects anything else with a
-    // 400 invalid_cell. Surface the error client-side to avoid a round trip and
-    // give the user clear guidance. Example valid input: +14045550100.
-    if (!isE164(trimmed)) {
-      setCellError("Enter a number in E.164 format, e.g. +14045550100.");
+    const e164 = normalizeToE164(cell.trim());
+    if (!e164) {
+      setCellError(PHONE_ERROR);
       return;
     }
     setCellError(null);
-    await verify.sendCode(trimmed);
+    await verify.sendCode(e164);
   }
 
   async function onConfirm(e: React.FormEvent): Promise<void> {
@@ -110,13 +109,13 @@ export function VoiceSection(): React.JSX.Element {
             <span className={styles.currentLabel}>Your cell</span>
             {currentlyVerified ? (
               <span className={styles.verified} role="status">
-                {fmtCell(me?.cell)} — Verified ✓
+                {formatPhoneDisplay(me?.cell)} — Verified ✓
                 {me?.cell_verified_at ? (
                   <span className={styles.verifiedAt}> {fmtVerifiedAt(me.cell_verified_at)}</span>
                 ) : null}
               </span>
             ) : me?.cell ? (
-              <span className={styles.unverified}>{fmtCell(me.cell)} — not verified</span>
+              <span className={styles.unverified}>{formatPhoneDisplay(me.cell)} — not verified</span>
             ) : (
               <span className={styles.unverified}>Not set</span>
             )}
@@ -135,7 +134,7 @@ export function VoiceSection(): React.JSX.Element {
           ) : verify.phase === 'code_sent' ? (
             <form className={styles.form} onSubmit={(e) => void onConfirm(e)}>
               <p className={styles.sentNote}>
-                We texted a 6-digit code to {fmtCell(verify.pendingCell ?? cell)}.
+                We texted a 6-digit code to {formatPhoneDisplay(verify.pendingCell ?? cell)}.
               </p>
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>Verification code</span>
@@ -181,11 +180,12 @@ export function VoiceSection(): React.JSX.Element {
                   type="tel"
                   inputMode="tel"
                   autoComplete="tel"
-                  placeholder="+14045550100"
+                  placeholder="(404) 555-0123"
                   required
                   value={cell}
                   disabled={verify.busy}
                   onChange={(e) => { setCell(e.target.value); setCellError(null); }}
+                  onBlur={onCellBlur}
                 />
               </label>
               {(cellError ?? verify.error) !== null ? (

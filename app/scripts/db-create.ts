@@ -19,7 +19,7 @@ import { TABLES } from '../src/lib/tables.js';
 export const LOCAL_DEFAULT_ENDPOINT = 'http://localhost:8000';
 
 /** True only for a DynamoDB Local endpoint on this machine. */
-function isLocalEndpoint(endpoint: string): boolean {
+export function isLocalEndpoint(endpoint: string): boolean {
   try {
     const host = new URL(endpoint).hostname;
     return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
@@ -69,24 +69,44 @@ export async function dropAllTables(endpoint: string): Promise<void> {
   }
 }
 
-const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
-const reset = process.argv.includes('--reset');
+// CLI guard: only run as a script when invoked directly (not when imported as a
+// module by globalSetup or other importers). Mirrors the pattern used in lane.mjs.
+// This preserves the existing CLI behavior while making the exports importable
+// without side effects.
+const moduleUrl = import.meta.url;
+let argvUrl: string | undefined;
 try {
-  if (reset) {
-    if (!isLocalEndpoint(endpoint)) {
-      throw new Error(
-        `--reset is destructive and only allowed against a localhost DynamoDB Local ` +
-          `endpoint; refusing to drop tables at ${endpoint}`,
-      );
+  argvUrl = process.argv[1]
+    ? new URL(
+        process.argv[1].startsWith('file:')
+          ? process.argv[1]
+          : `file:///${process.argv[1].replace(/\\/g, '/')}`,
+      ).href
+    : undefined;
+} catch {
+  argvUrl = undefined;
+}
+
+if (argvUrl && moduleUrl === argvUrl) {
+  const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
+  const reset = process.argv.includes('--reset');
+  try {
+    if (reset) {
+      if (!isLocalEndpoint(endpoint)) {
+        throw new Error(
+          `--reset is destructive and only allowed against a localhost DynamoDB Local ` +
+            `endpoint; refusing to drop tables at ${endpoint}`,
+        );
+      }
+      console.log(`db:create — RESET: dropping ${TABLES.length} tables at ${endpoint}`);
+      await dropAllTables(endpoint);
     }
-    console.log(`db:create — RESET: dropping ${TABLES.length} tables at ${endpoint}`);
-    await dropAllTables(endpoint);
+    console.log(`db:create — ensuring ${TABLES.length} tables at ${endpoint}`);
+    await createAllTables(endpoint);
+    console.log('db:create — done');
+  } catch (err) {
+    console.error('db:create failed — is DynamoDB Local up? (npm run db:start)');
+    console.error(err);
+    process.exit(1);
   }
-  console.log(`db:create — ensuring ${TABLES.length} tables at ${endpoint}`);
-  await createAllTables(endpoint);
-  console.log('db:create — done');
-} catch (err) {
-  console.error('db:create failed — is DynamoDB Local up? (npm run db:start)');
-  console.error(err);
-  process.exit(1);
 }

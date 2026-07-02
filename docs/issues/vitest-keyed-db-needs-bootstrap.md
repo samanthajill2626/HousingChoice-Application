@@ -3,10 +3,11 @@ id: vitest-keyed-db-needs-bootstrap
 title: Fresh worktree vitest runs 500 on /__dev/reseed until db:create runs under the worktree test key
 type: debt
 severity: low
-status: open
+status: resolved
+resolved: 2026-07-02
 area: infra
 created: 2026-07-02
-refs: app/vitest.config.ts, app/scripts/db-create.ts, docs/issues/dynamodb-local-cross-worktree-test-contention.md
+refs: app/vitest.config.ts, app/scripts/db-create.ts, app/test/globalSetup.ts, docs/issues/dynamodb-local-cross-worktree-test-contention.md
 ---
 
 **Problem.** Since per-access-key DynamoDB Local databases (no `-sharedDb`), each worktree's
@@ -26,3 +27,13 @@ after merging the per-key change (2026-07-02).
 `db:create` default to `testAccessKeyId()` when run outside the dev loop (respect-if-set,
 mirroring vitest.config), or at minimum document the one-liner in README's hermetic-mode
 section next to the per-key explanation.
+
+**Resolution.** `app/test/globalSetup.ts` (wired into `app/vitest.config.ts` as `test.globalSetup`)
+runs before any test file. It computes the active test key (same respect-if-set logic as
+`vitest.config.ts`), probes DynamoDB Local for reachability, and calls `createAllTables(endpoint)`
+(idempotent). Fail-soft: unreachable Docker → console.warn + return (pure-unit runs unaffected).
+Non-local endpoints are refused with a warn (local-only guard). `db-create.ts` gained a CLI
+guard so its top-level execution code no longer runs on import. `isLocalEndpoint` was exported for
+reuse. Three tests in `app/test/globalSetupEnsure.test.ts` verify creation, idempotency, and the
+non-local skip. `npm test` is now self-serve on a fresh worktree (Docker must be running for
+integration tests).

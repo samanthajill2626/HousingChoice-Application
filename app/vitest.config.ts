@@ -18,5 +18,9 @@ export default defineConfig({
       AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? testAccessKeyId(),
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? 'local',
     },
+    // Auto-bootstrap the hc-local- tables under the active test key before
+    // any test runs. Fail-soft: if Docker is down the setup warns and returns;
+    // pure-unit runs are unaffected. See app/test/globalSetup.ts.
+    globalSetup: './test/globalSetup.ts',
   },
 });

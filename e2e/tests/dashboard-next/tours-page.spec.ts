@@ -1,0 +1,263 @@
+import { test, expect, type Page } from '@playwright/test';
+
+// Tours e2e spec (:5174) — covers the three scenarios from the task brief:
+//
+//   1. Schedule WITH a time (→ 'scheduled'): the /tours Upcoming section lists it,
+//      the Today board shows it under "Tours today" linking to /tours/:tourId.
+//   2. Schedule WITHOUT a time (→ 'requested'): /tours "Needs booking" lists it,
+//      the Today board does NOT show it, the tour detail shows the requested state.
+//   3. Nav ordering: Tours appears after Placements in the Workspace nav and routes
+//      to /tours (frame.spec covers label presence; we add the ordering assertion
+//      and verify the route renders the Tours heading here).
+//
+// Seeded data (app/src/lib/seedData.ts):
+//   - tenant  contact-tenant-0001 = Tasha Nguyen
+//   - unit    unit-0001 = 1450 Joseph E. Boone Blvd NW
+//              tour_process = 'Text landlord; lockbox tours weekdays 9-5.'
+//              → keyword 'lockbox' is not a recognised keyword; 'Text landlord' →
+//                'landlord' → deriveTourType → 'landlord_led'
+//   - unit    unit-0002 = 88 Sycamore St, Decatur (used as an alternative unit)
+//
+// The spec reseeds once per file (beforeAll) so all tests in this file share a
+// clean DynamoDB state and any tours created in earlier tests do not interfere.
+
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+const TENANT_ID = 'contact-tenant-0001'; // Tasha Nguyen
+const UNIT_A_ADDRESS = '1450 Joseph E. Boone Blvd NW'; // unit-0001 — has tour_process
+
+/** A future datetime-local string (HTML input format) for TODAY, one hour from now.
+ *  Must be strictly in the future to pass the dialog's validation. */
+function futureDatetimeLocal(): string {
+  const d = new Date(Date.now() + 60 * 60 * 1000); // +1 h
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  // datetime-local format: YYYY-MM-DDTHH:MM (no seconds, no timezone)
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+/** Returns the ISO date for today in YYYY-MM-DD for the Tours today query. */
+function todayIso(): string {
+  const d = new Date();
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+async function devLogin(page: Page): Promise<void> {
+  await page.goto(`${NEXT}/`);
+  await page.getByRole('button', { name: /Continue as dev user/i }).click();
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+}
+
+// Reseed once before the entire describe block so every test starts clean.
+test.beforeAll(async ({ request }) => {
+  const res = await request.post(`${NEXT}/__dev/reseed`);
+  expect(res.ok(), `reseed failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+});
+
+test.describe('Tours page', () => {
+  test('nav: Tours appears after Placements in the Workspace nav and routes to /tours', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    const workspace = page.getByRole('navigation', { name: 'Workspace' });
+
+    // Both links must be present (frame.spec also asserts labels; here we add the
+    // route + ordering check).
+    const placements = workspace.getByRole('link', { name: 'Placements', exact: true });
+    const tours = workspace.getByRole('link', { name: 'Tours', exact: true });
+    await expect(placements).toBeVisible();
+    await expect(tours).toBeVisible();
+
+    // DOM ordering: the Tours link appears AFTER the Placements link in the nav.
+    const placementsIndex = await placements.evaluate(
+      (el) => Array.from(el.closest('nav')!.querySelectorAll('a')).indexOf(el as HTMLAnchorElement),
+    );
+    const toursIndex = await tours.evaluate(
+      (el) => Array.from(el.closest('nav')!.querySelectorAll('a')).indexOf(el as HTMLAnchorElement),
+    );
+    expect(toursIndex).toBeGreaterThan(placementsIndex);
+
+    // The link routes to /tours and renders the Tours heading.
+    await tours.click();
+    await expect(page).toHaveURL(/\/tours$/);
+    await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
+  });
+
+  test('schedule WITH a time: appears in Upcoming + Today board under Tours today', async ({
+    page,
+  }) => {
+    await devLogin(page);
+
+    // Navigate to the seeded tenant's contact page.
+    await page.goto(`${NEXT}/contacts/${TENANT_ID}`);
+    await expect(page.getByText('Tasha Nguyen').first()).toBeVisible();
+
+    // Open the "Schedule a tour" dialog from the Tours card.
+    await page.getByRole('button', { name: 'Schedule a tour' }).click();
+    const dialog = page.getByRole('dialog', { name: /Schedule a tour/i });
+    await expect(dialog).toBeVisible();
+
+    // The tenant side is locked (read-only) — visible as a group.
+    await expect(dialog.getByRole('group', { name: 'Tenant' })).toContainText('Tasha Nguyen');
+
+    // Pick the seeded unit (unit-0001 / 1450 Joseph E. Boone Blvd NW).
+    const propertyField = dialog.getByRole('combobox', { name: 'Property' });
+    await propertyField.fill('Joseph');
+    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+
+    // Tour type should now be prefilled — unit-0001 has tour_process containing
+    // "landlord" → deriveTourType → 'landlord_led'.
+    // The select value should be 'Landlord-led' (the TOUR_TYPE_LABELS display value).
+    const tourTypeSelect = dialog.getByRole('combobox', { name: 'Tour type' });
+    await expect(tourTypeSelect).toHaveValue('landlord_led');
+
+    // Set a future date/time for TODAY.
+    const futureTime = futureDatetimeLocal();
+    await dialog.getByLabel('Date & time').fill(futureTime);
+
+    // Submit.
+    await dialog.getByRole('button', { name: 'Schedule' }).click();
+
+    // Dialog closes and we land on /tours/:tourId.
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/tours\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
+
+    // Capture the tour id from the URL for later assertions.
+    const tourUrl = page.url();
+    const tourIdMatch = /\/tours\/([A-Za-z0-9_-]+)$/.exec(tourUrl);
+    expect(tourIdMatch, 'Expected to be on /tours/:tourId').not.toBeNull();
+    const tourId = tourIdMatch![1]!;
+
+    // ── Tour detail sanity ──
+    // The detail page renders inside an article — status is "Scheduled".
+    const detail = page.getByRole('article', { name: 'Tour details' });
+    await expect(detail).toBeVisible();
+    await expect(detail.getByText(/Scheduled/i).first()).toBeVisible();
+
+    // ── /tours page — Upcoming section lists the tour ──
+    await page.goto(`${NEXT}/tours`);
+    await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
+
+    // The Upcoming section must contain a row linking to this tour's detail.
+    const upcoming = page.getByRole('region', { name: 'Upcoming tours' });
+    await expect(upcoming).toBeVisible();
+    const tourLink = upcoming.getByRole('link', {
+      name: new RegExp(`Tour for Tasha Nguyen at .*Joseph E\\. Boone`, 'i'),
+    });
+    await expect(tourLink).toBeVisible({ timeout: 10_000 });
+    // The link href points to /tours/:tourId.
+    await expect(tourLink).toHaveAttribute('href', `/tours/${tourId}`);
+
+    // ── Today board — "Tours today" section shows this tour ──
+    // Navigate to Today, passing the local-day boundaries so the backend's
+    // tours_today window includes our new tour (scheduled 1 h from now, same day).
+    const ymd = todayIso();
+    const toursFrom = encodeURIComponent(`${ymd}T00:00:00.000Z`);
+    const toursTo = encodeURIComponent(`${ymd}T23:59:59.999Z`);
+    await page.goto(`${NEXT}/?day=${ymd}&toursFrom=${toursFrom}&toursTo=${toursTo}`);
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+
+    // The "Tours today" section must exist and contain a link to this tour.
+    const toursSection = page.getByRole('list', { name: 'Tours today' });
+    await expect(toursSection).toBeVisible({ timeout: 10_000 });
+    const todayLink = toursSection.getByRole('link').filter({ hasText: /Tasha Nguyen/ });
+    await expect(todayLink).toBeVisible();
+    await expect(todayLink).toHaveAttribute('href', `/tours/${tourId}`);
+  });
+
+  test('schedule WITHOUT a time: appears in Needs booking, not in Today board, detail shows requested', async ({
+    page,
+  }) => {
+    await devLogin(page);
+
+    // Open the schedule dialog from the tenant file.
+    await page.goto(`${NEXT}/contacts/${TENANT_ID}`);
+    await expect(page.getByText('Tasha Nguyen').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Schedule a tour' }).click();
+    const dialog = page.getByRole('dialog', { name: /Schedule a tour/i });
+    await expect(dialog).toBeVisible();
+
+    // Pick the unit.
+    const propertyField = dialog.getByRole('combobox', { name: 'Property' });
+    await propertyField.fill('Joseph');
+    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+
+    // Leave Date & time EMPTY — the "No time yet" hint should be visible.
+    await expect(dialog.getByText(/No time yet/i)).toBeVisible();
+
+    // The Date & time input must be blank.
+    await expect(dialog.getByLabel('Date & time')).toHaveValue('');
+
+    // Submit with no time.
+    await dialog.getByRole('button', { name: 'Schedule' }).click();
+
+    // Dialog closes and we land on /tours/:tourId.
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/tours\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
+
+    const tourUrl = page.url();
+    const tourIdMatch = /\/tours\/([A-Za-z0-9_-]+)$/.exec(tourUrl);
+    expect(tourIdMatch, 'Expected to be on /tours/:tourId').not.toBeNull();
+    const tourId = tourIdMatch![1]!;
+
+    // ── Tour detail: status is "Requested" (the 'requested' label) ──
+    const detail = page.getByRole('article', { name: 'Tour details' });
+    await expect(detail).toBeVisible();
+    // The status <dd> renders the TOUR_STATUS_LABELS text ("Requested") and has
+    // aria-label="Status: Requested". Use getByLabel (aria-label match) since
+    // Playwright doesn't expose bare <dd> with aria-label via getByRole('definition').
+    await expect(detail.getByLabel('Status: Requested')).toBeVisible();
+    // Scheduled time shows '—' (no time set).
+    await expect(detail.getByLabel('Scheduled: —')).toBeVisible();
+
+    // ── /tours page — "Needs booking" section lists the tour ──
+    await page.goto(`${NEXT}/tours`);
+    await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
+
+    const needsBooking = page.getByRole('region', { name: 'Needs booking' });
+    await expect(needsBooking).toBeVisible();
+    const bookingLink = needsBooking.getByRole('link', {
+      name: new RegExp(`Tour for Tasha Nguyen at .*Joseph E\\. Boone`, 'i'),
+    });
+    await expect(bookingLink).toBeVisible({ timeout: 10_000 });
+    await expect(bookingLink).toHaveAttribute('href', `/tours/${tourId}`);
+
+    // ── Today board — "Tours today" section must NOT contain this tour ──
+    // A requested tour has no scheduledAt, so it is excluded from the window query.
+    const ymd = todayIso();
+    const toursFrom = encodeURIComponent(`${ymd}T00:00:00.000Z`);
+    const toursTo = encodeURIComponent(`${ymd}T23:59:59.999Z`);
+    await page.goto(`${NEXT}/?day=${ymd}&toursFrom=${toursFrom}&toursTo=${toursTo}`);
+    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+
+    // Either the "Tours today" section is absent entirely, or it doesn't contain
+    // a link to the requested tour.
+    const toursTodayList = page.getByRole('list', { name: 'Tours today' });
+    const todayLinkForRequestedTour = toursTodayList.getByRole('link', {
+      name: /Tasha Nguyen/,
+    });
+
+    // We don't know whether a PREVIOUS test's scheduled tour is still visible;
+    // but THIS requested tour must not be there. If "Tours today" exists at all,
+    // the link to our requested tourId must be absent.
+    const hasTodaySection = await toursTodayList.isVisible().catch(() => false);
+    if (hasTodaySection) {
+      // Assert that the link to /tours/<requestedTourId> is not present.
+      await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
+    }
+    // If the section is absent, there is nothing to assert — that also satisfies
+    // the requirement.
+
+    // Additional: the requested tour DOES link from the Needs booking section
+    // (re-assert after navigating away and back to ensure persistence).
+    await page.goto(`${NEXT}/tours`);
+    await expect(
+      page.getByRole('region', { name: 'Needs booking' }).getByRole('link', {
+        name: new RegExp(`Tour for Tasha Nguyen at .*Joseph E\\. Boone`, 'i'),
+      }),
+    ).toBeVisible({ timeout: 10_000 });
+  });
+});

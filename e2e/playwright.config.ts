@@ -18,6 +18,7 @@ const laneJson = JSON.parse(execFileSync(process.execPath, [laneMjs], { encoding
   ports: { app: number; dashboard: number; fake: number; publicBase: number };
   tablePrefix: string;
   mediaBucket: string;
+  accessKeyId: string;
 };
 
 // Expose resolved URLs to test workers (fixtures in Task 3 read these).

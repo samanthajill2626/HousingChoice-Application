@@ -39,7 +39,7 @@ const laneMjs = path.join(repoRoot, 'e2e', 'support', 'lane.mjs');
 const laneJson = JSON.parse(
   execFileSync(process.execPath, [laneMjs], { encoding: 'utf8' }).trim(),
 );
-const { lane, ports, tablePrefix, mediaBucket } = laneJson;
+const { lane, ports, tablePrefix, mediaBucket, accessKeyId } = laneJson;
 
 // Derive all per-lane URLs. 127.0.0.1 everywhere — NEVER bare 'localhost'
 // (Vite/localhost can resolve to IPv6 ::1 while the free-probe + other services
@@ -64,6 +64,7 @@ writeFileSync(
       urls: { app: appUrl, dashboard: dashboardUrl, fake: fakeUrl, publicBase: publicBaseUrl },
       tablePrefix,
       mediaBucket,
+      accessKeyId,
     },
     null,
     2,
@@ -88,6 +89,19 @@ const childEnv = {
   OTEL_SDK_DISABLED: process.env.OTEL_SDK_DISABLED ?? 'true',
   DYNAMODB_ENDPOINT: process.env.DYNAMODB_ENDPOINT ?? LOCAL_ENDPOINT,
   TABLE_PREFIX: tablePrefix,
+  // Per-lane DynamoDB Local DATABASE (not just table prefix): without
+  // -sharedDb the store is keyed by (accessKeyId, region), so this key is
+  // what gives the lane its own SQLite write lock — see
+  // docs/issues/dynamodb-local-cross-worktree-test-contention.md.
+  // FORCED, no ?? fallback: an ambient shell AWS_ACCESS_KEY_ID would silently
+  // merge every lane back into ONE database. Safe to force — the hermetic
+  // stack never touches real AWS (MinIO clients pin their own fixed creds,
+  // and DynamoDB Local ignores the secret's value). AWS_REGION is pinned
+  // because the region is part of the store identity: a drifting region
+  // would silently point the same key at a different, empty database.
+  AWS_ACCESS_KEY_ID: accessKeyId,
+  AWS_SECRET_ACCESS_KEY: 'local',
+  AWS_REGION: 'us-east-1',
   // Local S3 (MinIO) so inbound MMS media mirrors + serves back to the dashboard.
   MEDIA_BUCKET: mediaBucket,
   MEDIA_S3_ENDPOINT: process.env.MEDIA_S3_ENDPOINT ?? LOCAL_S3_ENDPOINT,
@@ -348,7 +362,7 @@ async function main() {
   // Log the resolved lane so the MCP browser (and humans) can see which ports
   // are in use — critical for debugging and for the MCP to navigate the right URL.
   log(`resolved lane ${lane}: app=${appUrl} dashboard=${dashboardUrl} fake=${fakeUrl} publicBase=${publicBaseUrl}`);
-  log(`tablePrefix=${tablePrefix} mediaBucket=${mediaBucket}`);
+  log(`tablePrefix=${tablePrefix} mediaBucket=${mediaBucket} accessKeyId=${accessKeyId}`);
 
   log('ensuring DynamoDB Local…');
   await ensureDbStarted();

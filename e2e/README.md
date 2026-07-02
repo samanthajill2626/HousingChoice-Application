@@ -98,6 +98,15 @@ all 16 lanes are occupied, the resolver exits with a clear error and the offendi
 worktree can use `E2E_LANE=<n>` to force a specific lane after a `npm run
 e2e:stop` in that worktree.
 
+**Cold-start caveat.** The shared containers (DynamoDB Local `:8000`, MinIO `:9000`)
+are single instances. If two sessions start *from cold at the same instant*, both
+race to `docker run` the same container — the loser hits a name/port conflict. This
+is narrow (it only bites when both containers are down AND two starts land within
+the same moment) and self-corrects on a re-run. To avoid it entirely when kicking
+off several worktrees at once, warm the containers first: `npm run db:start &&
+npm run s3:start` (idempotent — "already running" once up), then start the e2e runs.
+The lanes themselves are fully isolated once booted.
+
 ### `e2e/.artifacts/lane.json`
 
 Every session writes its resolved state to `e2e/.artifacts/lane.json` before

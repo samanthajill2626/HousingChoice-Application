@@ -25,7 +25,6 @@ const flags: SystemFlags = {
   env: 'local',
   smsSendingEnabled: true,
   relayLiveProvisioning: true,
-  founderCellSet: false,
   pushConfigured: false,
   messagingDriver: 'console',
 };

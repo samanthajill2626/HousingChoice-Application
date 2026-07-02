@@ -132,8 +132,9 @@ test.describe('Settings — admin path', () => {
     // FlagPills.test.tsx where the config can be driven directly.
     await expect(page.getByText('SMS sending', { exact: true })).toBeVisible();
     await expect(page.getByText('Relay provisioning', { exact: true })).toBeVisible();
-    // The founder-cell + push readiness flags render too.
-    await expect(page.getByText('Founder cell', { exact: true })).toBeVisible();
+    // The push readiness flag renders too. (There is no "Founder cell" pill — the
+    // FOUNDER_CELL concept was removed; inbound routing uses the assigned
+    // inbound-voice-line holder's verified cell.)
     await expect(page.getByText('Push notifications', { exact: true })).toBeVisible();
     // Alarms + Recent errors degrade gracefully on the local stack (no AWS).
     await expect(page.getByRole('heading', { name: 'Alarms', level: 3 })).toBeVisible();

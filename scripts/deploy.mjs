@@ -12,8 +12,9 @@
 //   1b. SECRETS GATE: abort unless .env.<env> matches /hc/<env>/app/* (read-only
 //      `secrets:check` — never mutates SSM). The instance hydrates SSM into
 //      /opt/hc/.env on every roll (step 4), so a key left in .env but never
-//      pushed would silently ship missing (the FOUNDER_CELL-not-ringing bug).
-//      The gate refuses the deploy on drift; --skip-secrets bypasses it.
+//      pushed would silently ship missing (a class of bug once seen with
+//      FOUNDER_CELL, since removed). The gate refuses the deploy on drift;
+//      --skip-secrets bypasses it.
 //   2. tag = <env>-<git short sha>-<UTC yyyyMMddHHmmss>; dirty tree = warn only
 //   3. docker buildx build --platform linux/arm64 --provenance=false --push
 //   4. SSM Run Command on the instance (payload base64-encoded to dodge
@@ -211,8 +212,8 @@ if (listOnly) {
 
 // --- 1b. secrets gate: SSM must match .env.<env> before we roll the instance ----
 // Step 4 hydrates /hc/<env>/app/* into /opt/hc/.env on the box, so a key that's
-// in .env.<env> but never `secrets:push`-ed to SSM ships SILENTLY MISSING (the
-// FOUNDER_CELL-not-ringing class of bug). `secrets:check` is READ-ONLY — it
+// in .env.<env> but never `secrets:push`-ed to SSM ships SILENTLY MISSING (a
+// class of bug once seen with FOUNDER_CELL, since removed). `secrets:check` is READ-ONLY — it
 // never writes SSM — but it exits 2 on drift, so we gate the whole deploy on it
 // here, before spending a build. This runs for fresh builds AND --tag/--promote
 // rolls (every roll re-hydrates SSM). --skip-secrets bypasses (emergencies, or

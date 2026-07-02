@@ -114,8 +114,8 @@ export interface UserItem {
    * holder is now stored as ONE authoritative pointer (the HOLDER_POINTER_KEY
    * sentinel row) and this boolean is DERIVED in the views for the dashboard
    * mirror — the repo NEVER writes it. That holder's verified `cell` is what
-   * inbound calls ring, replacing the `FOUNDER_CELL` env var. Kept on the type
-   * only so the derived view JSON has a home.
+   * inbound calls ring (there is no env-var fallback). Kept on the type only so
+   * the derived view JSON has a home.
    */
   inbound_voice_line?: boolean;
   /**

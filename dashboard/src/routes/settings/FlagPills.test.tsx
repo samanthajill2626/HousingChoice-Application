@@ -1,6 +1,6 @@
 // FlagPills tests — the go-live readiness pills (doc §6). State is conveyed by
 // TEXT (queryable), never colour alone: the two A2P kill-switches show an amber
-// "Off · pre-A2P" pill when OFF; founder-cell + push read on/off; env + driver
+// "Off · pre-A2P" pill when OFF; push reads on/off; env + driver
 // are info pills. Mocks the api layer's getSystemFlags.
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +23,6 @@ function flags(overrides: Partial<SystemFlags> = {}): SystemFlags {
     env: 'dev',
     smsSendingEnabled: true,
     relayLiveProvisioning: true,
-    founderCellSet: true,
     pushConfigured: true,
     messagingDriver: 'twilio',
     ...overrides,
@@ -52,12 +51,10 @@ describe('FlagPills', () => {
     expect(screen.queryByText('Off · pre-A2P')).not.toBeInTheDocument();
   });
 
-  it('shows founder-cell Set/Not set and push Configured/Not configured by text', async () => {
-    getSystemFlags.mockResolvedValue(flags({ founderCellSet: false, pushConfigured: false }));
+  it('shows push Configured/Not configured by text', async () => {
+    getSystemFlags.mockResolvedValue(flags({ pushConfigured: false }));
     render(<FlagPills />);
-    await waitFor(() => expect(screen.getByText('Not set')).toBeInTheDocument());
-    expect(screen.getByText('Not configured')).toBeInTheDocument();
-    expect(screen.getByText('Founder cell')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Not configured')).toBeInTheDocument());
     expect(screen.getByText('Push notifications')).toBeInTheDocument();
   });
 

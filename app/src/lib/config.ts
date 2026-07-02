@@ -143,16 +143,6 @@ export interface AppConfig {
    */
   ourPhoneNumbers: string[];
   /**
-   * The founder's E.164 cell — the dial-through TARGET for founder
-   * call-triage (M1.9b / CO2 §7.1): an inbound call to a BUSINESS number is
-   * bridged to this cell with the business number as caller ID (NEVER the
-   * real caller's). NOT a secret-secret (it's a phone number, not a
-   * credential) but OPERATOR-SET; currently a 555 placeholder — live calls
-   * need the real number wired (FOUNDER_CELL). Unset = founder triage cannot
-   * bridge (the seam logs + falls back to a minimal greeting).
-   */
-  founderCell?: string;
-  /**
    * S3 bucket inbound MMS media is mirrored into (MEDIA_BUCKET) —
    * Terraform-managed in AWS (the s3_media module's bucket). Unset locally:
    * media mirroring is skipped with a log instead.
@@ -486,18 +476,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
-  // Founder cell (M1.9b call-triage): the dial-through target. E.164-validated
-  // (same posture as OUR_PHONE_NUMBERS — a malformed number would silently
-  // disable bridging) but OPTIONAL everywhere: founder triage is a feature, and
-  // the placeholder 555 number is fine until the real cell is wired. NOT
-  // fail-fast (unlike OUR_PHONE_NUMBERS) — an unset/placeholder founder cell
-  // must not take the deployed stack down; the triage branch logs + degrades.
-  const founderCellRaw = env.FOUNDER_CELL?.trim();
-  const founderCell = founderCellRaw !== undefined && founderCellRaw.length > 0 ? founderCellRaw : undefined;
-  if (founderCell !== undefined && !/^\+[1-9]\d{1,14}$/.test(founderCell)) {
-    throw new Error(`FOUNDER_CELL must be E.164 (+1...), got: ${founderCell}`);
-  }
-
   // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
   // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
   // would accept enqueues into the in-memory adapter (silently undelivered)
@@ -635,7 +613,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,
-    ...(founderCell !== undefined && { founderCell }),
     mediaBucket: env.MEDIA_BUCKET,
     mediaS3Endpoint: mediaS3Endpoint !== undefined && mediaS3Endpoint.length > 0 ? mediaS3Endpoint : undefined,
     sseMaxConnections,

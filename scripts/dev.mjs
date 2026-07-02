@@ -200,12 +200,10 @@ if (mockRedirect) {
     TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
     SMS_SENDING_ENABLED: 'true',
-    // Founder call-triage dial-through target: a fake E.164 so an inbound call to
-    // the business number runs the FULL founder bridge through the fake (whisper →
-    // press-1 → answer → record → transcribe) instead of degrading to the "text us"
-    // fallback. Never a real cell. A real value (env/.env.dev) still wins via the
-    // only-if-absent merge below.
-    FOUNDER_CELL: process.env.FOUNDER_CELL ?? '+15550000001',
+    // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's
+    // verified cell. The local seed (devReset → seedInboundVoiceLineHolder) uses
+    // the hardcoded SEED_INBOUND_VOICE_CELL fake, so nothing is injected here (the
+    // deprecated FOUNDER_CELL env var was removed).
   };
   for (const [k, v] of Object.entries(mockDefaults)) {
     if (childEnv[k] === undefined || childEnv[k] === '') childEnv[k] = v;

@@ -99,8 +99,8 @@ async function postVoiceStatusCallback(
 const NEXT = 'http://localhost:5174';
 
 // Each case starts from a clean, deterministic slate: a FRESH (unverified) VA, and
-// the founder seeded as the inbound-voice-line holder with a VERIFIED FOUNDER_CELL
-// (resetLocalData re-runs the §6 FOUNDER_CELL migration). Cell verification +
+// the founder seeded as the inbound-voice-line holder with a verified cell
+// (resetLocalData re-seeds the holder — see SEED_INBOUND_VOICE_CELL). Cell verification +
 // inbound-holder state persist on the fixed va/founder personas, so isolating each
 // test is what keeps the "unverified VA" and single-holder assertions honest. The
 // suite runs workers:1 / fullyParallel:false, so a per-test reseed never races.
@@ -110,9 +110,10 @@ test.beforeEach(async ({ request }) => {
 /** The app's own business number in the e2e stack (OUR_PHONE_NUMBERS[0]) — the
  *  masked caller ID the target sees, and the from= on the navigator-leg ring. */
 const BUSINESS = '+15550009999';
-/** The e2e stack seeds FOUNDER_CELL onto the founder as the inbound-line holder;
- *  the inbound cases prove a REASSIGNED holder's cell wins over this value. */
-const FOUNDER_CELL = '+15550000001';
+/** The cell the local seed stamps on the founder as the inbound-line holder
+ *  (matches SEED_INBOUND_VOICE_CELL); the inbound cases prove a REASSIGNED
+ *  holder's cell wins over this seeded value. */
+const SEEDED_HOLDER_CELL = '+15550000001';
 
 /** Dev-login as a persona (va→navigator, founder→admin), then load the SPA so the
  *  session cookie is live for subsequent page.request API calls. */
@@ -273,12 +274,12 @@ test('§9.4b an unverified (pending) cell is NEVER dialed on inbound — only th
   page,
 }) => {
   const api = page.request;
-  await devLoginAs(page, 'founder@example.com'); // admin; the seeded inbound holder (verified FOUNDER_CELL)
+  await devLoginAs(page, 'founder@example.com'); // admin; the seeded inbound holder (verified SEEDED_HOLDER_CELL)
 
   // Begin (but NEVER confirm) verifying a NEW cell on the holder. verify-start only
   // writes `cell_pending` — it does NOT touch the live verified `cell` — so this cell
   // is present-but-untrusted. The invariant under test: an unverified cell is never
-  // dialed; the bridge still rings the VERIFIED holder cell (FOUNDER_CELL), not the
+  // dialed; the bridge still rings the VERIFIED holder cell (SEEDED_HOLDER_CELL), not the
   // pending one.
   const pendingCell = uniquePhone();
   const start = await api.post(`${NEXT}/api/users/me/cell/verify-start`, { data: { cell: pendingCell } });
@@ -291,14 +292,14 @@ test('§9.4b an unverified (pending) cell is NEVER dialed on inbound — only th
 
   const call = (await listCalls(api)).find((c) => c.callSid === sid)!;
   // The bridge dialed the VERIFIED holder cell; the pending (unverified) cell was NOT dialed.
-  expect(legPhones(call)).toContain(FOUNDER_CELL);
+  expect(legPhones(call)).toContain(SEEDED_HOLDER_CELL);
   expect(legPhones(call)).not.toContain(pendingCell);
 });
 
 // ---------------------------------------------------------------------------
-// §9.5 — Inbound rings the HOLDER's cell (not FOUNDER_CELL); no holder → text-us
+// §9.5 — Inbound rings the HOLDER's cell (not SEEDED_HOLDER_CELL); no holder → text-us
 // ---------------------------------------------------------------------------
-test('§9.5 inbound rings the reassigned holder cell (not FOUNDER_CELL); no holder → text-us fallback', async ({
+test('§9.5 inbound rings the reassigned holder cell (not SEEDED_HOLDER_CELL); no holder → text-us fallback', async ({
   page,
   browser,
 }) => {
@@ -315,15 +316,15 @@ test('§9.5 inbound rings the reassigned holder cell (not FOUNDER_CELL); no hold
   // Admin reassigns the inbound line to the VA → single-holder MOVE (off the founder).
   expect(await assignInboundLine(admin, vaUserId)).toBe(200);
 
-  // Inbound call → the bridge dials the HOLDER (VA) cell, NOT FOUNDER_CELL.
+  // Inbound call → the bridge dials the HOLDER (VA) cell, NOT SEEDED_HOLDER_CELL.
   const caller1 = uniquePhone();
   const sid1 = await placeCall(admin, { from: caller1, to: BUSINESS });
   await pressCall(admin, sid1, '1').catch(() => undefined);
   const call1 = (await listCalls(admin)).find((c) => c.callSid === sid1)!;
   expect(legPhones(call1)).toContain(holderCell);
-  expect(legPhones(call1)).not.toContain(FOUNDER_CELL);
+  expect(legPhones(call1)).not.toContain(SEEDED_HOLDER_CELL);
 
-  // Clear the holder → the line moves OFF the VA. In this stack FOUNDER_CELL is the
+  // Clear the holder → the line moves OFF the VA. In this stack SEEDED_HOLDER_CELL is the
   // deprecated env fallback, so a subsequent inbound no longer rings the VA's cell
   // (the single-holder move + clear invariant) and degrades to the fallback instead.
   expect(await clearInboundLine(admin, vaUserId)).toBe(200);
@@ -347,7 +348,7 @@ test('§9.6 Team page: assigning the inbound line to B moves it off A (exactly o
   const { userId: founderId } = await devLoginAs(page, 'founder@example.com');
 
   // Ensure BOTH the founder (A) and the VA (B) have verified cells so either can hold
-  // the line. Founder keeps its seeded verified FOUNDER_CELL. Verify the VA's cell.
+  // the line. Founder keeps its seeded verified SEEDED_HOLDER_CELL. Verify the VA's cell.
   const vaCtx = await browser.newContext();
   const vaPage = await vaCtx.newPage();
   const { userId: vaId } = await devLoginAs(vaPage, 'va@example.com');

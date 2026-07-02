@@ -90,7 +90,7 @@ describe('FlyerFunnel', () => {
       expect.objectContaining({
         firstName: 'Ada',
         lastName: 'Lovelace',
-        phone: '4045551234',
+        phone: '+14045551234', // normalized to E.164 on submit
         unitId: 'unit-1',
         smsConsent: true,
       }),

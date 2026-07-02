@@ -52,8 +52,7 @@ describe('VoiceSection — cell verification', () => {
     confirmCellVerify.mockResolvedValue({ ok: true, cell_verified_at: '2026-07-01T00:00:00.000Z' });
     render(<VoiceSection />);
 
-    // Enter a valid E.164 cell (the backend requires E.164; the component now
-    // validates client-side before POST — bare 10-digit inputs are rejected).
+    // Enter a valid E.164 cell directly — normalizes identically, submit sends E.164.
     const cellInput = await screen.findByLabelText(/Your mobile number/i);
     await user.type(cellInput, '+14040100001');
     await user.click(screen.getByRole('button', { name: 'Send code' }));
@@ -68,21 +67,53 @@ describe('VoiceSection — cell verification', () => {
     expect(await screen.findByText(/You can now place masked calls/i)).toBeInTheDocument();
   });
 
-  it('rejects a bare 10-digit number with a client-side E.164 error (no POST)', async () => {
+  it('accepts a bare 10-digit number: blur snaps to display form, submit POSTs E.164', async () => {
+    const user = userEvent.setup();
+    getVoiceMe.mockResolvedValue(me());
+    startCellVerify.mockResolvedValue({ ok: true });
+    render(<VoiceSection />);
+
+    const cellInput = await screen.findByLabelText(/Your mobile number/i);
+    // Type a bare 10-digit number and blur — the field should snap to the display form.
+    await user.type(cellInput, '4049824978');
+    await user.tab(); // trigger blur
+    expect(cellInput).toHaveValue('(404) 982-4978');
+
+    // Submit → API receives E.164, not the display string.
+    await user.click(screen.getByRole('button', { name: 'Send code' }));
+    expect(startCellVerify).toHaveBeenCalledWith('+14049824978');
+  });
+
+  it('shows inline error and blocks POST when an invalid number is submitted', async () => {
     const user = userEvent.setup();
     getVoiceMe.mockResolvedValue(me());
     render(<VoiceSection />);
 
     const cellInput = await screen.findByLabelText(/Your mobile number/i);
-    // Type a bare 10-digit number — the backend would 400 invalid_cell; the
-    // component must catch this client-side so no POST is attempted.
-    await user.type(cellInput, '4040100001');
-    await user.click(screen.getByRole('button', { name: 'Send code' }));
-
-    // Inline error shown; no API call attempted.
+    // Type a short/garbage number (only 3 digits — unambiguously invalid).
+    await user.type(cellInput, '404');
+    await user.tab(); // trigger blur → inline error shown
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(/E\.164/i);
+    expect(alert).toHaveTextContent(/Enter a 10-digit US number/i);
+
+    // Submit should also be blocked (no API call).
+    await user.click(screen.getByRole('button', { name: 'Send code' }));
     expect(startCellVerify).not.toHaveBeenCalled();
+  });
+
+  it('passes explicit +44 international number through unchanged', async () => {
+    const user = userEvent.setup();
+    getVoiceMe.mockResolvedValue(me());
+    startCellVerify.mockResolvedValue({ ok: true });
+    render(<VoiceSection />);
+
+    const cellInput = await screen.findByLabelText(/Your mobile number/i);
+    await user.type(cellInput, '+442079460958');
+    await user.tab(); // blur — should stay as-is (non-NANP pass-through)
+    expect(cellInput).toHaveValue('+442079460958');
+
+    await user.click(screen.getByRole('button', { name: 'Send code' }));
+    expect(startCellVerify).toHaveBeenCalledWith('+442079460958');
   });
 
   it('surfaces an invalid_code error inline (role=alert) without advancing', async () => {

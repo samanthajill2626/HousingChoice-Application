@@ -26,6 +26,49 @@ async function fillRequiredFields(user: ReturnType<typeof userEvent.setup>): Pro
 
 beforeEach(() => vi.clearAllMocks());
 
+describe('IntakeForm — phone normalize-on-blur', () => {
+  it('blur with dashed 10-digit snaps the field to display form', async () => {
+    const user = userEvent.setup();
+    setup();
+    const phoneInput = screen.getByLabelText(/phone number/i);
+    await user.type(phoneInput, '404-982-4978');
+    await user.tab(); // blur
+    expect(phoneInput).toHaveValue('(404) 982-4978');
+  });
+
+  it('blur with garbage shows inline error; submit is blocked (no onSubmit call)', async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = setup();
+    await user.type(screen.getByLabelText(/first name/i), 'Ada');
+    await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
+    const phoneInput = screen.getByLabelText(/phone number/i);
+    await user.type(phoneInput, '404'); // too short
+    await user.tab();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Enter a 10-digit US number/i);
+
+    // Check consent and try submitting — phone error blocks it.
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
+    await user.click(screen.getByRole('button', { name: /send my info/i }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('explicit +44 international passes through and submits as-is', async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = setup();
+    await user.type(screen.getByLabelText(/first name/i), 'Ada');
+    await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
+    const phoneInput = screen.getByLabelText(/phone number/i);
+    await user.type(phoneInput, '+442079460958');
+    await user.tab();
+    expect(phoneInput).toHaveValue('+442079460958'); // non-NANP, no reformat
+
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
+    await user.click(screen.getByRole('button', { name: /send my info/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ phone: '+442079460958' }));
+  });
+});
+
 describe('IntakeForm — A2P/CTIA consent gate', () => {
   it('renders the verbatim filed consent label with Privacy Policy + Terms links (new tab, rel=noreferrer)', () => {
     setup();
@@ -69,7 +112,7 @@ describe('IntakeForm — A2P/CTIA consent gate', () => {
       expect.objectContaining({
         firstName: 'Ada',
         lastName: 'Lovelace',
-        phone: '4045551234',
+        phone: '+14045551234', // normalized to E.164 on submit
         smsConsent: true,
       }),
     );

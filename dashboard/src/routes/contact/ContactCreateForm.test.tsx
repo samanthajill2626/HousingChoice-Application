@@ -260,6 +260,55 @@ describe('ContactCreateForm', () => {
     expect('customFields' in body).toBe(false);
   });
 
+  // ── Phone normalize-on-blur ────────────────────────────────────────────────────
+  it('phone blur with dashed 10-digit snaps to display form; submit sends E.164', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'n1', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '404-982-4978');
+    await user.tab(); // blur
+    expect(phoneInput).toHaveValue('(404) 982-4978');
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['phone']).toBe('+14049824978');
+  });
+
+  it('phone blur with invalid number shows inline error; submit is blocked', async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '404'); // too short
+    await user.tab();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Enter a 10-digit US number/i);
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    expect(createContact).not.toHaveBeenCalled();
+  });
+
+  it('explicit +44 international phone passes through unchanged on submit', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'n2', type: 'tenant' } as Contact);
+    setup();
+
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    const phoneInput = screen.getByLabelText(/Phone/i);
+    await user.type(phoneInput, '+442079460958');
+    await user.tab();
+    expect(phoneInput).toHaveValue('+442079460958');
+
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    await waitFor(() => expect(createContact).toHaveBeenCalled());
+    const body = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body['phone']).toBe('+442079460958');
+  });
+
   // ── Consent to text (§3.3): optional; sent only when a method is chosen ──────
   it('omits consent fields when the consent section is left untouched (optional)', async () => {
     const user = userEvent.setup();

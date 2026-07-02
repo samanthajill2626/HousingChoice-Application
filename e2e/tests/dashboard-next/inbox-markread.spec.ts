@@ -5,7 +5,7 @@ import { sendAsParty } from '../../fixtures/fakeTwilio.js';
 // Proves the bug fix end-to-end: viewing a contact's page (while the tab is
 // visible) clears its Inbox unread, INCLUDING a reply that arrives while you're
 // already looking at the page. Uses the seeded tenant (Tasha, contact-tenant-0001).
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TASHA = '+15550100001';
 
 async function devLogin(page: Page): Promise<void> {

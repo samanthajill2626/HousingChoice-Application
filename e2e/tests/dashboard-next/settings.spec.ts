@@ -10,7 +10,7 @@ import { listThreads } from '../../fixtures/fakeTwilio.js';
 //     thread store); the System status tab is reachable (Phase-A stub).
 //   - VA: limited tab set (no Team/System); Templates inputs read-only.
 // Served on :5174 (the suite baseURL); targeted by absolute URL for explicitness.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 /** Dev-login as a specific persona (founder@example.com → admin per dev.ts) by
  *  driving the dev-login endpoint directly, then loading the app so the page picks

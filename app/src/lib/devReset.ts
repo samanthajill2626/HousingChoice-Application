@@ -50,7 +50,12 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
   const { config } = deps;
   const log = deps.logger ?? defaultLogger;
   const prefix = tableName(''); // the TABLE_PREFIX
-  if (!config.dynamodbEndpoint || prefix !== 'hc-local-') {
+  // Safety guard: only allow reseed against a hermetic local DynamoDB stack.
+  // The prefix must be the lane-0 dev prefix (hc-local-) OR a per-lane e2e
+  // prefix (hc-local-<N>- where N is a positive integer). This prevents
+  // accidental resets against dev-cloud or production tables.
+  const isHermeticPrefix = prefix === 'hc-local-' || /^hc-local-\d+-$/.test(prefix);
+  if (!config.dynamodbEndpoint || !isHermeticPrefix) {
     throw new Error(
       `resetLocalData refused: not a hermetic local stack (endpoint=${config.dynamodbEndpoint ?? 'unset'}, prefix=${prefix}).`,
     );

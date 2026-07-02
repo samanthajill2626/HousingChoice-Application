@@ -28,7 +28,7 @@ import { test, expect } from '@playwright/test';
 //   - Send button     → role="button",  name "Send" (Composer.tsx)
 //   - message bubble  → [data-testid="message-bubble"] with party-centric
 //                       [data-party-side="outgoing"|"incoming"] (MessageBubble.tsx)
-const FAKE_PHONES_URL = process.env.FAKE_PHONES_URL ?? 'http://localhost:8889';
+const FAKE_PHONES_URL = process.env['FAKE_TWILIO_URL'] ?? process.env.FAKE_PHONES_URL ?? 'http://127.0.0.1:8889';
 
 // Seeded tenant persona (fake-twilio/src/engine/registry.ts SEEDED_PERSONAS).
 const TENANT_NUMBER = '+15550100001';

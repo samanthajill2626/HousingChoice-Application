@@ -7,7 +7,7 @@ import { sendAsParty, listThreads } from '../../fixtures/fakeTwilio.js';
 // app's inbound pipeline → surfaces in the new Inbox (unread) → opening the row lands
 // on the contact page where the message is in the timeline → a staff reply goes out
 // through the real driver and delivers in the tenant's fake thread.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TASHA = '+15550100001'; // contact-tenant-0001's primary number
 
 async function devLogin(page: Page): Promise<void> {

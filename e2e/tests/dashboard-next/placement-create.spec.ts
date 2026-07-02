@@ -20,7 +20,7 @@ import { test, expect, type Page } from '@playwright/test';
 // succeeds. We deliberately pair Tasha with unit-0002 (no UNIT-side overlap) and
 // assert the create succeeds despite the tenant notice. Served on :5174 (the suite
 // baseURL); targeted by absolute URL for explicitness.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 const SEEDED_TENANT = 'contact-tenant-0001'; // Tasha Nguyen
 const SEEDED_UNIT_FREE = 'unit-0002'; // 88 Sycamore St, Decatur — no active placement

@@ -39,14 +39,20 @@ function formatScheduledAt(iso: string | undefined): string {
   });
 }
 
-/** The statuses from which a navigator can cancel (anything not already terminal). */
+/** The statuses from which a navigator can cancel.
+ *  Mirrors what the backend PATCH actually permits (any non-closed, non-toured status). */
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'requested',
   'scheduled',
   'confirmed',
 ]);
 
-/** The statuses from which a navigator can reschedule (mirrors canReschedule in toursModel). */
+/** The statuses from which a navigator can reschedule / book a time.
+ *  Mirrors canReschedule in app/src/lib/toursModel.ts:
+ *    requested (set a time = the scheduling step), scheduled, confirmed,
+ *    canceled (revival), no_show (second chance). */
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'requested',
   'scheduled',
   'confirmed',
   'canceled',
@@ -148,6 +154,8 @@ export function TourDetail(): React.JSX.Element {
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
   const canCancel = CANCELABLE.has(tour.status as TourStatus);
   const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
+  // A 'requested' tour has no time yet — the action is "Book a time", not "Reschedule".
+  const isRequested = tour.status === 'requested';
   // Exit gate: show when the tour has been toured but not yet decided
   const canRecord = tour.status === 'toured' && tour.outcome === undefined;
 
@@ -204,20 +212,25 @@ export function TourDetail(): React.JSX.Element {
 
       {actionError !== null ? <p role="alert">{actionError}</p> : null}
 
-      {/* Reschedule */}
+      {/* Book a time (requested) / Reschedule (all other reschedulable statuses) */}
       {canReschedule && !showReschedule ? (
         <button
           type="button"
           onClick={() => setShowReschedule(true)}
           disabled={submitting}
-          aria-label="Reschedule this tour"
+          aria-label={isRequested ? 'Book a time for this tour' : 'Reschedule this tour'}
         >
-          Reschedule
+          {isRequested ? 'Book a time' : 'Reschedule'}
         </button>
       ) : null}
       {showReschedule ? (
-        <form onSubmit={handleReschedule} aria-label="Reschedule tour form">
-          <label htmlFor="tour-reschedule-at">New date and time</label>
+        <form
+          onSubmit={handleReschedule}
+          aria-label={isRequested ? 'Book a time form' : 'Reschedule tour form'}
+        >
+          <label htmlFor="tour-reschedule-at">
+            {isRequested ? 'Date and time' : 'New date and time'}
+          </label>
           <input
             id="tour-reschedule-at"
             type="datetime-local"
@@ -226,7 +239,7 @@ export function TourDetail(): React.JSX.Element {
             required
           />
           <button type="submit" disabled={submitting || !newScheduledAt}>
-            Confirm reschedule
+            {isRequested ? 'Confirm booking' : 'Confirm reschedule'}
           </button>
           <button type="button" onClick={() => { setShowReschedule(false); setNewScheduledAt(''); }}>
             Cancel

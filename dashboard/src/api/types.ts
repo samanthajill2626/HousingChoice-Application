@@ -551,8 +551,10 @@ export interface Tour {
   moveForward?: boolean;
   /** True when outcome+moveForward have been set and moveForward is true. */
   convertible?: boolean;
-  created_at?: string;
-  updated_at?: string;
+  /** ISO 8601 — when the tour was created. camelCase to match the server's TourItem shape. */
+  createdAt?: string;
+  /** ISO 8601 — when the tour was last updated. camelCase to match the server's TourItem shape. */
+  updatedAt?: string;
   [key: string]: unknown;
 }
 

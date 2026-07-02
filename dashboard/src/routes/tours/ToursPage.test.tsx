@@ -106,7 +106,7 @@ const TOUR_TODAY: Tour = {
   scheduledAt: todayAt(14, 0), // 2:00 PM today
   tourType: 'self_guided',
   status: 'scheduled',
-  created_at: '2026-06-01T10:00:00Z',
+  createdAt: '2026-06-01T10:00:00Z',
 };
 
 /** A scheduled upcoming tour for tenant c2 / unit u2 in 7 days. */
@@ -117,7 +117,7 @@ const TOUR_NEXT_WEEK: Tour = {
   scheduledAt: sevenDaysFrom(10),
   tourType: 'landlord_led',
   status: 'confirmed',
-  created_at: '2026-06-02T10:00:00Z',
+  createdAt: '2026-06-02T10:00:00Z',
 };
 
 /** A second upcoming tour also in 7 days (same date group as TOUR_NEXT_WEEK). */
@@ -128,7 +128,7 @@ const TOUR_NEXT_WEEK_2: Tour = {
   scheduledAt: sevenDaysFrom(14), // same date, later time
   tourType: 'pm_team',
   status: 'scheduled',
-  created_at: '2026-06-03T10:00:00Z',
+  createdAt: '2026-06-03T10:00:00Z',
 };
 
 /** A third upcoming tour in 14 days (a different date group). */
@@ -139,7 +139,7 @@ const TOUR_TWO_WEEKS: Tour = {
   scheduledAt: fourteenDaysFrom(11),
   tourType: 'self_guided',
   status: 'scheduled',
-  created_at: '2026-06-04T10:00:00Z',
+  createdAt: '2026-06-04T10:00:00Z',
 };
 
 /** A requested (time-less) tour — older. */
@@ -149,7 +149,7 @@ const TOUR_REQUESTED_OLD: Tour = {
   unitId: 'u1',
   tourType: 'self_guided',
   status: 'requested',
-  created_at: '2026-05-01T08:00:00Z',
+  createdAt: '2026-05-01T08:00:00Z',
 };
 
 /** A requested (time-less) tour — newer. */
@@ -159,7 +159,7 @@ const TOUR_REQUESTED_NEW: Tour = {
   unitId: 'u2',
   tourType: 'landlord_led',
   status: 'requested',
-  created_at: '2026-05-15T08:00:00Z',
+  createdAt: '2026-05-15T08:00:00Z',
 };
 
 // ---------------------------------------------------------------------------
@@ -291,7 +291,7 @@ describe('ToursPage', () => {
   });
 
   it('lists needs-booking tours in the order provided by useTours (oldest first)', () => {
-    // useTours sorts by created_at ascending before returning. The component renders
+    // useTours sorts by createdAt ascending before returning. The component renders
     // whatever the hook provides. Here we supply already-sorted data (oldest first)
     // and assert the component renders them in that order.
     readyAll([], [TOUR_REQUESTED_OLD, TOUR_REQUESTED_NEW]);

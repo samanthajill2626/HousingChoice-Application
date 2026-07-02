@@ -19,7 +19,7 @@ export interface ToursPageState {
   /** Tours in the next 30 days (scheduled range). Sorted ascending by scheduledAt. */
   upcoming: Tour[];
   /** Time-less tours awaiting scheduling (status='requested'). Sorted ascending by
-   *  created_at (oldest first). */
+   *  createdAt (oldest first). */
   needsBooking: Tour[];
 }
 
@@ -61,10 +61,10 @@ export function useTours(): ToursPageState {
           return aAt < bAt ? -1 : aAt > bAt ? 1 : 0;
         });
 
-        // Sort needs-booking ascending by created_at (oldest first).
+        // Sort needs-booking ascending by createdAt (oldest first).
         const sortedNeedsBooking = [...needsBooking].sort((a, b) => {
-          const aAt = a.created_at ?? '';
-          const bAt = b.created_at ?? '';
+          const aAt = a.createdAt ?? '';
+          const bAt = b.createdAt ?? '';
           return aAt < bAt ? -1 : aAt > bAt ? 1 : 0;
         });
 

@@ -90,7 +90,47 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Book a time/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Cancel this tour/i })).not.toBeInTheDocument();
+  });
+
+  it('a requested tour renders "Book a time" and Cancel controls', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
+    // "Book a time" — not "Reschedule" — for a tour never yet scheduled
+    expect(screen.getByRole('button', { name: /Book a time/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
+    // Cancel must also be present
+    expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
+  });
+
+  it('booking a time on a requested tour PATCHes scheduledAt and the UI reflects scheduled', async () => {
+    const requestedTour = makeTour({ status: 'requested', scheduledAt: undefined });
+    const scheduledTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
+    getTour.mockResolvedValue(requestedTour);
+    patchTour.mockResolvedValue(scheduledTour);
+
+    renderDetail();
+    await waitFor(() => expect(screen.getByRole('button', { name: /Book a time/i })).toBeInTheDocument());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Book a time/i }));
+
+    // Booking form must appear
+    expect(screen.getByRole('form', { name: /Book a time form/i })).toBeInTheDocument();
+    const dateInput = screen.getByLabelText(/Date and time/i);
+    await user.type(dateInput, '2026-07-20T10:00');
+
+    await user.click(screen.getByRole('button', { name: /Confirm/i }));
+
+    // PATCH must include scheduledAt (status: 'scheduled' may also be included)
+    expect(patchTour).toHaveBeenCalledWith(
+      'tour-abc',
+      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20') }),
+    );
+    // After PATCH the UI reflects the new status
+    await waitFor(() => expect(screen.getByLabelText(/Status: Scheduled/i)).toBeInTheDocument());
   });
 
   it('canceling a tour calls PATCH with status=canceled', async () => {

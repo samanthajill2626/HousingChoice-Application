@@ -1,14 +1,13 @@
 // Small presentation helpers for the contact detail page — pure + tested in
 // isolation so the components stay declarative.
 import type { Address } from '../../api/index.js';
+import { formatPhoneDisplay } from '../../lib/phone.js';
 
 /** Format a US E.164 number as "(404) 010-0007". Non-US / unparseable numbers
- *  are returned as-is (honest — never mangle an unexpected shape). */
+ *  are returned as-is (honest — never mangle an unexpected shape).
+ *  Delegates to the shared lib formatter — ONE formatter implementation. */
 export function formatPhone(e164: string | undefined): string {
-  if (!e164) return '';
-  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
-  if (!m) return e164;
-  return `(${m[1] ?? ''}) ${m[2] ?? ''}-${m[3] ?? ''}`;
+  return formatPhoneDisplay(e164);
 }
 
 /** A short clock label for a message instant, e.g. "9:14a" / "1:02p". */

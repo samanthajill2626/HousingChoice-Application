@@ -1,86 +1,42 @@
-# Task 1 Report — Lane resolver module + unit tests
+# Task 1 Report — Shared dashboard phone lib + formatter consolidation + pinned tests
 
-**Status:** DONE
+**Date:** 2026-07-02  **Branch:** feat/flexible-phone-entry  **Status:** DONE
 
----
+## What was built
 
-## Files changed
+### `dashboard/src/lib/phone.ts` (new)
+- `normalizeToE164` — verbatim line-for-line port from `app/src/lib/phone.ts`; all code comments preserved.
+- `isE164` — verbatim port.
+- `formatPhoneDisplay` — mirrors `formatPhoneForDisplay` semantics (`+1XXXXXXXXXX` → `(AAA) BBB-CCCC`; non-NANP returned unchanged); returns `string` (not `string | undefined`) for undefined/empty input so it's safe in JSX without null-coalesce. Contract difference documented in the JSDoc.
+- Header cross-link: "keep in sync with app/src/lib/phone.ts (+ its test)".
 
-| File | Action | Notes |
-|---|---|---|
-| `e2e/support/lane.mjs` | Created | Pure ESM resolver — resolveLane, defaultProbe, CLI mode, internal exports |
-| `e2e/support/lane.d.ts` | Created | Hand-written TS types for all exports |
-| `e2e/tsconfig.json` | Modified | Added `"allowJs": true`; expanded `include` to cover `support/**` |
-| `app/test/lane.test.ts` | Created | 23 vitest unit tests (app workspace, runs in CI) |
-| `app/tsconfig.test.json` | Modified | Added `"allowJs": true` + `"../e2e/support"` in `include` so the .d.ts resolves |
+### `app/src/lib/phone.ts` (comment-only edit)
+- Added mirror cross-link at top: "keep in sync with dashboard/src/lib/phone.ts (+ its test)".
+- Zero behavior change.
 
----
+### `dashboard/src/lib/phone.test.ts` (new)
+- Pins the SAME input→expected table as `app/test/phone.test.ts` — every case mirrored exactly (9 `it` blocks covering all paths: E.164 passthrough, 10-digit NANP stripping, 11-digit leading-1, explicit-`+` international, 9-case reject table, `isE164` accepts/rejects, `formatPhoneDisplay` NANP/non-NANP/falsy).
+- One documented contract difference in `formatPhoneDisplay`: returns `''` (not `undefined`) for falsy input, matching the dashboard's JSX-safe contract.
 
-## Design decisions
+### `dashboard/src/routes/contact/format.ts` (consolidation)
+- Added import `formatPhoneDisplay` from `../../lib/phone.js`.
+- Replaced `formatPhone`'s inline regex body with a one-line delegation: `return formatPhoneDisplay(e164)`.
+- All 12+ import sites unchanged — the function signature and return type are identical.
+- ONE formatter implementation now; the old duplicated regex is gone.
 
-- **Worktree identity:** uses `git rev-parse --absolute-git-dir` (per-worktree gitdir, not
-  `--git-common-dir` which is shared). Falls back to the module's own directory.
-- **Hash:** djb2 (unsigned 32-bit) → `(h % MAX_LANES) + 1` for [1..16]. No dependencies.
-- **Free-probe:** `net.createServer().listen(port, host)` — real TCP bind attempt.
-  Injectable via `opts.probe` for deterministic testing.
-- **CLI detection:** compares `import.meta.url` to argv[1] normalized as a file URL
-  (handles Windows backslash paths).
-- **Test runner:** app workspace vitest (the e2e workspace has no vitest; app already has it
-  and can import `../../e2e/support/lane.mjs` via a relative path).
+## Verification results
 
----
+| Check | Result |
+|---|---|
+| `npm run typecheck` | EXIT:0 |
+| `npm test -w @housingchoice/dashboard` | EXIT:0 — 96 files / 730 tests passed (includes `src/lib/phone.test.ts` 9 tests + `src/routes/contact/format.test.ts` 11 tests) |
+| `npm test -w @housingchoice/app -- test/phone.test.ts` | EXIT:0 — 1 file / 9 tests passed |
 
-## Test run (23/23 green)
+## Self-review notes
 
-```
-vitest run --reporter=verbose app/test/lane.test.ts
-
- ✓ hash stability > djb2 is deterministic across calls for the same string
- ✓ hash stability > hashToLane always returns a value in [1, MAX_LANES]
- ✓ hash stability > hashToLane is stable across repeated calls for same identity
- ✓ hash stability > resolveLane returns the same lane on repeated calls (no env, no held ports)
- ✓ E2E_LANE override > honors E2E_LANE=3 and returns lane 3 without probing
- ✓ E2E_LANE override > returns correct ports for overridden lane
- ✓ E2E_LANE override > returns correct tablePrefix and mediaBucket for overridden lane
- ✓ E2E_LANE validation > rejects E2E_LANE=0 with a clear error mentioning lane 0 is forbidden
- ✓ E2E_LANE validation > rejects E2E_LANE=0 with a clear error
- ✓ E2E_LANE validation > rejects E2E_LANE=17 (above MAX_LANES)
- ✓ E2E_LANE validation > rejects E2E_LANE=-1 (negative)
- ✓ E2E_LANE validation > rejects E2E_LANE=abc (non-numeric)
- ✓ free-probe > bumps past a lane whose block has a held port (using a real TCP listener)
- ✓ free-probe > bumps using a real TCP listener on a computed port
- ✓ forbidden ports > lane 0 ports (8080/5174/8889/5173) never appear in any resolved block
- ✓ forbidden ports > 8000/9000 (DynamoDB/MinIO) never appear in any resolved block
- ✓ forbidden ports > no resolved block port is in the forbidden set [8080,5174,8889,5173,8000,9000]
- ✓ cap exceeded > throws a clear actionable error when all lanes are busy
- ✓ cap exceeded > error message mentions setting E2E_LANE
- ✓ portsForLane > lane 1 → 9101/9111/9121/9131
- ✓ portsForLane > lane 2 → 9201/9211/9221/9231
- ✓ portsForLane > lane 16 → 10601/10611/10621/10631
- ✓ portsForLane > all lanes produce tablePrefix and mediaBucket with lane number
-
-Test Files: 1 passed (1)
-Tests: 23 passed (23)
-Duration: 663ms
-```
-
-## CLI output
-
-```
-node e2e/support/lane.mjs
-{"lane":16,"ports":{"app":10601,"dashboard":10611,"fake":10621,"publicBase":10631},"tablePrefix":"hc-local-16-","mediaBucket":"hc-local-media-16"}
-```
-
-## Typecheck
-
-```
-npm run typecheck  →  all workspaces clean (0 errors)
-```
-
----
-
-## Concerns
-
-None. The `app/tsconfig.test.json` change (adding `allowJs` + `../e2e/support` in `include`) is
-scoped to the typecheck-only test config and does not affect the app build or src. The `.d.ts`
-resolves correctly via NodeNext module resolution once `allowJs: true` is present.
+- **Verbatim fidelity:** `normalizeToE164` and `isE164` are byte-for-byte identical to the app originals; the only diff is the file-level cross-link header comment.
+- **`formatPhoneDisplay` vs `formatPhoneForDisplay`:** The dashboard function uses `!e164` (falsy guard) and returns `''` instead of `undefined` for the missing-input case — this matches `formatPhone`'s existing contract and avoids a breaking change for all 12+ importers. The JSDoc documents this deliberately.
+- **Consolidation:** `formatPhone` is now a pure wrapper — ONE regex definition lives in `dashboard/src/lib/phone.ts`. The `format.test.ts` `formatPhone` cases still pass, confirming the wrapper is transparent.
+- **No YAGNI creep:** `usePhoneField` was not built (deferred to Task 3 per brief).
+- **No app behavior change:** the only app file touched got a one-line comment prepended; tests still pass unchanged.
+- **Drift alarm:** any divergence in either `normalizeToE164` implementation without a matching test update will fail `phone.test.ts` on one or both sides.

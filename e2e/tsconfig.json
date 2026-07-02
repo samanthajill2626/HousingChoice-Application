@@ -2,7 +2,8 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": true
   },
-  "include": ["playwright.config.ts", "*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "scenarios/**/*.ts"]
+  "include": ["playwright.config.ts", "*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "scenarios/**/*.ts", "support/**/*.ts", "support/**/*.mjs"]
 }

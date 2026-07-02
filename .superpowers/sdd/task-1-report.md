@@ -1,4 +1,4 @@
-# Task 1 Report — `Tour` entity + `toursRepo`
+# Task 1 Report — Lane resolver module + unit tests
 
 **Status:** DONE
 
@@ -8,77 +8,79 @@
 
 | File | Action | Notes |
 |---|---|---|
-| `app/src/lib/tables.ts` | Modified | Added `tours` table + 3 GSIs (`byTenant`, `byUnit`, `byScheduledAt`) |
-| `app/src/repos/toursRepo.ts` | Created | `TourItem`, `createToursRepo(deps)`, all 6 repo functions |
-| `app/test/toursRepo.integration.test.ts` | Created | 10 integration tests, mirrors `unitsRepo.integration.test.ts` |
-| `app/test/tables.test.ts` | Modified | Added `'tours'` to table list; added tours contract test |
-| `app/test/genTables.test.ts` | Modified | Added `'tours'` to alphabetical Terraform key list; added tours Terraform shape test |
-| `infra/envs/dev/tables.auto.tfvars.json` | Modified | `npm run gen:tables` auto-updated (15 tables) |
-| `infra/envs/prod/tables.auto.tfvars.json` | Modified | `npm run gen:tables` auto-updated (15 tables) |
+| `e2e/support/lane.mjs` | Created | Pure ESM resolver — resolveLane, defaultProbe, CLI mode, internal exports |
+| `e2e/support/lane.d.ts` | Created | Hand-written TS types for all exports |
+| `e2e/tsconfig.json` | Modified | Added `"allowJs": true`; expanded `include` to cover `support/**` |
+| `app/test/lane.test.ts` | Created | 23 vitest unit tests (app workspace, runs in CI) |
+| `app/tsconfig.test.json` | Modified | Added `"allowJs": true` + `"../e2e/support"` in `include` so the .d.ts resolves |
 
 ---
 
-## TDD — RED → GREEN
+## Design decisions
 
-**RED phase:** Tests written before the repo existed. Running them against a missing module would have produced import errors. Because the table creation is in `tables.ts` (consumed by `ensureTable` in `beforeAll`), the test would have also failed the `getTableSpec('tours')` call.
+- **Worktree identity:** uses `git rev-parse --absolute-git-dir` (per-worktree gitdir, not
+  `--git-common-dir` which is shared). Falls back to the module's own directory.
+- **Hash:** djb2 (unsigned 32-bit) → `(h % MAX_LANES) + 1` for [1..16]. No dependencies.
+- **Free-probe:** `net.createServer().listen(port, host)` — real TCP bind attempt.
+  Injectable via `opts.probe` for deterministic testing.
+- **CLI detection:** compares `import.meta.url` to argv[1] normalized as a file URL
+  (handles Windows backslash paths).
+- **Test runner:** app workspace vitest (the e2e workspace has no vitest; app already has it
+  and can import `../../e2e/support/lane.mjs` via a relative path).
 
-**GREEN phase:** Implemented `toursRepo.ts` and added the `tours` table spec to `tables.ts`. All 10 tests passed immediately on first run.
+---
 
-### Test run output (GREEN)
+## Test run (23/23 green)
 
 ```
-✓ create generates a tourId, stamps timestamps, and get reads it back  12ms
-✓ get returns undefined for an unknown tourId  3ms
-✓ create stores optional fields (groupThreadId, outcome, moveForward, convertible)  5ms
-✓ listByTenant returns all tours for a tenant and none for others  16ms
-✓ listByUnit returns all tours for a unit and none for others  9ms
-✓ listByScheduledRange returns tours in window and excludes tours outside  16ms
-✓ listByScheduledRange boundary: BETWEEN is inclusive on both ends  8ms
-✓ patch updates fields and bumps updatedAt without touching other fields  5ms
-✓ patch exit gate: sets outcome, moveForward, convertible  4ms
-✓ patch throws ConditionalCheckFailedException for an unknown tourId  5ms
+vitest run --reporter=verbose app/test/lane.test.ts
+
+ ✓ hash stability > djb2 is deterministic across calls for the same string
+ ✓ hash stability > hashToLane always returns a value in [1, MAX_LANES]
+ ✓ hash stability > hashToLane is stable across repeated calls for same identity
+ ✓ hash stability > resolveLane returns the same lane on repeated calls (no env, no held ports)
+ ✓ E2E_LANE override > honors E2E_LANE=3 and returns lane 3 without probing
+ ✓ E2E_LANE override > returns correct ports for overridden lane
+ ✓ E2E_LANE override > returns correct tablePrefix and mediaBucket for overridden lane
+ ✓ E2E_LANE validation > rejects E2E_LANE=0 with a clear error mentioning lane 0 is forbidden
+ ✓ E2E_LANE validation > rejects E2E_LANE=0 with a clear error
+ ✓ E2E_LANE validation > rejects E2E_LANE=17 (above MAX_LANES)
+ ✓ E2E_LANE validation > rejects E2E_LANE=-1 (negative)
+ ✓ E2E_LANE validation > rejects E2E_LANE=abc (non-numeric)
+ ✓ free-probe > bumps past a lane whose block has a held port (using a real TCP listener)
+ ✓ free-probe > bumps using a real TCP listener on a computed port
+ ✓ forbidden ports > lane 0 ports (8080/5174/8889/5173) never appear in any resolved block
+ ✓ forbidden ports > 8000/9000 (DynamoDB/MinIO) never appear in any resolved block
+ ✓ forbidden ports > no resolved block port is in the forbidden set [8080,5174,8889,5173,8000,9000]
+ ✓ cap exceeded > throws a clear actionable error when all lanes are busy
+ ✓ cap exceeded > error message mentions setting E2E_LANE
+ ✓ portsForLane > lane 1 → 9101/9111/9121/9131
+ ✓ portsForLane > lane 2 → 9201/9211/9221/9231
+ ✓ portsForLane > lane 16 → 10601/10611/10621/10631
+ ✓ portsForLane > all lanes produce tablePrefix and mediaBucket with lane number
 
 Test Files: 1 passed (1)
-Tests: 10 passed (10)
-Duration: 994ms
+Tests: 23 passed (23)
+Duration: 663ms
 ```
 
-### Full app suite (no regressions)
+## CLI output
 
 ```
-Test Files: 117 passed | 1 skipped (118)
-Tests: 1451 passed | 5 skipped (1456)
+node e2e/support/lane.mjs
+{"lane":16,"ports":{"app":10601,"dashboard":10611,"fake":10621,"publicBase":10631},"tablePrefix":"hc-local-16-","mediaBucket":"hc-local-media-16"}
 ```
 
-(1 skipped = `staticSmoke.test.ts` — no built dashboard; expected)
-
-### Typecheck
+## Typecheck
 
 ```
-npm run typecheck — all workspaces clean (0 errors)
+npm run typecheck  →  all workspaces clean (0 errors)
 ```
-
----
-
-## GSI design decisions
-
-- **`byTenant`**: hash `tenantId`; no range key. Supports `listByTenant(tenantId)`.
-- **`byUnit`**: hash `unitId`; no range key. Supports `listByUnit(unitId)`.
-- **`byScheduledAt`**: hash `_schedPartition` (constant string `'tours'`); range `scheduledAt` (ISO 8601). Supports `listByScheduledRange(from, to)` via `BETWEEN`. Sparse: items without `scheduledAt` never index here (though `scheduledAt` is currently required in `CreateTourInput` — sparseness is a convention that allows making it optional later without a migration, e.g. for draft/cancelled tours).
-
----
-
-## Key implementation notes
-
-- `TourStatus = string` — Task 2 narrows this to a proper enum in `toursModel.ts`
-- `status` defaults to `'scheduled'` in `create` when caller omits it
-- `CreateTourInput = Partial<TourItem> & { tenantId, unitId, scheduledAt, tourType }` — mirrors `CreateUnitInput` pattern (not `Omit`) to satisfy TypeScript's spread-into-explicit-type assignment
-- `patch` uses the same SET/REMOVE loop as `unitsRepo.update` (expression-aliased keys, null → REMOVE, undefined → skip)
-- `ConditionalCheckFailedException` re-exported for callers
-- `db-create.ts` was not modified directly — it iterates `TABLES` automatically; only `tables.ts` needed updating
 
 ---
 
 ## Concerns
 
-None. The implementation is complete, clean, and follows existing conventions precisely.
+None. The `app/tsconfig.test.json` change (adding `allowJs` + `../e2e/support` in `include`) is
+scoped to the typecheck-only test config and does not affect the app build or src. The `.d.ts`
+resolves correctly via NodeNext module resolution once `allowJs: true` is present.

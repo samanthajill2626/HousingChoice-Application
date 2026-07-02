@@ -3,9 +3,13 @@
   // app/src with types via vitest/tsx, outside the build rootDir). No emit.
   // Root `npm run typecheck` runs this — test code is held to the same
   // compiler options as src.
+  //
+  // allowJs: needed so the test that imports e2e/support/lane.mjs can resolve
+  // its hand-written lane.d.ts declaration via NodeNext module resolution.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "allowJs": true
   },
-  "include": ["test", "src"]
+  "include": ["test", "src", "../e2e/support"]
 }

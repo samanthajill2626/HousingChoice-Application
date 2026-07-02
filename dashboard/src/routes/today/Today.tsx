@@ -29,6 +29,8 @@ function hrefFor(item: TodayItem): string {
       return `/contacts/${item.refId}`;
     case 'conversation':
       return `/conversations/${item.refId}`;
+    case 'tour':
+      return `/tours/${item.refId}`;
   }
 }
 

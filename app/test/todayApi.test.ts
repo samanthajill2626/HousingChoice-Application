@@ -53,7 +53,28 @@ describe('today action-queue API (BE6/C7)', () => {
 
   const iso = (msFromNow: number): string => new Date(Date.now() + msFromNow).toISOString();
   const todayYmd = (): string => new Date().toISOString().slice(0, 10);
-  const tomorrowYmd = (): string => new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  // Mid-UTC-day instants: safely inside the route's UTC-day fallback window for
+  // "today"/"tomorrow" no matter what wall-clock time the test runs at.
+  const todayNoonIso = (): string => `${todayYmd()}T12:00:00.000Z`;
+  const tomorrowNoonIso = (): string =>
+    `${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T12:00:00.000Z`;
+
+  // tours_today source: Tour ENTITIES (the placement.tour_date branch is retired).
+  const seedTour = async (t: {
+    tourId: string;
+    tenantId: string;
+    scheduledAt?: string;
+    status?: string;
+  }): Promise<void> => {
+    await world.toursRepo.create({
+      tourId: t.tourId,
+      tenantId: t.tenantId,
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+      ...(t.scheduledAt !== undefined ? { scheduledAt: t.scheduledAt } : {}),
+      ...(t.status !== undefined ? { status: t.status } : {}),
+    } as Parameters<typeof world.toursRepo.create>[0]);
+  };
 
   const getItems = async (): Promise<TodayItem[]> => {
     const res = await authedGet('/api/today');
@@ -99,8 +120,8 @@ describe('today action-queue API (BE6/C7)', () => {
       next_deadline_type: 'rta_window',
       next_deadline_at: iso(-3_600_000), // 1h overdue
     });
-    // tours_today: a placement touring TODAY.
-    seedPlacement({ placementId: 'placement-tour', tenantId: 't-2', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    // tours_today: a Tour entity scheduled TODAY (mid-UTC-day instant).
+    await seedTour({ tourId: 'tour-today', tenantId: 't-2', scheduledAt: todayNoonIso() });
     // follow_ups: a due follow_up deadline.
     seedPlacement({
       placementId: 'placement-follow',
@@ -133,7 +154,7 @@ describe('today action-queue API (BE6/C7)', () => {
 
     const tours = byGroup('tours_today');
     expect(tours).toHaveLength(1);
-    expect(tours[0]).toMatchObject({ refType: 'placement', refId: 'placement-tour', who: 'Maria Lopez', why: 'Tour today' });
+    expect(tours[0]).toMatchObject({ refType: 'tour', refId: 'tour-today', who: 'Maria Lopez', why: 'Tour today' });
 
     const unrep = byGroup('unreplied');
     expect(unrep).toHaveLength(1);
@@ -264,22 +285,26 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(matches[0]!.why).toBe('RTA window closing');
   });
 
-  it('tours_today uses the UTC "today" date basis (today appears, tomorrow does not)', async () => {
+  it('tours_today folds in Tour entities on the UTC-today fallback window (tomorrow, requested, and legacy tour_date placements do not appear)', async () => {
     seedTenant('t-today', 'To', 'Day');
     seedTenant('t-tom', 'To', 'Morrow');
-    seedPlacement({ placementId: 'placement-today', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
-    seedPlacement({ placementId: 'placement-tomorrow', tenantId: 't-tom', stage: 'awaiting_inspection', tour_date: tomorrowYmd() });
+    await seedTour({ tourId: 'tour-today', tenantId: 't-today', scheduledAt: todayNoonIso() });
+    await seedTour({ tourId: 'tour-tomorrow', tenantId: 't-tom', scheduledAt: tomorrowNoonIso() });
+    // Time-less (requested) tours belong to the /tours "Needs booking" queue, never Today.
+    await seedTour({ tourId: 'tour-requested', tenantId: 't-today' });
+    // RETIREMENT: a placement with today's tour_date no longer yields a tours_today item.
+    seedPlacement({ placementId: 'placement-legacy-tour', tenantId: 't-today', stage: 'awaiting_inspection', tour_date: todayYmd() });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
-    expect(tours.map((i) => i.refId)).toEqual(['placement-today']);
+    expect(tours.map((i) => i.refId)).toEqual(['tour-today']);
   });
 
   it('?day= scopes tours_today to the caller\'s day (backend tz-agnostic; browser passes its local date)', async () => {
     // Two tours on distinct FAR-FUTURE days so neither collides with UTC-today.
     seedTenant('t-d2', 'Day', 'Two');
     seedTenant('t-d3', 'Day', 'Three');
-    seedPlacement({ placementId: 'placement-d2', tenantId: 't-d2', stage: 'awaiting_inspection', tour_date: '2030-01-02' });
-    seedPlacement({ placementId: 'placement-d3', tenantId: 't-d3', stage: 'awaiting_inspection', tour_date: '2030-01-03' });
+    await seedTour({ tourId: 'tour-d2', tenantId: 't-d2', scheduledAt: '2030-01-02T12:00:00.000Z' });
+    await seedTour({ tourId: 'tour-d3', tenantId: 't-d3', scheduledAt: '2030-01-03T12:00:00.000Z' });
 
     // Without ?day=, UTC-today is used → neither far-future tour appears.
     const noneByDefault = (await getItems()).filter((i) => i.group === 'tours_today');
@@ -290,12 +315,45 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(d2.status).toBe(200);
     expect(
       (d2.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
-    ).toEqual(['placement-d2']);
+    ).toEqual(['tour-d2']);
 
     const d3 = await authedGet('/api/today?day=2030-01-03');
     expect(
       (d3.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
-    ).toEqual(['placement-d3']);
+    ).toEqual(['tour-d3']);
+  });
+
+  it('?toursFrom/?toursTo supply the caller\'s LOCAL-day boundaries (an evening tour past the UTC boundary lands on the right local day)', async () => {
+    // 2030-01-03T01:00Z = the EVENING of Jan 2 in UTC-5 (e.g. 8pm America/New_York).
+    seedTenant('t-eve', 'Eve', 'Ning');
+    await seedTour({ tourId: 'tour-evening', tenantId: 't-eve', scheduledAt: '2030-01-03T01:00:00.000Z' });
+
+    // The plain UTC-day fallback for Jan 2 misses it (it's Jan 3 in UTC)…
+    const utcDay = await authedGet('/api/today?day=2030-01-02');
+    expect(
+      (utcDay.body as TodayResponse).items.filter((i) => i.group === 'tours_today'),
+    ).toEqual([]);
+
+    // …but the browser's real local-day window for Jan 2 (UTC-5) includes it.
+    const from = encodeURIComponent('2030-01-02T05:00:00.000Z');
+    const to = encodeURIComponent('2030-01-03T04:59:59.999Z');
+    const localDay = await authedGet(`/api/today?day=2030-01-02&toursFrom=${from}&toursTo=${to}`);
+    expect(localDay.status).toBe(200);
+    expect(
+      (localDay.body as TodayResponse).items.filter((i) => i.group === 'tours_today').map((i) => i.refId),
+    ).toEqual(['tour-evening']);
+  });
+
+  it('a malformed ?toursFrom/?toursTo pair is a 400 (one-sided, garbage, or inverted)', async () => {
+    const cases = [
+      '?toursFrom=2030-01-02T05:00:00.000Z', // one-sided
+      '?toursFrom=garbage&toursTo=2030-01-03T00:00:00.000Z', // unparseable
+      '?toursFrom=2030-01-03T00:00:00.000Z&toursTo=2030-01-02T00:00:00.000Z', // inverted
+    ];
+    for (const qs of cases) {
+      const res = await authedGet(`/api/today${qs}`);
+      expect(res.status, qs).toBe(400);
+    }
   });
 
   it('a malformed ?day= is a 400 (not a 500, not silently ignored)', async () => {
@@ -374,16 +432,19 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).not.toContain('placement-lost-deadline');
   });
 
-  it('a moved_in placement with today\'s tour_date does NOT appear in tours_today (active one does)', async () => {
-    seedTenant('t-movedin', 'Moved', 'In');
+  it('a canceled tour today does NOT appear in tours_today (scheduled + confirmed do)', async () => {
+    seedTenant('t-canceled', 'Cancel', 'Ed');
     seedTenant('t-touring', 'Still', 'Touring');
-    seedPlacement({ placementId: 'placement-movedin-tour', tenantId: 't-movedin', stage: 'moved_in', tour_date: todayYmd() });
-    seedPlacement({ placementId: 'placement-touring-tour', tenantId: 't-touring', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    seedTenant('t-confirmed', 'Con', 'Firmed');
+    await seedTour({ tourId: 'tour-canceled', tenantId: 't-canceled', scheduledAt: todayNoonIso(), status: 'canceled' });
+    await seedTour({ tourId: 'tour-live', tenantId: 't-touring', scheduledAt: todayNoonIso() });
+    await seedTour({ tourId: 'tour-confirmed', tenantId: 't-confirmed', scheduledAt: todayNoonIso(), status: 'confirmed' });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
     const ids = tours.map((i) => i.refId);
-    expect(ids).toContain('placement-touring-tour');
-    expect(ids).not.toContain('placement-movedin-tour');
+    expect(ids).toContain('tour-live');
+    expect(ids).toContain('tour-confirmed');
+    expect(ids).not.toContain('tour-canceled');
   });
 
   it('a lost placement with a due follow-up deadline does NOT appear in follow_ups (active one does)', async () => {
@@ -578,7 +639,7 @@ describe('today action-queue API (BE6/C7)', () => {
 
   it('the envelope is { items, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
-    seedPlacement({ placementId: 'placement-env', tenantId: 't-env', stage: 'awaiting_inspection', tour_date: todayYmd() });
+    await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items']);

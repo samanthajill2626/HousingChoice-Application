@@ -13,16 +13,22 @@
 // "Today" date basis (tours_today only): the BACKEND IS TIMEZONE-AGNOSTIC. The
 // only calendar-day input is which day's tours to fold in; every other group is
 // "as of now" (deadline instants are absolute ISO, unread is current state). The
-// CALLER decides the day: pass ?day=YYYY-MM-DD (the browser's LOCAL date) and the
-// tours group filters tour_date == that day (a plain string compare — tour_date is
-// a UTC-validated YYYY-MM-DD). When ?day= is absent we fall back to the UTC date
-// (new Date().toISOString().slice(0,10)); a malformed ?day= is a 400. This makes
-// the server and the client-side fallback agree by construction (both derive "today"
-// from the operator's browser). A richer date-navigable queue is a separate,
-// frontend-driven contract question (not built here).
+// CALLER decides the day. tours_today is derived from TOUR ENTITIES (toursRepo,
+// scheduledAt instants) — the legacy placement.tour_date branch is RETIRED (the
+// field + its tour_scheduled milestone live on; only this derivation moved).
+// Because scheduledAt is an instant, the caller also owns the day's BOUNDARIES:
+// pass ?toursFrom=&toursTo= (ISO instants for the browser's local day window) and
+// the tours group folds in scheduled/confirmed tours inside that window. When the
+// window is absent we fall back to the UTC window of ?day=YYYY-MM-DD (or of the
+// UTC date when ?day= is also absent) — evening tours near the UTC boundary may
+// bucket a day off under the fallback; the dashboard always sends the window.
+// Malformed ?day=/?toursFrom=/?toursTo= are 400s. This keeps the server and the
+// client-side fallback agreeing by construction (both derive "today" from the
+// operator's browser). A richer date-navigable queue is a separate, frontend-
+// driven contract question (not built here).
 //
 // Every repo read is a bounded GSI Query (never a Scan): listByNextDeadline (per
-// deadline type), listByTourDate, listByLastActivity({status:'open'}), and
+// deadline type), tours listByScheduledRange, listByLastActivity({status:'open'}), and
 // listByType (the unknown/needs_review triage partition). Each fetch is capped and
 // a log.warn fires if a cap is hit (no silent truncation).
 //
@@ -48,6 +54,10 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
+import {
+  createToursRepo,
+  type ToursRepo,
+} from '../repos/toursRepo.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
@@ -55,7 +65,7 @@ export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow
 
 export interface TodayItem {
   group: TodayGroup;
-  refType: 'placement' | 'contact' | 'conversation';
+  refType: 'placement' | 'contact' | 'conversation' | 'tour';
   refId: string;
   who: string;
   why: string;
@@ -74,6 +84,7 @@ export interface TodayRouterDeps {
   placementsRepo?: PlacementsRepo;
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
+  toursRepo?: ToursRepo;
 }
 
 // --- Grouping rules (match the spec + the frontend fallback) -----------------
@@ -182,11 +193,38 @@ function parseDayParam(raw: unknown): { day: string } | { error: string } | unde
   return { day: raw };
 }
 
+/**
+ * Validate the optional ?toursFrom=/?toursTo= pair (ISO instants — the browser's
+ * LOCAL-day window for tours_today). Both-or-neither; each must be a valid ISO
+ * datetime; from must precede to. Returns `undefined` when absent (caller falls
+ * back to the UTC window of the day), `{ from, to }` when valid, or `{ error }`
+ * for a malformed pair (→ 400).
+ */
+function parseToursWindow(
+  rawFrom: unknown,
+  rawTo: unknown,
+): { from: string; to: string } | { error: string } | undefined {
+  if (rawFrom === undefined && rawTo === undefined) return undefined;
+  if (typeof rawFrom !== 'string' || typeof rawTo !== 'string') {
+    return { error: 'toursFrom and toursTo must be provided together as ISO datetimes' };
+  }
+  const from = new Date(rawFrom);
+  const to = new Date(rawTo);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    return { error: 'toursFrom/toursTo must be valid ISO datetimes' };
+  }
+  if (from.getTime() >= to.getTime()) {
+    return { error: 'toursFrom must be before toursTo' };
+  }
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
 export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -202,6 +240,16 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       return;
     }
     const todayYmd = parsedDay?.day ?? nowIso.slice(0, 10);
+    // tours_today window: the caller's local-day boundaries as instants (the
+    // browser knows its offset; the server stays timezone-agnostic). Fallback:
+    // the UTC window of todayYmd (see the header note on the boundary caveat).
+    const parsedWindow = parseToursWindow(req.query['toursFrom'], req.query['toursTo']);
+    if (parsedWindow !== undefined && 'error' in parsedWindow) {
+      res.status(400).json({ error: parsedWindow.error });
+      return;
+    }
+    const toursWindow =
+      parsedWindow ?? { from: `${todayYmd}T00:00:00.000Z`, to: `${todayYmd}T23:59:59.999Z` };
 
     // A best-effort contact cache so we resolve each contact at most once (the
     // same tenant may anchor several placements). A missing contact must never 500 the
@@ -320,25 +368,28 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
-    // --- tours_today: placements whose CURRENT tour is today (UTC date basis) ---
+    // --- tours_today: Tour entities whose scheduledAt falls in the caller's day window ---
+    // status ∈ {scheduled, confirmed}; 'requested' tours have no scheduledAt and
+    // are naturally excluded by the sparse byScheduledAt GSI. The window comes
+    // from ?toursFrom/?toursTo (the browser's local-day boundaries) with a UTC-day
+    // fallback (see toursWindow above). Deleted-tenant check is best-effort (same
+    // as other groups). The placement.tour_date branch is RETIRED: only Tour
+    // entities appear here.
     {
-      const page = await placements.listByTourDate(todayYmd, { limit: GROUP_FETCH_LIMIT });
-      warnIfCapped('tours_today', page.items.length);
-      for (const c of page.items) {
-        // Terminal placements (moved_in/lost) are off the boards — a lingering
-        // tour_date that was never cleared on the transition must not surface.
-        if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedPlacementIds.has(c.placementId)) continue; // already needs_you_now
-        placedPlacementIds.add(c.placementId);
-        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
-        const who = (await resolveName(c.tenantId)) ?? c.tenantId;
+      const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled', 'confirmed']);
+      const todayTours = await tours.listByScheduledRange(toursWindow.from, toursWindow.to);
+      warnIfCapped('tours_today', todayTours.length);
+      for (const t of todayTours) {
+        if (!TOURS_TODAY_STATUSES.has(t.status)) continue; // skip non-active statuses
+        if (await isDeletedContact(t.tenantId)) continue; // deleted tenant → off the boards
+        const who = (await resolveName(t.tenantId)) ?? t.tenantId;
         const item: TodayItem = {
           group: 'tours_today',
-          refType: 'placement',
-          refId: c.placementId,
+          refType: 'tour',
+          refId: t.tourId,
           who,
           why: 'Tour today',
-          tag: stageLabel(c.stage),
+          tag: 'Tour',
         };
         // Tours all share "today" — order them by tenant name then refId (stable).
         toursToday.push({ item, at: now });

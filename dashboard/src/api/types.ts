@@ -171,7 +171,7 @@ export interface SystemErrorsResult {
 export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow_ups';
 export interface TodayItem {
   group: TodayGroup;
-  refType: 'placement' | 'contact' | 'conversation';
+  refType: 'placement' | 'contact' | 'conversation' | 'tour';
   refId: string;
   who: string; // display name / phone
   why: string; // "RTA window closing"

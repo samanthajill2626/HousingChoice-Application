@@ -1,7 +1,7 @@
 // useToday — the Today page's data hook. Prefers the server-assembled queue
 // (GET /api/today, §C7); when that endpoint isn't live yet (ApiError 404) it
 // falls back to assembling the SAME TodayItem[] client-side from /api/placements +
-// /api/conversations (buildTodayFromSources). Subscribes to the SSE stream and
+// /api/conversations + /api/tours (buildTodayFromSources). Subscribes to the SSE stream and
 // refetches (debounced) on placement.updated / conversation.updated so the queue
 // stays live. Returns a small { status, items, source } state for the view.
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -10,10 +10,11 @@ import {
   getPlacements,
   getConversations,
   getToday,
+  getTours,
   useEventStream,
   type TodayItem,
 } from '../../api/index.js';
-import { buildTodayFromSources, localYmd } from './buildToday.js';
+import { buildTodayFromSources, localDayWindow, localYmd } from './buildToday.js';
 
 export type TodayStatus = 'loading' | 'ready' | 'error';
 export type TodaySource = 'server' | 'fallback';
@@ -32,21 +33,33 @@ const REFETCH_DEBOUNCE_MS = 300;
 async function loadToday(
   signal: AbortSignal,
 ): Promise<{ items: TodayItem[]; source: TodaySource }> {
-  // The BROWSER owns "today". Compute the operator's local calendar day once and
-  // use it for BOTH paths: pass it as ?day= to the timezone-agnostic server, and
-  // (via the same `now`) as the tour_date basis in the fallback — so the server
-  // and the client build always agree on which day's tours to show.
+  // The BROWSER owns "today". Compute the operator's local day (and its
+  // boundary instants) once and use them for BOTH paths: pass ?day= + the
+  // toursFrom/toursTo window to the timezone-agnostic server, and (via the same
+  // `now`/window) fetch + fold Tour entities in the fallback — so the server and
+  // the client build always agree on which day's tours to show. tours_today is
+  // built from Tour entities; the legacy placement.tour_date basis is retired.
   const now = new Date();
   const day = localYmd(now);
+  const window = localDayWindow(now);
   try {
-    const res = await getToday(day, signal);
+    const res = await getToday(day, signal, window);
     return { items: res.items, source: 'server' };
   } catch (err) {
     // Only a 404 means "endpoint not live yet" → assemble client-side. Any other
     // failure (and the fallback's own failures) propagates to the error state.
     if (!(err instanceof ApiError) || err.status !== 404) throw err;
-    const [placements, conversations] = await Promise.all([getPlacements(signal), getConversations(signal)]);
-    const items = buildTodayFromSources(placements.placements, conversations.conversations, now);
+    const [placements, conversations, tours] = await Promise.all([
+      getPlacements(signal),
+      getConversations(signal),
+      getTours({ from: window.from, to: window.to }, signal),
+    ]);
+    const items = buildTodayFromSources(
+      placements.placements,
+      conversations.conversations,
+      now,
+      tours,
+    );
     return { items, source: 'fallback' };
   }
 }

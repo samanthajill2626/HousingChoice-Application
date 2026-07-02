@@ -494,6 +494,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
     }),
   );
   // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,

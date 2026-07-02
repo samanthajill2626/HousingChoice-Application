@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildTodayFromSources } from './buildToday.js';
-import type { PlacementItem, ConversationSummary } from '../../api/index.js';
+import type { PlacementItem, ConversationSummary, Tour } from '../../api/index.js';
 
 // A fixed "now" in local time. Tests build deadlines/tours relative to it.
 const NOW = new Date('2026-06-16T12:00:00');
@@ -37,6 +37,18 @@ function at(ms: number): string {
 }
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+
+/** tours_today source: Tour ENTITIES (placement.tour_date is retired). NOW is
+ *  local noon, so `at(2 * HOUR)` = 2pm on NOW's local day in any test TZ. */
+function tourOf(partial: Partial<Tour> & Pick<Tour, 'tourId'>): Tour {
+  return {
+    tenantId: `t-${partial.tourId}`,
+    unitId: `u-${partial.tourId}`,
+    tourType: 'self_guided',
+    status: 'scheduled',
+    ...partial,
+  } as Tour;
+}
 
 describe('buildTodayFromSources', () => {
   it('puts a placement with an upcoming deadline in needs_you_now with humanized urgency + tag', () => {
@@ -147,24 +159,41 @@ describe('buildTodayFromSources', () => {
     expect(unk?.refId).toBe('unknown?phone=%2B14040100007');
   });
 
-  it('puts a placement touring today in tours_today', () => {
+  it('puts a Tour entity scheduled today in tours_today (linking the tour, not a placement)', () => {
+    const items = buildTodayFromSources([], [], NOW, [
+      tourOf({ tourId: 'tour-1', scheduledAt: at(2 * HOUR) }),
+    ]);
+    const tour = items.find((i) => i.group === 'tours_today');
+    expect(tour?.refType).toBe('tour');
+    expect(tour?.refId).toBe('tour-1');
+    expect(tour?.why).toMatch(/Tour/);
+    expect(tour?.tag).toBe('Tour');
+  });
+
+  it('RETIRED: a placement with today\'s tour_date no longer yields a tours_today item', () => {
     const items = buildTodayFromSources(
-      [placementOf({ placementId: 'tour', stage: 'schedule_inspection', tour_date: '2026-06-16' })],
+      [placementOf({ placementId: 'legacy', stage: 'schedule_inspection', tour_date: '2026-06-16' })],
       [],
       NOW,
     );
-    const tour = items.find((i) => i.group === 'tours_today');
-    expect(tour?.refId).toBe('tour');
-    expect(tour?.why).toMatch(/Tour/);
-    expect(tour?.tag).toBe('Placement · Schedule inspection');
+    expect(items.filter((i) => i.group === 'tours_today')).toEqual([]);
+  });
+
+  it('excludes a requested (time-less) tour and a canceled tour from tours_today', () => {
+    const items = buildTodayFromSources([], [], NOW, [
+      tourOf({ tourId: 'tour-requested', status: 'requested' }), // no scheduledAt
+      tourOf({ tourId: 'tour-canceled', status: 'canceled', scheduledAt: at(2 * HOUR) }),
+      tourOf({ tourId: 'tour-confirmed', status: 'confirmed', scheduledAt: at(3 * HOUR) }),
+    ]);
+    expect(items.filter((i) => i.group === 'tours_today').map((i) => i.refId)).toEqual([
+      'tour-confirmed',
+    ]);
   });
 
   it('does not put a tour on a different day in tours_today', () => {
-    const items = buildTodayFromSources(
-      [placementOf({ placementId: 'tmrw', tour_date: '2026-06-17' })],
-      [],
-      NOW,
-    );
+    const items = buildTodayFromSources([], [], NOW, [
+      tourOf({ tourId: 'tmrw', scheduledAt: at(DAY + 2 * HOUR) }),
+    ]);
     expect(items.find((i) => i.group === 'tours_today')).toBeUndefined();
   });
 
@@ -234,11 +263,11 @@ describe('buildTodayFromSources', () => {
     const items = buildTodayFromSources(
       [
         placementOf({ placementId: 'fu', stage: 'awaiting_approval', next_deadline_type: 'follow_up', next_deadline_at: at(DAY) }),
-        placementOf({ placementId: 'tour', tour_date: '2026-06-16' }),
         placementOf({ placementId: 'need', next_deadline_type: 'rta_window', next_deadline_at: at(HOUR) }),
       ],
       [convOf({ conversationId: 'unrep', unread_count: 1, preview: 'hi', participant_display_name: 'X' })],
       NOW,
+      [tourOf({ tourId: 'tour', scheduledAt: at(2 * HOUR) })],
     );
     expect(items.map((i) => i.group)).toEqual([
       'needs_you_now',

@@ -24,6 +24,7 @@ import {
   type PlacementItem,
   type ConversationSummary,
   type ConversationType,
+  type Tour,
   type TodayItem,
 } from '../../api/index.js';
 
@@ -130,6 +131,17 @@ export function localYmd(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** The browser's LOCAL-day boundaries for `now`, as ISO instants. Sent to
+ *  /api/today (?toursFrom/?toursTo) and to /api/tours (?from/?to) so both the
+ *  server queue and this fallback fold in exactly the tours on the operator's
+ *  calendar day — Tour scheduledAt is an instant, so only the browser can say
+ *  where its day starts and ends. */
+export function localDayWindow(now: Date): { from: string; to: string } {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  return { from: from.toISOString(), to: to.toISOString() };
+}
+
 // --- Assembly ---------------------------------------------------------------
 
 interface NeedsRow {
@@ -138,10 +150,14 @@ interface NeedsRow {
   sortAt: number | null;
 }
 
+/** Tour statuses that appear in tours_today (time-scheduled, active tours). */
+const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled', 'confirmed']);
+
 export function buildTodayFromSources(
   placements: PlacementItem[],
   conversations: ConversationSummary[],
   now: Date,
+  tourEntities: Tour[] = [],
 ): TodayItem[] {
   const today = localYmd(now);
 
@@ -206,17 +222,25 @@ export function buildTodayFromSources(
       });
     }
 
-    // tours_today: a tour scheduled for today (local).
-    if (c.tour_date === today) {
-      tours.push({
-        group: 'tours_today',
-        refType: 'placement',
-        refId: c.placementId,
-        who: c.tenantId,
-        why: 'Tour today',
-        tag,
-      });
-    }
+    // NOTE: tours_today is now derived from Tour entities (see the loop below),
+    // NOT from placement.tour_date. The tour_date branch is RETIRED.
+  }
+
+  // tours_today: Tour entities scheduled on the operator's LOCAL day. The fetch
+  // window (localDayWindow) already bounds these, but re-check the local day here
+  // (defense in depth — a window drift must not surface a wrong-day tour) and the
+  // status set ('requested' tours have no scheduledAt and never qualify).
+  for (const t of tourEntities) {
+    if (t.scheduledAt === undefined || !TOURS_TODAY_STATUSES.has(t.status)) continue;
+    if (localYmd(new Date(t.scheduledAt)) !== today) continue;
+    tours.push({
+      group: 'tours_today',
+      refType: 'tour',
+      refId: t.tourId,
+      who: t.tenantId,
+      why: 'Tour today',
+      tag: 'Tour',
+    });
   }
 
   for (const conv of conversations) {

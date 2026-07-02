@@ -82,8 +82,23 @@ export function loginUrl(): string {
  *  server uses it ONLY to choose the tours_today group (omitting it makes the
  *  server use the UTC date). Compute `day` from local fields (see localYmd),
  *  never toISOString(). A malformed `day` returns 400. */
-export function getToday(day?: string, signal?: AbortSignal): Promise<TodayResponse> {
-  const path = day !== undefined ? `/api/today?day=${encodeURIComponent(day)}` : '/api/today';
+export function getToday(
+  day?: string,
+  signal?: AbortSignal,
+  toursWindow?: { from: string; to: string },
+): Promise<TodayResponse> {
+  const params = new URLSearchParams();
+  if (day !== undefined) params.set('day', day);
+  if (toursWindow !== undefined) {
+    // The browser's local-day boundaries as instants — tours_today is built from
+    // Tour scheduledAt instants, so the caller supplies its own day window (the
+    // server's fallback is the UTC window of `day`, which can bucket an evening
+    // tour a day off; real UI code always passes the window).
+    params.set('toursFrom', toursWindow.from);
+    params.set('toursTo', toursWindow.to);
+  }
+  const qs = params.toString();
+  const path = qs.length > 0 ? `/api/today?${qs}` : '/api/today';
   return request<TodayResponse>(path, { ...(signal !== undefined && { signal }) });
 }
 

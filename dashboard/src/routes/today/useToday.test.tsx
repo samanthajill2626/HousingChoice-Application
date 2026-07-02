@@ -8,6 +8,7 @@ import type { PlacementsPage, ConversationsPage, TodayResponse } from '../../api
 const getToday = vi.fn();
 const getPlacements = vi.fn();
 const getConversations = vi.fn();
+const getTours = vi.fn();
 let lastHandlers: { onPlacementUpdated?: () => void; onConversationUpdated?: () => void } = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -17,6 +18,7 @@ vi.mock('../../api/index.js', async () => {
     getToday: (...a: unknown[]) => getToday(...a),
     getPlacements: (...a: unknown[]) => getPlacements(...a),
     getConversations: (...a: unknown[]) => getConversations(...a),
+    getTours: (...a: unknown[]) => getTours(...a),
     useEventStream: (handlers: typeof lastHandlers) => {
       lastHandlers = handlers;
     },
@@ -63,6 +65,8 @@ beforeEach(() => {
   getToday.mockReset();
   getPlacements.mockReset();
   getConversations.mockReset();
+  getTours.mockReset();
+  getTours.mockResolvedValue([]); // fallback default: no tours today
   lastHandlers = {};
 });
 afterEach(() => {
@@ -79,14 +83,19 @@ describe('useToday', () => {
     expect(screen.getByTestId('first')).toHaveTextContent('Server Tasha');
     expect(getPlacements).not.toHaveBeenCalled();
     // The browser owns "today": the server call carries the operator's LOCAL
-    // calendar day (YYYY-MM-DD), not a UTC toISOString() date.
+    // calendar day (YYYY-MM-DD) AND its local-day boundary instants (the
+    // toursFrom/toursTo window for the Tour-entity tours_today group).
     expect(getToday).toHaveBeenCalledWith(
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       expect.anything(),
+      expect.objectContaining({
+        from: expect.stringMatching(/T.*Z$/),
+        to: expect.stringMatching(/T.*Z$/),
+      }),
     );
   });
 
-  it('falls back to placements+conversations on a 404', async () => {
+  it('falls back to placements+conversations+tours on a 404', async () => {
     getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
     getPlacements.mockResolvedValue(CASES);
     getConversations.mockResolvedValue(CONVERSATIONS);
@@ -95,6 +104,34 @@ describe('useToday', () => {
     expect(screen.getByTestId('source')).toHaveTextContent('fallback');
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('first')).toHaveTextContent('Fallback Tenant');
+    // The fallback fetches today's tours with the local-day window.
+    expect(getTours).toHaveBeenCalledWith(
+      expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+      expect.anything(),
+    );
+  });
+
+  it('fallback folds a Tour entity scheduled today into tours_today', async () => {
+    getToday.mockRejectedValue(new ApiError(404, 'not_found', 'no'));
+    getPlacements.mockResolvedValue({ nextCursor: null, placements: [] });
+    getConversations.mockResolvedValue(CONVERSATIONS);
+    const now = new Date();
+    const twoPmLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 0, 0);
+    getTours.mockResolvedValue([
+      {
+        tourId: 'tour-x',
+        tenantId: 'Tour Tenant',
+        unitId: 'u-x',
+        tourType: 'self_guided',
+        status: 'scheduled',
+        scheduledAt: twoPmLocal.toISOString(),
+      },
+    ]);
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('source')).toHaveTextContent('fallback');
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    expect(screen.getByTestId('first')).toHaveTextContent('Tour Tenant');
   });
 
   it('surfaces error status when the fallback itself fails', async () => {

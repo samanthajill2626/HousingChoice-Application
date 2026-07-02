@@ -25,13 +25,35 @@ shared and slow tests blow their 5s budgets.
 re-verifying, and "green" gates get retried. It will bite harder as concurrent-worktree
 development (the port-lane model) becomes the norm.
 
-**Suggested fix (options, cheapest first).**
-1. Raise `testTimeout` for the DynamoDB-Local integration suites (e.g. 15s) — timeouts are
-   contention, not hangs.
-2. Vitest table-prefix isolation per worktree (reuse the lane hash from
-   `e2e/support/lane.mjs` for unit-test table names) — removes data collisions, though the
-   throughput ceiling remains.
-3. A per-worktree DynamoDB Local container (heavier; probably unnecessary).
+**Root cause (measured, 2026-07-02).** No artificial cap to raise: the container runs
+uncapped (`mem=0 cpus=0`), already `-inMemory` (no disk/fsync in the path), and the Docker
+VM has 31GB. The ceiling is **structural**: the container runs **`-sharedDb`**, which puts
+EVERY lane's tables into ONE SQLite database inside the JVM — and SQLite permits **one
+writer at a time per database**. All lanes' writes (plus every Vitest integration run)
+serialize through a single write lock. Measured while two suites ran concurrently:
+`docker stats` pinned at **~105% CPU** (one core saturated, the rest idle) — a beefier
+machine cannot help while the write path serializes. The lane table-PREFIXES namespace
+data correctly (no contamination, ever) but do not split the underlying database, so they
+do not split the lock. Symptom shape confirmed repeatedly: 5s-budget integration tests
+and the heaviest-query e2e specs (inbox feed, stuck at `status "Loading"`) time out under
+a neighbor's run and pass solo in milliseconds.
 
-Until fixed: a lone red integration test in a full run that passes solo should be treated
-as this contention, verified by the solo re-run, and noted — not "fixed".
+**Decision (human, 2026-07-02): drop `-sharedDb` + per-lane access keys.** Without
+`-sharedDb`, DynamoDB Local keeps a SEPARATE database per AWS access key — so the lane
+launcher injecting `AWS_ACCESS_KEY_ID=hc-lane-<L>` (next to the `TABLE_PREFIX` it already
+injects) gives each lane its own database and its own write lock; concurrency then scales
+with lanes. The heavier alternative (a per-worktree container) also solves it and adds
+JVM-CPU isolation, but the per-key split is the lighter setup and was chosen. To
+implement (own branch, at a QUIET moment — changing the flag recreates the container and
+wipes every lane's in-memory tables, so never while a neighbor's stack is live):
+`scripts/db.mjs` (drop `-sharedDb`), `e2e/support/lane.mjs` + `scripts/e2e-session.mjs`
+(inject the per-lane key into all children), Vitest integration harnesses (per-worktree
+key, e.g. from the lane hash), and any ad-hoc tooling docs (inspection needs the lane's
+key to see its data). Verify with two worktrees' suites running head-to-head.
+
+**Mitigation applied (2026-07-02, tours branch):** `app/vitest.config.ts` raises
+`testTimeout` to 15s for the app suites — these are timeouts under load, never hangs, so
+the budget absorbs neighbor noise without masking real failures.
+
+Until the structural fix lands: a lone red integration test in a full run that passes solo
+should be treated as this contention, verified by the solo re-run, and noted — not "fixed".

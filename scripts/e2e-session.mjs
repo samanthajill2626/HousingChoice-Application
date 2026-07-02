@@ -207,6 +207,14 @@ function startFakeTwilio() {
     FAKE_TWILIO_PORT: String(ports.fake),
     APP_BASE_URL: appUrl,
     APP_PUBLIC_BASE_URL: publicBaseUrl,
+    // The base the fake mints RecordingUrl/MediaUrl from (recordingServeBase in
+    // callEngine). The app fetches recordings from the fake at TWILIO_API_BASE_URL
+    // (= fakeUrl) and its media-SSRF allowlist accepts ONLY that exact origin. The
+    // fake otherwise defaults this to http://localhost:<port>, whose origin differs
+    // from the lane's 127.0.0.1 fakeUrl → MediaFetchRefusedError 'host_not_allowed'
+    // (recording never mirrors). Pin it to fakeUrl so the origins match. 127.0.0.1
+    // everywhere — do NOT use localhost (the deliberate IPv4-consistency choice).
+    FAKE_TWILIO_PUBLIC_URL: fakeUrl,
     // Serve the pre-built fake-phones UI (built once in main() before first start).
     // On a restartBackend() bounce the existing dist is reused — the UI rarely
     // changes, so we don't rebuild it.

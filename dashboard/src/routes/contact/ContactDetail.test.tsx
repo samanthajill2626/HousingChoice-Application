@@ -17,6 +17,7 @@ const getContacts = vi.fn();
 const deleteContact = vi.fn();
 const restoreContact = vi.fn();
 const sendMessage = vi.fn();
+const ensureContactConversation = vi.fn();
 // Used by the "Start placement" dialog (PlacementCreateForm) when opened.
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
@@ -41,6 +42,7 @@ vi.mock('../../api/index.js', async () => {
     deleteContact: (...a: unknown[]) => deleteContact(...a),
     restoreContact: (...a: unknown[]) => restoreContact(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
+    ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     getTours: (...a: unknown[]) => getTours(...a),
@@ -120,6 +122,7 @@ beforeEach(() => {
   getContactMedia.mockReset();
   getContacts.mockReset();
   sendMessage.mockReset();
+  ensureContactConversation.mockReset();
   updateContact.mockReset();
   getPlacementsBy.mockReset();
   getPlacementsBy.mockResolvedValue([]);
@@ -377,6 +380,81 @@ describe('ContactDetail', () => {
 
       // No option for Tasha (the contact herself) must appear — self-link guard.
       expect(screen.queryByRole('option', { name: /Tasha Williams/i })).not.toBeInTheDocument();
+    });
+  });
+
+  // ── Texting a brand-new contact (no conversation yet) ───────────────────────
+  describe('texting a brand-new contact', () => {
+    it('Send is ENABLED with no thread; the first send creates the conversation, then POSTs into it', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      // Default beforeEach state: the timeline 404s and there are NO conversations
+      // — exactly a just-created contact. The contact HAS a phone.
+      getContact.mockResolvedValue(TENANT);
+      ensureContactConversation.mockResolvedValue('conv-new');
+      sendMessage.mockResolvedValue({
+        conversationId: 'conv-new',
+        providerSid: 'SM9',
+        tsMsgId: '2026-07-02T10:00:00.000Z#SM9',
+        status: 'sent',
+      });
+
+      renderAt('k1');
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+      // The regression: with no resolvable conversation the Send button stayed
+      // disabled forever. It must be ENABLED (the contact has a number).
+      const box = screen.getByLabelText('Reply message');
+      await user.type(box, 'Welcome aboard!');
+      const send = screen.getByRole('button', { name: /^Send$/i });
+      expect(send).toBeEnabled();
+
+      await user.click(send);
+
+      // The thread is created first, then the message goes into it.
+      await waitFor(() => expect(ensureContactConversation).toHaveBeenCalledWith('k1'));
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+      expect(sendMessage.mock.calls[0]![0]).toBe('conv-new');
+      expect(sendMessage.mock.calls[0]![1]).toEqual({ body: 'Welcome aboard!' });
+    });
+
+    it('does NOT create a thread when one already resolves from the timeline', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getContactTimeline.mockResolvedValue({
+        nextCursor: null,
+        items: [
+          {
+            kind: 'message',
+            id: 'm0',
+            at: '2026-06-01T10:00:00.000Z',
+            conversationId: 'conv-k1',
+            tsMsgId: '2026-06-01T10:00:00.000Z#SM0',
+            direction: 'outbound',
+            author: 'teammate',
+            type: 'sms',
+            body: 'Hi',
+            delivery_status: 'delivered',
+            toPhone: '+14040100007',
+          },
+        ],
+      });
+      sendMessage.mockResolvedValue({
+        conversationId: 'conv-k1',
+        providerSid: 'SM1',
+        tsMsgId: '2026-06-02T10:00:00.000Z#SM1',
+        status: 'sent',
+      });
+
+      renderAt('k1');
+      await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+      await user.type(screen.getByLabelText('Reply message'), 'Hello again');
+      await user.click(screen.getByRole('button', { name: /^Send$/i }));
+
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+      expect(sendMessage.mock.calls[0]![0]).toBe('conv-k1');
+      expect(ensureContactConversation).not.toHaveBeenCalled();
     });
   });
 

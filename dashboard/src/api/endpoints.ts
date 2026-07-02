@@ -620,6 +620,17 @@ export async function deleteContact(contactId: string): Promise<Contact> {
   return res.contact;
 }
 
+/** POST /api/contacts/:id/conversation — create-or-get the 1:1 thread for the
+ *  contact's PRIMARY number (idempotent), so a brand-new contact can be texted
+ *  before they've ever messaged us. Returns the conversationId to send into. */
+export async function ensureContactConversation(contactId: string): Promise<string> {
+  const res = await request<{ conversation: { conversationId: string } }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/conversation`,
+    { method: 'POST' },
+  );
+  return res.conversation.conversationId;
+}
+
 /** POST /api/contacts/:id/restore � clear deleted_at, bringing a soft-deleted
  *  contact back into the normal views. Returns the updated contact. */
 export async function restoreContact(contactId: string): Promise<Contact> {

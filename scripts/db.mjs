@@ -7,6 +7,12 @@
 // restarts — re-run `npm run db:create && npm run db:seed` (or `npm run dev`,
 // which does both) after any restart.
 //
+// NO -sharedDb: each (accessKeyId, region) pair gets its OWN database and its
+// own SQLite write lock, so concurrent suites don't serialize through one lock
+// (docs/issues/dynamodb-local-cross-worktree-test-contention.md). The e2e
+// launcher injects hclane<L> per lane, app vitest injects hctest<hash> per
+// worktree, and the dev loop rides the 'local' fallback in app/src/lib/dynamo.ts.
+//
 // Also imported by scripts/dev.mjs (ensureDbStarted).
 import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -57,10 +63,40 @@ async function waitForEndpoint(endpoint, timeoutMs = 30_000) {
   throw new Error(`DynamoDB Local did not answer at ${endpoint} within ${timeoutMs}ms`);
 }
 
-/** Idempotent start: running -> no-op; stopped -> start; absent -> run. */
+/**
+ * True when an existing container was created with the legacy -sharedDb flag
+ * (one SQLite database + ONE write lock shared by every lane — the structural
+ * contention fixed by per-lane access keys; see
+ * docs/issues/dynamodb-local-cross-worktree-test-contention.md). Such a
+ * container must be recreated: docker start would resurrect the old args.
+ * @param {string[]} args
+ */
+export function containerArgsAreStale(args) {
+  return args.includes('-sharedDb');
+}
+
+/** JVM args the container was created with (docker inspect .Args). */
+async function containerArgs() {
+  const { stdout } = await docker('inspect', '--format', '{{json .Args}}', CONTAINER_NAME);
+  return JSON.parse(stdout.trim());
+}
+
+/** Idempotent start: running -> no-op; stopped -> start; absent -> run.
+ *  A legacy -sharedDb container is removed + recreated (WIPES its in-memory
+ *  tables — every lane/dev stack must reseed; sequenced in the rollout note of
+ *  docs/superpowers/plans/2026-07-02-dynamodb-lane-keys.md). */
 export async function ensureDbStarted() {
   await assertDaemonUp();
-  const state = await containerState();
+  let state = await containerState();
+  if (state !== 'absent' && containerArgsAreStale(await containerArgs())) {
+    console.warn(
+      `db:start — ${CONTAINER_NAME} was created with the legacy -sharedDb flag; ` +
+        'recreating it WITHOUT -sharedDb (per-access-key databases). ' +
+        'ALL in-memory tables are wiped — every lane/dev stack must reseed.',
+    );
+    await docker('rm', '-f', CONTAINER_NAME);
+    state = 'absent';
+  }
   if (state === 'running') {
     console.log(`db:start — ${CONTAINER_NAME} already running`);
   } else if (state === 'stopped') {
@@ -70,7 +106,7 @@ export async function ensureDbStarted() {
     console.log(`db:start — creating container ${CONTAINER_NAME} (in-memory; data resets on stop)`);
     await docker(
       'run', '-d', '--name', CONTAINER_NAME, '-p', '8000:8000',
-      'amazon/dynamodb-local', '-jar', 'DynamoDBLocal.jar', '-sharedDb', '-inMemory',
+      'amazon/dynamodb-local', '-jar', 'DynamoDBLocal.jar', '-inMemory',
     );
   }
   await waitForEndpoint(LOCAL_ENDPOINT);

@@ -50,9 +50,81 @@ Driving the live UI through an MCP server has a browser-channel wrinkle on Windo
 Helpers (session mode):
 - `npm run e2e:reseed` — reset local data to a clean seeded slate (fast; no restart).
 - `npm run e2e:restart` — restart **app+worker only** to pick up backend code changes (Vite, DB, and the browser keep their place).
-- `npm run e2e:stop` — reliably stop the session stack (kills the launcher + children).
+- `npm run e2e:stop` — reliably stop the session stack (kills the launcher + children, removes `lane.json`).
 - `npm run e2e -- --grep "<name>"` — run a subset against the live session.
 - `npm run e2e:report` — open the last HTML report.
+
+## Port-lane model
+
+Each e2e run (or `npm run e2e:session`) operates in an isolated **lane** — a
+block of four ports that are never shared with `npm run dev` or another concurrent
+worktree.
+
+### Lane 0 — dev only
+
+Ports `8080 / 5174 / 8889 / 5173` are **lane 0** — the conventional `npm run dev`
+ports. **No e2e run ever uses lane 0.** The lane resolver always returns a lane
+≥ 1, and lane 0 is explicitly forbidden.
+
+### Lanes 1–16 — e2e lanes
+
+| Resource | Formula | Example (lane 1) |
+|----------|---------|------------------|
+| App (Express) | `9001 + L*100 + 0` | `:9101` |
+| Dashboard (Vite) | `9001 + L*100 + 10` | `:9111` |
+| Fake-Twilio | `9001 + L*100 + 20` | `:9121` |
+| Public base URL | `9001 + L*100 + 30` | `:9131` |
+
+Each lane gets its own DynamoDB table prefix (`hc-local-<L>-`) and S3 bucket
+(`hc-local-media-<L>`) — data never crosses between lanes.
+
+### How a lane is picked
+
+1. **`E2E_LANE` env var** (set by `playwright.config.ts` when it resolves a lane;
+   also an escape hatch for hash collisions — e.g. `E2E_LANE=3 npm run e2e`).
+2. **Hash → preferred lane.** `e2e/support/lane.mjs` hashes `git rev-parse
+   --absolute-git-dir` (per-worktree gitdir) with djb2 → maps to lane `[1..16]`.
+   Different worktrees hash to different preferred lanes, so concurrent worktrees
+   naturally spread out.
+3. **Free-probe.** If the preferred lane's four ports are occupied (a session is
+   already running there), the resolver walks forward until it finds a completely
+   free lane.
+
+### Concurrent worktrees
+
+Multiple worktrees can each run `npm run e2e` simultaneously. Each auto-picks its
+own free lane (step 3 above), so they never share ports, tables, or buckets. If
+all 16 lanes are occupied, the resolver exits with a clear error and the offending
+worktree can use `E2E_LANE=<n>` to force a specific lane after a `npm run
+e2e:stop` in that worktree.
+
+### `e2e/.artifacts/lane.json`
+
+Every session writes its resolved state to `e2e/.artifacts/lane.json` before
+starting children:
+
+```json
+{
+  "lane": 1,
+  "ports": { "app": 9101, "dashboard": 9111, "fake": 9121, "publicBase": 9131 },
+  "urls":  { "app": "http://127.0.0.1:9101", "dashboard": "http://127.0.0.1:9111",
+              "fake": "http://127.0.0.1:9121", "publicBase": "http://127.0.0.1:9131" },
+  "tablePrefix": "hc-local-1-",
+  "mediaBucket": "hc-local-media-1"
+}
+```
+
+The helper scripts (`e2e:reseed`, `e2e:restart`, `e2e:stop`) read this file to
+target the running lane. It is gitignored. `e2e:stop` removes it on teardown so a
+stale file cannot mislead the next run.
+
+### 127.0.0.1 convention
+
+All URLs in the harness use `127.0.0.1` — **never** bare `localhost`. On systems
+where Node resolves `localhost` to `::1` (IPv6) instead of `127.0.0.1` (IPv4),
+a probe of `127.0.0.1:<port>` sees a free port even if the process is listening
+on `localhost`, causing a false "free" and a double-bind. Forcing IPv4 throughout
+the lane stack eliminates this class of failure.
 
 ## Requirements
 - Docker running (DynamoDB Local). The launcher sets `DEV_AUTH_ENABLED=1` and
@@ -66,14 +138,15 @@ Helpers (session mode):
 
 ## Agent workflow (driving the UI yourself)
 1. Start the stack in the background: `npm run e2e:session` (wait for `ready`).
-2. Confirm you're on the hermetic stack: `GET /__dev/ping` → `{"dev":true}`.
-3. Authenticate the MCP browser: `POST /auth/dev-login` `{ "email": "va@example.com" }`
-   (proxied via `:5173`), or navigate the UI. Then drive with the Playwright MCP
+2. The launcher logs the lane URLs: `app=http://127.0.0.1:<port> dashboard=…`.
+3. Confirm you're on the hermetic stack: `GET /__dev/ping` via the dashboard URL → `{"dev":true}`.
+4. Authenticate the MCP browser: `POST /auth/dev-login` `{ "email": "va@example.com" }`
+   (proxied via the dashboard URL), or navigate the UI. Then drive with the Playwright MCP
    (navigate, snapshot, click, fill, screenshot).
-4. Assert outbound texts via `GET /__dev/outbox?to=<phone>`.
-5. After a change: backend → `npm run e2e:restart`; data → `npm run e2e:reseed`;
+5. Assert outbound texts via `GET /__dev/outbox?to=<phone>`.
+6. After a change: backend → `npm run e2e:restart`; data → `npm run e2e:reseed`;
    then re-drive (the browser keeps its page) or run a spec subset.
-6. Before claiming done: `npm run e2e` (full suite, green).
+7. Before claiming done: `npm run e2e` (full suite, green).
 
 ## Dev-only surface (local stack only)
 `/auth/dev-login`, `/__dev/ping`, `/__dev/outbox`, `/__dev/reseed` mount ONLY
@@ -84,9 +157,9 @@ is set. They never exist in a deployed environment.
 - `playwright.config.ts` — projects (`setup` → `chromium`), reporters, `webServer`.
 - `auth.setup.ts` — dev-login → saved `storageState` (the `vaPage` fixture uses it).
 - `fixtures/` — `auth` (`vaPage`), `outbox` (`getOutbox`), `reseed`.
-- `support/` — `selectors.md` (the selector conventions).
+- `support/` — `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup).
 - `tests/` — `public/`, `dashboard/`, `flows/`.
-- `.artifacts/` — reports, traces, screenshots, the `.restart` sentinel (gitignored).
+- `.artifacts/` — reports, traces, screenshots, the `.restart` sentinel, `lane.json` (gitignored).
 
 ## CI readiness (documented, not yet wired)
 

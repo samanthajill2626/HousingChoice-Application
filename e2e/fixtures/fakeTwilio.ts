@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import type { APIRequestContext } from '@playwright/test';
+import { fakeUrl, appUrl, publicBaseUrl } from '../support/urls.js';
 
 // Control-plane helpers for the fake-twilio host (:8889). `send-as-party` makes the
 // fake emit a REAL-signed inbound webhook to the app (exercising the signature
@@ -7,7 +8,7 @@ import type { APIRequestContext } from '@playwright/test';
 // outbound replies + their delivery state. (Restored for the new-dashboard comms
 // e2e after the legacy-only specs were removed in 40bd4f0; the control API is
 // unchanged.)
-const FAKE_BASE = process.env.FAKE_TWILIO_URL ?? 'http://localhost:8889';
+const FAKE_BASE = fakeUrl;
 
 // --- Direct inbound webhook (test-support only, for TwiML-reply assertions) ---
 //
@@ -23,8 +24,8 @@ const FAKE_BASE = process.env.FAKE_TWILIO_URL ?? 'http://localhost:8889';
 // app's PUBLIC_BASE_URL (what its signature middleware reconstructs). The hermetic
 // launcher's deterministic defaults are used when the values aren't in the Playwright
 // process env (scripts/e2e-session.mjs sets the same fallbacks on the app + fake).
-const APP_URL = process.env.E2E_APP_URL ?? 'http://localhost:8080';
-const APP_PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL ?? 'http://localhost:5173';
+const APP_URL = appUrl;
+const APP_PUBLIC_BASE_URL = publicBaseUrl;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token';
 const ORIGIN_SECRET = process.env.CF_ORIGIN_SECRET ?? 'dev-placeholder-not-a-secret';
 /** The app number the fake uses as OUR_PHONE_NUMBERS (send-as-party's default `to`). */

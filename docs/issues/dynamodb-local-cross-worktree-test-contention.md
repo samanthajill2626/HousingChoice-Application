@@ -3,7 +3,7 @@ id: dynamodb-local-cross-worktree-test-contention
 title: Shared DynamoDB Local makes app test suites flake under concurrent worktree runs
 type: debt
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-02
 refs: app/test/devOutbox.integration.test.ts, e2e/support/lane.mjs, scripts/db.mjs
@@ -57,3 +57,21 @@ the budget absorbs neighbor noise without masking real failures.
 
 Until the structural fix lands: a lone red integration test in a full run that passes solo
 should be treated as this contention, verified by the solo re-run, and noted — not "fixed".
+
+**Resolution (2026-07-02, feat/dynamodb-lane-keys — merged to main).** `-sharedDb` dropped
+from `scripts/db.mjs`; a legacy `-sharedDb` container is detected via `docker inspect`
+args and recreated with a loud warning (that bounce already happened on the dev machine —
+lane 0 was recreated + reseeded in place). Each e2e lane now injects its own access key
+(`hclane<L>`, from `e2e/support/lane.mjs` → forced into every `scripts/e2e-session.mjs`
+child so ambient `AWS_*` can't re-merge lanes) and each worktree's vitest run injects
+`hctest<hash>` (`app/vitest.config.ts`, respect-if-set) — DynamoDB Local keeps a separate
+database + SQLite write lock per **(access key, region)** pair. Two implementation notes
+vs the decision above, both validated empirically on a throwaway container before
+building: keys must be **alphanumeric** (`hc-lane-1` throws `UnrecognizedClientException`
+once `-sharedDb` is off — hence `hclane<L>`), and **region is part of the store
+identity**, so the launcher pins `AWS_REGION=us-east-1`. Verified with the prescribed
+head-to-head: two worktrees ran the full 82-spec e2e suite simultaneously — 82/82 + 82/82,
+zero timeout flakes, ~0.4m overhead vs solo, container CPU floating 8–80% instead of
+pinning ~105%. The 15s `testTimeout` mitigation is retained as belt-and-braces.
+Inspection docs updated (README + e2e/README): the access key now selects WHICH database
+you see (`local` = dev loop; a lane's key is in `e2e/.artifacts/lane.json`).

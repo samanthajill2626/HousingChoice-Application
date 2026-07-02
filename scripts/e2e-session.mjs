@@ -16,15 +16,59 @@ import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-// The entity-centric dashboard (:5174) the e2e specs drive.
+// The entity-centric dashboard the e2e specs drive.
 const dashboardNextDir = path.join(repoRoot, 'dashboard');
 const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
-// The fake-phones UI is a static build served by the fake-twilio host on :8889.
+// The fake-phones UI is a static build served by the fake-twilio host.
 // We build it once at session start (below) and point the host at its dist.
 const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const sentinel = path.join(artifactsDir, '.restart');
 const pidFile = path.join(artifactsDir, 'session.pid');
+const laneFile = path.join(artifactsDir, 'lane.json');
+
+// ---------------------------------------------------------------------------
+// Lane resolution — OBEY E2E_LANE if set (Playwright path), else free-probe.
+// ---------------------------------------------------------------------------
+// When Playwright spawns this script it injects E2E_LANE (the lane it resolved
+// at config load). We call resolveLane() which respects E2E_LANE via its own
+// env-override branch, so config and session always agree without re-probing.
+// When run directly (npm run e2e:session), E2E_LANE is unset and resolveLane()
+// hashes the worktree identity + free-probes to pick an available lane.
+const laneMjs = path.join(repoRoot, 'e2e', 'support', 'lane.mjs');
+const laneJson = JSON.parse(
+  execFileSync(process.execPath, [laneMjs], { encoding: 'utf8' }).trim(),
+);
+const { lane, ports, tablePrefix, mediaBucket } = laneJson;
+
+// Derive all per-lane URLs. 127.0.0.1 everywhere — NEVER bare 'localhost'
+// (Vite/localhost can resolve to IPv6 ::1 while the free-probe + other services
+// use IPv4, causing false "port free" probes and ERR_CONNECTION_REFUSED).
+const appUrl = `http://127.0.0.1:${ports.app}`;
+const dashboardUrl = `http://127.0.0.1:${ports.dashboard}`;
+const fakeUrl = `http://127.0.0.1:${ports.fake}`;
+// publicBase is the URL the fake HMAC-signs against and the app reconstructs
+// for Twilio signature verification. Must match on both sides.
+const publicBaseUrl = `http://127.0.0.1:${ports.publicBase}`;
+
+// Write the per-worktree state file so Task 3 fixtures + e2e-reseed/stop can
+// read the resolved lane without re-probing. Written early (before children
+// start) so any crash still leaves a readable file.
+mkdirSync(artifactsDir, { recursive: true });
+writeFileSync(
+  laneFile,
+  JSON.stringify(
+    {
+      lane,
+      ports,
+      urls: { app: appUrl, dashboard: dashboardUrl, fake: fakeUrl, publicBase: publicBaseUrl },
+      tablePrefix,
+      mediaBucket,
+    },
+    null,
+    2,
+  ),
+);
 
 // The current checkout's commit, stamped into BOTH the app and the dashboard at
 // launch so the e2e preflight (e2e/support/preflight.ts) can detect a STALE
@@ -43,11 +87,11 @@ const childEnv = {
   NODE_ENV: process.env.NODE_ENV ?? 'development',
   OTEL_SDK_DISABLED: process.env.OTEL_SDK_DISABLED ?? 'true',
   DYNAMODB_ENDPOINT: process.env.DYNAMODB_ENDPOINT ?? LOCAL_ENDPOINT,
-  TABLE_PREFIX: process.env.TABLE_PREFIX ?? 'hc-local-',
+  TABLE_PREFIX: tablePrefix,
   // Local S3 (MinIO) so inbound MMS media mirrors + serves back to the dashboard.
-  MEDIA_BUCKET: process.env.MEDIA_BUCKET ?? 'hc-local-media',
+  MEDIA_BUCKET: mediaBucket,
   MEDIA_S3_ENDPOINT: process.env.MEDIA_S3_ENDPOINT ?? LOCAL_S3_ENDPOINT,
-  PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? 'http://localhost:5173',
+  PUBLIC_BASE_URL: publicBaseUrl,
   DEV_AUTH_ENABLED: '1',
   MESSAGING_RECORD_OUTBOX: '1',
   // The public surface ships a strict per-IP abuse fence (default 5 req / 60s)
@@ -73,7 +117,7 @@ const childEnv = {
   TWILIO_API_KEY_SECRET: 'fake-secret',
   TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
-  TWILIO_API_BASE_URL: 'http://localhost:8889',
+  TWILIO_API_BASE_URL: fakeUrl,
   OUR_PHONE_NUMBERS: '+15550009999',
   // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's verified
   // cell. The local seed (devReset → seedInboundVoiceLineHolder) uses the hardcoded
@@ -88,6 +132,10 @@ const childEnv = {
   // reused server booted at a different commit is caught with an actionable error.
   E2E_APP_COMMIT: gitSha,
   VITE_E2E_COMMIT: gitSha,
+  // Pass the app port so the app process knows which port to bind.
+  PORT: String(ports.app),
+  // Pass the lane to child processes so they can self-identify if needed.
+  E2E_LANE: String(lane),
 };
 
 const children = new Map(); // name -> ChildProcess
@@ -121,40 +169,51 @@ function startWorker() {
   spawnNode('worker', ['--import', 'tsx', path.join('app', 'src', 'worker.ts')]);
 }
 function startViteNext() {
-  // PREFLIGHT — reap any orphan holding :5174 before spawning the dashboard's
-  // Vite. It pins `strictPort: true` (dashboard/vite.config.ts), so a held :5174
-  // makes Vite exit non-zero instead of drifting to another port — which here
-  // lands in `child.on('exit')` (logged, not a shutdown), so `web-next` silently
-  // vanishes and Playwright's webServer (:5174) polls a stale server or times
-  // out. Freeing the port first guarantees the child we spawn owns :5174 (same
-  // rationale as the :8889 reap in startFakeTwilio).
-  const reaped = killPort(5174);
-  if (reaped.length) log(`reaped orphan(s) holding :5174 before start: ${reaped.join(', ')}`);
-  spawnNode('web-next', [viteBin], dashboardNextDir);
+  // PREFLIGHT — reap any orphan holding the dashboard port before spawning Vite.
+  // It pins `strictPort: true` (dashboard/vite.config.ts), so a held port makes
+  // Vite exit non-zero instead of drifting to another port — which here lands in
+  // `child.on('exit')` (logged, not a shutdown), so `web-next` silently vanishes
+  // and Playwright's webServer polls a stale server or times out. Freeing the
+  // port first guarantees the child we spawn owns it.
+  const reaped = killPort(ports.dashboard);
+  if (reaped.length) log(`reaped orphan(s) holding :${ports.dashboard} before start: ${reaped.join(', ')}`);
+  // Pass PORT so vite.config.ts can read it (dashboard/vite.config.ts reads process.env.PORT).
+  spawnNode('web-next', [viteBin], dashboardNextDir, {
+    PORT: String(ports.dashboard),
+    APP_PORT: String(ports.app),
+  });
 }
 function startFakeTwilio() {
   // The fake-twilio host impersonates Twilio's REST API (the app's redirected
   // driver POSTs sends here) and fires correctly-signed webhooks BACK at the app.
-  // Two URLs, deliberately split: it POSTs webhooks to APP_BASE_URL (:8080, the
-  // app's real address) but SIGNS them against APP_PUBLIC_BASE_URL (the app's
-  // PUBLIC_BASE_URL, :5173) — because the app's signature middleware reconstructs
+  // Two URLs, deliberately split: it POSTs webhooks to APP_BASE_URL (the app's
+  // real address) but SIGNS them against APP_PUBLIC_BASE_URL (the app's
+  // PUBLIC_BASE_URL) — because the app's signature middleware reconstructs
   // the signed URL as `${PUBLIC_BASE_URL}${req.originalUrl}`. CF_ORIGIN_SECRET is
   // inherited from childEnv so the dispatcher's x-origin-verify header satisfies
   // the app's origin-secret validator (which gates /webhooks/* too).
   //
-  // PREFLIGHT — reap any orphan still holding :8889. On Windows a second
+  // PREFLIGHT — reap any orphan still holding the fake port. On Windows a second
   // `app.listen()` on an already-bound port does NOT raise EADDRINUSE: the listen
   // callback fires, the process exits 0 without ever owning the socket, and the
   // launcher would then track that throwaway child while an untracked orphan keeps
   // the port — un-killable by killChild/shutdown/e2e:stop. Freeing the port first
-  // guarantees the child we spawn below is the real :8889 owner and a tracked
+  // guarantees the child we spawn below is the real owner and a tracked
   // descendant of this launcher (so tree-kill teardown covers it).
-  const reaped = killPort(8889);
-  if (reaped.length) log(`reaped orphan(s) holding :8889 before start: ${reaped.join(', ')}`);
+  const reaped = killPort(ports.fake);
+  if (reaped.length) log(`reaped orphan(s) holding :${ports.fake} before start: ${reaped.join(', ')}`);
   spawnNode('fake-twilio', ['--import', 'tsx', path.join('fake-twilio', 'src', 'index.ts')], undefined, {
-    FAKE_TWILIO_PORT: '8889',
-    APP_BASE_URL: 'http://localhost:8080',
-    APP_PUBLIC_BASE_URL: childEnv.PUBLIC_BASE_URL,
+    FAKE_TWILIO_PORT: String(ports.fake),
+    APP_BASE_URL: appUrl,
+    APP_PUBLIC_BASE_URL: publicBaseUrl,
+    // The base the fake mints RecordingUrl/MediaUrl from (recordingServeBase in
+    // callEngine). The app fetches recordings from the fake at TWILIO_API_BASE_URL
+    // (= fakeUrl) and its media-SSRF allowlist accepts ONLY that exact origin. The
+    // fake otherwise defaults this to http://localhost:<port>, whose origin differs
+    // from the lane's 127.0.0.1 fakeUrl → MediaFetchRefusedError 'host_not_allowed'
+    // (recording never mirrors). Pin it to fakeUrl so the origins match. 127.0.0.1
+    // everywhere — do NOT use localhost (the deliberate IPv4-consistency choice).
+    FAKE_TWILIO_PUBLIC_URL: fakeUrl,
     // Serve the pre-built fake-phones UI (built once in main() before first start).
     // On a restartBackend() bounce the existing dist is reused — the UI rarely
     // changes, so we don't rebuild it.
@@ -164,8 +223,8 @@ function startFakeTwilio() {
 
 async function buildFakeUi() {
   // Build the standalone fake-phones React/Vite app once so the host can serve it
-  // as a static bundle on :8889. Vite caches between runs, so this is cheap after
-  // the first build. Must finish BEFORE startFakeTwilio() so dist/ exists.
+  // as a static bundle on the fake port. Vite caches between runs, so this is
+  // cheap after the first build. Must finish BEFORE startFakeTwilio() so dist/ exists.
   const started = Date.now();
   log('building fake-phones UI (npm run build -w @housingchoice/fake-twilio-web)…');
   // npm-cli.js ships alongside the node binary (…/node_modules/npm/bin/npm-cli.js),
@@ -190,7 +249,7 @@ async function runOnce(name, args) {
   });
 }
 
-async function waitForHealth(url = 'http://localhost:8080/health', timeoutMs = 60_000) {
+async function waitForHealth(url = `${appUrl}/health`, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -213,12 +272,12 @@ async function cleanSlate() {
   // fake-twilio's now-randomized SID base this keeps interactive `e2e:session` driving
   // clean and collision-free. `npm run e2e` ALSO reseeds in globalSetup — the extra
   // reseed there is a cheap, harmless no-op.)
-  const res = await fetch('http://localhost:8080/__dev/reseed', { method: 'POST' });
+  const res = await fetch(`${appUrl}/__dev/reseed`, { method: 'POST' });
   if (!res.ok) {
-    throw new Error(`clean-slate reseed failed (HTTP ${res.status}) at http://localhost:8080/__dev/reseed`);
+    throw new Error(`clean-slate reseed failed (HTTP ${res.status}) at ${appUrl}/__dev/reseed`);
   }
   // Best-effort: also clear the fake's threads + any in-flight status-callback timers.
-  await fetch('http://localhost:8889/control/reset', {
+  await fetch(`${fakeUrl}/control/reset`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: '{}',
@@ -254,7 +313,7 @@ async function restartBackend() {
     killChild('fake-twilio');
     await new Promise((r) => setTimeout(r, 200));
     startFakeTwilio();
-    await waitForHealth('http://localhost:8889/health');
+    await waitForHealth(`${fakeUrl}/health`);
     startApp();
     startWorker();
     await waitForHealth();
@@ -284,6 +343,11 @@ async function main() {
 
   if (!existsSync(sentinel)) writeFileSync(sentinel, '0');
 
+  // Log the resolved lane so the MCP browser (and humans) can see which ports
+  // are in use — critical for debugging and for the MCP to navigate the right URL.
+  log(`resolved lane ${lane}: app=${appUrl} dashboard=${dashboardUrl} fake=${fakeUrl} publicBase=${publicBaseUrl}`);
+  log(`tablePrefix=${tablePrefix} mediaBucket=${mediaBucket}`);
+
   log('ensuring DynamoDB Local…');
   await ensureDbStarted();
   log('ensuring MinIO local S3…');
@@ -299,13 +363,13 @@ async function main() {
 
   // Start fake-twilio FIRST so the app's very first outbound send has a host to
   // reach (the app only calls it on send, but this avoids a race on boot).
-  log('starting fake-twilio (:8889)…');
+  log(`starting fake-twilio (:${ports.fake})…`);
   startFakeTwilio();
-  await waitForHealth('http://localhost:8889/health');
-  log('fake-twilio ready (:8889)');
-  log('fake-phones UI → http://localhost:8889/');
+  await waitForHealth(`${fakeUrl}/health`);
+  log(`fake-twilio ready (:${ports.fake})`);
+  log(`fake-phones UI → ${fakeUrl}/`);
 
-  log('starting app, worker, web :5174 (non-watch)…');
+  log(`starting app, worker, web :${ports.dashboard} (non-watch)…`);
   startApp();
   startWorker();
   startViteNext();
@@ -317,7 +381,7 @@ async function main() {
   log('clean-slate reseed (hermetic session start)…');
   await cleanSlate();
 
-  log('ready — app :8080, web :5174, fake-twilio :8889, MinIO :9000 (MESSAGING_DRIVER=twilio → fake)');
+  log(`ready — app :${ports.app} (${appUrl}), web :${ports.dashboard} (${dashboardUrl}), fake-twilio :${ports.fake} (${fakeUrl}), MinIO :9000 (MESSAGING_DRIVER=twilio → fake)`);
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

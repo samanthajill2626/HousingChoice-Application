@@ -6,7 +6,7 @@ import { test, expect, type Page } from '@playwright/test';
 // inline Assign/Unassign round-trip with the live "Assigned · You" state-sync (the
 // project's #1 historical bug class). Served on :5174 (the suite baseURL);
 // targeted by absolute URL for explicitness.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);

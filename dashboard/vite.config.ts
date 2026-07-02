@@ -6,11 +6,12 @@ import react from '@vitejs/plugin-react';
 // Vite server proxies both there and stamps the DEV origin-secret placeholder
 // (the app's validator middleware rejects requests without it — the value
 // matches CF_ORIGIN_SECRET's local default in app/src/lib/config.ts).
-// Cloned verbatim from the legacy dashboard's vite config (same backend seam) —
-// only the listen port differs (:5174, the new dashboard owns Google OAuth in
-// local dev; see scripts/dev.mjs PUBLIC_BASE_URL default).
+// In the e2e stack, APP_PORT is set per-lane by e2e-session.mjs via PORT on the
+// app child; Vite reads it here to proxy to the correct lane app port.
+// In `npm run dev` (lane 0), APP_PORT is unset → falls back to 8080.
+const appPort = Number(process.env['APP_PORT'] ?? 8080);
 const appProxy = {
-  target: 'http://localhost:8080',
+  target: `http://127.0.0.1:${appPort}`,
   headers: { 'x-origin-verify': 'dev-placeholder-not-a-secret' },
 };
 
@@ -34,7 +35,16 @@ function commitStampPlugin() {
 export default defineConfig({
   plugins: [react(), commitStampPlugin()],
   server: {
-    port: 5174,
+    // In the e2e stack, PORT is set per-lane by e2e-session.mjs so each worktree
+    // gets an isolated dashboard port. In `npm run dev`, PORT is unset and we fall
+    // back to the lane-0 dev default (5174). strictPort ensures Vite exits with an
+    // error rather than silently drifting to a different port (which would make
+    // Playwright's webServer readiness probe poll the wrong address forever).
+    port: Number(process.env['PORT'] ?? 5174),
+    // Bind explicitly to IPv4 loopback so the health probe (127.0.0.1:<port>)
+    // always reaches it. Without this, `localhost` on some systems resolves to
+    // IPv6 ::1 and the 127.0.0.1 probe gets ERR_CONNECTION_REFUSED.
+    host: '127.0.0.1',
     strictPort: true,
     // Don't auto-launch a browser on start. `npm run dev` prints a clickable
     // http://localhost:5174 link in the terminal (see scripts/dev.mjs) — click

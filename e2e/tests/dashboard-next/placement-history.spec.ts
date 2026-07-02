@@ -6,7 +6,7 @@ import { test, expect, type Page } from '@playwright/test';
 // The seeded placement (placement-0001) is Tasha Nguyen on unit A, stage
 // awaiting_inspection. Served on :5174 (the suite baseURL); targeted by
 // absolute URL for explicitness.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // Log in as the seeded VA, then reset the seeded placement (placement-0001) back to
 // `awaiting_inspection` via an AUTHENTICATED request (session-safe, targeted) so

@@ -9,7 +9,7 @@ import { test, expect, type Page } from '@playwright/test';
 // Self-contained: the custom kind/label carry a per-run timestamp so repeated
 // runs never collide; the 409 case reuses the seeded tenant's number and must
 // NOT create a duplicate.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_TENANT = 'contact-tenant-0001'; // Tasha Nguyen, phone +15550100001
 const SEEDED_TENANT_PHONE = '+15550100001';
 

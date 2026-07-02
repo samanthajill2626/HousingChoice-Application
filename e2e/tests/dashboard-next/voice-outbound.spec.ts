@@ -50,8 +50,8 @@ import {
 } from '../../fixtures/voiceSetup.js';
 
 // The app's real address (not the dashboard proxy — webhooks go direct to the app).
-const APP_URL = process.env['E2E_APP_URL'] ?? 'http://localhost:8080';
-const APP_PUBLIC_BASE_URL = process.env['PUBLIC_BASE_URL'] ?? 'http://localhost:5173';
+const APP_URL = process.env['E2E_APP_URL'] ?? 'http://127.0.0.1:8080';
+const APP_PUBLIC_BASE_URL = process.env['PUBLIC_BASE_URL'] ?? 'http://127.0.0.1:5173';
 const TWILIO_AUTH_TOKEN = process.env['TWILIO_AUTH_TOKEN'] ?? 'hermetic-shared-twilio-token';
 const ORIGIN_SECRET = process.env['CF_ORIGIN_SECRET'] ?? 'dev-placeholder-not-a-secret';
 
@@ -96,7 +96,7 @@ async function postVoiceStatusCallback(
   return res.status();
 }
 
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // Each case starts from a clean, deterministic slate: a FRESH (unverified) VA, and
 // the founder seeded as the inbound-voice-line holder with a verified cell

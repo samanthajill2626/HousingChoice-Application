@@ -6,7 +6,7 @@ import { test, expect, type Page } from '@playwright/test';
 // and the Manage-numbers dialog. Targets the seeded tenant (Tasha Nguyen,
 // contact-tenant-0001). Mutations use the non-identifying `notes` field and are
 // reverted so other specs' name assertions stay valid.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TENANT = 'contact-tenant-0001';
 
 async function devLogin(page: Page): Promise<void> {

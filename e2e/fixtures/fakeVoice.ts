@@ -4,8 +4,9 @@
 // call to the app's number; the app bridges to the founder; the founder does not
 // answer; the app's missed-call auto-text fires.
 import type { APIRequestContext } from '@playwright/test';
+import { fakeUrl } from '../support/urls.js';
 
-const FAKE_BASE = process.env.FAKE_TWILIO_URL ?? 'http://localhost:8889';
+const FAKE_BASE = fakeUrl;
 
 export type CallScenario = {
   answerLeg?: 'callee' | 'founder' | 'team';

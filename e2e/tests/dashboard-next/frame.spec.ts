@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 // Communications groups, Contacts ▸ children, Settings), and can Sign out back to
 // Login. The dashboard is served on :5174 by the e2e session, which is also the
 // suite's baseURL; these specs target it by absolute URL for explicitness.
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 test('new dashboard: dev-login → AppFrame nav renders → sign out', async ({ page }) => {
   await page.goto(`${NEXT}/`);

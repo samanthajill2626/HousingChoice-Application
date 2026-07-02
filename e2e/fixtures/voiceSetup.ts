@@ -21,8 +21,8 @@ import { expect, type APIRequestContext } from '@playwright/test';
 import { getOutbox } from './outbox.js';
 import { pressCall, type FakeCall } from './fakeVoice.js';
 
-/** The dashboard dev-server origin (the :5174 proxy that fronts the app :8080). */
-export const NEXT = 'http://localhost:5174';
+/** The dashboard dev-server origin — resolved per-lane by playwright.config.ts. */
+export const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 /** Per-run-unique NANP E.164s so cases never collide (mirrors steps.freshContact
  *  / the local uniquePhone the voice spec used to keep). */

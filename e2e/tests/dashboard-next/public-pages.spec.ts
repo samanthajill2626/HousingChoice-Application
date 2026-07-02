@@ -31,7 +31,7 @@ import { getOutbox } from '../../fixtures/outbox.js';
 // uses a UNIQUE phone so the per-phone idempotent welcome never collides across
 // cases (or with other specs).
 
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_LANDLORD = 'contact-landlord-0001';
 const NON_SHAREABLE_UNIT = 'unit-0001'; // seeded `under_application` → opaque 404
 

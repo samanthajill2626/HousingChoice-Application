@@ -1,8 +1,38 @@
 import { defineConfig, devices } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 // The hermetic dev loop lives at the repo root, one level up from e2e/.
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+
+// ---------------------------------------------------------------------------
+// Lane resolution — synchronous, happens at config load before webServer boots.
+// ---------------------------------------------------------------------------
+// We use execSync so the async resolveLane() can run inside a synchronous
+// defineConfig() call. The resolved lane is passed to e2e-session.mjs via
+// E2E_LANE so the session NEVER re-probes and can't disagree with this config.
+const laneMjs = path.join(repoRoot, 'e2e', 'support', 'lane.mjs');
+const laneJson = JSON.parse(execFileSync(process.execPath, [laneMjs], { encoding: 'utf8' }).trim()) as {
+  lane: number;
+  ports: { app: number; dashboard: number; fake: number; publicBase: number };
+  tablePrefix: string;
+  mediaBucket: string;
+};
+
+// Expose resolved URLs to test workers (fixtures in Task 3 read these).
+// 127.0.0.1 everywhere — NEVER bare 'localhost' (IPv6 vs IPv4 mismatch).
+const resolvedAppUrl = `http://127.0.0.1:${laneJson.ports.app}`;
+const resolvedDashboardUrl = `http://127.0.0.1:${laneJson.ports.dashboard}`;
+const resolvedFakeUrl = `http://127.0.0.1:${laneJson.ports.fake}`;
+const resolvedPublicBaseUrl = `http://127.0.0.1:${laneJson.ports.publicBase}`;
+
+process.env['E2E_LANE'] = String(laneJson.lane);
+process.env['E2E_APP_URL'] = resolvedAppUrl;
+process.env['E2E_DASHBOARD_URL'] = resolvedDashboardUrl;
+process.env['E2E_FAKE_URL'] = resolvedFakeUrl;
+process.env['PUBLIC_BASE_URL'] = resolvedPublicBaseUrl;
+process.env['FAKE_TWILIO_URL'] = resolvedFakeUrl;
 
 // Absolute path for the HTML report, so the "npx playwright show-report <path>"
 // line Playwright prints at the end of a run is copy-pasteable from ANY directory
@@ -34,10 +64,10 @@ export default defineConfig({
     ['json', { outputFile: '.artifacts/results.json' }],
   ],
   use: {
-    // The dashboard (:5174). Specs hit :5174, the fake-phones host (:8889), or
-    // the backend API directly. Specs that need a different origin use an
-    // absolute URL.
-    baseURL: 'http://localhost:5174',
+    // The dashboard on the resolved lane port. Specs hit the dashboard, the
+    // fake-phones host, or the backend API directly via resolved env vars.
+    // 127.0.0.1 everywhere — never bare localhost (IPv6/IPv4 mismatch risk).
+    baseURL: resolvedDashboardUrl,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -55,15 +85,19 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // Boots DynamoDB Local + app(:8080) + worker + Vite (:5174) + fake-twilio
-    // (:8889) in hermetic mode. No AWS creds or secrets needed; messaging
-    // defaults to console. Env (DEV_AUTH_ENABLED, MESSAGING_RECORD_OUTBOX, etc.)
-    // is baked into the launcher.
-    command: 'node scripts/e2e-session.mjs',
+    // Boots DynamoDB Local + app + worker + Vite + fake-twilio on the resolved
+    // lane ports. E2E_LANE is injected so the session OBEYS this config's choice
+    // and never re-probes — config and session always agree. The resolved URLs are
+    // also forwarded so the session can skip re-derivation.
+    // 127.0.0.1 everywhere — never bare localhost.
+    command: `node scripts/e2e-session.mjs`,
+    env: {
+      E2E_LANE: String(laneJson.lane),
+    },
     cwd: repoRoot,
     // Readiness gate: the launcher only logs 'ready' after db:start/create/seed
-    // + app health; probe the new dashboard the specs hit.
-    url: 'http://localhost:5174',
+    // + app health; probe the dashboard port the specs hit.
+    url: resolvedDashboardUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
     stdout: 'pipe',

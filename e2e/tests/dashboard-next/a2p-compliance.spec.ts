@@ -28,7 +28,7 @@ import { tenantCallNoAnswer } from '../../fixtures/fakeVoice.js';
 // authenticated contacts API. Unique per-case phones avoid inbound-SID/dedupe and
 // per-phone welcome-idempotency collisions.
 
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 // --- Filed A2P copy (VERBATIM mirror of app/src/lib/smsCompliance.ts) ---
 const SMS_BRAND_NAME = 'Tenant Place LLC';

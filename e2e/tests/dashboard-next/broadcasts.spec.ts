@@ -23,7 +23,7 @@ import { listThreads } from '../../fixtures/fakeTwilio.js';
 // To get a multi-candidate, order-independent audience we create our OWN tenants
 // (voucherSize 2, unique per-run phones) via the API. Sends are asserted via the
 // fake-twilio thread store — never real SMS. Served on :5174 (the suite baseURL).
-const NEXT = 'http://localhost:5174';
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_UNIT = 'unit-0001'; // 1450 Joseph E. Boone Blvd NW, beds 2
 const TASHA = 'contact-tenant-0001';
 

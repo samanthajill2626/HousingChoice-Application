@@ -22,7 +22,10 @@ import {
   uniqueVoicePhone,
 } from '../fixtures/voiceSetup.js';
 
-const NEXT = 'http://localhost:5174';
+// Read the resolved dashboard URL from the env (set by playwright.config.ts at
+// config load from the lane resolver). Fall back to the lane-0 dev default so
+// `npm run e2e:session` without Playwright still has a sane value.
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 /** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
 export const APP_NUMBER = '+15550009999';
 /** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */

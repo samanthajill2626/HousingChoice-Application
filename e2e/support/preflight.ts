@@ -1,6 +1,7 @@
 import type { FullConfig } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { appUrl, dashboardUrl, fakeUrl } from './urls.js';
 
 /**
  * Global preflight — runs ONCE before any spec (Playwright `globalSetup`), after
@@ -29,7 +30,7 @@ const PREFLIGHT_POLL_MS = 1_000;
 
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const baseURL =
-    config.projects[0]?.use?.baseURL ?? process.env['E2E_BASE_URL'] ?? 'http://localhost:5174';
+    config.projects[0]?.use?.baseURL ?? process.env['E2E_BASE_URL'] ?? dashboardUrl;
   const url = `${baseURL}/__dev/ping`;
 
   // Poll until the app answers, rather than failing on the first miss. Playwright's
@@ -133,8 +134,6 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   // (worst on a freshly-booted stack; the full suite warms past it as the counter
   // climbs). Reseeding here clears those pointers so the fresh fake's SID space is clean.
   // (CI gets a fresh container, so this is a cheap near-no-op there.)
-  const appUrl = process.env['E2E_APP_URL'] ?? 'http://localhost:8080';
-  const fakeUrl = process.env['FAKE_TWILIO_URL'] ?? 'http://localhost:8889';
   const reseed = await fetch(`${appUrl}/__dev/reseed`, { method: 'POST' });
   if (!reseed.ok) {
     throw new Error(

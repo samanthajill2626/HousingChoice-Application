@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-07-01).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
+> is NOT current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/GLOSSARY.md`). Kept only as a point-in-time record of intent.
 # Tours — First-Class Tour Entity Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. **Do Task 0 (audit) first** — it locks the exact repo conventions/signatures this plan references at the pattern level; refine later tasks with what you find (mirrors how the landlord-onboarding build worked).

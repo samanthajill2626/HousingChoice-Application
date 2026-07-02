@@ -161,8 +161,9 @@ export function TourDetail(): React.JSX.Element {
           </div>
           <div>
             <dt>Scheduled</dt>
-            <dd aria-label={`Scheduled: ${formatScheduledAt(tour.scheduledAt)}`}>
-              {formatScheduledAt(tour.scheduledAt)}
+            {/* TODO(tours): render 'Not yet booked' for a timeless 'requested' tour (tours-sequence Task 4). */}
+            <dd aria-label={`Scheduled: ${formatScheduledAt(tour.scheduledAt ?? '')}`}>
+              {formatScheduledAt(tour.scheduledAt ?? '')}
             </dd>
           </div>
           <div>

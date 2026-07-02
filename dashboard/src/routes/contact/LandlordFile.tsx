@@ -173,7 +173,7 @@ export function LandlordFile({
               <Row
                 key={t.tourId}
                 to={`/tours/${t.tourId}`}
-                label={`${addr} · ${new Date(t.scheduledAt).toLocaleDateString()}`}
+                label={`${addr} · ${new Date(t.scheduledAt ?? '').toLocaleDateString()}`}
                 right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
               />
             );

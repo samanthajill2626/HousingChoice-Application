@@ -81,7 +81,7 @@ describe('POST /api/tours — create', () => {
       {}, // nothing
       { unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no tenantId
       { tenantId: 't', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'self_guided' }, // no unitId
-      { tenantId: 't', unitId: 'u', tourType: 'self_guided' }, // no scheduledAt
+      // NOTE: no-scheduledAt is NOT here — it's a valid timeless create (status 'requested').
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z' }, // no tourType
       { tenantId: 't', unitId: 'u', scheduledAt: 'not-a-date', tourType: 'self_guided' }, // bad date
       { tenantId: 't', unitId: 'u', scheduledAt: '2026-07-15T10:00:00.000Z', tourType: 'bad_type' }, // bad tourType
@@ -451,6 +451,141 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
     // no_show_checkin = NEW_SCHEDULED + 30m = '2026-07-20T14:30:00.000Z'
     expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+  });
+});
+
+// ============================================================================
+// Timeless create ('requested') + booking arms the ladder
+// (tours sequence gap 1: the tour record precedes the time)
+// ============================================================================
+
+const TIMELESS_CREATE_BODY = {
+  tenantId: 'contact-tenant-1',
+  unitId: 'unit-abc',
+  tourType: 'landlord_led',
+};
+
+describe('POST /api/tours — timeless create (no scheduledAt → requested)', () => {
+  it('creates a requested tour with NO scheduledAt attribute and NO reminders armed', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+
+    expect(res.status).toBe(201);
+    expect(res.body.tour).toMatchObject({
+      tenantId: 'contact-tenant-1',
+      unitId: 'unit-abc',
+      tourType: 'landlord_led',
+      status: 'requested',
+    });
+    expect(res.body.tour.scheduledAt).toBeUndefined();
+
+    // The stored item must OMIT the attribute entirely (sparse byScheduledAt
+    // GSI: absent attribute = not indexed) — not store undefined/null.
+    const stored = world.toursMap.get(res.body.tour.tourId as string)!;
+    expect('scheduledAt' in stored).toBe(false);
+
+    // No reminder ladder armed for a timeless tour.
+    expect(world.tourRemindersMap.size).toBe(0);
+  });
+
+  it('still requires tenantId, unitId, and tourType on a timeless create', async () => {
+    const { app } = makeWebhookHarness();
+    const cases = [
+      { unitId: 'u', tourType: 'self_guided' }, // no tenantId
+      { tenantId: 't', tourType: 'self_guided' }, // no unitId
+      { tenantId: 't', unitId: 'u' }, // no tourType
+    ];
+    for (const body of cases) {
+      const res = await authed(app).post('/api/tours').send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+  });
+});
+
+describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
+  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+  const BOOKED_AT = '2026-07-15T10:00:00.000Z';
+
+  it('scheduledAt alone auto-advances requested → scheduled and arms the ladder off the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    expect(created.status).toBe(201);
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+    expect(world.tourRemindersMap.size).toBe(0); // nothing armed yet
+
+    // Booking = the patch carries scheduledAt; no explicit status.
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: BOOKED_AT });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled'); // auto-advanced
+    expect(res.body.tour.scheduledAt).toBe(BOOKED_AT);
+
+    // The ladder armed with dueAts computed from the injected clock (the
+    // pre-booking cancel is a safe no-op: no rows existed, so none canceled).
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows.every((r) => r.canceledAt === undefined)).toBe(true);
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+    expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
+    // day_before = BOOKED_AT - 24h
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    // no_show_checkin = BOOKED_AT + 30m
+    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-15T10:30:00.000Z');
+  });
+
+  it('explicit { scheduledAt, status: "scheduled" } booking also works', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: BOOKED_AT, status: 'scheduled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled');
+    expect(res.body.tour.scheduledAt).toBe(BOOKED_AT);
+
+    const rows = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it('rejects { status: "scheduled" } with no time anywhere (patch or stored) → 400', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'scheduledAt is required to schedule this tour' });
+
+    // The tour is untouched and still unarmed.
+    expect(world.toursMap.get(tourId)?.status).toBe('requested');
+    expect(world.tourRemindersMap.size).toBe(0);
+  });
+
+  it('allows requested → canceled (no time needed to call it off)', async () => {
+    const { app } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(TIMELESS_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('canceled');
+  });
+
+  it('closed stays terminal: closed → requested is rejected (409)', async () => {
+    const { app } = makeWebhookHarness();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' });
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'requested' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('illegal_status_transition');
   });
 });
 

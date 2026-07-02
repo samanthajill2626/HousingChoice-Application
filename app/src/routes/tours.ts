@@ -2,16 +2,22 @@
 // Mounted under /api/tours, behind requireAuth via the /api mount (app.ts).
 // VAs schedule and manage tours, so NO admin gate (same posture as contacts).
 //
-//   POST  /api/tours  { tenantId, unitId, scheduledAt, tourType }  → 201 { tour }
+//   POST  /api/tours  { tenantId, unitId, scheduledAt?, tourType } → 201 { tour }
 //   GET   /api/tours/:tourId                                         → { tour } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=                     → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
 //   POST  /api/tours/:tourId/relay  { members }                      → 201 { tour, conversation }
 //
+// POST: scheduledAt is OPTIONAL. Absent → the tour is created 'requested' (the
+// timeless coordination anchor; no scheduledAt attribute stored, no reminders).
+// Present → status 'scheduled' and the reminder ladder arms immediately.
+//
 // PATCH supports:
 //   - Reschedule: { scheduledAt } — allowed only when canReschedule(current status)
-//     or when the status field brings the tour to 'scheduled'.
+//     or when the status field brings the tour to 'scheduled'. Booking: a
+//     scheduledAt patch on a 'requested' tour (no explicit status) auto-advances
+//     it to 'scheduled' in the same update.
 //   - Status change: { status } — allowlisted via isTourStatus; illegal transitions
 //     (e.g. closed → scheduled) are rejected 409.
 //   - Exit gate: { outcome, moveForward } — records the navigator decision; sets
@@ -120,7 +126,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // POST /api/tours — create a tour. Status defaults to 'scheduled'.
+  // POST /api/tours — create a tour. With scheduledAt → 'scheduled' + armed
+  // ladder; without → 'requested' (timeless), nothing armed until booking.
   router.post('/', async (req, res) => {
     const body = req.body;
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -146,8 +153,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(400).json({ error: 'unitId is required' });
       return;
     }
-    // Required: scheduledAt (valid ISO datetime)
-    if (!isValidIso(b['scheduledAt'])) {
+    // Optional: scheduledAt (valid ISO datetime when present). Absent → the
+    // tour is created timeless ('requested') and no reminders are armed.
+    const scheduledAt = b['scheduledAt'];
+    if (scheduledAt !== undefined && !isValidIso(scheduledAt)) {
       res.status(400).json({ error: 'scheduledAt must be a valid ISO 8601 datetime' });
       return;
     }
@@ -157,15 +166,21 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
+    // Timeless create: OMIT scheduledAt entirely (never undefined/null) so the
+    // sparse byScheduledAt GSI stays sparse; status is 'requested' until booked.
     const tour = await tours.create({
       tenantId: b['tenantId'] as string,
       unitId: b['unitId'] as string,
-      scheduledAt: b['scheduledAt'] as string,
       tourType: b['tourType'] as TourType,
+      ...(scheduledAt !== undefined
+        ? { scheduledAt: scheduledAt as string }
+        : { status: 'requested' satisfies TourStatus }),
     });
 
-    // Arm the reminder ladder (best-effort side effect).
-    await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+    // Arm the reminder ladder (best-effort side effect) — only once a time exists.
+    if (scheduledAt !== undefined) {
+      await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+    }
 
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
     res.status(201).json({ tour });
@@ -288,6 +303,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         res.status(409).json({ error: 'illegal_status_transition', detail: `cannot reschedule from status: ${currentStatus}` });
         return;
       }
+
+      if (
+        targetStatus === 'scheduled' &&
+        newScheduledAt === undefined &&
+        current.scheduledAt === undefined
+      ) {
+        // 'scheduled' means a time exists — a tour that never had one (e.g.
+        // still 'requested') cannot be scheduled without a scheduledAt.
+        res.status(400).json({ error: 'scheduledAt is required to schedule this tour' });
+        return;
+      }
     }
 
     // --- Reschedule (scheduledAt only, no status change) ---
@@ -305,6 +331,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const patch: Record<string, unknown> = {};
     if (newScheduledAt !== undefined) patch['scheduledAt'] = newScheduledAt;
     if (newStatus !== undefined) patch['status'] = newStatus;
+    // Booking: a scheduledAt patch on a 'requested' tour with no explicit
+    // status auto-advances requested → scheduled in the same update.
+    if (newScheduledAt !== undefined && newStatus === undefined && currentStatus === 'requested') {
+      patch['status'] = 'scheduled' satisfies TourStatus;
+    }
     if (newOutcome !== undefined) patch['outcome'] = newOutcome;
     if (newMoveForward !== undefined) {
       patch['moveForward'] = newMoveForward;

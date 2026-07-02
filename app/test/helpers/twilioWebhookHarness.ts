@@ -1473,8 +1473,9 @@ export function createFakeWorld(): FakeWorld {
       return [...toursMap.values()].filter((t) => t.unitId === unitId).map((t) => ({ ...t }));
     },
     async listByScheduledRange(from, to) {
+      // Sparse byScheduledAt GSI mirror: items without scheduledAt are never indexed.
       return [...toursMap.values()]
-        .filter((t) => t.scheduledAt >= from && t.scheduledAt <= to)
+        .filter((t) => t.scheduledAt !== undefined && t.scheduledAt >= from && t.scheduledAt <= to)
         .map((t) => ({ ...t }));
     },
     async patch(tourId, updates) {

@@ -42,8 +42,8 @@ export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
 /** Tour status — string-typed for now; Task 2 adds the full enum + guards. */
 export type TourStatus = string;
 
-/** Post-tour outcome (set when the tour is completed). */
-export type TourOutcome = 'completed' | 'no_show' | 'cancelled';
+/** Exit-gate outcome (mirrors lib/toursModel.ts TOUR_OUTCOMES). */
+export type TourOutcome = 'move_forward' | 'not_a_fit';
 
 /**
  * One scheduled (or completed) tour: a tenant visiting a unit.
@@ -61,8 +61,12 @@ export interface TourItem {
   tenantId: string;
   /** byUnit GSI hash: the unit being toured. */
   unitId: string;
-  /** ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range. */
-  scheduledAt: string;
+  /**
+   * ISO 8601 datetime of the scheduled visit. byScheduledAt GSI range.
+   * Absent on a `requested` (timeless) tour — the attribute is OMITTED, never
+   * written as undefined/null, so the sparse GSI does not index it.
+   */
+  scheduledAt?: string;
   /** Fixed constant 'tours' — byScheduledAt GSI hash partition key. */
   _schedPartition: 'tours';
   tourType: TourType;
@@ -83,13 +87,13 @@ export interface TourItem {
 
 /**
  * Input for creating a tour. tourId/createdAt/updatedAt/_schedPartition are
- * repo-generated. tenantId, unitId, scheduledAt, and tourType are required;
- * status defaults to 'scheduled' when not supplied.
+ * repo-generated. tenantId, unitId, and tourType are required; scheduledAt is
+ * optional (omitted for a timeless `requested` tour); status defaults to
+ * 'scheduled' when not supplied.
  */
 export type CreateTourInput = Partial<TourItem> & {
   tenantId: string;
   unitId: string;
-  scheduledAt: string;
   tourType: TourType;
 };
 

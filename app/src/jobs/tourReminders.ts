@@ -105,8 +105,16 @@ export async function armTourReminders(
   const log = deps.logger ?? defaultLogger;
   const created: TourReminderItem[] = [];
 
+  // A timeless ('requested') tour has no scheduledAt to arm off — callers
+  // shouldn't get here, but guard anyway (booking arms the ladder later).
+  const scheduledAt = tour.scheduledAt;
+  if (typeof scheduledAt !== 'string') {
+    log.warn({ tourId: tour.tourId }, 'tour reminders not armed (no scheduledAt)');
+    return created;
+  }
+
   for (const kind of REMINDER_KINDS) {
-    const dueAt = computeDueAt(kind, tour.scheduledAt, now);
+    const dueAt = computeDueAt(kind, scheduledAt, now);
     // Skip rows that are already past (they would never be polled).
     // `confirmation` is always `now`, so it always passes this check.
     if (dueAt < now) {

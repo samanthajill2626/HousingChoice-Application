@@ -35,6 +35,7 @@ import { PublicLayout } from './routes/public/PublicLayout.js';
 import { FlyerFunnel } from './routes/public/FlyerFunnel.js';
 import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
 import { TourDetail } from './routes/tours/TourDetail.js';
+import { ToursPage } from './routes/tours/ToursPage.js';
 
 /** /settings index → the first tab visible for the viewer's role (admin → Team,
  *  VA → Templates). A tiny component so it can read useAuth inside the routes. */
@@ -62,6 +63,9 @@ const IMPLEMENTED = new Set<string>([
   // /settings now has a REAL tabbed page (with nested sub-routes below); exclude
   // it from the placeholder generator (allNavTargets includes the footer link).
   '/settings',
+  // /tours now has a REAL list page (the placeholder is excluded so it isn't
+  // double-mounted alongside the implemented <Route> below).
+  '/tours',
 ]);
 
 /**
@@ -183,6 +187,10 @@ function AuthedApp(): React.JSX.Element {
               .map(({ to, label }) => (
                 <Route key={to} path={to.slice(1)} element={<Placeholder title={label} />} />
               ))}
+
+            {/* Tours list page at /tours. The static path ranks above the dynamic
+                tours/:tourId segment below. */}
+            <Route path="tours" element={<ToursPage />} />
 
             {/* Tour detail page — /tours/:tourId. The static paths above rank first. */}
             <Route path="tours/:tourId" element={<TourDetail />} />

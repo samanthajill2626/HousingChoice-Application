@@ -3,6 +3,7 @@
 // (nothing dimmed): Workspace and Communications. Contacts is a clickable parent
 // (→ the full Contacts list) with three filtered children: Tenants / Landlords /
 // Unknown (untriaged inbounds). Settings sits in the footer.
+// 2026-07-02: Tours added to Workspace after Placements — founder-approved amendment to the locked nav.
 //
 // `end` marks an exact-match link (react-router NavLink `end`) so a parent route
 // isn't highlighted while a child route is active.
@@ -11,6 +12,7 @@
 export type NavIconName =
   | 'today'
   | 'placements'
+  | 'tours'
   | 'contacts'
   | 'listings'
   | 'inbox'
@@ -53,6 +55,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/', label: 'Today', end: true, icon: 'today' },
       { to: '/placements', label: 'Placements', icon: 'placements' },
+      { to: '/tours', label: 'Tours', icon: 'tours' },
       {
         to: '/contacts',
         label: 'Contacts',

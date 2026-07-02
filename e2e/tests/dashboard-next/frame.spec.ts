@@ -22,7 +22,7 @@ test('new dashboard: dev-login → AppFrame nav renders → sign out', async ({ 
   // Left nav: the two labelled groups, with every Workspace destination present.
   const workspace = page.getByRole('navigation', { name: 'Workspace' });
   await expect(workspace).toBeVisible();
-  for (const label of ['Today', 'Placements', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Properties']) {
+  for (const label of ['Today', 'Placements', 'Tours', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Properties']) {
     await expect(workspace.getByRole('link', { name: label, exact: true })).toBeVisible();
   }
   const comms = page.getByRole('navigation', { name: 'Communications' });

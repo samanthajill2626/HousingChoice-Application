@@ -1,0 +1,161 @@
+/* Tours list page — two-section layout (Upcoming / Needs booking). Mirrors the
+ * ContactsList / ListingsList module language (tokens.css, never hard-coded). */
+
+.page {
+  /* Full-width: fills the AppFrame content area. */
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-1);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+
+.sub {
+  margin: var(--sp-1) 0 var(--sp-5);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- Sections (Upcoming / Needs booking) ----------------------------------- */
+
+.section {
+  margin-bottom: var(--sp-6);
+}
+
+.sectionTitle {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: var(--fs-xs);
+}
+
+/* --- Date group headers (within the Upcoming section) -------------------- */
+
+.dateGroup {
+  margin-bottom: var(--sp-4);
+}
+
+.dateLabel {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+
+/* --- Row list ------------------------------------------------------------- */
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rowItem {
+  margin-bottom: var(--sp-2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.row:hover {
+  border-color: var(--c-border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.tenant {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.property {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.time {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.badge {
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+/* --- States --------------------------------------------------------------- */
+
+.error {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.empty {
+  margin-top: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  text-align: center;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+}
+
+.emptyText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}

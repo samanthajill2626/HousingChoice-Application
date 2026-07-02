@@ -58,6 +58,17 @@ export function ContactsIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
+/** Tours — a house with a clock (viewing appointment). */
+export function ToursIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M3 10.5L12 4l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-9.5z" />
+      <circle cx="12" cy="14" r="3.5" />
+      <path d="M12 12.5v1.5l1 1" />
+    </Svg>
+  );
+}
+
 /** Properties — a building. */
 export function ListingsIcon({ size }: IconProps): React.JSX.Element {
   return (
@@ -136,6 +147,7 @@ export function CloseIcon({ size }: IconProps): React.JSX.Element {
 export const NAV_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   today: TodayIcon,
   placements: PlacementsIcon,
+  tours: ToursIcon,
   contacts: ContactsIcon,
   listings: ListingsIcon,
   inbox: InboxIcon,

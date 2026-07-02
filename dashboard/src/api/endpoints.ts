@@ -1006,11 +1006,20 @@ export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tou
   return res.tour;
 }
 
-/** GET /api/tours?tenantId=&unitId=&from=&to= — list tours by filter.
- *  Exactly one of tenantId / unitId / (from+to) must be provided (server enforces).
- *  Returns the tours array (unwrapped from { tours }). */
+/** GET /api/tours?tenantId=&unitId=&from=&to=&status= — list tours by filter.
+ *  Exactly one of tenantId / unitId / (from+to) / status must be provided
+ *  (server enforces). `status` may be supplied as a sole filter (e.g. 'requested'
+ *  to fetch all time-less tour requests). Returns the tours array (unwrapped from
+ *  { tours }). */
 export async function getTours(
-  params: { tenantId?: string; unitId?: string; from?: string; to?: string },
+  params: {
+    tenantId?: string;
+    unitId?: string;
+    from?: string;
+    to?: string;
+    /** Optional sole-filter status, e.g. 'requested' to fetch unscheduled tours. */
+    status?: TourStatus;
+  },
   signal?: AbortSignal,
 ): Promise<Tour[]> {
   const res = await request<ToursPage>('/api/tours', {
@@ -1019,6 +1028,7 @@ export async function getTours(
       ...(params.unitId !== undefined && { unitId: params.unitId }),
       ...(params.from !== undefined && { from: params.from }),
       ...(params.to !== undefined && { to: params.to }),
+      ...(params.status !== undefined && { status: params.status }),
     },
     ...(signal !== undefined && { signal }),
   });

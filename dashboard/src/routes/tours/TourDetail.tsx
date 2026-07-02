@@ -1,8 +1,10 @@
 // TourDetail — the detail page for a single tour (GET /api/tours/:tourId).
 // Shows: status, scheduled date/time ('Not yet booked' for a timeless
 // 'requested' tour), tour type, exit-gate feedback (the "Moving forward?"
-// question → PATCH { outcome, moveForward }), book / reschedule / cancel
-// controls, and a link to the tour's relay group thread.
+// question → PATCH { outcome, moveForward }), book / reschedule / cancel /
+// confirm / mark-toured / mark-no-show controls, an 'Open group thread'
+// affordance (provisions the masked relay group; members auto-resolved
+// server-side), and a link to the tour's relay group thread once it exists.
 //
 // Tours are SEPARATE from placements. This page records the navigator decision
 // (exit gate) but does NOT create a placement or change tenant status. The exit
@@ -15,6 +17,7 @@ import { useParams, Link } from 'react-router-dom';
 import {
   getTour,
   patchTour,
+  createTourRelay,
   ApiError,
   TOUR_STATUS_LABELS,
   TOUR_OUTCOME_LABELS,
@@ -91,15 +94,48 @@ export function TourDetail(): React.JSX.Element {
     return () => controller.abort();
   }, [tourId]);
 
-  async function handleCancel() {
+  // A bare status transition (confirm / toured / no-show / cancel): PATCH the
+  // new status and apply the returned tour — inapplicable controls disappear.
+  async function handleStatus(status: TourStatus, failMessage: string) {
     if (!tour || submitting) return;
     setSubmitting(true);
     setActionError(null);
     try {
-      const updated = await patchTour(tour.tourId, { status: 'canceled' });
+      const updated = await patchTour(tour.tourId, { status });
       setTour(updated);
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Cancel failed');
+      setActionError(err instanceof ApiError ? err.message : failMessage);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Open a masked group thread for the tour. Members are omitted so the server
+  // auto-resolves [tenant, unit's landlord]. On success the returned tour
+  // carries the new groupThreadId, so the 'Group thread' row + link appear.
+  async function handleOpenGroup() {
+    if (!tour || submitting) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      const { tour: updated } = await createTourRelay(tour.tourId);
+      setTour(updated);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        // relay_member_unresolvable carries a human-readable `detail`
+        // (e.g. which member has no phone) — show that, not the raw code.
+        const detail =
+          err.body !== null && typeof err.body === 'object'
+            ? (err.body as { detail?: unknown }).detail
+            : undefined;
+        setActionError(
+          err.code === 'relay_member_unresolvable' && typeof detail === 'string'
+            ? detail
+            : err.message,
+        );
+      } else {
+        setActionError('Failed to open group thread');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -178,6 +214,14 @@ export function TourDetail(): React.JSX.Element {
   const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
   // Book: only a 'requested' (timeless) tour is booked; afterwards Reschedule takes over.
   const canBook = tour.status === 'requested';
+  // Status controls: Confirm only from 'scheduled'; attendance (toured /
+  // no-show) from 'scheduled' or 'confirmed'. Marking toured is what makes the
+  // exit gate reachable.
+  const canConfirm = tour.status === 'scheduled';
+  const canMarkAttendance = tour.status === 'scheduled' || tour.status === 'confirmed';
+  // Open group: only before a group exists, and never on a dead tour.
+  const canOpenGroup =
+    tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   // Exit gate: show when the tour has been toured but not yet decided
   const canRecord = tour.status === 'toured' && tour.outcome === undefined;
 
@@ -292,15 +336,60 @@ export function TourDetail(): React.JSX.Element {
         </form>
       ) : null}
 
+      {/* Status controls: confirm, then mark attendance (toured / no-show). */}
+      {canConfirm ? (
+        <button
+          type="button"
+          onClick={() => void handleStatus('confirmed', 'Confirm failed')}
+          disabled={submitting}
+          aria-label="Confirm this tour"
+        >
+          Confirm tour
+        </button>
+      ) : null}
+      {canMarkAttendance ? (
+        <>
+          <button
+            type="button"
+            onClick={() => void handleStatus('toured', 'Status update failed')}
+            disabled={submitting}
+            aria-label="Mark this tour as toured"
+          >
+            Mark toured
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleStatus('no_show', 'Status update failed')}
+            disabled={submitting}
+            aria-label="Mark this tour as a no-show"
+          >
+            Mark no-show
+          </button>
+        </>
+      ) : null}
+
       {/* Cancel */}
       {canCancel ? (
         <button
           type="button"
-          onClick={handleCancel}
+          onClick={() => void handleStatus('canceled', 'Cancel failed')}
           disabled={submitting}
           aria-label="Cancel this tour"
         >
           Cancel tour
+        </button>
+      ) : null}
+
+      {/* Open group thread — Team-created by hand (never auto-created). Members
+          are omitted so the server auto-resolves [tenant, unit's landlord]. */}
+      {canOpenGroup ? (
+        <button
+          type="button"
+          onClick={() => void handleOpenGroup()}
+          disabled={submitting}
+          aria-label="Open a masked group thread for this tour"
+        >
+          Open group thread
         </button>
       ) : null}
 

@@ -11,6 +11,7 @@ import {
   buildTransitionBody,
   createContact,
   createTour,
+  createTourRelay,
   getPlacement,
   getContactVocabulary,
   getPlacementHistory,
@@ -169,6 +170,27 @@ it('createTour posts WITH scheduledAt when present', async () => {
   expect(request).toHaveBeenCalledWith('/api/tours', {
     method: 'POST',
     body: { tenantId: 'c1', unitId: 'u1', tourType: 'pm_team', scheduledAt: '2026-07-15T14:00:00.000Z' },
+  });
+});
+
+it('createTourRelay WITHOUT members posts an empty body (server auto-resolves)', async () => {
+  const tour = { tourId: 't1', tenantId: 'c1', unitId: 'u1', groupThreadId: 'conv-9' };
+  vi.mocked(request).mockResolvedValueOnce({ tour, conversation: { conversationId: 'conv-9' } });
+  const res = await createTourRelay('t1');
+  expect(request).toHaveBeenCalledWith('/api/tours/t1/relay', { method: 'POST', body: {} });
+  // The members key must be OMITTED entirely, never sent as undefined.
+  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  expect('members' in sent.body).toBe(false);
+  expect(res.tour).toEqual(tour);
+});
+
+it('createTourRelay WITH explicit members posts them unchanged', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ tour: { tourId: 't1' }, conversation: {} });
+  const members = [{ phone: '+15550001111', name: 'Tina Tenant' }];
+  await createTourRelay('t1', members);
+  expect(request).toHaveBeenCalledWith('/api/tours/t1/relay', {
+    method: 'POST',
+    body: { members },
   });
 });
 

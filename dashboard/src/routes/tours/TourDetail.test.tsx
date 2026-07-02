@@ -15,12 +15,14 @@ import type { Tour } from '../../api/index.js';
 
 const getTour = vi.fn();
 const patchTour = vi.fn();
+const createTourRelay = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getTour: (...a: unknown[]) => getTour(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
+    createTourRelay: (...a: unknown[]) => createTourRelay(...a),
   };
 });
 
@@ -278,5 +280,218 @@ describe('TourDetail', () => {
 
     expect(screen.queryByRole('form', { name: 'Book tour form' })).not.toBeInTheDocument();
     expect(patchTour).not.toHaveBeenCalled();
+  });
+
+  // ── Status controls + open-group affordance — tours-sequence Task 5 ─────────
+  // Confirm tour (scheduled only), Mark toured / Mark no-show (scheduled or
+  // confirmed — Mark toured is what makes the exit gate reachable), and the
+  // 'Open group thread' button (no groupThreadId yet, tour not canceled/closed).
+
+  it("a scheduled tour shows 'Confirm tour', 'Mark toured', and 'Mark no-show'", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Confirm this tour' })).toHaveTextContent('Confirm tour');
+    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toHaveTextContent('Mark toured');
+    expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toHaveTextContent('Mark no-show');
+  });
+
+  it("a confirmed tour shows 'Mark toured' + 'Mark no-show' but NOT 'Confirm tour'", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toBeInTheDocument();
+  });
+
+  it('a requested tour shows NONE of the three status controls', async () => {
+    getTour.mockResolvedValue(makeRequestedTour());
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+  });
+
+  it("a toured tour shows none of the three; 'Record outcome' is present", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
+  });
+
+  it("'Confirm tour' PATCHes { status: confirmed } and disappears after success", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
+    renderDetail();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Confirm this tour' })).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Confirm this tour' }));
+
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'confirmed' });
+    await waitFor(() => expect(screen.getByLabelText(/Status: Confirmed/i)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    // Attendance controls remain available on a confirmed tour.
+    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument();
+  });
+
+  it("'Mark toured' PATCHes { status: toured }; controls swap to 'Record outcome'", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Mark this tour as toured' }));
+
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
+    await waitFor(() => expect(screen.getByLabelText(/Status: Toured/i)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
+  });
+
+  it("'Mark no-show' PATCHes { status: no_show }", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'no_show' }));
+    renderDetail();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Mark this tour as a no-show' }));
+
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
+    await waitFor(() => expect(screen.getByLabelText(/Status: No show/i)).toBeInTheDocument());
+  });
+
+  it("shows 'Open group thread' when the tour has no groupThreadId", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).toHaveTextContent('Open group thread');
+  });
+
+  it("shows 'Open group thread' for a requested tour too (no group yet)", async () => {
+    getTour.mockResolvedValue(makeRequestedTour());
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides 'Open group thread' when groupThreadId is set; the view link shows instead", async () => {
+    getTour.mockResolvedValue(makeTour({ groupThreadId: 'conv-123' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument();
+  });
+
+  it("hides 'Open group thread' for canceled and closed tours", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: undefined }));
+    const first = renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).not.toBeInTheDocument();
+    first.unmount();
+
+    getTour.mockResolvedValue(
+      makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false, groupThreadId: undefined }),
+    );
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("'Open group thread' calls createTourRelay with ONLY the tourId; on success the link appears", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    createTourRelay.mockResolvedValue({
+      tour: makeTour({ status: 'scheduled', groupThreadId: 'conv-999' }),
+      conversation: {},
+    });
+    renderDetail();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+      ).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+
+    // Exactly one argument — members omitted so the server auto-resolves them.
+    expect(createTourRelay).toHaveBeenCalledWith('tour-abc');
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('relay_member_unresolvable renders the detail text inline', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    createTourRelay.mockRejectedValue(
+      new ApiError(
+        400,
+        'relay_member_unresolvable',
+        'relay_member_unresolvable (Tenant has no phone number on file)',
+        { error: 'relay_member_unresolvable', detail: 'Tenant has no phone number on file' },
+      ),
+    );
+    renderDetail();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+      ).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+
+    // The detail text — and ONLY the detail text — is the inline error.
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert').textContent).toBe('Tenant has no phone number on file');
+  });
+
+  it('a generic relay failure renders the error message inline', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    createTourRelay.mockRejectedValue(
+      new ApiError(409, 'relay_already_provisioned', 'relay_already_provisioned', {
+        error: 'relay_already_provisioned',
+      }),
+    );
+    renderDetail();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+      ).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/relay_already_provisioned/i);
   });
 });

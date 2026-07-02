@@ -1049,15 +1049,21 @@ export async function patchTour(
   return res.tour;
 }
 
-/** POST /api/tours/:tourId/relay { members } — provision a masked relay group
- *  thread for the tour. Stamps groupThreadId back on the tour.
- *  Returns the updated tour + the new conversation (unwrapped). */
+/** POST /api/tours/:tourId/relay — provision a masked relay group thread for
+ *  the tour. `members` is optional: when omitted the server auto-resolves
+ *  [tenant contact, unit's landlord contact] (phones + names). Stamps
+ *  groupThreadId back on the tour. Errors: 409 relay_already_provisioned when
+ *  the tour already has a group; 400 relay_member_unresolvable (with `detail`)
+ *  when a member can't resolve. Returns the updated tour + the new
+ *  conversation (unwrapped). */
 export async function createTourRelay(
   tourId: string,
-  members: Array<{ phone: string; contactId?: string; name?: string }>,
+  members?: Array<{ phone: string; contactId?: string; name?: string }>,
 ): Promise<{ tour: Tour; conversation: unknown }> {
   return request<{ tour: Tour; conversation: unknown }>(
     `/api/tours/${encodeURIComponent(tourId)}/relay`,
-    { method: 'POST', body: { members } },
+    // Omit the members key entirely when not given (server auto-resolves) —
+    // never send members: undefined.
+    { method: 'POST', body: members !== undefined ? { members } : {} },
   );
 }

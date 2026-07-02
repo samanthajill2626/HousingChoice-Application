@@ -143,10 +143,12 @@ a different name, not a gap to build** — the audit's job is to find the mappin
   repo/route); `GET /api/units/:id/similar` is a property-detail helper, not tenant-driven.
   "Find another match" = the team browses `GET /api/units?status=available`. Assert the
   deterministic fact (*a next listing can be sent*), **never** that an algorithm re-ranked.
-- **Tours is a SEPARATE, unbuilt workflow; `searching` absorbs touring** (STATUS-MODEL.md).
-  There is no tour entity to create at handoff (creating a placement would jump ahead to
-  Application). The real loop-exit signal: the fitting unit's `listing_send` row exists AND
-  the tenant stays `searching` (Tours-ready). Assert that — don't invent a Tours feature.
+- **Tours handoff** *(updated 2026-07-02 — the Tour entity is now built)*: `searching` still
+  absorbs touring (no tenant-status move), but the handoff IS a real record now — the tenant
+  texts tour interest, Team creates a **timeless tour** ('Schedule a tour' dialog, no
+  date), and `expectHandoffToTours` asserts the tour row (status 'Requested') + the
+  listing_send + tenant still `searching`. The original guidance ("don't invent a Tours
+  feature") described the pre-tours state and is superseded by the tours suite below.
 - **Set up an available property via the API:** `POST /api/units { landlordId, beds,
   jurisdiction, address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
   writable create field; `address` MUST be an object), then `PATCH /api/units/:id/listing-status
@@ -206,6 +208,60 @@ schema on a guess.
   statement separator and BREAKS the diagram parse. Use `.` / `—` inside notes, and avoid
   quotes in notes.
 
+## Audit-surfaced realities — tours (the fourth diagram)
+
+The first suite to encode a fully-async automation (the durable reminder ladder) and the
+masked relay group. These realities were paid for in build+debug time:
+
+- **Time-dependent automation needs a dev seam, not patience.** The reminder poller runs on
+  a 60s wall-clock interval; day-before/morning-of rungs can NEVER fire inside a spec.
+  `POST /__dev/tour-reminders/tick {now}` (triple-gated like every `/__dev` route) runs the
+  same `runDueTourReminders(now, deps)` the worker runs. Two traps: dueAt comparisons are
+  **lexicographic ISO-string** compares, so a tick `now` must be normalized
+  (`new Date(x).toISOString()` — the endpoint does this; verbs should still send full-ms
+  ISO); and the tick is **global** — it fires every due row in the DB, so all assertions
+  must be scoped to the spec's own phone numbers (self-clean isolation carries this).
+- **Two backend constraints shaped group-routed reminders:** the 1:1 send wrapper
+  hard-refuses `relay_group` conversations (`RelaySendNotSupportedError`), and **the worker
+  process cannot enqueue jobs** (no OutboundQueueAdapter — `jobs.enqueue` throws). So group
+  reminders are **direct per-member adapter sends from the pool number** (the `relay.intro`
+  precedent), NOT persisted as app messages. Corollary: they bypass the send breaker; 1:1
+  rungs do NOT (breaker = 10/min/conversation) — tick rungs one at a time.
+- **The fake has no group-thread concept.** A "group message" materializes as the same body
+  in EACH member's per-party thread; prove the sender with the message's `from` (the e2e
+  `FakeThread` type now carries `from`/`to`) — fake pool numbers match `/^\+1555019\d{4}$/`,
+  vs the app number `+15550009999`. Member→group = `send-as-party` with `to:` the pool
+  number (persona registered first); fan-out arrives as `"Name: body"` (or
+  `"Tenant Place LLC: body"` for staff sends).
+- **Inbound MMS from the fake's own host WORKS** — the fake serves canned raster images
+  (e.g. `/canned/room.png`) and the hermetic env pins `FAKE_TWILIO_PUBLIC_URL` into the
+  media-origin allowlist, so the self-guided ID gate is a REAL picture message (no
+  `MediaFetchRefusedError`). This supersedes the landlord-suite text-only workaround, which
+  was about `example.com` being a disallowed host — not about MMS itself.
+- **Make terminal states UI-reachable before writing the spec.** The exit gate rendered
+  only at `status==='toured'`, but no control could reach `toured` — the gate was
+  unreachable through the UI until the confirm/mark-toured/mark-no-show buttons were built.
+  When a diagram step gates on a state, audit HOW the state is reached, not just that the
+  gated UI exists.
+- **Timeless `requested` tours:** POST without `scheduledAt` → status `requested`, nothing
+  armed, invisible to the sparse `byScheduledAt` GSI; the FIRST `scheduledAt` (Book control
+  → `PATCH {scheduledAt, status:'scheduled'}`, or a bare `scheduledAt` patch which
+  auto-advances) is the booking and arms the ladder. Rows render 'Not booked'/'Not yet
+  booked' — assert the label 'Requested', never the raw enum.
+- **Strict-mode collisions to expect:** 'Group thread' vs 'View group thread' (use
+  `exact: true`); the plain form-dismiss 'Cancel' vs 'Cancel tour'; exit-gate labels use
+  **em dashes** ('Yes — move forward'); `/want to move forward/` matches BOTH the Team ask
+  and the tenant reply in a timeline — assert a reply-unique phrase.
+- **Module counters don't survive Playwright worker restarts but the DB does** — a
+  `seq`-based street address collided across specs in one run. Anything that must be unique
+  across a whole suite run needs a per-run stamp, not a module counter.
+- **Don't run `npm run e2e:session` and `npm run e2e` concurrently from one worktree** —
+  the run resolves the next free lane and reaps the session. One mode at a time; each
+  `npm run e2e` boots (and tears down) its own hermetic stack.
+- **Group sends produce benign `status callback for unknown provider SID` warnings** — the
+  direct-adapter sends (intros, group reminders) are deliberately not persisted, so their
+  delivery callbacks find no message row. Known noise class, not a failure signal.
+
 ## Debugging discipline
 
 When the suite is red, **find the root cause before fixing** (`superpowers:systematic-
@@ -227,3 +283,6 @@ state**, usually process-memory that survives a DB reseed.
 - Third worked example (with a real backing build): [`e2e/tests/scenarios/landlord-onboarding.spec.ts`](../e2e/tests/scenarios/landlord-onboarding.spec.ts)
   and its diagram [`documentation/landlord-onboarding-sequence.mermaid`](landlord-onboarding-sequence.mermaid);
   build plan [`docs/superpowers/plans/2026-06-30-landlord-onboarding.md`](../docs/superpowers/plans/2026-06-30-landlord-onboarding.md).
+- Fourth worked example (async automation + masked relay groups): [`e2e/tests/scenarios/tours.spec.ts`](../e2e/tests/scenarios/tours.spec.ts)
+  and its diagram [`documentation/tours-sequence.mermaid`](tours-sequence.mermaid);
+  build plan [`docs/superpowers/plans/2026-07-02-tours-sequence-e2e.md`](../docs/superpowers/plans/2026-07-02-tours-sequence-e2e.md).

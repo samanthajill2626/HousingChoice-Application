@@ -175,7 +175,6 @@ test('PM-team: same shape with the PM in the landlord slot → exit NO (not a fi
   await flow.teamConfirmsTour();
   await flow.teamMarksToured();
   await flow.teamRecordsExitGate('no');
-  await flow.teamClosesTour();
   await flow.expectTourClosedNotAFit();
 
   // Re-match: the tenant stays searching (hand back to Sending Unit).

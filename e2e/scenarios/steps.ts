@@ -764,7 +764,16 @@ export class Scenario {
       const res = await this.page.request.get(`${NEXT}/api/tours?tenantId=${encodeURIComponent(id)}`);
       expect(res.ok()).toBeTruthy();
       const { tours } = (await res.json()) as { tours: Array<{ unitId: string; status: string }> };
-      expect(tours.some((t) => t.unitId === fittingUnit.unitId)).toBe(true);
+      const handoffTour = tours.find((t) => t.unitId === fittingUnit.unitId);
+      expect(handoffTour).toBeDefined();
+      // The tour anchor is TIMELESS at handoff — booked later, in the Tours sequence.
+      expect(handoffTour?.status).toBe('requested');
+      // The fitting unit was actually SENT (listing_send row) — the Sending-Unit
+      // half of the handoff contract.
+      const sentRes = await this.page.request.get(`${NEXT}/api/contacts/${id}/listings-sent`);
+      expect(sentRes.ok()).toBeTruthy();
+      const { sent } = (await sentRes.json()) as { sent: Array<{ unitId: string }> };
+      expect(sent.some((sRow) => sRow.unitId === fittingUnit.unitId)).toBe(true);
       await this.assertStatus('searching');
       await this.page.goto(`${NEXT}/contacts/${id}`);
       // Team SEES the tour on the Tours card: the row reads "<address> · Not
@@ -1389,7 +1398,7 @@ export class Scenario {
           (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
         ),
         this.page
-          .getByRole('button', { name: 'Open a masked group thread for this tour' })
+          .getByRole('button', { name: 'Open group thread' })
           .click(),
       ]);
       expect(res.status(), await res.text()).toBe(201);
@@ -1485,7 +1494,7 @@ export class Scenario {
     const tour = this.requireActiveTour();
     return step(`Team books the tour (${times.scheduledAtLocal})`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('button', { name: 'Book this tour' }).click();
+      await this.page.getByRole('button', { name: 'Book tour' }).click();
       const form = this.page.getByRole('form', { name: 'Book tour form' });
       await expect(form).toBeVisible();
       // datetime-local input — fill takes the raw 'YYYY-MM-DDTHH:mm' value; the
@@ -1578,19 +1587,19 @@ export class Scenario {
 
   /** [Team, MANUAL] Confirm the scheduled tour (TourDetail control). */
   teamConfirmsTour(): Promise<void> {
-    return this.tourStatusAction('Confirm this tour', 'Confirmed', 'Team confirms the tour');
+    return this.tourStatusAction('Confirm tour', 'Confirmed', 'Team confirms the tour');
   }
 
   /** [Team, MANUAL] Log the tour outcome: toured (TourDetail control) — this is
    *  what makes the exit gate reachable. */
   teamMarksToured(): Promise<void> {
-    return this.tourStatusAction('Mark this tour as toured', 'Toured', 'Team logs the tour outcome (toured)');
+    return this.tourStatusAction('Mark toured', 'Toured', 'Team logs the tour outcome (toured)');
   }
 
   /** [Team, MANUAL] Log a no-show (TourDetail control). No-show tours stay
    *  reschedulable. */
   teamMarksNoShow(): Promise<void> {
-    return this.tourStatusAction('Mark this tour as a no-show', 'No show', 'Team logs a no-show');
+    return this.tourStatusAction('Mark no-show', 'No show', 'Team logs a no-show');
   }
 
   /** [Team, MANUAL] Reschedule the tour to a new time — cancels the pending
@@ -1763,29 +1772,13 @@ export class Scenario {
     });
   }
 
-  /**
-   * [Team, MANUAL] Close the tour (exit gate NO → "Close the tour"). TourDetail
-   * has NO Close button (closing is not a shipped control), so the [MANUAL] step
-   * is an authed API PATCH { status: 'closed' } — the same seam Team tooling
-   * would call; the UI is then reloaded to assert the 'Closed' label renders.
-   */
-  teamClosesTour(): Promise<void> {
-    const tour = this.requireActiveTour();
-    return step('Team closes the tour', async () => {
-      const res = await this.page.request.patch(`${NEXT}/api/tours/${tour.tourId}`, {
-        data: { status: 'closed' },
-      });
-      expect(res.ok(), await res.text()).toBeTruthy();
-      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await expect(this.page.getByLabel('Status: Closed')).toBeVisible();
-    });
-  }
-
   /** [App] Exit gate NO: outcome not_a_fit, NOT convertible, tour closed
    *  (terminal). The tenant re-enters the Sending-Unit loop unchanged. */
   expectTourClosedNotAFit(): Promise<void> {
     const tour = this.requireActiveTour();
     return step('App: tour closed as not-a-fit (re-match — back to Sending Unit)', async () => {
+      // The exit-gate NO save closed the tour in the SAME patch (diagram:
+      // "outcome not_a_fit. Close the tour") — no separate close step exists.
       const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
       expect(res.ok()).toBeTruthy();
       const { tour: t } = (await res.json()) as {
@@ -1794,6 +1787,9 @@ export class Scenario {
       expect(t.status).toBe('closed');
       expect(t.outcome).toBe('not_a_fit');
       expect(t.convertible).not.toBe(true);
+      // Team SEES it closed.
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await expect(this.page.getByLabel('Status: Closed')).toBeVisible();
     });
   }
 

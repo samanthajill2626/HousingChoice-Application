@@ -164,9 +164,9 @@ describe('TourDetail', () => {
     await waitFor(() => expect(screen.getByText(/ready for placement/i)).toBeInTheDocument());
   });
 
-  it('exit gate "No — not a fit" calls PATCH with outcome=not_a_fit, moveForward=false', async () => {
+  it('exit gate "No — not a fit" PATCHes outcome + moveForward AND closes the tour (diagram: not_a_fit closes)', async () => {
     const tour = makeTour({ status: 'toured' });
-    const closedTour = makeTour({ status: 'toured', outcome: 'not_a_fit', moveForward: false });
+    const closedTour = makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false });
     getTour.mockResolvedValue(tour);
     patchTour.mockResolvedValue(closedTour);
 
@@ -181,7 +181,10 @@ describe('TourDetail', () => {
     expect(patchTour).toHaveBeenCalledWith('tour-abc', {
       outcome: 'not_a_fit',
       moveForward: false,
+      status: 'closed',
     });
+    // The page reflects the closed tour.
+    expect(screen.getByLabelText(/Status: Closed/i)).toBeInTheDocument();
   });
 
   it('shows a group thread link when groupThreadId is set', async () => {
@@ -224,7 +227,7 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeRequestedTour());
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Book this tour' })).toHaveTextContent('Book tour');
+    expect(screen.getByRole('button', { name: 'Book tour' })).toHaveTextContent('Book tour');
     expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
   });
@@ -233,7 +236,7 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Book this tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Book tour' })).not.toBeInTheDocument();
   });
 
   it('booking a requested tour PATCHes { scheduledAt, status: scheduled }', async () => {
@@ -244,11 +247,11 @@ describe('TourDetail', () => {
 
     renderDetail();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Book this tour' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Book this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Book tour' }));
 
     // The booking form appears — mirrors the Reschedule form structure.
     const form = screen.getByRole('form', { name: 'Book tour form' });
@@ -270,11 +273,11 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeRequestedTour());
     renderDetail();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Book this tour' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Book this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Book tour' }));
     expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^Cancel$/ }));
 
@@ -291,36 +294,36 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Confirm this tour' })).toHaveTextContent('Confirm tour');
-    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toHaveTextContent('Mark toured');
-    expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toHaveTextContent('Mark no-show');
+    expect(screen.getByRole('button', { name: 'Confirm tour' })).toHaveTextContent('Confirm tour');
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toHaveTextContent('Mark toured');
+    expect(screen.getByRole('button', { name: 'Mark no-show' })).toHaveTextContent('Mark no-show');
   });
 
   it("a confirmed tour shows 'Mark toured' + 'Mark no-show' but NOT 'Confirm tour'", async () => {
     getTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark no-show' })).toBeInTheDocument();
   });
 
   it('a requested tour shows NONE of the three status controls', async () => {
     getTour.mockResolvedValue(makeRequestedTour());
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
   });
 
   it("a toured tour shows none of the three; 'Record outcome' is present", async () => {
     getTour.mockResolvedValue(makeTour({ status: 'toured' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
   });
 
@@ -329,17 +332,17 @@ describe('TourDetail', () => {
     patchTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
     renderDetail();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Confirm this tour' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Confirm tour' })).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Confirm this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm tour' }));
 
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'confirmed' });
     await waitFor(() => expect(screen.getByLabelText(/Status: Confirmed/i)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
     // Attendance controls remain available on a confirmed tour.
-    expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
   });
 
   it("'Mark toured' PATCHes { status: toured }; controls swap to 'Record outcome'", async () => {
@@ -347,17 +350,17 @@ describe('TourDetail', () => {
     patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
     renderDetail();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Mark this tour as toured' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Mark this tour as toured' }));
+    await user.click(screen.getByRole('button', { name: 'Mark toured' }));
 
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
     await waitFor(() => expect(screen.getByLabelText(/Status: Toured/i)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm this tour' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark this tour as a no-show' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
   });
 
@@ -366,11 +369,11 @@ describe('TourDetail', () => {
     patchTour.mockResolvedValue(makeTour({ status: 'no_show' }));
     renderDetail();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Mark this tour as a no-show' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Mark no-show' })).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Mark this tour as a no-show' }));
+    await user.click(screen.getByRole('button', { name: 'Mark no-show' }));
 
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
     await waitFor(() => expect(screen.getByLabelText(/Status: No show/i)).toBeInTheDocument());
@@ -381,7 +384,7 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
     expect(
-      screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.getByRole('button', { name: 'Open group thread' }),
     ).toHaveTextContent('Open group thread');
   });
 
@@ -390,7 +393,7 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
     expect(
-      screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.getByRole('button', { name: 'Open group thread' }),
     ).toBeInTheDocument();
   });
 
@@ -399,7 +402,7 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
     expect(
-      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.queryByRole('button', { name: 'Open group thread' }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument();
   });
@@ -409,7 +412,7 @@ describe('TourDetail', () => {
     const first = renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
     expect(
-      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.queryByRole('button', { name: 'Open group thread' }),
     ).not.toBeInTheDocument();
     first.unmount();
 
@@ -419,7 +422,7 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
     expect(
-      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.queryByRole('button', { name: 'Open group thread' }),
     ).not.toBeInTheDocument();
   });
 
@@ -432,12 +435,12 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+        screen.getByRole('button', { name: 'Open group thread' }),
       ).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
 
     // Exactly one argument — members omitted so the server auto-resolves them.
     expect(createTourRelay).toHaveBeenCalledWith('tour-abc');
@@ -445,7 +448,7 @@ describe('TourDetail', () => {
       expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument(),
     );
     expect(
-      screen.queryByRole('button', { name: 'Open a masked group thread for this tour' }),
+      screen.queryByRole('button', { name: 'Open group thread' }),
     ).not.toBeInTheDocument();
   });
 
@@ -462,12 +465,12 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+        screen.getByRole('button', { name: 'Open group thread' }),
       ).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
 
     // The detail text — and ONLY the detail text — is the inline error.
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
@@ -484,12 +487,12 @@ describe('TourDetail', () => {
     renderDetail();
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: 'Open a masked group thread for this tour' }),
+        screen.getByRole('button', { name: 'Open group thread' }),
       ).toBeInTheDocument(),
     );
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open a masked group thread for this tour' }));
+    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent(/relay_already_provisioned/i);

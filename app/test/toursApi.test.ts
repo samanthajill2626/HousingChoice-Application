@@ -220,6 +220,11 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
+    // The exit gate records a decision on a TOURED tour (guard added by the
+    // whole-branch review) — mark it toured first, as the dashboard does.
+    const toured = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(toured.status).toBe(200);
+
     // Record the exit gate.
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -245,6 +250,8 @@ describe('PATCH /api/tours/:tourId', () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
 
     const res = await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -332,6 +339,162 @@ describe('PATCH /api/tours/:tourId', () => {
 });
 
 // ============================================================================
+// Whole-branch-review hardening — transition guards, effective-status reminder
+// side effects, scheduledAt canonicalization, exit-gate status coupling
+// ============================================================================
+
+describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
+  const TIMELESS_BODY = { tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'landlord_led' };
+
+  it("rejects moving any tour BACK to 'requested' (create-only state)", async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'requested' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('illegal_status_transition');
+  });
+
+  it("a requested tour can only be booked or canceled — confirmed/toured/no_show are 409", async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    for (const target of ['confirmed', 'toured', 'no_show', 'closed']) {
+      const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: target });
+      expect(res.status, `requested → ${target}`).toBe(409);
+      expect(res.body.error).toBe('illegal_status_transition');
+    }
+
+    // Canceling a requested lead is fine.
+    const canceled = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.tour.status).toBe('canceled');
+  });
+
+  it('the exit gate requires a toured tour (409 on scheduled, immutable once closed)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // On a scheduled tour: refused.
+    const early = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect(early.status).toBe(409);
+    expect(early.body.error).toBe('illegal_exit_gate');
+
+    // Record it properly, close, then try to rewrite the decision: refused —
+    // convertible must be immutable after closure (Post-Tour conversion trusts it).
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    await authed(app).patch(`/api/tours/${tourId}`).send({ outcome: 'not_a_fit', moveForward: false });
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' });
+    const rewrite = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect(rewrite.status).toBe(409);
+  });
+});
+
+describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
+  const pendingRows = (world: FakeWorld, tourId: string) =>
+    [...world.tourRemindersMap.values()].filter(
+      (r) => r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined,
+    );
+
+  it('PATCH {scheduledAt, status:canceled} cancels — it must NOT arm a ladder on a dead tour', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-08-01T15:00:00.000Z', status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('canceled');
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+  });
+
+  it("PATCH {status:'toured'} cancels the still-pending rungs (no 'missed your tour' after attending)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(res.status).toBe(200);
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+  });
+
+  it('bare {scheduledAt} on a canceled tour auto-advances to scheduled and re-arms', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-08-02T15:00:00.000Z' });
+    expect(res.status).toBe(200);
+    expect(res.body.tour.status).toBe('scheduled');
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+  });
+
+  it("status-only revival {status:'scheduled'} on a canceled tour re-arms off the stored time", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect(pendingRows(world, tourId)).toHaveLength(0);
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' });
+    expect(res.status).toBe(200);
+    expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
+  });
+
+  it("status-only {status:'confirmed'} does NOT re-arm (no duplicate confirmation text)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const before = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    expect(res.status).toBe(200);
+    const after = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+    expect(after).toEqual(before); // same rows — nothing canceled, nothing re-armed
+  });
+});
+
+describe('scheduledAt is canonicalized (toISOString) at the route boundary', () => {
+  it('POST stores a canonical form for a ms-less UTC input', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: '2026-07-15T10:00:00Z' });
+    expect(res.status).toBe(201);
+    expect(res.body.tour.scheduledAt).toBe('2026-07-15T10:00:00.000Z');
+  });
+
+  it('PATCH canonicalizes a raw datetime-local value (dashboard Book/Reschedule shape)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const raw = '2026-08-03T14:30'; // zoneless datetime-local
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: raw });
+    expect(res.status).toBe(200);
+    // Whatever instant the server resolves the zoneless string to, the STORED
+    // value is the canonical toISOString() of it — lexicographically comparable
+    // in the sparse byScheduledAt GSI and unambiguous for computeDueAt.
+    expect(res.body.tour.scheduledAt).toBe(new Date(raw).toISOString());
+  });
+});
+
+// ============================================================================
 // Exit gate discipline — NO placement / NO tenant-status side effects
 // ============================================================================
 
@@ -367,7 +530,8 @@ describe('Exit gate: NO placement created, tenant status untouched', () => {
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    // Fire exit gate.
+    // Reach 'toured' first (the exit gate requires it), then fire the gate.
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({
       outcome: 'move_forward',
       moveForward: true,
@@ -689,6 +853,43 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
 
   afterEach(() => {
     _resetForTests();
+  });
+
+  it('409 tour_not_active: a canceled tour cannot open a group thread (stale-page race)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('tour_not_active');
+    expect(pool.provisioned).toHaveLength(0); // nothing was bought
+  });
+
+  it('concurrent provisions: exactly one 201, the loser 409s BEFORE buying a number (atomic claim)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const body = { members: [{ phone: '+15550200001', name: 'Alice' }, { phone: '+15550200002', name: 'Bob' }] };
+    const [a, b] = await Promise.all([
+      authed(app).post(`/api/tours/${tourId}/relay`).send(body),
+      authed(app).post(`/api/tours/${tourId}/relay`).send(body),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([201, 409]);
+    const loser = a.status === 409 ? a : b;
+    expect(loser.body.error).toBe('relay_already_provisioned');
+    // The race loser never provisioned: exactly ONE pool number was bought,
+    // and the stored groupThreadId is the winner's conversation (no orphan).
+    expect(pool.provisioned).toHaveLength(1);
+    const winner = a.status === 201 ? a : b;
+    expect(world.toursMap.get(tourId)!.groupThreadId).toBe(winner.body.conversation.conversationId);
   });
 
   it('happy path: 201, creates relay group owned by the tour, stamps groupThreadId on the tour', async () => {

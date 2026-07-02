@@ -28,7 +28,7 @@ import type {
   ConversationParticipant,
   ConversationsRepo,
 } from '../repos/conversationsRepo.js';
-import { relayMemberKey } from '../repos/messagesRepo.js';
+
 import {
   type ReminderKind,
   type TourReminderItem,
@@ -177,6 +177,14 @@ export interface RunDueTourRemindersDeps {
    * relay.intro precedent: per-member adapter sends FROM the pool number.
    */
   adapter: MessagingAdapter;
+  /**
+   * Shared A2P pacing bucket (optional): group-route reminders send N member
+   * messages per rung through the raw adapter, so they must draw from the SAME
+   * combined-outbound-rate bucket the relay fan-out / intro paths use
+   * (relayFanOut.ts acquires before every adapter send). Left unset by the
+   * hermetic dev tick — the fake provider needs no pacing.
+   */
+  tokenBucket?: { acquire(n: number): Promise<void> };
   logger?: Logger;
 }
 
@@ -390,6 +398,17 @@ async function resolveUsableGroup(
 }
 
 /**
+ * Log-safe member key (doc §9): the contactId when the member has one, else a
+ * redaction constant. NOT relayMemberKey() — its `phone#<E164>` fallback for
+ * contact-less members would put a raw phone number in the log line.
+ */
+function logSafeMemberKey(member: { contactId?: string }): string {
+  return member.contactId !== undefined && member.contactId.length > 0
+    ? member.contactId
+    : 'phone-only-member';
+}
+
+/**
  * Send one reminder rung into the tour's masked group: claim ONCE, then a
  * direct adapter send per member FROM the pool number — the relay.intro
  * precedent (relayFanOut.ts). sendMessageService is unusable here (it throws
@@ -425,7 +444,8 @@ async function sendGroupReminder(
   // Claim succeeded — send to each member. Per-member failures log and
   // CONTINUE with the remaining members; the claim is already stamped, so a
   // failed member is not retried (same accepted post-claim tradeoff as the
-  // 1:1 path). PII: memberKey/ids only — NEVER a phone number.
+  // 1:1 path). PII: log logSafeMemberKey (contactId or a redaction constant)
+  // — NEVER a phone number, and NOT relayMemberKey (phone#<E164> fallback).
   let sentCount = 0;
   for (const member of group.members) {
     try {
@@ -435,17 +455,20 @@ async function sendGroupReminder(
       // without sending (fail CLOSED — never text a possibly-opted-out number).
       if (await isMemberSuppressed(deps.contactsRepo, member)) {
         log.info(
-          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: relayMemberKey(member) },
+          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
           'tour reminder: group member opted out (sms_opt_out) — skipped',
         );
         continue;
       }
+      // A2P pacing: draw from the shared combined-rate bucket before every
+      // adapter send, exactly like the relay fan-out / intro loops.
+      await deps.tokenBucket?.acquire(1);
       await deps.adapter.sendMessage({ to: member.phone, from: group.poolNumber, body });
       sentCount += 1;
     } catch (err) {
       // One member's failure must not block the others (relay.intro precedent).
       log.error(
-        { err, reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: relayMemberKey(member) },
+        { err, reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
         'tour reminder: group send failed for a member — continuing',
       );
     }

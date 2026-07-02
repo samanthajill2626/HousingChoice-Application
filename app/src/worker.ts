@@ -113,6 +113,10 @@ runWithContext(bootContext, () => {
     // handlers use (createMessagingAdapter honors MESSAGING_RECORD_OUTBOX, so
     // hermetic-e2e group sends stay outbox-visible).
     adapter: createMessagingAdapter({ config, logger }),
+    // Same shared A2P bucket every other worker send path meters through
+    // (relay fan-out/intro, broadcast) — the COMBINED outbound rate must stay
+    // under the registered tier; group reminder rungs are N member sends each.
+    tokenBucket: a2pBucket,
     logger,
   };
 

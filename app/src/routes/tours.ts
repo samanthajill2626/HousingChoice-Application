@@ -179,12 +179,16 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     // Timeless create: OMIT scheduledAt entirely (never undefined/null) so the
     // sparse byScheduledAt GSI stays sparse; status is 'requested' until booked.
+    // scheduledAt is CANONICALIZED to toISOString() at the boundary: a zoneless
+    // datetime-local string would otherwise be parsed in the SERVER's timezone
+    // by computeDueAt, and the byScheduledAt GSI compares range keys
+    // lexicographically — mixed canonical/raw forms mis-bucket range queries.
     const tour = await tours.create({
       tenantId: b['tenantId'] as string,
       unitId: b['unitId'] as string,
       tourType: b['tourType'] as TourType,
       ...(scheduledAt !== undefined
-        ? { scheduledAt: scheduledAt as string }
+        ? { scheduledAt: new Date(scheduledAt as string).toISOString() }
         : { status: 'requested' satisfies TourStatus }),
     });
 
@@ -298,14 +302,33 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // --- Status transition guard ---
     // Rules:
     //   - 'closed' is terminal: no status change is allowed from 'closed'.
+    //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
+    //     it, and the only ways out are booking (→ scheduled, which requires a
+    //     time) or canceling — confirmed/toured/no_show all presuppose a time.
     //   - The only path back to 'scheduled' is via canReschedule() (i.e. from
-    //     scheduled/confirmed/canceled/no_show — NOT from toured or closed).
+    //     requested/scheduled/confirmed/canceled/no_show — NOT toured/closed).
     if (newStatus !== undefined) {
       const targetStatus = newStatus as TourStatus;
 
       if (currentStatus === 'closed') {
         // closed is fully terminal — no transitions allowed.
         res.status(409).json({ error: 'illegal_status_transition', detail: `a closed tour cannot be changed (current: closed, requested: ${targetStatus})` });
+        return;
+      }
+
+      if (targetStatus === 'requested') {
+        // requested is only ever set at create — a tour with (or past) a time
+        // cannot claim to be timeless again.
+        res.status(409).json({ error: 'illegal_status_transition', detail: `a tour cannot move back to requested (current: ${currentStatus})` });
+        return;
+      }
+
+      if (currentStatus === 'requested' && targetStatus !== 'scheduled' && targetStatus !== 'canceled') {
+        // Booking is the only forward path out of requested (the diagram's
+        // booking step is what advances the tour); confirmed/toured/no_show on
+        // a tour that never had a time would break booking semantics — e.g.
+        // an unreschedulable 'toured' dead end with no ladder ever armed.
+        res.status(409).json({ error: 'illegal_status_transition', detail: `a requested tour can only be booked (scheduled) or canceled (requested: ${targetStatus})` });
         return;
       }
 
@@ -337,14 +360,38 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       }
     }
 
+    // --- Exit gate guard ---
+    // The exit gate records the decision on a TOURED tour (diagram: outcome is
+    // logged after the visit). This also makes a closed tour's decision
+    // immutable — outcome-only patches used to bypass the closed-terminal 409,
+    // letting `convertible` flip after closure (the field downstream Post-Tour
+    // conversion trusts).
+    if ((newOutcome !== undefined || newMoveForward !== undefined) && currentStatus !== 'toured') {
+      res.status(409).json({ error: 'illegal_exit_gate', detail: `the exit gate records a decision on a toured tour (current: ${currentStatus})` });
+      return;
+    }
+
     // --- Build the patch ---
+    // scheduledAt is CANONICALIZED (toISOString) at the boundary — see the
+    // create route for why (server-TZ parsing in computeDueAt + lexicographic
+    // byScheduledAt GSI range compares).
     // Exit gate: outcome + moveForward → also set convertible.
     const patch: Record<string, unknown> = {};
-    if (newScheduledAt !== undefined) patch['scheduledAt'] = newScheduledAt;
+    const scheduledAtIso =
+      newScheduledAt !== undefined ? new Date(newScheduledAt as string).toISOString() : undefined;
+    if (scheduledAtIso !== undefined) patch['scheduledAt'] = scheduledAtIso;
     if (newStatus !== undefined) patch['status'] = newStatus;
-    // Booking: a scheduledAt patch on a 'requested' tour with no explicit
-    // status auto-advances requested → scheduled in the same update.
-    if (newScheduledAt !== undefined && newStatus === undefined && currentStatus === 'requested') {
+    // Booking / revival: a scheduledAt patch with no explicit status on a
+    // requested (booking), canceled, or no_show (revival) tour auto-advances to
+    // 'scheduled' in the same update — a fresh time on a dead-but-reschedulable
+    // tour must never leave it reading Canceled/No show with a live ladder.
+    // (confirmed keeps its status on a bare time change — a reschedule should
+    // not demote a confirmed tour.)
+    if (
+      scheduledAtIso !== undefined &&
+      newStatus === undefined &&
+      (currentStatus === 'requested' || currentStatus === 'canceled' || currentStatus === 'no_show')
+    ) {
       patch['status'] = 'scheduled' satisfies TourStatus;
     }
     if (newOutcome !== undefined) patch['outcome'] = newOutcome;
@@ -365,13 +412,29 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       throw err;
     }
 
-    // Reminder side effects after a successful patch.
-    if (newScheduledAt !== undefined) {
-      // Reschedule: cancel old reminders and re-arm with the new scheduledAt.
+    // Reminder side effects after a successful patch, keyed on the EFFECTIVE
+    // post-patch status — arming must never happen on a tour that is not live
+    // (e.g. PATCH {scheduledAt, status:'canceled'} must not text "Your tour is
+    // confirmed" at the whole group), and marking 'toured' must cancel the
+    // still-pending rungs (a tenant who showed up must never get the
+    // no_show_checkin "you may have missed your tour" text).
+    const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
+    const armable = effectiveStatus === 'scheduled' || effectiveStatus === 'confirmed';
+    // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
+    // status-only revival from canceled/no_show uses the stored time — its
+    // rungs were canceled and must come back). A status-only 'confirmed' patch
+    // does NOT re-arm (it would re-fire the confirmation rung).
+    const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
+    if (armable && rearmTrigger) {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
       await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
-    } else if (patch['status'] === 'canceled' || patch['status'] === 'closed') {
-      // Terminal status: cancel all pending reminders.
+    } else if (
+      effectiveStatus === 'canceled' ||
+      effectiveStatus === 'closed' ||
+      effectiveStatus === 'toured'
+    ) {
+      // Dead or completed: nothing left to remind. (no_show keeps its pending
+      // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
     }
 
@@ -457,6 +520,14 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
+    // Dead tours don't get group threads: a stale page's button click must not
+    // buy a pool number + text [AUTO] intros for a canceled/closed tour (the
+    // UI hides the control, but the route is the guard).
+    if (tour.status === 'canceled' || tour.status === 'closed') {
+      res.status(409).json({ error: 'tour_not_active', detail: `cannot open a group thread on a ${tour.status} tour` });
+      return;
+    }
+
     // One-thread-per-tour guard FIRST: a second provision would silently buy a
     // new pool number and overwrite groupThreadId, orphaning the live thread.
     if (typeof tour.groupThreadId === 'string' && tour.groupThreadId.length > 0) {
@@ -511,6 +582,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       }
     }
 
+    // Atomically claim the group-thread slot BEFORE buying anything: the
+    // read-guard above is check-then-act, so two overlapping POSTs could both
+    // pass it, buy two pool numbers, and orphan the first thread. The claim's
+    // ConditionExpression (attribute_not_exists(groupThreadId)) makes the race
+    // loser 409 here, before any provisioning side effects. The sentinel is
+    // replaced by the real conversation id on success and released on failure;
+    // a crash inside this window leaves the sentinel behind (rare — clears by
+    // removing groupThreadId), which we prefer over the double-buy.
+    const claimSentinel = `provisioning:${tourId}`;
+    try {
+      await tours.claimGroupThread(tourId, claimSentinel);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(409).json({ error: 'relay_already_provisioned' });
+        return;
+      }
+      throw err;
+    }
+
     // Provision the relay group owned by this tour.
     let conversation;
     try {
@@ -529,6 +619,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         },
       );
     } catch (err) {
+      // Provisioning failed — release the claim so a retry can provision.
+      await tours.releaseGroupThreadClaim(tourId, claimSentinel);
       if (err instanceof RelayProvisioningDisabledError) {
         log.warn({ err: { name: err.name }, tourId }, 'tour relay create: number provisioning disabled');
         res.status(503).json({ error: 'relay_provisioning_disabled', message: (err as Error).message });
@@ -542,7 +634,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       throw err;
     }
 
-    // Stamp the groupThreadId back on the tour.
+    // Stamp the real groupThreadId over the claim sentinel.
     const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
 
     log.info(

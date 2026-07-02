@@ -695,6 +695,43 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(2);
   });
 
+  it('group sends draw one token per member from the shared A2P bucket when provided', async () => {
+    const rig = createGroupTestRig();
+    const now0 = '2026-08-01T10:00:00.000Z';
+    const scheduledAt = '2026-08-03T18:00:00.000Z';
+    seedTenant(rig.world, 'contact-bucket-1', '+15550500011', 'conv-1to1-bucket-1', now0);
+    seedRelayGroup(rig.world, {
+      convId: 'conv-group-bucket-1',
+      poolNumber: '+15550190009',
+      participants: [
+        { contactId: 'contact-bucket-1', phone: '+15550500011', name: 'Tina Tenant' },
+        { contactId: 'contact-bucket-2', phone: '+15550500012', name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+    const tour = await tours.create({
+      tenantId: 'contact-bucket-1',
+      unitId: 'unit-bucket-1',
+      scheduledAt,
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: 'conv-group-bucket-1' });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    // Counting bucket: every adapter send must be preceded by one acquire(1) —
+    // the same combined A2P rate metering the relay fan-out/intro loops use.
+    let acquired = 0;
+    const bucket = {
+      acquire: async (n: number) => {
+        acquired += n;
+      },
+    };
+    await runDueTourReminders(now0, { ...rig.deps, tokenBucket: bucket });
+
+    expect(rig.groupSends).toHaveLength(2);
+    expect(acquired).toBe(2);
+  });
+
   // ---------------------------------------------------------------------------
   // Test 10 — pm_team + open group: same group routing
   // ---------------------------------------------------------------------------

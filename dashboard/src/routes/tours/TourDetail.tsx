@@ -149,7 +149,12 @@ export function TourDetail(): React.JSX.Element {
     setSubmitting(true);
     setActionError(null);
     try {
-      const updated = await patchTour(tour.tourId, { scheduledAt: bookScheduledAt, status: 'scheduled' });
+      // Normalize the zoneless datetime-local value to a full ISO instant (the
+      // navigator's timezone, not the server's) — same rule as ScheduleTourForm.
+      const updated = await patchTour(tour.tourId, {
+        scheduledAt: new Date(bookScheduledAt).toISOString(),
+        status: 'scheduled',
+      });
       setTour(updated);
       setShowBook(false);
       setBookScheduledAt('');
@@ -166,7 +171,11 @@ export function TourDetail(): React.JSX.Element {
     setSubmitting(true);
     setActionError(null);
     try {
-      const updated = await patchTour(tour.tourId, { scheduledAt: newScheduledAt, status: 'scheduled' });
+      // Normalize like handleBook — never send the raw zoneless string.
+      const updated = await patchTour(tour.tourId, {
+        scheduledAt: new Date(newScheduledAt).toISOString(),
+        status: 'scheduled',
+      });
       setTour(updated);
       setShowReschedule(false);
       setNewScheduledAt('');
@@ -183,9 +192,14 @@ export function TourDetail(): React.JSX.Element {
     setSubmitting(true);
     setActionError(null);
     try {
+      // The NO path CLOSES the tour in the same patch (diagram: "outcome
+      // not_a_fit. Close the tour") — the server's terminal branch also cancels
+      // any lingering reminder rungs. The YES path leaves it 'toured'
+      // (convertible; Post-Tour & Application closes it at conversion).
       const updated = await patchTour(tour.tourId, {
         outcome: exitOutcome,
         moveForward: exitMoveForward,
+        ...(exitMoveForward === false && { status: 'closed' as const }),
       });
       setTour(updated);
       setShowExitGate(false);
@@ -282,7 +296,6 @@ export function TourDetail(): React.JSX.Element {
           type="button"
           onClick={() => setShowBook(true)}
           disabled={submitting}
-          aria-label="Book this tour"
         >
           Book tour
         </button>
@@ -342,7 +355,6 @@ export function TourDetail(): React.JSX.Element {
           type="button"
           onClick={() => void handleStatus('confirmed', 'Confirm failed')}
           disabled={submitting}
-          aria-label="Confirm this tour"
         >
           Confirm tour
         </button>
@@ -353,7 +365,6 @@ export function TourDetail(): React.JSX.Element {
             type="button"
             onClick={() => void handleStatus('toured', 'Status update failed')}
             disabled={submitting}
-            aria-label="Mark this tour as toured"
           >
             Mark toured
           </button>
@@ -361,7 +372,6 @@ export function TourDetail(): React.JSX.Element {
             type="button"
             onClick={() => void handleStatus('no_show', 'Status update failed')}
             disabled={submitting}
-            aria-label="Mark this tour as a no-show"
           >
             Mark no-show
           </button>
@@ -387,7 +397,6 @@ export function TourDetail(): React.JSX.Element {
           type="button"
           onClick={() => void handleOpenGroup()}
           disabled={submitting}
-          aria-label="Open a masked group thread for this tour"
         >
           Open group thread
         </button>

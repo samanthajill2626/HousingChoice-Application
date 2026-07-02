@@ -1492,6 +1492,24 @@ export function createFakeWorld(): FakeWorld {
       toursMap.set(tourId, t);
       return { ...t };
     },
+    async claimGroupThread(tourId, value) {
+      // Mirror the conditional write: exists AND no groupThreadId yet.
+      const t = toursMap.get(tourId);
+      if (!t || t.groupThreadId !== undefined) {
+        throw new TourConditionalCheckFailedException({ message: `claim: slot taken or no tour ${tourId}`, $metadata: {} });
+      }
+      t.groupThreadId = value;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
+    async releaseGroupThreadClaim(tourId, value) {
+      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      const t = toursMap.get(tourId);
+      if (!t || t.groupThreadId !== value) return;
+      delete t.groupThreadId;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
   };
 
   const tourRemindersMap = new Map<string, TourReminderItem>();

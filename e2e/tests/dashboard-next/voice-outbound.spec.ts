@@ -29,6 +29,13 @@
 // logs a warning but proceeds).
 //
 // Unique phones per case (helper below) so cases never collide within a run.
+//
+// §flex — Human-format phone entry in Settings ▸ Voice:
+//   Drives the verify-cell flow typing a HUMAN format (`404-982-4978`) so the
+//   field normalizes on blur → `(404) 982-4978`, the code SMS arrives addressed
+//   to the E.164 `+14049824978`, and the verified display renders the display
+//   format. All stored/API values remain E.164; only the input and display formats
+//   are relaxed.
 import { createHmac } from 'node:crypto';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import {
@@ -503,4 +510,95 @@ test('§9.8 outbound-missed regression guard (I-1): a no-answer outbound call mu
     outboxAfter,
     'BUG REGRESSION (I-1): a missed outbound call fired the "we missed you" auto-text — the `direction !== "outbound"` guard in /voice/status is broken',
   ).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// §flex — Settings ▸ Voice: verify cell with a HUMAN-format input
+//
+// The VoiceSection normalizes on blur: typing `404-982-4978` → field snaps to
+// `(404) 982-4978`. The verify-start call is made with the E.164 `+14049824978`,
+// so the code SMS arrives addressed to that E.164. After confirm the display shows
+// the formatted `(404) 982-4978 — Verified ✓`. All stored/API values stay E.164.
+// ---------------------------------------------------------------------------
+test('§flex settings voice: human-format cell `404-982-4978` normalizes on blur, verify succeeds, display shows (404) 982-4978', async ({
+  page,
+}) => {
+  const api = page.request;
+
+  // Log in as the navigator (VA). This test runs after its own reseed (beforeEach).
+  const loginRes = await api.post(`${NEXT}/auth/dev-login`, { data: { email: 'va@example.com' } });
+  expect(loginRes.ok()).toBeTruthy();
+  await page.goto(`${NEXT}/`);
+  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+
+  // Navigate to Settings ▸ Voice.
+  await page.goto(`${NEXT}/settings/voice`);
+  await expect(page.getByRole('heading', { name: 'Voice', level: 2 })).toBeVisible();
+
+  // --- Step 1: type human-format cell and blur → the field normalizes ---
+  // The label is "Your mobile number" (displayed when the user has no verified cell).
+  const cellInput = page.getByLabel('Your mobile number');
+  await expect(cellInput).toBeVisible();
+  await cellInput.fill('404-982-4978');
+  // Blur by clicking somewhere neutral (Tab key also triggers onBlur).
+  await cellInput.blur();
+  // The field must snap to the canonical display format.
+  await expect(cellInput).toHaveValue('(404) 982-4978');
+  // No error should be visible — it's a valid number.
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  // --- Step 2: click "Send code" → verify-start → code SMS dispatched ---
+  await page.getByRole('button', { name: 'Send code' }).click();
+  // The phase transitions to code_sent: a sent-note appears referencing the display form.
+  await expect(page.getByText(/We texted a 6-digit code to/i)).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('(404) 982-4978')).toBeVisible();
+
+  // --- Step 3: read the code from the outbox (the app sent it to +14049824978) ---
+  const E164_CELL = '+14049824978';
+  let verifyCode: string | undefined;
+  await expect
+    .poll(
+      async () => {
+        const msgs = await getOutbox(api, { to: E164_CELL });
+        for (const m of msgs) {
+          const match = /(\d{6})/.exec(m.body ?? '');
+          if (match) { verifyCode = match[1]; }
+        }
+        return verifyCode;
+      },
+      { timeout: 10_000 },
+    )
+    .toBeTruthy();
+  // The outbox entry is addressed to the E.164 +14049824978 — stored value is E.164.
+  const outboxMsgs = await getOutbox(api, { to: E164_CELL });
+  expect(outboxMsgs.length).toBeGreaterThan(0);
+  expect(outboxMsgs.some((m) => m.to === E164_CELL)).toBe(true);
+
+  // --- Step 4: enter the code and confirm ---
+  const codeInput = page.getByLabel('Verification code');
+  await codeInput.fill(verifyCode!);
+  await page.getByRole('button', { name: 'Verify' }).click();
+
+  // --- Step 5: the "Verified ✓" status appears immediately after confirm ---
+  // Two role="status" elements can be visible simultaneously: the persistent "Your
+  // cell" chip AND the in-flow "Verified ✓ You can now place masked calls." The
+  // in-flow done message is the definitive confirmation. Match it exactly.
+  await expect(
+    page.getByRole('status').filter({ hasText: /Verified ✓ You can now place masked calls/i }),
+  ).toBeVisible({ timeout: 10_000 });
+
+  // --- Step 6: reload → the persistent "Your cell" display shows the formatted number ---
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Voice', level: 2 })).toBeVisible();
+  // The "Your cell" status chip renders the display-format number and "Verified ✓".
+  // Parentheses in regex must be escaped; the ✓ is U+2713 (same as in source).
+  await expect(page.getByRole('status').filter({ hasText: /\(404\) 982-4978/ })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: /Verified ✓/ })).toBeVisible();
+
+  // --- Stored value guard: the API sees E.164, never the display form ---
+  const meRes = await api.get(`${NEXT}/api/users/me`);
+  expect(meRes.ok()).toBeTruthy();
+  const { user } = (await meRes.json()) as { user: { cell?: string; cell_verified_at?: string } };
+  expect(user.cell).toBe(E164_CELL);
+  expect(typeof user.cell_verified_at).toBe('string');
 });

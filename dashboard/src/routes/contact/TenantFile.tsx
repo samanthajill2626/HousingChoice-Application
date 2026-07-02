@@ -211,7 +211,11 @@ export function TenantFile({
             <Row
               key={t.tourId}
               to={`/tours/${t.tourId}`}
-              label={`${unitLabel(unitMap, t.unitId)} · ${new Date(t.scheduledAt ?? '').toLocaleDateString()}`}
+              label={`${unitLabel(unitMap, t.unitId)} · ${
+                t.scheduledAt !== undefined
+                  ? new Date(t.scheduledAt).toLocaleDateString()
+                  : 'Not booked'
+              }`}
               right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
             />
           ))

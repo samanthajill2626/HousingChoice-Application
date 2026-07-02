@@ -20,6 +20,9 @@ const sendMessage = vi.fn();
 // Used by the "Start placement" dialog (PlacementCreateForm) when opened.
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
+// Used by the contact file's Tours card + the "Schedule a tour" dialog.
+const getTours = vi.fn();
+const createTour = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -40,6 +43,8 @@ vi.mock('../../api/index.js', async () => {
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
+    getTours: (...a: unknown[]) => getTours(...a),
+    createTour: (...a: unknown[]) => createTour(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -118,6 +123,9 @@ beforeEach(() => {
   updateContact.mockReset();
   getPlacementsBy.mockReset();
   getPlacementsBy.mockResolvedValue([]);
+  getTours.mockReset();
+  getTours.mockResolvedValue([]);
+  createTour.mockReset();
   getPlacements.mockResolvedValue(CASES);
   getUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -213,6 +221,36 @@ describe('ContactDetail', () => {
       expect(within(dialog).getByLabelText('Tenant')).toHaveTextContent('Tasha Williams'),
     );
     expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toBeInTheDocument();
+  });
+
+  it('the Tours-card "+ Schedule" action opens the Schedule-a-tour dialog locked to this tenant', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    renderAt('k1');
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+
+    // The action lives on the Tours card (tenant view only) — it only renders
+    // when ContactDetail wires onScheduleTour through to TenantFile.
+    await user.click(screen.getByRole('button', { name: 'Schedule a tour' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    // Tenant side is LOCKED (read-only label, NOT a combobox); the label resolves
+    // to the contact's name. The Unit side stays an editable picker.
+    expect(within(dialog).queryByRole('combobox', { name: 'Tenant' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByRole('group', { name: 'Tenant' })).toHaveTextContent('Tasha Williams'),
+    );
+    expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('combobox', { name: 'Tour type' })).toBeInTheDocument();
+  });
+
+  it('the "Schedule a tour" action is NOT shown for a landlord contact', async () => {
+    getContact.mockResolvedValue(LANDLORD);
+    renderAt('L1');
+    await waitFor(() => expect(screen.getByText('James Porter')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Schedule a tour' })).not.toBeInTheDocument();
   });
 
   it('the "Start placement" action is NOT shown for a landlord contact', async () => {

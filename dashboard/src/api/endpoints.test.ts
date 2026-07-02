@@ -10,6 +10,7 @@ import { request } from './client.js';
 import {
   buildTransitionBody,
   createContact,
+  createTour,
   getPlacement,
   getContactVocabulary,
   getPlacementHistory,
@@ -131,6 +132,44 @@ it('setListingStatus PATCHes listing-status and unwraps { unit }', async () => {
     body: { toStatus: 'off_market', source: 'manual' },
   });
   expect(u).toEqual({ unitId: 'u1', status: 'off_market' });
+});
+
+// --- Tours -------------------------------------------------------------------
+
+it('createTour posts WITHOUT scheduledAt when absent (timeless / requested) and unwraps { tour }', async () => {
+  const tour = { tourId: 't1', tenantId: 'c1', unitId: 'u1', tourType: 'self_guided', status: 'requested' };
+  vi.mocked(request).mockResolvedValueOnce({ tour });
+  const t = await createTour({ tenantId: 'c1', unitId: 'u1', tourType: 'self_guided' });
+  expect(request).toHaveBeenCalledWith('/api/tours', {
+    method: 'POST',
+    body: { tenantId: 'c1', unitId: 'u1', tourType: 'self_guided' },
+  });
+  // The key must be OMITTED, not sent as undefined.
+  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  expect('scheduledAt' in sent.body).toBe(false);
+  expect(t).toEqual(tour);
+});
+
+it('createTour posts WITH scheduledAt when present', async () => {
+  const tour = {
+    tourId: 't1',
+    tenantId: 'c1',
+    unitId: 'u1',
+    tourType: 'pm_team',
+    status: 'scheduled',
+    scheduledAt: '2026-07-15T14:00:00.000Z',
+  };
+  vi.mocked(request).mockResolvedValueOnce({ tour });
+  await createTour({
+    tenantId: 'c1',
+    unitId: 'u1',
+    tourType: 'pm_team',
+    scheduledAt: '2026-07-15T14:00:00.000Z',
+  });
+  expect(request).toHaveBeenCalledWith('/api/tours', {
+    method: 'POST',
+    body: { tenantId: 'c1', unitId: 'u1', tourType: 'pm_team', scheduledAt: '2026-07-15T14:00:00.000Z' },
+  });
 });
 
 // --- Pure helpers (no transport) --------------------------------------------

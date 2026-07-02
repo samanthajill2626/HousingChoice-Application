@@ -982,15 +982,22 @@ export function getSystemErrors(
 // The exit gate (PATCH { outcome, moveForward }) records the navigator decision;
 // tour becomes `convertible` when moveForward is true. Conversion is downstream.
 
-/** POST /api/tours — schedule a new tour. Status defaults to 'scheduled'.
+/** POST /api/tours — create a new tour. `scheduledAt` is OPTIONAL: with it the
+ *  tour is created 'scheduled' (reminder ladder arms server-side); without it
+ *  the tour is created timeless — status 'requested' — and booked later. The
+ *  key is OMITTED from the wire body when absent (never sent as undefined).
  *  Returns the created tour (unwrapped from { tour }). */
 export async function createTour(body: {
   tenantId: string;
   unitId: string;
-  scheduledAt: string;
+  scheduledAt?: string;
   tourType: TourType;
 }): Promise<Tour> {
-  const res = await request<{ tour: Tour }>('/api/tours', { method: 'POST', body });
+  const { scheduledAt, ...rest } = body;
+  const res = await request<{ tour: Tour }>('/api/tours', {
+    method: 'POST',
+    body: { ...rest, ...(scheduledAt !== undefined && { scheduledAt }) },
+  });
   return res.tour;
 }
 

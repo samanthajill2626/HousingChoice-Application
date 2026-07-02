@@ -196,4 +196,87 @@ describe('TourDetail', () => {
     await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
     expect(screen.queryByRole('link', { name: /Open group thread in inbox/i })).not.toBeInTheDocument();
   });
+
+  // ── The 'requested' (timeless) state — tours-sequence Task 4 ────────────────
+  // A requested tour has NO scheduledAt: it renders 'Not yet booked', offers a
+  // 'Book tour' control (NOT Reschedule — booking is its own verb), and can be
+  // canceled.
+  /** A timeless 'requested' tour: makeTour minus its scheduledAt. */
+  function makeRequestedTour(over: Partial<Tour> = {}): Tour {
+    const base = makeTour();
+    delete base.scheduledAt; // timeless — the property is truly absent
+    return { ...base, status: 'requested', ...over };
+  }
+
+  it("renders 'Requested' status and 'Not yet booked' for a timeless requested tour", async () => {
+    getTour.mockResolvedValue(makeRequestedTour());
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.getByLabelText(/Status: Requested/i)).toBeInTheDocument();
+    const scheduledDd = screen.getByLabelText('Scheduled: Not yet booked');
+    expect(scheduledDd).toHaveTextContent('Not yet booked');
+    expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the Book control (not Reschedule) plus Cancel tour for a requested tour', async () => {
+    getTour.mockResolvedValue(makeRequestedTour());
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Book this tour' })).toHaveTextContent('Book tour');
+    expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
+  });
+
+  it('does NOT show the Book control for a scheduled tour', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Book this tour' })).not.toBeInTheDocument();
+  });
+
+  it('booking a requested tour PATCHes { scheduledAt, status: scheduled }', async () => {
+    const tour = makeRequestedTour();
+    const bookedTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
+    getTour.mockResolvedValue(tour);
+    patchTour.mockResolvedValue(bookedTour);
+
+    renderDetail();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Book this tour' })).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Book this tour' }));
+
+    // The booking form appears — mirrors the Reschedule form structure.
+    const form = screen.getByRole('form', { name: 'Book tour form' });
+    expect(form).toBeInTheDocument();
+    const dateInput = screen.getByLabelText('Date and time');
+    expect(dateInput).toBeRequired();
+    await user.type(dateInput, '2026-07-20T10:00');
+
+    await user.click(screen.getByRole('button', { name: /Confirm booking/i }));
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', {
+      scheduledAt: expect.stringContaining('2026-07-20'),
+      status: 'scheduled',
+    });
+    // The page applies the returned tour: status flips to Scheduled.
+    await waitFor(() => expect(screen.getByLabelText(/Status: Scheduled/i)).toBeInTheDocument());
+  });
+
+  it('the Book form Cancel dismisses without PATCHing', async () => {
+    getTour.mockResolvedValue(makeRequestedTour());
+    renderDetail();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Book this tour' })).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Book this tour' }));
+    expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Cancel$/ }));
+
+    expect(screen.queryByRole('form', { name: 'Book tour form' })).not.toBeInTheDocument();
+    expect(patchTour).not.toHaveBeenCalled();
+  });
 });

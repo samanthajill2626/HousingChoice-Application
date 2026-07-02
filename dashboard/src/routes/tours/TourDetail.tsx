@@ -1,7 +1,8 @@
 // TourDetail — the detail page for a single tour (GET /api/tours/:tourId).
-// Shows: status, scheduled date/time, tour type, exit-gate feedback (the
-// "Moving forward?" question → PATCH { outcome, moveForward }), reschedule /
-// cancel controls, and a link to the tour's relay group thread.
+// Shows: status, scheduled date/time ('Not yet booked' for a timeless
+// 'requested' tour), tour type, exit-gate feedback (the "Moving forward?"
+// question → PATCH { outcome, moveForward }), book / reschedule / cancel
+// controls, and a link to the tour's relay group thread.
 //
 // Tours are SEPARATE from placements. This page records the navigator decision
 // (exit gate) but does NOT create a placement or change tenant status. The exit
@@ -39,11 +40,14 @@ function formatScheduledAt(iso: string): string {
 
 /** The statuses from which a navigator can cancel (anything not already terminal). */
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
+  'requested',
   'scheduled',
   'confirmed',
 ]);
 
-/** The statuses from which a navigator can reschedule (mirrors canReschedule in toursModel). */
+/** The statuses from which a navigator can RESCHEDULE. The backend's
+ *  canReschedule also allows 'requested' (booking rides the same guard), but in
+ *  the UI a requested tour uses the dedicated Book control, not Reschedule. */
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'scheduled',
   'confirmed',
@@ -62,6 +66,10 @@ export function TourDetail(): React.JSX.Element {
   // Reschedule form state
   const [showReschedule, setShowReschedule] = useState(false);
   const [newScheduledAt, setNewScheduledAt] = useState('');
+
+  // Book form state (a 'requested' tour has no time yet — booking sets one)
+  const [showBook, setShowBook] = useState(false);
+  const [bookScheduledAt, setBookScheduledAt] = useState('');
 
   // Exit gate form state
   const [showExitGate, setShowExitGate] = useState(false);
@@ -92,6 +100,25 @@ export function TourDetail(): React.JSX.Element {
       setTour(updated);
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Cancel failed');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Book a 'requested' (timeless) tour: setting scheduledAt + status 'scheduled'
+  // arms the reminder ladder server-side.
+  async function handleBook(e: React.FormEvent) {
+    e.preventDefault();
+    if (!tour || submitting || !bookScheduledAt) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      const updated = await patchTour(tour.tourId, { scheduledAt: bookScheduledAt, status: 'scheduled' });
+      setTour(updated);
+      setShowBook(false);
+      setBookScheduledAt('');
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Booking failed');
     } finally {
       setSubmitting(false);
     }
@@ -144,8 +171,13 @@ export function TourDetail(): React.JSX.Element {
 
   const statusLabel = TOUR_STATUS_LABELS[tour.status] ?? tour.status;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
+  // A timeless 'requested' tour has no scheduledAt yet — never "Invalid Date".
+  const scheduledDisplay =
+    tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not yet booked';
   const canCancel = CANCELABLE.has(tour.status as TourStatus);
   const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
+  // Book: only a 'requested' (timeless) tour is booked; afterwards Reschedule takes over.
+  const canBook = tour.status === 'requested';
   // Exit gate: show when the tour has been toured but not yet decided
   const canRecord = tour.status === 'toured' && tour.outcome === undefined;
 
@@ -161,10 +193,7 @@ export function TourDetail(): React.JSX.Element {
           </div>
           <div>
             <dt>Scheduled</dt>
-            {/* TODO(tours): render 'Not yet booked' for a timeless 'requested' tour (tours-sequence Task 4). */}
-            <dd aria-label={`Scheduled: ${formatScheduledAt(tour.scheduledAt ?? '')}`}>
-              {formatScheduledAt(tour.scheduledAt ?? '')}
-            </dd>
+            <dd aria-label={`Scheduled: ${scheduledDisplay}`}>{scheduledDisplay}</dd>
           </div>
           <div>
             <dt>Type</dt>
@@ -202,6 +231,36 @@ export function TourDetail(): React.JSX.Element {
       </section>
 
       {actionError !== null ? <p role="alert">{actionError}</p> : null}
+
+      {/* Book — a 'requested' tour has no time yet; booking sets one and arms reminders. */}
+      {canBook && !showBook ? (
+        <button
+          type="button"
+          onClick={() => setShowBook(true)}
+          disabled={submitting}
+          aria-label="Book this tour"
+        >
+          Book tour
+        </button>
+      ) : null}
+      {showBook ? (
+        <form onSubmit={handleBook} aria-label="Book tour form">
+          <label htmlFor="tour-book-at">Date and time</label>
+          <input
+            id="tour-book-at"
+            type="datetime-local"
+            value={bookScheduledAt}
+            onChange={(e) => setBookScheduledAt(e.target.value)}
+            required
+          />
+          <button type="submit" disabled={submitting || !bookScheduledAt}>
+            Confirm booking
+          </button>
+          <button type="button" onClick={() => { setShowBook(false); setBookScheduledAt(''); }}>
+            Cancel
+          </button>
+        </form>
+      ) : null}
 
       {/* Reschedule */}
       {canReschedule && !showReschedule ? (

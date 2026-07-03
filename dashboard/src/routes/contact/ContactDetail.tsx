@@ -33,7 +33,7 @@ import {
   type ContactType,
   type TimelineMessage,
 } from '../../api/index.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { Button, ContactStatusBadge, Spinner } from '../../ui/index.js';
 import { Modal } from './Modal.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
@@ -54,7 +54,7 @@ import { useContact } from './useContact.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
-import { contactDisplayName, contactStatusLabel } from './format.js';
+import { contactDisplayName } from './format.js';
 import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.js';
 import { buildReplyTargets } from './replyTargets.js';
 import { messageSid } from './media.js';
@@ -299,8 +299,10 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setDeleteBusy(false));
   };
 
-  // Header facts subline: voucher / authority for tenants, company / property
-  // count for landlords, plus the number count + status.
+  // Header facts subline: a quiet domain-glance line — voucher / authority for
+  // tenants, company / property count for landlords. The number count lives in the
+  // Details "Phone numbers" row and the status rides its own header badge, so
+  // neither is repeated here.
   const facts = buildFacts();
 
   return (
@@ -311,6 +313,9 @@ export function ContactDetail(): React.JSX.Element {
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
             <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
+            {contact.status ? (
+              <ContactStatusBadge type={contact.type} status={contact.status} />
+            ) : null}
             {deleted ? <span className={styles.deletedBadge}>🗑 Deleted</span> : null}
             {optedOut ? (
               <span className={styles.doNotContact}>⛔ Do Not Contact</span>
@@ -603,12 +608,6 @@ export function ContactDetail(): React.JSX.Element {
         parts.push(contact!['housingAuthority'] as string);
       }
     }
-    if (phones.length > 0) {
-      parts.push(`${phones.length} number${phones.length === 1 ? '' : 's'}`);
-    }
-    // The status rides the header facts as its DISPLAY label ("Needs review"),
-    // never the raw snake_case token.
-    if (contact!.status) parts.push(contactStatusLabel(contact!.type, contact!.status));
     return parts.join(' · ');
   }
 }

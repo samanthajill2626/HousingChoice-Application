@@ -404,3 +404,159 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('dev tick — POST /__dev/placement-nudges/tick', () => {
+  // The deterministic e2e seam for the worker's 60s placement-nudge poll: one
+  // POST = one runDuePlacementNudges(now) pass over the SAME world fakes the
+  // statusTransition choke point armed (mirrors the tour-reminder tick exactly).
+  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+  const TENANT_PHONE = '+15550400001';
+  // Canned rung body (jobs/placementNudges.ts NUDGE_RUNGS.awaiting_receipt).
+  const RECEIPT_BODY =
+    '[AUTO] Just checking in — did the rental application come through? Let us know if you need it re-sent.';
+
+  /** Harness app + dev router sharing ONE world: the tick drains the world's
+   *  placementNudges rows through the SAME repos and the 1:1 send lands on
+   *  world.sent via the world adapter (the spy surface). */
+  function buildTickHarness(): { app: Express; world: FakeWorld } {
+    const world = createFakeWorld();
+    const capture = createLogCapture();
+    const logger = createLogger({ destination: capture.stream });
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      DEV_AUTH_ENABLED: '1',
+      CF_ORIGIN_SECRET: SECRET,
+      MESSAGING_DRIVER: 'console',
+    });
+    const sendMessageService = createSendMessageService({
+      config,
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+      events: world.events,
+    });
+    const devRouter = createDevRouter({
+      config,
+      logger,
+      // Same shape worker.ts builds — but wired to the world fakes (no adapter:
+      // RunDuePlacementNudgesDeps routes 1:1 through sendMessageService only).
+      placementNudgeDeps: {
+        placementNudgesRepo: world.placementNudgesRepo,
+        placementsRepo: world.placementsRepo,
+        contactsRepo: world.contactsRepo,
+        unitsRepo: world.unitsRepo,
+        conversationsRepo: world.conversationsRepo,
+        sendMessageService,
+        logger,
+      },
+    });
+    const { app } = makeWebhookHarness({ world, devRouter });
+    return { app, world };
+  }
+
+  /** Seed a tenant + 1:1 conversation + an awaiting_receipt placement, then arm a
+   *  due receipt_check nudge row directly in the world's repo (the choke point's
+   *  arm path, minus the transition — this suite tests the tick, not the arming). */
+  async function armReceiptNudge(world: FakeWorld): Promise<void> {
+    world.contacts.push({
+      contactId: 'contact-nudge-tenant',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      created_at: FIXED_NOW,
+    });
+    world.conversations.set('conv-nudge-1', {
+      conversationId: 'conv-nudge-1',
+      participant_phone: TENANT_PHONE,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: FIXED_NOW,
+      created_at: FIXED_NOW,
+    });
+    world.placements.set('placement-nudge-1', {
+      placementId: 'placement-nudge-1',
+      tenantId: 'contact-nudge-tenant',
+      unitId: 'unit-nudge-1',
+      stage: 'awaiting_receipt',
+      created_at: FIXED_NOW,
+      updated_at: FIXED_NOW,
+    });
+    await world.placementNudgesRepo.create({
+      placementId: 'placement-nudge-1',
+      kind: 'receipt_check',
+      dueAt: FIXED_NOW,
+    });
+  }
+
+  it('fires the due rows at the supplied now — and only those, exactly once', async () => {
+    const { app, world } = buildTickHarness();
+    await armReceiptNudge(world);
+
+    const res = await request(app).post('/__dev/placement-nudges/tick').send({ now: FIXED_NOW });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]).toMatchObject({ to: TENANT_PHONE, body: RECEIPT_BODY });
+
+    // A second tick claims nothing new — the row was stamped sentAt on the first.
+    const res2 = await request(app).post('/__dev/placement-nudges/tick').send({ now: FIXED_NOW });
+    expect(res2.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('normalizes a milliseconds-less now to full toISOString() form', async () => {
+    const { app, world } = buildTickHarness();
+    await armReceiptNudge(world);
+
+    // The row's dueAt carries '.000Z' — a '…00Z' input must collapse to the same
+    // canonical form so the lexicographic dueAt <= now comparison fires it.
+    const res = await request(app)
+      .post('/__dev/placement-nudges/tick')
+      .send({ now: '2026-07-13T10:00:00Z' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, now: FIXED_NOW });
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]).toMatchObject({ to: TENANT_PHONE, body: RECEIPT_BODY });
+  });
+
+  it('defaults now to the wall clock when the body carries none', async () => {
+    const { app, world } = buildTickHarness();
+    await armReceiptNudge(world);
+
+    const res = await request(app).post('/__dev/placement-nudges/tick').send();
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // The echoed now is a full canonical ISO instant.
+    expect(typeof res.body.now).toBe('string');
+    expect(new Date(res.body.now as string).toISOString()).toBe(res.body.now);
+    // The armed row's dueAt (FIXED_NOW) is in the FUTURE relative to the real
+    // wall clock, so nothing is due — deterministic either way: the endpoint ran
+    // a poll pass without error and sent nothing.
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('rejects a malformed now with 400 (and runs no poll)', async () => {
+    const { app, world } = buildTickHarness();
+    await armReceiptNudge(world);
+
+    for (const bad of ['not-a-date', '', 123, { nested: true }]) {
+      const res = await request(app).post('/__dev/placement-nudges/tick').send({ now: bad });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body).toEqual({ error: 'now must be a valid ISO 8601 datetime' });
+    }
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('is absent when the dev router is not mounted', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const app = buildApp({ config }); // no devRouter
+    const res = await request(app)
+      .post('/__dev/placement-nudges/tick')
+      .set('x-origin-verify', SECRET)
+      .send({ now: FIXED_NOW });
+    expect(res.status).toBe(404);
+  });
+});

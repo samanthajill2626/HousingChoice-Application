@@ -27,6 +27,10 @@ import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
+import { createPlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
+import { createPlacementsRepo } from '../repos/placementsRepo.js';
+import { createUnitsRepo } from '../repos/unitsRepo.js';
+import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 
 export interface DevRouterDeps {
   logger?: Logger;
@@ -40,6 +44,9 @@ export interface DevRouterDeps {
   /** Poll deps for POST /__dev/tour-reminders/tick — injected in tests (the
    *  world fakes); defaults to the worker's construction (worker.ts). */
   tourReminderDeps?: RunDueTourRemindersDeps;
+  /** Poll deps for POST /__dev/placement-nudges/tick — injected in tests (the
+   *  world fakes); defaults to the worker's construction (worker.ts). */
+  placementNudgeDeps?: RunDuePlacementNudgesDeps;
 }
 
 // Role assigned when dev-login auto-provisions a missing user. The seed
@@ -188,6 +195,47 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     }
     await runDueTourReminders(nowIso, tourReminderDeps());
     log.info({ now: nowIso }, 'dev tour-reminder tick ran');
+    res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/placement-nudges/tick { now? } — the deterministic e2e seam for
+  // the worker's 60s placement-nudge poll (worker.ts): one POST runs ONE
+  // runDuePlacementNudges(now) pass instead of waiting for the wall-clock
+  // setInterval. Same triple-gate/hermetic-LOCAL-only construction as the
+  // tour-reminder tick above; json() is scoped to this route only.
+  //
+  // `now` (optional) must be a parseable ISO 8601 datetime; it is NORMALIZED
+  // via new Date(x).toISOString() because the nudge ladder compares ISO strings
+  // LEXICOGRAPHICALLY — '…00Z' vs '…00.000Z' inputs must collapse to the one
+  // canonical full-milliseconds form. Defaults to the wall clock.
+  let nudgeTickDeps = deps.placementNudgeDeps;
+  const placementNudgeDeps = (): RunDuePlacementNudgesDeps => {
+    // Built lazily on the first tick — mirrors worker.ts's placementNudgeDeps
+    // construction exactly (createMessagingAdapter honors MESSAGING_RECORD_OUTBOX
+    // via the send service, so hermetic-e2e sends stay outbox-visible).
+    nudgeTickDeps ??= {
+      placementNudgesRepo: createPlacementNudgesRepo({ logger: log }),
+      placementsRepo: createPlacementsRepo({ logger: log }),
+      contactsRepo: createContactsRepo({ logger: log }),
+      unitsRepo: createUnitsRepo({ logger: log }),
+      conversationsRepo: createConversationsRepo({ logger: log }),
+      sendMessageService: createSendMessageService({ config, logger: log }),
+      logger: log,
+    };
+    return nudgeTickDeps;
+  };
+  router.post('/__dev/placement-nudges/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    await runDuePlacementNudges(nowIso, placementNudgeDeps());
+    log.info({ now: nowIso }, 'dev placement-nudge tick ran');
     res.status(200).json({ ok: true, now: nowIso });
   });
 

@@ -128,6 +128,39 @@ runWithContext(bootContext, () => {
   }, 60_000).unref();
 }
 
+// Placement application-nudge poll: same stateless 60s cadence as the
+// tour-reminder poll above (state is the DynamoDB placementNudges rows). Deps
+// are built once, lazily imported like the tour block; the 1:1 nudge send goes
+// through sendMessageService only (no messaging adapter — landlord/tenant rungs
+// route to a 1:1 conversation, never a group fan-out). .unref()'d so it never
+// holds the process open on shutdown.
+{
+  const { createPlacementNudgesRepo } = await import('./repos/placementNudgesRepo.js');
+  const { createPlacementsRepo } = await import('./repos/placementsRepo.js');
+  const { createContactsRepo } = await import('./repos/contactsRepo.js');
+  const { createUnitsRepo } = await import('./repos/unitsRepo.js');
+  const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createSendMessageService } = await import('./services/sendMessage.js');
+  const { runDuePlacementNudges } = await import('./jobs/placementNudges.js');
+
+  const placementNudgeDeps = {
+    placementNudgesRepo: createPlacementNudgesRepo({ logger }),
+    placementsRepo: createPlacementsRepo({ logger }),
+    contactsRepo: createContactsRepo({ logger }),
+    unitsRepo: createUnitsRepo({ logger }),
+    conversationsRepo: createConversationsRepo({ logger }),
+    sendMessageService: createSendMessageService({ config, logger }),
+    logger,
+  };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runDuePlacementNudges(now, placementNudgeDeps).catch((err: unknown) => {
+      logger.error({ err }, 'placement nudge poll error');
+    });
+  }, 60_000).unref();
+}
+
 // Keep the process alive until a shutdown signal arrives (also covers the
 // local mode where no poll loop is running).
 const keepAlive = setInterval(() => {

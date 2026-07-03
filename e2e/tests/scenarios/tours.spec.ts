@@ -93,7 +93,7 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, owner, unit } = await searchingTenantOwnerUnit(flow, {
+  const { tenant, owner, ownerId, unit } = await searchingTenantOwnerUnit(flow, {
     tenant: 'Tourist',
     owner: 'Shower',
   });
@@ -105,6 +105,12 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   // [MANUAL] Open the masked relay group on the tour → [AUTO] intros to everyone.
   await flow.teamOpensTourGroup();
   await flow.expectGroupIntros([tenant, owner]);
+
+  // Membership shows on BOTH contact files (the "Group texts" card): the
+  // tenant's file names the owner, the owner's file names the tenant — each
+  // row linking to the owning tour's detail page.
+  await flow.expectGroupOnContactFile(owner);
+  await flow.expectGroupOnContactFile(tenant, ownerId);
 
   // The time negotiation happens IN the group — both directions, masked.
   await flow.partyProposesTimeInGroup(tenant, 'Could we do Saturday around 2pm?');

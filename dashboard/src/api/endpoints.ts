@@ -36,6 +36,7 @@ import type {
   MeUser,
   Message,
   RelatedUnit,
+  RelayGroupRow,
   SendMessageResult,
   SimilarUnit,
   SystemAlarmsResult,
@@ -512,6 +513,20 @@ export async function getContactMedia(
     { ...(signal !== undefined && { signal }) },
   );
   return res.media;
+}
+
+/** GET /api/contacts/:id/relay-groups — the contact's group-text (relay)
+ *  memberships, open + closed, newest-activity-first. 404s on a backend
+ *  without the route → the "Group texts" card renders its pending state. */
+export async function getContactRelayGroups(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<RelayGroupRow[]> {
+  const res = await request<{ groups: RelayGroupRow[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/relay-groups`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.groups;
 }
 
 // --- Contact mutations (edit / triage / phones / opt-out) -------------------

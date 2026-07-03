@@ -1148,6 +1148,29 @@ export interface ContactMediaItem {
   conversationId: string;
 }
 
+// --- Relay-group memberships (the contact file's "Group texts" card) --------
+// Copied verbatim from the backend wire shape (routes/contacts.ts
+// RelayGroupRow — GET /api/contacts/:id/relay-groups). One row per relay_group
+// thread whose roster includes this contact (matched server-side by contactId
+// OR any of the contact's numbers), open AND closed, newest-activity-first.
+
+export interface RelayGroupRow {
+  conversationId: string;
+  /** A closed group released its pool number; the membership remains context. */
+  status: 'open' | 'closed';
+  /** The pool number fronting the thread — absent once closed. */
+  poolNumber?: string;
+  memberCount: number;
+  lastActivityAt: string; // ISO
+  /** The owning entity — the card's link target (tour/placement detail).
+   *  `{ type: null }` = a standalone group (no link). */
+  owner: { type: 'tour' | 'placement' | null; id?: string };
+  /** Operator label stamped at provisioning (e.g. the placement tag). */
+  tag?: string;
+  /** The OTHER members' resolved display names (known names only — no phones). */
+  otherMemberNames: string[];
+}
+
 // --- C3: Unit ↔ contacts roster + related (§API Contract C3) ----------------
 // Copied verbatim from the build plan §C3. The property page's Contacts roster
 // (landlord/PM, each opening their contact page) + Related-properties panel.

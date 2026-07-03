@@ -211,6 +211,15 @@ const PREVIEW_MAX_CHARS = 120;
 /** Default inbox page size (GET /api/conversations passes its own limit). */
 const DEFAULT_INBOX_PAGE_LIMIT = 50;
 
+/**
+ * listRelayGroups walk bounds: items EVALUATED per page (DynamoDB `Limit`
+ * counts pre-filter evaluations) × the page budget = the most conversations
+ * one call will consider (2000). Past the budget the result is flagged
+ * `truncated` — the caller warns, never silently drops.
+ */
+const RELAY_LIST_PAGE_LIMIT = 100;
+const RELAY_LIST_MAX_PAGES = 20;
+
 export function toPreview(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
   // Truncate by CODE POINTS (Array.from), not UTF-16 units — a string slice
@@ -385,6 +394,21 @@ export interface ConversationsRepo {
    * the open relay when present, else undefined.
    */
   getByPoolNumber(poolNumber: string): Promise<ConversationItem | undefined>;
+  /**
+   * List the relay_group conversations in ONE status partition ('open' |
+   * 'closed'), newest-activity-first — the contact "Group texts" read
+   * (GET /api/contacts/:id/relay-groups). There is NO member→conversation
+   * index (a relay's participant_phone is the POOL number; rosters live in the
+   * un-indexed participants list), so this walks the byLastActivity partition
+   * with a type = relay_group filter — a paged Query, never a Scan. 1:1
+   * threads only ever write 'open', so the 'closed' partition is relays-only.
+   * The walk is bounded by a fixed page budget: `truncated` is true when the
+   * budget stopped it early — the caller MUST surface that (no silent
+   * truncation).
+   */
+  listRelayGroups(
+    status: 'open' | 'closed',
+  ): Promise<{ items: ConversationItem[]; truncated: boolean }>;
   /**
    * Idempotent member add (relay groups): appends the member unless an entry
    * with the same phone already exists. OPTIMISTIC CONCURRENCY: the write is
@@ -954,6 +978,35 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // it leaves the sparse GSI. Prefer an open match defensively.
       const items = (Items as ConversationItem[] | undefined) ?? [];
       return items.find((c) => c.status === 'open') ?? items[0];
+    },
+
+    async listRelayGroups(status) {
+      // One relay status partition of byLastActivity, newest-activity-first,
+      // filtered to relay_group server-side (the filter trims the wire, the
+      // page budget bounds the walk). See the interface note: there is no
+      // member→conversation index, so this is the read path for "which relay
+      // groups is contact X in" (rosters are matched by the caller).
+      const items: ConversationItem[] = [];
+      let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
+      for (let page = 0; page < RELAY_LIST_MAX_PAGES; page++) {
+        const { Items, LastEvaluatedKey } = await doc.send(
+          new QueryCommand({
+            TableName: table,
+            IndexName: 'byLastActivity',
+            KeyConditionExpression: '#s = :status',
+            FilterExpression: '#t = :relay',
+            ExpressionAttributeNames: { '#s': 'status', '#t': 'type' },
+            ExpressionAttributeValues: { ':status': status, ':relay': 'relay_group' },
+            ScanIndexForward: false, // newest activity first
+            Limit: RELAY_LIST_PAGE_LIMIT,
+            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+          }),
+        );
+        items.push(...(((Items ?? []) as ConversationItem[])));
+        if (LastEvaluatedKey === undefined) return { items, truncated: false };
+        exclusiveStartKey = LastEvaluatedKey;
+      }
+      return { items, truncated: true };
     },
 
     async addMember(conversationId, member) {

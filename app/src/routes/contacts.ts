@@ -39,8 +39,11 @@ import {
 import { HUMAN_CONSENT_METHODS, type ConsentMethod } from '../lib/smsCompliance.js';
 import {
   createConversationsRepo,
+  getOwner,
+  type ConversationParticipant,
   type ConversationsRepo,
   type ConversationType,
+  type RelayOwner,
 } from '../repos/conversationsRepo.js';
 import {
   createMessagesRepo,
@@ -91,6 +94,29 @@ interface ContactMediaItem {
   /** ISO 8601 — the source message's provider_ts (the sort key). */
   at: string;
   conversationId: string;
+}
+
+/**
+ * Wire shape (VERBATIM — the frontend imports identical field names). One
+ * relay-group membership row for the contact page's "Group texts" card: the
+ * thread + its open/closed status, the pool number fronting it (absent once
+ * closed — close clears it), roster size, last activity, the owning entity
+ * (tour/placement — the dashboard's link target, from getOwner()), the
+ * operator tag, and the OTHER members' resolved display names (known names
+ * only, NEVER a phone — least data that makes the row readable). Carrying
+ * numbers/names to the authed client matches the M1.7 relay posture; LOG
+ * LINES stay IDs/counts only (doc §9).
+ */
+interface RelayGroupRow {
+  conversationId: string;
+  status: 'open' | 'closed';
+  poolNumber?: string;
+  memberCount: number;
+  /** ISO 8601 — the conversation's last_activity_at. */
+  lastActivityAt: string;
+  owner: RelayOwner;
+  tag?: string;
+  otherMemberNames: string[];
 }
 
 /**
@@ -843,6 +869,74 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     }
     const rows = await listingSends.listByContact(contactId);
     res.json({ sent: rows.map(toListingSendRow) });
+  });
+
+  // GET /api/contacts/:contactId/relay-groups → { groups: RelayGroupRow[] }.
+  // The contact page's "Group texts" card: every relay_group thread whose
+  // roster includes this contact — by roster contactId OR any of the contact's
+  // numbers — open AND closed, newest-activity-first. There is NO
+  // member→conversation index (a relay's participant_phone is the POOL number;
+  // rosters live in the un-indexed participants list), so this reads the two
+  // relay status partitions via listRelayGroups (a bounded byLastActivity
+  // Query + type filter — never a Scan; 1:1 threads only ever write 'open', so
+  // the 'closed' partition is relays-only) and matches rosters in code — the
+  // today.ts precedent. 404 unknown contact / phone-pointer id (mirrors the
+  // sibling routes); { groups: [] } for a contact in no groups.
+  router.get('/:contactId/relay-groups', async (req, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Membership across ALL the contact's numbers (roster entries always carry
+    // a phone; contactId may be '' for members added by bare phone).
+    const phones = new Set(contactPhones(contact).map((p) => p.phone));
+    const isSelf = (p: ConversationParticipant): boolean =>
+      (p.contactId !== '' && p.contactId === contactId) || phones.has(p.phone);
+
+    const groups: RelayGroupRow[] = [];
+    for (const status of ['open', 'closed'] as const) {
+      const { items, truncated } = await conversations.listRelayGroups(status);
+      if (truncated) {
+        // No silent truncation — the partition walk hit its page budget, so
+        // groups with older last-activity were never considered.
+        log.warn(
+          { contactId, status },
+          'contact relay-groups: partition walk hit the page budget — older groups not considered',
+        );
+      }
+      for (const conv of items) {
+        const roster = conv.participants ?? [];
+        if (!roster.some(isSelf)) continue;
+        const otherMemberNames = roster
+          .filter((p) => !isSelf(p))
+          .map((p) => p.name)
+          .filter((n): n is string => typeof n === 'string' && n.length > 0);
+        groups.push({
+          conversationId: conv.conversationId,
+          status,
+          ...(typeof conv.pool_number === 'string' &&
+            conv.pool_number.length > 0 && { poolNumber: conv.pool_number }),
+          memberCount: roster.length,
+          lastActivityAt: conv.last_activity_at,
+          owner: getOwner(conv),
+          ...(typeof conv['placement_tag'] === 'string' &&
+            conv['placement_tag'].length > 0 && { tag: conv['placement_tag'] }),
+          otherMemberNames,
+        });
+      }
+    }
+    // Newest activity first across BOTH partitions (each partition read is
+    // already ordered; the merge is not).
+    groups.sort((a, b) =>
+      a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
+    );
+
+    log.info({ contactId, groupCount: groups.length }, 'contact relay groups served');
+    res.json({ groups });
   });
 
   // GET /api/contacts/:contactId/media → { media: ContactMediaItem[] } (BE5/C5).

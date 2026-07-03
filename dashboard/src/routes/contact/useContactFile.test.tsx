@@ -7,6 +7,7 @@ const getPlacements = vi.fn();
 const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
+const getContactRelayGroups = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -16,6 +17,7 @@ vi.mock('../../api/index.js', async () => {
     getUnits: (...a: unknown[]) => getUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
+    getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
   };
 });
 
@@ -30,6 +32,10 @@ function Probe({ contactId }: { contactId: string }): React.JSX.Element {
       <span data-testid="units">{f.units.length}</span>
       <span data-testid="sent">{f.listingsSent.status}</span>
       <span data-testid="media">{f.media.status}</span>
+      <span data-testid="groups">{f.relayGroups.status}</span>
+      <span data-testid="groupCount">
+        {f.relayGroups.status === 'ready' ? f.relayGroups.rows.length : ''}
+      </span>
     </div>
   );
 }
@@ -48,15 +54,17 @@ beforeEach(() => {
   getUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactMedia.mockReset();
+  getContactRelayGroups.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('useContactFile', () => {
-  it('loads placements + units and marks C4/C5 pending on a 404', async () => {
+  it('loads placements + units and marks C4/C5 + relay-groups pending on a 404', async () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe contactId="k1" />);
 
@@ -65,19 +73,33 @@ describe('useContactFile', () => {
     expect(screen.getByTestId('units').textContent).toBe('1');
     expect(screen.getByTestId('sent').textContent).toBe('pending');
     expect(screen.getByTestId('media').textContent).toBe('pending');
+    expect(screen.getByTestId('groups').textContent).toBe('pending');
   });
 
-  it('marks C4/C5 ready when those endpoints answer', async () => {
+  it('marks C4/C5 + relay-groups ready when those endpoints answer', async () => {
     getPlacements.mockResolvedValue(CASES);
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockResolvedValue([]);
     getContactMedia.mockResolvedValue([]);
+    getContactRelayGroups.mockResolvedValue([
+      {
+        conversationId: 'conv-g1',
+        status: 'open',
+        poolNumber: '+15550190001',
+        memberCount: 2,
+        lastActivityAt: '2026-07-01T10:00:00Z',
+        owner: { type: null },
+        otherMemberNames: [],
+      },
+    ]);
 
     render(<Probe contactId="k1" />);
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(screen.getByTestId('sent').textContent).toBe('ready');
     expect(screen.getByTestId('media').textContent).toBe('ready');
+    expect(screen.getByTestId('groups').textContent).toBe('ready');
+    expect(screen.getByTestId('groupCount').textContent).toBe('1');
   });
 
   it('surfaces an error when placements fail', async () => {
@@ -85,6 +107,7 @@ describe('useContactFile', () => {
     getUnits.mockResolvedValue(UNITS);
     getContactListingsSent.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getContactMedia.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe contactId="k1" />);
 

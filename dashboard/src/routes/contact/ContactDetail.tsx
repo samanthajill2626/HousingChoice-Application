@@ -421,6 +421,8 @@ export function ContactDetail(): React.JSX.Element {
                 placements={file.placements}
                 tours={file.tours}
                 units={file.units}
+                relayGroupsPending={file.relayGroups.status !== 'ready'}
+                relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
                 media={media}
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}
@@ -457,6 +459,8 @@ export function ContactDetail(): React.JSX.Element {
                 units={file.units}
                 listingsSentPending={file.listingsSent.status !== 'ready'}
                 listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
+                relayGroupsPending={file.relayGroups.status !== 'ready'}
+                relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
                 media={media}
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}

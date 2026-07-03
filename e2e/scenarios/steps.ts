@@ -1420,6 +1420,32 @@ export class Scenario {
     });
   }
 
+  /**
+   * [App→Team] The tour's masked group shows on a contact's file: the "Group
+   * texts" card lists the membership row, named for the OTHER member
+   * ("With <name>"), linking to the owning tour's detail page. `contactId`
+   * picks whose file to open (defaults to the active contact — the tenant).
+   */
+  expectGroupOnContactFile(other: Contact, contactId?: string): Promise<void> {
+    const tour = this.requireActiveTour();
+    const id = contactId ?? this.requireActiveContactId();
+    return step('Team sees the group text on the contact file (Group texts card)', async () => {
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Group texts' }) });
+      await expect(card).toBeVisible();
+      // The row's accessible name is "With <other member(s)> · <count> members";
+      // anchor on the named-for-the-other-member label, then assert the link
+      // target is THIS tour's detail page (the group's owner).
+      const row = card.getByRole('link', {
+        name: new RegExp(`^With .*${escapeRegExp(displayNameOf(other))}`),
+      });
+      await expect(row).toBeVisible();
+      await expect(row).toHaveAttribute('href', `/tours/${tour.tourId}`);
+    });
+  }
+
   /** [App→each member, AUTO] The intro message naming everyone connected reached
    *  EVERY member's fake thread FROM the pool number. */
   expectGroupIntros(members: Contact[]): Promise<void> {

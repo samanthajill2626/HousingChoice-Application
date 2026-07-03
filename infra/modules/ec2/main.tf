@@ -171,7 +171,10 @@ data "aws_iam_policy_document" "app" {
   }
 
   # Custom metrics. PutMetricData is not resource-scopable; constrain by
-  # namespace instead (app metrics + the CloudWatch agent's CWAgent).
+  # namespace instead (app metrics + the CloudWatch agent's CWAgent). The
+  # agent's OTLP metrics pipeline (metrics.metrics_collected.otlp, Task 2) also
+  # publishes app OTel metrics here under the CWAgent namespace — already
+  # covered, no new value needed.
   statement {
     sid       = "Metrics"
     actions   = ["cloudwatch:PutMetricData"]
@@ -181,6 +184,25 @@ data "aws_iam_policy_document" "app" {
       variable = "cloudwatch:namespace"
       values   = ["hc/${var.env}", "CWAgent"]
     }
+  }
+
+  # X-Ray write for the CloudWatch agent's OTLP traces pipeline (Task 2): the
+  # agent forwards received OTLP spans to X-Ray. Mirrors the AWS-managed
+  # AWSXRayDaemonWriteAccess policy exactly — Put* upload segments/telemetry,
+  # and the agent's X-Ray exporter reads centralized sampling rules/targets
+  # (Get*), so those three reads are REQUIRED here, not cargo-culted. None of
+  # these X-Ray actions support resource-level permissions, so resources must
+  # be ["*"] (there is nothing narrower to scope by).
+  statement {
+    sid = "XRayTraces"
+    actions = [
+      "xray:PutTraceSegments",
+      "xray:PutTelemetryRecords",
+      "xray:GetSamplingRules",
+      "xray:GetSamplingTargets",
+      "xray:GetSamplingStatisticSummaries",
+    ]
+    resources = ["*"]
   }
 
   # System Status read model (M1.4): backs the admin-only Settings → System
@@ -285,6 +307,21 @@ resource "aws_instance" "app" {
     # CloudWatch agent: host disk + memory metrics, and ship /var/log/messages
     # (OOM lines) to /hc/${var.env}/system. IAM already grants PutMetricData
     # (CWAgent namespace) + logs on /hc/${var.env}/*.
+    #
+    # It ALSO runs an OTLP/HTTP receiver on 0.0.0.0:4318 (Task 2, OTel wiring):
+    # the app/worker containers export OTLP to host.docker.internal:4318 (via the
+    # compose host-gateway alias — container localhost is NOT the host), and the
+    # agent forwards traces → AWS X-Ray and OTLP metrics → CloudWatch metrics
+    # (PutMetricData, CWAgent namespace). One shared OTLP HTTP receiver serves
+    # both /v1/traces and /v1/metrics on 4318 — the documented CloudWatch-agent
+    # pattern (traces.traces_collected.otlp + metrics.metrics_collected.otlp on
+    # the same http_endpoint map onto the agent's single underlying OTel
+    # Collector OTLP receiver, routed per signal). Bind 0.0.0.0 (not the
+    # 127.0.0.1 default) so the docker bridge can reach it — REQUIRED for
+    # containerized senders per the AWS docs. This is SAFE: the security group
+    # (infra/modules/network/main.tf) opens ONLY the app port to CloudFront's
+    # origin-facing prefix list; 4318 has NO ingress rule, so it is
+    # default-denied from the internet and reachable only from the local bridge.
     dnf install -y amazon-cloudwatch-agent
     cat > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json <<'CWCONFIG'
     {
@@ -294,7 +331,13 @@ resource "aws_instance" "app" {
         "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
         "metrics_collected": {
           "mem": { "measurement": ["mem_used_percent"] },
-          "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true }
+          "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true },
+          "otlp": { "http_endpoint": "0.0.0.0:4318" }
+        }
+      },
+      "traces": {
+        "traces_collected": {
+          "otlp": { "http_endpoint": "0.0.0.0:4318" }
         }
       },
       "logs": {

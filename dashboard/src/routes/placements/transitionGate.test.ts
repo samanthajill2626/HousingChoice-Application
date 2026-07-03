@@ -19,6 +19,18 @@ describe('gateFor', () => {
     expect(gateFor('awaiting_inspection', 'determine_rent')).toBe('inspectionOutcome');
   });
 
+  it('gates schedule_inspection → awaiting_inspection for inspectionDate', () => {
+    expect(gateFor('schedule_inspection', 'awaiting_inspection')).toBe('inspectionDate');
+  });
+
+  it('gates determine_rent → awaiting_rent_acceptance for rentDetermined', () => {
+    expect(gateFor('determine_rent', 'awaiting_rent_acceptance')).toBe('rentDetermined');
+  });
+
+  it('gates complete_paperwork → awaiting_move_in for moveInReady', () => {
+    expect(gateFor('complete_paperwork', 'awaiting_move_in')).toBe('moveInReady');
+  });
+
   it('returns none for an unrestricted move', () => {
     expect(gateFor('send_application', 'collect_rta')).toBe('none');
   });

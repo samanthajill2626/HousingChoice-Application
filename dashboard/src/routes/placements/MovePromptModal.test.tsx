@@ -52,3 +52,67 @@ describe('MovePromptModal (inspectionOutcome)', () => {
     expect(onConfirm).toHaveBeenCalledWith({ inspectionOutcome: 'pass' });
   });
 });
+
+describe('MovePromptModal (inspectionDate)', () => {
+  it('requires a date, then confirms with it', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(<MovePromptModal mode="inspectionDate" onClose={() => {}} onConfirm={onConfirm} />);
+
+    const confirm = screen.getByRole('button', { name: 'Confirm move' });
+    expect(confirm).toBeDisabled();
+
+    const input = screen.getByLabelText(/Inspection date/i);
+    await user.type(input, '2026-08-15');
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith({ inspectionDate: '2026-08-15' });
+  });
+});
+
+describe('MovePromptModal (rentDetermined)', () => {
+  it('keeps confirm disabled until a positive rent is entered, then confirms with it', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(<MovePromptModal mode="rentDetermined" onClose={() => {}} onConfirm={onConfirm} />);
+
+    const confirm = screen.getByRole('button', { name: 'Confirm move' });
+    expect(confirm).toBeDisabled();
+
+    const input = screen.getByLabelText(/Determined rent \(monthly\)/i);
+    await user.type(input, '0');
+    expect(confirm).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/greater than 0/i);
+
+    await user.clear(input);
+    await user.type(input, '1450');
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith({ rentDetermined: 1450 });
+  });
+});
+
+describe('MovePromptModal (moveInReady)', () => {
+  it('confirms with no payload', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(<MovePromptModal mode="moveInReady" onClose={() => {}} onConfirm={onConfirm} />);
+
+    const confirm = screen.getByRole('button', { name: 'Confirm move' });
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith({});
+  });
+
+  it('shows the LIF-pending note only when lifPending is true', () => {
+    const { rerender } = render(
+      <MovePromptModal mode="moveInReady" onClose={() => {}} onConfirm={() => {}} />,
+    );
+    expect(screen.queryByText(/LIF is not marked/i)).not.toBeInTheDocument();
+
+    rerender(
+      <MovePromptModal mode="moveInReady" onClose={() => {}} onConfirm={() => {}} lifPending />,
+    );
+    expect(screen.getByText(/LIF is not marked/i)).toBeInTheDocument();
+  });
+});

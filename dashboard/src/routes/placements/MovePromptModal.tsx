@@ -12,11 +12,18 @@ import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import styles from './MovePromptModal.module.css';
 
-export type MovePromptMode = 'finalRent' | 'inspectionOutcome';
+export type MovePromptMode =
+  | 'finalRent'
+  | 'inspectionOutcome'
+  | 'inspectionDate'
+  | 'rentDetermined'
+  | 'moveInReady';
 
 export interface MovePromptResult {
   finalRent?: number;
   inspectionOutcome?: InspectionOutcome;
+  inspectionDate?: string;
+  rentDetermined?: number;
 }
 
 export interface MovePromptModalProps {
@@ -24,6 +31,8 @@ export interface MovePromptModalProps {
   onClose: () => void;
   onConfirm: (result: MovePromptResult) => void;
   busy?: boolean;
+  /** moveInReady only: the tenant is LIF-eligible but LIF is not yet marked. */
+  lifPending?: boolean;
 }
 
 /** Parse the rent input to a positive number, or null when invalid (≤0 / NaN). */
@@ -33,34 +42,64 @@ export function parseFinalRent(raw: string): number | null {
   return n;
 }
 
+const TITLES: Readonly<Record<MovePromptMode, string>> = {
+  finalRent: 'Confirm final rent',
+  inspectionOutcome: 'Record inspection outcome',
+  inspectionDate: 'Schedule inspection',
+  rentDetermined: 'Confirm determined rent',
+  moveInReady: 'Confirm move-in ready',
+};
+
 export function MovePromptModal({
   mode,
   onClose,
   onConfirm,
   busy = false,
+  lifPending = false,
 }: MovePromptModalProps): React.JSX.Element {
   const [rent, setRent] = useState('');
   const [outcome, setOutcome] = useState<InspectionOutcome | ''>('');
+  const [inspectionDate, setInspectionDate] = useState('');
+  const [determinedRent, setDeterminedRent] = useState('');
   const rentId = useId();
   const groupId = useId();
+  const dateId = useId();
+  const determinedRentId = useId();
 
   const parsedRent = parseFinalRent(rent);
+  const parsedDeterminedRent = parseFinalRent(determinedRent);
   const canConfirm =
-    mode === 'finalRent' ? parsedRent !== null : outcome !== '';
+    mode === 'finalRent'
+      ? parsedRent !== null
+      : mode === 'inspectionOutcome'
+        ? outcome !== ''
+        : mode === 'inspectionDate'
+          ? inspectionDate !== ''
+          : mode === 'rentDetermined'
+            ? parsedDeterminedRent !== null
+            : true; // moveInReady — always confirmable
 
   function handleConfirm(): void {
     if (mode === 'finalRent') {
       if (parsedRent === null) return;
       onConfirm({ finalRent: parsedRent });
-    } else {
+    } else if (mode === 'inspectionOutcome') {
       if (outcome === '') return;
       onConfirm({ inspectionOutcome: outcome });
+    } else if (mode === 'inspectionDate') {
+      if (inspectionDate === '') return;
+      onConfirm({ inspectionDate });
+    } else if (mode === 'rentDetermined') {
+      if (parsedDeterminedRent === null) return;
+      onConfirm({ rentDetermined: parsedDeterminedRent });
+    } else {
+      onConfirm({});
     }
   }
 
   return (
     <Modal
-      title={mode === 'finalRent' ? 'Confirm final rent' : 'Record inspection outcome'}
+      title={TITLES[mode]}
       onClose={onClose}
       footer={
         <>
@@ -103,6 +142,57 @@ export function MovePromptModal({
           {rent !== '' && parsedRent === null ? (
             <p role="alert" className={styles.error}>
               Enter an amount greater than 0.
+            </p>
+          ) : null}
+        </>
+      ) : mode === 'rentDetermined' ? (
+        <>
+          <label className={styles.label} htmlFor={determinedRentId}>
+            Determined rent (monthly)
+          </label>
+          <div className={styles.rentRow}>
+            <span aria-hidden="true" className={styles.dollar}>
+              $
+            </span>
+            <input
+              id={determinedRentId}
+              className={styles.input}
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              value={determinedRent}
+              onChange={(e) => setDeterminedRent(e.target.value)}
+              placeholder="1450"
+            />
+          </div>
+          {determinedRent !== '' && parsedDeterminedRent === null ? (
+            <p role="alert" className={styles.error}>
+              Enter an amount greater than 0.
+            </p>
+          ) : null}
+        </>
+      ) : mode === 'inspectionDate' ? (
+        <>
+          <label className={styles.label} htmlFor={dateId}>
+            Inspection date
+          </label>
+          <input
+            id={dateId}
+            className={styles.input}
+            type="date"
+            value={inspectionDate}
+            onChange={(e) => setInspectionDate(e.target.value)}
+          />
+        </>
+      ) : mode === 'moveInReady' ? (
+        <>
+          <p className={styles.option}>
+            Confirm this placement is ready for move-in.
+          </p>
+          {lifPending ? (
+            <p role="alert" className={styles.error}>
+              LIF is not marked for a LIF-eligible tenant — proceed anyway?
             </p>
           ) : null}
         </>

@@ -21,7 +21,9 @@ import {
   isLostReasonCategory,
   isPlacementStage,
   isTenantOverrideStatus,
+  LANDLORD_STATUS_LABELS,
   STAGE_STUCK_THRESHOLDS,
+  TENANT_STATUS_LABELS,
   TERMINAL_STAGES,
   type InspectionOutcome,
   type LandlordStatus,
@@ -31,6 +33,7 @@ import {
   type TenantStatus,
   type TransitionSource,
 } from '../lib/statusModel.js';
+import type { ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
 import { type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
@@ -69,6 +72,8 @@ export interface StatusTransitionDeps {
    * with the POST-transition placement. Best-effort like `armStageNudge`.
    */
   closeRelayForLostPlacement?: (placement: PlacementItem) => Promise<void>;
+  /** Contact-timeline milestone emitter (best-effort). Optional — absent in legacy callers. */
+  activityEventsRepo?: ActivityEventsRepo;
 }
 
 export interface TransitionPlacementInput {
@@ -168,8 +173,24 @@ export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
   const { placementsRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
-  const { armStageNudge, closeRelayForLostPlacement } = deps;
+  const { armStageNudge, closeRelayForLostPlacement, activityEventsRepo } = deps;
   const log = deps.logger ?? defaultLogger;
+
+  const statusLabel = (contactType: string | undefined, status: string): string =>
+    (contactType === 'landlord'
+      ? (LANDLORD_STATUS_LABELS as Record<string, string>)[status]
+      : (TENANT_STATUS_LABELS as Record<string, string>)[status]) ?? status;
+
+  // Best-effort contact-timeline milestone on a REAL status change. Never throws
+  // out of the operator action; PII-safe log (ids/type only, never the label).
+  async function recordStatusMilestone(contactId: string, contactType: string | undefined, to: string): Promise<void> {
+    if (!activityEventsRepo || typeof contactId !== 'string' || contactId.length === 0) return;
+    try {
+      await activityEventsRepo.record({ contactId, type: 'contact_status_changed', label: `Status → ${statusLabel(contactType, to)}` });
+    } catch (err) {
+      log.error({ err, contactId }, 'contact_status_changed milestone record failed (best-effort)');
+    }
+  }
 
   /**
    * Derived TENANT-status write (load → override-gate → no-op-gate →
@@ -196,6 +217,10 @@ export function createStatusTransitionService(
         to: toStatus,
         source: 'derived',
       });
+      // Contact-timeline milestone on the DERIVED status change (guards above
+      // already skipped override-pinned + no-op). A landlord is never on the
+      // derived tenant path, so contact.type keys the tenant labels correctly.
+      await recordStatusMilestone(tenantId, contact.type, toStatus);
     } catch (err) {
       log.error({ err, tenantId }, 'derivation: tenant status write failed (best-effort)');
     }
@@ -466,6 +491,9 @@ export function createStatusTransitionService(
         source,
         ...(reason !== undefined && { reason }),
       });
+      // Contact-timeline milestone on a REAL status change (explicit path). The
+      // type-keyed label map picks LANDLORD_STATUS_LABELS vs TENANT_STATUS_LABELS.
+      if (from !== toStatus) await recordStatusMilestone(contactId, contact.type, toStatus);
       mergeContext({ contactId });
       log.info({ contactId, from, to: toStatus, source, ...(actor !== undefined && { actor }) }, 'tenant status set');
       return updated;

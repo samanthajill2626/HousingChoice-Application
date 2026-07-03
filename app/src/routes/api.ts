@@ -511,6 +511,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
+      activityEventsRepo: activityEvents,
       events,
       // Post-Tour & Application (Task 5): arm the stage nudge ladder + close a
       // lost placement's relay thread from the ONE transition choke point.

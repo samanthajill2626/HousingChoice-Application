@@ -914,3 +914,46 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(Date.parse(reentered.next_deadline_at!)).toBe(Date.parse(reentered.stage_entered_at!) + RTA_WINDOW_MS);
   });
 });
+
+function makeServiceWithActivity(world: FakeWorld): StatusTransitionService {
+  return createStatusTransitionService({
+    placementsRepo: world.placementsRepo,
+    unitsRepo: world.unitsRepo,
+    contactsRepo: world.contactsRepo,
+    auditRepo: world.auditRepo,
+    activityEventsRepo: world.activityEventsRepo,
+    events: world.events,
+    logger: createLogger({ destination: createLogCapture().stream }),
+  });
+}
+
+describe('statusTransition — contact_status_changed milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    // Landlord fixture — exercises the LANDLORD_STATUS_LABELS branch. Landlord
+    // statuses are needs_review|interested|active|parked (statusModel.ts:173).
+    await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'interested' });
+  });
+
+  it('records a contact_status_changed activity event on an explicit landlord status change', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'll-1', label: 'Status → Parked' }); // LANDLORD_STATUS_LABELS.parked
+    expect(ev[0].refType).toBeUndefined();
+  });
+
+  it('does NOT record when the status is unchanged (no-op)', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'interested', source: 'manual', actor: 'usr_va' });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
+  });
+
+  it('never throws out of setTenantStatus if the milestone write fails (best-effort)', async () => {
+    world.activityEventsRepo.record = async () => { throw new Error('boom'); };
+    const svc = makeServiceWithActivity(world);
+    await expect(svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
+  });
+});

@@ -397,3 +397,21 @@ describe('opt_out_changed milestone on opt-out routes', () => {
     expect(ev.map((e) => e.label)).toEqual(['Marked Do Not Call', 'Do Not Call cleared']);
   });
 });
+
+describe('contact_status_changed milestone on the edit-form status write', () => {
+  it('records a contact_status_changed milestone when the edit form changes a landlord status', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'll1', type: 'landlord', status: 'needs_review' } as ContactItem);
+    await authed(app).patch('/api/contacts/ll1').send({ status: 'active' }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0].label).toContain('Active');
+  });
+
+  it('records NO status milestone when the edit does not change status', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'll2', type: 'landlord', status: 'active', firstName: 'A' } as ContactItem);
+    await authed(app).patch('/api/contacts/ll2').send({ firstName: 'B' }).expect(200);
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
+  });
+});

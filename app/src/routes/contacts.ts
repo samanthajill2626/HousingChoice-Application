@@ -20,9 +20,11 @@ import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
+  LANDLORD_STATUS_LABELS,
   LANDLORD_STATUSES,
   NON_TENANT_STATUSES,
   statusAllowlistFor,
+  TENANT_STATUS_LABELS,
   TENANT_STATUSES,
 } from '../lib/statusModel.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -1068,6 +1070,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
+    // Read the pre-update contact ONCE, up front: it backs the type-scoped status
+    // re-validation and the 404 checks below, and lets the post-update milestone
+    // emit diff `status` against its prior value without a second fetch. Snapshot
+    // the prior status as a primitive NOW — `contacts.update` may return/mutate the
+    // same object graph, so reading `stored.status` after the write is unreliable.
+    const stored = await contacts.getById(contactId);
+    const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
+
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
     const newType = parsed.patch['type'];
     const convType = isContactType(newType) ? conversationTypeFor(newType) : undefined;
@@ -1078,7 +1088,6 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact's effective type so a tenant lifecycle value can't be written onto
     // a non-tenant (and vice-versa). 404 unknown contacts as the update would.
     if ('status' in parsed.patch && !('type' in parsed.patch)) {
-      const stored = await contacts.getById(contactId);
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
         return;
@@ -1113,7 +1122,6 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // an invalid (type, status) pair. tenant/landlord are handled by the
     // auto-advance above; unknown returns to the 'needs_review' front door.
     if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
-      const stored = await contacts.getById(contactId);
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
         return;
@@ -1179,6 +1187,23 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       ...(propagatedConversations > 0 && { propagatedConversations, conversationType: convType }),
     });
+
+    // Best-effort contact-timeline milestone on a REAL status change from the
+    // edit form (closes the gap the transition-service path doesn't cover). The
+    // handler may auto-set `status` even when the client didn't send it; the
+    // `!== stored.status` diff guard suppresses a no-op milestone in that case.
+    if (typeof parsed.patch.status === 'string' && stored && parsed.patch.status !== priorStatus) {
+      const labels = stored.type === 'landlord' ? LANDLORD_STATUS_LABELS : TENANT_STATUS_LABELS;
+      try {
+        await activityEvents.record({
+          contactId,
+          type: 'contact_status_changed',
+          label: `Status → ${(labels as Record<string, string>)[parsed.patch.status] ?? parsed.patch.status}`,
+        });
+      } catch (err) {
+        log.error({ err, contactId }, 'contact_status_changed (edit) milestone record failed (best-effort)');
+      }
+    }
     log.info(
       { contactId, fields: parsed.changedFields, propagatedConversations, actor: req.user?.userId },
       'contact triaged',

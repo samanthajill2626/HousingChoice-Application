@@ -813,11 +813,39 @@ operational. Migrated 2026-06-18: [`iam-user-mfa`](docs/issues/iam-user-mfa.md),
 [`cloudwatch-agent-disk-metric`](docs/issues/cloudwatch-agent-disk-metric.md),
 [`otlp-exporter-wiring`](docs/issues/otlp-exporter-wiring.md),
 [`messaging-delivery-alarms`](docs/issues/messaging-delivery-alarms.md),
-[`api-rate-limiting`](docs/issues/api-rate-limiting.md),
+[`api-rate-limiting`](docs/issues/api-rate-limiting.md) (resolved 2026-07-02 — see below),
 [`sns-prod-alert-confirmation`](docs/issues/sns-prod-alert-confirmation.md). Already
 addressed (no longer tracked): orphan boot-log lines (correlation fix shipped
 2026-06-12 — any orphan hit is now a real bug); custom domain + ACM (shipped in Phase 1
 Change Order 3 — see [Custom domain & TLS](#custom-domain--tls)).
+
+### Per-user rate limits on the send/call-cost routes (2026-07-02)
+
+The four authenticated routes that spend real money / touch real phones carry a
+**per-user sliding-window rate limit** (`app/src/middleware/rateLimit.ts`,
+`createUserRateLimit` — keyed by session userId, NOT IP, since staff share office
+IPs). Beyond a ceiling the request gets **HTTP 429 `{ error: 'rate_limited' }`
+with a `Retry-After` header** (seconds until the window admits again) and a
+correlated WARN (IDs/counts only, no PII); the dashboard shows an inline
+"sending too fast" message. A 429'd request performs NO side effect (no SMS, no
+call, no state touched).
+
+| Route | Default (per user) | Env override |
+|---|---|---|
+| Manual 1:1 send — `POST /api/conversations/:id/messages` | 30 / min | `RATE_LIMIT_MANUAL_SEND_PER_MIN` |
+| Broadcast send — `POST /api/broadcasts/:id/send` | 5 / min | `RATE_LIMIT_BROADCAST_SEND_PER_MIN` |
+| Call originate — `POST /api/contacts/:id/call` | 10 / min | `RATE_LIMIT_ORIGINATE_PER_MIN` |
+| Cell verify-start — `POST /api/users/me/cell/verify-start` | 3 / 3 min | `RATE_LIMIT_VERIFY_START_MAX` + `RATE_LIMIT_VERIFY_START_WINDOW_MS` |
+
+Tuning: code defaults apply when unset; to change a deployed stack, set the var
+in `.env.<env>` (template-first: `.env.<env>.example`) and `npm run
+secrets:push -- <env>` (next deploy hydrates it). A bad value (non-positive /
+non-integer) refuses boot — fail-fast, same as `PUBLIC_RATE_LIMIT_MAX`. The
+limiter is in-memory single-process (like the public per-IP fence and the SSE
+bus); multi-instance scaling would need a shared store. The hermetic e2e suite
+raises all four ceilings to 100000 (`scripts/e2e-session.mjs`) because every
+spec shares the one seeded dev-login user; an externally-set value still wins
+there. `npm run dev` keeps production defaults.
 
 **Access-key rotation (operational procedure).** Rotate the `housingchoice` IAM user's
 access key every ~90 days: `aws iam create-access-key` → update the profile →

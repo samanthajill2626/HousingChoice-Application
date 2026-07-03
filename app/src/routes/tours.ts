@@ -70,6 +70,7 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
+  type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
 import { nameFromContact, resolveMemberName } from './relayGroups.js';
 import {
@@ -149,6 +150,34 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
+  // Best-effort dual-write of a tour lifecycle event to BOTH surfaces: the
+  // tenant's contact timeline (activity event) and the property's Activity card
+  // (a `units#<unitId>` audit row). Each write is independently guarded — NEITHER
+  // may fail the route (state is already persisted). PII-safe log: ids/type only.
+  async function recordTourEvent(
+    tour: { tenantId: string; unitId: string; tourId: string },
+    activityType: ActivityEventType,
+    auditType: string,
+    label: string,
+  ): Promise<void> {
+    try {
+      await activityEvents.record({
+        contactId: tour.tenantId,
+        type: activityType,
+        label,
+        refType: 'tour',
+        refId: tour.tourId,
+      });
+    } catch (err) {
+      log.error({ err, tourId: tour.tourId }, `${activityType} milestone record failed (best-effort)`);
+    }
+    try {
+      await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
+    } catch (err) {
+      log.error({ err, tourId: tour.tourId }, `${auditType} unit audit failed (best-effort)`);
+    }
+  }
+
   // POST /api/tours — create a tour. With scheduledAt → 'scheduled' + armed
   // ladder; without → 'requested' (timeless), nothing armed until booking.
   router.post('/', async (req, res) => {
@@ -208,6 +237,12 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Invariant: no reminder rows may ever exist for a 'requested' / time-less tour.
     if (scheduledAt !== undefined) {
       await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+    }
+
+    // Dual-write the lifecycle event to the tenant timeline + property audit —
+    // ONLY for a scheduled create (a timeless 'requested' create emits nothing).
+    if (tour.status === 'scheduled') {
+      await recordTourEvent(tour, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
     }
 
     log.info({ tourId: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId }, 'tour created via api');
@@ -461,23 +496,43 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
     }
 
-    // tour_took_place milestone (Post-Tour & Application): record the person-
-    // centric activity event on the transition INTO 'toured'. Best-effort (a
-    // failed milestone must never fail the patch) and idempotent per transition
-    // — an already-toured tour re-PATCHed to 'toured' does NOT re-emit. PII:
-    // ids/type only (never the label). resolves tour-took-place-milestone.
-    if (newStatus === 'toured' && currentStatus !== 'toured') {
-      try {
-        await activityEvents.record({
-          contactId: current.tenantId,
-          type: 'tour_took_place',
-          label: 'Tour took place',
-          refType: 'tour',
-          refId: tourId,
-        });
-      } catch (err) {
-        log.error({ err, tourId }, 'tour_took_place milestone record failed (best-effort)');
-      }
+    // Tour lifecycle → tenant timeline + property (unit) audit (WS4). Each
+    // surfaced transition dual-writes both surfaces (best-effort, idempotent per
+    // REAL transition). We key on `effectiveStatus` (patch['status'] ?? current)
+    // — NOT the body-only `newStatus` — so booking/revival auto-advances (which
+    // set patch['status']='scheduled' with body newStatus undefined) are caught.
+    // Each INTO-status guard is against `currentStatus` (a no-op re-PATCH to the
+    // same status never re-emits). PII: ids/type only (never the label) in logs.
+    const t = { tenantId: current.tenantId, unitId: current.unitId, tourId };
+    // A bare time change on a tour that stays 'scheduled' is a reschedule.
+    const wasReschedule =
+      scheduledAtIso !== undefined && currentStatus === 'scheduled' && effectiveStatus === 'scheduled';
+    if (effectiveStatus === 'scheduled' && currentStatus !== 'scheduled') {
+      await recordTourEvent(t, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
+    } else if (wasReschedule) {
+      await recordTourEvent(t, 'tour_scheduled', 'tour_rescheduled', 'Tour rescheduled');
+    }
+    if (effectiveStatus === 'toured' && currentStatus !== 'toured') {
+      await recordTourEvent(t, 'tour_took_place', 'tour_took_place', 'Tour took place');
+    }
+    if (effectiveStatus === 'no_show' && currentStatus !== 'no_show') {
+      await recordTourEvent(t, 'tour_no_show', 'tour_no_show', 'Tour no-show');
+    }
+    if (effectiveStatus === 'canceled' && currentStatus !== 'canceled') {
+      await recordTourEvent(t, 'tour_canceled', 'tour_canceled', 'Tour canceled');
+    }
+    // Exit gate: `newOutcome`/`newMoveForward` are the parsed body locals; the
+    // gate already 409'd unless currentStatus==='toured'. Idempotent: emit only
+    // when the outcome was previously unset — a second identical PATCH won't
+    // re-emit (current.outcome is the pre-patch value).
+    const outcomeNewlySet = newOutcome !== undefined && current.outcome === undefined;
+    if (outcomeNewlySet) {
+      await recordTourEvent(
+        t,
+        'tour_outcome',
+        'tour_outcome',
+        `Tour outcome · ${newMoveForward === true ? 'moved forward' : 'not a fit'}`,
+      );
     }
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');

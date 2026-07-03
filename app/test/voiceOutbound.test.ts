@@ -330,6 +330,40 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(res.text).not.toContain('<Dial');
   });
 
+  // DNC re-check at press-1 (docs/issues/voice-bridge-dnc-recheck.md): the
+  // originate service refuses voice_opt_out PRE-dial, but staff can set the
+  // flag in the seconds between originate and the navigator's press-1 — the
+  // gate must re-check the freshly-loaded contact and hang up INSTEAD of
+  // dialing.
+  it('press-1 after the contact was marked voice_opt_out mid-ring → <Hangup>, NO <Dial>, IDs-only log', async () => {
+    const { world, harness, conversationId, callSid } = await originate();
+    // Staff mark the contact company do-not-call AFTER originate succeeded.
+    const contact = world.contacts.find((c) => c.contactId === 'c-target')!;
+    contact.voice_opt_out = true;
+
+    const res = await signedTwilioPost(
+      harness.app,
+      `/webhooks/twilio/voice/whisper-gate?conversationId=${encodeURIComponent(conversationId)}&parentCallSid=${encodeURIComponent(callSid)}&outbound=1`,
+      { Digits: '1', CallSid: 'CAnav-leg' },
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain('<Dial');
+    expect(res.text).not.toContain(TARGET);
+
+    // The call was never stamped accepted — the leg just ends (the status
+    // callback stamps the terminal outcome as usual).
+    const entry = world.messages.find((m) => m.provider_sid === callSid)!;
+    expect(entry.call_status).toBe('ringing');
+    expect(entry.answered_at).toBeUndefined();
+
+    // The refusal is logged at IDs-only — and no raw phone anywhere in logs.
+    const lines = JSON.stringify(harness.capture.lines);
+    expect(lines).toContain('target opted out mid-ring');
+    expect(lines).not.toContain(TARGET);
+    expect(lines).not.toContain(NAV_CELL);
+  });
+
   it('status callback on the originated CallSid stamps the outbound entry (answered)', async () => {
     const { world, harness, conversationId, callSid } = await originate();
     // press-1 accept, then the <Dial action> summary completes with a duration.

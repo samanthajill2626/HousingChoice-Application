@@ -366,3 +366,34 @@ describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)',
     expect(res.status).toBe(400);
   });
 });
+
+// Local authed(app) helper — mirrors the raw header/cookie pattern used above
+// (there is no shared `authed`; toursApi.test.ts defines its own per-file).
+function authed(app: Parameters<typeof request>[0]) {
+  return {
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    patch: (path: string) =>
+      request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+  };
+}
+
+describe('opt_out_changed milestone on opt-out routes', () => {
+  it('records an opt_out_changed milestone on SMS opt-out toggle (both directions)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c1', type: 'tenant', phone: '+15550100001' } as ContactItem);
+    await authed(app).post('/api/contacts/c1/opt-out').send({ optOut: true }).expect(200);
+    await authed(app).post('/api/contacts/c1/opt-out').send({ optOut: false }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'opt_out_changed');
+    expect(ev.map((e) => e.label)).toEqual(['Marked Do Not Contact', 'Do Not Contact cleared']);
+  });
+
+  it('records an opt_out_changed milestone on voice opt-out toggle (both directions)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c2', type: 'tenant', phone: '+15550100002' } as ContactItem);
+    await authed(app).post('/api/contacts/c2/voice-opt-out').send({ optOut: true }).expect(200);
+    await authed(app).post('/api/contacts/c2/voice-opt-out').send({ optOut: false }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'opt_out_changed');
+    expect(ev.map((e) => e.label)).toEqual(['Marked Do Not Call', 'Do Not Call cleared']);
+  });
+});

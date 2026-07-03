@@ -1291,6 +1291,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       optOut,
       actor: req.user?.userId,
     });
+    // Best-effort contact-timeline milestone (never fails the toggle route).
+    try {
+      await activityEvents.record({
+        contactId,
+        type: 'opt_out_changed',
+        label: optOut ? 'Marked Do Not Contact' : 'Do Not Contact cleared',
+      });
+    } catch (err) {
+      log.error({ err, contactId }, 'opt_out_changed (sms) milestone record failed (best-effort)');
+    }
     log.info({ contactId, optOut, actor: req.user?.userId }, 'contact sms_opt_out toggled');
     // Reflect the new flag without a second round-trip.
     res.json({ contact: withPhones({ ...existing, sms_opt_out: optOut }) });
@@ -1328,6 +1338,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       optOut,
       actor: req.user?.userId,
     });
+    // Best-effort contact-timeline milestone (never fails the toggle route).
+    try {
+      await activityEvents.record({
+        contactId,
+        type: 'opt_out_changed',
+        label: optOut ? 'Marked Do Not Call' : 'Do Not Call cleared',
+      });
+    } catch (err) {
+      log.error({ err, contactId }, 'opt_out_changed (voice) milestone record failed (best-effort)');
+    }
     log.info({ contactId, optOut, actor: req.user?.userId }, 'contact voice_opt_out toggled');
     res.json({ contact: withPhones({ ...existing, voice_opt_out: optOut }) });
   });

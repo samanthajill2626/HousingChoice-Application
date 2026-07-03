@@ -17,8 +17,11 @@ import {
   TENANT_STATUSES,
   LANDLORD_STATUSES,
   LISTING_STATUSES,
+  STAGE_LABELS,
+  TERMINAL_STAGES,
   type PlacementStage,
 } from '../src/lib/statusModel.js';
+import { TOUR_STATUS_LABELS } from '../src/lib/toursModel.js';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { TABLES } from '../src/lib/tables.js';
@@ -31,8 +34,13 @@ import {
   standaloneContactHistory,
   standaloneUnitHistory,
   entityHistory,
+  placementMilestones,
+  tourMilestones,
+  listingSendMilestones,
+  contactPhoneMilestones,
   LIFECYCLE_EVENT_TYPES,
   type AuditRow,
+  type ActivityRow,
 } from '../src/lib/seed/history.js';
 
 // --- helpers ----------------------------------------------------------------
@@ -346,8 +354,16 @@ describe('seed history — orchestrator + dedupe (single source of truth §4.7)'
     expect(out.audit_events.some((r) => r.ts === '2026-02-03T00:00:00.000Z#cafebabe')).toBe(true);
   });
 
-  it('activity_events is left to Task 2 (returns [])', () => {
-    expect(result.activity_events).toEqual([]);
+  it('activity_events is populated (Task 2) and every row has the stored milestone shape', () => {
+    expect(result.activity_events.length).toBeGreaterThan(0);
+    for (const r of result.activity_events) {
+      expect(typeof r['contactId']).toBe('string');
+      expect(String(r['tsEventId'])).toBe(`${r['at']}#${r['eventId']}`);
+      expect(String(r['eventId'])).toMatch(/^evt-/);
+      expect(typeof r['type']).toBe('string');
+      expect(typeof r['label']).toBe('string');
+      expect(typeof r['created_at']).toBe('string');
+    }
   });
 
   it('every generated audit SK has the real <ISO>#<suffix> shape', () => {
@@ -367,6 +383,183 @@ describe('seed history — orchestrator + dedupe (single source of truth §4.7)'
   it('entityHistory dispatches to the per-entity generators (live reuse hook)', () => {
     const p = PLACEMENTS[0]!;
     expect(entityHistory(p, { kind: 'placement' })).toEqual(placementHistory(p));
+  });
+});
+
+describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
+  const result = historyItems(FULL);
+  const TOURS = FULL['tours'] ?? [];
+  const LISTING_SENDS = FULL['listing_sends'] ?? [];
+
+  const byContact = new Map<string, ActivityRow[]>();
+  for (const r of result.activity_events) {
+    const list = byContact.get(String(r.contactId)) ?? [];
+    list.push(r);
+    byContact.set(String(r.contactId), list);
+  }
+
+  it('every placement-linked tenant has a non-empty timeline led by placement_opened (faithful writer labels)', () => {
+    for (const p of PLACEMENTS) {
+      const tenantId = String(p['tenantId']);
+      const rows = placementMilestones(p);
+      expect(rows.length).toBeGreaterThan(0);
+      const opened = rows[0]!;
+      expect(opened.type).toBe('placement_opened');
+      expect(opened.label).toBe('Placement opened'); // placements.ts:465
+      expect(opened.refType).toBe('placement');
+      expect(opened.refId).toBe(p['placementId']);
+      for (const r of rows) expect(r.contactId).toBe(tenantId);
+      // The merged orchestrator surfaces these rows for the tenant.
+      expect((byContact.get(tenantId) ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('placement milestone `at` values align with the Task-1 audit stage-hop instants (one coherent clock)', () => {
+    let sawStageChanged = false;
+    let sawClosed = false;
+    for (const p of PLACEMENTS) {
+      const audit = placementHistory(p).filter((r) => r.event_type === 'placement_stage_changed');
+      const hopIsos = new Set(audit.map((r) => iso(r.ts)));
+      const derived = placementHistory(p).filter((r) => r.payload['source'] === 'derived');
+      const oldestDerivedIso = derived.length
+        ? derived.map((r) => iso(r.ts)).reduce((a, b) => (a < b ? a : b))
+        : undefined;
+      const mile = placementMilestones(p);
+      for (const r of mile) {
+        const at = iso(r.tsEventId);
+        if (r.type === 'placement_opened') {
+          // Hop 0 = the create instant. It shares the create-time derived-flip instant
+          // (Task-1's oldest derived row) — a concrete tie to the same clock, and it is
+          // strictly OLDER than every recorded stage hop for a multi-hop placement.
+          if (oldestDerivedIso !== undefined) expect(at).toBe(oldestDerivedIso);
+        } else {
+          // stage_changed / placement_closed each land exactly on a Task-1 stage-hop instant.
+          expect(hopIsos.has(at)).toBe(true);
+          if (r.type === 'stage_changed') sawStageChanged = true;
+          if (r.type === 'placement_closed') sawClosed = true;
+        }
+      }
+      // Concrete terminal check: a terminal placement's placement_closed lands on the
+      // anchor (== newest audit hop).
+      const stage = String(p['stage']) as PlacementStage;
+      if (TERMINAL_STAGES.has(stage)) {
+        const closed = mile.find((r) => r.type === 'placement_closed')!;
+        expect(closed).toBeDefined();
+        expect(iso(closed.tsEventId)).toBe(iso(String(p['stage_entered_at'])));
+        expect(closed.label.startsWith(`Placement closed · ${STAGE_LABELS[stage]}`)).toBe(true);
+      }
+    }
+    // The alignment assertions must have actually run against both hop-milestone kinds.
+    expect(sawStageChanged).toBe(true);
+    expect(sawClosed).toBe(true);
+  });
+
+  it('a stage_changed milestone uses the real "Stage → <label>" writer format', () => {
+    const inspection = PLACEMENTS.find((p) => p['stage'] === 'awaiting_inspection');
+    expect(inspection).toBeDefined();
+    const rows = placementMilestones(inspection!);
+    const sc = rows.find((r) => r.type === 'stage_changed' && r.label === `Stage → ${STAGE_LABELS['awaiting_inspection']}`);
+    expect(sc).toBeDefined(); // placements.ts:556
+    expect(sc!.refType).toBe('placement');
+  });
+
+  it('tour_scheduled + tour_took_place are present for a toured tour, keyed on its tenant', () => {
+    const toured = TOURS.find((t) => t['status'] === 'toured');
+    expect(toured).toBeDefined();
+    const rows = tourMilestones(toured!);
+    const types = rows.map((r) => r.type);
+    expect(types).toContain('tour_scheduled');
+    expect(types).toContain('tour_took_place');
+    for (const r of rows) expect(r.contactId).toBe(toured!['tenantId']);
+    const tookPlace = rows.find((r) => r.type === 'tour_took_place')!;
+    // activityEventsRepo.ts:59 documents this exact label shape.
+    expect(tookPlace.label).toBe(`Tour took place · ${TOUR_STATUS_LABELS['toured']}`);
+    expect(tookPlace.refType).toBe('unit');
+    expect(tookPlace.refId).toBe(toured!['unitId']);
+    expect(iso(tookPlace.tsEventId)).toBe(iso(String(toured!['scheduledAt'])));
+    // The merged orchestrator surfaces the tour milestones for the tenant.
+    const merged = byContact.get(String(toured!['tenantId'])) ?? [];
+    expect(merged.some((r) => r.type === 'tour_took_place')).toBe(true);
+  });
+
+  it('a requested (timeless) tour yields NO milestones', () => {
+    const requested = TOURS.find((t) => t['status'] === 'requested');
+    if (requested) expect(tourMilestones(requested).length).toBe(0);
+  });
+
+  it('listing_sends produce faithful listing_sent (+ listing_reviewed on a reviewed response)', () => {
+    const send = LISTING_SENDS.find((s) => s['response'] === 'interested');
+    expect(send).toBeDefined();
+    const rows = listingSendMilestones(send!);
+    const sent = rows.find((r) => r.type === 'listing_sent')!;
+    expect(sent.label).toBe('Property sent'); // broadcastFanOut.ts:309
+    expect(sent.refType).toBe('unit');
+    expect(sent.refId).toBe(send!['unitId']);
+    expect(iso(sent.tsEventId)).toBe(iso(String(send!['sentAt'])));
+    const reviewed = rows.find((r) => r.type === 'listing_reviewed')!;
+    expect(reviewed.label).toBe('Property reviewed · Interested'); // units.ts:708
+    // a no_reply send has no review milestone
+    const noReply = LISTING_SENDS.find((s) => s['response'] === 'no_reply');
+    if (noReply) {
+      expect(listingSendMilestones(noReply).some((r) => r.type === 'listing_reviewed')).toBe(false);
+    }
+  });
+
+  it('a multi-phone contact emits a number_added milestone per non-primary number', () => {
+    const multi = CONTACTS.find(
+      (c) => Array.isArray(c['phones']) && (c['phones'] as unknown[]).length > 1,
+    );
+    expect(multi).toBeDefined();
+    const rows = contactPhoneMilestones(multi!);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.type).toBe('number_added');
+      expect(r.label).toBe('Number added'); // contacts.ts:1473
+      expect(r.refType).toBeUndefined();
+      expect(r.contactId).toBe(multi!['contactId']);
+    }
+  });
+
+  it('supersedes the 4 pre-seeded matrix activity rows (no duplicate eventId survives; covered contacts keep a timeline)', () => {
+    const pre = matrixItems()['activity_events'] ?? [];
+    expect(pre.length).toBe(4);
+    for (const preRow of pre) {
+      const cid = String(preRow['contactId']);
+      // The hand-authored matrix eventId is gone (superseded by the generator).
+      expect(result.activity_events.some((r) => r.eventId === preRow['eventId'])).toBe(false);
+      // …but the contact still has a (regenerated) timeline.
+      expect((byContact.get(cid) ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('preserves a pre-existing activity row for a contact the generator does NOT cover', () => {
+    const tables: Record<string, Record<string, unknown>[]> = {
+      contacts: [],
+      placements: [],
+      units: [],
+      tours: [],
+      listing_sends: [],
+      audit_events: [],
+      activity_events: [
+        {
+          contactId: 'contact-uncovered-01',
+          tsEventId: '2026-03-01T00:00:00.000Z#evt-mx-listing-sent-xxxx',
+          eventId: 'evt-mx-listing-sent-xxxx',
+          at: '2026-03-01T00:00:00.000Z',
+          type: 'listing_sent',
+          label: 'Property sent',
+          created_at: '2026-03-01T00:00:00.000Z',
+        },
+      ],
+    };
+    const out = historyItems(tables);
+    expect(out.activity_events.some((r) => r.eventId === 'evt-mx-listing-sent-xxxx')).toBe(true);
+  });
+
+  it('is byte-stable: two runs produce identical activity_events', () => {
+    const a = JSON.stringify(historyItems(buildFullTables()).activity_events);
+    const b = JSON.stringify(historyItems(buildFullTables()).activity_events);
+    expect(a).toBe(b);
   });
 });
 
@@ -449,6 +642,30 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
       // unit activity card has a publish + derived rows
       const unitActivity = await audit.listByEntity('units#unit-0001');
       expect(unitActivity.some((r) => r.event_type === 'listing_status_changed')).toBe(true);
+
+      // Contact Timeline milestones: the generated activity_events read back
+      // non-empty for the pinned placement's tenant. index.ts full-profile wiring
+      // of activity_events is deferred to Task 3 (live wiring), so this test drives
+      // the generator's output through a real PutCommand → activityEventsRepo round-
+      // trip (proving persistence + the newest-first read), independent of seedAll.
+      const { createActivityEventsRepo } = await import('../src/repos/activityEventsRepo.js');
+      const activityRepo = createActivityEventsRepo({ doc, env: testEnv });
+      const generatedActivity = historyItems(buildFullTables()).activity_events;
+      const leanTenantId = String(
+        (PLACEMENTS.find((p) => p['placementId'] === 'placement-0001') ?? {})['tenantId'],
+      );
+      const table = `${prefix}activity_events`;
+      const { PutCommand } = await import('@aws-sdk/lib-dynamodb');
+      for (const item of generatedActivity) {
+        await doc.send(new PutCommand({ TableName: table, Item: item }));
+      }
+      const { items: timeline } = await activityRepo.listByContact(leanTenantId);
+      expect(timeline.length).toBeGreaterThan(0);
+      expect(
+        timeline.some(
+          (i) => i.type === 'placement_opened' || i.type === 'stage_changed' || i.type === 'placement_closed',
+        ),
+      ).toBe(true);
     } finally {
       doc.destroy();
     }

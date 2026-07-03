@@ -43,11 +43,14 @@ import {
   TENANT_STATUSES,
   LANDLORD_STATUSES,
   LISTING_STATUSES,
+  STAGE_LABELS,
+  TERMINAL_STAGES,
   deriveStatuses,
   type PlacementStage,
   type TenantStatus,
   type ListingStatus,
 } from '../statusModel.js';
+import { TOUR_STATUS_LABELS, type TourStatus } from '../toursModel.js';
 
 // ---------------------------------------------------------------------------
 // Row shape (mirrors auditRepo.AuditEvent / what auditRepo.append writes)
@@ -72,6 +75,34 @@ export const LIFECYCLE_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   'tenant_status_changed',
   'listing_status_changed',
 ]);
+
+// ---------------------------------------------------------------------------
+// Activity-milestone row shape (mirrors activityEventsRepo.ActivityEventItem —
+// what activityEventsRepo.record persists; PK contactId, SK `<ISO at>#<eventId>`).
+// These feed the Contact Timeline "milestone" items (research §SURFACES.2).
+// ---------------------------------------------------------------------------
+
+export interface ActivityRow {
+  /** PK — the contact this milestone belongs to. */
+  contactId: string;
+  /** SK — `<ISO at>#<eventId>` (chronological, paginates backward). */
+  tsEventId: string;
+  /** Deterministic `evt-…` id (NOT random — byte-stable, mirrors matrix's evt-mx-…). */
+  eventId: string;
+  /** ISO 8601 — when the milestone happened (the timeline sort key). */
+  at: string;
+  /** ActivityEventType (activityEventsRepo.ts:33). */
+  type: string;
+  /** Human label as the REAL writer formats it (never invented). */
+  label: string;
+  /** Deep-link target type (activityEventsRepo ActivityEventRefType). */
+  refType?: string;
+  refId?: string;
+  /** ISO 8601 — audit furniture; matrix seeds this equal to `at`, we mirror that. */
+  created_at: string;
+  // Index signature so an ActivityRow[] flows into the seedAll `tables` map.
+  [key: string]: unknown;
+}
 
 // ---------------------------------------------------------------------------
 // Fixed constants
@@ -253,18 +284,39 @@ function makeRow(
  * genuine flip — matching the service's no-op skip. They share the stage-entry
  * timestamp of the hop that caused them (the create instant for the first flip).
  */
-export function placementHistory(placement: Record<string, unknown>): AuditRow[] {
+/** The shared stage-walk + per-hop instant computation (§4.6). */
+interface PlacementWalk {
+  placementId: string;
+  tenantId: string;
+  unitId: string;
+  /** The ordered stage sequence from the start element to the current one. */
+  walk: PlacementStage[];
+  /** T[k] = ISO instant the placement entered walk[k]; T[last] == the stored anchor. */
+  T: string[];
+  /** The lost-reason category (present only for a `lost` placement that has one). */
+  lostCategory?: string;
+}
+
+/**
+ * ONE stage-walk + per-hop instant computation, shared by BOTH the audit trail
+ * (placementHistory) and the timeline milestones (placementMilestones), so the
+ * two surfaces tell one coherent, SAME-CLOCK story (§4.6): each milestone's `at`
+ * equals the matching audit hop instant because they are the same `T[k]`. The
+ * walk is `PLACEMENT_STAGES.slice(0, idx+1)` for a non-`lost` target; a `lost`
+ * target walks a plausible active prefix (by lost-reason category) then `→ lost`.
+ * Returns null for a pointer/invalid placement.
+ */
+function placementWalk(placement: Record<string, unknown>): PlacementWalk | null {
   const placementId = String(placement['placementId'] ?? '');
   const tenantId = String(placement['tenantId'] ?? '');
   const unitId = String(placement['unitId'] ?? '');
   const stage = String(placement['stage'] ?? '') as PlacementStage;
   const anchor = String(placement['stage_entered_at'] ?? placement['created_at'] ?? '');
-  if (placementId === '' || anchor === '' || PLACEMENT_STAGES.indexOf(stage) < 0) return [];
+  if (placementId === '' || anchor === '' || PLACEMENT_STAGES.indexOf(stage) < 0) return null;
 
-  // 1) Build the ordered stage walk.
+  const category = (placement['lost_reason'] as Record<string, unknown> | undefined)?.['category'];
   let walk: PlacementStage[];
   if (stage === 'lost') {
-    const category = (placement['lost_reason'] as Record<string, unknown> | undefined)?.['category'];
     const lostFrom =
       (typeof category === 'string' && LOST_FROM_STAGE[category]) || LOST_FROM_DEFAULT;
     const prefix = PLACEMENT_STAGES.slice(0, PLACEMENT_STAGES.indexOf(lostFrom) + 1) as PlacementStage[];
@@ -272,13 +324,25 @@ export function placementHistory(placement: Record<string, unknown>): AuditRow[]
   } else {
     walk = PLACEMENT_STAGES.slice(0, PLACEMENT_STAGES.indexOf(stage) + 1) as PlacementStage[];
   }
-
-  // 2) Timestamp each stage entry, anchored to stage_entered_at, spaced by durations.
+  // Timestamp each stage entry, anchored to stage_entered_at, spaced by durations.
   const gapDays = walk.slice(0, -1).map((s) => Math.max(1, STAGE_DURATION_DAYS[s] || 1));
   const T = hopTimestamps(anchor, gapDays); // T[k] = entered walk[k]; T[last] = anchor
+  return {
+    placementId,
+    tenantId,
+    unitId,
+    walk,
+    T,
+    ...(typeof category === 'string' && { lostCategory: category }),
+  };
+}
+
+export function placementHistory(placement: Record<string, unknown>): AuditRow[] {
+  const w = placementWalk(placement);
+  if (w === null) return [];
+  const { placementId, tenantId, unitId, walk, T, lostCategory } = w;
 
   const rows: AuditRow[] = [];
-  const lostCategory = (placement['lost_reason'] as Record<string, unknown> | undefined)?.['category'];
 
   // 3) placement_stage_changed rows (one per consecutive pair).
   for (let k = 0; k < walk.length - 1; k++) {
@@ -469,6 +533,189 @@ export function entityHistory(
 }
 
 // ---------------------------------------------------------------------------
+// Activity-milestone generators (Contact Timeline surface, §4.6) — FAITHFUL
+// MIRRORS of the real writers' type/label/refType (never invented):
+//   • placement_opened  routes/placements.ts:465  ("Placement opened", ref placement)
+//   • stage_changed     routes/placements.ts:556  ("Stage → <label>",  ref placement)
+//   • placement_closed  routes/placements.ts:552  ("Placement closed · <stage>[ · <cat>]")
+//   • listing_sent      jobs/broadcastFanOut.ts:309 ("Property sent", ref unit)
+//   • listing_reviewed  routes/units.ts:708        ("Property reviewed · <resp>", ref unit)
+//   • number_added      routes/contacts.ts:1473    ("Number added", no ref)
+//   • tour_scheduled/tour_took_place — tours emit NO milestone at runtime today
+//     (research §WRITE-SHAPES.3: tour_took_place retired, tour_scheduled only from the
+//     legacy placement tour_date path). We materialize them directly from the tour
+//     entity so a tenant's timeline reflects their tour journey; labels follow the
+//     legacy `Tour scheduled · <date>` shape (placements.ts:565) and the repo's own
+//     documented `Tour took place · Toured` example (activityEventsRepo.ts:59).
+// Deterministic evt-* ids (hash8 of row identity) — the byte-stable analog of the
+// repo's random `evt-<uuid>`, extending matrix's deterministic evt-mx-… pattern.
+// ---------------------------------------------------------------------------
+
+/** Construct one activity-milestone row with a deterministic evt-* id (byte-stable). */
+function makeActivityRow(
+  contactId: string,
+  at: string,
+  type: string,
+  label: string,
+  ref?: { refType: string; refId: string },
+): ActivityRow {
+  const eventId = `evt-${hash8(`${contactId}|${type}|${at}|${ref?.refId ?? ''}|${label}`)}`;
+  return {
+    contactId,
+    tsEventId: `${at}#${eventId}`,
+    eventId,
+    at,
+    type,
+    label,
+    ...(ref !== undefined && { refType: ref.refType, refId: ref.refId }),
+    created_at: at,
+  };
+}
+
+/**
+ * The terminal-stage `Placement closed · …` reason suffix, CATEGORY-ONLY — a
+ * verbatim mirror of routes/placements.ts:539-548 (never fold the free text, which
+ * is PII, into a stored label; when only text exists use the static "reason on file").
+ */
+function closedReasonSuffix(placement: Record<string, unknown>, stage: PlacementStage): string {
+  if (stage !== 'lost') return '';
+  const lr = placement['lost_reason'];
+  if (typeof lr !== 'object' || lr === null) return '';
+  const cat = (lr as Record<string, unknown>)['category'];
+  const text = (lr as Record<string, unknown>)['text'];
+  const reasonText =
+    typeof cat === 'string' && cat.length > 0
+      ? cat
+      : typeof text === 'string' && text.length > 0
+        ? 'reason on file'
+        : '';
+  return reasonText.length > 0 ? ` · ${reasonText}` : '';
+}
+
+/**
+ * A placement-linked tenant's milestone timeline: `placement_opened` at hop 0
+ * (the create instant), a `stage_changed` at each non-terminal stage entry, and a
+ * `placement_closed` at a terminal (`moved_in`/`lost`). Each `at` is the SAME
+ * `T[k]` the audit trail uses (placementWalk), so the person-timeline and the
+ * placement drawer share one clock (§4.6). Returns [] for a pointer/invalid placement.
+ */
+export function placementMilestones(placement: Record<string, unknown>): ActivityRow[] {
+  const w = placementWalk(placement);
+  if (w === null || w.tenantId === '') return [];
+  const { placementId, tenantId, walk, T } = w;
+  const ref = { refType: 'placement', refId: placementId };
+  const rows: ActivityRow[] = [];
+  // POST /api/placements → placement_opened on the tenant's timeline (create instant).
+  rows.push(makeActivityRow(tenantId, T[0]!, 'placement_opened', 'Placement opened', ref));
+  // Each subsequent stage entry → the PATCH milestone (stage_changed, or a terminal close).
+  for (let k = 1; k < walk.length; k++) {
+    const stage = walk[k]!;
+    const at = T[k]!;
+    if (TERMINAL_STAGES.has(stage)) {
+      const reason = closedReasonSuffix(placement, stage);
+      rows.push(
+        makeActivityRow(tenantId, at, 'placement_closed', `Placement closed · ${STAGE_LABELS[stage]}${reason}`, ref),
+      );
+    } else {
+      rows.push(makeActivityRow(tenantId, at, 'stage_changed', `Stage → ${STAGE_LABELS[stage]}`, ref));
+    }
+  }
+  return rows;
+}
+
+/**
+ * Tour statuses in which the tenant PHYSICALLY toured (a `tour_took_place`
+ * milestone is warranted). `no_show`/`canceled` did NOT take place; `scheduled`/
+ * `confirmed` have not yet. `closed` follows a real tour, so it counts.
+ */
+const TOUR_TOOK_PLACE: ReadonlySet<TourStatus> = new Set<TourStatus>(['toured', 'closed']);
+
+/**
+ * A tour-owning tenant's milestones: `tour_scheduled` once the tour has a
+ * scheduled time (a timeless `requested` tour → none), and `tour_took_place` when
+ * the tour actually happened (toured/closed). Keyed on the tour's `tenantId`.
+ * refType `unit` (the property toured) — activity_events has no `tour` refType.
+ */
+export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
+  const tenantId = String(tour['tenantId'] ?? '');
+  const unitId = String(tour['unitId'] ?? '');
+  const status = String(tour['status'] ?? '') as TourStatus;
+  const scheduledAt = tour['scheduledAt'];
+  const createdAt = String(tour['createdAt'] ?? tour['updatedAt'] ?? '');
+  if (tenantId === '' || !(status in TOUR_STATUS_LABELS)) return [];
+  const hasSchedule = typeof scheduledAt === 'string' && scheduledAt.length > 0;
+  if (!hasSchedule) return []; // requested (timeless) → no scheduled/took-place milestones
+  const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;
+  const rows: ActivityRow[] = [];
+  // The booking happened at tour creation (these seed tours are created already-
+  // scheduled); label follows the legacy `Tour scheduled · <date>` shape.
+  const bookedAt = createdAt !== '' ? createdAt : scheduledAt;
+  rows.push(
+    makeActivityRow(tenantId, bookedAt, 'tour_scheduled', `Tour scheduled · ${scheduledAt.slice(0, 10)}`, ref),
+  );
+  if (TOUR_TOOK_PLACE.has(status)) {
+    // The tour happened at its scheduled time; label = the `toured` transition.
+    rows.push(
+      makeActivityRow(tenantId, scheduledAt, 'tour_took_place', `Tour took place · ${TOUR_STATUS_LABELS['toured']}`, ref),
+    );
+  }
+  return rows;
+}
+
+/** interested/not_a_fit → the reviewed-response label (routes/units.ts:708). */
+const LISTING_REVIEW_LABEL: Readonly<Record<string, string>> = {
+  interested: 'Property reviewed · Interested',
+  not_a_fit: 'Property reviewed · Not a fit',
+};
+
+/**
+ * A listing-send row → a `listing_sent` milestone ("Property sent", ref unit), plus
+ * a `listing_reviewed` when the recipient gave a reviewed response (interested/
+ * not_a_fit). Both anchor at the send's `sentAt`. Faithful to broadcastFanOut.ts:308
+ * (send) + units.ts:706-715 (review).
+ */
+export function listingSendMilestones(send: Record<string, unknown>): ActivityRow[] {
+  const contactId = String(send['contactId'] ?? '');
+  const unitId = String(send['unitId'] ?? '');
+  const at = String(send['sentAt'] ?? send['created_at'] ?? '');
+  if (contactId === '' || at === '') return [];
+  const rows: ActivityRow[] = [];
+  const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;
+  rows.push(makeActivityRow(contactId, at, 'listing_sent', 'Property sent', ref));
+  const reviewLabel = LISTING_REVIEW_LABEL[String(send['response'] ?? '')];
+  if (reviewLabel !== undefined && unitId !== '') {
+    rows.push(
+      makeActivityRow(contactId, at, 'listing_reviewed', reviewLabel, { refType: 'unit', refId: unitId }),
+    );
+  }
+  return rows;
+}
+
+/**
+ * A multi-phone contact → one `number_added` milestone per NON-primary number
+ * ("Number added", no ref — routes/contacts.ts:1471-1474). The primary number is
+ * the original capture, not an "add". Anchored at each phone's `firstSeenAt`
+ * (falling back to the contact anchor). Single-phone contacts → [].
+ */
+export function contactPhoneMilestones(contact: Record<string, unknown>): ActivityRow[] {
+  const contactId = String(contact['contactId'] ?? '');
+  if (contactId === '' || contactId.startsWith('phoneref#')) return [];
+  const phones = contact['phones'];
+  if (!Array.isArray(phones) || phones.length < 2) return [];
+  const anchor = String(contact['consent_at'] ?? contact['created_at'] ?? '');
+  const rows: ActivityRow[] = [];
+  for (const p of phones) {
+    if (typeof p !== 'object' || p === null) continue;
+    const rec = p as Record<string, unknown>;
+    if (rec['primary'] === true) continue; // primary = original capture, not an "add"
+    const at = String(rec['firstSeenAt'] ?? anchor);
+    if (at === '') continue;
+    rows.push(makeActivityRow(contactId, at, 'number_added', 'Number added'));
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -481,17 +728,25 @@ export function entityHistory(
  * dropped (superseded); all other pre-existing rows (e.g. lean's dead
  * contact.profile_edited) are preserved verbatim.
  *
- * `activity_events` is left to Task 2 — returns [] here. Wire only `.audit_events`
- * into seedAll for now.
+ * `activity_events` (Task 2, §4.6): the person-centric Contact Timeline milestones
+ * — placement_opened/stage_changed/placement_closed per placement (same clock as
+ * the audit trail via placementWalk), tour_scheduled/tour_took_place per tour,
+ * listing_sent/listing_reviewed per listing-send, number_added per multi-phone
+ * contact. Superseded ENTITY-SCOPED against the pre-existing matrix rows (§4.7):
+ * pre-existing activity rows are dropped for any contact this module covers, and
+ * preserved for contacts it does not.
  */
 export function historyItems(tables: Record<string, Record<string, unknown>[]>): {
   audit_events: AuditRow[];
-  activity_events: Record<string, unknown>[];
+  activity_events: ActivityRow[];
 } {
   const placements = tables['placements'] ?? [];
   const contacts = tables['contacts'] ?? [];
   const units = tables['units'] ?? [];
+  const tours = tables['tours'] ?? [];
+  const listingSends = tables['listing_sends'] ?? [];
   const preAudit = tables['audit_events'] ?? [];
+  const preActivity = tables['activity_events'] ?? [];
 
   const placementTenantIds = new Set(placements.map((p) => String(p['tenantId'] ?? '')));
   const placementUnitIds = new Set(placements.map((p) => String(p['unitId'] ?? '')));
@@ -523,5 +778,23 @@ export function historyItems(tables: Record<string, Record<string, unknown>[]>):
       !regeneratedEntityKeys.has(String(r['entityKey'])),
   ) as AuditRow[];
 
-  return { audit_events: [...keptPre, ...generated], activity_events: [] };
+  // ---- activity_events (Contact Timeline milestones, §4.6) ----
+  const generatedActivity: ActivityRow[] = [];
+  for (const p of placements) generatedActivity.push(...placementMilestones(p));
+  for (const t of tours) generatedActivity.push(...tourMilestones(t));
+  for (const s of listingSends) generatedActivity.push(...listingSendMilestones(s));
+  for (const c of contacts) generatedActivity.push(...contactPhoneMilestones(c));
+
+  // Dedupe/supersede (§4.7): a pre-existing activity row is dropped for any contact
+  // this module produced ≥1 milestone for (its regenerated timeline is authoritative);
+  // pre-existing rows for contacts we do NOT cover are preserved verbatim.
+  const coveredContactIds = new Set(generatedActivity.map((r) => r.contactId));
+  const keptPreActivity = preActivity.filter(
+    (r) => !coveredContactIds.has(String(r['contactId'])),
+  ) as ActivityRow[];
+
+  return {
+    audit_events: [...keptPre, ...generated],
+    activity_events: [...keptPreActivity, ...generatedActivity],
+  };
 }

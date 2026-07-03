@@ -83,6 +83,10 @@ export function AppFrame(): React.JSX.Element {
     };
   }, [drawerOpen, closeDrawer]);
 
+  const account = (
+    <AccountMenu email={me?.email ?? ''} role={me?.role ?? 'va'} onSignOut={handleSignOut} />
+  );
+
   return (
     <div className={styles.shell}>
       <aside className={`${styles.sidebar} ${collapsed ? styles.collapsed : ''}`} aria-label="Primary">
@@ -104,7 +108,7 @@ export function AppFrame(): React.JSX.Element {
             <ChevronIcon dir={collapsed ? 'right' : 'left'} />
           </button>
         </div>
-        <NavContents />
+        <NavContents account={account} />
       </aside>
 
       {isMobile ? (
@@ -134,12 +138,15 @@ export function AppFrame(): React.JSX.Element {
                 <CloseIcon />
               </button>
             </div>
-            <NavContents onNavigate={closeDrawer} />
+            <NavContents onNavigate={closeDrawer} account={account} />
           </aside>
         </>
       ) : null}
 
       <div className={styles.main}>
+        {/* Mobile-only top bar: the hamburger (opens the drawer) + brand. On desktop
+         *  the persistent sidebar carries the brand + account, so this bar is hidden
+         *  (CSS) and the routed content fills the full height. */}
         <header className={styles.topbar}>
           <button
             ref={hamburgerRef}
@@ -155,9 +162,6 @@ export function AppFrame(): React.JSX.Element {
           <NavLink to="/" className={styles.topbarBrand} end>
             HousingChoice
           </NavLink>
-          <div className={styles.topbarRight}>
-            <AccountMenu email={me?.email ?? ''} role={me?.role ?? 'va'} onSignOut={handleSignOut} />
-          </div>
         </header>
         <main className={styles.content}>
           <Outlet />
@@ -195,6 +199,10 @@ function AccountMenu({
     };
   }, [open]);
 
+  // A single-letter monogram from the email — the whole trigger in the collapsed
+  // icon rail (where the email text is hidden), and the leading glyph otherwise.
+  const initial = email.trim().charAt(0).toUpperCase() || '?';
+
   return (
     <div className={styles.account} ref={ref}>
       <button
@@ -205,6 +213,9 @@ function AccountMenu({
         aria-label="Account menu"
         onClick={() => setOpen((v) => !v)}
       >
+        <span className={styles.accountAvatar} aria-hidden="true">
+          {initial}
+        </span>
         <span className={styles.accountEmail}>{email}</span>
       </button>
       {open && (

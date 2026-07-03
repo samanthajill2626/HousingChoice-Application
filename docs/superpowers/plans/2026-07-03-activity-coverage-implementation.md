@@ -61,22 +61,22 @@
 **Interfaces:**
 - Produces: `ActivityEventType` now includes `'contact_status_changed' | 'opt_out_changed' | 'tour_canceled' | 'tour_no_show' | 'tour_outcome'` (in addition to the existing `tour_scheduled | tour_took_place | stage_changed | placement_closed | placement_opened | listing_sent | listing_reviewed | number_added | added_to_group_text | removed_from_group_text`). `TimelineMilestoneType` mirrors it verbatim.
 
-- [ ] **Step 1: Write the failing test** — assert a landlord-status milestone renders as a pin with its label and no crash for the new type. Append to `Timeline.test.tsx` (reuse its existing render harness — inspect the top of the file for the `renderTimeline`/items helper it already uses and match it):
+- [ ] **Step 1: Write the failing test** — assert a landlord-status milestone renders as a pin with its label and no crash for the new type. Append to `Timeline.test.tsx`. **The real helper signature is `renderTimeline(props: Partial<ComponentProps<typeof Timeline>>)` — call it as `renderTimeline({ items: [...] })`** (see `Timeline.test.tsx:8,83`); match its exact item shape:
 
 ```tsx
 it('renders a contact_status_changed milestone pin with its label', () => {
-  renderTimeline([
+  renderTimeline({ items: [
     { kind: 'milestone', id: 'evt-1', at: '2026-07-03T10:00:00.000Z',
       type: 'contact_status_changed', label: 'Status → Active' },
-  ]);
+  ] });
   expect(screen.getByText('Status → Active')).toBeInTheDocument();
 });
 
 it('renders a tour_canceled milestone pin as a tour deep-link', () => {
-  renderTimeline([
+  renderTimeline({ items: [
     { kind: 'milestone', id: 'evt-2', at: '2026-07-03T10:00:00.000Z',
       type: 'tour_canceled', label: 'Tour canceled', refType: 'tour', refId: 't-9' },
-  ]);
+  ] });
   const link = screen.getByRole('link', { name: /Tour canceled/ });
   expect(link).toHaveAttribute('href', '/tours/t-9');
 });
@@ -171,31 +171,35 @@ describe('statusTransition — contact_status_changed milestone', () => {
   let world: FakeWorld;
   beforeEach(async () => {
     world = createFakeWorld();
-    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant', status: 'active' });
+    // Landlord fixture — exercises the LANDLORD_STATUS_LABELS branch. Landlord
+    // statuses are needs_review|interested|active|parked (statusModel.ts:173).
+    await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'interested' });
   });
 
-  it('records a contact_status_changed activity event on an explicit tenant status change', async () => {
+  it('records a contact_status_changed activity event on an explicit landlord status change', async () => {
     const svc = makeServiceWithActivity(world);
-    await svc.setTenantStatus('tenant-1', { toStatus: 'parked', source: 'manual', actor: 'usr_va', reason: undefined });
+    await svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual', actor: 'usr_va' });
     const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
     expect(ev).toHaveLength(1);
-    expect(ev[0]).toMatchObject({ contactId: 'tenant-1', label: expect.stringContaining('Parked') });
+    expect(ev[0]).toMatchObject({ contactId: 'll-1', label: 'Status → Parked' }); // LANDLORD_STATUS_LABELS.parked
     expect(ev[0].refType).toBeUndefined();
   });
 
   it('does NOT record when the status is unchanged (no-op)', async () => {
     const svc = makeServiceWithActivity(world);
-    await svc.setTenantStatus('tenant-1', { toStatus: 'active', source: 'manual', actor: 'usr_va' });
+    await svc.setTenantStatus('ll-1', { toStatus: 'interested', source: 'manual', actor: 'usr_va' });
     expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
   });
 
   it('never throws out of setTenantStatus if the milestone write fails (best-effort)', async () => {
     world.activityEventsRepo.record = async () => { throw new Error('boom'); };
     const svc = makeServiceWithActivity(world);
-    await expect(svc.setTenantStatus('tenant-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
+    await expect(svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
   });
 });
 ```
+
+> **Label map:** `statusLabel` picks `LANDLORD_STATUS_LABELS` when `stored.type === 'landlord'` else `TENANT_STATUS_LABELS`. Tenant statuses are `needs_review|onboarding|searching|placing|placed|on_hold|inactive`; landlord `needs_review|interested|active|parked` — the two sets are disjoint except `needs_review`, so the type-keyed pick is correct.
 
 - [ ] **Step 2: Run — expect FAIL** (`activityEventsRepo` not a valid dep / no milestone recorded).
 
@@ -231,7 +235,7 @@ Destructure it in the factory (~:170): `const { placementsRepo, unitsRepo, conta
   }
 ```
 
-In `setTenantStatus`, read the stored contact before the write (there is already a `getById`/current read — inspect :438-460) and, **only when `from !== to`**, after the successful `contactsRepo.update`, call `await recordStatusMilestone(contactId, stored.type, input.toStatus);`. (Match the existing `from`/`to` locals the audit at :462-468 already computes.)
+In `setTenantStatus` the existing locals are `const contact = await contactsRepo.getById(...)` and `const from = contact.status` (`:440,443`), and `input.toStatus`. **Only when `from !== toStatus`**, after the successful `contactsRepo.update`, call `await recordStatusMilestone(contactId, contact.type, toStatus);` (destructured `toStatus` is already in scope at `:439`).
 
 - [ ] **Step 5: Emit on the derived path too** — in `deriveTenantStatus` (:186-202), the existing guards already skip override-pinned (:191) and no-op equal-status (:192). After the derived audit write (:194-198), add `await recordStatusMilestone(tenantId, stored?.type, toStatus);` (reuse whatever current-contact read the guard already performed; if none carries `.type`, fetch it once — a landlord is never on the derived tenant-status path, so `undefined` → tenant labels is acceptable, but prefer the real type if already in hand).
 
@@ -283,10 +287,12 @@ describe('statusTransition — placement stage milestone', () => {
   it('records a placement_closed milestone (with lost category, no free text) on a terminal move', async () => {
     const svc = makeServiceWithActivity(world);
     const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'chose_other_unit', text: 'secret note' } });
+    // Category MUST be a valid lost-reason category (statusModel.ts:303-311) or
+    // transitionPlacement drops it (isLostReasonCategory guard) → label omits it.
+    await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
     const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
     expect(ev).toHaveLength(1);
-    expect(ev[0].label).toContain('chose_other_unit');
+    expect(ev[0].label).toContain('tenant_withdrew');
     expect(ev[0].label).not.toContain('secret note');
   });
 });
@@ -315,7 +321,7 @@ Expected: FAIL (no milestones recorded).
   }
 ```
 
-Call it only when the stage actually changed: derive `lostCategory`/`lostHasText` from `input.lostReason` (the structured `{category, text}`) exactly as `placements.ts:707-718` does — **category only, never the free text** into the label. `tenantId` is on the placement item read in the method.
+Call it only when the stage actually changed. Derive `lostCategory`/`lostHasText` from the **stored/validated** `updated.lost_reason` (the `{category, text}` object AFTER `transitionPlacement`'s `isLostReasonCategory` validation — NOT the raw `input.lostReason`, which may carry an invalid category the service dropped), exactly as `placements.ts:707-718` reads `item.lost_reason` — **category only, never the free text** into the label. `tenantId` is on the placement item read in the method.
 
 - [ ] **Step 4: Run — expect PASS** (and re-run the whole file for regressions).
 
@@ -339,7 +345,7 @@ git commit -m "feat(activity): emit stage_changed/placement_closed milestone fro
 - Consumes: `activityEvents` (already a dep at contacts.ts:75).
 - Produces: each opt-out route records `{ contactId, type: 'opt_out_changed', label }` where label ∈ {`Marked Do Not Contact`, `Do Not Contact cleared`, `Marked Do Not Call`, `Do Not Call cleared`}.
 
-- [ ] **Step 1: Write the failing test** — a supertest route test on `makeWebhookHarness().app` (mirror the auth pattern from `toursApi.test.ts`): seed a contact, POST `/api/contacts/:id/opt-out {optOut:true}`, assert `world.activityEvents` gains a `opt_out_changed` with label `'Marked Do Not Contact'`; repeat `{optOut:false}` → `'Do Not Contact cleared'`; and `/voice-opt-out` → the Do-Not-Call labels.
+- [ ] **Step 1: Write the failing test** — a supertest route test on `makeWebhookHarness().app`. **Note:** `authed(app)` is a per-file local (defined in `toursApi.test.ts:39`), NOT shared — `contactsCrud.test.ts` uses the raw `.set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)` pattern. Either add a local `authed(app)` helper to `contactsCrud.test.ts` (copy from toursApi.test.ts) or use the raw pattern. Seed a contact, POST `/api/contacts/:id/opt-out {optOut:true}`, assert `world.activityEvents` gains an `opt_out_changed` with label `'Marked Do Not Contact'`; repeat `{optOut:false}` → `'Do Not Contact cleared'`; and `/voice-opt-out` → the Do-Not-Call labels.
 
 ```ts
 it('records an opt_out_changed milestone on SMS opt-out toggle', async () => {
@@ -384,16 +390,17 @@ git commit -m "feat(activity): emit opt_out_changed milestone on SMS/voice opt-o
 
 ## WS4 — Tour lifecycle → tenant + property (feeds WS1/WS2)
 
-### Task 4.1: Inject `auditRepo` into the tours router + dual-write on tour transitions
+### Task 4.1: Dual-write tenant activity + property audit on tour create + transitions
 
 **Files:**
-- Modify: `app/src/routes/tours.ts` (deps + PATCH handler :271-485, extend the block at :464-481)
-- Modify: `app/src/routes/api.ts` (`createToursRouter`/tours wiring — add `auditRepo` if not already passed)
+- Modify: `app/src/routes/tours.ts` (POST create handler :154-215 **and** PATCH handler :271-485)
 - Test: `app/test/toursApi.test.ts` (extend)
 
+> **`auditRepo` is ALREADY a dep** of tours.ts (`tours.ts:117`, defaulted as `audit` at `:142`) and api.ts already forwards it (`api.ts:428`) — **no injection needed**. Use the existing `audit` local. (The findings doc's "inject auditRepo" note was wrong.)
+
 **Interfaces:**
-- Consumes: `world.auditRepo`/`world.auditEvents`, `world.activityEvents`, existing `activityEvents` dep.
-- Produces: on each surfaced tour transition, records a tenant activity event `{ contactId: tour.tenantId, type, label, refType:'tour', refId: tourId }` AND a unit audit row `audit.append('units#'+tour.unitId, <auditType>, { tourId, ... })`.
+- Consumes: `world.auditRepo`/`world.auditEvents`, `world.activityEvents`, existing `activityEvents` + `audit` deps.
+- Produces: on tour **create-scheduled** AND each surfaced PATCH transition, records a tenant activity event `{ contactId: tour.tenantId, type, label, refType:'tour', refId: tourId }` AND a unit audit row `audit.append('units#'+tour.unitId, <auditType>, { tourId, ... })`.
 
 Transition → (activity type, audit type, label):
 | Into | activity type | audit type | label |
@@ -443,48 +450,63 @@ describe('PATCH /api/tours/:id — activity + property audit propagation', () =>
 });
 ```
 
-> Note: confirm the exact `outcome`/`moveForward` body field names and legal values against `tours.ts:392-425` and adjust the test literals; the exit-gate only applies when `currentStatus === 'toured'`.
+> Note: the exit-gate `outcome` field takes `'move_forward' | 'not_a_fit'` (`TourOutcome`); `moveForward` is a boolean. The gate only applies when `currentStatus === 'toured'`.
 
 - [ ] **Step 2: Run — expect FAIL.**
 
 Run: `cd app && npx vitest run test/toursApi.test.ts -t "propagation"`
 Expected: FAIL.
 
-- [ ] **Step 3: Inject `auditRepo`** — add `auditRepo?: AuditRepo` to the tours router deps, default `createAuditRepo({ logger })`, and ensure `api.ts` forwards `auditRepo` (it already has `audit`). Name the local `const audit = deps.auditRepo ?? createAuditRepo(...)`.
-
-- [ ] **Step 4: Implement the dual-write** — replace/extend the `tour_took_place` block (:464-481). Compute `newStatus`/`currentStatus` (already in scope). Add a single best-effort helper that writes both surfaces, then call it per INTO-status guard:
+- [ ] **Step 3: Factor a shared best-effort dual-write helper** — usable from both handlers. Place it inside the router factory (so `audit`/`activityEvents`/`log` are in scope), taking the tour's `tenantId`/`unitId`/`tourId` explicitly:
 
 ```ts
-async function recordTourEvent(activityType: ActivityEventType, auditType: string, label: string): Promise<void> {
+async function recordTourEvent(tour: { tenantId: string; unitId: string; tourId: string },
+    activityType: ActivityEventType, auditType: string, label: string): Promise<void> {
   try {
-    await activityEvents.record({ contactId: current.tenantId, type: activityType, label, refType: 'tour', refId: tourId });
-  } catch (err) { log.error({ err, tourId }, `${activityType} milestone record failed (best-effort)`); }
+    await activityEvents.record({ contactId: tour.tenantId, type: activityType, label, refType: 'tour', refId: tour.tourId });
+  } catch (err) { log.error({ err, tourId: tour.tourId }, `${activityType} milestone record failed (best-effort)`); }
   try {
-    await audit.append(`units#${current.unitId}`, auditType, { tourId });
-  } catch (err) { log.error({ err, tourId }, `${auditType} unit audit failed (best-effort)`); }
+    await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
+  } catch (err) { log.error({ err, tourId: tour.tourId }, `${auditType} unit audit failed (best-effort)`); }
 }
-
-const wasReschedule = /* the PATCH set a new scheduledAt on an already-scheduled tour — match tours.ts:379-384 logic */;
-if (newStatus === 'scheduled' && currentStatus !== 'scheduled') await recordTourEvent('tour_scheduled', 'tour_scheduled', 'Tour scheduled');
-else if (wasReschedule) await recordTourEvent('tour_scheduled', 'tour_rescheduled', 'Tour rescheduled');
-if (newStatus === 'toured' && currentStatus !== 'toured') await recordTourEvent('tour_took_place', 'tour_took_place', 'Tour took place');
-if (newStatus === 'no_show' && currentStatus !== 'no_show') await recordTourEvent('tour_no_show', 'tour_no_show', 'Tour no-show');
-if (newStatus === 'canceled' && currentStatus !== 'canceled') await recordTourEvent('tour_canceled', 'tour_canceled', 'Tour canceled');
-// exit-gate: outcome newly set while toured
-if (outcomeNewlySet) await recordTourEvent('tour_outcome', 'tour_outcome', `Tour outcome · ${moveForward ? 'moved forward' : 'not a fit'}`);
 ```
 
-Preserve the existing `tour_took_place` semantics exactly (it stays a tenant activity event; the audit row is additive). Derive `wasReschedule`/`outcomeNewlySet` from the same locals the handler already computes for its state machine (inspect :379-425). `current.unitId` is on the tour.
+- [ ] **Step 4: Emit on create-scheduled (POST handler, fixes the create path)** — in the POST create handler, after `const tour = await tours.create({...})` and the reminder arm (~:205, before `res.status(201).json`), emit **only when the created tour is scheduled** (a `requested`/timeless create emits nothing):
 
-- [ ] **Step 5: Run — expect PASS** (whole tours file, regression check).
+```ts
+if (tour.status === 'scheduled') {
+  await recordTourEvent(tour, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
+}
+```
+
+- [ ] **Step 5: Implement the PATCH dual-write** — extend the `tour_took_place` block (:464-481). The handler already computes `effectiveStatus = (patch['status'] ?? currentStatus)` (`tours.ts:444`) — **use `effectiveStatus`, NOT the body-only `newStatus`**, so booking/revival auto-advances (which set `patch['status']='scheduled'` with body `newStatus===undefined`, `tours.ts:413-419`) are caught. `scheduledAtIso !== undefined` (`tours.ts:450`) marks a time change (reschedule). Guard each INTO-status against `currentStatus`, and guard the outcome on it being newly set (`patch['outcome']` present AND `current.outcome === undefined`) for idempotency:
+
+```ts
+const t = { tenantId: current.tenantId, unitId: current.unitId, tourId };
+const wasReschedule = scheduledAtIso !== undefined && currentStatus === 'scheduled' && effectiveStatus === 'scheduled';
+if (effectiveStatus === 'scheduled' && currentStatus !== 'scheduled') await recordTourEvent(t, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
+else if (wasReschedule) await recordTourEvent(t, 'tour_scheduled', 'tour_rescheduled', 'Tour rescheduled');
+if (effectiveStatus === 'toured' && currentStatus !== 'toured') await recordTourEvent(t, 'tour_took_place', 'tour_took_place', 'Tour took place');
+if (effectiveStatus === 'no_show' && currentStatus !== 'no_show') await recordTourEvent(t, 'tour_no_show', 'tour_no_show', 'Tour no-show');
+if (effectiveStatus === 'canceled' && currentStatus !== 'canceled') await recordTourEvent(t, 'tour_canceled', 'tour_canceled', 'Tour canceled');
+// exit-gate: `newOutcome`/`newMoveForward` are the parsed body locals (tours.ts:392,420),
+// and the gate already 409'd unless currentStatus==='toured'. Idempotent: only when
+// the outcome was previously unset (a second identical PATCH won't re-emit).
+const outcomeNewlySet = newOutcome !== undefined && current.outcome === undefined;
+if (outcomeNewlySet) await recordTourEvent(t, 'tour_outcome', 'tour_outcome', `Tour outcome · ${newMoveForward === true ? 'moved forward' : 'not a fit'}`);
+```
+
+**Remove** the old standalone `tour_took_place`-only block (:469-481) — its tenant-activity emit is now covered by the `toured` line above (with the additive audit row). Locals confirmed present: `effectiveStatus` (:444), `scheduledAtIso` (:403), `newOutcome`/`newMoveForward` (:392,420), `current` (:317) with `.tenantId`/`.unitId`/`.outcome`, `currentStatus` (:323).
+
+- [ ] **Step 6: Run — expect PASS** (whole tours file, regression check — the existing tour-milestone tests filter by `type` so they tolerate the additive audit rows).
 
 Run: `cd app && npx vitest run test/toursApi.test.ts`
 Expected: PASS.
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 7: Commit.**
 
 ```bash
-git add app/src/routes/tours.ts app/src/routes/api.ts app/test/toursApi.test.ts
+git add app/src/routes/tours.ts app/test/toursApi.test.ts
 git commit -m "feat(activity): propagate tour lifecycle to tenant timeline + property audit"
 ```
 
@@ -523,7 +545,10 @@ it('writes NO units# audit row for a unit-less broadcast', async () => {
 Run: `cd app && npx vitest run test/broadcastFanOut.test.ts -t "broadcast_sent audit"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** — add `auditRepo` to the fan-out job's dep set (inspect how it receives repos — a factory or the job registration; default `createAuditRepo`). In `finalize` (:469-494), after `total` is computed, if `fresh.unitId` is a non-empty string, best-effort:
+- [ ] **Step 3: Implement** — three edits:
+  1. Add `auditRepo?: AuditRepo` to `BroadcastSendJobDeps` (`broadcastFanOut.ts:139-155`); resolve a local `const audit = deps.auditRepo ?? createAuditRepo({ logger })` in the handler factory.
+  2. `finalize` (`:469`) currently takes `(broadcasts, events, broadcastId, log)` and is called at `:413` and `:433` — **add `audit` as a param** and pass it at BOTH call sites (or close over it if `finalize` is defined inside the factory scope — inspect: if it's a module-level function, thread the param; if nested, just reference the local).
+  3. In `finalize`, after `total` is computed (`:480`), if `fresh.unitId` is a non-empty string, best-effort:
 
 ```ts
 if (typeof fresh.unitId === 'string' && fresh.unitId.length > 0) {
@@ -532,6 +557,8 @@ if (typeof fresh.unitId === 'string' && fresh.unitId.length > 0) {
   } catch (err) { log.error({ err, broadcastId }, 'broadcast_sent unit audit failed (best-effort)'); }
 }
 ```
+
+Also update the test's `registerBroadcastSendJobHandler(...)` wiring (`broadcastFanOut.test.ts:125-138`) to pass `auditRepo: world.auditRepo`.
 
 - [ ] **Step 4: Run — expect PASS.**
 
@@ -575,7 +602,7 @@ it('projects broadcast_sent and tour audit rows onto the activity wire', async (
 Run: `cd app && npx vitest run test/unitsApiActivity.test.ts -t "projects broadcast_sent"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** — extend the `UnitActivityEvent` interface (:118-135) with `broadcastId?: string; tenantCount?: number; tourId?: string; outcome?: string;`. In `toUnitActivityEvent` (:138-162) lift those keys from `e.payload` with the same defensive typeof checks the existing keys use. Update the doc-comment (:111-114) to list the new event types (`broadcast_sent`, `tour_scheduled`, `tour_rescheduled`, `tour_took_place`, `tour_no_show`, `tour_canceled`, `tour_outcome`).
+- [ ] **Step 3: Implement** — extend the `UnitActivityEvent` interface (:118-135) with `broadcastId?: string; tenantCount?: number; tourId?: string; outcome?: string;`. In `toUnitActivityEvent` (:138-162) lift `broadcastId`/`tourId`/`outcome` via the existing `str()` helper — but **`tenantCount` is a NUMBER**, so add a numeric lift (`const num = (v: unknown) => (typeof v === 'number' ? v : undefined)` and `tenantCount: num(p['tenantCount'])`), since the existing projection only has a string lift. Update the doc-comment (:111-114) to list the new event types (`broadcast_sent`, `tour_scheduled`, `tour_rescheduled`, `tour_took_place`, `tour_no_show`, `tour_canceled`, `tour_outcome`).
 
 - [ ] **Step 4: Run — expect PASS.**
 
@@ -687,16 +714,18 @@ it('records NO status milestone when the edit does not change status', async () 
 Run: `cd app && npx vitest run test/contactsCrud.test.ts -t "edit form changes a landlord status"`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** — in the PATCH handler, after the successful `contacts.update` (:1137) and only when `parsed.patch.status` is present AND differs from the stored status (the handler already reads `stored`/current at :1080-1091), best-effort record. Import `TENANT_STATUS_LABELS, LANDLORD_STATUS_LABELS` from `../lib/statusModel.js`; pick the map by `stored.type`:
+- [ ] **Step 3: Implement** — the existing `const stored` reads at :1081/:1116 are **block-scoped inside `if` guards** and NOT in scope after `contacts.update` (:1137). **Hoist one pre-update read** at the top of the handler: `const stored = await contacts.getById(contactId);` (reuse it for the existing 404 check too, to avoid a duplicate fetch). Then after the successful `contacts.update` (:1137), only when `parsed.patch.status` is present AND differs from `stored.status`, best-effort record. Import `TENANT_STATUS_LABELS, LANDLORD_STATUS_LABELS` from `../lib/statusModel.js`; pick the map by `stored.type`:
 
 ```ts
-if (typeof parsed.patch.status === 'string' && parsed.patch.status !== stored.status) {
+if (typeof parsed.patch.status === 'string' && stored && parsed.patch.status !== stored.status) {
   const labels = stored.type === 'landlord' ? LANDLORD_STATUS_LABELS : TENANT_STATUS_LABELS;
   try {
     await activityEvents.record({ contactId, type: 'contact_status_changed', label: `Status → ${(labels as Record<string,string>)[parsed.patch.status] ?? parsed.patch.status}` });
   } catch (err) { log.error({ err, contactId }, 'contact_status_changed (edit) milestone record failed (best-effort)'); }
 }
 ```
+
+> Note the handler may auto-set `parsed.patch['status']` even when the client didn't send it (`contacts.ts:1104-1107`); the `!== stored.status` diff guard correctly suppresses a milestone when the auto-set value equals the current status.
 
 > Guard against double-emit: this edit path and the transition-service `setTenantStatus` path are **distinct routes** (`PATCH /api/contacts/:id` vs `PATCH /api/contacts/:id/tenant-status`) — a single request goes through one, not both, so no dedupe needed.
 
@@ -716,6 +745,7 @@ git commit -m "feat(activity): emit contact_status_changed on the contact edit-f
 
 **Files:**
 - Modify: `app/src/routes/contactTimeline.ts` (deps :63-70; construct :283-289; landlord branch after milestone gather ~:378)
+- Modify: `app/src/routes/api.ts` (`createContactTimelineRouter({...})` call ~:375-382 — it forwards only contacts/conversations/messages/activityEvents today; **must add `unitsRepo` + `auditRepo`**)
 - Test: `app/test/contactTimeline.test.ts` (extend)
 
 **Interfaces:**
@@ -760,7 +790,7 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 Run: `cd app && npx vitest run test/contactTimeline.test.ts -t "landlord property interleave"`
 Expected: FAIL.
 
-- [ ] **Step 3: Add deps** — add `unitsRepo?: UnitsRepo; auditRepo?: AuditRepo;` to `ContactTimelineRouterDeps` (:63-70), import + default them (`createUnitsRepo`, `createAuditRepo`) at the construct site (:283-289). Confirm `api.ts` forwards both (it already carries `unitsRepo` + `auditRepo`).
+- [ ] **Step 3: Add deps + wire api.ts** — add `unitsRepo?: UnitsRepo; auditRepo?: AuditRepo;` to `ContactTimelineRouterDeps` (:63-70), import + default them (`createUnitsRepo`, `createAuditRepo`) at the construct site (:283-289). **Then edit `api.ts`**: the `createContactTimelineRouter({...})` call (~:375-382) forwards only `contactsRepo/conversationsRepo/messagesRepo/activityEventsRepo` today — add `...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo })` and `auditRepo: audit` (the `audit` local already exists at api.ts:253). Without this, the router falls back to real DynamoDB repos and the fake-world writes are invisible (test fails AND prod reads nothing).
 
 - [ ] **Step 4: Implement a server-side audit→milestone mapper + the landlord branch.** Add a module-level constant + helper:
 
@@ -774,6 +804,8 @@ const LANDLORD_FEED_TYPES = new Set([
 function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone | null {
   const p = (e.payload ?? {}) as Record<string, unknown>;
   const at = /* ISO prefix of e.ts */ (typeof e.ts === 'string' ? e.ts.split('#')[0] : '');
+  // id = the raw audit SK `e.ts` (<ISO>#<rand>) so the merged cursor lives in
+  // the SAME lexical space as the audit `before` bound (see globalKey below).
   const base = { kind: 'milestone' as const, id: e.ts ?? `${unitId}-${e.event_type}`, at };
   switch (e.event_type) {
     case 'broadcast_sent': {
@@ -808,13 +840,17 @@ if (contact.type === 'landlord') {
     for (const r of rows) {
       if (!LANDLORD_FEED_TYPES.has(r.event_type)) continue;
       const ms = unitAuditToMilestone(u.unitId, r);
-      if (ms) candidates.push({ /* globalKey from ms.at#ms.id */ globalKey: `${ms.at}#${ms.id}`, item: ms });
+      // globalKey = the raw audit SK (r.ts, `<ISO>#<rand>`) — the SAME lexical
+      // space as the `before` bound passed into listByEntity, so page-2+ cursors
+      // derived from a property row stay valid (NOT `${ms.at}#${ms.id}`, which
+      // would double-nest the ISO and break the audit `before` comparison).
+      if (ms && typeof r.ts === 'string') candidates.push({ globalKey: r.ts, item: ms });
     }
   }
 }
 ```
 
-Match the exact `candidates`/`globalKey` shape the file already uses (inspect :353-387). Add `const MAX_LANDLORD_UNITS = 25;` near the other limit consts.
+Match the exact `candidates`/`globalKey` shape the file already uses — the message/activity loops key on the raw `<at>#<id>` SK (inspect :353-387; `Candidate = { globalKey, item }` confirmed). Add `const MAX_LANDLORD_UNITS = 25;` near the other limit consts.
 
 - [ ] **Step 5: Run — expect PASS** (whole file).
 

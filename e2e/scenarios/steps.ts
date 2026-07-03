@@ -168,6 +168,17 @@ export function justAfter(iso: string): string {
   return new Date(Date.parse(iso) + 1_000).toISOString();
 }
 
+/**
+ * An ISO `now` `hours` out from the REAL wall clock — the placement-nudge tick's
+ * clock. Placement-nudge dueAt is `transitionMoment + delayMs` (armed at PATCH
+ * time on the server's wall clock), so to fire a rung whose delay is D hours,
+ * tick with `hoursFromNow(D + 1)` (a little past due). Recomputed at call time so
+ * it always sits ahead of the just-made transition.
+ */
+export function hoursFromNow(hours: number): string {
+  return new Date(Date.now() + hours * 3_600_000).toISOString();
+}
+
 /** Masked relay pool numbers minted by the fake (+1555019xxxx). */
 const POOL_NUMBER_RE = /^\+1555019\d{4}$/;
 
@@ -182,6 +193,9 @@ export class Scenario {
   /** The tour the scenario is driving (set by teamCreatesTourFromInterest); the
    *  group fields fill in when teamOpensTourGroup provisions the masked relay. */
   private activeTour: { tourId: string; poolNumber?: string; groupThreadId?: string } | null = null;
+  /** The placement the Post-Tour & Application scenario is driving (set by
+   *  teamConvertsTourToPlacement — the conversion of the active tour). */
+  private activePlacementId: string | null = null;
   private readonly registered = new Set<string>();
 
   constructor(
@@ -1869,6 +1883,278 @@ export class Scenario {
     });
   }
 
+  // ==== Post-Tour & Application verbs =========================================
+  // documentation/post-tour-application-sequence.mermaid + its writeup. Picks up
+  // from a CONVERTIBLE tour (the Tours exit gate) and drives the placement spine.
+  // Structural rules encoded:
+  //   - Conversion is QUIET (no announcement) and the tour's masked relay group
+  //     SURVIVES, rebinding to the placement — the channel continues.
+  //   - Team drives every stage move through the REAL PlacementDetail "Move to…"
+  //     picker (same gated pipeline as the board); Lost goes through the reason
+  //     modal.
+  //   - Nudges route to the PARTY's 1:1 (tenant/landlord), NEVER the group. The
+  //     placement-nudge tick (POST /__dev/placement-nudges/tick) is GLOBAL — like
+  //     the tour tick, assertions scope to THIS scenario's phones.
+
+  /**
+   * [Team, MANUAL] Convert the active CONVERTIBLE tour into a placement — drives
+   * the REAL TourDetail "Start placement" button, which POSTs
+   * /api/placements/from-tour and navigates to the new placement. QUIET: the
+   * server sends no announcement at convert time (founder 2026-07-02). Captures
+   * the new placementId (from the URL) as the scenario's active placement.
+   */
+  teamConvertsTourToPlacement(): Promise<string> {
+    const tour = this.requireActiveTour();
+    return step('Team converts the tour into a placement (Start placement)', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page
+        .getByRole('button', { name: 'Start placement from this tour' })
+        .click();
+      await this.page.waitForURL(/\/placements\/[^/?#]+$/, { timeout: 10_000 });
+      const m = /\/placements\/([^/?#]+)/.exec(this.page.url());
+      if (!m) throw new Error('teamConvertsTourToPlacement: expected a /placements/:id URL after convert');
+      const placementId = decodeURIComponent(m[1]!);
+      this.activePlacementId = placementId;
+      return placementId;
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Move the placement to `stageLabel` (the STAGE_LABELS display
+   * string) via the PlacementDetail "Move to…" picker — the SAME gated pipeline
+   * the board uses. When the target is 'Lost' the reason modal opens: pick the
+   * `lostReason` category (its visible label) and confirm. Asserts the new stage
+   * renders before returning.
+   */
+  teamMovesPlacementTo(stageLabel: string, opts?: { lostReason?: string }): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`Team moves the placement → ${stageLabel}`, async () => {
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      await expect(this.page.getByRole('combobox', { name: 'Move to stage' })).toBeVisible({
+        timeout: 10_000,
+      });
+      await this.page
+        .getByRole('combobox', { name: 'Move to stage' })
+        .selectOption({ label: stageLabel });
+
+      if (stageLabel === 'Lost') {
+        const dialog = this.page.getByRole('dialog', { name: 'Mark placement lost' });
+        await expect(dialog).toBeVisible();
+        const reasonLabel = opts?.lostReason ?? 'Tenant withdrew';
+        await dialog.getByRole('radio', { name: reasonLabel }).check();
+        await dialog.getByRole('button', { name: 'Mark lost' }).click();
+        await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+      }
+
+      // The header h1 renders the new stage LABEL (stageLabel + phase span) once
+      // the transition lands. Substring match tolerates the trailing phase text.
+      await expect(
+        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(stageLabel)) }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [App] The placement's current stage renders on PlacementDetail (Team SEES
+   *  the stageLabel in the page h1). */
+  expectPlacementStage(stageLabel: string): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: placement is at '${stageLabel}'`, async () => {
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      await expect(
+        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(stageLabel)) }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App, AUTO — dev seam] One deterministic placement-nudge poll pass. Pass
+   * `hoursFromNow(delayHours + 1)` to fire the current stage's rung (dueAt =
+   * transition moment + delay). GLOBAL: fires every due row in the DB — callers
+   * assert arrival scoped to THEIR OWN phones only.
+   */
+  devPlacementNudgeTick(nowIso?: string): Promise<void> {
+    return step(`App: placement-nudge poll ticks${nowIso !== undefined ? ` (now=${nowIso})` : ''}`, async () => {
+      const res = await this.page.request.post(`${NEXT}/__dev/placement-nudges/tick`, {
+        data: nowIso !== undefined ? { now: nowIso } : {},
+      });
+      expect(res.ok(), await res.text()).toBeTruthy();
+    });
+  }
+
+  /**
+   * [App→party, AUTO] A placement nudge reached the recipient's 1:1 thread — an
+   * outbound FROM THE APP NUMBER (never the pool) whose body includes `text`. The
+   * recipient is passed explicitly (tenant or landlord Contact) rather than by
+   * role, mirroring how the tour group verbs take the member Contact.
+   */
+  expectOutboxMessageContaining(recipient: Contact, text: string): Promise<void> {
+    return step(`App delivers a 1:1 nudge to ${displayNameOf(recipient)} ("…${text}…")`, async () => {
+      await expect
+        .poll(
+          async () => {
+            const threads = await listThreads(this.request);
+            const thread = threads.find((x) => x.partyNumber === recipient.phone);
+            return (
+              thread?.messages.some(
+                (m) =>
+                  m.direction === 'outbound' && m.from === APP_NUMBER && (m.body ?? '').includes(text),
+              ) ?? false
+            );
+          },
+          { timeout: 15_000 },
+        )
+        .toBe(true);
+    });
+  }
+
+  /**
+   * [App] The recipient did NOT receive a 1:1 message containing `text`. Used
+   * AFTER a tick to prove a canceled nudge fires nothing. Safe as a single check
+   * (not a poll): the tick awaits every due-row send before returning, and a
+   * canceled row can never fire on the worker's wall-clock poll either.
+   */
+  expectNoOutboxMessageContaining(recipient: Contact, text: string): Promise<void> {
+    return step(`App: no 1:1 nudge to ${displayNameOf(recipient)} containing "…${text}…"`, async () => {
+      const threads = await listThreads(this.request);
+      const thread = threads.find((x) => x.partyNumber === recipient.phone);
+      const leaked =
+        thread?.messages.some(
+          (m) => m.direction === 'outbound' && (m.body ?? '').includes(text),
+        ) ?? false;
+      expect(leaked).toBe(false);
+    });
+  }
+
+  /** [App] Entering Awaiting landlord submission armed the 48-HOUR RTA clock: the
+   *  placement's next_deadline is `rta_window` at ≈ now + 48h (±5 min). */
+  expectRtaClockArmed(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the 48-hour RTA clock is armed on the placement', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { placement } = (await res.json()) as {
+        placement: { next_deadline_type?: string; next_deadline_at?: string };
+      };
+      expect(placement.next_deadline_type).toBe('rta_window');
+      expect(typeof placement.next_deadline_at).toBe('string');
+      const armedAt = Date.parse(placement.next_deadline_at as string);
+      const expected = Date.now() + 48 * 3_600_000;
+      // ±5 min tolerance (the server armed off its own wall clock moments ago).
+      expect(Math.abs(armedAt - expected)).toBeLessThan(5 * 60_000);
+    });
+  }
+
+  /** [App] The placement is LOST — the terminal stage via API AND Team SEES the
+   *  'Lost' stage on PlacementDetail. */
+  expectPlacementLost(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the placement is lost (terminal)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(res.ok()).toBeTruthy();
+      const { placement } = (await res.json()) as { placement: { stage?: string } };
+      expect(placement.stage).toBe('lost');
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      await expect(
+        this.page.getByRole('heading', { level: 1, name: /Lost/ }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [App] Conversion moved the tenant Searching → Placing (Team SEES 'Placing'
+   *  in the tenant Details card). */
+  expectTenantPlacing(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: tenant derived to Placing on conversion', async () => {
+      await this.assertStatus('placing');
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Placing')).toBeVisible();
+    });
+  }
+
+  /** [App] Lost bounced the tenant back to Searching (re-match). Team SEES
+   *  'Searching' in the tenant Details card. */
+  expectTenantBackSearching(): Promise<void> {
+    const id = this.requireActiveContactId();
+    return step('App: tenant bounced back to Searching (re-match)', async () => {
+      await this.assertStatus('searching');
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Searching')).toBeVisible();
+    });
+  }
+
+  /** [App] Lost returned the property to Available (derived bounce-back). */
+  expectUnitAvailable(unit: Unit): Promise<void> {
+    return step('App: property returned to Available', async () => {
+      await expect
+        .poll(
+          async () => {
+            const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+            if (!res.ok()) return null;
+            const { unit: u } = (await res.json()) as { unit: { status?: string } };
+            return u.status ?? null;
+          },
+          { timeout: 10_000 },
+        )
+        .toBe('available');
+    });
+  }
+
+  /**
+   * [App] The tour's masked relay group SURVIVED conversion and now belongs to the
+   * placement: the placement carries `group_thread` = the tour's thread id, and
+   * the conversation's owner is `{type:'placement', id}` (the channel continues —
+   * nothing new or unmasked was created).
+   */
+  expectGroupThreadReboundToPlacement(): Promise<void> {
+    const placementId = this.requireActivePlacementId();
+    const groupThreadId = this.requireActiveTourGroup().groupThreadId;
+    return step('App: the masked group survived conversion (now placement-owned)', async () => {
+      const pRes = await this.page.request.get(`${NEXT}/api/placements/${placementId}`);
+      expect(pRes.ok()).toBeTruthy();
+      const { placement } = (await pRes.json()) as { placement: { group_thread?: string } };
+      expect(placement.group_thread).toBe(groupThreadId);
+
+      const cRes = await this.page.request.get(`${NEXT}/api/conversations/${groupThreadId}`);
+      expect(cRes.ok()).toBeTruthy();
+      const { conversation } = (await cRes.json()) as {
+        conversation: { status?: string; owner?: { type?: string; id?: string } };
+      };
+      expect(conversation.status).toBe('open');
+      expect(conversation.owner?.type).toBe('placement');
+      expect(conversation.owner?.id).toBe(placementId);
+    });
+  }
+
+  /** [App] Lost closed the placement's masked relay thread: the conversation is
+   *  `closed` and its pool number released (cleared). */
+  expectRelayClosed(): Promise<void> {
+    const groupThreadId = this.requireActiveTourGroup().groupThreadId;
+    return step('App: the masked relay thread closed on Lost', async () => {
+      await expect
+        .poll(
+          async () => {
+            const res = await this.page.request.get(`${NEXT}/api/conversations/${groupThreadId}`);
+            if (!res.ok()) return null;
+            const { conversation } = (await res.json()) as {
+              conversation: { status?: string; pool_number?: string };
+            };
+            return conversation.status ?? null;
+          },
+          { timeout: 10_000 },
+        )
+        .toBe('closed');
+      const res = await this.page.request.get(`${NEXT}/api/conversations/${groupThreadId}`);
+      const { conversation } = (await res.json()) as { conversation: { pool_number?: string } };
+      expect(conversation.pool_number).toBeUndefined();
+    });
+  }
+
   // ---- internal helpers ---------------------------------------------------
 
   /** Click a TourDetail status control and assert the new status LABEL renders. */
@@ -1947,6 +2233,12 @@ export class Scenario {
   private requireActiveContactId(): string {
     if (!this.activeContactId) throw new Error('no active contact — triage/create one first');
     return this.activeContactId;
+  }
+
+  private requireActivePlacementId(): string {
+    if (!this.activePlacementId)
+      throw new Error('no active placement — call teamConvertsTourToPlacement first');
+    return this.activePlacementId;
   }
 
   /** Register the contact's number as an ad-hoc party once (send-as-party requires

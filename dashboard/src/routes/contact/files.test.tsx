@@ -165,11 +165,11 @@ describe('LandlordFile', () => {
     company: 'Porter Properties',
   };
 
-  function renderIt(opts: { tours?: Tour[] } = {}) {
+  function renderIt(opts: { tours?: Tour[]; contact?: Contact } = {}) {
     return render(
       <MemoryRouter>
         <LandlordFile
-          contact={contact}
+          contact={opts.contact ?? contact}
           phones={[{ phone: '+14042220190', primary: true }]}
           placements={[{ ...TENANT_CASE, unitId: 'u1' }]}
           tours={opts.tours ?? []}
@@ -192,6 +192,39 @@ describe('LandlordFile', () => {
     renderIt();
     expect(screen.getByText('Porter Properties')).toBeInTheDocument();
     expect(screen.getByText('Landlord')).toBeInTheDocument();
+  });
+
+  it('renders the preference chips + policy rows + notes in Preferences & notes', () => {
+    renderIt({
+      contact: {
+        ...contact,
+        accepts_programs: ['HCV', 'VASH'],
+        lease_terms: '12-month minimum',
+        pet_policy: 'Small dogs OK, $300 deposit',
+        notes: 'Prefers texts over calls.',
+      },
+    });
+    expect(screen.getByText('HCV')).toBeInTheDocument();
+    expect(screen.getByText('VASH')).toBeInTheDocument();
+    expect(screen.getByText('Lease terms')).toBeInTheDocument();
+    expect(screen.getByText('12-month minimum')).toBeInTheDocument();
+    expect(screen.getByText('Pet policy')).toBeInTheDocument();
+    expect(screen.getByText('Small dogs OK, $300 deposit')).toBeInTheDocument();
+    expect(screen.getByText('Prefers texts over calls.')).toBeInTheDocument();
+    expect(screen.queryByText(/No preferences yet/i)).not.toBeInTheDocument();
+  });
+
+  it('shows only the pieces that exist — notes alone, no empty policy rows', () => {
+    renderIt({ contact: { ...contact, notes: 'Met at the housing fair.' } });
+    expect(screen.getByText('Met at the housing fair.')).toBeInTheDocument();
+    expect(screen.queryByText('Lease terms')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pet policy')).not.toBeInTheDocument();
+    expect(screen.queryByText(/No preferences yet/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the empty panel only when programs, policies, AND notes are all absent', () => {
+    renderIt();
+    expect(screen.getByText(/No preferences yet/i)).toBeInTheDocument();
   });
 
   it('renders placements on their units linking to the placement route', () => {

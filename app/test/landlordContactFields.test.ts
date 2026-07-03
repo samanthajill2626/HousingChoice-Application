@@ -128,6 +128,123 @@ describe('structured landlord fields', () => {
   });
 });
 
+// Landlord preference defaults — accepts_programs/lease_terms/pet_policy: the
+// person-level policies the Preferences & notes card renders (the per-unit facts
+// live on units). Same first-class-optional-field convention as the deal terms.
+describe('landlord preference defaults', () => {
+  it('PATCH persists the preference fields and GET returns them', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', firstName: 'Pat', lastName: 'Owner' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        accepts_programs: ['HCV', 'VASH'],
+        lease_terms: '12-month minimum, month-to-month after',
+        pet_policy: 'Small dogs OK, $300 deposit',
+      })
+      .expect(200);
+
+    const got = await request(app)
+      .get(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+    expect(got.body.contact.accepts_programs).toEqual(['HCV', 'VASH']);
+    expect(got.body.contact.lease_terms).toBe('12-month minimum, month-to-month after');
+    expect(got.body.contact.pet_policy).toBe('Small dogs OK, $300 deposit');
+  });
+
+  it('accepts an empty programs array and empty strings (clearing)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', accepts_programs: ['HCV'], lease_terms: 'x', pet_policy: 'y' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ accepts_programs: [], lease_terms: '', pet_policy: '' })
+      .expect(200);
+
+    const got = await request(app)
+      .get(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+    expect(got.body.contact.accepts_programs).toEqual([]);
+    expect(got.body.contact.lease_terms).toBe('');
+    expect(got.body.contact.pet_policy).toBe('');
+  });
+
+  it('rejects a non-array programs value, non-string elements, and non-string text fields', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ accepts_programs: 'HCV' })
+      .expect(400);
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ accepts_programs: ['HCV', 42] })
+      .expect(400);
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ lease_terms: 12 })
+      .expect(400);
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ pet_policy: false })
+      .expect(400);
+  });
+
+  it('POST create accepts the preference fields', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        type: 'landlord',
+        accepts_programs: ['HCV'],
+        lease_terms: 'Year lease',
+        pet_policy: 'No pets',
+      })
+      .expect(201);
+    expect(created.body.contact.accepts_programs).toEqual(['HCV']);
+    expect(created.body.contact.lease_terms).toBe('Year lease');
+    expect(created.body.contact.pet_policy).toBe('No pets');
+  });
+});
+
 // Task 4a: park_reason is settable via the generic PATCH (today it's only written
 // by the /tenant-status route on a `parked` move). The edit form persists a park
 // reason alongside a status change, so the generic PATCH must accept it.

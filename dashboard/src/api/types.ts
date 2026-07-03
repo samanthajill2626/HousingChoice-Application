@@ -785,6 +785,10 @@ export interface ContactCreate {
   phone?: string;
   voucherSize?: number;
   company?: string;
+  /** Landlord preference defaults (person-level policies). */
+  accepts_programs?: string[];
+  lease_terms?: string;
+  pet_policy?: string;
   role?: string;
   relationships?: Relationship[];
   customFields?: CustomField[];
@@ -859,6 +863,14 @@ export interface Contact {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /** Landlord preference DEFAULTS — person-level policies across their properties
+   *  (the per-unit facts stay on UnitItem.accepted_programs etc.). `pet_policy`
+   *  is distinct from `pets` (the TENANT intake answer above). */
+  accepts_programs?: string[];
+  /** Free-text lease-terms policy ("12-month minimum, month-to-month after"). */
+  lease_terms?: string;
+  /** Free-text pet policy ("small dogs OK, $300 deposit"). */
+  pet_policy?: string;
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -893,6 +905,11 @@ export interface ContactPatch {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /** Landlord preference defaults (person-level policies). An empty array /
+   *  empty string clears the field. */
+  accepts_programs?: string[];
+  lease_terms?: string;
+  pet_policy?: string;
   /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
   park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */

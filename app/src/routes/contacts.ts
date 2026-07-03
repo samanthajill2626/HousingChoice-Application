@@ -181,6 +181,18 @@ const LANDLORD_BOOLEAN_FIELDS = [
   'income_includes_voucher',
 ] as const;
 
+/**
+ * Landlord preference defaults (free text) — person-level policies applied
+ * across the landlord's properties (the per-unit facts live on UnitItem).
+ * Empty string clears, like `company`. `accepts_programs` (the string[] sibling)
+ * is validated separately.
+ */
+const LANDLORD_TEXT_PREFERENCE_FIELDS = ['lease_terms', 'pet_policy'] as const;
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((s) => typeof s === 'string');
+}
+
 // The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
 // lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
 // (statusAllowlistFor) so BOTH status-setting paths — this generic PATCH and the
@@ -460,6 +472,24 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     }
   }
 
+  // Landlord preference defaults (person-level policies — see the repo doc).
+  // Programs as a string array (empty array clears); the two text policies as
+  // free text (empty string clears, like company).
+  if ('accepts_programs' in b) {
+    const v = b['accepts_programs'];
+    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
+    patch['accepts_programs'] = v;
+    changedFields.push('accepts_programs');
+  }
+  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'string') return { error: `${key} must be a string` };
+      patch[key] = v;
+      changedFields.push(key);
+    }
+  }
+
   // A2P/CTIA consent (spec §3.4): the JIT record-consent PATCH carries the four
   // HUMAN consent fields. Validated here; consent_captured_by is stamped by the
   // route (session user), never trusted from the client.
@@ -612,6 +642,20 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     if (key in b) {
       const v = b[key];
       if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
+      item[key] = v;
+    }
+  }
+
+  // Landlord preference defaults (see parseTriageBody).
+  if ('accepts_programs' in b) {
+    const v = b['accepts_programs'];
+    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
+    item.accepts_programs = v;
+  }
+  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
+    if (key in b) {
+      const v = b[key];
+      if (typeof v !== 'string') return { error: `${key} must be a string` };
       item[key] = v;
     }
   }

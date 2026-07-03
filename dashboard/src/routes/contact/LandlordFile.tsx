@@ -2,8 +2,9 @@
 // tenant file; the cards center on the units they own: Details (role/company) ·
 // Preferences · Properties (their units, with status) · Tours on their properties ·
 // Placements on their units · Group texts · Media. Properties + Placements + Tours
-// are REAL (from /api/units + /api/placements + /api/tours?unitId=); Preferences +
-// Group texts + Media are pending until their backend slices land.
+// are REAL (from /api/units + /api/placements + /api/tours?unitId=); Preferences
+// render the contact's accepts_programs/lease_terms/pet_policy + notes; Group
+// texts are pending until their backend slice lands.
 import {
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
@@ -18,6 +19,7 @@ import {
   Card,
   CardAction,
   CardInlineAction,
+  Chips,
   EmptyRow,
   KV,
   PendingPanel,
@@ -80,6 +82,16 @@ export function LandlordFile({
   const myPlacements = landlordPlacements(placements, units, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
   const company = typeof contact['company'] === 'string' ? contact['company'] : '—';
+  // Preferences & notes — the landlord's person-level defaults (their properties'
+  // per-unit facts live on the units). Programs as chips, the two policies as KV
+  // rows, free-text notes below; the empty panel only when ALL are absent.
+  const programs = Array.isArray(contact.accepts_programs)
+    ? contact.accepts_programs.filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+    : [];
+  const leaseTerms = typeof contact.lease_terms === 'string' ? contact.lease_terms.trim() : '';
+  const petPolicy = typeof contact.pet_policy === 'string' ? contact.pet_policy.trim() : '';
+  const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
+  const hasPreferences = programs.length > 0 || leaseTerms !== '' || petPolicy !== '' || notes !== '';
 
   return (
     <>
@@ -130,7 +142,16 @@ export function LandlordFile({
           )
         }
       >
-        <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
+        {hasPreferences ? (
+          <>
+            {programs.length > 0 ? <Chips items={programs} /> : null}
+            {leaseTerms !== '' ? <KV k="Lease terms" v={leaseTerms} /> : null}
+            {petPolicy !== '' ? <KV k="Pet policy" v={petPolicy} /> : null}
+            {notes !== '' ? <KV k="Notes" v={notes} /> : null}
+          </>
+        ) : (
+          <PendingPanel note="No preferences yet — use + Add to record accepted programs, lease terms, a pet policy, or a note." />
+        )}
       </Card>
 
       <Card

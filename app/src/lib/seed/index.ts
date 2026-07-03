@@ -137,7 +137,7 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
   }
 
   if (profile === 'full') {
-    await seedLive(endpoint);
+    await seedLive(endpoint, new Date());
   }
 
   // Fold in the inbound-voice-line holder stamp (both profiles; idempotent).

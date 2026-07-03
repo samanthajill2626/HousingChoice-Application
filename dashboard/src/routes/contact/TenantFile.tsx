@@ -1,16 +1,17 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
 // status) · Preferences & notes · Properties sent (C4) · Tours · Placements · Group
-// texts · Media (C5). Placements + Tours are REAL (placements from /api/placements,
-// tours from /api/tours?tenantId=); Properties-sent + Media render a "pending backend"
-// state until BE4/BE5 land; Preferences are manual-now (pending until the gleaning
-// slice). Each list row links to its detail route.
+// texts · Media (C5). Placements + Tours + Properties-sent + Group texts are REAL
+// (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
+// /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
+// gleaning slice). Each list row links to its detail route.
 import {
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type RelayGroupRow,
   type Tour,
   type UnitItem,
   type ListingSendRow,
@@ -29,6 +30,7 @@ import {
   responseClass,
 } from './Card.js';
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
+import { GroupTextsCard } from './GroupTextsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -46,6 +48,10 @@ export interface TenantFileProps {
   listingsSentPending: boolean;
   /** C4 listings-sent rows — the properties broadcast/sent to this tenant. */
   listingsSent: ListingSendRow[];
+  /** Relay-membership slice status (panel degrades to pending on 404). */
+  relayGroupsPending: boolean;
+  /** The group texts (relay threads) this contact is a member of. */
+  relayGroups: RelayGroupRow[];
   /** "Media from comms" — derived from the live timeline (updates as messages
    *  arrive); `mediaLoading` covers the brief window before the timeline lands. */
   media: CommsMediaItem[];
@@ -83,6 +89,8 @@ export function TenantFile({
   units,
   listingsSentPending,
   listingsSent,
+  relayGroupsPending,
+  relayGroups,
   media,
   mediaLoading,
   onEdit,
@@ -253,9 +261,7 @@ export function TenantFile({
         )}
       </Card>
 
-      <Card title="Group texts">
-        <PendingPanel note="Group-text membership arrives with the backend." />
-      </Card>
+      <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

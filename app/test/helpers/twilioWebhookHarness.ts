@@ -365,6 +365,14 @@ export function createFakeWorld(): FakeWorld {
       }
       return undefined;
     },
+    async listRelayGroups(status) {
+      // Mirrors the real repo: one relay status partition, newest-activity-first.
+      // The in-memory walk never pages, so truncated is always false here.
+      const items = [...conversations.values()]
+        .filter((c) => c.type === 'relay_group' && c.status === status)
+        .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
+      return { items, truncated: false };
+    },
     async addMember(conversationId, member) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`addMember: no conversation ${conversationId}`);

@@ -109,6 +109,7 @@ function makeFakes(
     resetUnread: async () => conversation,
     setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
     listByLastActivity: async () => ({ items: [conversation] }),
+    listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async (_id, mode) => {
       fakes.modeSets.push(mode);
       conversation.ai_mode = mode;

@@ -10,11 +10,13 @@ import {
   getPlacements,
   getContactListingsSent,
   getContactMedia,
+  getContactRelayGroups,
   getTours,
   getUnits,
   type ContactMediaItem,
   type ListingSendRow,
   type PlacementItem,
+  type RelayGroupRow,
   type Tour,
   type UnitItem,
 } from '../../api/index.js';
@@ -42,6 +44,9 @@ export interface ContactFileState {
   // delete this field + its fetch below + getContactMedia usage + the media
   // assertions in useContactFile.test.tsx. Left in deliberately for now.
   media: Slice<ContactMediaItem>;
+  /** The contact's group-text (relay) memberships — the "Group texts" card.
+   *  404 (a backend without the route) → 'pending', mirroring the C4/C5 slices. */
+  relayGroups: Slice<RelayGroupRow>;
 }
 
 /** Resolve a maybe-not-live slice: a 404 → 'pending'; other errors → 'error'. */
@@ -67,6 +72,7 @@ const FILE_LOADING: ContactFileState = {
   tours: [],
   listingsSent: { status: 'loading' },
   media: { status: 'loading' },
+  relayGroups: { status: 'loading' },
 };
 
 /**
@@ -100,13 +106,14 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
       try {
         // Placements + units back the REAL panels (Placements / Tours / Properties); both
         // exist today. The C4/C5 slices degrade independently.
-        const [placements, units, listingsSent, media] = await Promise.all([
+        const [placements, units, listingsSent, media, relayGroups] = await Promise.all([
           getPlacements(signal),
           getUnits({}, signal),
           loadSlice((s) => getContactListingsSent(contactId, s), signal),
           // TODO(contact-file-dead-media-slice): unused — see the `media` field above. The gallery
           // now derives from the live timeline; this fetch can be removed.
           loadSlice((s) => getContactMedia(contactId, s), signal),
+          loadSlice((s) => getContactRelayGroups(contactId, s), signal),
         ]);
         if (signal.aborted) return;
 
@@ -144,6 +151,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           tours,
           listingsSent,
           media,
+          relayGroups,
           forId: contactId,
         });
       } catch (err) {

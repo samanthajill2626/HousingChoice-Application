@@ -1,15 +1,16 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) ·
 // Preferences · Properties (their units, with status) · Tours on their properties ·
-// Placements on their units · Group texts · Media. Properties + Placements + Tours
-// are REAL (from /api/units + /api/placements + /api/tours?unitId=); Preferences +
-// Group texts + Media are pending until their backend slices land.
+// Placements on their units · Group texts · Media. Properties + Placements + Tours +
+// Group texts are REAL (from /api/units + /api/placements + /api/tours?unitId= +
+// /api/contacts/:id/relay-groups); Preferences are pending until their backend slice lands.
 import {
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type RelayGroupRow,
   type Tour,
   type UnitItem,
 } from '../../api/index.js';
@@ -25,6 +26,7 @@ import {
   Row,
   responseClass,
 } from './Card.js';
+import { GroupTextsCard } from './GroupTextsCard.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
@@ -40,6 +42,10 @@ export interface LandlordFileProps {
    *  each owned unit by the caller. Pass an empty array while loading or when none exist. */
   tours: Tour[];
   units: UnitItem[];
+  /** Relay-membership slice status (panel degrades to pending on 404). */
+  relayGroupsPending: boolean;
+  /** The group texts (relay threads) this contact is a member of. */
+  relayGroups: RelayGroupRow[];
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
@@ -70,6 +76,8 @@ export function LandlordFile({
   placements,
   tours,
   units,
+  relayGroupsPending,
+  relayGroups,
   media,
   mediaLoading,
   onEdit,
@@ -206,9 +214,7 @@ export function LandlordFile({
         )}
       </Card>
 
-      <Card title="Group texts">
-        <PendingPanel note="Group-text membership arrives with the backend." />
-      </Card>
+      <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

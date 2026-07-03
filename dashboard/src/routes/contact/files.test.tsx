@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import type { CommsMediaItem } from './media.js';
-import type { PlacementItem, Contact, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
+import type { PlacementItem, Contact, RelayGroupRow, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -46,6 +46,8 @@ describe('TenantFile', () => {
       listingsSent?: ListingSendRow[];
       media?: CommsMediaItem[];
       tours?: Tour[];
+      relayGroupsPending?: boolean;
+      relayGroups?: RelayGroupRow[];
     } = {},
   ) {
     return render(
@@ -58,6 +60,8 @@ describe('TenantFile', () => {
           units={[UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
           listingsSent={opts.listingsSent ?? []}
+          relayGroupsPending={opts.relayGroupsPending ?? true}
+          relayGroups={opts.relayGroups ?? []}
           media={opts.media ?? []}
         />
       </MemoryRouter>,
@@ -141,6 +145,34 @@ describe('TenantFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
+  it('shows "No group texts yet." when the relay slice is ready but empty', () => {
+    renderIt({ relayGroupsPending: false, relayGroups: [] });
+    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
+  });
+
+  it('renders Group-texts rows (relay memberships) linking to the owner tour', () => {
+    renderIt({
+      relayGroupsPending: false,
+      relayGroups: [
+        {
+          conversationId: 'conv-g1',
+          status: 'open',
+          poolNumber: '+15550190001',
+          memberCount: 2,
+          lastActivityAt: '2026-07-01T10:00:00Z',
+          owner: { type: 'tour', id: 'tour-9' },
+          otherMemberNames: ['Lars Landlord'],
+        },
+      ],
+    });
+    const link = screen
+      .getAllByRole('link')
+      .find((a) => a.getAttribute('href') === '/tours/tour-9');
+    expect(link).toBeDefined();
+    expect(link).toHaveTextContent('With Lars Landlord');
+    expect(link).toHaveTextContent('2 members');
+  });
+
   it('shows "No media yet" when there is no comms media', () => {
     renderIt({ media: [] });
     expect(screen.getByText(/No media yet/i)).toBeInTheDocument();
@@ -165,7 +197,7 @@ describe('LandlordFile', () => {
     company: 'Porter Properties',
   };
 
-  function renderIt(opts: { tours?: Tour[] } = {}) {
+  function renderIt(opts: { tours?: Tour[]; relayGroups?: RelayGroupRow[] } = {}) {
     return render(
       <MemoryRouter>
         <LandlordFile
@@ -174,6 +206,8 @@ describe('LandlordFile', () => {
           placements={[{ ...TENANT_CASE, unitId: 'u1' }]}
           tours={opts.tours ?? []}
           units={[UNIT, PLACED_UNIT]}
+          relayGroupsPending={opts.relayGroups === undefined}
+          relayGroups={opts.relayGroups ?? []}
           media={[]}
         />
       </MemoryRouter>,
@@ -238,5 +272,25 @@ describe('LandlordFile', () => {
     expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*·.*Not booked/);
     expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
     expect(screen.getByText('Requested')).toBeInTheDocument();
+  });
+
+  it('renders Group-texts rows — a closed placement-owned group links to the placement', () => {
+    renderIt({
+      relayGroups: [
+        {
+          conversationId: 'conv-g2',
+          status: 'closed',
+          memberCount: 3,
+          lastActivityAt: '2026-06-28T10:00:00Z',
+          owner: { type: 'placement', id: 'k1' },
+          otherMemberNames: ['Tina Tenant'],
+        },
+      ],
+    });
+    const link = screen
+      .getAllByRole('link')
+      .find((a) => a.getAttribute('href') === '/placements/k1' && /With Tina Tenant/.test(a.textContent ?? ''));
+    expect(link).toBeDefined();
+    expect(link).toHaveTextContent('Closed');
   });
 });

@@ -189,11 +189,25 @@ export function toPlacementUpdatedEvent(item: PlacementItem): PlacementUpdatedEv
   };
 }
 
+/**
+ * A scheduled-message ladder changed — a tour reminder or placement nudge was
+ * armed, rescheduled, or canceled. The contact timeline's pinned "Upcoming"
+ * section refetches on this so future/scheduled sends appear/disappear live
+ * without a manual reload. ID-only, best-effort payload: `contactId` is the
+ * affected person (a tour's tenantId / a placement's tenantId) and is ADVISORY
+ * — the client refetches unconditionally, so a landlord-recipient nudge need
+ * not resolve the landlord contact (no extra unit read). NO PII (never logged).
+ */
+export interface ScheduledUpdatedEvent {
+  contactId?: string;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
   'broadcast.updated': BroadcastUpdatedEvent;
   'placement.updated': PlacementUpdatedEvent;
+  'scheduled.updated': ScheduledUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

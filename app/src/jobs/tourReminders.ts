@@ -45,7 +45,7 @@ import { isMemberSuppressed } from './relayFanOut.js';
 // Canned reminder text
 // ---------------------------------------------------------------------------
 
-const REMINDER_BODIES: Record<ReminderKind, string> = {
+export const REMINDER_BODIES: Record<ReminderKind, string> = {
   confirmation: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
   day_before: '[AUTO] Reminder: your property tour is tomorrow.',
   morning_of: '[AUTO] Good morning! Your property tour is today.',
@@ -367,7 +367,7 @@ interface UsableGroup {
  * Anything else returns undefined → the caller falls back to the tenant-1:1
  * path (a reminder must never be lost).
  */
-async function resolveUsableGroup(
+export async function resolveUsableGroup(
   tour: TourItem,
   row: TourReminderItem,
   deps: RunDueTourRemindersDeps,

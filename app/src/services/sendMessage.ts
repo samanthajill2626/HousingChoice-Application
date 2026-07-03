@@ -33,6 +33,7 @@ import {
   type DeliveryStatus,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
+import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
 
 // --- Typed errors (route maps these to HTTP statuses) ----------------------
 
@@ -213,7 +214,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // Twilio send → no 30034 → no reputation damage. Explicit === false so a
     // hand-built test config without the field is treated as enabled. The
     // Twilio driver enforces the same backstop for any direct-adapter caller.
-    if (config.smsSendingEnabled === false) {
+    if (isKillSwitchOff(config.smsSendingEnabled)) {
       log.warn({ conversationId }, 'send refused: SMS sending disabled (pre-A2P kill-switch)');
       throw new SmsSendingDisabledError();
     }
@@ -226,7 +227,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // EITHER flag refuses: the conversation-level flag covers STOPs from
     // phones with no contact record yet (auto-capture is M1.2).
     const contact = await contacts.findByPhone(conversation.participant_phone);
-    if (conversation.sms_opt_out === true || contact?.sms_opt_out === true) {
+    if (isOptedOut(conversation.sms_opt_out, contact?.sms_opt_out)) {
       log.warn(
         {
           conversationId,
@@ -258,7 +259,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // (2) Circuit breaker — automated sends only; manual human sends are
     // always allowed (even in manual mode) and never counted.
     if (automated) {
-      if (conversation.ai_mode === 'manual') throw new ManualModeError(conversationId);
+      if (isManualMode(conversation.ai_mode)) throw new ManualModeError(conversationId);
       const count = await conversations.incrementAutomatedSendCount(conversationId, minuteBucket());
       if (count > config.sendBreakerMaxPerMinute) {
         await conversations.setMode(conversationId, 'manual');

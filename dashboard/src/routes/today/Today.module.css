@@ -77,6 +77,9 @@
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
+  /* Extra left gutter reserves room for the attention dot, so dotted and
+   * undotted rows' text align in one column (the dot lives in this gutter). */
+  padding-left: var(--sp-5);
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
@@ -98,8 +101,16 @@
   outline-offset: 2px;
 }
 
+/* The attention dot is anchored to the NAME (absolutely positioned in the row's
+ * left gutter): it stays vertically centred on the name in both the one-line and
+ * stacked layouts, and — being out of flow — never nudges the why/chips lines or
+ * misaligns dotted vs. undotted rows. */
 .dot {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  margin-right: var(--sp-2);
+  transform: translateY(-50%);
   width: 8px;
   height: 8px;
   border-radius: var(--radius-pill);
@@ -117,6 +128,7 @@
 }
 
 .who {
+  position: relative; /* anchor for the absolutely-positioned attention dot */
   flex: 0 0 auto;
   font-weight: var(--fw-semibold);
   color: var(--c-text);

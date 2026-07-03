@@ -39,11 +39,15 @@ function Row({ item }: { item: TodayItem }): React.JSX.Element {
   return (
     <li className={styles.rowItem}>
       <Link to={hrefFor(item)} className={styles.row}>
-        {item.attention ? <span className={styles.dot} aria-label="Needs attention" /> : null}
         {/* Text block (who · why). On a tight content pane it stacks above the meta
-         *  chips (container query in the CSS) so the "why" never gets crushed. */}
+         *  chips (container query in the CSS) so the "why" never gets crushed.
+         *  The attention dot is anchored to the name (absolutely, in the row's left
+         *  gutter) so it centres on the name and never shifts the why/chips lines. */}
         <span className={styles.main}>
-          <span className={styles.who}>{item.who}</span>
+          <span className={styles.who}>
+            {item.attention ? <span className={styles.dot} aria-label="Needs attention" /> : null}
+            {item.who}
+          </span>
           <span className={styles.why}>{item.why}</span>
         </span>
         {hasMeta ? (

@@ -11,7 +11,10 @@
 //          claim-wins-once (fake claim returns false ⇒ no send);
 //          stale-stage row is claimed-but-not-sent;
 //          SendRefusedError keeps the claim + does not throw;
-//          landlord recipient resolved via unit.landlordId.
+//          landlord recipient resolved via unit.landlordId;
+//          create-on-demand — a landlord with NO 1:1 gets one minted (right type +
+//          name denorm) then the nudge sent; the claim is idempotent per phone so
+//          two rungs never duplicate; an sms_opt_out landlord's send still refuses.
 import { describe, expect, it } from 'vitest';
 import type { ContactItem, ContactsRepo } from '../src/repos/contactsRepo.js';
 import type {
@@ -121,10 +124,43 @@ function makeFakeUnitsRepo(units: UnitItem[]): UnitsRepo {
   } as unknown as UnitsRepo;
 }
 
-function makeFakeConversationsRepo(convs: ConversationItem[]): ConversationsRepo {
+// Fake conversations repo. Models findByParticipantPhone AND the create-on-demand
+// path: createOrGetByParticipantPhone is the one-active-conversation-per-phone
+// CLAIM (idempotent per phone — two calls for the same phone return the SAME
+// conversation, so a race can never mint a duplicate) and applyTriage stamps the
+// display-name denorm. Returns the repo directly so existing call sites (which
+// pass the result inline) are unchanged.
+let convCounter = 0;
+function makeFakeConversationsRepo(seed: ConversationItem[] = []): ConversationsRepo {
+  const byId = new Map<string, ConversationItem>(seed.map((c) => [c.conversationId, c]));
+  // The active claim: phone → conversationId (only OPEN conversations claim).
+  const claimByPhone = new Map<string, string>();
+  for (const c of seed) if (c.status === 'open') claimByPhone.set(c.participant_phone, c.conversationId);
   return {
     async findByParticipantPhone(phone: string) {
-      return convs.filter((c) => c.participant_phone === phone);
+      return [...byId.values()].filter((c) => c.participant_phone === phone);
+    },
+    async createOrGetByParticipantPhone(phone: string, type: ConversationItem['type']) {
+      const existingId = claimByPhone.get(phone);
+      if (existingId !== undefined) return byId.get(existingId)!; // claim held → same conv
+      const conv = conversation(`conv-created-${++convCounter}`, phone, type);
+      byId.set(conv.conversationId, conv);
+      claimByPhone.set(phone, conv.conversationId);
+      return conv;
+    },
+    async applyTriage(
+      conversationId: string,
+      fields: { displayName?: string | null; type?: ConversationItem['type'] },
+    ) {
+      const conv = byId.get(conversationId);
+      if (!conv) throw new Error(`applyTriage: conversation ${conversationId} not found`);
+      const next: ConversationItem = { ...conv };
+      if (fields.displayName !== undefined && fields.displayName !== null) {
+        next.participant_display_name = fields.displayName;
+      }
+      if (fields.type !== undefined) next.type = fields.type;
+      byId.set(conversationId, next);
+      return next;
     },
   } as unknown as ConversationsRepo;
 }
@@ -381,5 +417,128 @@ describe('runDuePlacementNudges', () => {
     // Missing placement is NOT claimed (row stays pending — a resurrected
     // placement could still be nudged; mirrors tourReminders' warn+skip).
     expect(row.sentAt).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Create-the-1:1-on-demand (FIX 7 — resolves placement-nudge-needs-landlord-1to1)
+  // -------------------------------------------------------------------------
+
+  function landlordRow(nudgeId: string, placementId: string, kind: NudgeKind): PlacementNudgeItem {
+    return {
+      nudgeId,
+      placementId,
+      kind,
+      dueAt: '2026-07-05T09:00:00.000Z',
+      _nudgePartition: 'nudges',
+      createdAt: FIXED_CREATED,
+    };
+  }
+
+  it('landlord with NO existing 1:1: creates the conversation (landlord_1to1, name denorm) then sends into it', async () => {
+    const landlordPhone = '+15550700003';
+    const p = makePlacement({ placementId: 'p-1', stage: 'awaiting_approval', unitId: 'unit-9' });
+    const { repo } = makeFakeNudgesRepo([landlordRow('nudge-1', 'p-1', 'approval_check')]);
+    const send = makeSendSpy();
+    // Empty seed → the landlord has NO 1:1 thread (the DESIGNED masked-pool flow).
+    const convRepo = makeFakeConversationsRepo([]);
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        {
+          contactId: 'contact-landlord-1',
+          type: 'landlord',
+          phone: landlordPhone,
+          firstName: 'Larry',
+          lastName: 'Landlord',
+          created_at: FIXED_CREATED,
+        } as ContactItem,
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-1', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: convRepo,
+      sendMessageService: send.service,
+    };
+    await runDuePlacementNudges(NOW, deps);
+
+    // The 1:1 was minted on demand, typed landlord_1to1, with the display name denorm'd.
+    const created = await convRepo.findByParticipantPhone(landlordPhone);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.type).toBe('landlord_1to1');
+    expect(created[0]!.participant_display_name).toBe('Larry Landlord');
+    // ...and the nudge was sent into that new conversation.
+    expect(send.sent).toHaveLength(1);
+    expect(send.sent[0]!.conversationId).toBe(created[0]!.conversationId);
+    expect(send.sent[0]!.body).toBe(NUDGE_RUNGS.awaiting_approval!.body);
+    expect(send.sent[0]!.automated).toBe(true);
+  });
+
+  it('two landlord rungs for the same phone create EXACTLY ONE conversation (claim is idempotent)', async () => {
+    const landlordPhone = '+15550700004';
+    const pA = makePlacement({ placementId: 'p-A', stage: 'awaiting_approval', unitId: 'unit-9' });
+    const pB = makePlacement({ placementId: 'p-B', stage: 'awaiting_landlord_submission', unitId: 'unit-9' });
+    const { repo } = makeFakeNudgesRepo([
+      landlordRow('nudge-A', 'p-A', 'approval_check'),
+      landlordRow('nudge-B', 'p-B', 'rta_window_closing'),
+    ]);
+    const send = makeSendSpy();
+    const convRepo = makeFakeConversationsRepo([]);
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: repo,
+      placementsRepo: makeFakePlacementsRepo([pA, pB]),
+      contactsRepo: makeFakeContactsRepo([
+        contact('contact-landlord-1', 'landlord', landlordPhone),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-1', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: convRepo,
+      sendMessageService: send.service,
+    };
+    await runDuePlacementNudges(NOW, deps);
+
+    // The claim is idempotent per phone: both rungs resolve to the SAME single conv.
+    const created = await convRepo.findByParticipantPhone(landlordPhone);
+    expect(created).toHaveLength(1);
+    expect(send.sent).toHaveLength(2);
+    expect(send.sent[0]!.conversationId).toBe(created[0]!.conversationId);
+    expect(send.sent[1]!.conversationId).toBe(created[0]!.conversationId);
+  });
+
+  it('sms_opt_out landlord: the 1:1 may be created but the send is REFUSED — claim stays stamped, no retry', async () => {
+    const landlordPhone = '+15550700005';
+    const p = makePlacement({ placementId: 'p-1', stage: 'awaiting_approval', unitId: 'unit-9' });
+    const rows = makeFakeNudgesRepo([landlordRow('nudge-1', 'p-1', 'approval_check')]);
+    const row = rows.rows[0]!;
+    // sendMessageService is the sole enforcer of the opt-out gate: it throws
+    // SendRefusedError('contact_opted_out') for a DNC landlord regardless of whether
+    // the thread was just created. Thread existence is NOT a consent bypass.
+    const refusingSend = makeSendSpy({
+      throwErr: new SendRefusedError('conv-created', 'contact_opted_out'),
+    });
+    const convRepo = makeFakeConversationsRepo([]);
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: rows.repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        contact('contact-landlord-1', 'landlord', landlordPhone),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-1', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: convRepo,
+      sendMessageService: refusingSend.service,
+    };
+    await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
+
+    // The 1:1 was created on demand (thread existence is not consent)...
+    expect(await convRepo.findByParticipantPhone(landlordPhone)).toHaveLength(1);
+    // ...the send was attempted and refused by the gate...
+    expect(refusingSend.sent).toHaveLength(1);
+    // ...and the claim is already stamped so no retry will fire (mirror the
+    // existing SendRefusedError shape).
+    expect(row.sentAt).toBeDefined();
+    expect(await rows.repo.listDue(NOW)).toHaveLength(0);
   });
 });

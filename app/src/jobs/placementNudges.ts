@@ -14,7 +14,9 @@
 //   listDue(now), then per row (isolated try/catch): resolve the placement; if it
 //   already LEFT the rung's stage the row is STALE — claim it to retire it and do
 //   NOT send; else resolve the recipient (tenant = placement.tenantId; landlord =
-//   unit.landlordId) → phone → 1:1 conversation → CLAIM the row BEFORE sending →
+//   unit.landlordId) → phone → 1:1 conversation (created on demand when none
+//   exists yet — thread existence is not consent, the send gates still apply) →
+//   CLAIM the row BEFORE sending →
 //   sendMessageService. SendRefusedError ⇒ claim kept, warn, no retry. Missing
 //   entities ⇒ warn + skip. Mirrors tourReminders' processReminderRow EXACTLY for
 //   the claim/error semantics.
@@ -23,7 +25,8 @@
 // nudgeId/placementId/tenantId/unitId/kind/stage.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { PlacementStage } from '../lib/statusModel.js';
-import type { ContactsRepo } from '../repos/contactsRepo.js';
+import { conversationTypeFor } from '../lib/voiceMasking.js';
+import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type {
   NudgeKind,
@@ -86,6 +89,19 @@ const STAGE_BY_KIND: Partial<Record<NudgeKind, PlacementStage>> = Object.fromEnt
     ([stage, rung]) => [rung.kind, stage],
   ),
 ) as Partial<Record<NudgeKind, PlacementStage>>;
+
+/**
+ * The denormalized inbox display name from a contact's resolved fields —
+ * `firstName lastName` trimmed → a non-empty string, else null (HONEST: a name is
+ * never invented). Mirrors the contacts-route helper of the same shape. PII
+ * (doc §9): the name is DATA (denorm'd onto the thread), NEVER logged here.
+ */
+function contactDisplayName(contact: ContactItem): string | null {
+  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
+  const joined = `${first} ${last}`.trim();
+  return joined.length > 0 ? joined : null;
+}
 
 // ---------------------------------------------------------------------------
 // armNudgeForStage
@@ -160,7 +176,8 @@ export interface RunDuePlacementNudgesDeps {
  * Error handling (mirrors jobs/tourReminders.ts EXACTLY):
  * - SendRefusedError → warn + return (claim already stamped — no retry).
  * - Other send error → error + rethrow into the per-row catch (claim stamped).
- * - Missing placement/unit/contact/phone/conversation → warn + skip.
+ * - Missing placement/unit/contact/phone → warn + skip. A missing 1:1
+ *   conversation is NOT a skip — it is created on demand and the send proceeds.
  * Designed to be called by a setInterval in worker.ts.
  */
 export async function runDuePlacementNudges(
@@ -271,18 +288,45 @@ async function processNudgeRow(
     return;
   }
 
-  // Find the recipient's 1:1 conversation via phone lookup. A tenant rung routes
-  // to tenant_1to1 (or an unresolved unknown_1to1); a landlord rung to
+  // Find (or create) the recipient's 1:1 conversation via phone lookup. A tenant
+  // rung routes to tenant_1to1 (or an unresolved unknown_1to1); a landlord rung to
   // landlord_1to1 (or unknown_1to1). NEVER the masked group (founder 2026-07-02).
   const convs = await deps.conversationsRepo.findByParticipantPhone(phone);
   const wantedType = rung.recipient === 'tenant' ? 'tenant_1to1' : 'landlord_1to1';
-  const conv = convs.find((c) => c.type === wantedType || c.type === 'unknown_1to1');
+  let conv = convs.find((c) => c.type === wantedType || c.type === 'unknown_1to1');
   if (!conv) {
-    log.warn(
-      { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind, recipient: rung.recipient },
-      'placement nudge: no 1:1 conversation found — skipping',
+    // No usable 1:1 yet — CREATE it on demand and proceed to send. This unblocks
+    // the DESIGNED landlord flow where all prior traffic went through the masked
+    // pool number, so no landlord_1to1 was ever minted (approval_check /
+    // rta_window_closing used to silently skip). Thread existence is NOT a consent
+    // mechanism: every gate (sms_sending_disabled, opt-out, JIT consent, breaker,
+    // manual mode) is enforced by sendMessageService at send time and still fires.
+    // Mirrors the contacts "text a brand-new contact" fix (9a45085):
+    // createOrGetByParticipantPhone is the same one-active-conversation-per-phone
+    // claim every inbound path uses, so a racing inbound never creates a duplicate.
+    conv = await deps.conversationsRepo.createOrGetByParticipantPhone(
+      phone,
+      conversationTypeFor(contact),
     );
-    return;
+    // Best-effort display-name denorm so the NEW inbox row shows the person, not a
+    // bare phone (mirrors 9a45085). A failure here must NEVER block the send — and
+    // no explicit event emit is needed: the send below emits conversation.updated
+    // from touchLastActivity's ALL_NEW, which carries this name to the live inbox.
+    const displayName = contactDisplayName(contact);
+    if (displayName !== null && conv.participant_display_name !== displayName) {
+      try {
+        conv = await deps.conversationsRepo.applyTriage(conv.conversationId, { displayName });
+      } catch (err) {
+        log.warn(
+          { err, nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
+          'placement nudge: display-name denorm failed (best-effort) — sending anyway',
+        );
+      }
+    }
+    log.info(
+      { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind, recipient: rung.recipient, conversationId: conv.conversationId },
+      'placement nudge: no 1:1 conversation — created on demand',
+    );
   }
 
   // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two

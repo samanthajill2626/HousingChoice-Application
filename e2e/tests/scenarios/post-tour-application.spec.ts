@@ -105,9 +105,12 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   const flow = new Scenario(page, request);
   const { tenant, owner, unit } = await reachConvertibleTour(flow, { tenant: 'Mover', owner: 'Keys' });
 
-  // Landlord-routed nudges need a landlord 1:1 to land in — the diagram's
-  // "L->>A: Received — reviewing" once the application reaches them. (The masked
-  // group is NEVER a nudge target — founder 2026-07-02.)
+  // Diagram-faithful: the "L->>A: Received — reviewing" arrow once the application
+  // reaches the landlord. This is NOT a technical prerequisite for the landlord
+  // nudges — the poller now mints the 1:1 on demand when none exists (see the BLOWN
+  // deviation below, which deliberately omits this). We keep it here because the
+  // diagram models the landlord replying. (The masked group is NEVER a nudge target
+  // — founder 2026-07-02.)
   await flow.landlordTexts(owner, 'Got the application — reviewing it now.');
 
   // [MANUAL] Convert — QUIET. Placement born at Send application; tenant Searching
@@ -204,7 +207,10 @@ test('marked deviation — 48h window BLOWN at Awaiting landlord submission → 
 }) => {
   const flow = new Scenario(page, request);
   const { owner } = await reachConvertibleTour(flow, { tenant: 'Late', owner: 'Slow' });
-  await flow.landlordTexts(owner, 'Reviewing.');
+  // NO manufactured landlord 1:1 here: this landlord's only prior traffic was the
+  // masked pool number (the DESIGNED flow), so no landlord_1to1 exists yet. The
+  // rta_window_closing nudge below exercises CREATE-ON-DEMAND end-to-end — the
+  // poller mints the 1:1 on first send (resolves placement-nudge-needs-landlord-1to1).
 
   await flow.teamConvertsTourToPlacement();
   // Walk to Awaiting landlord submission (no skip).

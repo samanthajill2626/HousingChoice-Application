@@ -65,7 +65,9 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
     interface TimelineScheduled extends TimelineBase {
       kind: 'scheduled';
       // id = `sched#${source}#${rowId}`, at = dueAt
-      conversationId: string;              // the resolved 1:1 thread this item belongs to
+      conversationId?: string;             // the resolved 1:1 thread, if one already exists;
+                                           // ABSENT for a landlord nudge whose 1:1 is created
+                                           // on demand at fire time (item still shows — see M4)
       source: 'tour_reminder' | 'placement_nudge';
       reminderKind?: ReminderKind;
       nudgeKind?: NudgeKind;
@@ -76,23 +78,39 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
     }
     ```
   - **Gather (fills the `TODO` anchor at ~L346), the by-conversation resolution — the core
-    build gap.** There is no contact→reminder index, so for the contact's resolved 1:1
-    conversation set (already computed at L325-337, `relay_group` excluded):
-    1. **Tour reminders:** find tours where the contact is the tenant (`toursRepo` by
-       tenantId), for each `listByTour` → keep rows that are (a) upcoming
-       (`!sentAt && !canceledAt`) AND (b) will route to a **1:1** (i.e. the tour is
-       self_guided **or** has no usable group — mirror `resolveUsableGroup`). Group-routed
-       rungs are dropped (they have no 1:1). Map each surviving row → `TimelineScheduled`
-       on the tenant's resolved 1:1 conversationId.
-    2. **Placement nudges:** find placements where the contact is tenant OR landlord
-       (tenant via `placement.tenantId`; landlord via units the contact owns →
-       placements on those units). For each `listByPlacement` → keep upcoming rows whose
-       `rung.recipient` party == this contact, map → `TimelineScheduled` on the matching
-       1:1 conversationId. (A nudge whose 1:1 does not yet exist — created-on-demand at
-       fire time — resolves to the same `conversationTypeFor` thread; if absent, we still
-       surface it against the conversation it *will* target if we can resolve the phone,
-       else skip. v1: only surface when a 1:1 already exists in `convById`, matching what
-       the timeline can show.)
+    build gap.** There is no contact→reminder index. The gather resolves the *viewed
+    contact's* scheduled rows directly (we know the contact; we do NOT require a
+    pre-existing conversation). Three **independent walks**, each `Promise.all`-parallelized
+    internally and with each other (verified index-backed, not scans — review confirmed):
+    1. **Tour reminders (tenant only — tours only ever target the tenant):**
+       `toursRepo.listByTenant(contactId)` (`byTenant` GSI) → per tour `listByTour` in
+       parallel → keep rows that are (a) upcoming (`!sentAt && !canceledAt`) AND (b) will
+       route to a **1:1**. Route predicate MUST reuse the **exact** poller function — extract
+       and export `resolveUsableGroup` from `jobs/tourReminders.ts` and call it (a
+       non-self_guided tour with a `groupThreadId` whose group is *unusable* — closed / no
+       pool / empty roster — actually 1:1-sends; a cheap `!groupThreadId` proxy would wrongly
+       hide it, M3). Group-routed rungs are dropped (no 1:1). Attach to the tenant's 1:1
+       resolved the **same way the poller does** — from `contact.phone` (scalar primary) →
+       `findByParticipantPhone` → first `tenant_1to1|unknown_1to1` (mirror
+       `tourReminders.ts:270-281`, not the multi-phone `convById`, m4).
+    2. **Placement nudges — tenant rungs:** `placementsRepo.listByTenant(contactId)` → per
+       placement `listByPlacement` → keep upcoming rows whose `rung.recipient === 'tenant'`.
+       Attach to the tenant 1:1 (as above).
+    3. **Placement nudges — landlord rungs:** `unitsRepo.listByLandlord(contactId)`
+       (`byLandlord` GSI) → `placementsRepo.listByUnit` per unit → `listByPlacement` → keep
+       upcoming rows whose `rung.recipient === 'landlord'`. Attach to the landlord 1:1 if one
+       exists; **else surface with `conversationId` absent** (landlord nudges create the 1:1
+       on demand at fire time — `placementNudges.ts:294-330` — so requiring a pre-existing
+       conversation would make the feature invisible for the common landlord case it was
+       built for, M4). Cap the unit walk (e.g. first 50 units) and `log` if truncated (no
+       silent cap).
+  - **Perf (M2).** This N+1 fan-out runs only when `upcoming` is returned (first page; the
+    client never paginates, so effectively every contact-timeline load + every
+    `scheduled.updated`/`message.persisted` refetch). All walks + per-parent `listBy*` are
+    `Promise.all`-parallelized; worst case is a landlord owning many units. Acceptable at
+    Phase-1 data volumes; the honest scale answer (a denormalized target-conversation field
+    written at arm time → one indexed read) is recorded as a follow-up if load warrants it.
+    Skip the whole gather when a `kinds` filter is present and excludes `scheduled`.
   - **Ordering carve-out (the pagination hazard):** scheduled items are **NOT** merged
     into the DESC-take-`limit` `candidates` slice (a future `dueAt` would corrupt the
     slice + cursor). Instead they are gathered separately and returned in a new envelope
@@ -107,17 +125,24 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
     `toursRepo`, `placementsRepo`, `unitsRepo`, plus the suppression evaluator (§C) inputs.
 
 - **Client types `dashboard/src/api/types.ts`:** add `TimelineScheduled` to the union +
-  `upcoming?: TimelineScheduled[]` to `ContactTimelinePage`.
+  `upcoming?: TimelineScheduled[]` to `ContactTimelinePage`. Thread `upcoming` through
+  `useContactTimeline`'s `loadTimeline` return type → hook state → renderer (today it drops
+  everything but `items`, `useContactTimeline.ts:94-132`). The 404 `buildTimelineFallback`
+  branch produces no scheduled data → default `upcoming` to `[]` there so the pinned section
+  simply doesn't render on the fallback path (m1).
 
 - **Renderer `dashboard/src/routes/contact/Timeline.tsx`:** render `page.upcoming` as a
   **pinned "Upcoming (N)" section** between the scrollable `div.stream` and the reply
-  composer. Each item: a clock icon, "sends <relative + absolute time>", the body, a
-  source tag (tour reminder / nudge), and — when `suppression` is present — a distinct
-  **"Will be skipped — <reason>"** treatment (amber/danger, not the normal send styling).
-  New `ScheduledCard` component. `page.upcoming` is rendered directly by the pinned
-  section, not through `StreamItem`; since `TimelineItem` now includes `'scheduled'`,
-  `StreamItem`'s switch gets a defensive `case 'scheduled': return null` (main-stream
-  `items` never contains scheduled rows). Empty `upcoming` → section not rendered.
+  composer. Each item: a clock icon, the fire time, the body, a source tag (tour reminder /
+  nudge), and — when `suppression` is present — a distinct **"Will be skipped — <reason>"**
+  treatment (amber/danger, not the normal send styling). **Fire-time display has two
+  branches (m3):** `dueAt > now` → "sends <relative + absolute>" (e.g. "sends in 3h");
+  `dueAt <= now` → "sending shortly / due now" (the `confirmation` rung is always armed with
+  `dueAt = now` and only sends on the next poll tick, so it is a past-`dueAt` pending row).
+  New `ScheduledCard` component. `page.upcoming` is rendered directly by the pinned section,
+  not through `StreamItem`; since `TimelineItem` now includes `'scheduled'`, `StreamItem`'s
+  switch gets a defensive `case 'scheduled': return null` (main-stream `items` never contains
+  scheduled rows). Empty `upcoming` → section not rendered.
 
 ### C. Suppression honesty — shared evaluator
 
@@ -133,9 +158,20 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
   (`conversation.ai_mode === 'manual'` — which also subsumes a tripped breaker), and for
   nudges the stale-stage guard (`placement.stage !== STAGE_BY_KIND[kind]`). **Excludes**
   JIT-consent (never applies to automated) and live-breaker prediction (unevaluable).
-- **`sendMessage`'s Gates 0/1/2a are refactored to call the same helper** so preview and
-  real send share one definition and cannot drift. (Breaker + audit side-effects stay in
-  `sendMessage`; the helper is the pure predicate portion.)
+- **The refactor MUST NOT change real send behavior (M1 — the review's top risk).** Do NOT
+  collapse `sendMessage`'s five sequential gate throws into one top-of-function call — that
+  would (a) reorder the relay-guard (0b, `sendMessage.ts:223`) relative to opt-out so a
+  `relay_group`+opted-out send throws the wrong error *code*, and (b) risk enforcing
+  manual-mode on human sends (it is deliberately `if (automated)`-only, `:260`). Instead,
+  extract the **individual boolean predicates** (`isKillSwitchOff(config)`,
+  `isOptedOut(conversation, contact)`, `isManualMode(conversation)`) and have `sendMessage`
+  call them **at their existing positions**, preserving the exact ordering, the `if (automated)`
+  guards, the WARN logs (`:217`, `:230-237` — which stay in `sendMessage`, NOT the helper, so
+  timeline loads don't spam "send refused" warnings), and the distinct throw types. The pure
+  `evaluateScheduledSendSuppression` composes the same predicates for the preview (evaluating
+  manual-mode unconditionally, since every previewed item is automated). Pin them together
+  with a regression test asserting the exact error **code** for (a) relay+opted-out and
+  (b) a human send into a manual-mode conversation (must still succeed).
 - The timeline gather + the tour-reminders endpoint both call the helper to populate
   `suppression`. The UI always caveats implicitly: state is a current estimate (opt-out /
   manual / kill-switch can flip before fire); when it fires or is retired the item
@@ -147,13 +183,18 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
   `message.persisted` → the timeline already refetches → the re-gather drops the now-`sentAt`
   row from `upcoming` and the real sent bubble appears in `items`. No new code.
 - **arm / reschedule / cancel:** add one new SSE event **`scheduled.updated`** to
-  `AppEventMap` (`app/src/lib/events.ts`), payload `{ contactId?: string; conversationId?: string }`
-  (IDs only — PII rule). Emit it at the arm + cancel sites:
-  - tour: `armTourReminders` / `cancelTourReminders` call sites in `routes/tours.ts`
-    (create ~L210, reschedule cancel+arm ~L452-453, cancel ~L461). One emit after the
-    cancel+arm pair for reschedule.
-  - nudge: `armNudgeForStage` / `cancelForPlacement` (invoked from `statusTransition.ts`).
-    Resolve the affected contactId(s) for the payload.
+  `AppEventMap` (`app/src/lib/events.ts`), payload `{ contactId?: string }` (IDs only — PII
+  rule). **Keep the payload cheap (m2):** the client consumer refetches *unconditionally*
+  (mirroring `message.persisted`, `useContactTimeline.ts:246-248`), so a precise id is
+  advisory only — do NOT spend an extra `unitsRepo.getById` to chase a landlord rung's
+  contactId that the client ignores. Emit:
+  - tour: at the `armTourReminders` / `cancelTourReminders` call sites in `routes/tours.ts`
+    (create ~L210, reschedule cancel+arm ~L452-453, cancel ~L461) with `tour.tenantId` (in
+    hand). One emit after the cancel+arm pair for reschedule.
+  - nudge: at `armNudgeForStage` / `cancelForPlacement`. The nudge arm hook is currently
+    wired with only `{placementNudgesRepo, logger}` (`api.ts:517-521`) — **thread `events`
+    into it** so it can emit. Use `placement.tenantId` (trivially in hand); don't resolve the
+    landlord id. A hook failure must still never fail the transition (best-effort, as today).
   - SSE route `routes/api.ts` `GET /api/events`: add the `onScheduledUpdated` subscribe/off
     pair. Client `EventStreamProvider` + `EventStreamHandlers`: add `onScheduledUpdated`.
     `useContactTimeline` wires `onScheduledUpdated: scheduleRefetch` (300ms-debounced).
@@ -161,27 +202,36 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
 ## Data / infra
 
 - **No new tables or GSIs.** Part A reuses `byTour`; Part B reuses `byTour` + `byPlacement`
-  + existing tour/placement/unit reads. No schema change → **no Terraform apply required**.
-- The by-contact resolution walks existing indexes (tours by tenant, placements by
-  tenant/landlord-unit). If a contact→tour / contact→placement lookup turns out to need an
-  index that doesn't exist, that becomes a build-time finding (note in the plan); the
-  expectation from research is these lookups already exist for the dashboard's contact page.
+  + existing tour/placement/unit reads. No schema change → **no Terraform apply required.**
+- The by-contact resolution walks **existing, verified index-backed reads** (review
+  confirmed): `toursRepo.listByTenant` (`byTenant` GSI, `toursRepo.ts:117,234`),
+  `unitsRepo.listByLandlord` (`byLandlord` GSI, `unitsRepo.ts:283,476`) →
+  `placementsRepo.listByUnit` (`placementsRepo.ts:221`), `placementsRepo.listByTenant`, and
+  the existing `listByTour` / `listByPlacement`. No scans. `byLandlord` indexes the primary
+  `landlordId`, which is exactly the field nudge routing uses (`unit.landlordId`) — so the
+  gather and the poller agree on the target.
 
 ## Testing
 
-- **Unit (vitest):** `evaluateScheduledSendSuppression` truth table; the tour-reminders
-  endpoint mapping (state derivation, `next`); the timeline gather (upcoming bucket, group
-  routed rungs excluded, suppression populated, cursor pages return empty `upcoming`).
+- **Unit (vitest):** `evaluateScheduledSendSuppression` truth table; the M1 regression test
+  (relay+opted-out error code; human send into manual-mode still succeeds); the tour-reminders
+  endpoint mapping (state derivation, `next`); the timeline gather (upcoming bucket; a
+  non-self_guided tour with an *unusable* group still surfaces as a 1:1 upcoming item, M3;
+  group-routed rungs excluded; landlord nudge surfaces with `conversationId` absent, M4;
+  suppression populated; cursor pages return empty `upcoming`).
 - **e2e (Playwright)** — extend `e2e/scenarios/steps.ts` + specs, using the deterministic
   tick seams:
   - (a) book a tour → contact timeline shows the future reminder item(s) with body + time
-    *before* any tick.
+    *before* any tick (note: the `confirmation` rung is past-`dueAt` pre-tick → renders as
+    "due now / sending shortly", m3).
   - (b) `tickTourReminders(justAfter(rung))` → item transitions to a sent message (live).
   - (c) reschedule → tour Reminders panel shows old rungs canceled + fresh ladder; timeline
     upcoming re-armed; `expectReminderTo1to1('confirmation', tenant, 2)` at the send layer.
   - (d) opt the contact out (`postInboundSms {body:'STOP'}`) → the future item reads
     **suppressed**, and `expectNoOutboxMessageContaining(...)` confirms nothing delivered.
   - Part A: tour detail Reminders panel renders the ladder states.
+  - Placement nudge (tenant): move a placement into `awaiting_receipt` → tenant timeline
+    shows the future nudge → `devPlacementNudgeTick(hoursFromNow(25))` → transitions to sent.
 - Full `npm test` + `npm run e2e` green on latest `main`.
 
 ## Sub-issues to file
@@ -189,8 +239,8 @@ Make scheduled outbound SMS visible *before* it fires, in two places:
 - `scheduled-send-surface-cues` — Today-queue + tour/placement-row next-send chips.
 - `today-next-tour-reminder-from-ladder` — repoint Today's "next tour reminder" at the tour
   ladder; retire the orphaned placement `tour_reminder` deadline type.
-- (Possibly) `scheduled-nudge-preview-before-1to1-exists` — surfacing a nudge whose 1:1 is
-  created-on-demand only at fire time, if v1 skipping proves insufficient.
+- (Perf watch, only if load warrants) denormalize a target-conversation field on the
+  scheduled-send rows at arm time → collapse the Part-B gather to one indexed read (M2).
 
 ## Build sequence
 

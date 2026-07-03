@@ -908,10 +908,16 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * from the URL — only the conversationId is. Returns undefined when the
    * conversation is missing / carries no participant phone (the caller then
    * refuses to bridge). PII: the returned label is a role/name, never a phone.
+   *
+   * `optedOut` carries the freshly-loaded contact's voice_opt_out (company
+   * do-not-call) so the press-1 gate can RE-CHECK it at dial time — the
+   * originate service already refuses pre-dial, but staff can set the flag in
+   * the seconds between originate and press-1
+   * (docs/issues/voice-bridge-dnc-recheck.md).
    */
   async function resolveOutboundTarget(
     conversationId: string,
-  ): Promise<{ targetPhone: string; label: string } | undefined> {
+  ): Promise<{ targetPhone: string; label: string; optedOut: boolean } | undefined> {
     if (conversationId.length === 0) return undefined;
     const conversation = await conversations.getById(conversationId);
     const targetPhone =
@@ -920,7 +926,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         : undefined;
     if (conversation === undefined || targetPhone === undefined) return undefined;
     const contact = await contacts.findByPhone(targetPhone);
-    return { targetPhone, label: maskedCallerLabel(contact) };
+    return {
+      targetPhone,
+      label: maskedCallerLabel(contact),
+      optedOut: contact?.voice_opt_out === true,
+    };
   }
 
   // ---------------------------------------------------------------------
@@ -1065,6 +1075,21 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         log.warn(
           { callSid: parentCallSid, outbound: true },
           'outbound whisper gate: target/business number unresolved — hanging up',
+        );
+        sendTwiml(res, vr);
+        return;
+      }
+      // DNC RE-CHECK at dial time (docs/issues/voice-bridge-dnc-recheck.md):
+      // the originate service refused voice_opt_out pre-dial, but staff can set
+      // the flag in the seconds between originate and this press-1 — the flag
+      // was just re-read from the contact, so honor it and hang up INSTEAD of
+      // dialing. No status regression concerns: the leg simply ends (the status
+      // callback stamps the terminal outcome). IDs-only log — never a phone.
+      if (target.optedOut) {
+        vr.hangup();
+        log.info(
+          { callSid: parentCallSid, outbound: true },
+          'outbound whisper gate: target opted out mid-ring (voice_opt_out) — hanging up, not dialing',
         );
         sendTwiml(res, vr);
         return;

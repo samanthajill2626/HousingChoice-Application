@@ -355,11 +355,18 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   const withDeadline = (
     p: PlacementItem,
     soonest: SoonestDeadline | null,
-  ): PlacementItem => ({
-    ...p,
-    next_deadline_type: soonest?.type,
-    next_deadline_at: soonest?.at,
-  });
+  ): PlacementItem => {
+    // Terminal-stage guard (parity with today.ts): a closed deal has NO live
+    // deadline. A straggler deadline row (a partial clearForPlacement failure, or
+    // a voucher-sync↔terminal-transition race) must NOT surface a chip on the
+    // card/detail — treat a terminal placement as having no deadline.
+    const effective = TERMINAL_STAGES.has(p.stage) ? null : soonest;
+    return {
+      ...p,
+      next_deadline_type: effective?.type,
+      next_deadline_at: effective?.at,
+    };
+  };
 
   /** Emit placement.updated with the recomputed soonest deadline (one query). */
   async function emitPlacementUpdated(placement: PlacementItem): Promise<void> {

@@ -142,6 +142,29 @@ describe('placements API (M1.10b)', () => {
     expect(bareRow.next_deadline_type ?? null).toBeNull();
   });
 
+  it('a TERMINAL placement with a straggler deadline serializes next_deadline_* as null (list + detail)', async () => {
+    // A closed deal that still has a lingering deadline row (reachable via a
+    // partial clearForPlacement failure or a voucher-sync↔terminal-transition
+    // race). The serializer must treat a terminal placement as having NO
+    // deadline — parity with today.ts's read-time TERMINAL_STAGES skip.
+    const terminal = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-term', stage: 'moved_in' });
+    await world.placementDeadlinesRepo.arm(terminal.placementId, 'voucher_expiration', '2026-08-01T00:00:00.000Z');
+
+    // List path (listAllPending → map).
+    const list = await authedGet('/api/placements');
+    expect(list.status).toBe(200);
+    const listRow = (list.body.placements as Array<{ placementId: string; next_deadline_type?: string; next_deadline_at?: string }>)
+      .find((r) => r.placementId === terminal.placementId)!;
+    expect(listRow.next_deadline_type ?? null).toBeNull();
+    expect(listRow.next_deadline_at ?? null).toBeNull();
+
+    // Detail path (listByPlacement).
+    const detail = await authedGet(`/api/placements/${terminal.placementId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.placement.next_deadline_type ?? null).toBeNull();
+    expect(detail.body.placement.next_deadline_at ?? null).toBeNull();
+  });
+
   it('PATCH /api/placements/:placementId clears tour_date with null and emits (stage is NOT writable here)', async () => {
     const c = await world.placementsRepo.create({
       tenantId: 't',

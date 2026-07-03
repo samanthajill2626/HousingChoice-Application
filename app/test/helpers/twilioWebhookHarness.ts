@@ -1996,6 +1996,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
       placementsRepo: world.placementsRepo,
+      // placement-deadline-model: the escalation emit recomputes the soonest
+      // deadline so the pending chip is PRESERVED (not nulled) on attention raise.
+      placementDeadlinesRepo: world.placementDeadlinesRepo,
       // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
       unitsRepo: world.unitsRepo,
       broadcastsRepo: world.broadcastsRepo,

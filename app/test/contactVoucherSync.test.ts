@@ -52,7 +52,14 @@ describe('contact voucher_expiration_date → placement deadline sync', () => {
   });
 
   it('clearing the date (empty string) retires voucher_expiration on active placements', async () => {
-    await world.contactsRepo.create({ contactId: 'tn-2', type: 'tenant', status: 'searching' });
+    // The contact has a stored voucher date on file (so clearing it is a REAL
+    // change that the diff-gated sync acts on), plus the corresponding deadline.
+    await world.contactsRepo.create({
+      contactId: 'tn-2',
+      type: 'tenant',
+      status: 'searching',
+      voucher_expiration_date: '2026-12-01T00:00:00.000Z',
+    });
     const active = await world.placementsRepo.create({ tenantId: 'tn-2', unitId: 'u-c', stage: 'collect_rta' });
     await world.placementDeadlinesRepo.arm(active.placementId, 'voucher_expiration', '2026-12-01T00:00:00.000Z');
 
@@ -80,6 +87,46 @@ describe('contact voucher_expiration_date → placement deadline sync', () => {
     expect(rows[0]!.at).toBe('2026-11-15T00:00:00.000Z');
     // The create response carries the computed soonest next_deadline_*.
     expect(res.body.placement.next_deadline_type).toBe('voucher_expiration');
+  });
+
+  it('re-PATCHing the SAME voucher date is a no-op (no arm/retire, no emit); changing it re-syncs', async () => {
+    await world.contactsRepo.create({ contactId: 'tn-5', type: 'tenant', status: 'searching' });
+    await world.placementsRepo.create({ tenantId: 'tn-5', unitId: 'u-e', stage: 'collect_rta' });
+
+    // Count arm/retire on the SHARED repo (the same object the router holds).
+    let arms = 0;
+    let retires = 0;
+    const origArm = world.placementDeadlinesRepo.arm.bind(world.placementDeadlinesRepo);
+    const origRetire = world.placementDeadlinesRepo.retire.bind(world.placementDeadlinesRepo);
+    world.placementDeadlinesRepo.arm = (placementId, type, at) => {
+      arms += 1;
+      return origArm(placementId, type, at);
+    };
+    world.placementDeadlinesRepo.retire = (placementId, type) => {
+      retires += 1;
+      return origRetire(placementId, type);
+    };
+
+    const placementUpdates = (): number =>
+      world.emitted.filter((e) => e.event === 'placement.updated').length;
+
+    // First set — a REAL change → arms once + emits.
+    expect((await authedPatch('/api/contacts/tn-5', { voucher_expiration_date: '2026-12-01' })).status).toBe(200);
+    expect(arms).toBe(1);
+    const emittedAfterFirst = placementUpdates();
+    expect(emittedAfterFirst).toBeGreaterThan(0);
+
+    // Re-PATCH the SAME date (raw form differs from the stored ISO, but is
+    // canonically equal) — NO arm/retire, NO new placement.updated emit.
+    expect((await authedPatch('/api/contacts/tn-5', { voucher_expiration_date: '2026-12-01' })).status).toBe(200);
+    expect(arms).toBe(1); // unchanged
+    expect(retires).toBe(0);
+    expect(placementUpdates()).toBe(emittedAfterFirst); // no new emit
+
+    // CHANGING it re-syncs (arms again + emits).
+    expect((await authedPatch('/api/contacts/tn-5', { voucher_expiration_date: '2027-01-15' })).status).toBe(200);
+    expect(arms).toBe(2);
+    expect(placementUpdates()).toBeGreaterThan(emittedAfterFirst);
   });
 
   it('rejects a non-date voucher_expiration_date (400) on both create and patch', async () => {

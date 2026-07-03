@@ -1194,6 +1194,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       parsed.changedFields.push('consent_captured_by');
     }
 
+    // Capture the PRIOR stored voucher date BEFORE the write so the voucher
+    // sync below can fire only on a REAL change (see the sync block). Read once,
+    // and only when the PATCH actually touches voucher_expiration_date.
+    const priorVoucherDate =
+      'voucher_expiration_date' in parsed.patch
+        ? (await contacts.getById(contactId))?.voucher_expiration_date
+        : undefined;
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -1214,26 +1222,38 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     if ('voucher_expiration_date' in parsed.patch) {
       const raw = parsed.patch['voucher_expiration_date'];
       const date = typeof raw === 'string' ? raw : undefined; // null → clear
-      try {
-        let exclusiveStartKey: Record<string, unknown> | undefined;
-        do {
-          const page = await placements.listByTenant(contactId, {
-            ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
-          });
-          for (const p of page.items) {
-            if (TERMINAL_STAGES.has(p.stage)) continue; // terminal untouched
-            if (date !== undefined) {
-              await placementDeadlines.arm(p.placementId, 'voucher_expiration', date);
-            } else {
-              await placementDeadlines.retire(p.placementId, 'voucher_expiration');
+      // Only sync on a REAL change: canonicalize the NEW value and the PRIOR
+      // stored one identically (a valid date → its ISO instant; absent/'' → the
+      // cleared sentinel) and compare. A raw-API caller that merely echoes the
+      // same voucher_expiration_date must NOT trigger redundant arm/retire writes
+      // + placement.updated SSE fan-out on every active placement.
+      const canonicalVoucher = (v: unknown): string | undefined =>
+        typeof v === 'string' && v.length > 0 && !Number.isNaN(Date.parse(v))
+          ? new Date(v).toISOString()
+          : undefined;
+      const voucherChanged = canonicalVoucher(raw) !== canonicalVoucher(priorVoucherDate);
+      if (voucherChanged) {
+        try {
+          let exclusiveStartKey: Record<string, unknown> | undefined;
+          do {
+            const page = await placements.listByTenant(contactId, {
+              ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+            });
+            for (const p of page.items) {
+              if (TERMINAL_STAGES.has(p.stage)) continue; // terminal untouched
+              if (date !== undefined) {
+                await placementDeadlines.arm(p.placementId, 'voucher_expiration', date);
+              } else {
+                await placementDeadlines.retire(p.placementId, 'voucher_expiration');
+              }
+              const ds = await placementDeadlines.listByPlacement(p.placementId);
+              events.emit('placement.updated', toPlacementUpdatedEvent(p, soonestDeadline(ds)));
             }
-            const ds = await placementDeadlines.listByPlacement(p.placementId);
-            events.emit('placement.updated', toPlacementUpdatedEvent(p, soonestDeadline(ds)));
-          }
-          exclusiveStartKey = page.lastEvaluatedKey;
-        } while (exclusiveStartKey !== undefined);
-      } catch (err) {
-        log.warn({ err, contactId }, 'voucher deadline sync failed (best-effort)');
+            exclusiveStartKey = page.lastEvaluatedKey;
+          } while (exclusiveStartKey !== undefined);
+        } catch (err) {
+          log.warn({ err, contactId }, 'voucher deadline sync failed (best-effort)');
+        }
       }
     }
 

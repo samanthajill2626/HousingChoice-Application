@@ -297,8 +297,7 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         // Past-due by a few DAYS (not months). Enter the stage the deadline's
         // natural span earlier so next_deadline_at = entry + span, in the past.
         const overdueDays = 1 + (counter % 3); // 1..3 days overdue
-        const spanMs =
-          dt === 'voucher_expiration' ? 21 * DAY_MS : deadlineSpanMs(dt, stage);
+        const spanMs = deadlineSpanMs(dt, stage);
         stageEnteredAt = new Date(now.getTime() - overdueDays * DAY_MS - spanMs);
         nextDeadlineAt = daysAgo(now, overdueDays);
       } else if (dt === 'rta_window') {
@@ -311,10 +310,15 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         stageEnteredAt = new Date(now.getTime() - (1 + (counter % 3)) * DAY_MS);
         nextDeadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2–4 weeks out
       } else {
-        // Recently entered; deadline upcoming = entry + the type's span.
+        // Recently entered; deadline strictly UPCOMING. Measure the type's full
+        // span from NOW (not from stage entry) so the deadline always clears now
+        // regardless of how long we've been in-stage — otherwise a short span
+        // (e.g. follow_up ~2.5d) on an older entry would land in the past yet be
+        // unflagged. Invariant next_deadline_at ≥ stage_entered_at holds since
+        // now ≥ stageEnteredAt and the span is positive.
         const inStageDays = 1 + (counter % 3); // 1..3 days in current stage
         stageEnteredAt = new Date(now.getTime() - inStageDays * DAY_MS);
-        nextDeadlineAt = new Date(stageEnteredAt.getTime() + deadlineSpanMs(dt, stage)).toISOString();
+        nextDeadlineAt = new Date(now.getTime() + deadlineSpanMs(dt, stage)).toISOString();
       }
       const stageEnteredIso = stageEnteredAt.toISOString();
       const createdAt = journeyStart(stageEnteredAt, stage);

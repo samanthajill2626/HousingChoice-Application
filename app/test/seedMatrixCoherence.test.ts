@@ -107,6 +107,22 @@ describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
     }
   });
 
+  it('attention-flagged deadlines are OVERDUE (< now); every non-flagged deadline is UPCOMING (> now)', () => {
+    // Spec §3 intent: only attention-flagged placements land past-due; all
+    // others must be strictly in the future (an unflagged past-due deadline
+    // reads as a bug in the dashboard).
+    const withDeadline = PLACEMENTS.filter((p) => p['next_deadline_at'] !== undefined);
+    expect(withDeadline.length, 'matrix must include deadline-bearing placements').toBeGreaterThanOrEqual(1);
+    for (const p of withDeadline) {
+      const dueMs = ms(p['next_deadline_at']);
+      if (p['attention'] !== undefined) {
+        expect(dueMs, `flagged placement ${p['placementId']} must be overdue (< now)`).toBeLessThan(NOW_MS);
+      } else {
+        expect(dueMs, `unflagged placement ${p['placementId']} must be upcoming (> now)`).toBeGreaterThan(NOW_MS);
+      }
+    }
+  });
+
   it('attention-flagged active placements are genuinely overdue (deadline in the recent past)', () => {
     const flagged = PLACEMENTS.filter((p) => isActive(p) && p['attention'] !== undefined);
     expect(flagged.length, 'matrix must include ≥1 attention-flagged placement').toBeGreaterThanOrEqual(1);

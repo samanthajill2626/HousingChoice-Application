@@ -1086,7 +1086,12 @@ export type TimelineMilestoneType =
   | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
+  | 'tour_canceled'
+  | 'tour_no_show'
+  | 'tour_outcome'
   | 'stage_changed'
+  | 'contact_status_changed'
+  | 'opt_out_changed'
   | 'number_added'
   | 'added_to_group_text'
   | 'removed_from_group_text';

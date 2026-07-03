@@ -105,7 +105,9 @@ function milestoneVariant(type: TimelineMilestoneType): string {
     case 'added_to_group_text':
     case 'removed_from_group_text':
       return styles.purple ?? '';
+    case 'tour_scheduled':
     case 'tour_took_place':
+    case 'tour_outcome':
     case 'placement_closed':
       return styles.green ?? '';
     default:

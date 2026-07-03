@@ -648,6 +648,10 @@ export interface PlacementItem {
   stage_source?: TransitionSource;
   /** Inspection pass/fail recorded on the move OUT of awaiting_inspection. */
   inspection_outcome?: InspectionOutcome;
+  /** Inspection date (YYYY-MM-DD) captured on the move OUT of awaiting_inspection. */
+  inspection_date?: string;
+  /** Determined rent (>0) captured on the move OUT of determine_rent. */
+  rent_determined?: number;
   /** The CURRENT scheduled tour date, YYYY-MM-DD (absent when none scheduled). */
   tour_date?: string;
   /** The next-deadline composite (set/cleared together via the deadline route). */
@@ -666,6 +670,11 @@ export interface PlacementItem {
   lost_reason?: LostReason;
   lease_date?: string;
   move_in_date?: string;
+  /** Complete-paperwork checklist toggles (Approval & Move-in), set via PATCH. */
+  lease_signed?: boolean;
+  /** LIF checklist toggle — conditional on the tenant's lifEligible flag. */
+  lif?: boolean;
+  move_in_details?: boolean;
   /** Free-text placement-level note the operator keeps on the board. */
   notes?: string;
   /** Escalation flag (doc §7.1) — cleared via updatePlacement({ attention: null }). */

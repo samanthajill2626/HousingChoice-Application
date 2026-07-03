@@ -190,6 +190,10 @@ export interface TransitionInput {
   finalRent?: number;
   /** Written only on the move OUT of awaiting_inspection. */
   inspectionOutcome?: InspectionOutcome;
+  /** Inspection date (YYYY-MM-DD), written on the move OUT of awaiting_inspection. */
+  inspectionDate?: string;
+  /** Determined rent (>0), written on the move OUT of determine_rent. */
+  rentDetermined?: number;
 }
 
 /** True when a lost reason is acceptable to the backend: a category OR non-empty
@@ -211,6 +215,8 @@ export function buildTransitionBody(input: TransitionInput): Record<string, unkn
     ...(input.lostReason !== undefined && { lostReason: input.lostReason }),
     ...(input.finalRent !== undefined && { finalRent: input.finalRent }),
     ...(input.inspectionOutcome !== undefined && { inspectionOutcome: input.inspectionOutcome }),
+    ...(input.inspectionDate !== undefined && { inspectionDate: input.inspectionDate }),
+    ...(input.rentDetermined !== undefined && { rentDetermined: input.rentDetermined }),
   };
 }
 

@@ -8,10 +8,11 @@
 import {
   LISTING_STATUS_LABELS,
   TENANT_STATUS_LABELS,
+  type LandlordStatus,
   type ListingStatus,
   type TenantStatus,
 } from '../api/index.js';
-import { humanize } from '../routes/contact/format.js';
+import { contactStatusLabel, humanize } from '../routes/contact/format.js';
 import styles from './StatusBadge.module.css';
 
 export type BadgeTone = 'neutral' | 'positive' | 'progress' | 'muted' | 'warn';
@@ -25,6 +26,16 @@ const TENANT_TONE: Record<TenantStatus, BadgeTone> = {
   placed: 'positive',
   on_hold: 'muted',
   inactive: 'muted',
+};
+
+/** landlord lead status → tone. `needs_review` is the triage front door (warn);
+ *  a pursued lead is `interested` (progress); an onboarded landlord is `active`
+ *  (positive); a declined/dead lead is `parked` (muted). */
+const LANDLORD_TONE: Record<LandlordStatus, BadgeTone> = {
+  needs_review: 'warn',
+  interested: 'progress',
+  active: 'positive',
+  parked: 'muted',
 };
 
 /** property status → tone (colour family). `available` is the publicly-shareable
@@ -71,5 +82,31 @@ function toneFor(kind: 'tenant' | 'listing', status: string): BadgeTone {
 export function StatusBadge({ kind, status }: StatusBadgeProps): React.JSX.Element {
   const label = labelFor(kind, status);
   const tone = toneFor(kind, status);
+  return <span className={`${styles.badge} ${TONE_CLASS[tone]}`}>{label}</span>;
+}
+
+/** Resolve a CONTACT's status tone across every audience the contact page shows:
+ *  tenant + landlord get their own lifecycle maps; every other type (unknown / pm /
+ *  team_member) carries the coarse needs_review|active pair, where only the triage
+ *  front door (`needs_review`) warns. Off-list values fall back to neutral. This is
+ *  the single source of truth for "does this status want attention?" (tone === 'warn'). */
+export function contactStatusTone(type: string | undefined, status: string): BadgeTone {
+  if (type === 'tenant') return TENANT_TONE[status as TenantStatus] ?? 'neutral';
+  if (type === 'landlord') return LANDLORD_TONE[status as LandlordStatus] ?? 'neutral';
+  return status === 'needs_review' ? 'warn' : 'neutral';
+}
+
+/** A status pill for a CONTACT (any type) — mirrors {@link StatusBadge} but resolves
+ *  its label + tone from the contact's `type`, so it reads correctly for tenants,
+ *  landlords, and untriaged contacts alike. Used for the prominent header badge. */
+export function ContactStatusBadge({
+  type,
+  status,
+}: {
+  type: string | undefined;
+  status: string;
+}): React.JSX.Element {
+  const label = contactStatusLabel(type, status);
+  const tone = contactStatusTone(type, status);
   return <span className={`${styles.badge} ${TONE_CLASS[tone]}`}>{label}</span>;
 }

@@ -17,7 +17,7 @@ import {
   type ListingSendRow,
   type ListingResponse,
 } from '../../api/index.js';
-import { StatusBadge } from '../../ui/index.js';
+import { StatusBadge, contactStatusTone } from '../../ui/index.js';
 import {
   Card,
   CardAction,
@@ -34,7 +34,7 @@ import { GroupTextsCard } from './GroupTextsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
-import { formatAddress, formatPhone } from './format.js';
+import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
 
 export interface TenantFileProps {
   contact: Contact;
@@ -143,7 +143,18 @@ export function TenantFile({
           k="Status"
           v={
             <>
-              {contact.status ? <StatusBadge kind="tenant" status={contact.status} /> : '—'}
+              {contact.status ? (
+                // The status is already the prominent header badge, so here it reads
+                // as plain text — EXCEPT when it wants attention (warn tone, e.g.
+                // "Needs review"), where the pill still earns its colour.
+                contactStatusTone(contact.type, contact.status) === 'warn' ? (
+                  <StatusBadge kind="tenant" status={contact.status} />
+                ) : (
+                  contactStatusLabel(contact.type, contact.status)
+                )
+              ) : (
+                '—'
+              )}
               {contact.porting === true ? (
                 <span className={responseClass.muted}> · Porting</span>
               ) : null}
@@ -199,16 +210,9 @@ export function TenantFile({
         title="Tours"
         aside={
           onScheduleTour ? (
-            <>
-              {tours.length > 0 ? (
-                <span className={responseClass.muted}>{tours.length} · </span>
-              ) : null}
-              <CardAction onClick={onScheduleTour} label="Schedule a tour">
-                + Schedule
-              </CardAction>
-            </>
-          ) : tours.length > 0 ? (
-            String(tours.length)
+            <CardAction onClick={onScheduleTour} label="Schedule a tour">
+              + Schedule
+            </CardAction>
           ) : undefined
         }
       >
@@ -234,16 +238,9 @@ export function TenantFile({
         title="Placements"
         aside={
           onStartPlacement ? (
-            <>
-              {myPlacements.length > 0 ? (
-                <span className={responseClass.muted}>{myPlacements.length} · </span>
-              ) : null}
-              <CardAction onClick={onStartPlacement} label="Start a placement">
-                + Start placement
-              </CardAction>
-            </>
-          ) : myPlacements.length > 0 ? (
-            String(myPlacements.length)
+            <CardAction onClick={onStartPlacement} label="Start a placement">
+              + Start placement
+            </CardAction>
           ) : undefined
         }
       >

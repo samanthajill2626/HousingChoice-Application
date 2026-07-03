@@ -10,6 +10,8 @@
   right: 0;
   z-index: 30;
   min-width: 15rem;
+  /* Never let the 15rem popover spill past the viewport on a phone. */
+  max-width: calc(100vw - 2 * var(--sp-4));
   display: flex;
   flex-direction: column;
   padding: var(--sp-1);
@@ -17,6 +19,17 @@
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
+}
+
+/* Below 860 the ContactDetail header drops its actions to a full-width row that
+ * starts at the LEFT edge, so the trigger sits near the left — anchoring the
+ * popover to the right there runs it off the left side of the screen. Flip it to
+ * open left-aligned (rightward) so it stays fully on-screen. */
+@media (max-width: 860px) {
+  .menu {
+    left: 0;
+    right: auto;
+  }
 }
 
 .row {

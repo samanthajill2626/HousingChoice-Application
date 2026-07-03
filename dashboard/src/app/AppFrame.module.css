@@ -316,19 +316,16 @@
   height: 100%;
 }
 
+/* The top bar is MOBILE-ONLY chrome (hamburger + brand). On desktop the sidebar
+ * carries the brand + account, so the bar is hidden here and re-shown flex in the
+ * <768px media query — reclaiming the full top strip for content on desktop. */
 .topbar {
-  display: flex;
+  display: none;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--c-border);
   background: var(--c-surface);
-}
-
-/* Account menu pushed to the right edge; on desktop the hamburger + brand are
- * hidden (display:none below), so this keeps the menu right-aligned as before. */
-.topbarRight {
-  margin-left: auto;
 }
 
 /* Hamburger + brand: mobile-only (shown in the <768px media query). */
@@ -424,46 +421,97 @@
   flex: 1;
 }
 
-/* --- Account menu -------------------------------------------------------- */
+/* --- Account menu (pinned to the BOTTOM of the nav) ---------------------- */
+/* margin-top:auto floats the account to the bottom of the flex .nav, below the
+ * Settings footer, on both the desktop sidebar and the mobile drawer. */
+.accountFooter {
+  margin-top: auto;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--c-nav-border);
+}
+
 .account {
   position: relative;
 }
 
 .accountTrigger {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: var(--sp-2);
+  width: 100%;
   background: transparent;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-pill);
-  padding: var(--sp-1) var(--sp-3);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--sp-2);
   font-size: var(--fs-sm);
-  color: var(--c-text);
+  color: var(--c-nav-text);
+  text-align: left;
   cursor: pointer;
-  max-width: 220px;
 }
 
 .accountTrigger:hover {
-  background: var(--c-surface-2);
+  background: var(--c-nav-hover-bg);
+  color: var(--c-nav-active-text);
+}
+
+.accountTrigger:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Monogram chip — the sole visible glyph in the collapsed rail. */
+.accountAvatar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--c-nav-active-bg);
+  color: var(--c-nav-active-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
 }
 
 .accountEmail {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Opens UPWARD from the bottom-pinned trigger, spanning the trigger width. It
+ * stays within the sidebar/drawer box, so their overflow:auto doesn't clip it. */
 .popover {
   position: absolute;
-  top: calc(100% + var(--sp-2));
+  bottom: calc(100% + var(--sp-2));
+  left: 0;
   right: 0;
-  min-width: 220px;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
   padding: var(--sp-3);
   z-index: 20;
+}
+
+/* Collapsed rail: only the monogram shows; clicking flies the popover out to the
+ * right (bottom-aligned), escaping the rail via its overflow:visible. */
+.sidebar.collapsed .accountTrigger {
+  justify-content: center;
+}
+
+.sidebar.collapsed .accountEmail {
+  display: none;
+}
+
+.sidebar.collapsed .popover {
+  left: calc(100% + var(--sp-2));
+  right: auto;
+  bottom: 0;
+  min-width: 220px;
 }
 
 .identity {
@@ -523,6 +571,9 @@
 @media (max-width: 767.98px) {
   .sidebar {
     display: none;
+  }
+  .topbar {
+    display: flex;
   }
   .hamburger {
     display: inline-flex;

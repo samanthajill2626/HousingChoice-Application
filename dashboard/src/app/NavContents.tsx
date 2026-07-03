@@ -66,8 +66,13 @@ function NavLeafLink({
 
 export function NavContents({
   onNavigate,
+  account,
 }: {
   onNavigate?: () => void;
+  /** Optional account control, pinned to the BOTTOM of the nav (below Settings).
+   *  Shared by the desktop sidebar and the mobile drawer so the account lives in
+   *  one place on both surfaces. */
+  account?: React.ReactNode;
 }): React.JSX.Element {
   return (
     <div className={styles.nav}>
@@ -103,6 +108,7 @@ export function NavContents({
       <nav className={styles.footer} aria-label="Settings">
         <NavLeafLink item={NAV_FOOTER} {...(onNavigate && { onNavigate })} />
       </nav>
+      {account ? <div className={styles.accountFooter}>{account}</div> : null}
     </div>
   );
 }

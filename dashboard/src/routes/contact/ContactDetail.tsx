@@ -223,10 +223,13 @@ export function ContactDetail(): React.JSX.Element {
   // the SSE message.persisted refetch brings back BOTH the resent message and the
   // lineage that hides the stale failed bubble. The provider SID is the suffix of
   // tsMsgId (`<provider_ts>#<sid>`); without it there's nothing to retry.
-  const onRetry = (msg: TimelineMessage): void => {
+  // Returns the promise so the Timeline can surface a refusal (429
+  // rate_limited — the retry shares the manual-send budget — opt-out, …) in
+  // its composer error slot rather than swallowing it.
+  const onRetry = async (msg: TimelineMessage): Promise<void> => {
     const sid = messageSid(msg);
     if (sid.length === 0) return;
-    void retryMessage(msg.conversationId, sid);
+    await retryMessage(msg.conversationId, sid);
   };
 
   // Header ⋯ menu + UnknownFile triage. Each endpoint RETURNS the updated contact,

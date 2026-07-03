@@ -323,6 +323,23 @@ describe('Timeline', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it('surfaces a rate-limited RETRY in the composer error slot (retry shares the manual-send budget)', async () => {
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'This one failed',
+    };
+    const onRetry = vi.fn().mockRejectedValue(new ApiError(429, 'rate_limited', 'rate_limited'));
+    renderTimeline({ items: [failed], onRetry });
+    fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
+    // The rejection is NOT swallowed — it lands in the same error slot as a send.
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Sending too fast — wait a moment and try again.');
+  });
+
   it('hides a failed message that a delivered retry superseded (retry_of), keeping only the retry', () => {
     const failed: TimelineItem = {
       ...MESSAGE_OUT,

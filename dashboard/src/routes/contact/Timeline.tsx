@@ -80,8 +80,10 @@ export interface TimelineProps {
   /** Called with the textarea body when the operator sends. Returns a promise so
    *  the reply box can show an in-flight state and restore the draft on failure. */
   onSend?: (body: string) => Promise<void>;
-  /** Retry a failed outbound message — resends its body to its own conversation. */
-  onRetry?: (msg: TimelineMessage) => void;
+  /** Retry a failed outbound message — resends its body to its own conversation.
+   *  May return the send promise: a rejection (e.g. 429 rate_limited — the retry
+   *  shares the manual-send budget) is surfaced in the composer's error slot. */
+  onRetry?: (msg: TimelineMessage) => void | Promise<void>;
   /** Contact is on the Do-Not-Contact list (sms_opt_out) — show a standing note
    *  at the composer so it's clear BEFORE sending (the send is refused too). */
   optedOut?: boolean;
@@ -403,6 +405,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return out;
   }, [visible]);
 
+  // A retry IS a send — surface its failure (429 rate_limited, opt-out, …) in
+  // the SAME composer error slot handleSend uses, instead of swallowing the
+  // rejection (the bug: retry shares the manual-send budget, so hammering Retry
+  // rate-limits with zero feedback). The wrapper keeps the bubble-level
+  // onRetry contract void — rejections land in sendError.
+  const onRetrySurfaced = onRetry
+    ? (msg: TimelineMessage): void => {
+        setSendError(null);
+        void Promise.resolve(onRetry(msg)).catch((err: unknown) => {
+          setSendError(sendFailureMessage(err));
+        });
+      }
+    : undefined;
+
   const handleSend = async (): Promise<void> => {
     const original = draft;
     const text = draft.trim();
@@ -487,7 +503,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               <div key={`cluster-${ci}`} className={styles.day}>
                 {cluster.label ? <div className={styles.divider}>{cluster.label}</div> : null}
                 {cluster.items.map((item, ii) => (
-                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} onRetry={onRetry} />
+                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} onRetry={onRetrySurfaced} />
                 ))}
               </div>
             ))

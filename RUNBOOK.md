@@ -439,6 +439,27 @@ loop — exercising handlers locally is what the test suite's `InMemoryScheduler
 is for. To consume REAL dev-queue messages from a local worker, set `JOBS_QUEUE_URL` in `.env`
 (live mode) — note it then competes with the deployed dev worker for messages.
 
+#### Worker clock polls (durable-row ladders)
+
+Separate from the SQS job path, the worker runs 60-second `setInterval` polls over durable
+DynamoDB rows — state survives restarts because it lives in the table, never in process:
+
+- **Tour reminders** (`tourReminders` table, `jobs/tourReminders.ts`): the tour-reminder ladder
+  (confirmation / day-before / morning-of / en-route / no-show check-in). Armed at booking,
+  re-armed on reschedule, canceled on cancel/close. Group-routed for landlord-led/PM tours.
+- **Placement nudges** (`placementNudges` table, `jobs/placementNudges.ts`): the Post-Tour &
+  Application ladder — one stage-keyed chase per awaiting stage (tenant: application received /
+  completed; landlord: approval check at +24h, RTA 48h-window-closing at +36h). Armed/canceled by
+  the status-transition choke point on every stage move; always the party's 1:1 thread, never the
+  group. The RTA hard clock itself (`rta_window`, +48h) is a placement `next_deadline`, visible on
+  the Today board.
+
+Both polls use claim-before-send (a row is atomically stamped `sentAt` before the outbound send),
+so a double-started worker cannot double-text. Deterministic e2e/dev seams (hermetic-LOCAL-only):
+`POST /__dev/tour-reminders/tick { now? }` and `POST /__dev/placement-nudges/tick { now? }`.
+If a ladder seems dead in a deployed env: check the worker service is running (one process runs
+both polls), then look for `… poll error` lines in the worker logs.
+
 ### What the health-check gate does
 
 Every deploy (build, `--tag`, `--promote`) runs this gate **on the instance** before declaring success:

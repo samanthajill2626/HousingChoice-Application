@@ -99,6 +99,34 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
     expect(updated.updated_at).not.toBe(before);
   });
 
+  it('round-trips the approval/move-in fields (inspection_date, rent_determined, checklist)', async () => {
+    const created = await placements.create({ tenantId: 't1', unitId: 'u1', stage: 'schedule_inspection' });
+    const updated = await placements.update(created.placementId, {
+      inspection_date: '2026-07-20',
+      rent_determined: 1850,
+      lease_signed: true,
+      lif: false,
+      move_in_details: true,
+    });
+    expect(updated.inspection_date).toBe('2026-07-20');
+    expect(updated.rent_determined).toBe(1850);
+    expect(updated.lease_signed).toBe(true);
+    expect(updated.lif).toBe(false);
+    expect(updated.move_in_details).toBe(true);
+
+    // Type-level contract: the five are FIRST-CLASS typed on PlacementItem, not
+    // the `[key: string]: unknown` fallthrough. These concrete assignments fail
+    // `tsc` (unknown → string/number/boolean) until the fields are declared —
+    // the actual RED gate for this types-only task (the values themselves
+    // already round-trip via the repo's generic passthrough).
+    const _inspection: string | undefined = updated.inspection_date;
+    const _rent: number | undefined = updated.rent_determined;
+    const _leaseSigned: boolean | undefined = updated.lease_signed;
+    const _lif: boolean | undefined = updated.lif;
+    const _moveInDetails: boolean | undefined = updated.move_in_details;
+    expect([_inspection, _rent, _leaseSigned, _lif, _moveInDetails]).toHaveLength(5);
+  });
+
   it('update throws ConditionalCheckFailedException for an unknown placement', async () => {
     await expect(placements.update('placement-ghost', { stage: 'lost' })).rejects.toBeInstanceOf(
       ConditionalCheckFailedException,

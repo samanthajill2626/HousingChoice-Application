@@ -8,7 +8,7 @@
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
 // first (roles/labels) so it's testable.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   TimelineCall,
@@ -16,9 +16,11 @@ import type {
   TimelineMessage,
   TimelineMilestone,
   TimelineMilestoneType,
+  TimelineScheduled,
 } from '../../api/index.js';
 import { ApiError } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
+import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
 import { deliveryReason, presentDeliveryStatus } from './deliveryStatus.js';
 import { messageMediaSrc, messageSid } from './media.js';
@@ -60,6 +62,10 @@ export type TimelineStatus = 'loading' | 'ready' | 'error';
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
+  /** Not-yet-sent scheduled messages — rendered in a pinned "Upcoming" section
+   *  between the stream and the composer (shown only when non-empty). Never part
+   *  of `items`. */
+  upcoming?: TimelineScheduled[];
   /** Which path produced items — drives an honest "(assembled)" note when the
    *  server timeline (with milestones) isn't live yet. */
   source: 'server' | 'fallback';
@@ -87,6 +93,12 @@ export interface TimelineProps {
   /** Contact is on the Do-Not-Contact list (sms_opt_out) — show a standing note
    *  at the composer so it's clear BEFORE sending (the send is refused too). */
   optedOut?: boolean;
+  /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
+   *  consent modal records consent, then retries the send out-of-band of the
+   *  composer). The composer restored its draft on the 409 refusal, so it must
+   *  re-clear it on that success — a plain send clears optimistically; this one
+   *  can't, because its success happens outside handleSend. */
+  clearDraftSignal?: number;
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
@@ -324,7 +336,7 @@ function StreamItem({
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
       return <MessageBubble msg={item} onRetry={onRetry} />;
@@ -332,6 +344,10 @@ function StreamItem({
       return <CallCard call={item} />;
     case 'milestone':
       return <MilestonePin ms={item} />;
+    case 'scheduled':
+      // The main stream never carries scheduled rows (they live in the pinned
+      // `upcoming` section). This case only satisfies TS union exhaustiveness.
+      return null;
   }
 }
 
@@ -339,6 +355,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const {
     status,
     items,
+    upcoming,
     source,
     replyToPhone,
     replyToLabel,
@@ -349,11 +366,21 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onSend,
     onRetry,
     optedOut,
+    clearDraftSignal,
   } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // A deferred send (post-consent retry) landed: clear the draft the 409 refusal
+  // restored, matching a normal successful send. Guarded so the initial 0 is inert.
+  useEffect(() => {
+    if (clearDraftSignal) {
+      setDraft('');
+      setSendError(null);
+    }
+  }, [clearDraftSignal]);
   // The reply box starts one line and grows to fit the draft (up to its CSS
   // max-height); a manual drag-resize overrides that until the draft clears.
   const replyRef = useAutoGrowTextarea(draft);
@@ -511,6 +538,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             ))
           : null}
       </div>
+
+      {upcoming && upcoming.length > 0 ? (
+        <section className={styles.upcoming} aria-label="Upcoming scheduled messages">
+          <header className={styles.upcomingHead}>Upcoming ({upcoming.length})</header>
+          <div className={styles.upcomingList}>
+            {upcoming.map((sched) => (
+              <ScheduledCard key={sched.id} item={sched} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className={styles.reply}>
         {optedOut ? (

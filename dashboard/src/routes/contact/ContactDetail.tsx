@@ -94,6 +94,9 @@ export function ContactDetail(): React.JSX.Element {
   const [pendingConsentSend, setPendingConsentSend] = useState<
     { conversationId: string; body: string; replyToPhone?: string } | null
   >(null);
+  // Bumped by deferredSend when an out-of-band send (the post-consent retry) lands,
+  // so the Timeline composer clears the draft it restored on the 409 refusal.
+  const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The current navigator's voice self-view — gates the masked-call control on
@@ -190,6 +193,19 @@ export function ContactDetail(): React.JSX.Element {
         throw err;
       });
   };
+  // A DEFERRED send — one that runs OUTSIDE the composer's own optimistic-send flow.
+  // Today that's the just-in-time consent retry (after the user records consent in the
+  // modal), but ANY out-of-band/retry send should route through here. The composer
+  // RESTORED its draft when the original send was refused (409), so on success we clear
+  // it — matching what a normal send does. A rejected send propagates (caller decides);
+  // the draft is left intact so the message isn't lost.
+  //   NB: the NORMAL path (onSend, via the composer's handleSend) clears the draft
+  //   SYNCHRONOUSLY before its POST and must NOT go through here — re-clearing after the
+  //   POST resolves would wipe a message typed while it was in flight.
+  const deferredSend = (conversationId: string, body: string, toPhone?: string): Promise<void> =>
+    postSend(conversationId, body, toPhone).then(() => {
+      setClearDraftSignal((n) => n + 1);
+    });
   const onSend = async (body: string): Promise<void> => {
     // No thread yet (a brand-new contact who has never messaged us): create-or-get
     // the primary number's 1:1 conversation first, THEN send into it. Idempotent —
@@ -399,6 +415,7 @@ export function ContactDetail(): React.JSX.Element {
           <Timeline
             status={timeline.status}
             items={timeline.items}
+            upcoming={timeline.upcoming}
             source={timeline.source}
             {...(replyToPhone !== undefined && { replyToPhone })}
             replyToLabel={defaultPhoneLabel(phones)}
@@ -409,6 +426,7 @@ export function ContactDetail(): React.JSX.Element {
             onSend={onSend}
             onRetry={onRetry}
             optedOut={optedOut}
+            clearDraftSignal={clearDraftSignal}
           />
         </div>
         <div
@@ -550,7 +568,12 @@ export function ContactDetail(): React.JSX.Element {
             setContact(updated);
             setPendingConsentSend(null);
             if (retry !== null) {
-              void postSend(retry.conversationId, retry.body, retry.replyToPhone);
+              // Out-of-band of the composer: deferredSend clears the restored draft on
+              // success; a fresh refusal leaves it (message preserved). The no-op catch
+              // avoids an unhandled rejection.
+              void deferredSend(retry.conversationId, retry.body, retry.replyToPhone).catch(
+                () => {},
+              );
             }
           }}
         />

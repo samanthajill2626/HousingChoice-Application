@@ -132,6 +132,10 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   await flow.expectOutboxMessageContaining(owner, APPROVAL_NUDGE);
 
   // --- RTA block -----------------------------------------------------------
+  // KNOWN COLLAPSE (docs/issues/rta-documents-mms-unmodeled.md): the diagram's
+  // `T->>A: RTA documents (photos or files, MMS)` inbound is not modeled — the
+  // collect→review moves are bare stage transitions with no documents. The MMS
+  // build path exists (see the tours ID gate); modeled in a later wave.
   await flow.teamMovesPlacementTo('Collect RTA');
   await flow.teamMovesPlacementTo('Review RTA');
   await flow.teamMovesPlacementTo('Send RTA to landlord');

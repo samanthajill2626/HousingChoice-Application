@@ -813,6 +813,15 @@ export interface MessagePersistedEvent {
   deliveryStatus: DeliveryStatus;
 }
 
+/** GET /api/events 'scheduled.updated' payload (scheduled-message-visibility Task 6).
+ *  A tour-reminder or placement-nudge ladder was armed/rescheduled/canceled — the
+ *  contact timeline's pinned "Upcoming" section refetches so future sends
+ *  appear/disappear live. ID-only, advisory payload (`contactId` may be absent);
+ *  the timeline refetches unconditionally. NO PII. */
+export interface ScheduledUpdatedEvent {
+  contactId?: string;
+}
+
 // --- Contact creation / vocabulary (extensible create flow) ------------------
 
 /** A relationship link on a contact (e.g. spouse, employer, property manager). */

@@ -261,6 +261,9 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   useEventStream({
     onMessagePersisted: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
+    // A tour-reminder / placement-nudge ladder was armed/rescheduled/canceled —
+    // refetch so the pinned "Upcoming" section updates live (Task 6).
+    onScheduledUpdated: scheduleRefetch,
   });
 
   // Merge server items with optimistic sends, dropping any optimistic bubble the

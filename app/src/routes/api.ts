@@ -25,6 +25,7 @@ import {
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
+  type ScheduledUpdatedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -379,6 +380,17 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
+      // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
+      // timeline can project pending tour reminders + placement nudges. Forwarded
+      // CONDITIONALLY (mirroring the pattern used across this file) and never
+      // default-constructed here — a live DynamoDB default would break the
+      // in-memory unit tests; the router gates the gather off unless all five are
+      // present. buildApp already threads all five into deps.
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      ...(deps.placementNudgesRepo !== undefined && { placementNudgesRepo: deps.placementNudgesRepo }),
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       config,
     }),
   );
@@ -533,6 +545,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       armStageNudge: (placement, toStage, nowIso) =>
         armNudgeForStage(placement, toStage, nowIso, {
           placementNudgesRepo: placementNudges,
+          // Task 6: best-effort scheduled.updated so the timeline's "Upcoming"
+          // section refetches live when a nudge is armed/canceled on a stage move.
+          events,
           ...(deps.logger !== undefined && { logger: deps.logger }),
         }),
       closeRelayForLostPlacement: relayLifecycle.closeForLost,
@@ -1134,10 +1149,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onPlacementUpdated = (payload: PlacementUpdatedEvent): void => {
       writeEvent('placement.updated', payload);
     };
+    const onScheduledUpdated = (payload: ScheduledUpdatedEvent): void => {
+      writeEvent('scheduled.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
     events.on('placement.updated', onPlacementUpdated);
+    events.on('scheduled.updated', onScheduledUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -1159,6 +1178,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('message.persisted', onMessagePersisted);
       events.off('broadcast.updated', onBroadcastUpdated);
       events.off('placement.updated', onPlacementUpdated);
+      events.off('scheduled.updated', onScheduledUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

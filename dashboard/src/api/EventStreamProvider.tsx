@@ -27,6 +27,7 @@ import type {
   ConversationUpdatedEvent,
   MessagePersistedEvent,
   BroadcastUpdatedEvent,
+  ScheduledUpdatedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
@@ -35,6 +36,9 @@ export interface EventStreamHandlers {
   onPlacementUpdated?: (event: PlacementUpdatedEvent) => void;
   /** A message was persisted — the contact timeline refetches to show it live. */
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
+  /** A scheduled ladder (tour reminder / placement nudge) was armed/rescheduled/
+   *  canceled — the contact timeline refetches its pinned "Upcoming" section. */
+  onScheduledUpdated?: (event: ScheduledUpdatedEvent) => void;
   /** A broadcast changed — the Results view overlays status+stats live (then
    *  refetches for the per-recipient detail the payload omits). */
   onBroadcastUpdated?: (event: BroadcastUpdatedEvent) => void;
@@ -139,6 +143,11 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
       source.addEventListener('broadcast.updated', (ev) => {
         const data = parse<BroadcastUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onBroadcastUpdated, data);
+      });
+
+      source.addEventListener('scheduled.updated', (ev) => {
+        const data = parse<ScheduledUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onScheduledUpdated, data);
       });
 
       source.addEventListener('error', () => {

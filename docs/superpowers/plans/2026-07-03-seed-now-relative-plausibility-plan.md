@@ -27,57 +27,44 @@ truth). Grounding: `.superpowers/sdd/seed-plausibility-findings.md` (every viola
 
 ---
 
-## Task 1: Now-relative helper foundation + thread `now` through `matrixItems`
+## Task 1: Now-relative threading + coherent PLACEMENTS (deadlines, dates, attention, moved_in)
 
 **Files:** `app/src/lib/seed/matrix.ts` (add now-relative date helpers; change `matrixItems()` →
-`matrixItems(now: Date)`), `app/src/lib/seed/index.ts` (pass `new Date()` / the seed clock to
-`matrixItems` in the full branch — mirror how `seedLive(endpoint, now)` is called). Tests: new
-`app/test/seedMatrixCoherence.test.ts` scaffold + a determinism test.
+`matrixItems(now: Date)`; rewrite `buildPlacementsMatrix` + the deadline/attention/date helpers),
+`app/src/lib/seed/index.ts` (pass the seed clock to `matrixItems` in the full branch — mirror how
+`seedLive(endpoint, now)` is called). Tests: new `app/test/seedMatrixCoherence.test.ts`.
 
-Read findings §"Key dates" + §Interaction; `live.ts` (how it takes/uses `now`); `index.ts`
-`seedAll` (the full-profile assembly + `seedLive` call). Build a small deterministic date toolkit
-on `now`: `daysAgo(now, d)`, `daysFromNow(now, d)`, `hoursFromNow`, and a
-`journeyStart(now, stage)` that subtracts `Σ STAGE_STUCK_THRESHOLDS(prior stages)`. Replace the
-`pastDate`/`DEADLINE_DATES` module constants' *usage* incrementally (Tasks 2–3 consume the toolkit;
-this task just introduces it, threads `now`, and keeps existing output compiling). **After this
-task the seed must still build and seed without error** (typecheck + a scripted `seedAll(_,'full')`
-against DynamoDB Local); determinism test: `matrixItems(fixedNow)` deep-equals a second call.
-
-Verify: typecheck; `npm test -w app` green; scripted full seed OK.
-
----
-
-## Task 2: Coherent now-relative PLACEMENTS (deadlines, dates, attention, moved_in)
-
-**Files:** `app/src/lib/seed/matrix.ts` (`buildPlacementsMatrix` + the deadline/attention/date
-helpers); tests in `app/test/seedMatrixCoherence.test.ts`.
-
-Read findings §A (all) + the deadline-type-by-phase table + §"Correct-by-construction rules".
-Implement per spec §3:
-- Phase→valid-deadline-type mapping (a `Record<PlacementPhase, DeadlineType[]>` derived so a new
-  phase is a typecheck concern); pick a deterministic type per placement from its phase's set;
-  **drop `tour_reminder` entirely from placement selection.**
-- `stage_entered_at = now − daysInStage(stage)`; `created_at = journeyStart(now, stage)`;
-  deadline date per type (rta_window +48h, stuck +threshold, follow_up +~2-3d, voucher future);
+Read findings §"Key dates", §A (all), the deadline-type-by-phase table, §"Correct-by-construction
+rules", §Interaction; `live.ts` (how it takes/uses `now`); `index.ts` `seedAll` (full-profile
+assembly + `seedLive` call). Build a small deterministic date toolkit on `now` (`daysAgo`,
+`daysFromNow`, `hoursFromNow`, `journeyStart(now, stage)` = subtract `Σ STAGE_STUCK_THRESHOLDS(prior
+stages)`) and **consume it immediately** in the placements rewrite (no unused helpers). Then per
+spec §3:
+- Phase→valid-deadline-type mapping (`Record<PlacementPhase, DeadlineType[]>` so a new phase is a
+  typecheck concern); pick a deterministic type per placement from its phase's set; **drop
+  `tour_reminder` entirely from placement selection.**
+- `stage_entered_at = now − daysInStage(stage)`; `created_at = journeyStart(now, stage)`; deadline
+  date per type (rta_window +48h, stuck +threshold, follow_up +~2-3d, voucher future);
   attention-flagged placements → deadline a few days PAST now (overdue); others upcoming.
-- Phase-scoped attention reasons.
-- moved_in / lost: coherent recent-past dates with correct ordering (incl. the linked tenant's
-  `move_in_date`/`consent_at`).
-- Keep `deriveStatuses` statuses + rent/voucher fields as-is.
+- Phase-scoped attention reasons; moved_in/lost coherent recent-past ordering (incl. the linked
+  tenant's `move_in_date`/`consent_at`). Keep `deriveStatuses` statuses + rent/voucher fields as-is.
+- Leave `buildToursMatrix` using its existing `pastDate` for now (Task 2 rewrites it) — the seed
+  must still build/seed without error after this task.
 
-**Tests (the point):** every matrix placement satisfies the coherence invariants (deadline type ∈
-phase set, never tour_reminder; `next_deadline_at ≥ stage_entered_at`; `created_at ≤
-stage_entered_at`, strict for non-first stage; moved_in ordering; attention reason ∈ phase set);
-every stage still ×2; each phase-valid deadline type still appears. Assert the specific
-previously-broken cases now pass (a `collect_rta` placement has an RTA-valid, correctly-dated
-deadline; no placement anywhere has `tour_reminder`).
+**Tests (the point):** determinism (`matrixItems(fixedNow)` deep-equals a second call); every
+matrix placement satisfies the coherence invariants (deadline type ∈ phase set, never
+tour_reminder; `next_deadline_at ≥ stage_entered_at`; `created_at ≤ stage_entered_at`, strict for
+non-first stage; moved_in ordering; attention reason ∈ phase set); every stage still ×2; each
+phase-valid deadline type still appears; assert the previously-broken cases now pass (a
+`collect_rta` placement has an RTA-valid, correctly-dated deadline; NO placement has
+`tour_reminder`).
 
-Verify: typecheck; app suite; scripted full seed → read a `collect_rta` placement back and confirm
-a sane deadline.
+Verify: typecheck; `npm test -w app`; scripted `seedAll(_,'full')` against DynamoDB Local → read a
+`collect_rta` placement back and confirm a sane deadline.
 
 ---
 
-## Task 3: Coherent now-relative TOURS + reminders; history coherence check; full gates
+## Task 2: Coherent now-relative TOURS + reminders; history coherence check; full gates
 
 **Files:** `app/src/lib/seed/matrix.ts` (`buildToursMatrix`); tests in the coherence test file.
 Read findings §B (all) + spec §4–5; `toursModel.ts` (convertible semantics); `tourReminders.ts`
@@ -108,7 +95,7 @@ timeline are now-relative and consistent with the placement's now-relative `stag
 
 ---
 
-## Task 4: Final review + orchestrator UI verification
+## Task 3: Final review + orchestrator UI verification
 
 Whole-branch adversarial review (coherence invariants hold; lean/live untouched; determinism; no
 `tour_reminder` on placements; no live-fire reminders; coverage retained). Fix loop for

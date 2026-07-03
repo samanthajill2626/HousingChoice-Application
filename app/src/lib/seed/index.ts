@@ -112,12 +112,16 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
     tables[base] = [...items];
   }
 
+  // One seed clock shared by the now-relative generators (matrix + live) so the
+  // whole 'full' world agrees on "now" (mirrors seedLive(endpoint, now)).
+  const now = new Date();
+
   if (profile === 'full') {
     // Merge castItems and matrixItems on top of lean (additive by table name).
     for (const [base, items] of Object.entries(castItems())) {
       tables[base] = [...(tables[base] ?? []), ...items];
     }
-    for (const [base, items] of Object.entries(matrixItems())) {
+    for (const [base, items] of Object.entries(matrixItems(now))) {
       tables[base] = [...(tables[base] ?? []), ...items];
     }
 
@@ -150,7 +154,7 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
   }
 
   if (profile === 'full') {
-    await seedLive(endpoint, new Date());
+    await seedLive(endpoint, now);
     // Seed the two cast media objects (MinIO); fail-soft when MinIO is unreachable.
     await seedMedia();
   }

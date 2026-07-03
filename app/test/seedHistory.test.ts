@@ -48,12 +48,17 @@ const iso = (ts: string) => ts.split('#')[0]!;
 const isoList = (rows: AuditRow[]) => rows.map((r) => iso(r.ts));
 const strictlyIncreasing = (xs: string[]) => xs.every((x, i) => i === 0 || xs[i - 1]! < x);
 
+// matrixItems() is now-relative (Task 1): every call defaults to `new Date()`.
+// Pass a FIXED clock so buildFullTables() is deterministic across calls — the
+// byte-stability assertions below compare two independent builds.
+const FIXED_NOW = new Date('2026-07-03T12:00:00.000Z');
+
 /** Build the FULL item map the way seedAll('full') does (lean + cast + matrix). */
 function buildFullTables(): Record<string, Record<string, unknown>[]> {
   const tables: Record<string, Record<string, unknown>[]> = {};
   for (const [base, items] of Object.entries(SEED)) tables[base] = [...items];
   for (const [base, items] of Object.entries(castItems())) tables[base] = [...(tables[base] ?? []), ...items];
-  for (const [base, items] of Object.entries(matrixItems())) tables[base] = [...(tables[base] ?? []), ...items];
+  for (const [base, items] of Object.entries(matrixItems(FIXED_NOW))) tables[base] = [...(tables[base] ?? []), ...items];
   return tables;
 }
 

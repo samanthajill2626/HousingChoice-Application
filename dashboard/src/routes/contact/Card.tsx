@@ -3,6 +3,7 @@
 // an optional right-aligned action/count slot. PendingPanel is the honest
 // "arrives with the backend" empty state for the C4/C5 slices (listings-sent /
 // media) and the manual-now preferences — we never fabricate data.
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './Card.module.css';
 
@@ -130,6 +131,48 @@ export function Chips({ items }: { items: string[] }): React.JSX.Element {
           {c}
         </span>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Full-text notes: prose with the author's newlines PRESERVED (pre-wrap),
+ * clamped to ~6 lines with a "Show more"/"Show less" toggle that appears only
+ * when the text actually overflows the clamp. Replaces the old chip rendering,
+ * which collapsed newlines and truncated nothing (a wall-of-text pill).
+ */
+export function NotesText({ text }: { text: string }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const ref = useRef<HTMLParagraphElement>(null);
+
+  // Measure whether the CLAMPED text overflows (→ show the toggle). Re-measure
+  // on text changes and container resizes (wrap width changes the line count).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = (): void => setOverflowing(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, expanded]);
+
+  return (
+    <div>
+      <p ref={ref} className={`${styles.notes} ${expanded ? '' : styles.notesClamped}`}>
+        {text}
+      </p>
+      {overflowing || expanded ? (
+        <button
+          type="button"
+          className={styles.notesToggle}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      ) : null}
     </div>
   );
 }

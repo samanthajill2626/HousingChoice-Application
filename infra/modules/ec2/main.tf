@@ -171,7 +171,10 @@ data "aws_iam_policy_document" "app" {
   }
 
   # Custom metrics. PutMetricData is not resource-scopable; constrain by
-  # namespace instead (app metrics + the CloudWatch agent's CWAgent).
+  # namespace instead (app metrics + the CloudWatch agent's CWAgent). The
+  # agent's OTLP metrics pipeline (metrics.metrics_collected.otlp, Task 2) also
+  # publishes app OTel metrics here under the CWAgent namespace — already
+  # covered, no new value needed.
   statement {
     sid       = "Metrics"
     actions   = ["cloudwatch:PutMetricData"]
@@ -181,6 +184,25 @@ data "aws_iam_policy_document" "app" {
       variable = "cloudwatch:namespace"
       values   = ["hc/${var.env}", "CWAgent"]
     }
+  }
+
+  # X-Ray write for the CloudWatch agent's OTLP traces pipeline (Task 2): the
+  # agent forwards received OTLP spans to X-Ray. Mirrors the AWS-managed
+  # AWSXRayDaemonWriteAccess policy exactly — Put* upload segments/telemetry,
+  # and the agent's X-Ray exporter reads centralized sampling rules/targets
+  # (Get*), so those three reads are REQUIRED here, not cargo-culted. None of
+  # these X-Ray actions support resource-level permissions, so resources must
+  # be ["*"] (there is nothing narrower to scope by).
+  statement {
+    sid = "XRayTraces"
+    actions = [
+      "xray:PutTraceSegments",
+      "xray:PutTelemetryRecords",
+      "xray:GetSamplingRules",
+      "xray:GetSamplingTargets",
+      "xray:GetSamplingStatisticSummaries",
+    ]
+    resources = ["*"]
   }
 
   # System Status read model (M1.4): backs the admin-only Settings → System
@@ -285,6 +307,31 @@ resource "aws_instance" "app" {
     # CloudWatch agent: host disk + memory metrics, and ship /var/log/messages
     # (OOM lines) to /hc/${var.env}/system. IAM already grants PutMetricData
     # (CWAgent namespace) + logs on /hc/${var.env}/*.
+    #
+    # It ALSO runs OTLP receivers (Task 2, OTel wiring) so the app/worker
+    # containers can export telemetry to the host agent (via the compose
+    # host-gateway alias host.docker.internal — container localhost is NOT the
+    # host). The agent forwards traces → AWS X-Ray and OTLP metrics → CloudWatch
+    # metrics (PutMetricData, CWAgent namespace).
+    #
+    # TWO separate otlp sections, on DISTINCT ports — the CloudWatch agent doc's
+    # Important note requires each `otlp` section to have its own endpoint+port
+    # (two sections on one port → the second receiver fails to bind, "address
+    # already in use", silently losing a signal). So traces bind :4318 and
+    # metrics bind :4320 (the two http_endpoints below), and the app is told to
+    # send metrics to :4320 via OTEL_EXPORTER_OTLP_METRICS_ENDPOINT while traces
+    # ride the base OTEL_EXPORTER_OTLP_ENDPOINT (:4318, +/v1/traces).
+    #
+    # HTTP listeners bind 0.0.0.0 (not the 127.0.0.1 default): the senders are
+    # Docker containers reaching the host over the docker bridge, and per the AWS
+    # docs a containerized sender REQUIRES 0.0.0.0. This is SAFE — the security
+    # group (infra/modules/network/main.tf) opens ONLY the app port to
+    # CloudFront's origin-facing prefix list; 4318/4320 have NO ingress rule, so
+    # they are default-denied from the internet and reachable only from the local
+    # docker bridge. gRPC listeners bind 127.0.0.1 (loopback): we use the HTTP
+    # exporters only, so the gRPC listeners are unused — keep them host-local, on
+    # distinct ports (4317/4319) so the two sections don't collide on gRPC's 4317
+    # default either.
     dnf install -y amazon-cloudwatch-agent
     cat > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json <<'CWCONFIG'
     {
@@ -294,7 +341,13 @@ resource "aws_instance" "app" {
         "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
         "metrics_collected": {
           "mem": { "measurement": ["mem_used_percent"] },
-          "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true }
+          "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true },
+          "otlp": { "grpc_endpoint": "127.0.0.1:4319", "http_endpoint": "0.0.0.0:4320" }
+        }
+      },
+      "traces": {
+        "traces_collected": {
+          "otlp": { "grpc_endpoint": "127.0.0.1:4317", "http_endpoint": "0.0.0.0:4318" }
         }
       },
       "logs": {

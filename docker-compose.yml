@@ -17,6 +17,10 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    # Reaches the host's CloudWatch agent OTLP receiver (OTEL_EXPORTER_OTLP_ENDPOINT
+    # = host.docker.internal:4318); harmless when that endpoint env is unset.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # .env is hydrated from Parameter Store by the deploy script.
     env_file: .env
     environment:
@@ -37,6 +41,10 @@ services:
     command: ["node", "dist/worker.js"]
     # No ports — the worker serves no HTTP traffic.
     restart: unless-stopped
+    # Reaches the host's CloudWatch agent OTLP receiver (OTEL_EXPORTER_OTLP_ENDPOINT
+    # = host.docker.internal:4318); harmless when that endpoint env is unset.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # .env is hydrated from Parameter Store by the deploy script.
     env_file: .env
     environment:

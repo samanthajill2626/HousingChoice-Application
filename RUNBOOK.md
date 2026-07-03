@@ -666,6 +666,14 @@ The CloudWatch agent collects two host metrics that the log-derived metrics cann
 - **`mem_used_percent`** — total host memory (RSS + buffers + cached), reported as a percent
   of the 2 GB t4g.small total.
 
+The agent also runs **two OTLP receivers**: one on
+`0.0.0.0:4318` forwarding spans to **AWS X-Ray** (traces pipeline), and one on `0.0.0.0:4320`
+publishing metrics to **CloudWatch metrics** under the `CWAgent` namespace (metrics pipeline). The
+app and worker containers export to the host agent via `host.docker.internal` — the compose
+`extra_hosts: host.docker.internal:host-gateway` alias makes the host reachable from inside each
+container. See [OTLP wiring — apply and verify](#otlp-wiring--apply-and-verify) below for the
+one-time apply steps.
+
 The agent config lives on the instance at
 `/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json` and is written by the EC2 `user_data`
 script at first-boot. rsyslog ships `/var/log/messages` (kernel ring buffer, OOM-killer lines)
@@ -692,7 +700,7 @@ aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <
 # decoded on the instance — base64 has no quotes/backslashes/shell-special chars, so it embeds
 # cleanly with zero escaping hazard. $json is single-quoted so its real double-quotes and the
 # literal ${aws:InstanceId} placeholder (the agent expands it at runtime) are preserved as-is.
-$json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
+$json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true},"otlp":{"grpc_endpoint":"127.0.0.1:4319","http_endpoint":"0.0.0.0:4320"}}},"traces":{"traces_collected":{"otlp":{"grpc_endpoint":"127.0.0.1:4317","http_endpoint":"0.0.0.0:4318"}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 $configCmd = "[`"echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`",`"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`"]"
 aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <instance-id> --document-name "AWS-RunShellScript" --parameters "{`"commands`":$configCmd}" --comment "write CWAgent config + start" --no-cli-pager
@@ -712,6 +720,101 @@ aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <
 
 > **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` in `$json` before running
 > against the prod instance at M1.11 cutover.
+
+### OTLP wiring — apply and verify
+
+**What changed (2026-07-02).** The CloudWatch agent now also acts as
+an OTLP receiver: traces on `0.0.0.0:4318` → AWS X-Ray; OTLP metrics on `0.0.0.0:4320` →
+CloudWatch metrics (`CWAgent` namespace). The app and worker containers export to the host agent
+via `host.docker.internal:4318` (traces) and `host.docker.internal:4320` (metrics). Two new IAM
+actions (`xray:PutTraceSegments` etc., mirroring `AWSXRayDaemonWriteAccess`) were added to the
+instance role; the `PutMetricData` grant already covered `CWAgent` metrics. Telemetry only flows
+when both the agent config and the env vars are in place — apply them in the order below.
+
+#### 1. Apply Terraform (IAM + user_data — new instances and the instance role)
+
+```powershell
+npm run plan -- dev
+npm run apply -- dev
+```
+
+> **Prod:** rides the M1.11 cutover — `npm run plan -- prod` / `npm run apply -- prod` at that
+> milestone, consistent with all prod-infra deferrals in this runbook.
+
+#### 2. Update the agent config on the already-running dev instance
+
+`user_data` runs only at first boot. Push the new config (which includes the two OTLP receiver
+sections) to the running instance via SSM and reload the agent. This is identical to the one-time
+install snippet above, with `$json` already set to the current config (including OTLP). Run Step 2
+only (the agent is already installed):
+
+```powershell
+# Re-apply the agent config with the OTLP receiver sections. $json is single-quoted so its
+# double-quotes and the literal ${aws:InstanceId} placeholder are preserved verbatim.
+$json = '{"agent":{"metrics_collection_interval":60,"run_as_user":"root"},"metrics":{"namespace":"CWAgent","append_dimensions":{"InstanceId":"${aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]},"disk":{"measurement":["disk_used_percent"],"resources":["/"],"drop_device":true},"otlp":{"grpc_endpoint":"127.0.0.1:4319","http_endpoint":"0.0.0.0:4320"}}},"traces":{"traces_collected":{"otlp":{"grpc_endpoint":"127.0.0.1:4317","http_endpoint":"0.0.0.0:4318"}}},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/messages","log_group_name":"/hc/dev/system","log_stream_name":"{instance_id}"}]}}}}'
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+$configCmd = "[`"echo $b64 | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`",`"/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json`"]"
+aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids i-0ad45daa858632001 --document-name "AWS-RunShellScript" --parameters "{`"commands`":$configCmd}" --comment "apply OTLP receiver config" --no-cli-pager
+```
+
+> **Prod note.** Change `/hc/dev/system` to `/hc/prod/system` and use the prod instance ID
+> (`i-087fd4eda3e2804c1`) when running against prod at M1.11 cutover.
+
+After sending, confirm the command succeeded and that the agent log shows both receivers started
+cleanly (see Troubleshooting below).
+
+#### 3. Set the OTLP env vars and deploy
+
+Telemetry starts flowing only when both ends are in place (agent config live + env vars set). Do
+step 2 first; then:
+
+1. Merge BOTH new keys from `.env.dev.example` into the real `.env.dev`:
+   - `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318`
+   - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://host.docker.internal:4320/v1/metrics`
+
+   Both must be set together — if the metrics var is missing, metrics fall back to `:4318` and
+   collide with the traces receiver, silently losing metrics.
+
+2. Push to Parameter Store and deploy:
+
+```powershell
+npm run secrets:push -- dev
+npm run deploy:dev
+```
+
+#### 4. Verify in the console
+
+Hit a few routes in the app first to generate traces and metric data points.
+
+**Traces → X-Ray.** In the CloudWatch console: **Application monitoring → Traces** (or the
+classic X-Ray console → **Traces** / **Service map**), region us-east-1. Look for service names
+`housingchoice-app` and `housingchoice-worker`. Allow a minute for the first segments to appear.
+
+**Metrics → CloudWatch metrics, namespace `CWAgent`.** In the CloudWatch console: **Metrics →
+All metrics → `CWAgent`**. App OTel instrument metrics appear here alongside the existing host
+`mem_used_percent` / `disk_used_percent` metrics (same namespace). Dimensions include `InstanceId`.
+
+#### Troubleshooting
+
+- **Both OTLP receivers listening?** Via SSM Run Command on the instance:
+  `ss -ltnp | grep -E '4318|4320'` — both HTTP ports must be bound. If one is missing, the agent
+  log will show "address already in use" (stale single-port config) or a receiver startup error.
+- **Agent log clean?** Check
+  `/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log` (via SSM) after running
+  fetch-config. Both OTLP receivers must show a successful start with NO "address already in use"
+  error — that error means a port collision (a stale config still occupying a port).
+- **Both env vars in the container?** Via SSM Run Command:
+  `docker compose exec app env | grep OTEL` — expect `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318` AND `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://host.docker.internal:4320/v1/metrics`. If either is missing, re-run `secrets:push` and redeploy.
+- **`host.docker.internal` resolving?** Via SSM:
+  `docker compose exec app getent hosts host.docker.internal` — must resolve to the host gateway
+  IP. If not, the compose `extra_hosts` alias is missing (verify the deployed `docker-compose.yml`
+  has `extra_hosts: ["host.docker.internal:host-gateway"]` on both `app` and `worker`).
+- **IAM applied?** Confirm `npm run apply -- dev` completed (exit 0) after this branch merged.
+  Without the `XRayTraces` IAM statement, the agent will receive spans but fail to PUT them to
+  X-Ray (access-denied errors in the agent log).
+- **`OTEL_SDK_DISABLED` must NOT be set** in deployed envs (it disables the SDK entirely). It is
+  `true` only in `.env.example` for local/hermetic runs — confirm it is absent from `.env.dev`
+  and `.env.prod`.
 
 ## Costs
 
@@ -811,13 +914,14 @@ Tracked items (gaps, deferrals, one-time actions) now live in the issue registry
 operational. Migrated 2026-06-18: [`iam-user-mfa`](docs/issues/iam-user-mfa.md),
 [`ses-sandbox-exit`](docs/issues/ses-sandbox-exit.md),
 [`cloudwatch-agent-disk-metric`](docs/issues/cloudwatch-agent-disk-metric.md),
-[`otlp-exporter-wiring`](docs/issues/otlp-exporter-wiring.md),
 [`messaging-delivery-alarms`](docs/issues/messaging-delivery-alarms.md),
 [`api-rate-limiting`](docs/issues/api-rate-limiting.md) (resolved 2026-07-02 — see below),
 [`sns-prod-alert-confirmation`](docs/issues/sns-prod-alert-confirmation.md). Already
 addressed (no longer tracked): orphan boot-log lines (correlation fix shipped
 2026-06-12 — any orphan hit is now a real bug); custom domain + ACM (shipped in Phase 1
-Change Order 3 — see [Custom domain & TLS](#custom-domain--tls)).
+Change Order 3 — see [Custom domain & TLS](#custom-domain--tls)); OTLP exporter wiring
+(shipped 2026-07-02 — see
+[OTLP wiring — apply and verify](#otlp-wiring--apply-and-verify) above).
 
 ### Per-user rate limits on the send/call-cost routes (2026-07-02)
 

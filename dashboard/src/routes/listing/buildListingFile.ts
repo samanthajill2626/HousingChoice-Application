@@ -31,7 +31,8 @@ export interface RosterRow {
   fallback: boolean;
 }
 
-const ROLE_LABEL: Record<UnitContact['role'], string> = {
+/** Human label per roster role — shared with the Activity card's contact rows. */
+export const ROLE_LABEL: Record<UnitContact['role'], string> = {
   landlord: 'Landlord',
   pm: 'Property manager',
   owner: 'Owner',

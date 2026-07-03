@@ -804,8 +804,10 @@ export function createFakeWorld(): FakeWorld {
       const actorId = typeof actor === 'string' ? actor : undefined;
       // Keep the recorded shape EXACTLY as the real repo's asserted item (no
       // extra keys — many tests do `toEqual` on world.auditEvents): entityKey,
-      // event_type, optional actorId, optional payload. A monotonic `ts` is
-      // attached on a non-enumerable key so listByEntity can order newest-first
+      // event_type, optional actorId, optional payload. A monotonic seq clock +
+      // a real `<ISO>#<seq>` ts SK are attached on NON-ENUMERABLE keys so
+      // listByEntity can order newest-first AND return the ts the real repo
+      // always carries (the units /activity read derives id/at from it) —
       // without polluting the asserted object shape.
       const rec: FakeWorld['auditEvents'][number] = {
         entityKey,
@@ -813,15 +815,27 @@ export function createFakeWorld(): FakeWorld {
         ...(actorId !== undefined && { actorId }),
         ...(payload !== undefined && { payload }),
       };
-      Object.defineProperty(rec, '__seq', { value: auditEvents.length, enumerable: false });
+      const seq = auditEvents.length;
+      Object.defineProperty(rec, '__seq', { value: seq, enumerable: false });
+      // Zero-padded seq suffix: unique + string-sorts in insertion order even
+      // for same-millisecond appends (mirrors the real `<ISO>#<random>` shape).
+      Object.defineProperty(rec, '__ts', {
+        value: `${new Date().toISOString()}#${seq.toString().padStart(6, '0')}`,
+        enumerable: false,
+      });
       auditEvents.push(rec);
     },
     async listByEntity(entityKey, opts = {}) {
-      // Mirror the real repo: NEWEST-FIRST. The fake uses insertion order (the
-      // hidden __seq) as the clock; `before` is an exclusive __seq bound when a
-      // test pages (none currently do). limit defaults to 50.
+      // Mirror the real repo: NEWEST-FIRST, and every returned item carries its
+      // `ts` SK (copied from the hidden __ts — the spread drops non-enumerable
+      // keys, so it is re-attached enumerably on the COPY; world.auditEvents
+      // assertions never see it). The fake uses insertion order (the hidden
+      // __seq) as the clock; `before` is an exclusive __seq bound when a test
+      // pages (none currently do). limit defaults to 50.
       const seqOf = (e: object): number =>
         typeof (e as { __seq?: number }).__seq === 'number' ? (e as { __seq: number }).__seq : 0;
+      const tsOf = (e: object): string | undefined =>
+        typeof (e as { __ts?: string }).__ts === 'string' ? (e as { __ts: string }).__ts : undefined;
       const beforeSeq = typeof opts.before === 'string' ? Number(opts.before) : undefined;
       const items = auditEvents
         .filter((e) => e.entityKey === entityKey)
@@ -829,7 +843,10 @@ export function createFakeWorld(): FakeWorld {
         .slice()
         .sort((a, b) => seqOf(b) - seqOf(a)) // newest-first
         .slice(0, opts.limit ?? 50)
-        .map((e) => ({ ...e }));
+        .map((e) => {
+          const ts = tsOf(e);
+          return { ...e, ...(ts !== undefined && { ts }) };
+        });
       return items as import('../../src/repos/auditRepo.js').AuditEvent[];
     },
   };

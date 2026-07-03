@@ -14,6 +14,7 @@ import {
   getPlacements,
   getContact,
   getUnit,
+  getUnitActivity,
   getUnitRecipients,
   getUnitRelated,
   getUnits,
@@ -22,6 +23,7 @@ import {
   type ListingSendRow,
   type RelatedUnit,
   type SimilarUnit,
+  type UnitActivityEvent,
   type UnitItem,
 } from '../../api/index.js';
 import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
@@ -50,6 +52,8 @@ export interface ListingState {
   recipients: Slice<ListingSendRow>;
   /** Similar comps (C6) — 'pending' until BE6. */
   similar: Slice<SimilarUnit>;
+  /** The property's audit-trail Activity rows — 'pending' on an older backend. */
+  activity: Slice<UnitActivityEvent>;
 }
 
 const LOADING: Omit<ListingState, 'setUnit'> = {
@@ -61,6 +65,7 @@ const LOADING: Omit<ListingState, 'setUnit'> = {
   related: { status: 'loading' },
   recipients: { status: 'loading' },
   similar: { status: 'loading' },
+  activity: { status: 'loading' },
 };
 
 /** Resolve a maybe-not-live slice: a 404 → 'pending'; other errors → 'error'. */
@@ -121,7 +126,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         const unit = await getUnit(unitId, signal);
         if (signal.aborted) return;
 
-        const [landlord, units, placements, relatedSlice, recipients, similar] = await Promise.all([
+        const [landlord, units, placements, relatedSlice, recipients, similar, activity] = await Promise.all([
           loadLandlord(unit.landlordId, signal),
           // NOTE: first inbox page only (nextCursor not paged) for the
           // same-landlord Related + placements-on-unit derivations — a transitional
@@ -132,6 +137,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           loadSlice((s) => getUnitRelated(unitId, s), signal),
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
           loadSlice((s) => getUnitSimilar(unitId, s), signal),
+          loadSlice((s) => getUnitActivity(unitId, s), signal),
         ]);
         if (signal.aborted) return;
 
@@ -151,6 +157,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           related,
           recipients,
           similar,
+          activity,
           forId: unitId,
         });
       } catch (err) {

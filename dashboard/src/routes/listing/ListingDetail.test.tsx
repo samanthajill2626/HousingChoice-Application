@@ -90,6 +90,7 @@ const READY: ListingState = {
   },
   recipients: { status: 'pending' },
   similar: { status: 'pending' },
+  activity: { status: 'pending' },
 };
 
 afterEach(() => vi.restoreAllMocks());
@@ -218,6 +219,64 @@ describe('ListingDetail', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getAllByText('Arrives with the backend.').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders Activity rows: staff copy labels, times, and contact link-outs', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      activity: {
+        status: 'ready',
+        rows: [
+          {
+            id: '2026-07-02T14:30:00.000Z#000002',
+            at: '2026-07-02T14:30:00.000Z',
+            type: 'listing_response_set',
+            contactId: 'c-t1',
+            contactName: 'Tina Renter',
+            response: 'interested',
+          },
+          {
+            id: '2026-07-01T09:00:00.000Z#000001',
+            at: '2026-07-01T09:00:00.000Z',
+            type: 'unit_updated',
+            fields: ['rent_min', 'deposit'],
+          },
+          {
+            id: '2026-06-30T09:00:00.000Z#000000',
+            at: '2026-06-30T09:00:00.000Z',
+            type: 'listing_status_changed',
+            from: 'setup',
+            to: 'available',
+            source: 'manual',
+          },
+        ],
+      },
+    });
+    renderAt();
+    // The response event links out to the tenant's contact file.
+    expect(screen.getByRole('link', { name: /Tenant response · Interested/ })).toHaveAttribute(
+      'href',
+      '/contacts/c-t1',
+    );
+    expect(screen.getByText('Tina Renter')).toBeInTheDocument();
+    // Edit event: label + humanized changed fields.
+    expect(screen.getByText('Property updated')).toBeInTheDocument();
+    expect(screen.getByText('Rent min, Deposit')).toBeInTheDocument();
+    // Status event with the from → to detail.
+    expect(screen.getByText('Status changed to Available')).toBeInTheDocument();
+    expect(screen.getByText(/from Setup/)).toBeInTheDocument();
+  });
+
+  it('renders "No activity yet." for a real-but-empty Activity trail', () => {
+    useListing.mockReturnValue({ ...READY, activity: { status: 'ready', rows: [] } });
+    renderAt();
+    expect(screen.getByText('No activity yet.')).toBeInTheDocument();
+  });
+
+  it('renders an honest error row when Activity fails to load', () => {
+    useListing.mockReturnValue({ ...READY, activity: { status: 'error' } });
+    renderAt();
+    expect(screen.getByText(/couldn.t load activity/i)).toBeInTheDocument();
   });
 
   it('renders photos from media, with a placeholder for bare S3 keys', () => {

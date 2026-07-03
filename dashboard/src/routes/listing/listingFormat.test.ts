@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { UnitItem } from '../../api/index.js';
+import type { UnitActivityEvent, UnitItem } from '../../api/index.js';
 import {
   buildListingFacts,
   formatBedsBaths,
   formatMoney,
   formatRent,
+  describeUnitActivity,
   isMediaUrl,
   shortAddress,
   statusLabel,
@@ -95,5 +96,73 @@ describe('shortAddress', () => {
   it('formats an address, falling back to the unitId', () => {
     expect(shortAddress({ line1: '1450 Joseph Blvd NW' }, 'u1')).toBe('1450 Joseph Blvd NW');
     expect(shortAddress(undefined, 'u1')).toBe('u1');
+  });
+});
+
+describe('describeUnitActivity', () => {
+  const evt = (over: Partial<UnitActivityEvent>): UnitActivityEvent => ({
+    id: '2026-07-01T09:00:00.000Z#000001',
+    at: '2026-07-01T09:00:00.000Z',
+    type: 'unit_created',
+    ...over,
+  });
+
+  it('uses staff copy ("property") for the lifecycle events', () => {
+    expect(describeUnitActivity(evt({ type: 'unit_created' }))).toEqual({ label: 'Property created' });
+    expect(describeUnitActivity(evt({ type: 'unit_deleted' }))).toEqual({ label: 'Property deleted' });
+    expect(describeUnitActivity(evt({ type: 'unit_restored' }))).toEqual({ label: 'Property restored' });
+  });
+
+  it('lists the humanized changed fields on an edit', () => {
+    expect(describeUnitActivity(evt({ type: 'unit_updated', fields: ['rent_min', 'deposit'] }))).toEqual({
+      label: 'Property updated',
+      sub: 'Rent min, Deposit',
+    });
+    // No recorded fields → no sub-line (never an empty one).
+    expect(describeUnitActivity(evt({ type: 'unit_updated' }))).toEqual({ label: 'Property updated' });
+  });
+
+  it('describes roster changes with name → id fallback, role label, and a contact link', () => {
+    expect(
+      describeUnitActivity(
+        evt({ type: 'unit_contact_added', contactId: 'c1', contactName: 'Pat Manager', role: 'pm' }),
+      ),
+    ).toEqual({ label: 'Contact added', sub: 'Pat Manager · Property manager', to: '/contacts/c1' });
+    // Unresolved contact → the id stands in; unknown role humanizes.
+    expect(
+      describeUnitActivity(evt({ type: 'unit_contact_added', contactId: 'c2', role: 'site_agent' })),
+    ).toEqual({ label: 'Contact added', sub: 'c2 · Site agent', to: '/contacts/c2' });
+    expect(
+      describeUnitActivity(evt({ type: 'unit_contact_removed', contactId: 'c1', contactName: 'Pat Manager' })),
+    ).toEqual({ label: 'Contact removed', sub: 'Pat Manager', to: '/contacts/c1' });
+  });
+
+  it('describes a tenant response with the response in the label', () => {
+    expect(
+      describeUnitActivity(
+        evt({ type: 'listing_response_set', contactId: 'c1', contactName: 'Tina Renter', response: 'not_a_fit' }),
+      ),
+    ).toEqual({ label: 'Tenant response · Not a fit', sub: 'Tina Renter', to: '/contacts/c1' });
+  });
+
+  it('describes status changes via the property-status labels, flagging derived ones', () => {
+    expect(
+      describeUnitActivity(
+        evt({ type: 'listing_status_changed', from: 'setup', to: 'available', source: 'manual' }),
+      ),
+    ).toEqual({ label: 'Status changed to Available', sub: 'from Setup' });
+    expect(
+      describeUnitActivity(
+        evt({ type: 'listing_status_changed', from: 'available', to: 'under_application', source: 'derived' }),
+      ),
+    ).toEqual({ label: 'Status changed to Under application', sub: 'from Available · automatic' });
+    // No from recorded → no sub-line.
+    expect(
+      describeUnitActivity(evt({ type: 'listing_status_changed', to: 'available' })),
+    ).toEqual({ label: 'Status changed to Available' });
+  });
+
+  it('humanizes an unknown event type (open set — never a blank row)', () => {
+    expect(describeUnitActivity(evt({ type: 'unit_frobnicated' }))).toEqual({ label: 'Unit frobnicated' });
   });
 });

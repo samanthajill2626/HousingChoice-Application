@@ -22,7 +22,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   CannotRemovePrimaryLandlordError,
   createUnitsRepo,
@@ -104,6 +104,61 @@ function toRelatedUnit(
     status: unit.status as UnitStatus,
     relation,
     ...(label !== undefined && { label }),
+  };
+}
+
+/**
+ * One property Activity row (the dashboard's Activity card) — a unit audit
+ * event projected onto the wire. `type` is the audit event_type (an open set;
+ * today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
+ * listing_response_set, listing_status_changed, unit_deleted, unit_restored).
+ * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
+ * raw payload document (a future payload field can't leak through here).
+ */
+interface UnitActivityEvent {
+  /** The audit `ts` SK (`<ISO>#<suffix>`) — unique within the unit. */
+  id: string;
+  /** ISO 8601 — the ts prefix (when the event happened). */
+  at: string;
+  type: string;
+  /** The acting user, when the event wasn't a system action. */
+  actorId?: string;
+  contactId?: string;
+  /** Read-time enrichment (best-effort) — omitted when the contact is gone. */
+  contactName?: string;
+  role?: string;
+  response?: string;
+  fields?: string[];
+  from?: string;
+  to?: string;
+  source?: string;
+}
+
+/** Project one audit row → the Activity wire shape (fixed-key whitelist). */
+function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
+  const p = e.payload ?? {};
+  const str = (key: string): string | undefined =>
+    typeof p[key] === 'string' ? (p[key] as string) : undefined;
+  const fieldsRaw = p['fields'];
+  const fields = Array.isArray(fieldsRaw)
+    ? fieldsRaw.filter((f): f is string => typeof f === 'string')
+    : undefined;
+  // `at` is the ISO prefix of the `<ISO>#<suffix>` SK (same derivation as the
+  // contact timeline's atOf) — the SK IS the timestamp the trail sorts by.
+  const hash = e.ts.indexOf('#');
+  const at = hash > 0 ? e.ts.slice(0, hash) : e.ts;
+  return {
+    id: e.ts,
+    at,
+    type: e.event_type,
+    ...(typeof e.actorId === 'string' && { actorId: e.actorId }),
+    ...(str('contactId') !== undefined && { contactId: str('contactId') }),
+    ...(str('role') !== undefined && { role: str('role') }),
+    ...(str('response') !== undefined && { response: str('response') }),
+    ...(fields !== undefined && { fields }),
+    ...(str('from') !== undefined && { from: str('from') }),
+    ...(str('to') !== undefined && { to: str('to') }),
+    ...(str('source') !== undefined && { source: str('source') }),
   };
 }
 
@@ -557,6 +612,60 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const similar = rankSimilarUnits(unit, candidates);
     log.info({ unitId, candidateCount: candidates.length, returned: similar.length }, 'similar units served');
     res.json({ similar });
+  });
+
+  // GET /api/units/:unitId/activity?limit= — the property Activity card read.
+  // Serves the unit's AUDIT trail (entityKey `units#<unitId>` — unit_created /
+  // unit_updated / roster changes / listing_response_set / listing_status_changed
+  // / delete+restore) NEWEST-FIRST via auditRepo.listByEntity, projected onto
+  // UnitActivityEvent (fixed-key whitelist, never the raw payload). contactName
+  // is resolved at read time (best-effort, mirrors /placements' tenantName).
+  // Bounded-limit (1..MAX, default DEFAULT) — no cursor; a unit's trail is
+  // small, and the repo's `before` bound is there when paging is ever needed.
+  // 404 unknown unit (matches the sibling reads). NOTE: "property sent to
+  // tenant" audits under broadcasts#<id>, so sends don't appear here — the
+  // "Sent to tenants" card (GET /:unitId/recipients) is that view.
+  router.get('/:unitId/activity', async (req, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const limit = parseLimit(req.query['limit']);
+    if (limit === undefined) {
+      res.status(400).json({ error: `limit must be an integer 1..${MAX_PAGE_LIMIT}` });
+      return;
+    }
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+
+    const rows = await audit.listByEntity(`units#${unitId}`, { limit });
+    const events = rows.map(toUnitActivityEvent);
+
+    // Read-time contactName enrichment, deduped per contactId; a missing/failed
+    // lookup leaves contactName absent (the client falls back to the id) and
+    // NEVER 500s — same posture as /placements' tenantName.
+    const nameByContact = new Map<string, string | undefined>();
+    for (const e of events) {
+      if (e.contactId === undefined || nameByContact.has(e.contactId)) continue;
+      try {
+        const contact = await contacts.getById(e.contactId);
+        nameByContact.set(e.contactId, contact ? displayNameOfContact(contact) : undefined);
+      } catch (err) {
+        log.warn(
+          { unitId, contactId: e.contactId, err },
+          'unit activity: contact lookup failed (best-effort)',
+        );
+        nameByContact.set(e.contactId, undefined);
+      }
+    }
+    for (const e of events) {
+      const name = e.contactId !== undefined ? nameByContact.get(e.contactId) : undefined;
+      if (name !== undefined) e.contactName = name;
+    }
+
+    // PII (doc §9): IDs/counts only — never labels/names/payloads in logs.
+    log.info({ unitId, returned: events.length }, 'unit activity served');
+    res.json({ events });
   });
 
   // PATCH /api/units/:unitId/recipients/:contactId { response } (BE4/C4).

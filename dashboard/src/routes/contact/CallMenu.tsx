@@ -117,6 +117,12 @@ export function CallMenu({
             });
             return;
           }
+          if (err.code === 'rate_limited') {
+            // 429 per-user rate limit on originate — a clear inline reason
+            // (the finally below un-sticks the dial buttons).
+            setCall({ kind: 'error', message: 'Calling too fast — wait a moment and try again.' });
+            return;
+          }
         }
         setCall({ kind: 'error', message: "Couldn't start the call — please try again." });
       })

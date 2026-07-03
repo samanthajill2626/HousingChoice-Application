@@ -146,4 +146,20 @@ describe('VoiceSection — cell verification', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/temporarily unavailable/i);
   });
+
+  it('surfaces a 429 rate_limited from verify-start inline (and Send code is not stuck)', async () => {
+    const user = userEvent.setup();
+    getVoiceMe.mockResolvedValue(me());
+    startCellVerify.mockRejectedValue(new ApiError(429, 'rate_limited', 'rate limited'));
+    render(<VoiceSection />);
+
+    await user.type(await screen.findByLabelText(/Your mobile number/i), '+14040100001');
+    await user.click(screen.getByRole('button', { name: 'Send code' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Too many codes requested — wait a few minutes and try again.',
+    );
+    // busy reset by the finally — the Send code control is back and enabled.
+    expect(screen.getByRole('button', { name: 'Send code' })).toBeEnabled();
+  });
 });

@@ -44,6 +44,8 @@ function sendFailureMessage(err: unknown): string {
         return 'This conversation is paused (manual mode) — automated sending is off.';
       case 'breaker_open':
         return 'Sending is temporarily rate-limited. Please try again shortly.';
+      case 'rate_limited':
+        return 'Sending too fast — wait a moment and try again.';
       case 'sms_sending_disabled':
         return 'SMS sending is currently disabled.';
       case 'relay_closed':

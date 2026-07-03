@@ -189,7 +189,9 @@ export function RecipientPreview({
       navigate(`/broadcasts/${encodeURIComponent(draftId)}`);
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.status === 409) {
+        if (err.code === 'rate_limited' || err.status === 429) {
+          setError('Sending too fast — wait a moment and try again.');
+        } else if (err.status === 409) {
           setError('This broadcast was already sent (or is sending).');
           setRacedToResults(true);
         } else if (err.status === 400 && err.code === 'empty_audience') {

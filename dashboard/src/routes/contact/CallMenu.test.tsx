@@ -120,6 +120,19 @@ describe('CallMenu — masked originate', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/Set up your cell/i);
   });
 
+  it('surfaces a 429 rate_limited inline and the dial buttons reset (not stuck)', async () => {
+    const user = userEvent.setup();
+    originateCall.mockRejectedValue(new ApiError(429, 'rate_limited', 'rate limited'));
+    render(<CallMenu contactId="c1" phones={PHONES} defaultPhone={PHONES[0]} />);
+    await user.click(screen.getByRole('button', { name: /Call/i }));
+    await user.click(screen.getAllByRole('menuitem')[0]!);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Calling too fast — wait a moment and try again.',
+    );
+    // dialing reset by the finally — the dial buttons are usable again.
+    screen.getAllByRole('menuitem').forEach((b) => expect(b).toBeEnabled());
+  });
+
   it('handles a 409 contact_voice_opted_out gracefully', async () => {
     const user = userEvent.setup();
     originateCall.mockRejectedValue(

@@ -398,6 +398,21 @@ describe('RecipientPreview — send errors', () => {
     expect(alert).toHaveTextContent(/cap/i);
   });
 
+  it('surfaces a 429 rate_limited inline AND re-enables Send (not stuck)', async () => {
+    const u = userEvent.setup();
+    sendBroadcast.mockRejectedValue(new ApiError(429, 'rate_limited', 'rate limited'));
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })] }),
+    });
+    await u.click(screen.getByRole('button', { name: /^Send to/ }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Sending too fast — wait a moment and try again.');
+    // The busy flag reset — the Send control is back and enabled, not stuck on "Sending…".
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    // No stray Results link (that's the 409 affordance, not a rate limit).
+    expect(within(alert).queryByRole('button', { name: /View results/i })).not.toBeInTheDocument();
+  });
+
   it('surfaces a 409 not-draft inline AND offers a Results link', async () => {
     const u = userEvent.setup();
     sendBroadcast.mockRejectedValue(new ApiError(409, 'broadcast_not_draft', 'already sent'));

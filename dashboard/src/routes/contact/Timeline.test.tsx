@@ -218,6 +218,19 @@ describe('Timeline', () => {
     expect(box).toHaveValue('Hello?'); // draft preserved
   });
 
+  it('surfaces the rate-limited reason when the send 429s (rate_limited)', async () => {
+    const onSend = vi.fn().mockRejectedValue(new ApiError(429, 'rate_limited', 'rate_limited'));
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'Rapid fire' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Sending too fast — wait a moment and try again.');
+    expect(box).toHaveValue('Rapid fire'); // draft preserved
+    // The busy flag reset — Send is back (not stuck on "Sending…") and enabled.
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+  });
+
   it('shows a standing Do-Not-Contact note at the composer when the contact is opted out', () => {
     renderTimeline({ items: [MESSAGE_IN], optedOut: true });
     expect(screen.getByRole('note')).toHaveTextContent(/Do-Not-Contact/i);

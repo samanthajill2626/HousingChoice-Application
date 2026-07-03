@@ -2,8 +2,8 @@
 // section (Voice Phase 1 §7). Any logged-in user attaches + verifies their OWN
 // cell (their outbound masked-call bridge leg). Two steps: verify-start (SMS a
 // 6-digit code) → verify-confirm (stamp cell_verified_at). Maps the backend guard
-// codes (invalid_cell / sms_unavailable / invalid_code / code_expired /
-// too_many_attempts) to clear inline messages. Refetches the self view on success
+// codes (invalid_cell / sms_unavailable / rate_limited / invalid_code /
+// code_expired / too_many_attempts) to clear inline messages. Refetches the self view on success
 // so the section shows the verified cell + timestamp.
 import { useCallback, useState } from 'react';
 import { ApiError, confirmCellVerify, startCellVerify, type MeUser } from '../../api/index.js';
@@ -32,6 +32,9 @@ function startMessage(code: string): string {
   if (code === 'invalid_cell') return "That doesn't look like a valid US mobile number.";
   if (code === 'sms_unavailable') {
     return 'Texting is temporarily unavailable — try again in a moment.';
+  }
+  if (code === 'rate_limited') {
+    return 'Too many codes requested — wait a few minutes and try again.';
   }
   return "Couldn't send the code — please try again.";
 }

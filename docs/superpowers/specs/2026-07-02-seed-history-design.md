@@ -130,8 +130,13 @@ For every full-profile contact with a lifecycle, emit `activity_events` mileston
 its journey (shape `activityEventsRepo.ts:49`, `{contactId, tsEventId:'<ISO at>#<eventId>', at,
 type, label, refType?, refId?, created_at}`, deterministic `evt-*` ids like matrix's pattern):
 
-- Placement-linked tenant: `placement_opened` (hop 0) → `stage_changed` per phase boundary →
-  `placement_closed` at `moved_in`/terminal.
+- Placement-linked tenant: `placement_opened` (hop 0) → `stage_changed` **per stage hop** →
+  `placement_closed` at `moved_in`/terminal. (Erratum: an earlier draft said "per phase
+  boundary"; the real writer — `placements.ts` `recordPlacementMilestone` — emits `stage_changed`
+  on every stage-changing PATCH, i.e. per hop, and per-hop is also what lands each milestone `at`
+  on its matching `placement_stage_changed` audit instant. Phase-boundary granularity belongs to
+  the *derived* `tenant_status_changed`/`listing_status_changed` audit rows, §4.4, not to this
+  milestone.)
 - Tour-owning tenant: `tour_scheduled` (at `scheduled`) → `tour_took_place` (at `toured`).
 - Where the story has them: `listing_sent`/`listing_reviewed`, `number_added`,
   `added_to_group_text`.

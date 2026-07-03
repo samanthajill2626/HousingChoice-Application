@@ -11,5 +11,5 @@
     "noEmit": true,
     "allowJs": true
   },
-  "include": ["test", "src", "../e2e/support"]
+  "include": ["test", "src", "../e2e/support", "../fake-twilio/src/engine"]
 }

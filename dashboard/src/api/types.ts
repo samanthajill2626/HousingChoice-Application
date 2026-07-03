@@ -1189,11 +1189,34 @@ export interface TimelineMilestone extends TimelineBase {
   refType?: 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
   refId?: string; // deep-link target (links out, no inline content)
 }
-export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
+/**
+ * A not-yet-sent scheduled message for this contact's 1:1 thread — the pinned
+ * "Upcoming" bucket the server ships alongside the timeline (scheduled-message-
+ * visibility). Mirrors the server contract VERBATIM. NEVER appears in the main
+ * `items` stream (only in `ContactTimelinePage.upcoming`); it renders as a
+ * distinct dashed/muted card, visibly NOT a sent message. `at` is the fire time.
+ */
+export interface TimelineScheduled extends TimelineBase {
+  kind: 'scheduled';
+  /** Absent for a landlord nudge with no 1:1 yet. */
+  conversationId?: string;
+  source: 'tour_reminder' | 'placement_nudge';
+  reminderKind?: 'confirmation' | 'day_before' | 'morning_of' | 'en_route' | 'no_show_checkin';
+  nudgeKind?: 'receipt_check' | 'completion_check' | 'approval_check' | 'rta_window_closing';
+  body: string;
+  /** Present when the message is armed but will be skipped at fire time. */
+  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+  refType: 'tour' | 'placement';
+  refId: string;
+}
+export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone | TimelineScheduled;
 
 export interface ContactTimelinePage {
   items: TimelineItem[]; // chronological; client renders oldest→newest
   nextCursor: string | null;
+  /** Not-yet-sent scheduled messages (the pinned "Upcoming" section). Absent on
+   *  an older backend that predates the bucket → the client defaults to []. */
+  upcoming?: TimelineScheduled[];
 }
 
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------

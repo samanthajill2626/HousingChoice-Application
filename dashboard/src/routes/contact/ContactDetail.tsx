@@ -399,6 +399,7 @@ export function ContactDetail(): React.JSX.Element {
           <Timeline
             status={timeline.status}
             items={timeline.items}
+            upcoming={timeline.upcoming}
             source={timeline.source}
             {...(replyToPhone !== undefined && { replyToPhone })}
             replyToLabel={defaultPhoneLabel(phones)}

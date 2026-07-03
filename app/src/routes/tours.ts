@@ -67,6 +67,10 @@ import {
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+} from '../repos/activityEventsRepo.js';
 import { nameFromContact, resolveMemberName } from './relayGroups.js';
 import {
   createPoolNumbersService,
@@ -116,6 +120,8 @@ export interface ToursRouterDeps {
   contactsRepo?: ContactsRepo;
   /** Relay auto-membership: resolve the tour's unit → its landlord contact. */
   unitsRepo?: UnitsRepo;
+  /** Person-centric milestone log — emits tour_took_place on the toured transition. */
+  activityEventsRepo?: ActivityEventsRepo;
   events?: EventBus;
   /**
    * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
@@ -134,6 +140,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents =
+    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const events = deps.events ?? appEvents;
@@ -451,6 +459,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // Dead or completed: nothing left to remind. (no_show keeps its pending
       // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
+    }
+
+    // tour_took_place milestone (Post-Tour & Application): record the person-
+    // centric activity event on the transition INTO 'toured'. Best-effort (a
+    // failed milestone must never fail the patch) and idempotent per transition
+    // — an already-toured tour re-PATCHed to 'toured' does NOT re-emit. PII:
+    // ids/type only (never the label). resolves tour-took-place-milestone.
+    if (newStatus === 'toured' && currentStatus !== 'toured') {
+      try {
+        await activityEvents.record({
+          contactId: current.tenantId,
+          type: 'tour_took_place',
+          label: 'Tour took place',
+          refType: 'tour',
+          refId: tourId,
+        });
+      } catch (err) {
+        log.error({ err, tourId }, 'tour_took_place milestone record failed (best-effort)');
+      }
     }
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');

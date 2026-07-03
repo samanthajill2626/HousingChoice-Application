@@ -3,7 +3,7 @@ id: tour-took-place-milestone
 title: tour_took_place activity milestone no longer fires (was derived from retired placement.tours[])
 type: debt
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-01
 refs: app/src/routes/placements.ts:567, app/src/repos/activityEventsRepo.ts:39, dashboard/src/routes/contact/Timeline.tsx:98
@@ -23,3 +23,13 @@ milestone from a tour status/outcome change (e.g. when a Tour transitions to `to
 a tour event/hook, keyed to the tour's tenant (+ unit). This belongs with the downstream
 Post-Tour & Application wiring (the tour→placement conversion sequence), where tour events
 first cross into placement/activity territory.
+
+**Resolved 2026-07-03** (Post-Tour & Application, Task 2): emitted from `routes/tours.ts`
+on the PATCH transition INTO `toured` (guard `newStatus === 'toured' && currentStatus !==
+'toured'` → idempotent, no re-emit on a re-toured tour). Records one activity event
+`{contactId: tour.tenantId, type:'tour_took_place', label:'Tour took place', refType:'tour',
+refId: tourId}`, best-effort (try/catch + log, ids only). Added `'tour'` to
+`ActivityEventRefType` (activityEventsRepo.ts) and to the timeline wire type
+(contactTimeline.ts now references that union). `activityEventsRepo` wired into
+`ToursRouterDeps` + api.ts. Tests: `toursApi.test.ts` "PATCH → toured records the
+tour_took_place activity milestone".

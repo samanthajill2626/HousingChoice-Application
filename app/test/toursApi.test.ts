@@ -339,6 +339,63 @@ describe('PATCH /api/tours/:tourId', () => {
 });
 
 // ============================================================================
+// tour_took_place milestone — recorded on the transition INTO 'toured'
+// (Post-Tour & Application Task 2; resolves docs/issues/tour-took-place-milestone)
+// ============================================================================
+
+describe('PATCH → toured records the tour_took_place activity milestone', () => {
+  it('records exactly one tour_took_place (refType tour, refId tourId) on scheduled → toured', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+    const tenantId = BASE_CREATE_BODY.tenantId;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(res.status).toBe(200);
+
+    const { items } = await world.activityEventsRepo.listByContact(tenantId);
+    const milestones = items.filter((e) => e.type === 'tour_took_place');
+    expect(milestones).toHaveLength(1);
+    expect(milestones[0]).toMatchObject({
+      contactId: tenantId,
+      type: 'tour_took_place',
+      label: 'Tour took place',
+      refType: 'tour',
+      refId: tourId,
+    });
+  });
+
+  it('is idempotent: re-PATCHing an already-toured tour does NOT re-emit', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const tenantId = BASE_CREATE_BODY.tenantId;
+
+    const first = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(first.status).toBe(200);
+    const second = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(second.status).toBe(200);
+
+    const { items } = await world.activityEventsRepo.listByContact(tenantId);
+    expect(items.filter((e) => e.type === 'tour_took_place')).toHaveLength(1);
+  });
+
+  it('does not emit tour_took_place for a non-toured transition', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const tenantId = BASE_CREATE_BODY.tenantId;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    expect(res.status).toBe(200);
+
+    const { items } = await world.activityEventsRepo.listByContact(tenantId);
+    expect(items.filter((e) => e.type === 'tour_took_place')).toHaveLength(0);
+  });
+});
+
+// ============================================================================
 // Whole-branch-review hardening — transition guards, effective-status reminder
 // side effects, scheduledAt canonicalization, exit-gate status coupling
 // ============================================================================

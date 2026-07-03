@@ -33,6 +33,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createActivityEventsRepo,
   type ActivityEventItem,
+  type ActivityEventRefType,
   type ActivityEventsRepo,
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
@@ -110,7 +111,7 @@ interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
   type: ActivityEventType;
   label: string;
-  refType?: 'placement' | 'unit' | 'conversation' | 'broadcast';
+  refType?: ActivityEventRefType;
   refId?: string;
 }
 type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;

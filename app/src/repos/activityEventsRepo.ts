@@ -43,7 +43,7 @@ export type ActivityEventType =
   | 'removed_from_group_text';
 
 /** What a milestone can deep-link out to (C2 `TimelineMilestone.refType`). */
-export type ActivityEventRefType = 'placement' | 'unit' | 'conversation' | 'broadcast';
+export type ActivityEventRefType = 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
 
 /** One stored activity event. Flexible document — these are the read fields. */
 export interface ActivityEventItem {

@@ -408,6 +408,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Relay auto-membership: resolve [tenant, unit's landlord] from contacts + units.
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // tour_took_place milestone on the toured transition (Post-Tour & Application).
+      activityEventsRepo: activityEvents,
       events,
     }),
   );

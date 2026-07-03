@@ -367,7 +367,7 @@ interface UsableGroup {
  * Anything else returns undefined → the caller falls back to the tenant-1:1
  * path (a reminder must never be lost).
  */
-async function resolveUsableGroup(
+export async function resolveUsableGroup(
   tour: TourItem,
   row: TourReminderItem,
   deps: RunDueTourRemindersDeps,

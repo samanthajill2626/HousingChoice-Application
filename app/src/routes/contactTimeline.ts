@@ -40,6 +40,7 @@ import {
 import {
   contactPhones,
   createContactsRepo,
+  type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import {
@@ -59,6 +60,26 @@ import {
   type DeliveryStatus,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import type { PlacementStage } from '../lib/statusModel.js';
+import {
+  REMINDER_BODIES,
+  resolveUsableGroup,
+  type RunDueTourRemindersDeps,
+} from '../jobs/tourReminders.js';
+import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
+import {
+  type ReminderKind,
+  type TourReminderItem,
+  type TourRemindersRepo,
+} from '../repos/tourRemindersRepo.js';
+import { type NudgeKind, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
+import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
+import { type UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  evaluateScheduledSendSuppression,
+  type ScheduledSuppression,
+} from '../services/scheduledSendSuppression.js';
 
 export interface ContactTimelineRouterDeps {
   logger?: Logger;
@@ -67,6 +88,16 @@ export interface ContactTimelineRouterDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   activityEventsRepo?: ActivityEventsRepo;
+  // Scheduled-send gather (Part B) — the not-yet-sent tour reminders + placement
+  // nudges surfaced in the first-page `upcoming[]` bucket. All five must be
+  // present for the gather to run; when any is absent the bucket is `[]` (the
+  // gather never default-constructs a DynamoDB repo, so injecting-less callers —
+  // e.g. the in-memory unit-test app — simply skip it).
+  toursRepo?: ToursRepo;
+  tourRemindersRepo?: TourRemindersRepo;
+  placementNudgesRepo?: PlacementNudgesRepo;
+  placementsRepo?: PlacementsRepo;
+  unitsRepo?: UnitsRepo;
 }
 
 // --- C2 wire shapes (VERBATIM — the frontend imports identical field names) --
@@ -115,10 +146,28 @@ interface TimelineMilestone extends TimelineBase {
   refId?: string;
 }
 type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
-// TODO(scheduled-message-visibility): add a future `kind: 'scheduled'` member here
-// and merge not-yet-sent scheduled outbound sends (tour reminders, placement
-// nudges — see the candidate-gather in the route handler) into the timeline so a
-// pending text shows up as a FUTURE item (body + send time) before it fires.
+
+/**
+ * A not-yet-sent scheduled outbound (tour reminder / placement nudge), surfaced
+ * as a FUTURE item in the first-page `upcoming[]` bucket (never merged into the
+ * DESC-take-limit `items` slice — a future `dueAt` would corrupt the cursor).
+ * `at` = the row's `dueAt`; `id` = `sched#<source>#<rowId>`.
+ */
+interface TimelineScheduled extends TimelineBase {
+  kind: 'scheduled';
+  /** The resolved 1:1 thread if one already exists; ABSENT for a landlord nudge
+   *  whose 1:1 is created on demand at fire time (item still shows — M4). */
+  conversationId?: string;
+  source: 'tour_reminder' | 'placement_nudge';
+  reminderKind?: ReminderKind;
+  nudgeKind?: NudgeKind;
+  /** The canned template that WILL send (faithful preview). */
+  body: string;
+  /** Absent = will send; present = will be skipped + the reason. */
+  suppression?: ScheduledSuppression;
+  refType: 'tour' | 'placement';
+  refId: string;
+}
 
 /** A candidate carries its global comparison key alongside the wire item. */
 interface Candidate {
@@ -130,8 +179,31 @@ interface Candidate {
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
-const ALL_KINDS = ['message', 'call', 'milestone'] as const;
+const ALL_KINDS = ['message', 'call', 'milestone', 'scheduled'] as const;
 type TimelineKind = (typeof ALL_KINDS)[number];
+
+/** Cap the landlord unit walk (M2) — log when truncated (never a silent cap). */
+const UNIT_WALK_CAP = 50;
+
+/**
+ * Reverse index: nudge `kind` → the stage that arms it + its recipient/body.
+ * Derived from the exported `NUDGE_RUNGS` (stage → rung) so the gather can, per
+ * nudge row, recover the rung's stage (for the `staleStage` suppression check),
+ * its recipient (to scope tenant vs landlord rungs), and its canned body.
+ */
+interface NudgeRungInfo {
+  stage: PlacementStage;
+  recipient: 'tenant' | 'landlord';
+  body: string;
+}
+const NUDGE_RUNG_BY_KIND: Map<NudgeKind, NudgeRungInfo> = (() => {
+  const map = new Map<NudgeKind, NudgeRungInfo>();
+  for (const [stage, rung] of Object.entries(NUDGE_RUNGS)) {
+    if (rung === undefined) continue;
+    map.set(rung.kind, { stage: stage as PlacementStage, recipient: rung.recipient, body: rung.body });
+  }
+  return map;
+})();
 
 /** Parse ?limit= into 1..MAX (default). undefined ⇒ 400 upstream. */
 function parseLimit(raw: unknown): number | undefined {
@@ -280,6 +352,177 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
   };
 }
 
+/** The five repos the scheduled-send gather walks. */
+interface ScheduledGatherRepos {
+  toursRepo: ToursRepo;
+  tourRemindersRepo: TourRemindersRepo;
+  placementsRepo: PlacementsRepo;
+  placementNudgesRepo: PlacementNudgesRepo;
+  unitsRepo: UnitsRepo;
+}
+
+/**
+ * Gather this contact's not-yet-sent scheduled sends into the first-page
+ * `upcoming[]` bucket. Three independent walks (M2 — all `Promise.all`-parallel,
+ * internally and with each other), each index-backed (no scans):
+ *   1. tenant tours → tour reminders that will route 1:1 (self_guided OR an
+ *      UNUSABLE group per the EXACT poller `resolveUsableGroup`, M3);
+ *   2. tenant placements → nudge rungs whose recipient is the tenant;
+ *   3. landlord units → placements → nudge rungs whose recipient is the landlord
+ *      (surfaced even with NO landlord 1:1 yet — `conversationId` absent, M4).
+ * Every item's send-time suppression is previewed via the shared evaluator.
+ * PII (doc §9): no bodies/phones logged — only IDs/counts.
+ */
+async function gatherUpcoming(params: {
+  contact: ContactItem;
+  config: AppConfig;
+  conversationsRepo: ConversationsRepo;
+  repos: ScheduledGatherRepos;
+  log: Logger;
+}): Promise<TimelineScheduled[]> {
+  const { contact, config, conversationsRepo, repos, log } = params;
+  const contactId = contact.contactId;
+
+  // Resolve the contact's 1:1 threads the SAME way the pollers do — from the
+  // scalar primary phone (not the multi-phone convById), first matching type.
+  const phone = contact.phone;
+  const convs =
+    typeof phone === 'string' && phone.length > 0
+      ? await conversationsRepo.findByParticipantPhone(phone)
+      : [];
+  const tenantConv = convs.find((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
+  const landlordConv = convs.find((c) => c.type === 'landlord_1to1' || c.type === 'unknown_1to1');
+  const contactOptOut = contact.sms_opt_out === true;
+
+  /** Preview suppression against a 1:1 thread (+ optional nudge stale-stage). */
+  const suppressionFor = (
+    conv: ConversationItem | undefined,
+    staleStage: boolean,
+  ): ScheduledSuppression | undefined =>
+    evaluateScheduledSendSuppression({
+      smsSendingEnabled: config.smsSendingEnabled,
+      convOptOut: conv?.sms_opt_out,
+      contactOptOut,
+      aiMode: conv?.ai_mode,
+      staleStage,
+    });
+
+  /** Map upcoming nudge rows of ONE recipient on ONE placement → items. */
+  const nudgeItemsFor = (
+    rows: Array<{ nudgeId: string; kind: NudgeKind; dueAt: string; sentAt?: string; canceledAt?: string }>,
+    placement: PlacementItem,
+    recipient: 'tenant' | 'landlord',
+    conv: ConversationItem | undefined,
+  ): TimelineScheduled[] => {
+    const items: TimelineScheduled[] = [];
+    for (const row of rows) {
+      if (row.sentAt !== undefined || row.canceledAt !== undefined) continue; // upcoming only
+      const info = NUDGE_RUNG_BY_KIND.get(row.kind);
+      if (info === undefined || info.recipient !== recipient) continue; // scope to this recipient
+      const suppression = suppressionFor(conv, placement.stage !== info.stage);
+      items.push({
+        kind: 'scheduled',
+        id: `sched#placement_nudge#${row.nudgeId}`,
+        at: row.dueAt,
+        source: 'placement_nudge',
+        nudgeKind: row.kind,
+        body: info.body,
+        ...(conv !== undefined && { conversationId: conv.conversationId }),
+        ...(suppression !== undefined && { suppression }),
+        refType: 'placement',
+        refId: placement.placementId,
+      });
+    }
+    return items;
+  };
+
+  // Walk 1 — tenant tours → 1:1-routed tour reminders.
+  const tourWalk = (async (): Promise<TimelineScheduled[]> => {
+    const tours = await repos.toursRepo.listByTenant(contactId);
+    const perTour = await Promise.all(
+      tours.map(async (tour: TourItem): Promise<TimelineScheduled[]> => {
+        const rows = await repos.tourRemindersRepo.listByTour(tour.tourId);
+        const upcomingRows = rows.filter((r) => r.sentAt === undefined && r.canceledAt === undefined);
+        if (upcomingRows.length === 0) return [];
+        // Route decision — mirror the poller EXACTLY: self_guided always 1:1;
+        // any other type is 1:1 ONLY when its group is unusable (M3). A
+        // group-routed rung has no 1:1 thread → it is dropped here.
+        let routes1to1 = tour.tourType === 'self_guided';
+        if (!routes1to1) {
+          // resolveUsableGroup only reads `deps.conversationsRepo` — a narrow
+          // structural view is all it needs (cast documented).
+          const groupDeps = { conversationsRepo } as unknown as RunDueTourRemindersDeps;
+          const group = await resolveUsableGroup(tour, upcomingRows[0]!, groupDeps, log);
+          routes1to1 = group === undefined;
+        }
+        if (!routes1to1) return [];
+        return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
+          const suppression = suppressionFor(tenantConv, false);
+          return {
+            kind: 'scheduled',
+            id: `sched#tour_reminder#${row.reminderId}`,
+            at: row.dueAt,
+            source: 'tour_reminder',
+            reminderKind: row.kind,
+            body: REMINDER_BODIES[row.kind],
+            ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
+            ...(suppression !== undefined && { suppression }),
+            refType: 'tour',
+            refId: tour.tourId,
+          };
+        });
+      }),
+    );
+    return perTour.flat();
+  })();
+
+  // Walk 2 — tenant placements → tenant-recipient nudge rungs.
+  const tenantNudgeWalk = (async (): Promise<TimelineScheduled[]> => {
+    const { items: placements } = await repos.placementsRepo.listByTenant(contactId);
+    const perPlacement = await Promise.all(
+      placements.map(async (placement): Promise<TimelineScheduled[]> => {
+        const rows = await repos.placementNudgesRepo.listByPlacement(placement.placementId);
+        return nudgeItemsFor(rows, placement, 'tenant', tenantConv);
+      }),
+    );
+    return perPlacement.flat();
+  })();
+
+  // Walk 3 — landlord units → placements → landlord-recipient nudge rungs.
+  const landlordNudgeWalk = (async (): Promise<TimelineScheduled[]> => {
+    const unitsPage = await repos.unitsRepo.listByLandlord(contactId, { limit: UNIT_WALK_CAP });
+    if (unitsPage.lastEvaluatedKey !== undefined) {
+      log.info(
+        { contactId, cap: UNIT_WALK_CAP },
+        'contact timeline: landlord unit walk truncated at cap — some landlord nudges may be omitted',
+      );
+    }
+    const perUnit = await Promise.all(
+      unitsPage.items.map(async (unit): Promise<TimelineScheduled[]> => {
+        const { items: placements } = await repos.placementsRepo.listByUnit(unit.unitId);
+        const perPlacement = await Promise.all(
+          placements.map(async (placement): Promise<TimelineScheduled[]> => {
+            const rows = await repos.placementNudgesRepo.listByPlacement(placement.placementId);
+            return nudgeItemsFor(rows, placement, 'landlord', landlordConv);
+          }),
+        );
+        return perPlacement.flat();
+      }),
+    );
+    return perUnit.flat();
+  })();
+
+  const [tourItems, tenantNudgeItems, landlordNudgeItems] = await Promise.all([
+    tourWalk,
+    tenantNudgeWalk,
+    landlordNudgeWalk,
+  ]);
+  const upcoming = [...tourItems, ...tenantNudgeItems, ...landlordNudgeItems];
+  // Ascending by dueAt (`at`) — a stable chronological order for the pinned section.
+  upcoming.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  return upcoming;
+}
+
 export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const config = deps.config ?? loadConfig();
@@ -287,6 +530,25 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+
+  // Scheduled-send gather repos (Part B): used ONLY when ALL are injected — we
+  // deliberately do NOT default-construct them (a default would open a live
+  // DynamoDB repo the in-memory unit-test app never provides). When any is
+  // absent the `upcoming[]` bucket is simply `[]`.
+  const scheduledRepos: ScheduledGatherRepos | undefined =
+    deps.toursRepo !== undefined &&
+    deps.tourRemindersRepo !== undefined &&
+    deps.placementsRepo !== undefined &&
+    deps.placementNudgesRepo !== undefined &&
+    deps.unitsRepo !== undefined
+      ? {
+          toursRepo: deps.toursRepo,
+          tourRemindersRepo: deps.tourRemindersRepo,
+          placementsRepo: deps.placementsRepo,
+          placementNudgesRepo: deps.placementNudgesRepo,
+          unitsRepo: deps.unitsRepo,
+        }
+      : undefined;
 
   const router = Router();
 
@@ -304,7 +566,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     // 2. Parse kinds / cursor / limit (all validated → 400 on bad input).
     const kinds = parseKinds(req.query['kinds']);
     if (kinds === undefined) {
-      res.status(400).json({ error: 'kinds must be a comma list of: message, call, milestone' });
+      res.status(400).json({ error: 'kinds must be a comma list of: message, call, milestone, scheduled' });
       return;
     }
     const limit = parseLimit(req.query['limit']);
@@ -343,10 +605,9 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
 
     // 4. Candidate gather — fetch limit+1 from EACH source, all bounded
     //    `< boundaryKey`, so the merge can decide whether more pages remain.
-    // TODO(scheduled-message-visibility): also gather this contact's not-yet-sent
-    // scheduled sends here (tourRemindersRepo.listByTour + placementNudgesRepo,
-    // for this contact's conversation(s)) as future `kind:'scheduled'` candidates —
-    // reflecting send-time suppression (opt-out/manual/breaker) honestly.
+    //    Not-yet-sent scheduled sends are deliberately NOT gathered here (a
+    //    future `dueAt` would corrupt this DESC-take-limit slice + cursor) — they
+    //    are gathered into the separate first-page `upcoming[]` bucket in step 6.
     const candidates: Candidate[] = [];
 
     if (wantMessage || wantCall) {
@@ -397,11 +658,33 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       'contact timeline page served',
     );
 
-    // 6. Respond ASCENDING (oldest→newest) per C2: reverse the descending page
+    // 6. Scheduled-send gather (Part B) — a SEPARATE first-page-only bucket. A
+    //    future `dueAt` sorts newer than every message, so scheduled items must
+    //    NOT enter the DESC-take-limit `candidates` slice / cursor math above.
+    //    Run only on the first page (`cursor` absent) AND when the caller wants
+    //    the `scheduled` kind. Failures never break the timeline — the bucket is
+    //    supplementary, so a gather error logs + falls back to `[]`.
+    let upcoming: TimelineScheduled[] = [];
+    if (boundaryKey === undefined && kinds.has('scheduled') && scheduledRepos !== undefined) {
+      try {
+        upcoming = await gatherUpcoming({
+          contact,
+          config,
+          conversationsRepo: conversations,
+          repos: scheduledRepos,
+          log,
+        });
+      } catch (err) {
+        log.error({ err, contactId }, 'contact timeline: scheduled gather failed — returning empty upcoming');
+        upcoming = [];
+      }
+    }
+
+    // 7. Respond ASCENDING (oldest→newest) per C2: reverse the descending page
     //    for the wire. nextCursor was derived above from the descending slice's
     //    LAST element (the OLDEST returned item) BEFORE this reverse, so the
     //    cursor still pages backward in time (older) with no dups/skips.
-    res.json({ items: page.map((c) => c.item).reverse(), nextCursor });
+    res.json({ items: page.map((c) => c.item).reverse(), nextCursor, upcoming });
   });
 
   return router;

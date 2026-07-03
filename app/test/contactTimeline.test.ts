@@ -496,15 +496,16 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     world.units.set('u1', { unitId: 'u1', landlordId: 'll1', status: 'available' });
     await world.auditRepo.append('units#u1', 'broadcast_sent', { broadcastId: 'b1', tenantCount: 4 });
     await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't1' });
+    await world.auditRepo.append('units#u1', 'listing_status_changed', { to: 'under_application' });
     await world.auditRepo.append('units#u1', 'unit_updated', { fields: ['rent_min'] }); // EXCLUDED
 
     const res = await authedGet(app, '/api/contacts/ll1/timeline');
     expect(res.status).toBe(200);
 
     const ms = res.body.items.filter((i: { kind: string }) => i.kind === 'milestone');
-    // ONLY the two lifecycle rows interleave — the unit_updated field-edit is
+    // ONLY the three lifecycle rows interleave — the unit_updated field-edit is
     // filtered out (never surfaced on any timeline; it stays in the audit trail).
-    expect(ms).toHaveLength(2);
+    expect(ms).toHaveLength(3);
     const types = ms.map((m: { type: string }) => m.type);
     expect(types).toContain('tour_scheduled'); // tour_* maps 1:1 to the same-named type
     expect(types).not.toContain('unit_updated');
@@ -523,6 +524,16 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 
     const tr = ms.find((m: { refType?: string }) => m.refType === 'tour');
     expect(tr).toMatchObject({ type: 'tour_scheduled', refType: 'tour', refId: 't1' });
+
+    // The status-change row humanizes the raw enum via LISTING_STATUS_LABELS,
+    // matching the property Activity card ('under_application' → 'Under application').
+    const st = ms.find((m: { type: string }) => m.type === 'stage_changed');
+    expect(st).toMatchObject({
+      type: 'stage_changed',
+      refType: 'unit',
+      refId: 'u1',
+      label: 'Property status → Under application',
+    });
   });
 
   it('does NOT interleave property activity for a tenant contact', async () => {

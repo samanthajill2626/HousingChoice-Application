@@ -63,6 +63,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import type { PlacementStage } from '../lib/statusModel.js';
+import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   REMINDER_BODIES,
   resolveUsableGroup,
@@ -464,14 +465,16 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
         refType: 'tour',
         ...(typeof p['tourId'] === 'string' && { refId: p['tourId'] }),
       };
-    case 'listing_status_changed':
+    case 'listing_status_changed': {
+      const to = typeof p['to'] === 'string' ? p['to'] : '';
       return {
         ...base,
         type: 'stage_changed',
-        label: `Property status → ${typeof p['to'] === 'string' ? p['to'] : ''}`,
+        label: `Property status → ${(LISTING_STATUS_LABELS as Record<string, string>)[to] ?? to}`,
         refType: 'unit',
         refId: unitId,
       };
+    }
     case 'unit_contact_added':
     case 'unit_contact_removed':
       return {
@@ -790,28 +793,35 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       // its merged cursor lives in the SAME lexical space as the audit `before`
       // bound below — a double-nested `${at}#${id}` would break page-2 paging.
       if (contact.type === 'landlord') {
-        const owned = await units.listByLandlord(contactId, { limit: MAX_LANDLORD_UNITS });
-        if (owned.items.length >= MAX_LANDLORD_UNITS) {
-          log.warn({ contactId, count: owned.items.length }, 'landlord property fan-out capped');
-        }
-        for (const u of owned.items) {
-          let rows: AuditEvent[];
-          try {
-            rows = await audit.listByEntity(`units#${u.unitId}`, {
-              limit: limit + 1,
-              ...(boundaryKey !== undefined && { before: boundaryKey }),
-            });
-          } catch (err) {
-            log.error({ err, contactId, unitId: u.unitId }, 'landlord property audit read failed (best-effort)');
-            continue;
+        // Best-effort: a `listByLandlord` GSI failure (throttle/unavailable) must
+        // degrade the property interleave to nothing, NEVER fail the whole timeline
+        // — mirrors the scheduled-gather fallback below. PII-safe log (ids only).
+        try {
+          const owned = await units.listByLandlord(contactId, { limit: MAX_LANDLORD_UNITS });
+          if (owned.items.length >= MAX_LANDLORD_UNITS) {
+            log.warn({ contactId, count: owned.items.length }, 'landlord property fan-out capped');
           }
-          for (const r of rows) {
-            if (!LANDLORD_FEED_TYPES.has(r.event_type)) continue;
-            const ms = unitAuditToMilestone(u.unitId, r);
-            if (ms !== null && typeof r.ts === 'string') {
-              candidates.push({ globalKey: r.ts, item: ms });
+          for (const u of owned.items) {
+            let rows: AuditEvent[];
+            try {
+              rows = await audit.listByEntity(`units#${u.unitId}`, {
+                limit: limit + 1,
+                ...(boundaryKey !== undefined && { before: boundaryKey }),
+              });
+            } catch (err) {
+              log.error({ err, contactId, unitId: u.unitId }, 'landlord property audit read failed (best-effort)');
+              continue;
+            }
+            for (const r of rows) {
+              if (!LANDLORD_FEED_TYPES.has(r.event_type)) continue;
+              const ms = unitAuditToMilestone(u.unitId, r);
+              if (ms !== null && typeof r.ts === 'string') {
+                candidates.push({ globalKey: r.ts, item: ms });
+              }
             }
           }
+        } catch (err) {
+          log.error({ err, contactId }, 'landlord property interleave failed (best-effort) — timeline continues without property pins');
         }
       }
     }

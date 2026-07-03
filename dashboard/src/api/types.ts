@@ -550,6 +550,9 @@ export interface Tour {
   moveForward?: boolean;
   /** True when outcome+moveForward have been set and moveForward is true. */
   convertible?: boolean;
+  /** The placementId this tour was converted into (Post-Tour & Application).
+   *  Set by POST /api/placements/from-tour; presence means the tour is spent. */
+  convertedPlacementId?: string;
   /** ISO 8601 — when the tour was created. camelCase to match the server's TourItem shape. */
   createdAt?: string;
   /** ISO 8601 — when the tour was last updated. camelCase to match the server's TourItem shape. */
@@ -578,6 +581,10 @@ export interface PlacementItem {
   tenantId: string;
   /** The unit this deal is on. */
   unitId: string;
+  /** The tour this placement was converted from, when born via the Post-Tour &
+   *  Application conversion (POST /api/placements/from-tour). Absent on manually
+   *  created placements. */
+  fromTourId?: string;
   /** The stage ladder position (the kanban column). */
   stage: PlacementStage;
   /** When the placement last entered its current stage (ISO 8601). */
@@ -1124,7 +1131,7 @@ export interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
   type: TimelineMilestoneType;
   label: string; // human text, e.g. "Tour took place · Toured"
-  refType?: 'placement' | 'unit' | 'conversation' | 'broadcast';
+  refType?: 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
   refId?: string; // deep-link target (links out, no inline content)
 }
 export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;

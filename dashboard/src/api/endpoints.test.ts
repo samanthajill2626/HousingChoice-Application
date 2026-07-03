@@ -10,6 +10,7 @@ import { request } from './client.js';
 import {
   buildTransitionBody,
   createContact,
+  createPlacementFromTour,
   createTour,
   createTourRelay,
   getTours,
@@ -134,6 +135,24 @@ it('setListingStatus PATCHes listing-status and unwraps { unit }', async () => {
     body: { toStatus: 'off_market', source: 'manual' },
   });
   expect(u).toEqual({ unitId: 'u1', status: 'off_market' });
+});
+
+it('createPlacementFromTour POSTs { tourId } and returns the { placement, tour } envelope', async () => {
+  const placement = { placementId: 'k1', tenantId: 'c1', unitId: 'u1', stage: 'send_application', fromTourId: 't1' };
+  const tour = { tourId: 't1', tenantId: 'c1', unitId: 'u1', tourType: 'self_guided', status: 'closed', convertedPlacementId: 'k1' };
+  vi.mocked(request).mockResolvedValueOnce({ placement, tour });
+  const res = await createPlacementFromTour('t1');
+  expect(request).toHaveBeenCalledWith('/api/placements/from-tour', {
+    method: 'POST',
+    body: { tourId: 't1' },
+  });
+  expect(res.placement).toEqual(placement);
+  expect(res.tour).toEqual(tour);
+});
+
+it('createPlacementFromTour propagates a non-2xx rejection (e.g. 409 tour_already_converted)', async () => {
+  vi.mocked(request).mockRejectedValueOnce(new Error('tour_already_converted'));
+  await expect(createPlacementFromTour('t1')).rejects.toThrow(/tour_already_converted/);
 });
 
 // --- Tours -------------------------------------------------------------------

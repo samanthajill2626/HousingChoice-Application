@@ -16,6 +16,7 @@ import type { Tour } from '../../api/index.js';
 const getTour = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
+const createPlacementFromTour = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -23,7 +24,16 @@ vi.mock('../../api/index.js', async () => {
     getTour: (...a: unknown[]) => getTour(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
+    createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
   };
+});
+
+// Spy on useNavigate so the convert action's post-success navigation is assertable
+// while the rest of react-router-dom (MemoryRouter/Routes/Link) stays real.
+const navigateSpy = vi.fn();
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return { ...actual, useNavigate: () => navigateSpy };
 });
 
 import { TourDetail } from './TourDetail.js';
@@ -521,6 +531,90 @@ describe('TourDetail', () => {
     // The detail text — and ONLY the detail text — is the inline error.
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     expect(screen.getByRole('alert').textContent).toBe('Tenant has no phone number on file');
+  });
+
+  // ── Post-Tour & Application: Start placement from a convertible tour ────────
+  // A convertible, not-yet-converted tour offers "Start placement" (→ convert →
+  // navigate to the new placement). Once converted, the tour carries
+  // convertedPlacementId and shows a "View placement" link instead (no button).
+
+  it("shows 'Start placement' for a convertible, unconverted tour", async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.getByRole('button', { name: 'Start placement from this tour' }),
+    ).toHaveTextContent('Start placement');
+    // Not yet converted → no "View placement" link.
+    expect(screen.queryByRole('link', { name: /View placement/i })).not.toBeInTheDocument();
+  });
+
+  it("does NOT show 'Start placement' for a non-convertible tour", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    expect(
+      screen.queryByRole('button', { name: 'Start placement from this tour' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a 'View placement' link (and NO Start button) once the tour is converted", async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'closed', convertible: true, convertedPlacementId: 'plc-77' }),
+    );
+    renderDetail();
+    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
+    const link = screen.getByRole('link', { name: /View placement/i });
+    expect(link).toHaveAttribute('href', '/placements/plc-77');
+    expect(
+      screen.queryByRole('button', { name: 'Start placement from this tour' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("'Start placement' converts the tour then navigates to the new placement", async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockResolvedValue({
+      placement: { placementId: 'plc-abc', tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' },
+      tour: makeTour({ status: 'closed', convertible: true, convertedPlacementId: 'plc-abc' }),
+    });
+    renderDetail();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Start placement from this tour' }),
+      ).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Start placement from this tour' }));
+
+    expect(createPlacementFromTour).toHaveBeenCalledWith('tour-abc');
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-abc'));
+  });
+
+  it("a convert failure surfaces via role=alert and does NOT navigate", async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockRejectedValue(
+      new ApiError(409, 'tour_already_converted', 'tour_already_converted'),
+    );
+    renderDetail();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Start placement from this tour' }),
+      ).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Start placement from this tour' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/tour_already_converted/i);
+    expect(navigateSpy).not.toHaveBeenCalled();
   });
 
   it('a generic relay failure renders the error message inline', async () => {

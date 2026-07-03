@@ -122,6 +122,21 @@ describe('Timeline', () => {
     expect(link).toHaveAttribute('href', '/placements/k1');
   });
 
+  it("deep-links a 'tour' refType milestone to the tour detail page", () => {
+    const tourMilestone: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms-tour',
+      at: '2026-06-08T08:00:00',
+      type: 'tour_took_place',
+      label: 'Tour took place · Toured',
+      refType: 'tour',
+      refId: 'tour-55',
+    };
+    renderTimeline({ items: [tourMilestone] });
+    const link = screen.getByRole('link', { name: /Tour took place/ });
+    expect(link).toHaveAttribute('href', '/tours/tour-55');
+  });
+
   it('hides milestones when "Comms only" is toggled', () => {
     renderTimeline({ items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED] });
     expect(screen.getByText(/Placement opened/)).toBeInTheDocument();

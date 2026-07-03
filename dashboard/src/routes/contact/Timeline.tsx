@@ -121,6 +121,8 @@ function milestoneHref(ms: TimelineMilestone): string | null {
       return `/conversations/${ms.refId}`;
     case 'broadcast':
       return `/broadcasts/${ms.refId}`;
+    case 'tour':
+      return `/tours/${ms.refId}`;
     default:
       return null;
   }

@@ -140,6 +140,22 @@ export async function createPlacement(body: {
   return res.placement;
 }
 
+/** POST /api/placements/from-tour — the Post-Tour & Application conversion: turn a
+ *  CONVERTIBLE tour into a placement. The backend reuses the placement-create path,
+ *  finalizes the tour (closed + convertedPlacementId + reminders canceled) and
+ *  re-parents the tour's masked relay thread to the new placement. Body { tourId }.
+ *  Returns the { placement, tour } envelope as-is (the new placement + the finalized
+ *  tour). Throws ApiError on non-2xx — 409 tour_not_convertible / tour_already_converted,
+ *  404 tour_not_found / tenant_not_found / unit_not_found. */
+export function createPlacementFromTour(
+  tourId: string,
+): Promise<{ placement: PlacementItem; tour: Tour }> {
+  return request<{ placement: PlacementItem; tour: Tour }>('/api/placements/from-tour', {
+    method: 'POST',
+    body: { tourId },
+  });
+}
+
 /** GET /api/placements?tenantId= / ?unitId= — the placements on a tenant OR a unit
  *  (the overlap check for manual creation). Exactly one of tenantId/unitId is sent;
  *  the server honors the most-specific filter. First page only (overlap needs only

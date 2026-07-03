@@ -13,11 +13,12 @@
 // Audience vocabulary: navigator/staff see "property"; tenant sees "home".
 // This is a staff-only dashboard page, so we use "property" for the unit.
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   getTour,
   patchTour,
   createTourRelay,
+  createPlacementFromTour,
   ApiError,
   TOUR_STATUS_LABELS,
   TOUR_OUTCOME_LABELS,
@@ -60,6 +61,7 @@ const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
 
 export function TourDetail(): React.JSX.Element {
   const { tourId } = useParams<{ tourId: string }>();
+  const navigate = useNavigate();
   const [tour, setTour] = useState<Tour | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -207,6 +209,23 @@ export function TourDetail(): React.JSX.Element {
       setExitMoveForward(null);
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Exit gate update failed');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Post-Tour & Application conversion: turn a CONVERTIBLE, not-yet-converted
+  // tour into a placement, then jump to the new placement. QUIET — the server
+  // sends no announcement at convert time (founder 2026-07-02).
+  async function handleConvert() {
+    if (!tour || submitting) return;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      const { placement } = await createPlacementFromTour(tour.tourId);
+      navigate(`/placements/${placement.placementId}`);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Failed to start placement');
     } finally {
       setSubmitting(false);
     }
@@ -451,6 +470,23 @@ export function TourDetail(): React.JSX.Element {
             Cancel
           </button>
         </form>
+      ) : null}
+
+      {/* Post-Tour & Application: a convertible, not-yet-converted tour offers
+          'Start placement' (converts + jumps to the new placement). Once converted
+          the tour carries convertedPlacementId → link to the placement instead. */}
+      {tour.convertible === true && tour.convertedPlacementId === undefined ? (
+        <button
+          type="button"
+          onClick={() => void handleConvert()}
+          disabled={submitting}
+          aria-label="Start placement from this tour"
+        >
+          Start placement
+        </button>
+      ) : null}
+      {typeof tour.convertedPlacementId === 'string' ? (
+        <Link to={`/placements/${tour.convertedPlacementId}`}>View placement</Link>
       ) : null}
     </article>
   );

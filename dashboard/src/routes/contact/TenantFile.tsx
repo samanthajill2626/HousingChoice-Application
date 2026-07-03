@@ -22,7 +22,7 @@ import {
   Card,
   CardAction,
   CardInlineAction,
-  Chips,
+  NotesText,
   EmptyRow,
   KV,
   PendingPanel,
@@ -104,7 +104,7 @@ export function TenantFile({
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
   const housingAuthority = contact.housingAuthority ?? '—';
   const currentAddress = formatAddress(contact.address) || '—';
-  const prefs = typeof contact.notes === 'string' && contact.notes.trim() ? [contact.notes.trim()] : [];
+  const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
 
   return (
     <>
@@ -166,8 +166,8 @@ export function TenantFile({
           )
         }
       >
-        {prefs.length > 0 ? (
-          <Chips items={prefs} />
+        {notes ? (
+          <NotesText text={notes} />
         ) : (
           <PendingPanel note="No preferences yet — added manually for now." />
         )}

@@ -21,6 +21,7 @@ import {
   CardInlineAction,
   EmptyRow,
   KV,
+  NotesText,
   PendingPanel,
   Row,
   responseClass,
@@ -138,7 +139,11 @@ export function LandlordFile({
           )
         }
       >
-        <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
+        {typeof contact.notes === 'string' && contact.notes.trim() ? (
+          <NotesText text={contact.notes.trim()} />
+        ) : (
+          <PendingPanel note="Accepts-programs / lease terms / pet policy arrive with the backend." />
+        )}
       </Card>
 
       <Card

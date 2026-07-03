@@ -1,42 +1,26 @@
-# Task 1 Report — Shared dashboard phone lib + formatter consolidation + pinned tests
+# Task 1 Report — seed/ module skeleton + profiles + holder-stamp fold-in
 
-**Date:** 2026-07-02  **Branch:** feat/flexible-phone-entry  **Status:** DONE
+**Status:** COMPLETE — all gates green.
 
-## What was built
+## Files changed
+- `app/src/lib/seed/index.ts` — NEW: `seedAll(endpoint, profile='lean')`, `seedInboundVoiceLineHolder`, `SEED_INBOUND_VOICE_CELL`, `LOCAL_DEFAULT_ENDPOINT`, `SeedProfile` type
+- `app/src/lib/seed/lean.ts` — pre-existing; no drift found
+- `app/src/lib/seed/cast.ts` — task comment corrected: Task 2 → Task 3
+- `app/src/lib/seed/matrix.ts` — task comment corrected: Task 3 → Task 2
+- `app/src/lib/seedData.ts` — rewritten as thin re-export from `./seed/index.js`
+- `app/scripts/db-seed.ts` — profile via `SEED_PROFILE` env; one log line names profile
+- `scripts/dev.mjs` — `runTsx()` gains optional `extraEnv={}` param; `--seeded` path passes `{ SEED_PROFILE: 'full' }` to db-seed only
+- `app/test/seedProfile.integration.test.ts` — NEW: 4 profile-contract tests (lean count, lean items present, holder stamped, full ⊇ lean)
 
-### `dashboard/src/lib/phone.ts` (new)
-- `normalizeToE164` — verbatim line-for-line port from `app/src/lib/phone.ts`; all code comments preserved.
-- `isE164` — verbatim port.
-- `formatPhoneDisplay` — mirrors `formatPhoneForDisplay` semantics (`+1XXXXXXXXXX` → `(AAA) BBB-CCCC`; non-NANP returned unchanged); returns `string` (not `string | undefined`) for undefined/empty input so it's safe in JSX without null-coalesce. Contract difference documented in the JSDoc.
-- Header cross-link: "keep in sync with app/src/lib/phone.ts (+ its test)".
+## lean.ts fidelity
+No drift found. `lean.ts` is byte-equivalent to the SEED object in the original `seedData.ts` — same IDs, fields, timestamps (T0/T1/T2), MATCH_EXPIRES_AT, and all comments.
 
-### `app/src/lib/phone.ts` (comment-only edit)
-- Added mirror cross-link at top: "keep in sync with dashboard/src/lib/phone.ts (+ its test)".
-- Zero behavior change.
+## Test summary
+- `npm test -w @housingchoice/app -- test/seedData.test.ts`: 11/11 passed (unchanged)
+- `npm test -w @housingchoice/app -- test/seedProfile.integration.test.ts`: 4/4 passed
+- Full app suite: 128 passed, 1 skipped (S3/MinIO not running — expected), 0 failed
+- Scripted proof: `SEED_PROFILE=full npx tsx app/scripts/db-seed.ts` → exit 0, holder stamped; bare `npx tsx app/scripts/db-seed.ts` → exit 0, holder stamped
 
-### `dashboard/src/lib/phone.test.ts` (new)
-- Pins the SAME input→expected table as `app/test/phone.test.ts` — every case mirrored exactly (9 `it` blocks covering all paths: E.164 passthrough, 10-digit NANP stripping, 11-digit leading-1, explicit-`+` international, 9-case reject table, `isE164` accepts/rejects, `formatPhoneDisplay` NANP/non-NANP/falsy).
-- One documented contract difference in `formatPhoneDisplay`: returns `''` (not `undefined`) for falsy input, matching the dashboard's JSX-safe contract.
-
-### `dashboard/src/routes/contact/format.ts` (consolidation)
-- Added import `formatPhoneDisplay` from `../../lib/phone.js`.
-- Replaced `formatPhone`'s inline regex body with a one-line delegation: `return formatPhoneDisplay(e164)`.
-- All 12+ import sites unchanged — the function signature and return type are identical.
-- ONE formatter implementation now; the old duplicated regex is gone.
-
-## Verification results
-
-| Check | Result |
-|---|---|
-| `npm run typecheck` | EXIT:0 |
-| `npm test -w @housingchoice/dashboard` | EXIT:0 — 96 files / 730 tests passed (includes `src/lib/phone.test.ts` 9 tests + `src/routes/contact/format.test.ts` 11 tests) |
-| `npm test -w @housingchoice/app -- test/phone.test.ts` | EXIT:0 — 1 file / 9 tests passed |
-
-## Self-review notes
-
-- **Verbatim fidelity:** `normalizeToE164` and `isE164` are byte-for-byte identical to the app originals; the only diff is the file-level cross-link header comment.
-- **`formatPhoneDisplay` vs `formatPhoneForDisplay`:** The dashboard function uses `!e164` (falsy guard) and returns `''` instead of `undefined` for the missing-input case — this matches `formatPhone`'s existing contract and avoids a breaking change for all 12+ importers. The JSDoc documents this deliberately.
-- **Consolidation:** `formatPhone` is now a pure wrapper — ONE regex definition lives in `dashboard/src/lib/phone.ts`. The `format.test.ts` `formatPhone` cases still pass, confirming the wrapper is transparent.
-- **No YAGNI creep:** `usePhoneField` was not built (deferred to Task 3 per brief).
-- **No app behavior change:** the only app file touched got a one-line comment prepended; tests still pass unchanged.
-- **Drift alarm:** any divergence in either `normalizeToE164` implementation without a matching test update will fail `phone.test.ts` on one or both sides.
+## Concerns
+- `devReset.ts` still calls `seedInboundVoiceLineHolder` separately after `seedAll`. Because `seedAll` now folds in the holder stamp, this is a harmless double-stamp (the second call overwrites `cell_verified_at` with a slightly later ISO timestamp — per the plan, this is acceptable and intentional).
+- The `cell_verified_at` field set by the holder stamp is NOT byte-stable (uses `new Date().toISOString()` as default) — this is pre-existing behavior carried forward verbatim.

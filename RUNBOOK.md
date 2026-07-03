@@ -666,7 +666,7 @@ The CloudWatch agent collects two host metrics that the log-derived metrics cann
 - **`mem_used_percent`** — total host memory (RSS + buffers + cached), reported as a percent
   of the 2 GB t4g.small total.
 
-The agent also runs **two OTLP receivers** (added feat/otlp-exporter-wiring, 2026-07-02): one on
+The agent also runs **two OTLP receivers**: one on
 `0.0.0.0:4318` forwarding spans to **AWS X-Ray** (traces pipeline), and one on `0.0.0.0:4320`
 publishing metrics to **CloudWatch metrics** under the `CWAgent` namespace (metrics pipeline). The
 app and worker containers export to the host agent via `host.docker.internal` — the compose
@@ -723,7 +723,7 @@ aws ssm send-command --profile housingchoice --region us-east-1 --instance-ids <
 
 ### OTLP wiring — apply and verify
 
-**What changed (feat/otlp-exporter-wiring, 2026-07-02).** The CloudWatch agent now also acts as
+**What changed (2026-07-02).** The CloudWatch agent now also acts as
 an OTLP receiver: traces on `0.0.0.0:4318` → AWS X-Ray; OTLP metrics on `0.0.0.0:4320` →
 CloudWatch metrics (`CWAgent` namespace). The app and worker containers export to the host agent
 via `host.docker.internal:4318` (traces) and `host.docker.internal:4320` (metrics). Two new IAM
@@ -920,7 +920,7 @@ operational. Migrated 2026-06-18: [`iam-user-mfa`](docs/issues/iam-user-mfa.md),
 addressed (no longer tracked): orphan boot-log lines (correlation fix shipped
 2026-06-12 — any orphan hit is now a real bug); custom domain + ACM (shipped in Phase 1
 Change Order 3 — see [Custom domain & TLS](#custom-domain--tls)); OTLP exporter wiring
-(shipped feat/otlp-exporter-wiring 2026-07-02 — see
+(shipped 2026-07-02 — see
 [OTLP wiring — apply and verify](#otlp-wiring--apply-and-verify) above).
 
 **Access-key rotation (operational procedure).** Rotate the `housingchoice` IAM user's

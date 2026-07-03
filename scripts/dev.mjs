@@ -211,11 +211,11 @@ if (mockRedirect) {
 }
 
 /** Run a one-shot tsx script (db:create / db:seed) and await success. */
-function runTsx(scriptRelPath, scriptArgs = []) {
+function runTsx(scriptRelPath, scriptArgs = [], extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', scriptRelPath, ...scriptArgs], {
       cwd: repoRoot,
-      env: childEnv,
+      env: { ...childEnv, ...extraEnv },
       stdio: 'inherit',
     });
     child.on('error', reject);
@@ -258,8 +258,8 @@ if (mode === 'local') {
     console.log(`dev — step 3/${localSteps}: tables + media bucket`);
     await runTsx('app/scripts/db-create.ts');
     await runTsx('app/scripts/s3-create.ts');
-    console.log(`dev — step 4/${localSteps}: seed data (--seeded)`);
-    await runTsx('app/scripts/db-seed.ts');
+    console.log(`dev — step 4/${localSteps}: seed data (--seeded, profile: full)`);
+    await runTsx('app/scripts/db-seed.ts', [], { SEED_PROFILE: 'full' });
   } else {
     // No --seeded: DROP + recreate the tables so a previously-seeded container
     // can't leak stale fixtures — a true zero-data start. (--reset is hard-

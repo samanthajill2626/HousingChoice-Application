@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom';
 import { STAGE_LABELS, type PlacementItem } from '../../api/index.js';
 import { StatusBadge } from '../../ui/index.js';
 import { shortDate } from './placementsFormat.js';
+import { DeadlineChip } from './DeadlineChip.js';
 import styles from './PlacementCard.module.css';
 
 export interface PlacementCardProps {
@@ -41,8 +42,6 @@ export function PlacementCard({
 
   const stageLabel = STAGE_LABELS[placement.stage] ?? placement.stage;
   const tourDate = shortDate(placement.tour_date);
-  const deadline =
-    placement.next_deadline_at !== undefined ? shortDate(placement.next_deadline_at) : '';
 
   return (
     <article
@@ -81,7 +80,7 @@ export function PlacementCard({
       <div className={styles.metaRow}>
         <span className={styles.stage}>{stageLabel}</span>
         {tourDate ? <span className={styles.meta}>Tour {tourDate}</span> : null}
-        {!tourDate && deadline ? <span className={styles.meta}>Due {deadline}</span> : null}
+        <DeadlineChip placement={placement} />
         {tenantStatus ? <StatusBadge kind="tenant" status={tenantStatus} /> : null}
       </div>
 

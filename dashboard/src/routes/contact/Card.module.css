@@ -132,6 +132,9 @@ a.li:focus-visible {
 
 .liRight {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-size: var(--fs-xs);
   flex: 0 0 auto;
 }

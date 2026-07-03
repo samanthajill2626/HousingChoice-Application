@@ -28,6 +28,7 @@ import {
   Row,
   responseClass,
 } from './Card.js';
+import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
@@ -224,7 +225,12 @@ export function LandlordFile({
                 key={c.placementId}
                 to={`/placements/${c.placementId}`}
                 label={addr}
-                right={STAGE_LABELS[c.stage] ?? c.stage}
+                right={
+                  <>
+                    <DeadlineChip placement={c} />
+                    {STAGE_LABELS[c.stage] ?? c.stage}
+                  </>
+                }
               />
             );
           })

@@ -29,6 +29,7 @@ import {
   Row,
   responseClass,
 } from './Card.js';
+import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { MediaGallery } from './MediaGallery.js';
@@ -252,7 +253,12 @@ export function TenantFile({
               key={c.placementId}
               to={`/placements/${c.placementId}`}
               label={unitLabel(unitMap, c.unitId)}
-              right={STAGE_LABELS[c.stage] ?? c.stage}
+              right={
+                <>
+                  <DeadlineChip placement={c} />
+                  {STAGE_LABELS[c.stage] ?? c.stage}
+                </>
+              }
             />
           ))
         )}

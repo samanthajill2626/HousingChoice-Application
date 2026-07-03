@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline } from './Timeline.js';
 import { ApiError } from '../../api/index.js';
-import type { TimelineItem } from '../../api/index.js';
+import type { TimelineItem, TimelineScheduled } from '../../api/index.js';
 
 function renderTimeline(props: Partial<React.ComponentProps<typeof Timeline>> = {}) {
   const items: TimelineItem[] = props.items ?? [];
@@ -490,5 +490,49 @@ describe('Timeline', () => {
     ] });
     const link = screen.getByRole('link', { name: /Tour canceled/ });
     expect(link).toHaveAttribute('href', '/tours/t-9');
+  });
+
+  // --- Pinned "Upcoming" scheduled-messages section ------------------------
+  const SCHEDULED: TimelineScheduled = {
+    kind: 'scheduled',
+    id: 'sched-1',
+    at: '2999-01-01T10:00:00Z', // always future so it never reads "sending shortly"
+    conversationId: 'c1',
+    source: 'tour_reminder',
+    reminderKind: 'day_before',
+    body: 'Reminder: your tour is tomorrow.',
+    refType: 'tour',
+    refId: 'tour-9',
+  };
+
+  it('renders the pinned "Upcoming (N)" section when upcoming is non-empty', () => {
+    renderTimeline({ items: [MESSAGE_IN], upcoming: [SCHEDULED] });
+    const section = screen.getByRole('region', { name: 'Upcoming scheduled messages' });
+    expect(section).toBeInTheDocument();
+    expect(screen.getByText('Upcoming (1)')).toBeInTheDocument();
+    // The scheduled item's body renders inside the section.
+    expect(screen.getByText('Reminder: your tour is tomorrow.')).toBeInTheDocument();
+  });
+
+  it('does NOT render the Upcoming section when upcoming is empty or absent', () => {
+    const { rerender } = renderTimeline({ items: [MESSAGE_IN], upcoming: [] });
+    expect(
+      screen.queryByRole('region', { name: 'Upcoming scheduled messages' }),
+    ).not.toBeInTheDocument();
+    // Absent (undefined) prop path — same result.
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={[MESSAGE_IN]}
+          source="server"
+          canSend={false}
+          onSend={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    expect(
+      screen.queryByRole('region', { name: 'Upcoming scheduled messages' }),
+    ).not.toBeInTheDocument();
   });
 });

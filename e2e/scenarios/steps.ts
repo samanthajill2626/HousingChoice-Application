@@ -119,6 +119,17 @@ export const TOUR_REMINDER_BODIES: Record<ReminderKind, string> = {
   no_show_checkin: '[AUTO] Hi! We noticed you may have missed your tour. Want to reschedule?',
 };
 
+/** The staff-facing rung labels the Reminders panel renders (verbatim mirror of
+ *  dashboard REMINDER_KIND_LABELS) — the pinned accessible-name contract for the
+ *  scheduled-message-visibility Part A panel assertions. */
+export const REMINDER_KIND_LABELS: Record<ReminderKind, string> = {
+  confirmation: 'Confirmation',
+  day_before: 'Day before',
+  morning_of: 'Morning of',
+  en_route: 'En route',
+  no_show_checkin: 'No-show check-in',
+};
+
 /** A booking time + the reminder-ladder dueAts the backend will arm off it. */
 export interface TourTimes {
   /** The raw datetime-local value the Book/Reschedule forms send ('YYYY-MM-DDTHH:mm'). */
@@ -2271,6 +2282,136 @@ export class Scenario {
       const { conversation } = (await res.json()) as { conversation: { pool_number?: string } };
       expect(conversation.pool_number).toBeUndefined();
     });
+  }
+
+  // ==== Scheduled-message visibility verbs ====================================
+  // documentation/…/scheduled-message-visibility. Two surfaces:
+  //   - Part A: the tour Reminders panel on /tours/:id — the armed ladder, each
+  //     rung's state (upcoming/sent/canceled), the NEXT rung (aria-current="step"
+  //     + a "Next" tag), and an armed-but-will-be-skipped note.
+  //   - Part B: the pinned "Upcoming scheduled messages" region on a contact's
+  //     1:1 timeline — each not-yet-sent tour reminder / placement nudge as a card
+  //     carrying its body, a source tag ("Tour reminder"/"Nudge"), a fire-time
+  //     line ("sends in Nh · <abs>" future, "sending shortly" due-now), and — when
+  //     suppressed — an amber "Will be skipped — <reason>".
+  // All accessibility-first; the deterministic tick seams drive future→sent.
+
+  /** The active contact's id (captured on create/triage) — so a scheduled-message
+   *  spec can pin its Upcoming assertions to a SPECIFIC contact page. */
+  contactId(): string {
+    return this.requireActiveContactId();
+  }
+
+  /**
+   * [App→Team] A not-yet-sent scheduled send is PINNED in the contact's "Upcoming
+   * scheduled messages" region: exactly one card whose body contains
+   * `opts.bodyContains`, showing the source tag ("Tour reminder"/"Nudge") and a
+   * fire-time affordance. Scoped to the Upcoming region + the single card so a
+   * same-body SENT bubble elsewhere on the timeline can never false-match.
+   */
+  expectUpcomingItem(
+    contactId: string,
+    opts: { bodyContains: string; source: 'tour_reminder' | 'placement_nudge' },
+  ): Promise<void> {
+    const tag = opts.source === 'tour_reminder' ? 'Tour reminder' : 'Nudge';
+    return step(`App: an Upcoming ${tag} item ("…${opts.bodyContains}…") on the contact`, async () => {
+      const card = await this.gotoUpcomingCard(contactId, opts.bodyContains);
+      await expect(card.getByText(tag, { exact: true })).toBeVisible();
+      // The fire-time line is the ONLY node whose text STARTS with "sends"/"sending
+      // shortly" (the head div leads with the clock glyph, so an anchored regex
+      // isolates the fire span from its container).
+      await expect(card.getByText(/^sends |^sending shortly/)).toBeVisible();
+    });
+  }
+
+  /**
+   * [App→Team] The Upcoming card for `bodyContains` shows the honest suppression
+   * treatment — an amber "Will be skipped — <reason>" line (the send WILL be
+   * refused at fire time). The item still renders (visibility, not omission).
+   */
+  expectUpcomingSuppressed(contactId: string, bodyContains: string): Promise<void> {
+    return step(`App: the Upcoming item ("…${bodyContains}…") is marked will-be-skipped`, async () => {
+      const card = await this.gotoUpcomingCard(contactId, bodyContains);
+      await expect(card.getByText(/^Will be skipped —/)).toBeVisible();
+    });
+  }
+
+  /**
+   * [App→Team] The scheduled item for `bodyContains` has FIRED: it left the
+   * Upcoming region AND a real sent bubble now renders in the 1:1 timeline. The
+   * bubble wait proves the timeline refetched fresh data before the absence is
+   * asserted (so a mid-load empty section can't false-pass the "gone" check).
+   */
+  expectScheduledSent(contactId: string, bodyContains: string): Promise<void> {
+    return step(`App: the scheduled item ("…${bodyContains}…") fired (left Upcoming, sent bubble shows)`, async () => {
+      await this.page.goto(`${NEXT}/contacts/${contactId}`);
+      const comms = this.page.getByRole('region', { name: 'Communications and activity' });
+      // The sent message renders as a real bubble in the log — its presence proves
+      // the fetch resolved with fresh (post-tick) data.
+      await expect(comms.getByText(bodyContains).first()).toBeVisible({ timeout: 15_000 });
+      // …and the pinned Upcoming card for it is gone (the server excludes sent rows).
+      const upcoming = this.page.getByRole('region', { name: 'Upcoming scheduled messages' });
+      await expect(
+        upcoming.locator('> div > div').filter({ hasText: bodyContains }),
+      ).toHaveCount(0, { timeout: 15_000 });
+    });
+  }
+
+  /** [Team] Open the tour Reminders panel on /tours/:id (defaults to the active
+   *  tour) — Part A surface. Asserts the titled "Reminders" region is present. */
+  openTourReminders(tourId?: string): Promise<void> {
+    const id = tourId ?? this.requireActiveTour().tourId;
+    return step('Team opens the tour Reminders panel', async () => {
+      await this.page.goto(`${NEXT}/tours/${id}`);
+      await expect(this.page.getByRole('region', { name: 'Reminders' })).toBeVisible({
+        timeout: 10_000,
+      });
+    });
+  }
+
+  /**
+   * [App→Team] A rung in the OPEN Reminders panel is in the expected state:
+   *   - 'sent'      → the row shows a "Sent · <when>" chip;
+   *   - 'canceled'  → the row shows a "Canceled" chip (struck-through);
+   *   - 'next'      → the row is the next-to-fire (aria-current="step" + a "Next" tag);
+   *   - 'upcoming'  → the row is armed and neither sent nor canceled.
+   * Rows are scoped by the rung's staff label (REMINDER_KIND_LABELS); after a
+   * reschedule a label can appear twice (an old canceled row + a fresh armed one),
+   * so the state filter is what disambiguates.
+   */
+  expectReminderRung(
+    kind: ReminderKind,
+    state: 'upcoming' | 'sent' | 'canceled' | 'next',
+  ): Promise<void> {
+    const label = REMINDER_KIND_LABELS[kind];
+    return step(`App: Reminders panel shows '${label}' as ${state}`, async () => {
+      const region = this.page.getByRole('region', { name: 'Reminders' });
+      const rows = region.getByRole('listitem').filter({ hasText: label });
+      let row;
+      if (state === 'sent') row = rows.filter({ hasText: /Sent/ });
+      else if (state === 'canceled') row = rows.filter({ hasText: 'Canceled' });
+      else if (state === 'next') row = rows.filter({ hasText: 'Next' });
+      else row = rows.filter({ hasNotText: 'Sent' }).filter({ hasNotText: 'Canceled' });
+      await expect(row.first()).toBeVisible({ timeout: 10_000 });
+      if (state === 'next') await expect(row.first()).toHaveAttribute('aria-current', 'step');
+    });
+  }
+
+  /** Navigate to a contact and return the SINGLE Upcoming card whose body contains
+   *  `bodyContains`. The card roots are the grandchild divs of the Upcoming region
+   *  (region → list div → card divs), so filtering by body text can't accidentally
+   *  select an ancestor container. */
+  private async gotoUpcomingCard(
+    contactId: string,
+    bodyContains: string,
+  ): Promise<import('@playwright/test').Locator> {
+    await this.page.goto(`${NEXT}/contacts/${contactId}`);
+    const upcoming = this.page.getByRole('region', { name: 'Upcoming scheduled messages' });
+    await expect(upcoming).toBeVisible({ timeout: 10_000 });
+    const card = upcoming.locator('> div > div').filter({ hasText: bodyContains });
+    await expect(card).toHaveCount(1, { timeout: 10_000 });
+    await expect(card).toBeVisible();
+    return card;
   }
 
   // ---- internal helpers ---------------------------------------------------

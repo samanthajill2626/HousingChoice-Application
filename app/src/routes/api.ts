@@ -25,6 +25,7 @@ import {
   type ConversationUpdatedEvent,
   type EventBus,
   type MessagePersistedEvent,
+  type ScheduledUpdatedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -47,8 +48,8 @@ import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/acti
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
-import { type UnitsRepo } from '../repos/unitsRepo.js';
-import { type PlacementsRepo } from '../repos/placementsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -83,8 +84,9 @@ import { createSystemRouter } from './system.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
-import { type ToursRepo } from '../repos/toursRepo.js';
-import { type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import { createTourRemindersRouter } from './tourReminders.js';
+import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
@@ -263,6 +265,19 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // ladder on every move; the relay lifecycle closes a LOST placement's masked
   // thread. Both are best-effort inside the transition service.
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
+  // gather walks these five scheduled-send repos. Default-construct them here (the
+  // same `?? create…` pattern as conversations/messages above) so the gather is
+  // LIVE in production/e2e — the production composition root (index.ts) calls
+  // buildApp with NO `api` deps, so nothing was injecting them and the gather was
+  // permanently gated off. Each factory only builds a client object (no network at
+  // construction); the gather itself is best-effort/try-caught in the router, so a
+  // repo miss yields an empty `upcoming[]`, never a 500. `placementNudges` above is
+  // reused (not rebuilt). Tests that inject fakes via `deps.X` still win through `??`.
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const poolNumbersForLifecycle =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const relayLifecycle = createPlacementRelayLifecycle({
@@ -378,12 +393,24 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
-      // WS3 Task 3.2: a landlord's owned-property lifecycle interleave needs the
-      // units (byLandlord GSI) + the shared audit trail. Without these the router
-      // falls back to real DynamoDB repos (fake-world writes invisible in tests;
-      // prod reads nothing).
-      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // WS3 Task 3.2: a landlord's owned-property lifecycle interleave reads the
+      // shared audit trail (the units byLandlord GSI is forwarded below for the
+      // gather and shared by the interleave). Forward the RESOLVED `audit` local
+      // (same rationale as the gather repos below) so prod/e2e read a real repo.
       auditRepo: audit,
+      // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
+      // timeline can project pending tour reminders + placement nudges. Forward the
+      // RESOLVED locals (each `deps.X ?? create…` above), NOT `deps.X` — the router
+      // only runs the gather when ALL five are present, and the production
+      // composition root (index.ts) passes NO `api` deps, so forwarding `deps.X`
+      // here left them undefined and the gather permanently off in prod/e2e. The
+      // locals default-construct real repos (best-effort/try-caught in the router),
+      // while tests injecting fakes still win through the `??`.
+      toursRepo: tours,
+      tourRemindersRepo: tourReminders,
+      placementNudgesRepo: placementNudges,
+      placementsRepo: placements,
+      unitsRepo: units,
       config,
     }),
   );
@@ -439,6 +466,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // tour_took_place milestone on the toured transition (Post-Tour & Application).
       activityEventsRepo: activityEvents,
       events,
+    }),
+  );
+  // Tour reminders read endpoint (scheduled-message-visibility). Mounted at
+  // /tours too — its only path is GET /:tourId/reminders, a DISTINCT segment
+  // from the tours router's routes above (GET /:tourId matches a single
+  // segment, never /:tourId/reminders), so the two never collide.
+  router.use(
+    '/tours',
+    createTourRemindersRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      conversationsRepo: conversations,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).
@@ -524,6 +566,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       armStageNudge: (placement, toStage, nowIso) =>
         armNudgeForStage(placement, toStage, nowIso, {
           placementNudgesRepo: placementNudges,
+          // Task 6: best-effort scheduled.updated so the timeline's "Upcoming"
+          // section refetches live when a nudge is armed/canceled on a stage move.
+          events,
           ...(deps.logger !== undefined && { logger: deps.logger }),
         }),
       closeRelayForLostPlacement: relayLifecycle.closeForLost,
@@ -1125,10 +1170,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onPlacementUpdated = (payload: PlacementUpdatedEvent): void => {
       writeEvent('placement.updated', payload);
     };
+    const onScheduledUpdated = (payload: ScheduledUpdatedEvent): void => {
+      writeEvent('scheduled.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
     events.on('placement.updated', onPlacementUpdated);
+    events.on('scheduled.updated', onScheduledUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -1150,6 +1199,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('message.persisted', onMessagePersisted);
       events.off('broadcast.updated', onBroadcastUpdated);
       events.off('placement.updated', onPlacementUpdated);
+      events.off('scheduled.updated', onScheduledUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

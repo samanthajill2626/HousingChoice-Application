@@ -355,13 +355,21 @@ describe('seed matrix: users', () => {
 // 14. every_deadline_type ≥1
 // ---------------------------------------------------------------------------
 describe('seed matrix: next_deadline_type coverage', () => {
-  const DEADLINE_TYPES = ['tour_reminder', 'rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'] as const;
+  // `tour_reminder` is a TOURS concept (a tour is a separate entity in the
+  // `searching` phase); it is NEVER a valid placement next_deadline. So it is
+  // deliberately excluded from the placement-deadline coverage set.
+  const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'] as const;
 
-  it('every next_deadline_type value appears ≥1 across all placements', () => {
+  it('every placement next_deadline_type value appears ≥1 across all placements', () => {
     const deadlineCounts = countByField(allPlacements, 'next_deadline_type');
     for (const dt of DEADLINE_TYPES) {
       expect(deadlineCounts[dt] ?? 0, `deadline type '${dt}'`).toBeGreaterThanOrEqual(1);
     }
+  });
+
+  it('NO placement anywhere carries a tour_reminder deadline (tours are a separate entity)', () => {
+    const deadlineCounts = countByField(allPlacements, 'next_deadline_type');
+    expect(deadlineCounts['tour_reminder'] ?? 0).toBe(0);
   });
 });
 

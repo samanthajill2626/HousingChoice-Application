@@ -23,6 +23,7 @@
 //
 // PII (doc §9): NEVER log a phone number/name/body. Log only
 // nudgeId/placementId/tenantId/unitId/kind/stage.
+import type { EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { PlacementStage } from '../lib/statusModel.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
@@ -109,6 +110,13 @@ function contactDisplayName(contact: ContactItem): string | null {
 
 export interface ArmNudgeForStageDeps {
   placementNudgesRepo: PlacementNudgesRepo;
+  /**
+   * Optional event bus (scheduled-message-visibility Task 6). When present, a
+   * best-effort `scheduled.updated` is emitted after every arm/cancel so the
+   * contact timeline's pinned "Upcoming" section refetches live. NEVER throws /
+   * fails the stage transition — a broken emit is swallowed.
+   */
+  events?: EventBus;
   logger?: Logger;
 }
 
@@ -126,6 +134,24 @@ export async function armNudgeForStage(
 ): Promise<void> {
   const log = deps.logger ?? defaultLogger;
 
+  // Best-effort live-update poke: the ladder is about to change (arm and/or
+  // cancel), so tell the contact timeline's pinned "Upcoming" section to
+  // refetch. NEVER let a broken emit throw into — and fail — the stage
+  // transition (scheduled-message-visibility Task 6). ID-only, advisory payload;
+  // a landlord-recipient rung is deliberately NOT resolved (the client refetches
+  // unconditionally, so tenantId is enough of a hint).
+  const pokeTimeline = (): void => {
+    if (deps.events === undefined) return;
+    try {
+      deps.events.emit('scheduled.updated', { contactId: placement.tenantId });
+    } catch (err) {
+      log.error(
+        { err, placementId: placement.placementId },
+        'placement nudge: scheduled.updated emit failed (best-effort, ignored)',
+      );
+    }
+  };
+
   // Cancel first — the stage moved on, so any pending chase for the old stage is
   // moot (and a late poll must never fire it).
   await deps.placementNudgesRepo.cancelForPlacement(placement.placementId);
@@ -136,6 +162,7 @@ export async function armNudgeForStage(
       { placementId: placement.placementId, stage: toStage },
       'placement nudge: stage has no rung (terminal/rung-less) — canceled only',
     );
+    pokeTimeline();
     return;
   }
 
@@ -149,6 +176,7 @@ export async function armNudgeForStage(
     { placementId: placement.placementId, stage: toStage, kind: rung.kind, dueAt, nudgeId: row.nudgeId },
     'placement nudge armed',
   );
+  pokeTimeline();
 }
 
 // ---------------------------------------------------------------------------

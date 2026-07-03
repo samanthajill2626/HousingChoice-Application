@@ -210,11 +210,13 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       stage: 'awaiting_inspection', // byStage
       stage_entered_at: T2, // §8 time-in-stage basis
       stage_source: 'manual', // §8 provenance
-      tour_date: '2026-06-13', // byTourDate (sparse — present because scheduled)
-      next_deadline_type: 'tour_reminder', // byNextDeadline HASH (sparse)
-      next_deadline_at: '2026-06-13T13:00:00.000Z', // byNextDeadline RANGE
+      // Deadline: `awaiting_inspection` is the Inspection phase — tours are a
+      // separate entity in the `searching` phase, so a placement here NEVER carries
+      // a `tour_reminder`. The time-in-stage "stuck" nudge is the correct clock
+      // (stage_entered_at T2 + the 10-day awaiting_inspection threshold).
+      next_deadline_type: 'stuck_placement', // byNextDeadline HASH (sparse)
+      next_deadline_at: '2026-06-11T14:05:45.000Z', // byNextDeadline RANGE (T2 + 10d)
       group_thread: IDS.conversation,
-      tour_history: [{ scheduled_for: '2026-06-13T14:00:00.000Z', status: 'scheduled' }],
       created_at: T2,
     },
   ],

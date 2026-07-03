@@ -237,6 +237,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Invariant: no reminder rows may ever exist for a 'requested' / time-less tour.
     if (scheduledAt !== undefined) {
       await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+      // A reminder ladder now exists — nudge the contact timeline's pinned
+      // "Upcoming" section to refetch live (scheduled-message-visibility Task 6).
+      // ID-only, advisory payload; a requested/timeless create arms nothing so
+      // it deliberately does NOT emit.
+      events.emit('scheduled.updated', { contactId: tour.tenantId });
     }
 
     // Dual-write the lifecycle event to the tenant timeline + property audit —
@@ -483,9 +488,13 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // rungs were canceled and must come back). A status-only 'confirmed' patch
     // does NOT re-arm (it would re-fire the confirmation rung).
     const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
+    // Whether the reminder ladder changed on this patch — drives the ONE
+    // scheduled.updated emit below (arm/reschedule OR cancel, never both).
+    let ladderChanged = false;
     if (armable && rearmTrigger) {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
       await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+      ladderChanged = true;
     } else if (
       effectiveStatus === 'canceled' ||
       effectiveStatus === 'closed' ||
@@ -494,6 +503,13 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // Dead or completed: nothing left to remind. (no_show keeps its pending
       // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
+      ladderChanged = true;
+    }
+    // ONE emit after the cancel+arm pair (scheduled-message-visibility Task 6):
+    // the contact timeline's pinned "Upcoming" section refetches so the
+    // rescheduled/canceled future item moves live. ID-only, advisory payload.
+    if (ladderChanged) {
+      events.emit('scheduled.updated', { contactId: tour.tenantId });
     }
 
     // Tour lifecycle → tenant timeline + property (unit) audit (WS4). Each

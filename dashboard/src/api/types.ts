@@ -565,6 +565,61 @@ export interface ToursPage {
   tours: Tour[];
 }
 
+// --- Tour reminder ladder (scheduled-message-visibility) ---------------------
+
+/** The five reminder rungs of a tour's ladder (mirrors the app-side ReminderKind). */
+export type ReminderKind =
+  | 'confirmation'
+  | 'day_before'
+  | 'morning_of'
+  | 'en_route'
+  | 'no_show_checkin';
+
+/**
+ * One rung of a tour's reminder ladder (GET /api/tours/:tourId/reminders).
+ * Mirrors the server's TourReminderView shape verbatim (Task 2).
+ */
+export interface TourReminderView {
+  reminderId: string;
+  kind: ReminderKind;
+  /** ISO 8601 — when the rung is due to fire. */
+  dueAt: string;
+  state: 'upcoming' | 'sent' | 'canceled';
+  /** ISO 8601 — when it was sent (present when state === 'sent'). */
+  sentAt?: string;
+  /** ISO 8601 — when it was canceled (present when state === 'canceled'). */
+  canceledAt?: string;
+  body: string;
+  /** Present when the rung is armed but will be skipped at fire time. */
+  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+}
+
+/** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
+export interface TourRemindersPage {
+  reminders: TourReminderView[];
+  /** The next reminder due to fire (highlight it in the UI). Absent when none upcoming. */
+  next?: TourReminderView;
+}
+
+/** Human-readable labels for the reminder rungs (staff-facing). */
+export const REMINDER_KIND_LABELS: Readonly<Record<ReminderKind, string>> = {
+  confirmation: 'Confirmation',
+  day_before: 'Day before',
+  morning_of: 'Morning of',
+  en_route: 'En route',
+  no_show_checkin: 'No-show check-in',
+};
+
+/** Human-readable phrasings for why an armed rung will be skipped (staff-facing). */
+export const REMINDER_SUPPRESSION_LABELS: Readonly<
+  Record<NonNullable<TourReminderView['suppression']>['reason'], string>
+> = {
+  sms_sending_disabled: 'SMS sending is off',
+  contact_opted_out: 'contact opted out',
+  manual_mode: 'manual mode',
+  stale_stage: 'tour no longer at this stage',
+};
+
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
 export interface PlacementAttention {
   reason: string;
@@ -756,6 +811,15 @@ export interface MessagePersistedEvent {
   tsMsgId: string;
   direction: MessageDirection;
   deliveryStatus: DeliveryStatus;
+}
+
+/** GET /api/events 'scheduled.updated' payload (scheduled-message-visibility Task 6).
+ *  A tour-reminder or placement-nudge ladder was armed/rescheduled/canceled — the
+ *  contact timeline's pinned "Upcoming" section refetches so future sends
+ *  appear/disappear live. ID-only, advisory payload (`contactId` may be absent);
+ *  the timeline refetches unconditionally. NO PII. */
+export interface ScheduledUpdatedEvent {
+  contactId?: string;
 }
 
 // --- Contact creation / vocabulary (extensible create flow) ------------------
@@ -1139,11 +1203,34 @@ export interface TimelineMilestone extends TimelineBase {
   refType?: 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
   refId?: string; // deep-link target (links out, no inline content)
 }
-export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
+/**
+ * A not-yet-sent scheduled message for this contact's 1:1 thread — the pinned
+ * "Upcoming" bucket the server ships alongside the timeline (scheduled-message-
+ * visibility). Mirrors the server contract VERBATIM. NEVER appears in the main
+ * `items` stream (only in `ContactTimelinePage.upcoming`); it renders as a
+ * distinct dashed/muted card, visibly NOT a sent message. `at` is the fire time.
+ */
+export interface TimelineScheduled extends TimelineBase {
+  kind: 'scheduled';
+  /** Absent for a landlord nudge with no 1:1 yet. */
+  conversationId?: string;
+  source: 'tour_reminder' | 'placement_nudge';
+  reminderKind?: 'confirmation' | 'day_before' | 'morning_of' | 'en_route' | 'no_show_checkin';
+  nudgeKind?: 'receipt_check' | 'completion_check' | 'approval_check' | 'rta_window_closing';
+  body: string;
+  /** Present when the message is armed but will be skipped at fire time. */
+  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+  refType: 'tour' | 'placement';
+  refId: string;
+}
+export type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone | TimelineScheduled;
 
 export interface ContactTimelinePage {
   items: TimelineItem[]; // chronological; client renders oldest→newest
   nextCursor: string | null;
+  /** Not-yet-sent scheduled messages (the pinned "Upcoming" section). Absent on
+   *  an older backend that predates the bucket → the client defaults to []. */
+  upcoming?: TimelineScheduled[];
 }
 
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------

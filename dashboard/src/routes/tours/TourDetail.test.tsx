@@ -17,6 +17,10 @@ const getTour = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
+// RemindersPanel (mounted by TourDetail) fetches its own ladder — stub it so the
+// detail tests don't hit the network (a real fetch would surface a second
+// role="alert" and collide with the action-error assertions).
+const getTourReminders = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -25,6 +29,7 @@ vi.mock('../../api/index.js', async () => {
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
+    getTourReminders: (...a: unknown[]) => getTourReminders(...a),
   };
 });
 
@@ -62,6 +67,8 @@ function renderDetail(tourId = 'tour-abc') {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: an empty ladder (RemindersPanel renders "No reminders armed.").
+  getTourReminders.mockResolvedValue({ reminders: [] });
 });
 
 describe('TourDetail', () => {

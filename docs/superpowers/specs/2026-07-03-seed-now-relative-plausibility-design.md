@@ -26,8 +26,16 @@ change brings that discipline to the whole matrix.
    byte-stable e2e gate (that's lean), so now-relative output is fine — mirrors `live.ts`.
 2. **Coherent by construction.** Field values are derived from the entity's stage/phase and a
    single per-entity clock, not independent round-robins.
-3. **`lean` and `live.ts` are untouched.** Lean is the e2e regression gate (byte-identical). Live
-   is already correct.
+3. **`live.ts` is untouched** (already correct). **`lean` is untouched EXCEPT one coherence fix
+   (added after user feedback):** its pinned showcase `placement-0001` (Tasha Nguyen,
+   `awaiting_inspection`) carried a legacy pre-tours-entity shape — a `tour_reminder` deadline
+   (which floated it to the top of Today) plus vestigial `tour_date`/`tour_history` that the
+   dashboard still renders as a "Tour date". Corrected to a phase-appropriate `stuck_placement`
+   deadline (`stage_entered_at` T2 + the 10-day `awaiting_inspection` threshold) and the legacy
+   tour fields removed. Lean stays fixed-date + deterministic (e2e must remain green — the
+   verification gate); only these field values changed. The `seedMatrix.test.ts` deadline-type
+   coverage set drops `tour_reminder` (never valid on a placement) and gains a "no placement
+   carries tour_reminder" assertion.
 4. **No behavior/schema/route change.** Only the seed generator (+ its tests) changes.
 
 ## 3. Placement model (now-relative)

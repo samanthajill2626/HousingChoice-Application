@@ -9,10 +9,14 @@
 //     call DOES; full message body is returned untruncated;
 //   - 404 unknown contact; 400 invalid cursor.
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Express } from 'express';
+import express, { type Express } from 'express';
 import request from 'supertest';
-import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { createContactTimelineRouter } from '../src/routes/contactTimeline.js';
+import type { AppConfig } from '../src/lib/config.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
 
 const TENANT = 'c-tenant';
@@ -543,5 +547,238 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
         (i: { kind: string; type?: string }) => i.kind === 'milestone' && i.type === 'listing_sent',
       ),
     ).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part B server (scheduled-message-visibility, Task 4): the not-yet-sent
+// scheduled-send gather returned in a FIRST-PAGE-ONLY `upcoming[]` envelope.
+// Built directly against createContactTimelineRouter with the in-memory fakes
+// (no DynamoDB) so the gather's three walks + suppression are exercised.
+// ---------------------------------------------------------------------------
+
+const CONFIRMATION_BODY =
+  "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
+const DAY_BEFORE_BODY = '[AUTO] Reminder: your property tour is tomorrow.';
+const APPROVAL_BODY = '[AUTO] Checking in — any decision yet on the application we sent over?';
+
+describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
+  function makeGatherHarness(): { world: FakeWorld; app: Express } {
+    const world = createFakeWorld();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    const config = {
+      smsSendingEnabled: true,
+      ourPhoneNumbers: [OUR_NUMBER],
+    } as unknown as AppConfig;
+    const router = createContactTimelineRouter({
+      logger,
+      config,
+      contactsRepo: world.contactsRepo,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      activityEventsRepo: world.activityEventsRepo,
+      toursRepo: world.toursRepo,
+      tourRemindersRepo: world.tourRemindersRepo,
+      placementNudgesRepo: world.placementNudgesRepo,
+      placementsRepo: world.placementsRepo,
+      unitsRepo: world.unitsRepo,
+    });
+    const app = express();
+    app.use('/api/contacts', router);
+    return { world, app };
+  }
+
+  function seedConv(
+    world: FakeWorld,
+    conversationId: string,
+    participantPhone: string,
+    type: ConversationType,
+  ): void {
+    const now = new Date().toISOString();
+    world.conversations.set(conversationId, {
+      conversationId,
+      participant_phone: participantPhone,
+      status: 'open',
+      last_activity_at: now,
+      type,
+      ai_mode: 'auto',
+      created_at: now,
+    });
+  }
+
+  /** Seed a relay_group conversation; `usable` toggles open+pool+roster vs closed. */
+  function seedGroup(world: FakeWorld, conversationId: string, poolNumber: string, usable: boolean): void {
+    const now = new Date().toISOString();
+    world.conversations.set(conversationId, {
+      conversationId,
+      participant_phone: poolNumber,
+      pool_number: poolNumber,
+      status: usable ? 'open' : 'closed',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      created_at: now,
+      participants: [{ contactId: 'someone', phone: '+15550190999' }],
+    });
+  }
+
+  it('self_guided tour with 2 upcoming rungs → 2 scheduled items (asc by dueAt) on the tenant 1:1', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600001';
+    world.contacts.push({ contactId: 'ct-1', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-1', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-1',
+      unitId: 'u-1',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Insert out of dueAt order to prove the ascending sort.
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'day_before', dueAt: '2099-01-09T10:00:00.000Z' });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/contacts/ct-1/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up.every((i) => i.kind === 'scheduled' && i.source === 'tour_reminder')).toBe(true);
+    expect(up.map((i) => i.at)).toEqual(['2099-01-05T10:00:00.000Z', '2099-01-09T10:00:00.000Z']);
+    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.body).toBe(CONFIRMATION_BODY);
+    expect(up[1]!.body).toBe(DAY_BEFORE_BODY);
+    expect(up.every((i) => i.conversationId === 'conv-ct-1')).toBe(true);
+    expect(up.every((i) => i.suppression === undefined)).toBe(true);
+    expect(up[0]!.refType).toBe('tour');
+    expect(up[0]!.refId).toBe(tour.tourId);
+  });
+
+  it('non-self_guided tour with an UNUSABLE (closed) group still surfaces its rungs as 1:1 items (M3)', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600002';
+    world.contacts.push({ contactId: 'ct-2', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-2', phone, 'tenant_1to1');
+    seedGroup(world, 'grp-closed', '+15550190002', /* usable */ false);
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-2',
+      unitId: 'u-2',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'landlord_led',
+      groupThreadId: 'grp-closed',
+    });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/contacts/ct-2/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.source).toBe('tour_reminder');
+    expect(up[0]!.conversationId).toBe('conv-ct-2');
+  });
+
+  it('non-self_guided tour with a USABLE group does NOT surface its rungs (group-routed, no 1:1)', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600003';
+    world.contacts.push({ contactId: 'ct-3', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-3', phone, 'tenant_1to1');
+    seedGroup(world, 'grp-open', '+15550190003', /* usable */ true);
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-3',
+      unitId: 'u-3',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'landlord_led',
+      groupThreadId: 'grp-open',
+    });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/contacts/ct-3/timeline');
+    expect(res.status).toBe(200);
+    expect(res.body.upcoming).toEqual([]);
+  });
+
+  it('landlord contact with an awaiting_approval nudge and NO landlord 1:1 → item with conversationId undefined (M4)', async () => {
+    const { world, app } = makeGatherHarness();
+    const landlordPhone = '+15550600004';
+    world.contacts.push({ contactId: 'll-1', type: 'landlord', status: 'active', phone: landlordPhone });
+    // Deliberately NO conversation for the landlord (created on demand at fire time).
+    const unit = await world.unitsRepo.create({ landlordId: 'll-1', status: 'available' });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'tt-1',
+      unitId: unit.unitId,
+      stage: 'awaiting_approval',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'approval_check',
+      dueAt: '2099-02-01T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ll-1/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.source).toBe('placement_nudge');
+    expect(up[0]!.nudgeKind).toBe('approval_check');
+    expect(up[0]!.body).toBe(APPROVAL_BODY);
+    expect('conversationId' in up[0]!).toBe(false);
+    expect(up[0]!.suppression).toBeUndefined();
+    expect(up[0]!.refType).toBe('placement');
+    expect(up[0]!.refId).toBe(placement.placementId);
+  });
+
+  it('opted-out tenant → the tour-reminder upcoming item carries suppression contact_opted_out', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600005';
+    world.contacts.push({ contactId: 'ct-5', type: 'tenant', status: 'active', phone, sms_opt_out: true });
+    seedConv(world, 'conv-ct-5', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-5',
+      unitId: 'u-5',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/contacts/ct-5/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
+  it('a request WITH a cursor returns an empty upcoming[] (gather is first-page only)', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600006';
+    world.contacts.push({ contactId: 'ct-6', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-6', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-6',
+      unitId: 'u-6',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const cursor = Buffer.from('2099-01-01T00:00:00.000Z#z', 'utf8').toString('base64url');
+    const res = await request(app).get(`/api/contacts/ct-6/timeline?cursor=${encodeURIComponent(cursor)}`);
+    expect(res.status).toBe(200);
+    expect(res.body.upcoming).toEqual([]);
+  });
+
+  it('kinds=message (excludes scheduled) → empty upcoming[] and the gather is skipped', async () => {
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600007';
+    world.contacts.push({ contactId: 'ct-7', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-7', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-7',
+      unitId: 'u-7',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/contacts/ct-7/timeline?kinds=message');
+    expect(res.status).toBe(200);
+    expect(res.body.upcoming).toEqual([]);
   });
 });

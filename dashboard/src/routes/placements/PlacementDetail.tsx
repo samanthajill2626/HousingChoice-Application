@@ -144,6 +144,8 @@ export function PlacementDetail(): React.JSX.Element {
         ...(extra.lostReason !== undefined && { lostReason: extra.lostReason }),
         ...(extra.finalRent !== undefined && { finalRent: extra.finalRent }),
         ...(extra.inspectionOutcome !== undefined && { inspectionOutcome: extra.inspectionOutcome }),
+        ...(extra.inspectionDate !== undefined && { inspectionDate: extra.inspectionDate }),
+        ...(extra.rentDetermined !== undefined && { rentDetermined: extra.rentDetermined }),
       })
         .then((updated) => setPlacement(updated))
         .catch(() => setError('That move was rejected — please try again.'))
@@ -327,6 +329,8 @@ export function PlacementDetail(): React.JSX.Element {
       {pending !== null &&
       (pending.gate === 'finalRent' ||
         pending.gate === 'inspectionOutcome' ||
+        pending.gate === 'inspectionDate' ||
+        pending.gate === 'rentDetermined' ||
         pending.gate === 'moveInReady') ? (
         <MovePromptModal
           mode={pending.gate}

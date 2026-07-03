@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -189,6 +189,54 @@ describe('PlacementDetail', () => {
     await user.type(input, '0');
     expect(within(dialog).getByRole('button', { name: 'Confirm move' })).toBeDisabled();
     expect(transitionPlacement).not.toHaveBeenCalled();
+  });
+
+  it('the move into awaiting_inspection prompts for the inspection date, forwarding it', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'schedule_inspection' });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_inspection' });
+    renderAt();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Schedule inspection/ })).toBeInTheDocument());
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_inspection');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Schedule inspection' })).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    const input = within(dialog).getByLabelText(/Inspection date/i);
+    fireEvent.change(input, { target: { value: '2026-07-20' } });
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_inspection',
+        source: 'manual',
+        inspectionDate: '2026-07-20',
+      }),
+    );
+  });
+
+  it('the move into awaiting_rent_acceptance prompts for the determined rent, forwarding it', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
+    renderAt();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Determine rent/ })).toBeInTheDocument());
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_rent_acceptance');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Confirm determined rent' })).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    const input = within(dialog).getByLabelText(/Determined rent/i);
+    await user.type(input, '1850');
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_rent_acceptance',
+        source: 'manual',
+        rentDetermined: 1850,
+      }),
+    );
   });
 
   it('live-updates the page fields when a placement.updated event for this placement arrives', async () => {

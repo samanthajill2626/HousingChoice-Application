@@ -308,20 +308,30 @@ resource "aws_instance" "app" {
     # (OOM lines) to /hc/${var.env}/system. IAM already grants PutMetricData
     # (CWAgent namespace) + logs on /hc/${var.env}/*.
     #
-    # It ALSO runs an OTLP/HTTP receiver on 0.0.0.0:4318 (Task 2, OTel wiring):
-    # the app/worker containers export OTLP to host.docker.internal:4318 (via the
-    # compose host-gateway alias — container localhost is NOT the host), and the
-    # agent forwards traces → AWS X-Ray and OTLP metrics → CloudWatch metrics
-    # (PutMetricData, CWAgent namespace). One shared OTLP HTTP receiver serves
-    # both /v1/traces and /v1/metrics on 4318 — the documented CloudWatch-agent
-    # pattern (traces.traces_collected.otlp + metrics.metrics_collected.otlp on
-    # the same http_endpoint map onto the agent's single underlying OTel
-    # Collector OTLP receiver, routed per signal). Bind 0.0.0.0 (not the
-    # 127.0.0.1 default) so the docker bridge can reach it — REQUIRED for
-    # containerized senders per the AWS docs. This is SAFE: the security group
-    # (infra/modules/network/main.tf) opens ONLY the app port to CloudFront's
-    # origin-facing prefix list; 4318 has NO ingress rule, so it is
-    # default-denied from the internet and reachable only from the local bridge.
+    # It ALSO runs OTLP receivers (Task 2, OTel wiring) so the app/worker
+    # containers can export telemetry to the host agent (via the compose
+    # host-gateway alias host.docker.internal — container localhost is NOT the
+    # host). The agent forwards traces → AWS X-Ray and OTLP metrics → CloudWatch
+    # metrics (PutMetricData, CWAgent namespace).
+    #
+    # TWO separate otlp sections, on DISTINCT ports — the CloudWatch agent doc's
+    # Important note requires each `otlp` section to have its own endpoint+port
+    # (two sections on one port → the second receiver fails to bind, "address
+    # already in use", silently losing a signal). So traces bind :4318 and
+    # metrics bind :4320 (the two http_endpoints below), and the app is told to
+    # send metrics to :4320 via OTEL_EXPORTER_OTLP_METRICS_ENDPOINT while traces
+    # ride the base OTEL_EXPORTER_OTLP_ENDPOINT (:4318, +/v1/traces).
+    #
+    # HTTP listeners bind 0.0.0.0 (not the 127.0.0.1 default): the senders are
+    # Docker containers reaching the host over the docker bridge, and per the AWS
+    # docs a containerized sender REQUIRES 0.0.0.0. This is SAFE — the security
+    # group (infra/modules/network/main.tf) opens ONLY the app port to
+    # CloudFront's origin-facing prefix list; 4318/4320 have NO ingress rule, so
+    # they are default-denied from the internet and reachable only from the local
+    # docker bridge. gRPC listeners bind 127.0.0.1 (loopback): we use the HTTP
+    # exporters only, so the gRPC listeners are unused — keep them host-local, on
+    # distinct ports (4317/4319) so the two sections don't collide on gRPC's 4317
+    # default either.
     dnf install -y amazon-cloudwatch-agent
     cat > /opt/aws/amazon-cloudwatch-agent/etc/hc-agent.json <<'CWCONFIG'
     {
@@ -332,12 +342,12 @@ resource "aws_instance" "app" {
         "metrics_collected": {
           "mem": { "measurement": ["mem_used_percent"] },
           "disk": { "measurement": ["disk_used_percent"], "resources": ["/"], "drop_device": true },
-          "otlp": { "http_endpoint": "0.0.0.0:4318" }
+          "otlp": { "grpc_endpoint": "127.0.0.1:4319", "http_endpoint": "0.0.0.0:4320" }
         }
       },
       "traces": {
         "traces_collected": {
-          "otlp": { "http_endpoint": "0.0.0.0:4318" }
+          "otlp": { "grpc_endpoint": "127.0.0.1:4317", "http_endpoint": "0.0.0.0:4318" }
         }
       },
       "logs": {

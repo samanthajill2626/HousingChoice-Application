@@ -12,9 +12,13 @@
 // whitespace) we behave exactly as before — the SDK starts with no exporters
 // (no-op export), so a deploy without the env stays harmless. The exporters
 // are constructed with NO explicit url so they honor OTEL_EXPORTER_OTLP_ENDPOINT
-// themselves (appending /v1/traces and /v1/metrics). The exporter packages are
-// dynamically imported ONLY when the endpoint is set, preserving the zero-cost
-// disabled path.
+// themselves (appending /v1/traces and /v1/metrics) — and ALSO honor the standard
+// per-signal OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT overrides. The deploy
+// uses OTEL_EXPORTER_OTLP_METRICS_ENDPOINT to point metrics at the CloudWatch
+// agent's SECOND OTLP port (the agent requires one port per otlp receiver
+// section, so traces and metrics can't share the base :4318). The exporter
+// packages are dynamically imported ONLY when the endpoint is set, preserving
+// the zero-cost disabled path.
 //
 // Instrumentation is deliberately lean: http + express only.
 //

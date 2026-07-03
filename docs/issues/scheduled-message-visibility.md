@@ -3,9 +3,10 @@ id: scheduled-message-visibility
 title: Surface scheduled outbound texts (tour reminders, placement nudges) — as a reminder ladder AND as future items in the contact's 1:1 timeline
 type: improvement
 severity: high
-status: open
+status: resolved
 area: app+dashboard (comms / tours / placements)
 created: 2026-07-03
+resolved: 2026-07-03
 refs: app/src/jobs/tourReminders.ts, app/src/repos/tourRemindersRepo.ts, app/src/jobs/placementNudges.ts, app/src/repos/placementNudgesRepo.ts, app/src/routes/contactTimeline.ts, app/src/routes/tours.ts, dashboard/src/api/types.ts:1099, dashboard/src/routes/contact/Timeline.tsx, dashboard/src/routes/tours/TourDetail.tsx
 ---
 
@@ -109,3 +110,41 @@ the existing deterministic seams (`POST /__dev/tour-reminders/tick`, the placeme
 [case-single-next-deadline-slot](./case-single-next-deadline-slot.md),
 [transition-service-no-activity-milestones](./transition-service-no-activity-milestones.md),
 [relay-group-no-dashboard-surface](./relay-group-no-dashboard-surface.md).
+
+---
+
+**Resolution (2026-07-03).** Built on `feat/scheduled-message-visibility` (research →
+design → plan → TDD build → e2e). Design + plan:
+[docs/superpowers/specs/2026-07-03-scheduled-message-visibility-design.md](../superpowers/specs/2026-07-03-scheduled-message-visibility-design.md),
+[docs/superpowers/plans/2026-07-03-scheduled-message-visibility.md](../superpowers/plans/2026-07-03-scheduled-message-visibility.md);
+research findings under [docs/research/scheduled-message-visibility/](../research/scheduled-message-visibility/README.md).
+
+- **Sources.** A backend sweep confirmed only **two** durable, queryable, future-dated
+  outbound-SMS row sources: **tour reminders** and **placement nudges**. `next_deadline` is a
+  board clock (no SMS), `retrySend` is ephemeral (≤240s, no queryable row), broadcasts fire
+  immediately — all correctly out of scope. Bodies are canned `[AUTO]` per-`kind`/`stage`
+  templates, so previews are perfectly faithful.
+- **Part A — tour Reminders panel.** New `GET /api/tours/:id/reminders` over `listByTour`;
+  `RemindersPanel` on the tour detail shows each rung's state (upcoming / sent / canceled) +
+  times + body, with the `next` rung highlighted, mirroring the `DeadlineChip` pattern.
+- **Part B — future items in the 1:1 timeline.** New `kind:'scheduled'` member returned in a
+  separate first-page-only **`upcoming[]`** envelope bucket (a future `dueAt` would corrupt the
+  DESC-take-limit pagination + cursor if interleaved). Rendered as a **pinned "Upcoming"
+  section**. The gather resolves the contact's scheduled rows by walking their tours (by tenant)
+  and placements (by tenant + by landlord-owned units), parallelized + capped. Group-routed
+  (landlord_led/pm_team) tour reminders have no 1:1 and appear only in Part A. Landlord nudges
+  surface even before their 1:1 exists (created on demand at fire time).
+- **Suppression honesty.** A shared `evaluateScheduledSendSuppression` (kill-switch / opt-out /
+  manual-mode + nudge stale-stage; JIT-consent and live-breaker excluded) is called by both the
+  real send path and the preview, so an opted-out / manual-mode contact's upcoming item reads
+  **"Will be skipped — <reason>"** and never falsely promises delivery.
+- **Live updates.** future→sent is free (existing `message.persisted` refetch drops the sent
+  row from `upcoming`); a new `scheduled.updated` SSE event drives arm / reschedule / cancel.
+- **Verification.** Unit: app + dashboard green; e2e: a new `scheduled-visibility.spec.ts`
+  proves future→sent, reschedule cancel+re-arm, opted-out suppression, and a tenant nudge, all
+  via the deterministic tick seams.
+- **No schema/infra change** (reuses existing GSIs) — **no Terraform apply required**.
+- **Deferred (sub-issues):** [scheduled-send-surface-cues](./scheduled-send-surface-cues.md)
+  (Today/row chips) and
+  [today-next-tour-reminder-from-ladder](./today-next-tour-reminder-from-ladder.md) (repoint
+  Today + retire the orphan `tour_reminder` deadline type).

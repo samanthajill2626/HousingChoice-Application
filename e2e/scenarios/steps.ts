@@ -2044,6 +2044,124 @@ export class Scenario {
     });
   }
 
+  /**
+   * [App] The inverse of {@link expectRtaClockArmed}: after LEAVING
+   * awaiting_landlord_submission for a non-terminal stage, the stage-scoped
+   * rta_window clock is RETIRED and the destination stage's stuck_placement nudge
+   * takes the single next_deadline slot (the Fix-1 lifecycle). Proves the clock
+   * CLEARED — next_deadline_type is now 'stuck_placement', never the stale
+   * 'rta_window'. Load-bearing: pre-Fix-1 the rta_window persisted, so this fails.
+   */
+  expectRtaClockCleared(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the RTA clock cleared on leaving Awaiting landlord submission', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { placement } = (await res.json()) as { placement: { next_deadline_type?: string } };
+      expect(placement.next_deadline_type).not.toBe('rta_window');
+      expect(placement.next_deadline_type).toBe('stuck_placement');
+    });
+  }
+
+  /**
+   * [App, dev seam] Simulate the 48-HOUR RTA window ELAPSING: overwrite the
+   * placement's rta_window deadline to a PAST instant via POST
+   * /api/placements/:id/deadline { type, at }. Today compares next_deadline_at to
+   * the server WALL CLOCK (it cannot be ticked like a nudge), so a past instant is
+   * how we make the deadline due/overdue — the same moral trick as ticking a nudge
+   * `now`. Leaves the stage untouched (still Awaiting landlord submission) so the
+   * now-overdue clock surfaces on the board.
+   */
+  devBlowRtaWindow(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: force the 48h RTA window to blow (deadline → past)', async () => {
+      const res = await this.page.request.post(`${NEXT}/api/placements/${id}/deadline`, {
+        data: { type: 'rta_window', at: new Date(Date.now() - 60_000).toISOString() },
+      });
+      expect(res.ok(), await res.text()).toBeTruthy();
+    });
+  }
+
+  /**
+   * [App] The blown RTA window RENDERS on the Today board: a needs_you_now row for
+   * THIS placement (scoped by its /placements/:id link) reading "RTA window
+   * closing", an "overdue" urgency chip, and the "Placement · Awaiting landlord
+   * submission" stage tag — the deadline alert where the operator actually sees it.
+   */
+  expectRtaDeadlineOnBoard(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the overdue RTA deadline surfaces on the Today board', async () => {
+      await this.page.goto(`${NEXT}/`);
+      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      const needs = this.page.getByRole('list', { name: 'Needs you now' });
+      const row = needs.locator(`a[href="/placements/${id}"]`);
+      await expect(row).toBeVisible({ timeout: 10_000 });
+      await expect(row.getByText('RTA window closing')).toBeVisible();
+      await expect(row.getByText('overdue')).toBeVisible();
+      await expect(row.getByText(/Awaiting landlord submission/)).toBeVisible();
+    });
+  }
+
+  /**
+   * [App] The placement no longer surfaces ANYWHERE on the Today board — after the
+   * late submit the rta_window is cleared and the destination's stuck_placement
+   * deadline is far-future, so no due-clock row remains. Waits for the board's
+   * /api/today fetch to resolve first (so a still-loading spinner can't false-pass
+   * the absence), then asserts the placement link is gone.
+   */
+  expectPlacementGoneFromBoard(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the placement no longer surfaces on the Today board', async () => {
+      const [resp] = await Promise.all([
+        this.page.waitForResponse((r) => /\/api\/today(\?|$)/.test(r.url())),
+        this.page.goto(`${NEXT}/`),
+      ]);
+      expect(resp.ok()).toBeTruthy();
+      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      await expect(this.page.locator(`a[href="/placements/${id}"]`)).toHaveCount(0, {
+        timeout: 10_000,
+      });
+    });
+  }
+
+  /**
+   * [App] Conversion FINALIZED the tour: it is CLOSED and back-links to the new
+   * placement (convertedPlacementId === the active placement) — the diagram's "the
+   * tour closes as converted".
+   */
+  expectTourFinalized(): Promise<void> {
+    const tour = this.requireActiveTour();
+    const placementId = this.requireActivePlacementId();
+    return step('App: the tour finalized (closed + linked to the placement)', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { tour: t } = (await res.json()) as {
+        tour: { status?: string; convertedPlacementId?: string };
+      };
+      expect(t.status).toBe('closed');
+      expect(t.convertedPlacementId).toBe(placementId);
+    });
+  }
+
+  /**
+   * [App] Conversion moved the property to Under application (API status
+   * 'under_application') AND Team SEES the "Under application" badge in the
+   * property-detail header (scoped to the h1 so the status-select option copy
+   * can't double-match).
+   */
+  expectUnitUnderApplication(unit: Unit): Promise<void> {
+    return step('App: property reads Under application', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { unit: u } = (await res.json()) as { unit: { status?: string } };
+      expect(u.status).toBe('under_application');
+      await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
+      await expect(
+        this.page.getByRole('heading', { level: 1 }).getByText('Under application', { exact: true }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
   /** [App] The placement is LOST — the terminal stage via API AND Team SEES the
    *  'Lost' stage on PlacementDetail. */
   expectPlacementLost(): Promise<void> {

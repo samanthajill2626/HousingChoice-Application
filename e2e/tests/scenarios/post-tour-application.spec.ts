@@ -36,6 +36,7 @@ import {
 // Distinctive substrings of the four nudge bodies (app/src/jobs/placementNudges.ts
 // NUDGE_RUNGS) — pinned here so a body reword breaks the test loudly.
 const RECEIPT_NUDGE = 'did the rental application come through';
+const COMPLETION_NUDGE = 'How is the application coming along';
 const APPROVAL_NUDGE = 'any decision yet on the application';
 const RTA_CLOSING_NUDGE = 'the 48-hour RTA window is closing';
 
@@ -100,8 +101,9 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   page,
   request,
 }) => {
+  test.slow(); // the packed no-skip walk — every stage, three ticks, board reads.
   const flow = new Scenario(page, request);
-  const { tenant, owner } = await reachConvertibleTour(flow, { tenant: 'Mover', owner: 'Keys' });
+  const { tenant, owner, unit } = await reachConvertibleTour(flow, { tenant: 'Mover', owner: 'Keys' });
 
   // Landlord-routed nudges need a landlord 1:1 to land in — the diagram's
   // "L->>A: Received — reviewing" once the application reaches them. (The masked
@@ -112,6 +114,10 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   // → Placing; the masked relay group survives, now placement-owned.
   await flow.teamConvertsTourToPlacement();
   await flow.expectPlacementStage('Send application');
+  // Conversion is finalized on BOTH sides: the tour closes as converted (back-links
+  // to the placement) and the property reads Under application.
+  await flow.expectTourFinalized();
+  await flow.expectUnitUnderApplication(unit);
   await flow.expectTenantPlacing();
   await flow.expectGroupThreadReboundToPlacement();
 
@@ -122,8 +128,12 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   await flow.devPlacementNudgeTick(hoursFromNow(25));
   await flow.expectOutboxMessageContaining(tenant, RECEIPT_NUDGE);
 
-  // Awaiting receipt → Awaiting completion (tenant confirmed receipt).
+  // Awaiting receipt → Awaiting completion (tenant confirmed receipt): the [AUTO]
+  // completion-check nudge fires 1:1 to the TENANT ~24h later. Tick + assert BEFORE
+  // the next move (leaving the stage cancels the rung).
   await flow.teamMovesPlacementTo('Awaiting completion');
+  await flow.devPlacementNudgeTick(hoursFromNow(25));
+  await flow.expectOutboxMessageContaining(tenant, COMPLETION_NUDGE);
 
   // Awaiting completion → Awaiting approval (completed app is in the landlord's
   // hands): the [AUTO] approval-check nudge fires 1:1 to the LANDLORD ~24h later.
@@ -151,6 +161,12 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   // submitted): the handoff to Approval & Move-in. END of this sequence.
   await flow.teamMovesPlacementTo('Awaiting authority approval');
   await flow.expectPlacementStage('Awaiting authority approval');
+  // Fix-1 lifecycle: leaving awaiting_landlord_submission RETIRED the +48h
+  // rta_window and armed the destination's far-future stuck_placement instead.
+  // (A future rta_window never renders on Today — needs_you_now is bounded to
+  // deadlines due at/before now — so the submit-time clear is proven at the data
+  // layer here; the RENDERED overdue-deadline row lives on the BLOWN path below.)
+  await flow.expectRtaClockCleared();
 });
 
 test('marked deviation — landlord denies at Awaiting approval → Lost (tenant Searching, unit Available, relay closed)', async ({
@@ -182,7 +198,7 @@ test('marked deviation — landlord denies at Awaiting approval → Lost (tenant
   await flow.expectNoOutboxMessageContaining(tenant, RECEIPT_NUDGE);
 });
 
-test('marked deviation — 48h window blown at Awaiting landlord submission → closing nudge + RTA deadline → late submit', async ({
+test('marked deviation — 48h window BLOWN at Awaiting landlord submission → closing nudge + overdue RTA deadline on Today → late submit clears it', async ({
   page,
   request,
 }) => {
@@ -201,15 +217,22 @@ test('marked deviation — 48h window blown at Awaiting landlord submission → 
   await flow.teamMovesPlacementTo('Awaiting landlord submission');
 
   // The 48h clock is armed on the placement; ticking past the 36h rung fires the
-  // closing nudge (the deadline alert is display-only on Today, verified via the
-  // armed deadline on the placement — Today reads that same next_deadline).
+  // closing nudge 1:1 to the landlord.
   await flow.expectRtaClockArmed();
   await flow.devPlacementNudgeTick(hoursFromNow(37));
   await flow.expectOutboxMessageContaining(owner, RTA_CLOSING_NUDGE);
 
-  // Recommit: late submission → Awaiting authority approval.
+  // BLOW the window: Today compares the deadline to the server wall clock (it can't
+  // be ticked), so overwrite the rta_window to a PAST instant to simulate the 48h
+  // elapsing — then the deadline surfaces OVERDUE on the Today board (needs_you_now).
+  await flow.devBlowRtaWindow();
+  await flow.expectRtaDeadlineOnBoard();
+
+  // Recommit: late submission → Awaiting authority approval. The stage-scoped
+  // rta_window is retired, so the overdue row is GONE from the board.
   await flow.teamMovesPlacementTo('Awaiting authority approval');
   await flow.expectPlacementStage('Awaiting authority approval');
+  await flow.expectPlacementGoneFromBoard();
 });
 
 test('marked deviation — party backs out early at Awaiting receipt → Lost (bounce-back, relay closed)', async ({

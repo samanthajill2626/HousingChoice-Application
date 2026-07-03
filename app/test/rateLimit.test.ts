@@ -23,6 +23,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { createUserRateLimit } from '../src/middleware/rateLimit.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
+import type { MessagesRepo } from '../src/repos/messagesRepo.js';
 import type { SendMessageInput } from '../src/services/sendMessage.js';
 import {
   makeFakeUsersRepo,
@@ -321,6 +322,66 @@ describe('route-level per-user rate limits (the four send/call-cost routes)', ()
     vi.setSystemTime(Date.now() + 61_000);
     expect((await send()).status).toBe(201);
     expect(calls).toHaveLength(3);
+  });
+
+  it('retry SHARES the manual-send budget: a send + a retry exhaust the ceiling → the next 429s', async () => {
+    // The retry POST fires a real SMS and escapes the breaker, so it MUST draw on
+    // the SAME per-user manual-send window as the send route (not a second budget,
+    // which would let a client machine-gun 30 sends + 30 retries/min — spec §1).
+    const calls: SendMessageInput[] = [];
+    const app = buildApp({
+      config: loadConfig({
+        NODE_ENV: 'test',
+        CF_ORIGIN_SECRET: ORIGIN_SECRET,
+        RATE_LIMIT_MANUAL_SEND_PER_MIN: '2',
+      } as NodeJS.ProcessEnv),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: {
+          async getById() {
+            return undefined; // not a relay group — the 1:1 path
+          },
+        } as unknown as ConversationsRepo,
+        messagesRepo: {
+          async getByProviderSid() {
+            return undefined; // no original → the retry handler 404s AFTER the limiter admits
+          },
+        } as unknown as MessagesRepo,
+        sendMessageService: async (input) => {
+          calls.push(input);
+          return {
+            conversationId: input.conversationId,
+            providerSid: `SMfake-${calls.length}`,
+            tsMsgId: `2026-07-02T10:00:00.000Z#SMfake-${calls.length}`,
+            status: 'queued',
+          };
+        },
+      },
+    });
+    const send = () =>
+      request(app)
+        .post('/api/conversations/conv-1/messages')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ body: 'hi' });
+    const retry = () =>
+      request(app)
+        .post('/api/conversations/conv-1/messages/SMorig/retry')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({});
+
+    // Ceiling is 2, SHARED across send + retry.
+    expect((await send()).status).toBe(201); // slot 1 — a real send
+    expect((await retry()).status).toBe(404); // slot 2 — limiter admits (shared), handler 404s (no original)
+    const limited = await retry(); // slot 3 — the SHARED budget is spent
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ error: 'rate_limited' });
+    expect(Number(limited.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+    // The 429'd retry never reached the handler; the 404 retry never sent. Only the
+    // one real send fired — proving retry consumes the manual-send window.
+    expect(calls).toHaveLength(1);
   });
 
   it('broadcast send: the limiter fronts the handler (429 past the ceiling, recovers)', async () => {

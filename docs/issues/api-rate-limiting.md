@@ -29,6 +29,12 @@ all four send/call-cost routes, not just manual send: manual 1:1 send (30/min,
 `RATE_LIMIT_ORIGINATE_PER_MIN`), and cell verify-start (3/3 min,
 `RATE_LIMIT_VERIFY_START_MAX` + `_WINDOW_MS`). On limit: 429
 `{ error: 'rate_limited' }` + `Retry-After` seconds + an IDs-only WARN. The
-hermetic e2e stack raises the ceilings (`scripts/e2e-session.mjs`); RUNBOOK
-"Security / hardening" documents tuning. Companion issues resolved in the same
-change: `voice-verify-start-rate-limit`, `voice-bridge-dnc-recheck`.
+message **retry** route (`POST .../messages/:providerSid/retry`) shares the SAME
+`manualSendLimiter` budget as the send route — it fires a real SMS and escapes
+the per-conversation breaker (`automated:false`), and a retry never clears the
+original's `failed` status, so an un-metered retry could be re-fired unbounded;
+sharing the one 30/min window closes that (spec §1's stuck-retry threat) without
+granting a separate budget. The hermetic e2e stack raises the ceilings
+(`scripts/e2e-session.mjs`); RUNBOOK "Security / hardening" documents tuning.
+Companion issues resolved in the same change: `voice-verify-start-rate-limit`,
+`voice-bridge-dnc-recheck`.

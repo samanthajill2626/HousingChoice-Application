@@ -589,9 +589,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // re-reads the original by its provider SID (so the body AND media resend
   // correctly — the client never holds provider media URLs) and stamps the new
   // message with `retry_of` so the contact timeline collapses the stale failed
-  // bubble. A manual human send: automated:false (never breaker-metered).
-  router.post('/conversations/:conversationId/messages/:providerSid/retry', async (req, res) => {
-    const { conversationId, providerSid } = req.params;
+  // bubble. A manual human send: automated:false (never breaker-metered) — so it
+  // escapes the per-conversation breaker. It fires a real SMS, and because a
+  // successful retry mints a NEW SID and never clears the original's `failed`
+  // status, the same failed SID stays retryable indefinitely. Front it with the
+  // SAME `manualSendLimiter` instance as the send route so retries + sends share
+  // the ONE per-user manual-send budget (30/min) — a stuck Retry loop can't
+  // machine-gun texts (spec §1), and no client gets 30 sends + 30 retries.
+  router.post('/conversations/:conversationId/messages/:providerSid/retry', manualSendLimiter, async (req, res) => {
+    // Middleware ahead of the handler defeats Express's path-literal param typing —
+    // coerce (matches the send route above).
+    const conversationId = String(req.params['conversationId'] ?? '');
+    const providerSid = String(req.params['providerSid'] ?? '');
     mergeContext({ conversationId });
 
     const original = await messages.getByProviderSid(providerSid);

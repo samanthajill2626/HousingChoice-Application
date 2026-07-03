@@ -281,6 +281,54 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Now-relative lifecycle history (Task 3d live wiring)
+  // ---------------------------------------------------------------------------
+  describe('live lifecycle history — now-relative + monotonic trails', () => {
+    it('overdue-RTA placement carries a now-relative, strictly-increasing audit trail', async () => {
+      const { Items } = await doc.send(new QueryCommand({
+        TableName: `${prefix}audit_events`,
+        KeyConditionExpression: '#e = :e',
+        ExpressionAttributeNames: { '#e': 'entityKey' },
+        ExpressionAttributeValues: { ':e': `placements#${LIVE_IDS.placementOverdueRta}` },
+      }));
+      const rows = (Items ?? []).filter((r) => r['event_type'] === 'placement_stage_changed');
+      expect(rows.length).toBeGreaterThan(0);
+      const isos = rows.map((r) => String(r['ts']).split('#')[0]!).sort();
+      // Strictly increasing ISO prefixes (chronological, collision-free).
+      for (let i = 1; i < isos.length; i++) {
+        expect(isos[i - 1]! < isos[i]!, `hop ${i} must be strictly after hop ${i - 1}`).toBe(true);
+      }
+      // Now-relative (NOT a fixed calendar literal): the newest hop equals the
+      // placement's now-72h stage_entered_at and is strictly before FIXED_NOW.
+      const newest = isos[isos.length - 1]!;
+      const stageEnteredAt = new Date(FIXED_NOW.getTime() - 72 * 60 * 60 * 1000).toISOString();
+      expect(newest).toBe(stageEnteredAt);
+      expect(new Date(newest).getTime()).toBeLessThan(FIXED_NOW.getTime());
+      // The whole trail sits within a plausible now-relative window (< ~400d before now).
+      expect(new Date(isos[0]!).getTime()).toBeGreaterThan(
+        FIXED_NOW.getTime() - 400 * 24 * 60 * 60 * 1000,
+      );
+    });
+
+    it('live tenant timeline milestones are now-relative (placement_opened present)', async () => {
+      const { Items } = await doc.send(new QueryCommand({
+        TableName: `${prefix}activity_events`,
+        KeyConditionExpression: '#c = :c',
+        ExpressionAttributeNames: { '#c': 'contactId' },
+        ExpressionAttributeValues: { ':c': LIVE_IDS.tenantA },
+      }));
+      const rows = Items ?? [];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.some((r) => r['type'] === 'placement_opened')).toBe(true);
+      for (const r of rows) {
+        const at = new Date(String(r['at'])).getTime();
+        expect(at).toBeLessThanOrEqual(FIXED_NOW.getTime());
+        expect(at).toBeGreaterThan(FIXED_NOW.getTime() - 400 * 24 * 60 * 60 * 1000);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // ID collision check
   // ---------------------------------------------------------------------------
   describe('no live ID collides with lean / matrix / cast IDs', () => {

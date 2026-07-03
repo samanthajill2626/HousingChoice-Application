@@ -124,11 +124,13 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
     // Lifecycle-history post-pass (FULL profile ONLY — the lean branch is never
     // touched, keeping its byte-stable e2e/reseed world). Deterministic AUDIT
     // trails materialize how every non-start placement/tenant/landlord/unit got
-    // to its END state; historyItems dedupes vs pre-existing lifecycle rows so it
-    // is the single source of truth (§4.7). Only .audit_events is wired for now
-    // (activity_events milestones are a later task). Runs after cast+matrix merge
-    // and BEFORE the Put loop below.
-    tables['audit_events'] = historyItems(tables).audit_events;
+    // to its END state, PLUS the person-centric Contact Timeline milestones
+    // (activity_events); historyItems dedupes both vs the pre-existing rows so it
+    // is the single source of truth (§4.7). Call it ONCE and wire BOTH tables.
+    // Runs after cast+matrix merge and BEFORE the Put loop below.
+    const history = historyItems(tables);
+    tables['audit_events'] = history.audit_events;
+    tables['activity_events'] = history.activity_events;
   }
 
   const doc = createDocumentClient({ endpoint });

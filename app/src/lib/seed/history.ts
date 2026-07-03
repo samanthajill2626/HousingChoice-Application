@@ -551,15 +551,25 @@ export function entityHistory(
 // repo's random `evt-<uuid>`, extending matrix's deterministic evt-mx-… pattern.
 // ---------------------------------------------------------------------------
 
-/** Construct one activity-milestone row with a deterministic evt-* id (byte-stable). */
+/**
+ * Construct one activity-milestone row with a deterministic evt-* id (byte-stable).
+ * `salt` disambiguates rows that would otherwise share every id input — e.g. two
+ * non-primary phones added at the same instant on one contact (same contactId/type/
+ * at/label, no ref) would collide on eventId → one silently overwrites the other on
+ * Put. It is appended to the id hash ONLY when provided, so every existing caller
+ * (no salt) keeps its historical byte-stable eventId unchanged.
+ */
 function makeActivityRow(
   contactId: string,
   at: string,
   type: string,
   label: string,
   ref?: { refType: string; refId: string },
+  salt?: string,
 ): ActivityRow {
-  const eventId = `evt-${hash8(`${contactId}|${type}|${at}|${ref?.refId ?? ''}|${label}`)}`;
+  const idParts = [contactId, type, at, ref?.refId ?? '', label];
+  if (salt !== undefined) idParts.push(salt);
+  const eventId = `evt-${hash8(idParts.join('|'))}`;
   return {
     contactId,
     tsEventId: `${at}#${eventId}`,
@@ -704,14 +714,18 @@ export function contactPhoneMilestones(contact: Record<string, unknown>): Activi
   if (!Array.isArray(phones) || phones.length < 2) return [];
   const anchor = String(contact['consent_at'] ?? contact['created_at'] ?? '');
   const rows: ActivityRow[] = [];
-  for (const p of phones) {
-    if (typeof p !== 'object' || p === null) continue;
+  phones.forEach((p, i) => {
+    if (typeof p !== 'object' || p === null) return;
     const rec = p as Record<string, unknown>;
-    if (rec['primary'] === true) continue; // primary = original capture, not an "add"
+    if (rec['primary'] === true) return; // primary = original capture, not an "add"
     const at = String(rec['firstSeenAt'] ?? anchor);
-    if (at === '') continue;
-    rows.push(makeActivityRow(contactId, at, 'number_added', 'Number added'));
-  }
+    if (at === '') return;
+    // Salt the id with the phone value + loop index so two non-primary phones that
+    // share a firstSeenAt (or both fall back to the same anchor) yield DISTINCT
+    // eventIds — otherwise they collide and one silently overwrites the other on Put.
+    const salt = `${String(rec['phone'] ?? '')}#${i}`;
+    rows.push(makeActivityRow(contactId, at, 'number_added', 'Number added', undefined, salt));
+  });
   return rows;
 }
 

@@ -520,6 +520,34 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     }
   });
 
+  it('two non-primary phones sharing a firstSeenAt yield DISTINCT number_added rows (no id collision)', () => {
+    // Synthetic contact: two NON-primary phones added at the SAME instant. Without
+    // the per-phone salt both rows hash to one eventId → identical tsEventId/PK+SK →
+    // one silently overwrites the other on Put. Assert both survive as distinct rows.
+    const sameInstant = '2026-05-01T00:00:00.000Z';
+    const contact = {
+      contactId: 'contact-collide-01',
+      type: 'tenant',
+      status: 'searching',
+      created_at: '2026-04-01T00:00:00.000Z',
+      phones: [
+        { phone: '+15550190001', primary: true, firstSeenAt: '2026-04-01T00:00:00.000Z' },
+        { phone: '+15550190002', primary: false, firstSeenAt: sameInstant },
+        { phone: '+15550190003', primary: false, firstSeenAt: sameInstant },
+      ],
+    };
+    const rows = contactPhoneMilestones(contact);
+    expect(rows.length).toBe(2); // one per NON-primary phone
+    const eventIds = new Set(rows.map((r) => r.eventId));
+    expect(eventIds.size).toBe(2); // distinct ids despite identical at/type/label
+    const tsEventIds = new Set(rows.map((r) => r.tsEventId));
+    expect(tsEventIds.size).toBe(2); // distinct PK+SK → both survive a Put
+    for (const r of rows) {
+      expect(r.type).toBe('number_added');
+      expect(r.at).toBe(sameInstant);
+    }
+  });
+
   it('supersedes the 4 pre-seeded matrix activity rows (no duplicate eventId survives; covered contacts keep a timeline)', () => {
     const pre = matrixItems()['activity_events'] ?? [];
     expect(pre.length).toBe(4);
@@ -643,22 +671,17 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
       const unitActivity = await audit.listByEntity('units#unit-0001');
       expect(unitActivity.some((r) => r.event_type === 'listing_status_changed')).toBe(true);
 
-      // Contact Timeline milestones: the generated activity_events read back
-      // non-empty for the pinned placement's tenant. index.ts full-profile wiring
-      // of activity_events is deferred to Task 3 (live wiring), so this test drives
-      // the generator's output through a real PutCommand → activityEventsRepo round-
-      // trip (proving persistence + the newest-first read), independent of seedAll.
+      // Contact Timeline milestones (Task 3a persistence gap): seedAll('full') must
+      // persist activity_events too — NOT just audit_events. We read the pinned
+      // placement's tenant timeline back through the REAL activityEventsRepo (a
+      // newest-first round-trip) WITHOUT any manual Put loop here, so a green
+      // assertion proves index.ts routed history.activity_events through the real
+      // Put path. (A regression that drops the wiring makes this timeline empty.)
       const { createActivityEventsRepo } = await import('../src/repos/activityEventsRepo.js');
       const activityRepo = createActivityEventsRepo({ doc, env: testEnv });
-      const generatedActivity = historyItems(buildFullTables()).activity_events;
       const leanTenantId = String(
         (PLACEMENTS.find((p) => p['placementId'] === 'placement-0001') ?? {})['tenantId'],
       );
-      const table = `${prefix}activity_events`;
-      const { PutCommand } = await import('@aws-sdk/lib-dynamodb');
-      for (const item of generatedActivity) {
-        await doc.send(new PutCommand({ TableName: table, Item: item }));
-      }
       const { items: timeline } = await activityRepo.listByContact(leanTenantId);
       expect(timeline.length).toBeGreaterThan(0);
       expect(
@@ -666,6 +689,129 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
           (i) => i.type === 'placement_opened' || i.type === 'stage_changed' || i.type === 'placement_closed',
         ),
       ).toBe(true);
+    } finally {
+      doc.destroy();
+    }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// FIDELITY PIN (Task 3c): the generator's placement audit row must match what the
+// REAL statusTransition service writes for the same hop. We drive one genuine
+// transitionPlacement() hop against DynamoDB Local, read the persisted audit row
+// back via auditRepo.listByEntity, and assert the generator's row for that same
+// (from,to,source) hop agrees on event_type + payload key-set + source. If the
+// service's audit shape ever drifts (new/renamed payload key, different
+// event_type), this test fails — pointing straight at history.ts as needing a
+// matching update. Hermetic: its own throwaway prefix (upsert-only seed can't
+// pollute it).
+// ---------------------------------------------------------------------------
+describe.skipIf(!reachable)('seed history — generator ↔ real statusTransition audit fidelity', () => {
+  const prefix = `hc-fid-${randomUUID().slice(0, 8)}-`;
+  const testEnv: { TABLE_PREFIX?: string } = { TABLE_PREFIX: prefix };
+  const origPrefix = process.env.TABLE_PREFIX;
+  let adminClient: ReturnType<typeof createDynamoClient> | undefined;
+
+  beforeAll(async () => {
+    process.env.DYNAMODB_ENDPOINT = endpoint;
+    process.env.TABLE_PREFIX = prefix;
+    adminClient = createDynamoClient({ endpoint });
+    for (const spec of TABLES) {
+      await ensureTable(adminClient, spec, `${prefix}${spec.baseName}`);
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    if (origPrefix === undefined) delete process.env.TABLE_PREFIX;
+    else process.env.TABLE_PREFIX = origPrefix;
+    if (adminClient) {
+      for (const spec of TABLES) {
+        await deleteTableIfExists(adminClient, `${prefix}${spec.baseName}`);
+      }
+      adminClient.destroy();
+    }
+  }, 120_000);
+
+  it('generator placement_stage_changed row matches the real service audit for the same hop', async () => {
+    const { PutCommand } = await import('@aws-sdk/lib-dynamodb');
+    const { createDocumentClient } = await import('../src/lib/dynamo.js');
+    const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
+    const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
+    const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
+    const { createAuditRepo } = await import('../src/repos/auditRepo.js');
+    const { createEventBus } = await import('../src/lib/events.js');
+
+    const doc = createDocumentClient({ endpoint });
+    try {
+      // Minimal cast for ONE real hop: send_application → awaiting_receipt (manual).
+      const FROM: PlacementStage = 'send_application';
+      const TO: PlacementStage = 'awaiting_receipt';
+      const SOURCE = 'manual' as const;
+      const ACTOR = 'user-fidelity';
+      const placementId = 'placement-fid-01';
+      const tenantId = 'contact-fid-tenant-01';
+      const unitId = 'unit-fid-01';
+      const anchor = '2026-05-01T00:00:00.000Z';
+
+      // Seed the driving entities directly (Put) so the service can load them.
+      await doc.send(new PutCommand({
+        TableName: `${prefix}placements`,
+        Item: { placementId, tenantId, unitId, stage: FROM, stage_source: 'manual', stage_entered_at: anchor, created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}contacts`,
+        Item: { contactId: tenantId, type: 'tenant', status: 'needs_review', created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}units`,
+        Item: { unitId, status: 'available', status_source: 'manual', created_at: anchor },
+      }));
+
+      // Construct the REAL service from doc-backed repos + a throwaway event bus.
+      const svc = createStatusTransitionService({
+        placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        unitsRepo: createUnitsRepo({ doc, env: testEnv }),
+        contactsRepo: createContactsRepo({ doc, env: testEnv }),
+        auditRepo: createAuditRepo({ doc, env: testEnv }),
+        events: createEventBus(),
+      });
+
+      // Drive ONE genuine hop through the real write path.
+      await svc.transitionPlacement(placementId, { toStage: TO, source: SOURCE, actor: ACTOR });
+
+      // Read the persisted audit row back for this hop.
+      const audit = createAuditRepo({ doc, env: testEnv });
+      const rows = await audit.listByEntity(`placements#${placementId}`);
+      const realRow = rows.find(
+        (r) => r.event_type === 'placement_stage_changed' && r.payload?.['from'] === FROM && r.payload?.['to'] === TO,
+      );
+      expect(realRow, 'real service must have written the stage-change audit row').toBeDefined();
+
+      // The GENERATOR's row for the SAME hop: build a placement that ends at TO and
+      // pick the from→to row out of its walk.
+      const generated = placementHistory({
+        placementId,
+        tenantId,
+        unitId,
+        stage: TO,
+        stage_entered_at: anchor,
+      }).find(
+        (r) => r.event_type === 'placement_stage_changed' && r.payload['from'] === FROM && r.payload['to'] === TO,
+      );
+      expect(generated, 'generator must produce the same from→to row').toBeDefined();
+
+      // FIDELITY: same event_type, same payload KEY-SET, same source value. (Actor
+      // VALUE legitimately differs — the seed pins user-0001, the test drove user-
+      // fidelity — but both carry the `actor` key, so the key-set matches.)
+      expect(generated!.event_type).toBe(realRow!.event_type);
+      expect(generated!.payload['source']).toBe(realRow!.payload!['source']);
+      const realKeys = Object.keys(realRow!.payload ?? {}).sort();
+      const genKeys = Object.keys(generated!.payload).sort();
+      expect(genKeys).toEqual(realKeys); // [actor, from, to, source]
+      // And the top-level actorId hoist mirrors payload.actor on both sides.
+      expect(typeof realRow!.actorId).toBe('string');
+      expect(typeof generated!.actorId).toBe('string');
     } finally {
       doc.destroy();
     }

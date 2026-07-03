@@ -1,0 +1,65 @@
+---
+title: Housing Choice — Approval and Move-in (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor T as Tenant
+    participant A as Housing Choice App
+    participant S as Team
+    actor L as Landlord/PM
+    actor H as Housing Authority
+    Note over T,S: The app owns the phone number. Every call/text flows Tenant to Team and Landlord to Team THROUGH the app (both directions).<br/>Notes marked [AUTO] are app automation. [MANUAL] is a person (Team) acting.
+    Note over T,H: Picks up from Post-Tour and Application — the landlord has submitted the RTA to the housing authority, so the placement sits at Awaiting authority approval. Ends when the tenant moves in (Moved in) — the finishline.
+    Note over T,H: The placement is the spine. Stages name the NEXT outstanding action. EVERY stage transition in this span is stamped below — the tests must move the placement into and out of each stage without skipping any.
+    Note over T,L: The masked RELAY group carried over from the placement remains the channel throughout. No new or unmasked group text is created.
+    Note over S,H: The Housing Authority is OFF the masked relay. It deals with Team and the landlord out-of-band (approval, inspection, rent determination, HAP contract). Team RECORDS each authority milestone as it lands.
+    Note over A: [AUTO] Throughout this window each stage carries a stuck-too-long threshold. A stage that sits past it surfaces on the Today board so Team can chase it. No other automation runs in this span.
+
+    Note over T,H: AUTHORITY APPROVAL — the roughly 4-week housing authority window opens.
+    H->>S: RTA approved (out-of-band notice)
+    Note over A: [MANUAL] Stage — Awaiting authority approval to Schedule inspection
+
+    Note over T,H: INSPECTION — the HQS inspection the LANDLORD committed to at onboarding (the landlord schedules it, not the Team).
+    L->>A: Scheduled the inspection for a date
+    A->>S: Relay the inspection date
+    Note over A: [MANUAL] Record the inspection date. Stage — Schedule inspection to Awaiting inspection
+    H->>S: Inspection result — passed (out-of-band)
+    Note over A: [MANUAL] Record inspection outcome pass. Stage — Awaiting inspection to Determine rent
+    alt Inspection fails — marked deviation, not elaborated here
+        Note over T,H: Inspection outcome FAIL is recorded. The landlord re-inspects (back to Schedule inspection), or the placement is LOST with reason landlord lost inspection. Full re-inspection handling is a separate future sequence if needed.
+    end
+
+    Note over T,H: RENT DETERMINATION — the authority sets the contract rent and the tenant portion.
+    H->>S: Rent determination amount (out-of-band notice)
+    Note over A: [MANUAL] Record the determined rent amount. Stage — Determine rent to Awaiting rent acceptance
+    L->>A: Accept the determined rent
+    A->>S: Relay the acceptance
+    Note over A: [MANUAL] Record acceptance — the accepted amount is written onto the property as final_rent. Stage — Awaiting rent acceptance to Awaiting HAP contract
+    alt Landlord rejects the determined rent — marked deviation, not elaborated here
+        Note over T,H: The landlord will not accept the determined rent, so the deal cannot proceed. Placement LOST with reason landlord lost rent. Full renegotiation handling is a separate future sequence if needed.
+    end
+
+    Note over T,H: CONTRACT — the HAP contract is executed between the authority and the landlord. The property reads Finalizing from here.
+    H->>L: HAP contract for execution (out-of-band)
+    L->>A: HAP contract executed
+    A->>S: Relay
+    Note over A: [MANUAL] Record the HAP contract. Stage — Awaiting HAP contract to Complete paperwork
+
+    Note over T,L: PAPERWORK — an unordered checklist. Lease signed and move-in details shared are REQUIRED. LIF is relevant ONLY when the tenant is LIF-eligible, and is OPTIONAL even then.
+    T->>A: Signed the lease
+    A->>S: Relay
+    Note over A: [MANUAL] Record lease signed
+    S->>A: Share the move-in details with the tenant
+    A->>T: Deliver the move-in details
+    Note over A: [MANUAL] Record move-in details shared
+    Note over A: [AUTO] When the tenant is LIF-eligible, surface a flag for Team to confirm whether LIF is included. LIF never blocks moving forward.
+    Note over A: [AUTO] Once the required items are recorded, surface a Ready-for-move-in confirmation (noting unconfirmed LIF for a LIF-eligible tenant). Advancing is a deliberate Team confirmation, NOT an automatic all-checked jump.
+    Note over A: [MANUAL] Confirm paperwork complete. Stage — Complete paperwork to Awaiting move-in
+
+    Note over T,L: MOVE-IN — the tenant takes up residence. The finishline.
+    T->>A: Moved in
+    A->>S: Relay
+    Note over A: [MANUAL] Record move-in. Stage — Awaiting move-in to Moved in. Tenant reads Placed. Property reads Occupied.
+
+    Note over T,H: MARKED DEVIATION (any stage) — either party backs out entirely. The placement is LOST from wherever it stands. Tenant returns to Searching (re-match). Property returns to Available. The relay thread closes.
+    Note over T,H: Handoff to Invoicing (separate, deferred) — reaching Moved in is where the landlord invoice for the determined rent will be generated. That is its own small sequence (source docs Track 7) and is NOT built here.

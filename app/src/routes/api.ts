@@ -464,6 +464,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      // Post-Tour conversion (POST /placements/from-tour): read/finalize the
+      // source tour + cancel its pending reminder rows on convert.
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       auditRepo: audit,
       // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,

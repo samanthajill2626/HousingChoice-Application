@@ -46,6 +46,9 @@ import {
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import { cancelTourReminders } from '../jobs/tourReminders.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -76,6 +79,10 @@ export interface PlacementsRouterDeps {
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
   poolNumbersService?: PoolNumbersService;
+  /** Post-Tour conversion (POST /from-tour): read/finalize the source tour. */
+  toursRepo?: ToursRepo;
+  /** Post-Tour conversion: cancel the tour's pending reminder rows on convert. */
+  tourRemindersRepo?: TourRemindersRepo;
   /** BE2/C2: emit placement_opened/placement_closed/stage_changed/tour_* milestones. */
   activityEventsRepo?: ActivityEventsRepo;
   /**
@@ -306,6 +313,8 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   // §7 derive-on-create: the transition service's derive helpers stamp the
   // tenant + property coarse statuses on create (override-gated, source 'derived').
   // Self-construct from the SAME repos this router already builds when not injected.
@@ -479,6 +488,96 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       'placement created via api',
     );
     res.status(201).json({ placement: created });
+  });
+
+  // POST /api/placements/from-tour — the Post-Tour & Application conversion.
+  // Creates the placement from a CONVERTIBLE tour (exit gate said move forward),
+  // finalizes the tour (closed + convertedPlacementId + reminders canceled) and
+  // re-parents the tour's masked relay thread to the placement. QUIET: no
+  // announcement message is sent (founder 2026-07-02). PII: log ids only.
+  router.post('/from-tour', async (req: AuthedRequest, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const unknownFields = Object.keys(b).filter((k) => k !== 'tourId');
+    if (unknownFields.length > 0) {
+      res.status(400).json({ error: `unknown field(s): ${unknownFields.join(', ')}` });
+      return;
+    }
+    if (typeof b['tourId'] !== 'string' || b['tourId'].length === 0) {
+      res.status(400).json({ error: 'tourId (non-empty string) is required' });
+      return;
+    }
+    const tourId = b['tourId'];
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    if (tour.convertible !== true) {
+      res.status(409).json({ error: 'tour_not_convertible' });
+      return;
+    }
+    if (typeof tour['convertedPlacementId'] === 'string') {
+      res.status(409).json({ error: 'tour_already_converted' });
+      return;
+    }
+    // Referential integrity (same posture as POST /): the tenant + unit must
+    // still exist. IDs only in the response codes.
+    if (!(await contacts.getById(tour.tenantId))) {
+      res.status(404).json({ error: 'tenant_not_found' });
+      return;
+    }
+    if (!(await units.getById(tour.unitId))) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+
+    // Create the placement at the ladder's first rung, carrying the tour
+    // provenance (fromTourId) and — when the tour had a masked relay thread —
+    // the group_thread link so the thread survives the conversion.
+    const created = await placements.create({
+      tenantId: tour.tenantId,
+      unitId: tour.unitId,
+      stage: 'send_application',
+      stage_entered_at: new Date().toISOString(),
+      stage_source: 'manual',
+      fromTourId: tour.tourId,
+      ...(typeof tour.groupThreadId === 'string' && { group_thread: tour.groupThreadId }),
+    });
+    mergeContext({ placementId: created.placementId });
+
+    // Finalize the tour BEFORE returning — stamping convertedPlacementId is what
+    // makes a second convert 409.
+    await tours.patch(tour.tourId, { status: 'closed', convertedPlacementId: created.placementId });
+    await cancelTourReminders(tour.tourId, { tourRemindersRepo: reminders, logger: log });
+
+    // Re-parent the masked relay thread (metadata-only; pool + members preserved).
+    if (typeof tour.groupThreadId === 'string') {
+      try {
+        await conversations.rebindOwner(tour.groupThreadId, { type: 'placement', id: created.placementId });
+      } catch (err) {
+        log.error({ err, placementId: created.placementId }, 'convert: thread rebind failed (best-effort)');
+      }
+    }
+
+    await audit.append(`placements#${created.placementId}`, 'placement_created', {
+      actor: req.user?.userId,
+      tenantId: created.tenantId,
+      unitId: created.unitId,
+      stage: created.stage,
+      fromTourId: tour.tourId,
+    });
+    await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
+    events.emit('placement.updated', toPlacementUpdatedEvent(created));
+    // §7 derive-on-create: stamp the tenant → placing (and property) coarse
+    // statuses. Best-effort — a derived write failure must NEVER fail the 201.
+    try {
+      await transitions.deriveForStage(created.tenantId, created.unitId, created.stage);
+    } catch (err) {
+      log.error({ err, placementId: created.placementId }, 'derive-on-convert failed (best-effort)');
+    }
+    const finalTour = await tours.get(tour.tourId);
+    log.info({ placementId: created.placementId, tourId: tour.tourId }, 'tour converted to placement');
+    res.status(201).json({ placement: created, tour: finalTour });
   });
 
   // GET /api/placements/:placementId — one placement.

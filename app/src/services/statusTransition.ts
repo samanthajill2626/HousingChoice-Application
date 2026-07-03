@@ -92,6 +92,18 @@ export interface TransitionPlacementInput {
    * the card.
    */
   inspectionOutcome?: InspectionOutcome;
+  /**
+   * The LANDLORD-scheduled inspection date (Approval & Move-in). Supplied on the
+   * move INTO the inspection wait — the transition OUT of `schedule_inspection` —
+   * and written onto the placement as `inspection_date`. Ignored on any other move.
+   */
+  inspectionDate?: string;
+  /**
+   * The authority's DETERMINED rent (Approval & Move-in). Supplied on the move OUT
+   * of `determine_rent` and written onto the placement as `rent_determined`.
+   * Distinct from `finalRent` (the ACCEPTED amount). Ignored on any other move.
+   */
+  rentDetermined?: number;
   /** The acting user (userId) — indexed onto the audit row's byActor GSI (§8). */
   actor?: string;
 }
@@ -270,7 +282,7 @@ export function createStatusTransitionService(
 
   return {
     async transitionPlacement(placementId, input) {
-      const { toStage, source, reason, lostReason, finalRent, inspectionOutcome, actor } = input;
+      const { toStage, source, reason, lostReason, finalRent, inspectionOutcome, inspectionDate, rentDetermined, actor } = input;
       if (!isPlacementStage(toStage)) {
         throw new TransitionRefusedError('bad_stage', `unknown placement stage: ${String(toStage)}`);
       }
@@ -310,6 +322,25 @@ export function createStatusTransitionService(
           throw new TransitionRefusedError('bad_inspection_outcome', 'inspectionOutcome must be pass or fail');
         }
         patch.inspection_outcome = inspectionOutcome;
+      }
+
+      // Approval & Move-in: the LANDLORD-scheduled inspection date is recorded on
+      // the move INTO the inspection wait (OUT of `schedule_inspection`), the same
+      // "captured on the relevant move" shape as inspection_outcome/final_rent.
+      if (from === 'schedule_inspection' && inspectionDate !== undefined) {
+        if (typeof inspectionDate !== 'string' || inspectionDate.length === 0) {
+          throw new TransitionRefusedError('bad_inspection_date', 'inspectionDate must be a non-empty date string');
+        }
+        patch.inspection_date = inspectionDate;
+      }
+      // The authority's DETERMINED rent is recorded on the move OUT of
+      // `determine_rent`. Distinct from final_rent (the ACCEPTED amount written to
+      // the unit on the awaiting_rent_acceptance exit, unchanged below).
+      if (from === 'determine_rent' && rentDetermined !== undefined) {
+        if (!Number.isFinite(rentDetermined) || rentDetermined <= 0) {
+          throw new TransitionRefusedError('bad_rent_determined', 'rentDetermined must be a finite number > 0');
+        }
+        patch.rent_determined = rentDetermined;
       }
 
       const updated = await placementsRepo.update(placementId, patch);

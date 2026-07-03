@@ -8,9 +8,9 @@
 //           properties � Similar properties.
 //   BOTTOM (full width) � Photos.
 // Real panels come from existing endpoints (unit, placements, units, the landlord
-// contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
-// honest "Arrives with the backend" pending state, and "Activity" (BE2) is
-// pending too. Nothing is fabricated.
+// contact, the unit audit trail for Activity); slices an older deployed backend
+// doesn't serve yet (recipients / similar / activity 404s) degrade to an honest
+// "Arrives with the backend" pending state. Nothing is fabricated.
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { deleteUnit, restoreUnit } from '../../api/index.js';
@@ -30,6 +30,7 @@ import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
 import {
   buildListingFacts,
+  describeUnitActivity,
   formatBedsBaths,
   formatMoney,
   formatRent,
@@ -37,6 +38,7 @@ import {
   shortAddress,
   statusLabel,
 } from './listingFormat.js';
+import { formatDayDivider, formatTime } from '../contact/format.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
 import styles from './ListingDetail.module.css';
 
@@ -122,7 +124,7 @@ export function ListingDetail(): React.JSX.Element {
     );
   }
 
-  const { unit, roster, placementsOnUnit, related, recipients, similar } = state;
+  const { unit, roster, placementsOnUnit, related, recipients, similar, activity } = state;
   const address = shortAddress(unit.address, unit.unitId);
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
@@ -342,7 +344,35 @@ export function ListingDetail(): React.JSX.Element {
           </Card>
 
           <Card title="Activity">
-            <PendingPanel note="The property's activity log arrives with the backend." />
+            {activity.status === 'ready' ? (
+              activity.rows.length === 0 ? (
+                <EmptyRow>No activity yet.</EmptyRow>
+              ) : (
+                activity.rows.map((e) => {
+                  const d = describeUnitActivity(e);
+                  const when = [formatDayDivider(e.at), formatTime(e.at)]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    <Row
+                      key={e.id}
+                      {...(d.to !== undefined && { to: d.to })}
+                      label={
+                        <span>
+                          {d.label}
+                          {d.sub ? <span className={styles.subLabel}>{d.sub}</span> : null}
+                        </span>
+                      }
+                      right={when}
+                    />
+                  );
+                })
+              )
+            ) : activity.status === 'error' ? (
+              <EmptyRow>We couldn&apos;t load activity.</EmptyRow>
+            ) : (
+              <PendingPanel />
+            )}
           </Card>
         </div>
 

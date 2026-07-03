@@ -1,7 +1,13 @@
 // listingFormat — small pure presentation helpers for the property detail page.
 // Tested in isolation so the component stays declarative.
-import { LISTING_STATUS_LABELS, type ListingStatus, type UnitItem } from '../../api/index.js';
+import {
+  LISTING_STATUS_LABELS,
+  type ListingStatus,
+  type UnitActivityEvent,
+  type UnitItem,
+} from '../../api/index.js';
 import { formatAddress, humanize } from '../contact/format.js';
+import { ROLE_LABEL } from './buildListingFile.js';
 
 /** A whole-dollar money label, e.g. 1550 → "$1,550". Undefined → "". */
 export function formatMoney(amount: number | undefined): string {
@@ -64,4 +70,61 @@ export function shortAddress(
   unitId: string,
 ): string {
   return formatAddress(address) || unitId;
+}
+
+/** What an Activity row renders: the event line, an optional detail sub-line,
+ *  and an optional contact link (the row links out when the event references a
+ *  contact). */
+export interface UnitActivityDescription {
+  label: string;
+  sub?: string;
+  to?: string;
+}
+
+/** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
+ *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
+export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
+  // The contact an event references, by best display form: resolved name → id.
+  const who = e.contactName ?? e.contactId;
+  const contactLink =
+    e.contactId !== undefined ? { to: `/contacts/${encodeURIComponent(e.contactId)}` } : {};
+  switch (e.type) {
+    case 'unit_created':
+      return { label: 'Property created' };
+    case 'unit_updated': {
+      const fields = (e.fields ?? []).map((f) => humanize(f)).join(', ');
+      return { label: 'Property updated', ...(fields && { sub: fields }) };
+    }
+    case 'unit_contact_added': {
+      const role =
+        e.role !== undefined ? (ROLE_LABEL[e.role as keyof typeof ROLE_LABEL] ?? humanize(e.role)) : undefined;
+      const sub = [who, role].filter(Boolean).join(' · ');
+      return { label: 'Contact added', ...(sub && { sub }), ...contactLink };
+    }
+    case 'unit_contact_removed':
+      return { label: 'Contact removed', ...(who !== undefined && { sub: who }), ...contactLink };
+    case 'listing_response_set': {
+      const response = e.response !== undefined ? humanize(e.response) : undefined;
+      return {
+        label: response !== undefined ? `Tenant response · ${response}` : 'Tenant response',
+        ...(who !== undefined && { sub: who }),
+        ...contactLink,
+      };
+    }
+    case 'listing_status_changed': {
+      const to = e.to !== undefined ? statusLabel(e.to) : undefined;
+      const from = e.from !== undefined ? statusLabel(e.from) : undefined;
+      const auto = e.source === 'derived' ? ' · automatic' : '';
+      return {
+        label: to !== undefined ? `Status changed to ${to}` : 'Status changed',
+        ...(from !== undefined && { sub: `from ${from}${auto}` }),
+      };
+    }
+    case 'unit_deleted':
+      return { label: 'Property deleted' };
+    case 'unit_restored':
+      return { label: 'Property restored' };
+    default:
+      return { label: humanize(e.type) };
+  }
 }

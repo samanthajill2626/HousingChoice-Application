@@ -49,6 +49,7 @@ import type {
   TourStatus,
   TourType,
   ToursPage,
+  UnitActivityEvent,
   UnitItem,
   UnitsPage,
 } from './types.js';
@@ -432,6 +433,20 @@ export async function getUnitSimilar(
     { ...(signal !== undefined && { signal }) },
   );
   return res.similar;
+}
+
+/** GET /api/units/:id/activity — the property's audit-trail Activity rows,
+ *  newest-first. 404s on an older deployed backend → the Activity card renders
+ *  a "pending backend" state. */
+export async function getUnitActivity(
+  unitId: string,
+  signal?: AbortSignal,
+): Promise<UnitActivityEvent[]> {
+  const res = await request<{ events: UnitActivityEvent[] }>(
+    `/api/units/${encodeURIComponent(unitId)}/activity`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.events;
 }
 
 // --- Contacts (/api/contacts) -----------------------------------------------

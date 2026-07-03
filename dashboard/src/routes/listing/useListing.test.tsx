@@ -10,6 +10,7 @@ const getContact = vi.fn();
 const getUnitRelated = vi.fn();
 const getUnitRecipients = vi.fn();
 const getUnitSimilar = vi.fn();
+const getUnitActivity = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -22,6 +23,7 @@ vi.mock('../../api/index.js', async () => {
     getUnitRelated: (...a: unknown[]) => getUnitRelated(...a),
     getUnitRecipients: (...a: unknown[]) => getUnitRecipients(...a),
     getUnitSimilar: (...a: unknown[]) => getUnitSimilar(...a),
+    getUnitActivity: (...a: unknown[]) => getUnitActivity(...a),
   };
 });
 
@@ -40,6 +42,10 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
       </span>
       <span data-testid="recipients">{s.recipients.status}</span>
       <span data-testid="similar">{s.similar.status}</span>
+      <span data-testid="activity">{s.activity.status}</span>
+      <span data-testid="activity-rows">
+        {s.activity.status === 'ready' ? s.activity.rows.length : -1}
+      </span>
     </div>
   );
 }
@@ -63,6 +69,7 @@ beforeEach(() => {
   getUnitRelated.mockReset();
   getUnitRecipients.mockReset();
   getUnitSimilar.mockReset();
+  getUnitActivity.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -75,6 +82,7 @@ describe('useListing', () => {
     getUnitRelated.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
     getUnitSimilar.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
 
     render(<Probe unitId="u1" />);
 
@@ -88,6 +96,8 @@ describe('useListing', () => {
     // C4/C6 stay pending
     expect(screen.getByTestId('recipients').textContent).toBe('pending');
     expect(screen.getByTestId('similar').textContent).toBe('pending');
+    // activity degrades the same way on an older deployed backend
+    expect(screen.getByTestId('activity').textContent).toBe('pending');
   });
 
   it('uses the live /related endpoint when it answers', async () => {
@@ -100,6 +110,9 @@ describe('useListing', () => {
     ]);
     getUnitRecipients.mockResolvedValue([]);
     getUnitSimilar.mockResolvedValue([]);
+    getUnitActivity.mockResolvedValue([
+      { id: '2026-07-01T09:00:00.000Z#000001', at: '2026-07-01T09:00:00.000Z', type: 'unit_created' },
+    ]);
 
     render(<Probe unitId="u1" />);
 
@@ -108,6 +121,8 @@ describe('useListing', () => {
     expect(screen.getByTestId('related-rows').textContent).toBe('1');
     expect(screen.getByTestId('recipients').textContent).toBe('ready');
     expect(screen.getByTestId('similar').textContent).toBe('ready');
+    expect(screen.getByTestId('activity').textContent).toBe('ready');
+    expect(screen.getByTestId('activity-rows').textContent).toBe('1');
   });
 
   it('errors when the unit itself fails to load', async () => {
@@ -118,6 +133,7 @@ describe('useListing', () => {
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
 
     render(<Probe unitId="u1" />);
 
@@ -132,6 +148,7 @@ describe('useListing', () => {
     getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
     getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
 
     render(<Probe unitId="u1" />);
 

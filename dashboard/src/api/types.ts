@@ -1182,6 +1182,34 @@ export interface SimilarUnit {
   summary: string;
 }
 
+// --- Unit activity (the property page's Activity card) -----------------------
+// MIRRORS app/src/routes/units.ts UnitActivityEvent — one unit AUDIT-trail row
+// projected onto the wire (fixed-key whitelist, never the raw audit payload).
+// 404s on older deployed backends → an honest pending state.
+
+/** One property Activity row. `type` is the audit event_type — an OPEN set;
+ *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
+ *  listing_response_set, listing_status_changed, unit_deleted, unit_restored.
+ *  Unknown types must still render (humanized), never blank. */
+export interface UnitActivityEvent {
+  /** The audit ts sort key — unique within the unit (a stable React key). */
+  id: string;
+  /** ISO 8601 — when the event happened. */
+  at: string;
+  type: string;
+  /** The acting user, when the event wasn't a system action. */
+  actorId?: string;
+  contactId?: string;
+  /** Server-resolved display name (best-effort) — absent when unknown. */
+  contactName?: string;
+  role?: string;
+  response?: string;
+  fields?: string[];
+  from?: string;
+  to?: string;
+  source?: string;
+}
+
 // --- Broadcasts (the "Share properties to tenants" surface) -----------------
 // MIRRORS app/src/routes/broadcasts.ts + app/src/repos/broadcastsRepo.ts — the
 // wire shapes the broadcasts router exchanges. The dashboard is a separate

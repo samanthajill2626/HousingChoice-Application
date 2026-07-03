@@ -378,6 +378,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
+      // WS3 Task 3.2: a landlord's owned-property lifecycle interleave needs the
+      // units (byLandlord GSI) + the shared audit trail. Without these the router
+      // falls back to real DynamoDB repos (fake-world writes invisible in tests;
+      // prod reads nothing).
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      auditRepo: audit,
       config,
     }),
   );

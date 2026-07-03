@@ -5,7 +5,13 @@
 
 .page {
   /* Full-width: the queue fills the AppFrame content area (which already pads the
-   * gutters). No max-width cap — this nav page spans the whole window. */
+   * gutters). No max-width cap — this nav page spans the whole window.
+   *
+   * A query container so each row stacks on the CONTENT PANE's width, not the
+   * viewport's — the pane is narrow both on phones AND just above the nav
+   * breakpoint (where the expanded sidebar still eats ~240px), and a viewport
+   * media query can't tell those apart. */
+  container-type: inline-size;
 }
 
 .title {
@@ -100,7 +106,18 @@
   background: var(--c-warning);
 }
 
+/* Text block: who + why on one line (wide), stacked (tight). flex:1 + min-width:0
+ * lets it take the room left of the meta chips and lets `why` truncate. */
+.main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .who {
+  flex: 0 0 auto;
   font-weight: var(--fw-semibold);
   color: var(--c-text);
   white-space: nowrap;
@@ -115,9 +132,17 @@
   min-width: 0;
 }
 
+/* Meta chips (urgency + tag), grouped so they move + wrap together. On a wide
+ * pane .main's flex:1 pushes this to the right edge; no margin-left:auto needed. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
 .urg {
   flex: 0 0 auto;
-  margin-left: auto;
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--c-danger) 12%, transparent);
@@ -127,14 +152,8 @@
   white-space: nowrap;
 }
 
-/* When there's no urgency chip, the tag is what pins to the right edge. */
-.urg + .tag {
-  margin-left: var(--sp-2);
-}
-
 .tag {
-  flex: 0 0 auto;
-  margin-left: auto;
+  flex: 0 1 auto;
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-surface-2);
@@ -142,6 +161,40 @@
   color: var(--c-text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
+}
+
+/* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
+ * stack the text block over the chips so the name + reason get a full line each
+ * and the chips wrap onto their own line instead of overflowing or crushing the
+ * reason. */
+@container (max-width: 560px) {
+  .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .main {
+    /* auto (not 100%) so the attention dot stays on this line beside the text
+     * block; only .meta (basis 100%) wraps to its own line below. */
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* Now that the reason owns its own line, let it wrap in full instead of
+   * truncating — the whole point is that it stops getting cut off. */
+  .why {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+  /* A long tag ("Placement · Awaiting landlord submission") wraps inside its chip
+   * rather than running off the edge on the narrowest phones. */
+  .tag {
+    white-space: normal;
+  }
 }
 
 /* --- States --------------------------------------------------------------- */

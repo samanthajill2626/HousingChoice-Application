@@ -35,14 +35,23 @@ function hrefFor(item: TodayItem): string {
 }
 
 function Row({ item }: { item: TodayItem }): React.JSX.Element {
+  const hasMeta = Boolean(item.urgency) || Boolean(item.tag);
   return (
     <li className={styles.rowItem}>
       <Link to={hrefFor(item)} className={styles.row}>
         {item.attention ? <span className={styles.dot} aria-label="Needs attention" /> : null}
-        <span className={styles.who}>{item.who}</span>
-        <span className={styles.why}>{item.why}</span>
-        {item.urgency ? <span className={styles.urg}>{item.urgency}</span> : null}
-        {item.tag ? <span className={styles.tag}>{item.tag}</span> : null}
+        {/* Text block (who · why). On a tight content pane it stacks above the meta
+         *  chips (container query in the CSS) so the "why" never gets crushed. */}
+        <span className={styles.main}>
+          <span className={styles.who}>{item.who}</span>
+          <span className={styles.why}>{item.why}</span>
+        </span>
+        {hasMeta ? (
+          <span className={styles.meta}>
+            {item.urgency ? <span className={styles.urg}>{item.urgency}</span> : null}
+            {item.tag ? <span className={styles.tag}>{item.tag}</span> : null}
+          </span>
+        ) : null}
       </Link>
     </li>
   );

@@ -181,16 +181,39 @@ function journeyStart(stageEnteredAt: Date, stage: PlacementStage): string {
   return new Date(stageEnteredAt.getTime() - priorStagesBacklogMs(stage)).toISOString();
 }
 
-/** How long (ms) a given deadline type sits after stage entry (non-overdue rows). */
-function deadlineSpanMs(type: PlacementDeadlineType, _stage: PlacementStage): number {
-  switch (type) {
-    case 'rta_window':
-      return 48 * HOUR_MS; // the 48h RTA clock
-    case 'follow_up':
-      return Math.round(2.5 * DAY_MS); // ~2–3 days
-    case 'voucher_expiration':
-      return 21 * DAY_MS; // handled specially (future weeks) — value kept for symmetry
-  }
+// ---------------------------------------------------------------------------
+// Per-placement showcase ROLE (deliberate deadline×stuck quadrants)
+// ---------------------------------------------------------------------------
+// Each active (stage, rep) is assigned a deterministic role that decides which
+// deadline×stuck quadrant the placement demonstrates on the Today board. The
+// curated map below hand-places a small set of rows so ALL FOUR quadrants are
+// covered — deadline-not-stuck (due_hard/due_followup/upcoming), stuck-no-deadline
+// (stuck_only), both, and neither (calm). Everything NOT in the map defaults to
+// `upcoming` for rep 1 and `calm` for rep 2, so most placements are off-board and
+// the board reads cleanly. Roles:
+//   - due_hard    → needs_you_now, NOT stuck: overdue hard clock (rta_window/voucher).
+//   - due_followup→ follow_ups, NOT stuck: overdue follow_up, NOT attention-flagged.
+//   - stuck_only  → follow_ups via DERIVED stuck; NO deadline item.
+//   - both        → needs_you_now (overdue hard clock) + follow_ups (derived stuck).
+//   - upcoming    → off-board calm: a future (not-due) deadline.
+//   - calm        → off-board: neither a deadline nor stuck.
+type PlacementRole = 'due_hard' | 'due_followup' | 'stuck_only' | 'both' | 'upcoming' | 'calm';
+
+const ROLE_MAP: Partial<Record<PlacementStage, Partial<Record<number, PlacementRole>>>> = {
+  send_application: { 1: 'due_hard' }, //                      App  → voucher overdue (needs)
+  awaiting_completion: { 1: 'due_followup', 2: 'both' }, //    App  → follow_up overdue (follow); voucher overdue + stuck (both)
+  collect_rta: { 1: 'due_hard' }, //                          RTA  → rta_window overdue (needs)
+  review_rta: { 1: 'stuck_only' }, //                         RTA  → stuck, NO deadline (follow)
+  awaiting_landlord_submission: { 2: 'due_hard' }, //         RTA  → rta_window overdue (needs)
+  awaiting_authority_approval: { 1: 'both' }, //             RTA  → rta_window overdue + stuck (both)
+  awaiting_inspection: { 1: 'stuck_only' }, //               Insp → stuck, NO deadline (follow)
+  determine_rent: { 2: 'stuck_only' }, //                    Rent → stuck, NO deadline (follow)
+  complete_paperwork: { 1: 'due_followup' }, //              Admin→ follow_up overdue (follow)
+};
+
+/** The curated role for (stage, rep); default rep1→upcoming, rep2→calm. */
+function roleFor(stage: PlacementStage, rep: number): PlacementRole {
+  return ROLE_MAP[stage]?.[rep] ?? (rep === 1 ? 'upcoming' : 'calm');
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +301,12 @@ interface PlacementGroup {
 function buildPlacementsMatrix(now: Date): PlacementGroup[] {
   const groups: PlacementGroup[] = [];
   let counter = 0;
+  // Attention is decoupled from overdue-ness: flag ONLY the `both` rows (always)
+  // and the FIRST `due_hard` row (they're already in needs_you_now, overdue hard
+  // clocks). An overdue `due_followup` must NOT be flagged — it lands in follow_ups
+  // ONLY. This flips false→true the first time a due_hard row is seen (deterministic
+  // iteration order ⇒ always the same row: send_application/1).
+  let dueHardAttentionAssigned = false;
 
   // Active stages (not terminals)
   const activeStages = PLACEMENT_STAGES.filter((s) => s !== 'moved_in' && s !== 'lost');
@@ -291,41 +320,81 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
       const derived = deriveStatuses(stage);
       const phase = STAGE_PHASE[stage];
 
-      // Deterministic per-placement choices.
-      const validTypes = PHASE_DEADLINE_TYPES[phase];
-      const dt = validTypes[counter % validTypes.length]!;
-      const overdue = counter % 5 === 0; // attention-flagged rows are genuinely past-due
+      // Curated showcase ROLE → which deadline×stuck quadrant this placement
+      // demonstrates (deliberate coverage; most rows are calm/upcoming so the board
+      // reads cleanly). See ROLE_MAP + role mechanics above.
+      const role = roleFor(stage, rep);
+      // HARD(phase): the "hard clock" deadline type — rta_window in RTA, else
+      // voucher_expiration. Every role that uses HARD sits on an App/RTA stage per
+      // the curated map, so this is always a phase-valid type.
+      const hardType: PlacementDeadlineType = phase === 'RTA' ? 'rta_window' : 'voucher_expiration';
+      const stuckThresholdMs = STAGE_STUCK_THRESHOLDS[stage] ?? 0;
 
-      // --- stage_entered_at + next_deadline_at (coherent by type) ------------
+      // Role → (stage_entered_at, optional deadline type/at, attention, voucher date).
+      // All now-relative + deterministic. Invariants held by construction:
+      //   deadline.at ≥ stage_entered_at; created_at = journeyStart ≤ stage_entered_at;
+      //   attention rows are always overdue; voucher_expiration_date ⟺ voucher deadline.
       let stageEnteredAt: Date;
-      let nextDeadlineAt: string;
-      if (overdue) {
-        // Past-due by a few DAYS (not months). Enter the stage the deadline's
-        // natural span earlier so next_deadline_at = entry + span, in the past.
-        const overdueDays = 1 + (counter % 3); // 1..3 days overdue
-        const spanMs = deadlineSpanMs(dt, stage);
-        stageEnteredAt = new Date(now.getTime() - overdueDays * DAY_MS - spanMs);
-        nextDeadlineAt = daysAgo(now, overdueDays);
-      } else if (dt === 'rta_window') {
-        // The 48h RTA clock is still open — closes within the next ~2 days
-        // (hour precision). Entry = close − 48h (coherent, ≤ now).
-        nextDeadlineAt = hoursFromNow(now, 6 + (counter % 36)); // 6–41h out
-        stageEnteredAt = new Date(Date.parse(nextDeadlineAt) - 48 * HOUR_MS);
-      } else if (dt === 'voucher_expiration') {
-        // Recently entered; voucher expires weeks out.
-        stageEnteredAt = new Date(now.getTime() - (1 + (counter % 3)) * DAY_MS);
-        nextDeadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2–4 weeks out
-      } else {
-        // Recently entered; deadline strictly UPCOMING. Measure the type's full
-        // span from NOW (not from stage entry) so the deadline always clears now
-        // regardless of how long we've been in-stage — otherwise a short span
-        // (e.g. follow_up ~2.5d) on an older entry would land in the past yet be
-        // unflagged. Invariant next_deadline_at ≥ stage_entered_at holds since
-        // now ≥ stageEnteredAt and the span is positive.
-        const inStageDays = 1 + (counter % 3); // 1..3 days in current stage
-        stageEnteredAt = new Date(now.getTime() - inStageDays * DAY_MS);
-        nextDeadlineAt = new Date(now.getTime() + deadlineSpanMs(dt, stage)).toISOString();
+      let deadlineType: PlacementDeadlineType | undefined;
+      let deadlineAt: string | undefined;
+      let attention = false;
+      let voucherExpirationDate: string | undefined;
+
+      switch (role) {
+        case 'due_hard': {
+          // needs_you_now, NOT stuck: entered 2d ago (< every threshold) with an
+          // overdue hard clock. The FIRST due_hard row is attention-flagged.
+          stageEnteredAt = new Date(now.getTime() - 2 * DAY_MS);
+          deadlineType = hardType;
+          deadlineAt = hoursFromNow(now, -12); // now − 12h (overdue → surfaces)
+          if (hardType === 'voucher_expiration') voucherExpirationDate = deadlineAt;
+          if (!dueHardAttentionAssigned) {
+            attention = true;
+            dueHardAttentionAssigned = true;
+          }
+          break;
+        }
+        case 'due_followup': {
+          // follow_ups, NOT stuck: an overdue follow_up that is NOT attention-flagged
+          // (the fix — an overdue follow_up lands in follow_ups ONLY, not needs_you_now).
+          stageEnteredAt = new Date(now.getTime() - 2 * DAY_MS);
+          deadlineType = 'follow_up';
+          deadlineAt = daysAgo(now, 1); // now − 1d (overdue)
+          break;
+        }
+        case 'stuck_only': {
+          // follow_ups via DERIVED stuck; NO deadline item. Age > threshold ⇒ stuck.
+          stageEnteredAt = new Date(now.getTime() - (stuckThresholdMs + 3 * DAY_MS));
+          break;
+        }
+        case 'both': {
+          // needs_you_now (overdue hard clock) + follow_ups (derived stuck). Always
+          // attention-flagged (it's already in needs_you_now, overdue).
+          stageEnteredAt = new Date(now.getTime() - (stuckThresholdMs + 3 * DAY_MS));
+          deadlineType = hardType;
+          deadlineAt = hoursFromNow(now, -12); // now − 12h (overdue)
+          if (hardType === 'voucher_expiration') voucherExpirationDate = deadlineAt;
+          attention = true;
+          break;
+        }
+        case 'upcoming': {
+          // Off-board calm: a phase-appropriate deadline comfortably in the future
+          // (not on Today). Spread the type across the phase set for coverage.
+          stageEnteredAt = new Date(now.getTime() - 2 * DAY_MS);
+          const validTypes = PHASE_DEADLINE_TYPES[phase];
+          deadlineType = validTypes[counter % validTypes.length]!;
+          deadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2–4 weeks out
+          if (deadlineType === 'voucher_expiration') voucherExpirationDate = deadlineAt;
+          break;
+        }
+        case 'calm':
+        default: {
+          // Off-board: neither a deadline nor stuck.
+          stageEnteredAt = new Date(now.getTime() - 2 * DAY_MS);
+          break;
+        }
       }
+
       const stageEnteredIso = stageEnteredAt.toISOString();
       const createdAt = journeyStart(stageEnteredAt, stage);
 
@@ -339,33 +408,32 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         created_at: createdAt,
         // No raw next_deadline slot (placement-deadline-model): the flat
         // next_deadline_type/at are COMPUTED at read time from the first-class
-        // placementDeadlines item built just below. `dt`/`nextDeadlineAt` here only
-        // shape that item + the attention flag.
+        // placementDeadlines item (when present).
       };
 
-      // Deadlines are first-class placementDeadlines items now (placement-deadline-
-      // model): build the item (deterministic id) from the now-relative type/date
-      // computed above instead of a stored next_deadline slot. `dt` is always a LIVE
-      // type (rta_window / voucher_expiration / follow_up) — stuck is DERIVED from
-      // time-in-stage, tours own tour_reminder — so every active row carries exactly
-      // one coherent deadline item.
-      const deadline: Record<string, unknown> = {
-        deadlineId: deadlineIdFor(placementId, dt),
-        placementId,
-        type: dt,
-        at: nextDeadlineAt,
-        _deadlinePartition: 'deadlines',
-        createdAt,
-        updatedAt: createdAt,
-      };
-
-      if (overdue) {
-        const pool = attentionReasonPool(stage);
-        placementBase['attention'] = { reason: pool[counter % pool.length]!, at: nextDeadlineAt };
+      // Deadlines are first-class placementDeadlines items (placement-deadline-model),
+      // built ONLY when the role calls for one. stuck_only/calm carry NO item — the
+      // stuck signal is DERIVED from time-in-stage, and calm is genuinely off-board.
+      // `deadlineType` is always a LIVE type (rta_window / voucher_expiration /
+      // follow_up); tours own tour_reminder, which can never appear here.
+      let deadline: Record<string, unknown> | undefined;
+      if (deadlineType !== undefined && deadlineAt !== undefined) {
+        deadline = {
+          deadlineId: deadlineIdFor(placementId, deadlineType),
+          placementId,
+          type: deadlineType,
+          at: deadlineAt,
+          _deadlinePartition: 'deadlines',
+          createdAt,
+          updatedAt: createdAt,
+        };
       }
 
-      // Cover the voucher-sync source field on ~1/3 of tenants (a fixed future
-      // date; distinct from the deadline TYPE and from voucherSize).
+      if (attention) {
+        const pool = attentionReasonPool(stage);
+        placementBase['attention'] = { reason: pool[counter % pool.length]!, at: deadlineAt };
+      }
+
       const tenant: Record<string, unknown> = {
         contactId: tenantId,
         type: 'tenant',
@@ -381,14 +449,19 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         consent_at: createdAt,
         created_at: createdAt,
       };
-      if (counter % 3 === 0) tenant['voucher_expiration_date'] = '2026-09-30T00:00:00.000Z';
+      // Voucher coherence: set voucher_expiration_date ONLY when this placement
+      // carries a voucher_expiration deadline, pinned to the deadline instant
+      // (materialized-from-field coherence). No blanket counter%3 line any more.
+      if (voucherExpirationDate !== undefined) {
+        tenant['voucher_expiration_date'] = voucherExpirationDate;
+      }
 
       groups.push({
         tenantId,
         unitId,
         placementId,
         stage,
-        deadline,
+        ...(deadline !== undefined ? { deadline } : {}),
         tenant,
         unit: {
           unitId,

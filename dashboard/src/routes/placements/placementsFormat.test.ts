@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { historyTitle, humanizeToken, summarizeHistory } from './placementsFormat.js';
+import { dateTime, historyTitle, humanizeToken, shortDate, summarizeHistory } from './placementsFormat.js';
+
+describe('dateTime / shortDate normalise the audit sort-key suffix (never render it raw)', () => {
+  const CLEAN = '2026-06-01T14:05:45.000Z';
+  // Audit/timeline SORT KEYS are `<ISO>#<collision suffix>` — new Date() can't parse
+  // them, so the raw key used to leak into the History panel.
+  const SORTKEY = `${CLEAN}#33937ff7`;
+
+  it('dateTime formats a <ISO>#<suffix> sort key identically to the clean ISO', () => {
+    expect(dateTime(SORTKEY)).toBe(dateTime(CLEAN));
+    expect(dateTime(SORTKEY)).not.toContain('#');
+  });
+
+  it('shortDate formats a <ISO>#<suffix> sort key identically to the clean ISO', () => {
+    expect(shortDate(SORTKEY)).toBe(shortDate(CLEAN));
+    expect(shortDate(SORTKEY)).not.toContain('#');
+  });
+});
 
 describe('summarizeHistory (M6 — human labels, never raw snake_case)', () => {
   it('labels a placement_stage_changed from→to via STAGE_LABELS', () => {

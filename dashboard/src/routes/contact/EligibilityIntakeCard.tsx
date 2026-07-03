@@ -7,7 +7,25 @@ import type { Contact } from '../../api/index.js';
 import { Card, KV } from './Card.js';
 
 export interface EligibilityIntakeCardProps {
-  contact: Pick<Contact, 'pets' | 'evictions' | 'tenure' | 'lifEligible'>;
+  contact: Pick<
+    Contact,
+    'pets' | 'evictions' | 'tenure' | 'lifEligible' | 'voucher_expiration_date'
+  >;
+}
+
+/** An ISO instant → a friendly "Mon D, YYYY" date, or '' when unparseable. The
+ *  voucher expiration is a calendar DATE canonicalized to UTC midnight, so format
+ *  in UTC to recover that exact date (a local-TZ format would shift it a day in
+ *  negative-offset zones). */
+function friendlyDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 export function EligibilityIntakeCard({
@@ -20,6 +38,10 @@ export function EligibilityIntakeCard({
   if (typeof contact.lifEligible === 'boolean') {
     rows.push({ k: 'LIF eligible', v: contact.lifEligible ? 'Yes' : 'No' });
   }
+  const voucherExpires = contact.voucher_expiration_date
+    ? friendlyDate(contact.voucher_expiration_date)
+    : '';
+  if (voucherExpires) rows.push({ k: 'Voucher expires', v: voucherExpires });
 
   if (rows.length === 0) return null;
 

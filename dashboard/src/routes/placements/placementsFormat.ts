@@ -17,10 +17,8 @@ import { contactDisplayName, formatAddress } from '../contact/format.js';
 
 /** Noun labels for a placement's next-deadline clock (staff-facing). */
 export const DEADLINE_TYPE_LABEL: Record<PlacementDeadlineType, string> = {
-  tour_reminder: 'Tour reminder',
   rta_window: 'RTA window',
   voucher_expiration: 'Voucher expiration',
-  stuck_placement: 'Stuck placement',
   follow_up: 'Follow-up',
 };
 

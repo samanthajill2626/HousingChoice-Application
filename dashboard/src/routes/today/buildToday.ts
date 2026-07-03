@@ -6,18 +6,23 @@
 //
 // Grouping (from the build plan §B1):
 //   needs_you_now — a placement with a pending business-clock deadline (any type
-//     except follow_up/stuck_placement, which are follow-ups) OR an `attention` flag,
+//     except follow_up, which is a follow-up) OR an `attention` flag,
 //     PLUS untriaged inbounds (unknown_1to1 conversations). Ordered most-urgent
 //     first (overdue/soonest deadline, then attention rows, then untriaged).
 //   tours_today  — a placement whose tour_date is today (local).
 //   unreplied    — a conversation with unread_count > 0 (excluding the untriaged
 //     unknowns, which surface in needs_you_now).
-//   follow_ups   — a placement whose next_deadline_type is follow_up or stuck_placement.
+//   follow_ups   — a placement whose next_deadline_type is follow_up.
 //
-// We invent NO fields the wire doesn't carry: "stuck N days" age is not
-// computable from PlacementItem here, so stuck placements are detected via
-// next_deadline_type === 'stuck_placement' only (the design's "stuck 6 days" copy is
-// a server-side enrichment for the real /api/today).
+// DERIVED-STUCK is DEFERRED to the server here. Stuck is no longer a
+// next_deadline_type value (the backend derives it from time-in-stage against
+// STAGE_STUCK_THRESHOLDS and folds a "Stuck — needs a check" row into
+// follow_ups). Reproducing that would mean mirroring a fresh 16-entry threshold
+// map — business-clock tuning with no importable source in this package and no
+// natural drift-guard. This buildToday is a FALLBACK (used only when GET
+// /api/today 404s); the real /api/today is authoritative and does the
+// derivation. So the fallback omits client-derived stuck rather than carry a
+// silent-drift hazard for a path that essentially never runs in production.
 import {
   STAGE_LABELS,
   type PlacementDeadlineType,
@@ -40,16 +45,13 @@ const GROUP_ORDER: Record<TodayItem['group'], number> = {
 /** Deadline types that route to follow_ups rather than needs_you_now. */
 const FOLLOW_UP_DEADLINES: ReadonlySet<PlacementDeadlineType> = new Set<PlacementDeadlineType>([
   'follow_up',
-  'stuck_placement',
 ]);
 
 // --- Humanizers -------------------------------------------------------------
 
 const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
-  tour_reminder: 'Tour reminder',
   rta_window: 'RTA window closing',
   voucher_expiration: 'Voucher expiring',
-  stuck_placement: 'Stuck — needs a nudge',
   follow_up: 'Follow-up due',
 };
 

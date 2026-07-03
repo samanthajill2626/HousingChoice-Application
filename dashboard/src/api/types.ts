@@ -471,14 +471,13 @@ export function formatLostReason(lr: LostReason | undefined): string {
   return cat || text;
 }
 
-/** The business-clock deadline types (doc §5): the single most-urgent pending
- *  clock a placement carries. */
-export type PlacementDeadlineType =
-  | 'tour_reminder'
-  | 'rta_window'
-  | 'voucher_expiration'
-  | 'stuck_placement'
-  | 'follow_up';
+/** The business-clock deadline types (doc §5). Each is a first-class deadline
+ *  ITEM the server materializes; `next_deadline_type`/`next_deadline_at` carry the
+ *  SOONEST of a placement's items (computed server-side). `tour_reminder` and
+ *  `stuck_placement` are retired — stuck is now DERIVED from time-in-stage
+ *  server-side, never a deadline value. MIRRORS app placementsRepo
+ *  PLACEMENT_DEADLINE_TYPES. */
+export type PlacementDeadlineType = 'rta_window' | 'voucher_expiration' | 'follow_up';
 
 // NOTE: PlacementTour is retired — placement.tours[] has no real data and is
 // being removed. Use the first-class Tour entity (Tour / getTours / getTour etc.)
@@ -805,6 +804,8 @@ export interface ContactCreate {
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */
   consent_note?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). Only meaningful on a tenant. */
+  voucher_expiration_date?: string;
 }
 
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------
@@ -849,6 +850,10 @@ export interface Contact {
   consent_note?: string;
   /** Actor userId when staff-entered; unset for automatic methods. */
   consent_captured_by?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). When set on a tenant, the
+   *  backend materializes a `voucher_expiration` placement-deadline on the
+   *  tenant's active placements. */
+  voucher_expiration_date?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
   /** Landlord/PM company name (editable). */
@@ -934,6 +939,9 @@ export interface ContactPatch {
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */
   consent_note?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). Sent as an ISO instant to set,
+   *  or `null` to clear. Only meaningful on a tenant contact. */
+  voucher_expiration_date?: string | null;
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the

@@ -20,6 +20,19 @@ describe('EligibilityIntakeCard', () => {
     expect(screen.getByText('Yes')).toBeInTheDocument();
   });
 
+  it('renders a "Voucher expires" row with a friendly date when set', () => {
+    render(<EligibilityIntakeCard contact={{ voucher_expiration_date: '2026-08-15T00:00:00.000Z' }} />);
+    expect(screen.getByText('Voucher expires')).toBeInTheDocument();
+    expect(screen.getByText('Aug 15, 2026')).toBeInTheDocument();
+  });
+
+  it('omits the "Voucher expires" row when unset or unparseable', () => {
+    const { container } = render(
+      <EligibilityIntakeCard contact={{ voucher_expiration_date: 'not-a-date' }} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
   it('renders "No" when lifEligible is false (a recorded value, not empty)', () => {
     render(<EligibilityIntakeCard contact={{ lifEligible: false }} />);
     expect(screen.getByText('LIF eligible')).toBeInTheDocument();

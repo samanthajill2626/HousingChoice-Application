@@ -145,6 +145,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '',
   );
   const [company, setCompany] = useState(str(contact['company']));
+  // Landlord preference defaults (the Preferences & notes card). Programs as a
+  // comma-separated string (normalized to string[] on save — the ListingEditForm
+  // pattern); lease terms + pet policy as free text.
+  const [acceptsPrograms, setAcceptsPrograms] = useState(
+    (contact.accepts_programs ?? []).join(', '),
+  );
+  const [leaseTerms, setLeaseTerms] = useState(str(contact.lease_terms));
+  const [petPolicy, setPetPolicy] = useState(str(contact.pet_policy));
   // Landlord onboarding deal terms + approval criteria (edit form). contract_status
   // as a select (''=unset); expected_rent as a numeric string ('' = unset); the four
   // criteria as booleans; park_reason as free text.
@@ -234,6 +242,22 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     }
     if (notes !== str(contact.notes)) patch.notes = notes;
     if (isLandlord && company !== str(contact['company'])) patch.company = company;
+
+    // Landlord preference defaults — dirty-tracked like everything else. Programs:
+    // normalize the comma-separated input (trim, drop empties) and send the array
+    // only when the normalized form changed (mirrors ListingEditForm).
+    if (isLandlord) {
+      const normPrograms = acceptsPrograms
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const initPrograms = (contact.accepts_programs ?? []).map((p) => p.trim()).filter(Boolean);
+      if (JSON.stringify(normPrograms) !== JSON.stringify(initPrograms)) {
+        patch.accepts_programs = normPrograms;
+      }
+      if (leaseTerms !== str(contact.lease_terms)) patch.lease_terms = leaseTerms;
+      if (petPolicy !== str(contact.pet_policy)) patch.pet_policy = petPolicy;
+    }
 
     // Landlord onboarding deal terms + approval criteria — dirty-tracked, only the
     // changed fields ride the PATCH (the server SET-merges).
@@ -570,6 +594,42 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               autoComplete="off"
             />
           </label>
+        ) : null}
+
+        {isLandlord ? (
+          <div className={styles.fieldset}>
+            <span className={styles.label}>Preferences</span>
+            <label className={styles.field}>
+              <span className={styles.label}>Accepted vouchers / programs</span>
+              <input
+                className={styles.input}
+                value={acceptsPrograms}
+                onChange={(e) => setAcceptsPrograms(e.target.value)}
+                placeholder="Comma-separated, e.g. HCV, VASH"
+                autoComplete="off"
+              />
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Lease terms</span>
+              <input
+                className={styles.input}
+                value={leaseTerms}
+                onChange={(e) => setLeaseTerms(e.target.value)}
+                placeholder="e.g. 12-month minimum, month-to-month after"
+                autoComplete="off"
+              />
+            </label>
+            <label className={styles.field}>
+              <span className={styles.label}>Pet policy</span>
+              <input
+                className={styles.input}
+                value={petPolicy}
+                onChange={(e) => setPetPolicy(e.target.value)}
+                placeholder="e.g. small dogs OK, $300 deposit"
+                autoComplete="off"
+              />
+            </label>
+          </div>
         ) : null}
 
         {isLandlord ? (

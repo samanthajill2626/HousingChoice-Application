@@ -8,6 +8,7 @@ import { test, expect, type Page } from '@playwright/test';
 // reverted so other specs' name assertions stay valid.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TENANT = 'contact-tenant-0001';
+const LANDLORD = 'contact-landlord-0001';
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
@@ -108,6 +109,42 @@ test.describe('Contact detail — header actions + edit', () => {
     await page.getByLabel('ZIP', { exact: true }).fill('');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByText('dekalb_housing')).toHaveCount(0);
+  });
+
+  test('landlord preferences (programs / lease terms / pet policy) persist across a reload', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts/${LANDLORD}`);
+    await expect(page.getByRole('heading', { name: 'Preferences & notes' })).toBeVisible();
+
+    // Fill the landlord-only Preferences fieldset in the edit dialog.
+    await page.getByRole('button', { name: 'Edit contact details' }).click();
+    await expect(page.getByRole('dialog', { name: /Edit contact/i })).toBeVisible();
+    await page.getByLabel('Accepted vouchers / programs').fill('HCV, VASH');
+    await page.getByLabel('Lease terms').fill('12-month minimum');
+    await page.getByLabel('Pet policy').fill('Small dogs OK');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // The card renders program chips + the two policy rows (live, from the
+    // returned contact) — and still does after a full reload (persisted).
+    await expect(page.getByText('HCV', { exact: true })).toBeVisible();
+    await expect(page.getByText('VASH', { exact: true })).toBeVisible();
+    await expect(page.getByText('12-month minimum')).toBeVisible();
+    await expect(page.getByText('Small dogs OK')).toBeVisible();
+    await page.reload();
+    await expect(page.getByText('HCV', { exact: true })).toBeVisible();
+    await expect(page.getByText('12-month minimum')).toBeVisible();
+
+    // Cleanup — clear all three so the seeded landlord stays pristine.
+    await page.getByRole('button', { name: 'Edit contact details' }).click();
+    await page.getByLabel('Accepted vouchers / programs').fill('');
+    await page.getByLabel('Lease terms').fill('');
+    await page.getByLabel('Pet policy').fill('');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText('12-month minimum')).toHaveCount(0);
   });
 
   test('Manage numbers: add + remove a number round-trips through the backend', async ({ page }) => {

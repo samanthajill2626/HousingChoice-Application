@@ -182,6 +182,19 @@ export interface ContactItem {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /**
+   * Landlord preference DEFAULTS — person-level policies applied across their
+   * properties, distinct from the per-unit facts on UnitItem. Deliberately
+   * `accepts_programs` (not the unit's `accepted_programs`) so the default and
+   * the fact never conflate; `pet_policy` (not `pets`) because `pets` above is
+   * the TENANT intake answer. Same convention as the deal terms: first-class
+   * optional fields, NOT type-gated, validated only when supplied.
+   */
+  accepts_programs?: string[];
+  /** Free-text lease-terms policy ("12-month minimum, month-to-month after"). */
+  lease_terms?: string;
+  /** Free-text pet policy ("small dogs OK, $300 deposit"). */
+  pet_policy?: string;
   [key: string]: unknown;
 }
 

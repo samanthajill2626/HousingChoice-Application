@@ -245,6 +245,7 @@ export function createFakeWorld(): FakeWorld {
   events.on('message.persisted', (payload) => emitted.push({ event: 'message.persisted', payload }));
   events.on('broadcast.updated', (payload) => emitted.push({ event: 'broadcast.updated', payload }));
   events.on('placement.updated', (payload) => emitted.push({ event: 'placement.updated', payload }));
+  events.on('scheduled.updated', (payload) => emitted.push({ event: 'scheduled.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>

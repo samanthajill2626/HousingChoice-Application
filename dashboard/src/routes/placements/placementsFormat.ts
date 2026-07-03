@@ -14,6 +14,7 @@ import {
   type UnitItem,
 } from '../../api/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { isoOf } from '../../lib/time.js';
 
 /** Noun labels for a placement's next-deadline clock (staff-facing). */
 export const DEADLINE_TYPE_LABEL: Record<PlacementDeadlineType, string> = {
@@ -64,19 +65,23 @@ export function listingAddress(units: Map<string, UnitItem>, unitId: string): st
   return formatAddress(u.address) || unitId;
 }
 
-/** A short YYYY-MM-DD date label (the tour date / a deadline date), or "". */
+/** A short "Jun 18" date label (the tour date / a deadline date), or "". Accepts a
+ *  clean ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf). */
 export function shortDate(iso: string | undefined): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const norm = isoOf(iso);
+  const d = new Date(norm);
+  if (Number.isNaN(d.getTime())) return norm.slice(0, 10);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-/** A date-and-time label for a history row, e.g. "Jun 18, 1:02 PM", or the raw
- *  string when unparseable. */
+/** A date-and-time label for a history row, e.g. "Jun 18, 1:02 PM". Accepts a clean
+ *  ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf) so the
+ *  raw key never renders; falls back to the normalised string when unparseable. */
 export function dateTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  const norm = isoOf(iso);
+  const d = new Date(norm);
+  if (Number.isNaN(d.getTime())) return norm;
   return d.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',

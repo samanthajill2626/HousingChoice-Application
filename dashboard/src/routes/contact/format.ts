@@ -8,6 +8,7 @@ import {
   type TenantStatus,
 } from '../../api/index.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
+import { isoOf } from '../../lib/time.js';
 
 /** Format a US E.164 number as "(404) 010-0007". Non-US / unparseable numbers
  *  are returned as-is (honest — never mangle an unexpected shape).
@@ -16,9 +17,10 @@ export function formatPhone(e164: string | undefined): string {
   return formatPhoneDisplay(e164);
 }
 
-/** A short clock label for a message instant, e.g. "9:14a" / "1:02p". */
+/** A short clock label for a message instant, e.g. "9:14a" / "1:02p". Accepts a
+ *  clean ISO instant or a `<ISO>#<suffix>` sort key (normalised via isoOf). */
 export function formatTime(iso: string): string {
-  const d = new Date(iso);
+  const d = new Date(isoOf(iso));
   if (Number.isNaN(d.getTime())) return '';
   let h = d.getHours();
   const min = d.getMinutes();
@@ -28,9 +30,10 @@ export function formatTime(iso: string): string {
   return `${h}:${min.toString().padStart(2, '0')}${mer}`;
 }
 
-/** A date-divider label for a day, e.g. "Mon Jun 8". */
+/** A date-divider label for a day, e.g. "Mon Jun 8". Accepts a clean ISO instant or
+ *  a `<ISO>#<suffix>` sort key (normalised via isoOf). */
 export function formatDayDivider(iso: string): string {
-  const d = new Date(iso);
+  const d = new Date(isoOf(iso));
   if (Number.isNaN(d.getTime())) return '';
   // "Mon Jun 8" — drop the comma toLocaleDateString puts after the weekday.
   return d
@@ -38,10 +41,12 @@ export function formatDayDivider(iso: string): string {
     .replace(',', '');
 }
 
-/** A stable per-day key (YYYY-MM-DD in local time) for grouping into dividers. */
+/** A stable per-day key (YYYY-MM-DD in local time) for grouping into dividers.
+ *  Accepts a clean ISO instant or a `<ISO>#<suffix>` sort key (normalised). */
 export function dayKey(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  const norm = isoOf(iso);
+  const d = new Date(norm);
+  if (Number.isNaN(d.getTime())) return norm;
   const y = d.getFullYear();
   const m = (d.getMonth() + 1).toString().padStart(2, '0');
   const day = d.getDate().toString().padStart(2, '0');

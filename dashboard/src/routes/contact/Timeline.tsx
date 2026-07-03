@@ -16,9 +16,11 @@ import type {
   TimelineMessage,
   TimelineMilestone,
   TimelineMilestoneType,
+  TimelineScheduled,
 } from '../../api/index.js';
 import { ApiError } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
+import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
 import { deliveryReason, presentDeliveryStatus } from './deliveryStatus.js';
 import { messageMediaSrc, messageSid } from './media.js';
@@ -60,6 +62,10 @@ export type TimelineStatus = 'loading' | 'ready' | 'error';
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
+  /** Not-yet-sent scheduled messages — rendered in a pinned "Upcoming" section
+   *  between the stream and the composer (shown only when non-empty). Never part
+   *  of `items`. */
+  upcoming?: TimelineScheduled[];
   /** Which path produced items — drives an honest "(assembled)" note when the
    *  server timeline (with milestones) isn't live yet. */
   source: 'server' | 'fallback';
@@ -330,7 +336,7 @@ function StreamItem({
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
       return <MessageBubble msg={item} onRetry={onRetry} />;
@@ -338,6 +344,10 @@ function StreamItem({
       return <CallCard call={item} />;
     case 'milestone':
       return <MilestonePin ms={item} />;
+    case 'scheduled':
+      // The main stream never carries scheduled rows (they live in the pinned
+      // `upcoming` section). This case only satisfies TS union exhaustiveness.
+      return null;
   }
 }
 
@@ -345,6 +355,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const {
     status,
     items,
+    upcoming,
     source,
     replyToPhone,
     replyToLabel,
@@ -527,6 +538,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             ))
           : null}
       </div>
+
+      {upcoming && upcoming.length > 0 ? (
+        <section className={styles.upcoming} aria-label="Upcoming scheduled messages">
+          <header className={styles.upcomingHead}>Upcoming ({upcoming.length})</header>
+          <div className={styles.upcomingList}>
+            {upcoming.map((sched) => (
+              <ScheduledCard key={sched.id} item={sched} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className={styles.reply}>
         {optedOut ? (

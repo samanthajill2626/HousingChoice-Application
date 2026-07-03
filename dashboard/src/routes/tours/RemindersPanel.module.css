@@ -1,0 +1,116 @@
+/* RemindersPanel — the armed reminder ladder on TourDetail. Tokens only
+ * (tokens.css), never hard-coded colours. State chips mirror DeadlineChip:
+ * upcoming = amber, sent = green, canceled = muted. */
+
+.panel {
+  margin: var(--sp-5) 0;
+}
+
+.title {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.muted {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.row {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+/* The next rung to fire — emphasized with a left accent + stronger border. */
+.next {
+  border-color: var(--c-border-strong);
+  box-shadow: inset 3px 0 0 0 var(--c-accent, var(--c-focus-ring));
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.kind {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.nextTag {
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border-strong);
+  color: var(--c-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* --- State chips (mirror DeadlineChip tone) -------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.upcoming {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+}
+
+.sent {
+  background: var(--c-evt-green-bg);
+  color: var(--c-evt-green-text);
+}
+
+.canceled {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
+/* --- Row body + suppression note ------------------------------------------ */
+
+.body {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.struck {
+  text-decoration: line-through;
+  color: var(--c-text-muted);
+}
+
+.suppression {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-evt-amber-text);
+}

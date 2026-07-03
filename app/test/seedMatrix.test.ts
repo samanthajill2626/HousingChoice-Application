@@ -383,6 +383,11 @@ describe('seed matrix: placementDeadlines type coverage', () => {
     );
     expect(withVoucher.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('NO placement anywhere carries a tour_reminder deadline (tours are a separate entity)', () => {
+    const deadlineCounts = countByField(allPlacements, 'next_deadline_type');
+    expect(deadlineCounts['tour_reminder'] ?? 0).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

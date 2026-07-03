@@ -3,8 +3,16 @@
 // Every enum value for placements (stages), units (listing statuses), tenants,
 // landlords, and tours appears ≥2 times. IDs use a fixed pattern:
 //   <entity>-mx-<state>-NN   e.g. tenant-mx-searching-01, placement-mx-send-application-01
-// Names come from fixed pools (never Math.random). Dates are fixed past ISO
-// constants (nothing relative to now — that is Task 4's live.ts).
+// Names come from fixed pools (never Math.random).
+//
+// DATES: placements are NOW-RELATIVE and coherent by construction — matrixItems
+// takes an injected `now` (as seedLive does) and derives every placement date
+// from it (stage_entered_at, created_at, next_deadline_at, moved_in ordering).
+// TOURS + their reminder ladders are ALSO now-relative (buildToursMatrix(now)):
+// upcoming tours are future-dated with a pending day_before that never live-fires,
+// past tours have all-terminal reminders — every instant derived from `now` by
+// real date arithmetic. Given a fixed `now` the output is deterministic. All
+// other standalone builders keep their fixed-past ISO constants.
 //
 // §7 tripwire: every placement's linked tenant + unit carry the status that
 // deriveStatuses(stage) produces, with status_source:'derived'.
@@ -13,7 +21,7 @@
 // no_show_checkin reminder row with sentAt set (archive — written directly for
 // historical tours since the reminder worker never ran for them).
 
-import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, deriveStatuses, type PlacementStage } from '../statusModel.js';
+import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, STAGE_PHASE, STAGE_STUCK_THRESHOLDS, deriveStatuses, type PlacementStage, type PlacementPhase } from '../statusModel.js';
 import { TOUR_STATUSES, type TourStatus } from '../toursModel.js';
 import { deadlineIdFor } from '../../repos/placementDeadlinesRepo.js';
 
@@ -119,28 +127,98 @@ const matrixConsent = (i: number) => MATRIX_CONSENT_METHODS[i % MATRIX_CONSENT_M
 // stuck_placement are retired (tours are first-class; stuck is derived).
 const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'follow_up'] as const;
 type DeadlineType = typeof DEADLINE_TYPES[number];
-const deadlineType = (i: number): DeadlineType => DEADLINE_TYPES[i % DEADLINE_TYPES.length]!;
 
-// Paired deadline dates (past, fixed)
-const DEADLINE_DATES = [
-  '2026-01-10T13:00:00.000Z',
-  '2026-01-25T13:00:00.000Z',
-  '2026-02-10T13:00:00.000Z',
-  '2026-02-25T13:00:00.000Z',
-  '2026-03-10T13:00:00.000Z',
-];
-const deadlineAt = (i: number) => DEADLINE_DATES[i % DEADLINE_DATES.length]!;
+// A PLACEMENT deadline is never a tour_reminder — tours own that type. Making it
+// a distinct type means the phase→type map below CANNOT even reference it.
+type PlacementDeadlineType = Exclude<DeadlineType, 'tour_reminder'>;
+
+/**
+ * Phase → the deadline types that are plausible for a placement in that phase
+ * (findings §A "deadline TYPE by phase"). Only the three LIVE deadline types
+ * survive (placement-deadline-model): `tour_reminder` is a tours concept and
+ * `stuck_placement` is now DERIVED from time-in-stage (never a stored deadline) —
+ * both are structurally absent from PlacementDeadlineType. `rta_window` appears
+ * ONLY in the RTA phase. Adding a new PlacementPhase is a typecheck error here —
+ * coverage by construction.
+ */
+export const PHASE_DEADLINE_TYPES: Readonly<Record<PlacementPhase, readonly PlacementDeadlineType[]>> = {
+  'Application': ['voucher_expiration', 'follow_up'],
+  'RTA': ['rta_window', 'voucher_expiration', 'follow_up'],
+  'Inspection': ['follow_up'],
+  'Rent Determination': ['follow_up'],
+  'Contract': ['follow_up'],
+  'Administrative': ['follow_up'],
+  'Closure': ['follow_up'],
+};
 
 // ---------------------------------------------------------------------------
-// Attention reasons
+// Now-relative date toolkit (deterministic given `now`)
 // ---------------------------------------------------------------------------
-const ATTENTION_REASONS = [
-  'Voucher expiring soon — expedite',
-  'Landlord unreachable — follow up immediately',
-  'Inspection overdue — reschedule required',
-  'RTA window closing — escalate',
-];
-const attentionReason = (i: number) => ATTENTION_REASONS[i % ATTENTION_REASONS.length]!;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+const daysAgo = (now: Date, d: number): string => new Date(now.getTime() - d * DAY_MS).toISOString();
+const daysFromNow = (now: Date, d: number): string => new Date(now.getTime() + d * DAY_MS).toISOString();
+const hoursFromNow = (now: Date, h: number): string => new Date(now.getTime() + h * HOUR_MS).toISOString();
+
+/** Σ of the stuck thresholds of every stage strictly BEFORE `stage` in the ladder. */
+function priorStagesBacklogMs(stage: PlacementStage): number {
+  const idx = PLACEMENT_STAGES.indexOf(stage);
+  let sum = 0;
+  for (let i = 0; i < idx; i++) {
+    sum += STAGE_STUCK_THRESHOLDS[PLACEMENT_STAGES[i]!] ?? 0;
+  }
+  return sum;
+}
+
+/**
+ * created_at = the day the placement journey began = `stage_entered_at` minus the
+ * summed stuck-thresholds of all prior stages (a realistic backdated journey).
+ * For `send_application` (first stage) the backlog is 0 → created_at == entry.
+ */
+function journeyStart(stageEnteredAt: Date, stage: PlacementStage): string {
+  return new Date(stageEnteredAt.getTime() - priorStagesBacklogMs(stage)).toISOString();
+}
+
+/** How long (ms) a given deadline type sits after stage entry (non-overdue rows). */
+function deadlineSpanMs(type: PlacementDeadlineType, _stage: PlacementStage): number {
+  switch (type) {
+    case 'rta_window':
+      return 48 * HOUR_MS; // the 48h RTA clock
+    case 'follow_up':
+      return Math.round(2.5 * DAY_MS); // ~2–3 days
+    case 'voucher_expiration':
+      return 21 * DAY_MS; // handled specially (future weeks) — value kept for symmetry
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attention reasons (phase-scoped — findings §A5)
+// ---------------------------------------------------------------------------
+/**
+ * The set of plausible attention reasons for a placement in `stage`:
+ * - "Voucher expiring" — any pre-move-in stage (all active stages qualify).
+ * - "Inspection overdue" — ONLY the Inspection phase.
+ * - "RTA window closing" — ONLY the RTA phase.
+ * - "Landlord unreachable" — ONLY where the landlord is the blocking actor
+ *   (RTA submission / rent acceptance / HAP contract).
+ * The generator AND the coherence test both read this single source of truth.
+ */
+export function attentionReasonPool(stage: PlacementStage): string[] {
+  const phase = STAGE_PHASE[stage];
+  const pool = ['Voucher expiring soon — expedite'];
+  if (phase === 'Inspection') pool.push('Inspection overdue — reschedule required');
+  if (phase === 'RTA') pool.push('RTA window closing — escalate');
+  if (
+    stage === 'awaiting_landlord_submission' ||
+    stage === 'awaiting_rent_acceptance' ||
+    stage === 'awaiting_hap_contract'
+  ) {
+    pool.push('Landlord unreachable — follow up immediately');
+  }
+  return pool;
+}
 
 // ---------------------------------------------------------------------------
 // Park reasons for parked landlords
@@ -183,10 +261,21 @@ interface PlacementGroup {
 }
 
 /**
- * Build the 2-per-stage placement matrix: 17 active stages ×2, moved_in ×2, lost ×2.
+ * Build the 2-per-stage placement matrix: 16 active stages ×2, moved_in ×2, lost ×2.
  * Each placement gets its own tenant + unit with deriveStatuses applied.
+ *
+ * NOW-RELATIVE + coherent by construction (findings §A "Correct-by-construction"):
+ *   - stage_entered_at = now − (a plausible time in the current stage).
+ *   - created_at = journeyStart(stage_entered_at, stage) (backdated over prior
+ *     stages; == stage_entered_at only for send_application).
+ *   - next_deadline_type ∈ PHASE_DEADLINE_TYPES[phase] (never tour_reminder;
+ *     rta_window only in RTA), picked deterministically per placement.
+ *   - next_deadline_at derived from the type; attention-flagged rows land a few
+ *     days PAST now (genuinely overdue → needs_you_now / follow_ups), others
+ *     upcoming. Invariant: next_deadline_at ≥ stage_entered_at.
+ *   - attention.reason ∈ attentionReasonPool(stage).
  */
-function buildPlacementsMatrix(): PlacementGroup[] {
+function buildPlacementsMatrix(now: Date): PlacementGroup[] {
   const groups: PlacementGroup[] = [];
   let counter = 0;
 
@@ -200,44 +289,79 @@ function buildPlacementsMatrix(): PlacementGroup[] {
       const unitId = stableId('unit', tag, rep);
       const placementId = stableId('placement', tag, rep);
       const derived = deriveStatuses(stage);
-      const fi = counter;
-      const li = counter + 3;
-      const createdAt = pastDate(counter);
-      const hasDeadline = counter % 2 === 0; // alternate which rows have a deadline
-      const hasAttention = counter % 5 === 0; // ~20% of rows carry attention
+      const phase = STAGE_PHASE[stage];
+
+      // Deterministic per-placement choices.
+      const validTypes = PHASE_DEADLINE_TYPES[phase];
+      const dt = validTypes[counter % validTypes.length]!;
+      const overdue = counter % 5 === 0; // attention-flagged rows are genuinely past-due
+
+      // --- stage_entered_at + next_deadline_at (coherent by type) ------------
+      let stageEnteredAt: Date;
+      let nextDeadlineAt: string;
+      if (overdue) {
+        // Past-due by a few DAYS (not months). Enter the stage the deadline's
+        // natural span earlier so next_deadline_at = entry + span, in the past.
+        const overdueDays = 1 + (counter % 3); // 1..3 days overdue
+        const spanMs = deadlineSpanMs(dt, stage);
+        stageEnteredAt = new Date(now.getTime() - overdueDays * DAY_MS - spanMs);
+        nextDeadlineAt = daysAgo(now, overdueDays);
+      } else if (dt === 'rta_window') {
+        // The 48h RTA clock is still open — closes within the next ~2 days
+        // (hour precision). Entry = close − 48h (coherent, ≤ now).
+        nextDeadlineAt = hoursFromNow(now, 6 + (counter % 36)); // 6–41h out
+        stageEnteredAt = new Date(Date.parse(nextDeadlineAt) - 48 * HOUR_MS);
+      } else if (dt === 'voucher_expiration') {
+        // Recently entered; voucher expires weeks out.
+        stageEnteredAt = new Date(now.getTime() - (1 + (counter % 3)) * DAY_MS);
+        nextDeadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2–4 weeks out
+      } else {
+        // Recently entered; deadline strictly UPCOMING. Measure the type's full
+        // span from NOW (not from stage entry) so the deadline always clears now
+        // regardless of how long we've been in-stage — otherwise a short span
+        // (e.g. follow_up ~2.5d) on an older entry would land in the past yet be
+        // unflagged. Invariant next_deadline_at ≥ stage_entered_at holds since
+        // now ≥ stageEnteredAt and the span is positive.
+        const inStageDays = 1 + (counter % 3); // 1..3 days in current stage
+        stageEnteredAt = new Date(now.getTime() - inStageDays * DAY_MS);
+        nextDeadlineAt = new Date(now.getTime() + deadlineSpanMs(dt, stage)).toISOString();
+      }
+      const stageEnteredIso = stageEnteredAt.toISOString();
+      const createdAt = journeyStart(stageEnteredAt, stage);
 
       const placementBase: Record<string, unknown> = {
         placementId,
         tenantId,
         unitId,
         stage,
-        stage_entered_at: createdAt,
+        stage_entered_at: stageEnteredIso,
         stage_source: 'manual',
         created_at: createdAt,
+        // No raw next_deadline slot (placement-deadline-model): the flat
+        // next_deadline_type/at are COMPUTED at read time from the first-class
+        // placementDeadlines item built just below. `dt`/`nextDeadlineAt` here only
+        // shape that item + the attention flag.
       };
 
-      // Deadlines are first-class placementDeadlines items now. When this row has
-      // one, build the item (deterministic id) instead of a stored next_deadline
-      // slot. All matrix rows are non-terminal here (moved_in/lost handled below),
-      // and their stage_entered_at is months in the past — so they ALSO derive as
-      // "stuck" in Today, exercising derived-stuck coverage without extra fixtures.
-      let deadline: Record<string, unknown> | undefined;
-      if (hasDeadline) {
-        const dt = deadlineType(counter);
-        const at = deadlineAt(counter);
-        deadline = {
-          deadlineId: deadlineIdFor(placementId, dt),
-          placementId,
-          type: dt,
-          at,
-          _deadlinePartition: 'deadlines',
-          createdAt,
-          updatedAt: createdAt,
-        };
-      }
+      // Deadlines are first-class placementDeadlines items now (placement-deadline-
+      // model): build the item (deterministic id) from the now-relative type/date
+      // computed above instead of a stored next_deadline slot. `dt` is always a LIVE
+      // type (rta_window / voucher_expiration / follow_up) — stuck is DERIVED from
+      // time-in-stage, tours own tour_reminder — so every active row carries exactly
+      // one coherent deadline item.
+      const deadline: Record<string, unknown> = {
+        deadlineId: deadlineIdFor(placementId, dt),
+        placementId,
+        type: dt,
+        at: nextDeadlineAt,
+        _deadlinePartition: 'deadlines',
+        createdAt,
+        updatedAt: createdAt,
+      };
 
-      if (hasAttention) {
-        placementBase['attention'] = { reason: attentionReason(counter), at: createdAt };
+      if (overdue) {
+        const pool = attentionReasonPool(stage);
+        placementBase['attention'] = { reason: pool[counter % pool.length]!, at: nextDeadlineAt };
       }
 
       // Cover the voucher-sync source field on ~1/3 of tenants (a fixed future
@@ -248,8 +372,8 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         status: derived.tenantStatus,
         status_source: 'derived',
         phone: phoneBase(counter),
-        firstName: firstName(TENANT_FIRST, fi),
-        lastName: lastName(TENANT_LAST, fi),
+        firstName: firstName(TENANT_FIRST, counter),
+        lastName: lastName(TENANT_LAST, counter + 3),
         voucherSize: beds(counter),
         housingAuthority: auth(counter),
         porting: counter % 3 === 0,
@@ -264,7 +388,7 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         unitId,
         placementId,
         stage,
-        ...(deadline !== undefined && { deadline }),
+        deadline,
         tenant,
         unit: {
           unitId,
@@ -286,7 +410,7 @@ function buildPlacementsMatrix(): PlacementGroup[] {
     }
   }
 
-  // moved_in ×2
+  // moved_in ×2 — recent-past ordering: created_at ≤ lease_date ≤ move_in_date ≤ now.
   for (let rep = 1; rep <= 2; rep++) {
     counter++;
     const stage: PlacementStage = 'moved_in';
@@ -294,7 +418,12 @@ function buildPlacementsMatrix(): PlacementGroup[] {
     const unitId = stableId('unit', stage, rep);
     const placementId = stableId('placement', stage, rep);
     const derived = deriveStatuses(stage);
-    const createdAt = pastDate(counter);
+    // Moved in ~2–3 weeks ago; lease signed ~2 weeks before that.
+    const moveInDate = daysAgo(now, 12 + rep * 4).slice(0, 10); // date-only (rep1: 16d, rep2: 20d ago)
+    const leaseDate = daysAgo(now, 26 + rep * 4).slice(0, 10); // date-only (rep1: 30d, rep2: 34d ago)
+    // Entered the terminal moved_in stage at move-in; journey began well before.
+    const stageEnteredAt = new Date(`${moveInDate}T10:00:00.000Z`);
+    const createdAt = journeyStart(stageEnteredAt, stage);
     groups.push({
       tenantId,
       unitId,
@@ -313,7 +442,7 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         porting: false,
         consent_method: matrixConsent(counter),
         consent_at: createdAt,
-        move_in_date: '2026-05-01',
+        move_in_date: moveInDate,
         created_at: createdAt,
       },
       unit: {
@@ -337,16 +466,16 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         tenantId,
         unitId,
         stage,
-        stage_entered_at: createdAt,
+        stage_entered_at: stageEnteredAt.toISOString(),
         stage_source: 'manual',
-        move_in_date: '2026-05-01',
-        lease_date: '2026-04-15',
+        move_in_date: moveInDate,
+        lease_date: leaseDate,
         created_at: createdAt,
       },
     });
   }
 
-  // lost ×2 — distinct reason categories
+  // lost ×2 — distinct reason categories; became lost recently after a long journey.
   for (let rep = 1; rep <= 2; rep++) {
     counter++;
     const stage: PlacementStage = 'lost';
@@ -354,7 +483,8 @@ function buildPlacementsMatrix(): PlacementGroup[] {
     const unitId = stableId('unit', stage, rep);
     const placementId = stableId('placement', stage, rep);
     const derived = deriveStatuses(stage);
-    const createdAt = pastDate(counter);
+    const stageEnteredAt = new Date(now.getTime() - (5 + rep * 3) * DAY_MS); // 8–11 days ago
+    const createdAt = journeyStart(stageEnteredAt, stage);
     // Alternate category sets for the two lost placements
     const lostCategory = rep === 1 ? LOST_CATEGORIES_A[0] : LOST_CATEGORIES_B[0];
     const lostText = rep === 1
@@ -400,7 +530,7 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         tenantId,
         unitId,
         stage,
-        stage_entered_at: createdAt,
+        stage_entered_at: stageEnteredAt.toISOString(),
         stage_source: 'manual',
         lost_reason: { category: lostCategory, text: lostText },
         created_at: createdAt,
@@ -643,18 +773,53 @@ function buildLandlordsMatrix(): LandlordGroup[] {
 }
 
 // ---------------------------------------------------------------------------
-// Tours matrix — every TOUR_STATUS ×2
-// 'no_show' tours include a sent no_show_checkin reminder row.
-// 'requested' tours have ZERO reminder rows.
-// Other terminal/past tours have sent reminder rows.
+// Tours matrix — every TOUR_STATUS ×2, NOW-RELATIVE + coherent by construction
+// (findings §B). Every tour's whole timeline is derived from the injected `now`
+// by real date arithmetic — never the fixed pastDate pool (which reordered time
+// via index wraparound and live-fired stale reminders).
+//
+// Per status:
+//   - requested  — TIMELESS: no scheduledAt, ZERO reminder rows (invariant).
+//   - scheduled/confirmed — UPCOMING (scheduledAt = now + Ndays): a SENT
+//     confirmation (armed at creation) + a PENDING day_before whose dueAt =
+//     scheduledAt − 24h ≥ now, so listDue(now) never returns it (no live-fire).
+//   - toured/no_show/canceled/closed — recent PAST (scheduledAt = now − Ndays):
+//     ALL reminders terminal. day_before sent at its dueAt (= scheduledAt − 24h);
+//     no_show adds a sent no_show_checkin at scheduledAt + 30m; canceled's
+//     day_before is canceled (canceledAt between its dueAt and scheduledAt).
+//   - toured/closed carry the exit-gate shape the route + cast + conversion read:
+//     outcome + moveForward, updatedAt advanced past scheduledAt (decision recorded
+//     post-visit). convertible is true ONLY for a `toured` tour (the ready-to-convert
+//     state); a `closed` tour is terminal and is NEVER convertible — otherwise its
+//     "Start placement" button (gated only on convertible===true &&
+//     convertedPlacementId===undefined, no status gate) would create an orphan placement.
+//
+// Invariants (asserted in seedMatrixCoherence.test.ts): requested ⇒ 0 reminders;
+// createdAt ≤ scheduledAt; per reminder createdAt ≤ dueAt ≤ (sentAt ?? canceledAt
+// ?? ∞); and the load-bearing one — NO pending reminder has dueAt < now.
 // ---------------------------------------------------------------------------
 interface TourGroup {
   tour: Record<string, unknown>;
   reminders: Record<string, unknown>[];
 }
 
-function buildToursMatrix(availableUnitIds: string[], searchingTenantIds: string[]): TourGroup[] {
+// Upcoming statuses are future-dated; the rest of the non-requested statuses are
+// recent-past. Day offsets are indexed by (rep − 1) for per-rep variety.
+const UPCOMING_TOUR_STATUSES: ReadonlySet<TourStatus> = new Set<TourStatus>(['scheduled', 'confirmed']);
+const UPCOMING_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
+  scheduled: [3, 5],
+  confirmed: [2, 4],
+};
+const PAST_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
+  toured: [4, 6],
+  no_show: [3, 5],
+  canceled: [5, 7],
+  closed: [8, 10],
+};
+
+function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenantIds: string[]): TourGroup[] {
   const groups: TourGroup[] = [];
+  const nowMs = now.getTime();
   let counter = 0;
   let unitIdx = 0;
   let tenantIdx = 0;
@@ -662,105 +827,136 @@ function buildToursMatrix(availableUnitIds: string[], searchingTenantIds: string
   const pickUnit = () => availableUnitIds[unitIdx++ % Math.max(1, availableUnitIds.length)] ?? 'unit-mx-tourable-01';
   const pickTenant = () => searchingTenantIds[tenantIdx++ % Math.max(1, searchingTenantIds.length)] ?? 'tenant-mx-searching-standalone-01';
 
+  const iso = (msVal: number) => new Date(msVal).toISOString();
+
   for (const status of TOUR_STATUSES) {
     for (let rep = 1; rep <= 2; rep++) {
       counter++;
       const tourId = `tour-mx-${status.replace(/_/g, '-')}-${String(rep).padStart(2, '0')}`;
       const unitId = pickUnit();
       const tenantId = pickTenant();
-      const createdAt = pastDate(counter);
+      const tourType = counter % 3 === 0 ? 'pm_team' : counter % 3 === 1 ? 'landlord_led' : 'self_guided';
       const reminders: Record<string, unknown>[] = [];
+
+      // --- requested: timeless, zero reminders (invariant) -------------------
+      if (status === 'requested') {
+        const createdAt = iso(nowMs - (2 + rep) * DAY_MS); // 3–4 days ago
+        groups.push({
+          tour: { tourId, tenantId, unitId, status, tourType, createdAt, updatedAt: createdAt },
+          reminders,
+        });
+        continue;
+      }
+
+      // --- non-requested: a real scheduled time + a coherent reminder ladder --
+      const upcoming = UPCOMING_TOUR_STATUSES.has(status);
+      let scheduledMs: number;
+      let createdMs: number;
+      if (upcoming) {
+        const off = UPCOMING_TOUR_DAYS[status]![rep - 1]!;
+        scheduledMs = nowMs + off * DAY_MS;      // future
+        createdMs = nowMs - (2 + rep) * DAY_MS;  // booked a few days ago
+      } else {
+        const off = PAST_TOUR_DAYS[status]![rep - 1]!;
+        scheduledMs = nowMs - off * DAY_MS;      // recent past
+        createdMs = scheduledMs - (2 + rep) * DAY_MS; // booked before the tour
+      }
+      const scheduledAt = iso(scheduledMs);
+      const createdAt = iso(createdMs);
+      const dayBeforeDueAt = iso(scheduledMs - 24 * HOUR_MS); // computeDueAt('day_before') parity
 
       const tour: Record<string, unknown> = {
         tourId,
         tenantId,
         unitId,
         status,
-        tourType: counter % 3 === 0 ? 'pm_team' : counter % 3 === 1 ? 'landlord_led' : 'self_guided',
+        tourType,
         createdAt,
         updatedAt: createdAt,
-        _schedPartition: 'tours', // needed for byScheduledAt GSI when scheduledAt present
+        scheduledAt,
+        _schedPartition: 'tours', // sparse byScheduledAt GSI membership
       };
 
-      if (status === 'requested') {
-        // INVARIANT: no scheduledAt, no reminder rows
-        delete tour['_schedPartition']; // omit — no scheduledAt on requested
+      // Confirmation is armed at creation and sent immediately — always terminal.
+      reminders.push({
+        reminderId: `rem-mx-${tourId}-conf`,
+        tourId,
+        kind: 'confirmation',
+        dueAt: createdAt,
+        sentAt: createdAt,
+        _reminderPartition: 'reminders',
+        createdAt,
+      });
+
+      if (upcoming) {
+        // day_before is PENDING but its dueAt (scheduledAt − 24h) is ≥ now, so
+        // listDue(now) never returns it — the live-fire bug cannot recur.
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          // sentAt / canceledAt absent = pending (dueAt is in the future)
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+      } else if (status === 'canceled') {
+        // Canceled between the day_before due instant and the scheduled time: the
+        // pending day_before was canceled (never sent). canceledAt sits between its
+        // dueAt and scheduledAt (and after createdAt).
+        const canceledAt = iso(scheduledMs - 6 * HOUR_MS);
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          canceledAt,
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+        tour['canceledAt'] = canceledAt;
+        tour['updatedAt'] = canceledAt;
       } else {
-        // All non-requested tours have a scheduled time (past)
-        const scheduledAt = pastDate(counter + 1);
-        tour['scheduledAt'] = scheduledAt;
+        // toured / no_show / closed — day_before was SENT at its due instant.
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          sentAt: dayBeforeDueAt,
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+        tour['updatedAt'] = scheduledAt;
 
         if (status === 'no_show') {
-          // Write a sent no_show_checkin reminder row (archive; sentAt set)
-          const remId = `rem-mx-${tourId}-nsc`;
+          const checkinDueAt = iso(scheduledMs + 30 * MINUTE_MS); // computeDueAt('no_show_checkin')
           reminders.push({
-            reminderId: remId,
+            reminderId: `rem-mx-${tourId}-nsc`,
             tourId,
             kind: 'no_show_checkin',
-            dueAt: scheduledAt, // sent around the scheduled time + 30m (simplified to same ts)
-            sentAt: pastDate(counter + 2),
+            dueAt: checkinDueAt,
+            sentAt: checkinDueAt,
             _reminderPartition: 'reminders',
             createdAt,
           });
-        } else if (status === 'scheduled' || status === 'confirmed') {
-          // Scheduled/confirmed: write pending reminder rows (dueAt in future relative to a past creation)
-          // We still use past dates for byte stability, but sentAt is absent (pending)
-          const remId1 = `rem-mx-${tourId}-conf`;
-          reminders.push({
-            reminderId: remId1,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter), // sent immediately on creation
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-          const remId2 = `rem-mx-${tourId}-dbf`;
-          reminders.push({
-            reminderId: remId2,
-            tourId,
-            kind: 'day_before',
-            dueAt: pastDate(counter + 1),
-            // sentAt absent = pending
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'toured') {
-          tour['outcome'] = rep === 1 ? 'move_forward' : 'not_a_fit';
-          tour['moveForward'] = rep === 1;
-          tour['convertible'] = rep === 1;
-          // Archived — write a sent confirmation reminder
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'closed') {
-          tour['outcome'] = rep === 1 ? 'move_forward' : 'not_a_fit';
-          tour['moveForward'] = rep === 1;
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'canceled') {
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            canceledAt: pastDate(counter + 1),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
+          tour['updatedAt'] = checkinDueAt;
+        } else {
+          // toured / closed carry the exit-gate decision the route/conversion read.
+          // The decision is recorded POST-visit (exit gate), so updatedAt advances a
+          // few hours past the scheduled visit — still comfortably ≤ now.
+          const moveForward = rep === 1;
+          tour['updatedAt'] = iso(scheduledMs + (2 + rep) * HOUR_MS);
+          tour['outcome'] = moveForward ? 'move_forward' : 'not_a_fit';
+          tour['moveForward'] = moveForward;
+          // convertible ONLY for a `toured` (ready-to-convert) tour. A `closed` tour is
+          // terminal/already-decided and must NEVER be convertible: both
+          // placements.ts POST /placements/from-tour (L516) and TourDetail's
+          // "Start placement" button (L484) gate SOLELY on
+          // `convertible===true && convertedPlacementId===undefined` — no status gate —
+          // so a convertible closed tour would show a live button and create an orphan
+          // placement. The ready-to-convert state is modeled by `toured` rep1.
+          tour['convertible'] = status === 'toured' && moveForward;
         }
       }
 
@@ -998,8 +1194,8 @@ function buildUsers(): Record<string, unknown>[] {
  * Reminder invariant: 'requested' tours → zero reminder rows; all other
  * tours with sentAt reminders are valid archive writes (the worker already ran).
  */
-export function matrixItems(): Record<string, Record<string, unknown>[]> {
-  const placementGroups = buildPlacementsMatrix();
+export function matrixItems(now: Date = new Date()): Record<string, Record<string, unknown>[]> {
+  const placementGroups = buildPlacementsMatrix(now);
 
   // Collect available unit IDs for tours to reference
   const unitGroups = buildUnitsMatrix(placementGroups);
@@ -1017,7 +1213,7 @@ export function matrixItems(): Record<string, Record<string, unknown>[]> {
     'tenant-mx-searching-standalone-01',
   ];
 
-  const tourGroups = buildToursMatrix(availableUnitIds, searchingTenantIds);
+  const tourGroups = buildToursMatrix(now, availableUnitIds, searchingTenantIds);
   const landlordGroups = buildLandlordsMatrix();
 
   // Flatten everything by table

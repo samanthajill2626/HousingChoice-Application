@@ -50,6 +50,7 @@ import type {
   TourStatus,
   TourType,
   ToursPage,
+  TourRemindersPage,
   UnitActivityEvent,
   UnitItem,
   UnitsPage,
@@ -1082,6 +1083,20 @@ export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tou
     ...(signal !== undefined && { signal }),
   });
   return res.tour;
+}
+
+/** GET /api/tours/:tourId/reminders — the armed reminder ladder for a tour
+ *  (confirmation / day_before / morning_of / en_route / no_show_checkin), each
+ *  rung's state (upcoming · sent · canceled) plus the NEXT rung to fire. Returns
+ *  { reminders, next? } as-is (no unwrap). */
+export async function getTourReminders(
+  tourId: string,
+  signal?: AbortSignal,
+): Promise<TourRemindersPage> {
+  return request<TourRemindersPage>(
+    `/api/tours/${encodeURIComponent(tourId)}/reminders`,
+    { ...(signal !== undefined && { signal }) },
+  );
 }
 
 /** GET /api/tours?tenantId=&unitId=&from=&to=&status= — list tours by filter.

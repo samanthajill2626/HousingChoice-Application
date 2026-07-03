@@ -18,6 +18,7 @@ import {
   type SendMessageResult,
   type TimelineItem,
   type TimelineMessage,
+  type TimelineScheduled,
 } from '../../api/index.js';
 import { buildTimelineFallback } from './buildTimelineFallback.js';
 
@@ -30,6 +31,9 @@ interface TimelineData {
   status: TimelineStatus;
   /** Server items merged with any in-flight OPTIMISTIC sends (deduped by tsMsgId). */
   items: TimelineItem[];
+  /** Not-yet-sent scheduled messages (the pinned "Upcoming" section). The
+   *  fallback path (no /timeline endpoint yet) has none → []. */
+  upcoming: TimelineScheduled[];
   /** Which path produced `items` — 'server' (/timeline) or 'fallback' (assembled). */
   source: TimelineSource;
 }
@@ -95,14 +99,18 @@ async function loadTimeline(
   contactId: string,
   kinds: string | undefined,
   signal: AbortSignal,
-): Promise<{ items: TimelineItem[]; source: TimelineSource }> {
+): Promise<{ items: TimelineItem[]; upcoming: TimelineScheduled[]; source: TimelineSource }> {
   try {
     const page = await getContactTimeline(
       contactId,
       kinds !== undefined ? { kinds } : {},
       signal,
     );
-    return { items: normalizeServerItems(page.items), source: 'server' };
+    return {
+      items: normalizeServerItems(page.items),
+      upcoming: page.upcoming ?? [],
+      source: 'server',
+    };
   } catch (err) {
     // Only a 404 means "endpoint not live yet" → assemble the fallback. Any
     // other failure (and the fallback's own failures) propagates to the error
@@ -127,7 +135,13 @@ async function loadTimeline(
     for (const r of results) {
       if (r.status === 'fulfilled') messagesByConvId.set(r.value.id, r.value.messages);
     }
-    return { items: buildTimelineFallback(conversations, messagesByConvId), source: 'fallback' };
+    // The messages-only fallback has no scheduled bucket (that's a /timeline-only
+    // envelope) — default upcoming to [] (m1).
+    return {
+      items: buildTimelineFallback(conversations, messagesByConvId),
+      upcoming: [],
+      source: 'fallback',
+    };
   }
 }
 
@@ -135,6 +149,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   const [state, setState] = useState<TimelineData>({
     status: 'loading',
     items: [],
+    upcoming: [],
     source: 'server',
   });
 
@@ -206,9 +221,9 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const { items, source } = await loadTimeline(contactId, kinds, controller.signal);
+      const { items, upcoming, source } = await loadTimeline(contactId, kinds, controller.signal);
       if (controller.signal.aborted) return;
-      setState({ status: 'ready', items, source });
+      setState({ status: 'ready', items, upcoming, source });
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -246,6 +261,9 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   useEventStream({
     onMessagePersisted: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
+    // A tour-reminder / placement-nudge ladder was armed/rescheduled/canceled —
+    // refetch so the pinned "Upcoming" section updates live (Task 6).
+    onScheduledUpdated: scheduleRefetch,
   });
 
   // Merge server items with optimistic sends, dropping any optimistic bubble the
@@ -263,6 +281,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   return {
     status: state.status,
     items,
+    upcoming: state.upcoming,
     source: state.source,
     addOptimistic,
     resolveOptimistic,

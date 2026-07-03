@@ -406,6 +406,84 @@ a.pill:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* --- Upcoming (pinned scheduled-message section) -------------------------- */
+/* Pinned BETWEEN the scrollable stream and the composer: not-yet-sent scheduled
+ * messages. Distinct dashed/muted treatment so it never reads as sent history. */
+
+.upcoming {
+  flex: none;
+  border-top: 1px dashed var(--c-border-strong);
+  background: var(--c-surface-2);
+  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.upcomingHead {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-text-subtle);
+}
+
+.upcomingList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* One scheduled item: dashed + muted, deliberately NOT a sent bubble. */
+.scheduled {
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  padding: var(--sp-2) var(--sp-3);
+  opacity: 0.92;
+}
+
+.scheduledHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.scheduledClock {
+  font-size: var(--fs-sm);
+}
+
+.scheduledFire {
+  color: var(--c-text-muted);
+}
+
+.scheduledTag {
+  margin-left: auto;
+  font-weight: var(--fw-medium);
+  color: var(--c-text-subtle);
+}
+
+.scheduledBody {
+  margin-top: var(--sp-1);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Armed-but-will-be-skipped note — amber, so it's clearly a warning. */
+.scheduledSkip {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
 /* --- Reply box ------------------------------------------------------------ */
 
 .reply {

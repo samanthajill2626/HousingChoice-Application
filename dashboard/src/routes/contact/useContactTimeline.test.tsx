@@ -36,12 +36,13 @@ import {
 } from './useContactTimeline.js';
 
 function Probe({ contactId, kinds }: { contactId: string; kinds?: string }): React.JSX.Element {
-  const { status, items, source } = useContactTimeline(contactId, kinds);
+  const { status, items, upcoming, source } = useContactTimeline(contactId, kinds);
   return (
     <div>
       <span data-testid="status">{status}</span>
       <span data-testid="source">{source}</span>
       <span data-testid="count">{items.length}</span>
+      <span data-testid="upcoming">{upcoming.length}</span>
     </div>
   );
 }
@@ -144,6 +145,40 @@ describe('useContactTimeline', () => {
     expect(screen.getByTestId('count').textContent).toBe('1');
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
     expect(getConversationMessages).toHaveBeenCalledWith('c1', expect.anything());
+  });
+
+  it('threads the server upcoming[] bucket through to state', async () => {
+    getContactTimeline.mockResolvedValue({
+      ...SERVER_PAGE,
+      upcoming: [
+        {
+          kind: 'scheduled',
+          id: 'sched-1',
+          at: '2026-06-18T15:00:00Z',
+          conversationId: 'c1',
+          source: 'tour_reminder',
+          body: 'reminder',
+          refType: 'tour',
+          refId: 'tour-9',
+        },
+      ],
+    } satisfies ContactTimelinePage);
+
+    render(<Probe contactId="k1" />);
+
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(screen.getByTestId('upcoming').textContent).toBe('1');
+  });
+
+  it('defaults upcoming to [] on the 404 fallback path', async () => {
+    getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'nope'));
+    getConversations.mockResolvedValue(CONVERSATIONS);
+    getConversationMessages.mockResolvedValue([]);
+
+    render(<Probe contactId="k1" />);
+
+    await waitFor(() => expect(screen.getByTestId('source').textContent).toBe('fallback'));
+    expect(screen.getByTestId('upcoming').textContent).toBe('0');
   });
 
   it('surfaces an error state on a non-404 failure', async () => {

@@ -210,11 +210,14 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       stage: 'awaiting_inspection', // byStage
       stage_entered_at: T2, // §8 time-in-stage basis
       stage_source: 'manual', // §8 provenance
-      tour_date: '2026-06-13', // byTourDate (sparse — present because scheduled)
-      // No placement deadline: `tour_reminder` is retired (tours are first-class),
-      // and real deadlines are now first-class placementDeadlines items.
+      // No placement deadline: `awaiting_inspection` is the Inspection phase — tours
+      // are a separate first-class entity in the `searching` phase, so a placement
+      // here NEVER carries a `tour_reminder` (nor a tour_date/tour_history). Real
+      // deadlines are now first-class placementDeadlines items, and the "stuck" clock
+      // is DERIVED from time-in-stage (stage_entered_at T2 + the awaiting_inspection
+      // threshold), not a stored deadline — so no raw next_deadline_* fields and no
+      // placementDeadlines item belong here.
       group_thread: IDS.conversation,
-      tour_history: [{ scheduled_for: '2026-06-13T14:00:00.000Z', status: 'scheduled' }],
       created_at: T2,
     },
   ],

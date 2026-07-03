@@ -330,11 +330,13 @@ describe('matrix coherence: tour timeline ordering', () => {
 });
 
 describe('matrix coherence: the load-bearing live-fire invariant', () => {
-  it('NO pending reminder has dueAt < now (would live-fire on the next poll)', () => {
-    const offenders = TOUR_REMINDERS.filter((r) => isPending(r) && ms(r['dueAt']) < NOW_MS);
+  it('NO pending reminder has dueAt ≤ now (would live-fire on the next poll)', () => {
+    // tourRemindersRepo.listDue fires on dueAt <= now (INCLUSIVE), so a pending
+    // reminder whose dueAt is EXACTLY now would still be re-sent — flag <= now, not < now.
+    const offenders = TOUR_REMINDERS.filter((r) => isPending(r) && ms(r['dueAt']) <= NOW_MS);
     expect(
       offenders.map((r) => `${r['reminderId']}@${r['dueAt']}`),
-      'pending reminders with dueAt in the past would be re-sent by runDueTourReminders',
+      'pending reminders with dueAt ≤ now would be re-sent by runDueTourReminders',
     ).toEqual([]);
   });
 
@@ -346,7 +348,8 @@ describe('matrix coherence: the load-bearing live-fire invariant', () => {
         const dayBefore = rems.find((r) => r['kind'] === 'day_before');
         expect(dayBefore, `upcoming ${t['tourId']} must have a day_before reminder`).toBeDefined();
         expect(isPending(dayBefore!), `upcoming ${t['tourId']} day_before must be pending`).toBe(true);
-        expect(ms(dayBefore!['dueAt']), `upcoming ${t['tourId']} day_before dueAt ≥ now`).toBeGreaterThanOrEqual(NOW_MS);
+        // Strict > now: at exactly now the reminder would live-fire (listDue is dueAt<=now).
+        expect(ms(dayBefore!['dueAt']), `upcoming ${t['tourId']} day_before dueAt > now`).toBeGreaterThan(NOW_MS);
       } else if (PAST_TOUR.has(status)) {
         for (const r of rems) {
           expect(isPending(r), `past ${t['tourId']} reminder ${r['reminderId']} must be terminal`).toBe(false);
@@ -368,17 +371,52 @@ describe('matrix coherence: the load-bearing live-fire invariant', () => {
 });
 
 describe('matrix coherence: convertible representation is consistent (toured ↔ closed)', () => {
-  it('every toured/closed tour sets outcome+moveForward+convertible with convertible === (moveForward===true)', () => {
+  it('toured/closed set outcome+moveForward; toured mirrors convertible; closed is never convertible', () => {
     const decided = TOURS.filter((t) => tourStatusOf(t) === 'toured' || tourStatusOf(t) === 'closed');
     expect(decided.length, 'expected ≥4 decided tours (toured×2 + closed×2)').toBeGreaterThanOrEqual(4);
     for (const t of decided) {
       expect(t['outcome'], `${t['tourId']} must have an outcome`).toBeDefined();
       expect(typeof t['moveForward'], `${t['tourId']} moveForward is a boolean`).toBe('boolean');
-      // The unified shape: convertible mirrors the moveForward decision (what the
-      // conversion route + /tours UI read).
-      expect(t['convertible'], `${t['tourId']} convertible must mirror moveForward`).toBe(t['moveForward'] === true);
       const expectedOutcome = t['moveForward'] === true ? 'move_forward' : 'not_a_fit';
       expect(t['outcome'], `${t['tourId']} outcome ↔ moveForward`).toBe(expectedOutcome);
+      if (tourStatusOf(t) === 'toured') {
+        // A `toured` tour is the ready-to-convert state: convertible mirrors moveForward.
+        expect(t['convertible'], `toured ${t['tourId']} convertible must mirror moveForward`).toBe(t['moveForward'] === true);
+      } else {
+        // A `closed` tour is terminal/already-decided — convertible must be falsy,
+        // never true (see the regression assertion below).
+        expect(t['convertible'], `closed ${t['tourId']} must not be convertible`).toBeFalsy();
+      }
+    }
+  });
+
+  it('NO closed tour is convertible (pins the orphan-placement regression)', () => {
+    // Both placements.ts POST /placements/from-tour and TourDetail's "Start placement"
+    // button gate SOLELY on convertible===true && convertedPlacementId===undefined
+    // (no status gate). A convertible closed tour would therefore show a live button
+    // and create an orphan placement — this asserts that can never be seeded.
+    const closed = TOURS.filter((t) => tourStatusOf(t) === 'closed');
+    expect(closed.length, 'expected ≥2 closed tours').toBeGreaterThanOrEqual(2);
+    for (const t of closed) {
+      expect(t['convertible'], `closed ${t['tourId']} convertible`).not.toBe(true);
+    }
+  });
+
+  it('≥1 toured tour remains convertible (ready-to-convert coverage preserved)', () => {
+    const convertibleToured = TOURS.filter(
+      (t) => tourStatusOf(t) === 'toured' && t['convertible'] === true,
+    );
+    expect(convertibleToured.length, 'toured rep1 must remain convertible').toBeGreaterThanOrEqual(1);
+  });
+
+  it('toured/closed record their exit-gate decision post-visit (scheduledAt < updatedAt ≤ now)', () => {
+    const decided = TOURS.filter((t) => tourStatusOf(t) === 'toured' || tourStatusOf(t) === 'closed');
+    expect(decided.length).toBeGreaterThanOrEqual(4);
+    for (const t of decided) {
+      // createdAt ≤ scheduledAt ≤ updatedAt ≤ now, with the decision strictly after the visit.
+      expect(ms(t['createdAt']), `${t['tourId']}: createdAt ≤ scheduledAt`).toBeLessThanOrEqual(ms(t['scheduledAt']));
+      expect(ms(t['updatedAt']), `${t['tourId']}: updatedAt > scheduledAt`).toBeGreaterThan(ms(t['scheduledAt']));
+      expect(ms(t['updatedAt']), `${t['tourId']}: updatedAt ≤ now`).toBeLessThanOrEqual(NOW_MS);
     }
   });
 });

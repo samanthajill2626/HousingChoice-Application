@@ -753,8 +753,12 @@ function buildLandlordsMatrix(): LandlordGroup[] {
 //     ALL reminders terminal. day_before sent at its dueAt (= scheduledAt − 24h);
 //     no_show adds a sent no_show_checkin at scheduledAt + 30m; canceled's
 //     day_before is canceled (canceledAt between its dueAt and scheduledAt).
-//   - toured/closed carry the SAME exit-gate shape the route + cast + conversion
-//     read: outcome + moveForward + convertible (convertible === moveForward).
+//   - toured/closed carry the exit-gate shape the route + cast + conversion read:
+//     outcome + moveForward, updatedAt advanced past scheduledAt (decision recorded
+//     post-visit). convertible is true ONLY for a `toured` tour (the ready-to-convert
+//     state); a `closed` tour is terminal and is NEVER convertible — otherwise its
+//     "Start placement" button (gated only on convertible===true &&
+//     convertedPlacementId===undefined, no status gate) would create an orphan placement.
 //
 // Invariants (asserted in seedMatrixCoherence.test.ts): requested ⇒ 0 reminders;
 // createdAt ≤ scheduledAt; per reminder createdAt ≤ dueAt ≤ (sentAt ?? canceledAt
@@ -904,12 +908,21 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
           });
           tour['updatedAt'] = checkinDueAt;
         } else {
-          // toured / closed carry the exit-gate decision the route/conversion read:
-          // outcome + moveForward + convertible (convertible === moveForward===true).
+          // toured / closed carry the exit-gate decision the route/conversion read.
+          // The decision is recorded POST-visit (exit gate), so updatedAt advances a
+          // few hours past the scheduled visit — still comfortably ≤ now.
           const moveForward = rep === 1;
+          tour['updatedAt'] = iso(scheduledMs + (2 + rep) * HOUR_MS);
           tour['outcome'] = moveForward ? 'move_forward' : 'not_a_fit';
           tour['moveForward'] = moveForward;
-          tour['convertible'] = moveForward;
+          // convertible ONLY for a `toured` (ready-to-convert) tour. A `closed` tour is
+          // terminal/already-decided and must NEVER be convertible: both
+          // placements.ts POST /placements/from-tour (L516) and TourDetail's
+          // "Start placement" button (L484) gate SOLELY on
+          // `convertible===true && convertedPlacementId===undefined` — no status gate —
+          // so a convertible closed tour would show a live button and create an orphan
+          // placement. The ready-to-convert state is modeled by `toured` rep1.
+          tour['convertible'] = status === 'toured' && moveForward;
         }
       }
 

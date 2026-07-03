@@ -40,7 +40,6 @@
 
 import {
   PLACEMENT_STAGES,
-  STAGE_PHASE,
   TENANT_STATUSES,
   LANDLORD_STATUSES,
   LISTING_STATUSES,
@@ -510,10 +509,18 @@ export function historyItems(tables: Record<string, Record<string, unknown>[]>):
     generated.push(...standaloneUnitHistory(u));
   }
 
-  // Dedupe: this module owns all lifecycle-class rows in the full profile. Drop
-  // pre-existing lifecycle rows (superseded), keep everything else verbatim.
+  // Dedupe: this module owns all lifecycle-class rows in the full profile — but only
+  // for entities it actually regenerates. Drop a pre-existing lifecycle row ONLY when
+  // the generator emitted at least one row for that same entityKey (its full trail
+  // supersedes the hand-authored hop). A hand-authored lifecycle row on an entity the
+  // generator produces NO rows for (e.g. a contact ending at needs_review → empty
+  // trail) is preserved, so we never silently lose it. Non-lifecycle rows are always
+  // kept verbatim.
+  const regeneratedEntityKeys = new Set(generated.map((r) => r.entityKey));
   const keptPre = preAudit.filter(
-    (r) => !LIFECYCLE_EVENT_TYPES.has(String(r['event_type'])),
+    (r) =>
+      !LIFECYCLE_EVENT_TYPES.has(String(r['event_type'])) ||
+      !regeneratedEntityKeys.has(String(r['entityKey'])),
   ) as AuditRow[];
 
   return { audit_events: [...keptPre, ...generated], activity_events: [] };

@@ -17,9 +17,11 @@ import {
   TENANT_STATUSES,
   LANDLORD_STATUSES,
   LISTING_STATUSES,
-  deriveStatuses,
   type PlacementStage,
 } from '../src/lib/statusModel.js';
+import { createDynamoClient } from '../src/lib/dynamo.js';
+import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { TABLES } from '../src/lib/tables.js';
 import { SEED } from '../src/lib/seed/lean.js';
 import { castItems } from '../src/lib/seed/cast.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
@@ -114,20 +116,31 @@ describe('seed history — derived tenant/unit side-effects', () => {
   it('derived rows appear exactly where deriveStatuses flips and share a placement stage-entry timestamp', () => {
     for (const p of PLACEMENTS) {
       const rows = placementHistory(p);
+      // The set of PLACEMENT-STAGE-ENTRY timestamps (the `placement_stage_changed`
+      // hop instants) — deliberately NOT including the derived rows themselves, so
+      // membership below is a real constraint (proving derived rows are slaved to the
+      // placement clock, not vacuously true because the row is in its own set).
       const placementIsos = new Set(
         rows.filter((r) => r.event_type === 'placement_stage_changed').map((r) => iso(r.ts)),
       );
-      // include the create instant (oldest) — derived create rows anchor there
+      // The create-instant derived flips (baseline needs_review/available → the first
+      // stage's derivation) anchor at the walk's oldest instant — strictly older than
+      // every hop, so no `placement_stage_changed` row records it. Both the tenant and
+      // the unit create rows independently land there; take that shared oldest instant
+      // as the create-entry timestamp (independent of any single row under test).
       const derivedTenant = rows.filter((r) => r.event_type === 'tenant_status_changed');
       const derivedUnit = rows.filter(
         (r) => r.event_type === 'listing_status_changed' && r.payload['source'] === 'derived',
       );
+      const derivedIsos = [...derivedTenant, ...derivedUnit].map((r) => iso(r.ts));
+      const createIso = derivedIsos.length ? derivedIsos.reduce((a, b) => (a < b ? a : b)) : undefined;
+      // A derived row shares EITHER a stage-entry hop timestamp OR the create instant.
+      const stageEntryIsos = new Set(placementIsos);
+      if (createIso !== undefined) stageEntryIsos.add(createIso);
       for (const r of [...derivedTenant, ...derivedUnit]) {
         expect(r.payload['source']).toBe('derived');
         expect(r.actorId).toBeUndefined(); // derived rows carry NO actor
-        // shares SOME stage-entry ts (either a hop ts or the create ts)
-        const allStageIsos = new Set(rows.map((x) => iso(x.ts)));
-        expect(allStageIsos.has(iso(r.ts))).toBe(true);
+        expect(stageEntryIsos.has(iso(r.ts))).toBe(true);
       }
       // final tenant/unit derived status equals the stored end state
       const tenant = CONTACTS.find((c) => c['contactId'] === p['tenantId']);
@@ -176,7 +189,9 @@ describe('seed history — standalone contact status trails', () => {
       expect(rows[0]!.payload['from']).toBe('needs_review');
       expect(rows[rows.length - 1]!.payload['to']).toBe(c['status']);
       expect(strictlyIncreasing(isoList(rows))).toBe(true);
-      expect(iso(rows[rows.length - 1]!.ts)).toBe(iso(String(c['created_at'])));
+      // anchor is `consent_at ?? created_at` (setTenantStatus's clock) — assert against
+      // that, not bare created_at, so it stays correct if fixtures diverge the two.
+      expect(iso(rows[rows.length - 1]!.ts)).toBe(iso(String(c['consent_at'] ?? c['created_at'])));
       // TENANT_STATUSES membership sanity
       expect(TENANT_STATUSES as readonly string[]).toContain(c['status']);
     }
@@ -275,10 +290,60 @@ describe('seed history — orchestrator + dedupe (single source of truth §4.7)'
       (r) =>
         r.entityKey === 'placements#placement-0001' &&
         r.payload?.['from'] === 'send_rta_to_landlord' &&
-        !String(r.ts).includes('#') === false && // generated rows always have <ISO>#<suffix>
-        r.ts === '2026-06-01T14:05:45.000Z', // the bare-ISO lean SK
+        r.ts === '2026-06-01T14:05:45.000Z', // the bare-ISO lean SK (generated rows are <ISO>#<suffix>)
     );
     expect(stray).toBeUndefined();
+  });
+
+  it('preserves a pre-existing lifecycle row on an entity the generator produces NO rows for, but drops it for a regenerated entity', () => {
+    // Entity-scoped dedupe: a hand-authored lifecycle row must survive when the
+    // generator emits nothing for that entityKey (e.g. a contact that ends at
+    // needs_review → empty trail), yet still be superseded when the generator DOES
+    // regenerate that entity. Non-lifecycle rows are always kept.
+    const tables: Record<string, Record<string, unknown>[]> = {
+      contacts: [
+        // needs_review → generator emits ZERO rows for contacts#ghost-0001
+        { contactId: 'ghost-0001', type: 'tenant', status: 'needs_review', created_at: '2026-01-01T00:00:00.000Z' },
+        // placing → generator DOES emit a ladder for contacts#active-0001
+        { contactId: 'active-0001', type: 'tenant', status: 'placing', created_at: '2026-01-01T00:00:00.000Z' },
+      ],
+      placements: [],
+      units: [],
+      audit_events: [
+        // hand-authored lifecycle row on the NON-regenerated entity → must be PRESERVED
+        {
+          entityKey: 'contacts#ghost-0001',
+          ts: '2026-02-01T00:00:00.000Z#deadbeef',
+          event_type: 'tenant_status_changed',
+          payload: { from: 'needs_review', to: 'needs_review', source: 'manual' },
+        },
+        // hand-authored lifecycle row on the REGENERATED entity → must be DROPPED
+        {
+          entityKey: 'contacts#active-0001',
+          ts: '2026-02-02T00:00:00.000Z#feedface',
+          event_type: 'tenant_status_changed',
+          payload: { from: 'x', to: 'y', source: 'manual' },
+        },
+        // non-lifecycle row → always PRESERVED
+        {
+          entityKey: 'contacts#ghost-0001',
+          ts: '2026-02-03T00:00:00.000Z#cafebabe',
+          event_type: 'contact.profile_edited',
+          payload: {},
+        },
+      ],
+    };
+    const out = historyItems(tables);
+    // preserved: the ghost's hand-authored lifecycle row survives (generator emitted nothing for it)
+    expect(out.audit_events.some((r) => r.ts === '2026-02-01T00:00:00.000Z#deadbeef')).toBe(true);
+    // dropped: the regenerated entity's pre-existing lifecycle row is superseded
+    expect(out.audit_events.some((r) => r.ts === '2026-02-02T00:00:00.000Z#feedface')).toBe(false);
+    // and the generator DID produce a fresh ladder for the regenerated entity
+    expect(
+      out.audit_events.some((r) => r.entityKey === 'contacts#active-0001' && r.event_type === 'tenant_status_changed'),
+    ).toBe(true);
+    // non-lifecycle row always preserved
+    expect(out.audit_events.some((r) => r.ts === '2026-02-03T00:00:00.000Z#cafebabe')).toBe(true);
   });
 
   it('activity_events is left to Task 2 (returns [])', () => {
@@ -334,16 +399,36 @@ if (!reachable) {
 }
 
 describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB Local)', () => {
-  // Reuse the standard hc-local- tables (globalSetup bootstraps them for this key).
-  const testEnv: { TABLE_PREFIX?: string } = {};
+  // HERMETIC: seed into a THROWAWAY table prefix (created in beforeAll, dropped in
+  // afterAll) rather than the shared hc-local- tables. seedAll is upsert-only (Put,
+  // never Delete), so reusing the shared tables lets a stale hand-authored lean row
+  // (the bare-ISO placements#placement-0001 hop, SK with no `#suffix`) survive from a
+  // PRIOR lean seed and inflate the read-back count — a false "dedupe regression". A
+  // private prefix guarantees the round-trip observes ONLY what this seedAll wrote.
+  const prefix = `hc-hist-${randomUUID().slice(0, 8)}-`;
+  const testEnv: { TABLE_PREFIX?: string } = { TABLE_PREFIX: prefix };
+  const origPrefix = process.env.TABLE_PREFIX;
+  let adminClient: ReturnType<typeof createDynamoClient> | undefined;
 
   beforeAll(async () => {
     process.env.DYNAMODB_ENDPOINT = endpoint;
-  });
+    process.env.TABLE_PREFIX = prefix;
+    adminClient = createDynamoClient({ endpoint });
+    for (const spec of TABLES) {
+      await ensureTable(adminClient, spec, `${prefix}${spec.baseName}`);
+    }
+  }, 120_000);
 
-  afterAll(() => {
-    void randomUUID; // keep import used across skip paths
-  });
+  afterAll(async () => {
+    if (origPrefix === undefined) delete process.env.TABLE_PREFIX;
+    else process.env.TABLE_PREFIX = origPrefix;
+    if (adminClient) {
+      for (const spec of TABLES) {
+        await deleteTableIfExists(adminClient, `${prefix}${spec.baseName}`);
+      }
+      adminClient.destroy();
+    }
+  }, 120_000);
 
   it('seedAll(_, "full") completes and placement-0001 reads back as a coherent stage trail', async () => {
     const { seedAll } = await import('../src/lib/seed/index.js');

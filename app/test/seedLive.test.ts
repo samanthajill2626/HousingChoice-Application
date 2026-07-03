@@ -219,28 +219,36 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
   // Placement deadline assertions
   // ---------------------------------------------------------------------------
   describe('PLACEMENT-A (overdue RTA)', () => {
-    it('next_deadline_at is in the PAST relative to FIXED_NOW', async () => {
+    it('the rta_window placementDeadlines item is in the PAST relative to FIXED_NOW', async () => {
       const { Item } = await doc.send(new GetCommand({
-        TableName: `${prefix}placements`,
-        Key: { placementId: LIVE_IDS.placementOverdueRta },
+        TableName: `${prefix}placementDeadlines`,
+        Key: { deadlineId: `${LIVE_IDS.placementOverdueRta}#rta_window` },
       }));
       expect(Item).toBeDefined();
-      expect(Item!['next_deadline_type']).toBe('rta_window');
-      const deadlineAt = Item!['next_deadline_at'] as string;
-      expect(new Date(deadlineAt).getTime()).toBeLessThan(FIXED_NOW.getTime());
+      expect(Item!['type']).toBe('rta_window');
+      expect(Item!['placementId']).toBe(LIVE_IDS.placementOverdueRta);
+      expect(new Date(Item!['at'] as string).getTime()).toBeLessThan(FIXED_NOW.getTime());
+    });
+
+    it('also carries a FUTURE voucher_expiration item (from tenant A voucher_expiration_date)', async () => {
+      const { Item } = await doc.send(new GetCommand({
+        TableName: `${prefix}placementDeadlines`,
+        Key: { deadlineId: `${LIVE_IDS.placementOverdueRta}#voucher_expiration` },
+      }));
+      expect(Item).toBeDefined();
+      expect(new Date(Item!['at'] as string).getTime()).toBeGreaterThan(FIXED_NOW.getTime());
     });
   });
 
   describe('PLACEMENT-B (follow-up due)', () => {
-    it('next_deadline_at is at or before FIXED_NOW', async () => {
+    it('the follow_up placementDeadlines item is at or before FIXED_NOW', async () => {
       const { Item } = await doc.send(new GetCommand({
-        TableName: `${prefix}placements`,
-        Key: { placementId: LIVE_IDS.placementFollowUp },
+        TableName: `${prefix}placementDeadlines`,
+        Key: { deadlineId: `${LIVE_IDS.placementFollowUp}#follow_up` },
       }));
       expect(Item).toBeDefined();
-      expect(Item!['next_deadline_type']).toBe('follow_up');
-      const deadlineAt = Item!['next_deadline_at'] as string;
-      expect(new Date(deadlineAt).getTime()).toBeLessThanOrEqual(FIXED_NOW.getTime());
+      expect(Item!['type']).toBe('follow_up');
+      expect(new Date(Item!['at'] as string).getTime()).toBeLessThanOrEqual(FIXED_NOW.getTime());
     });
   });
 
@@ -299,9 +307,10 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         expect(isos[i - 1]! < isos[i]!, `hop ${i} must be strictly after hop ${i - 1}`).toBe(true);
       }
       // Now-relative (NOT a fixed calendar literal): the newest hop equals the
-      // placement's now-72h stage_entered_at and is strictly before FIXED_NOW.
+      // placement's now-8-day stage_entered_at (OLD enough to be derived-stuck)
+      // and is strictly before FIXED_NOW.
       const newest = isos[isos.length - 1]!;
-      const stageEnteredAt = new Date(FIXED_NOW.getTime() - 72 * 60 * 60 * 1000).toISOString();
+      const stageEnteredAt = new Date(FIXED_NOW.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString();
       expect(newest).toBe(stageEnteredAt);
       expect(new Date(newest).getTime()).toBeLessThan(FIXED_NOW.getTime());
       // The whole trail sits within a plausible now-relative window (< ~400d before now).

@@ -9,10 +9,14 @@
 //           number. Full 5-rung reminder ladder armed via armTourReminders.
 //   TOUR-C  confirmed tour +2 days (no new contacts — reuses live tenant/unit).
 //
-//   PLACEMENT-A  overdue RTA deadline (rta_window, next_deadline_at in the PAST)
-//                → surfaces in Today's needs_you_now.
-//   PLACEMENT-B  due follow-up (follow_up, next_deadline_at at/just before now)
-//                → surfaces in Today's follow_ups (also tested as ≤ now).
+//   PLACEMENT-A  overdue RTA deadline (rta_window placementDeadlines item in the
+//                PAST) → surfaces in Today's needs_you_now. Its stage_entered_at
+//                is OLD (8 days), so it is ALSO derived-stuck → surfaces in
+//                follow_ups too (the deliberate coexistence the refactor enables).
+//                Tenant A carries a voucher_expiration_date, so a future
+//                voucher_expiration deadline is armed as well.
+//   PLACEMENT-B  due follow-up (follow_up placementDeadlines item at/just before
+//                now) → surfaces in Today's follow_ups (also tested as ≤ now).
 //
 // Tenant IDs, unit IDs, placement IDs, and conversation IDs all use the
 // *-live-* namespace to avoid collisions with lean (*-000N), matrix (mx-*),
@@ -28,6 +32,7 @@ import { createDocumentClient } from '../dynamo.js';
 import { tableName } from '../config.js';
 import { armTourReminders } from '../../jobs/tourReminders.js';
 import { createTourRemindersRepo } from '../../repos/tourRemindersRepo.js';
+import { createPlacementDeadlinesRepo } from '../../repos/placementDeadlinesRepo.js';
 import { deriveStatuses } from '../statusModel.js';
 import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
@@ -103,6 +108,12 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
   const overdueAt = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
   // Due follow-up: set at (now - 5 minutes) so it is definitively ≤ now.
   const followUpAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+  // Upcoming voucher expiration (tenant A): 20 days out — NOT yet due, so it
+  // shows on the card but not in Today's needs_you_now (a realistic future clock).
+  const voucherAt = new Date(now.getTime() + 20 * 24 * 60 * 60 * 1000).toISOString();
+  // PLACEMENT-A entered its stage 8 days ago — past the awaiting_landlord_submission
+  // stuck threshold (7d), so it is DERIVED-stuck as well as on the RTA clock.
+  const placementAEnteredAt = new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString();
 
   return {
     contacts: [
@@ -119,6 +130,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         housingAuthority: 'atlanta_housing',
         voucher_program: 'HCV',
         rta_expiration_date: tomorrowYmd, // urgently expiring — matches scenario
+        voucher_expiration_date: voucherAt, // source of the voucher_expiration deadline
         porting: false,
         created_at: iso,
       },
@@ -342,9 +354,9 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         unitId: LIVE_IDS.unitA,
         stage: 'awaiting_landlord_submission',
         stage_source: 'manual',
-        stage_entered_at: new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString(),
-        next_deadline_type: 'rta_window',
-        next_deadline_at: overdueAt,
+        // OLD stage entry → also derived-stuck (deadlines are now first-class
+        // placementDeadlines items, armed in seedLive below, not stored here).
+        stage_entered_at: placementAEnteredAt,
         created_at: iso,
         updated_at: iso,
       },
@@ -356,8 +368,6 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         stage: 'collect_rta',
         stage_source: 'manual',
         stage_entered_at: new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString(),
-        next_deadline_type: 'follow_up',
-        next_deadline_at: followUpAt,
         created_at: iso,
         updated_at: iso,
       },
@@ -403,6 +413,18 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
         `  seeded   ${table} (live): ${items.length} item${items.length === 1 ? '' : 's'}`,
       );
     }
+
+    // Arm the placement DEADLINE items via the REAL placementDeadlinesRepo (the
+    // same code path the transition service / create route use), pointed at the
+    // seed endpoint. Dates recomputed from `now` (mirror buildLiveStaticItems).
+    const deadlinesRepo = createPlacementDeadlinesRepo({ doc });
+    const overdueAt = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    const followUpAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+    const voucherAt = new Date(now.getTime() + 20 * 24 * 60 * 60 * 1000).toISOString();
+    await deadlinesRepo.arm(LIVE_IDS.placementOverdueRta, 'rta_window', overdueAt);
+    await deadlinesRepo.arm(LIVE_IDS.placementOverdueRta, 'voucher_expiration', voucherAt);
+    await deadlinesRepo.arm(LIVE_IDS.placementFollowUp, 'follow_up', followUpAt);
+    console.log('  seeded   placementDeadlines (live): 3 items');
 
     // Arm reminder ladders via the REAL armTourReminders function.
     // We construct a TourRemindersRepo pointed at the seed endpoint.

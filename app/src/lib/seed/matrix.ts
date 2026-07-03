@@ -15,6 +15,7 @@
 
 import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, deriveStatuses, type PlacementStage } from '../statusModel.js';
 import { TOUR_STATUSES, type TourStatus } from '../toursModel.js';
+import { deadlineIdFor } from '../../repos/placementDeadlinesRepo.js';
 
 // ---------------------------------------------------------------------------
 // Fixed past dates (byte-stable)
@@ -114,7 +115,9 @@ const matrixConsent = (i: number) => MATRIX_CONSENT_METHODS[i % MATRIX_CONSENT_M
 // ---------------------------------------------------------------------------
 // Deadline types
 // ---------------------------------------------------------------------------
-const DEADLINE_TYPES = ['tour_reminder', 'rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'] as const;
+// The three live deadline types (placement-deadline-model): tour_reminder /
+// stuck_placement are retired (tours are first-class; stuck is derived).
+const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'follow_up'] as const;
 type DeadlineType = typeof DEADLINE_TYPES[number];
 const deadlineType = (i: number): DeadlineType => DEADLINE_TYPES[i % DEADLINE_TYPES.length]!;
 
@@ -175,6 +178,8 @@ interface PlacementGroup {
   tenant: Record<string, unknown>;
   unit: Record<string, unknown>;
   placement: Record<string, unknown>;
+  /** First-class placementDeadlines item (placement-deadline-model), when armed. */
+  deadline?: Record<string, unknown>;
 }
 
 /**
@@ -211,36 +216,56 @@ function buildPlacementsMatrix(): PlacementGroup[] {
         created_at: createdAt,
       };
 
+      // Deadlines are first-class placementDeadlines items now. When this row has
+      // one, build the item (deterministic id) instead of a stored next_deadline
+      // slot. All matrix rows are non-terminal here (moved_in/lost handled below),
+      // and their stage_entered_at is months in the past — so they ALSO derive as
+      // "stuck" in Today, exercising derived-stuck coverage without extra fixtures.
+      let deadline: Record<string, unknown> | undefined;
       if (hasDeadline) {
         const dt = deadlineType(counter);
-        placementBase['next_deadline_type'] = dt;
-        placementBase['next_deadline_at'] = deadlineAt(counter);
+        const at = deadlineAt(counter);
+        deadline = {
+          deadlineId: deadlineIdFor(placementId, dt),
+          placementId,
+          type: dt,
+          at,
+          _deadlinePartition: 'deadlines',
+          createdAt,
+          updatedAt: createdAt,
+        };
       }
 
       if (hasAttention) {
         placementBase['attention'] = { reason: attentionReason(counter), at: createdAt };
       }
 
+      // Cover the voucher-sync source field on ~1/3 of tenants (a fixed future
+      // date; distinct from the deadline TYPE and from voucherSize).
+      const tenant: Record<string, unknown> = {
+        contactId: tenantId,
+        type: 'tenant',
+        status: derived.tenantStatus,
+        status_source: 'derived',
+        phone: phoneBase(counter),
+        firstName: firstName(TENANT_FIRST, fi),
+        lastName: lastName(TENANT_LAST, fi),
+        voucherSize: beds(counter),
+        housingAuthority: auth(counter),
+        porting: counter % 3 === 0,
+        consent_method: matrixConsent(counter),
+        consent_at: createdAt,
+        created_at: createdAt,
+      };
+      if (counter % 3 === 0) tenant['voucher_expiration_date'] = '2026-09-30T00:00:00.000Z';
+
       groups.push({
         tenantId,
         unitId,
         placementId,
         stage,
-        tenant: {
-          contactId: tenantId,
-          type: 'tenant',
-          status: derived.tenantStatus,
-          status_source: 'derived',
-          phone: phoneBase(counter),
-          firstName: firstName(TENANT_FIRST, fi),
-          lastName: lastName(TENANT_LAST, fi),
-          voucherSize: beds(counter),
-          housingAuthority: auth(counter),
-          porting: counter % 3 === 0,
-          consent_method: matrixConsent(counter),
-          consent_at: createdAt,
-          created_at: createdAt,
-        },
+        ...(deadline !== undefined && { deadline }),
+        tenant,
         unit: {
           unitId,
           landlordId: 'contact-landlord-0001', // lean anchor landlord
@@ -1008,6 +1033,9 @@ export function matrixItems(): Record<string, Record<string, unknown>[]> {
   ];
 
   const placements: Record<string, unknown>[] = placementGroups.map((g) => g.placement);
+  const placementDeadlines: Record<string, unknown>[] = placementGroups
+    .filter((g) => g.deadline !== undefined)
+    .map((g) => g.deadline as Record<string, unknown>);
   const tours: Record<string, unknown>[] = tourGroups.map((g) => g.tour);
   const tourReminders: Record<string, unknown>[] = tourGroups.flatMap((g) => g.reminders);
 
@@ -1015,6 +1043,7 @@ export function matrixItems(): Record<string, Record<string, unknown>[]> {
     contacts,
     units,
     placements,
+    placementDeadlines,
     tours,
     tourReminders,
     pool_numbers: buildPoolNumbers(),

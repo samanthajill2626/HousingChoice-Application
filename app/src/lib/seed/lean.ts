@@ -211,8 +211,8 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       stage_entered_at: T2, // §8 time-in-stage basis
       stage_source: 'manual', // §8 provenance
       tour_date: '2026-06-13', // byTourDate (sparse — present because scheduled)
-      next_deadline_type: 'tour_reminder', // byNextDeadline HASH (sparse)
-      next_deadline_at: '2026-06-13T13:00:00.000Z', // byNextDeadline RANGE
+      // No placement deadline: `tour_reminder` is retired (tours are first-class),
+      // and real deadlines are now first-class placementDeadlines items.
       group_thread: IDS.conversation,
       tour_history: [{ scheduled_for: '2026-06-13T14:00:00.000Z', status: 'scheduled' }],
       created_at: T2,

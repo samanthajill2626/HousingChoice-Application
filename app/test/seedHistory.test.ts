@@ -816,4 +816,201 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
       doc.destroy();
     }
   }, 60_000);
+
+  // LOST hop: the payload gains `lost_reason_category` (statusTransition.ts:306-308).
+  // Drive a real → lost transition, read back the placement_stage_changed row, and
+  // assert the generator's `→ lost` row agrees on event_type + payload KEY-SET
+  // (including lost_reason_category) + source. A drift in the service's lost audit
+  // shape (a renamed/dropped category key) fails here.
+  it('generator → lost row matches the real service lost audit (payload gains lost_reason_category)', async () => {
+    const { PutCommand } = await import('@aws-sdk/lib-dynamodb');
+    const { createDocumentClient } = await import('../src/lib/dynamo.js');
+    const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
+    const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
+    const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
+    const { createAuditRepo } = await import('../src/repos/auditRepo.js');
+    const { createEventBus } = await import('../src/lib/events.js');
+
+    const doc = createDocumentClient({ endpoint });
+    try {
+      // A real hop from an active stage → the TERMINAL `lost`, carrying a structured
+      // lost reason (category). The service records `lost_reason_category` from the
+      // stored lost_reason (ReturnValues:ALL_NEW), never the free text (§9 PII).
+      const FROM: PlacementStage = 'send_application';
+      const SOURCE = 'manual' as const;
+      const ACTOR = 'user-fidelity';
+      const CATEGORY = 'no_contact';
+      const placementId = 'placement-fid-lost';
+      const tenantId = 'contact-fid-lost-tenant';
+      const unitId = 'unit-fid-lost';
+      const anchor = '2026-05-01T00:00:00.000Z';
+
+      await doc.send(new PutCommand({
+        TableName: `${prefix}placements`,
+        Item: { placementId, tenantId, unitId, stage: FROM, stage_source: 'manual', stage_entered_at: anchor, created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}contacts`,
+        Item: { contactId: tenantId, type: 'tenant', status: 'needs_review', created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}units`,
+        Item: { unitId, status: 'available', status_source: 'manual', created_at: anchor },
+      }));
+
+      const svc = createStatusTransitionService({
+        placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        unitsRepo: createUnitsRepo({ doc, env: testEnv }),
+        contactsRepo: createContactsRepo({ doc, env: testEnv }),
+        auditRepo: createAuditRepo({ doc, env: testEnv }),
+        events: createEventBus(),
+      });
+
+      // Drive the genuine → lost hop with a structured category.
+      await svc.transitionPlacement(placementId, {
+        toStage: 'lost',
+        source: SOURCE,
+        lostReason: { category: CATEGORY },
+        actor: ACTOR,
+      });
+
+      const audit = createAuditRepo({ doc, env: testEnv });
+      const rows = await audit.listByEntity(`placements#${placementId}`);
+      const realRow = rows.find(
+        (r) => r.event_type === 'placement_stage_changed' && r.payload?.['to'] === 'lost',
+      );
+      expect(realRow, 'real service must have written the → lost stage-change audit row').toBeDefined();
+      // The service stamped the category (NOT the free text) onto the audit payload.
+      expect(realRow!.payload!['lost_reason_category']).toBe(CATEGORY);
+
+      // The GENERATOR's `→ lost` row for a placement ending at `lost` with the same
+      // category. (The `from` VALUE legitimately differs — the generator picks a
+      // plausible lost-from stage by category — but the SHAPE must match.)
+      const generated = placementHistory({
+        placementId,
+        tenantId,
+        unitId,
+        stage: 'lost',
+        stage_entered_at: anchor,
+        lost_reason: { category: CATEGORY },
+      }).find((r) => r.event_type === 'placement_stage_changed' && r.payload['to'] === 'lost');
+      expect(generated, 'generator must produce a → lost row').toBeDefined();
+      expect(generated!.payload['lost_reason_category']).toBe(CATEGORY);
+
+      // FIDELITY: same event_type, same source value, same payload KEY-SET — and the
+      // key-set MUST include lost_reason_category on both sides.
+      expect(generated!.event_type).toBe(realRow!.event_type);
+      expect(generated!.payload['source']).toBe(realRow!.payload!['source']);
+      const realKeys = Object.keys(realRow!.payload ?? {}).sort();
+      const genKeys = Object.keys(generated!.payload).sort();
+      expect(genKeys).toEqual(realKeys); // [actor, from, lost_reason_category, source, to]
+      expect(realKeys).toContain('lost_reason_category');
+      // Manual hop → both carry an actor (hoisted to actorId).
+      expect(typeof realRow!.actorId).toBe('string');
+      expect(typeof generated!.actorId).toBe('string');
+    } finally {
+      doc.destroy();
+    }
+  }, 60_000);
+
+  // DERIVED side-effects: a status-flipping transition fires `tenant_status_changed`
+  // / `listing_status_changed` rows with `source:'derived'` and NO actor (so
+  // auditRepo hoists NO actorId). Drive a fresh placement forward one hop
+  // (needs_review→placing tenant, available→under_application unit), read both
+  // derived rows back, and assert the generator's derived rows agree on event_type +
+  // payload KEY-SET + source:'derived' + the ABSENT actorId.
+  it('generator derived rows match the real service derived audit (source:derived, NO actorId)', async () => {
+    const { PutCommand } = await import('@aws-sdk/lib-dynamodb');
+    const { createDocumentClient } = await import('../src/lib/dynamo.js');
+    const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
+    const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
+    const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
+    const { createAuditRepo } = await import('../src/repos/auditRepo.js');
+    const { createEventBus } = await import('../src/lib/events.js');
+
+    const doc = createDocumentClient({ endpoint });
+    try {
+      // Fresh baselines (tenant needs_review, unit available) so ONE manual advance
+      // flips both coarse statuses via deriveStatuses (§7): tenant → placing, unit →
+      // under_application — each a `source:'derived'` side-effect audit row.
+      const TO: PlacementStage = 'awaiting_receipt';
+      const SOURCE = 'manual' as const;
+      const ACTOR = 'user-fidelity';
+      const placementId = 'placement-fid-derived';
+      const tenantId = 'contact-fid-derived-tenant';
+      const unitId = 'unit-fid-derived';
+      const anchor = '2026-05-01T00:00:00.000Z';
+
+      await doc.send(new PutCommand({
+        TableName: `${prefix}placements`,
+        Item: { placementId, tenantId, unitId, stage: 'send_application', stage_source: 'manual', stage_entered_at: anchor, created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}contacts`,
+        Item: { contactId: tenantId, type: 'tenant', status: 'needs_review', created_at: anchor },
+      }));
+      await doc.send(new PutCommand({
+        TableName: `${prefix}units`,
+        Item: { unitId, status: 'available', status_source: 'manual', created_at: anchor },
+      }));
+
+      const svc = createStatusTransitionService({
+        placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        unitsRepo: createUnitsRepo({ doc, env: testEnv }),
+        contactsRepo: createContactsRepo({ doc, env: testEnv }),
+        auditRepo: createAuditRepo({ doc, env: testEnv }),
+        events: createEventBus(),
+      });
+
+      // ACTOR is supplied on the transition — but the DERIVED side-effect rows are
+      // system writes and must NOT inherit it (the service passes no actor to the
+      // derive helpers). This asserts that separation holds end-to-end.
+      await svc.transitionPlacement(placementId, { toStage: TO, source: SOURCE, actor: ACTOR });
+
+      const audit = createAuditRepo({ doc, env: testEnv });
+      const realTenant = (await audit.listByEntity(`contacts#${tenantId}`)).find(
+        (r) => r.event_type === 'tenant_status_changed' && r.payload?.['source'] === 'derived',
+      );
+      const realUnit = (await audit.listByEntity(`units#${unitId}`)).find(
+        (r) => r.event_type === 'listing_status_changed' && r.payload?.['source'] === 'derived',
+      );
+      expect(realTenant, 'service must write a derived tenant_status_changed row').toBeDefined();
+      expect(realUnit, 'service must write a derived listing_status_changed row').toBeDefined();
+      // Derived = system → auditRepo hoists NO actorId (payload carries no `actor`).
+      expect(realTenant!.actorId).toBeUndefined();
+      expect(realUnit!.actorId).toBeUndefined();
+      expect(realTenant!.payload!['to']).toBe('placing');
+      expect(realUnit!.payload!['to']).toBe('under_application');
+
+      // The GENERATOR's derived rows for the same one-hop walk.
+      const gen = placementHistory({ placementId, tenantId, unitId, stage: TO, stage_entered_at: anchor });
+      const genTenant = gen.find(
+        (r) => r.event_type === 'tenant_status_changed' && r.payload['source'] === 'derived',
+      );
+      const genUnit = gen.find(
+        (r) => r.event_type === 'listing_status_changed' && r.payload['source'] === 'derived',
+      );
+      expect(genTenant, 'generator must emit a derived tenant row').toBeDefined();
+      expect(genUnit, 'generator must emit a derived unit row').toBeDefined();
+      // The generator likewise emits NO actor on derived rows → no actorId hoisted.
+      expect(genTenant!.actorId).toBeUndefined();
+      expect(genUnit!.actorId).toBeUndefined();
+
+      // FIDELITY: same event_type + source:'derived' + payload KEY-SET on both rows.
+      expect(genTenant!.event_type).toBe(realTenant!.event_type);
+      expect(genUnit!.event_type).toBe(realUnit!.event_type);
+      expect(genTenant!.payload['source']).toBe('derived');
+      expect(genUnit!.payload['source']).toBe('derived');
+      expect(Object.keys(genTenant!.payload).sort()).toEqual(
+        Object.keys(realTenant!.payload ?? {}).sort(),
+      ); // [from, source, to]
+      expect(Object.keys(genUnit!.payload).sort()).toEqual(
+        Object.keys(realUnit!.payload ?? {}).sort(),
+      ); // [from, source, to]
+    } finally {
+      doc.destroy();
+    }
+  }, 60_000);
 });

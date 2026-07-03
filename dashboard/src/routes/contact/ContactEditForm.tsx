@@ -65,6 +65,7 @@ function defaultStatusForType(type: ContactType, storedStatus: string): string {
   return isNonTenantStatus(storedStatus) ? storedStatus : 'needs_review';
 }
 import { Button } from '../../ui/index.js';
+import { consentAtFromDate } from '../../lib/consentCopy.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
@@ -143,6 +144,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [notes, setNotes] = useState(str(contact.notes));
   const [voucher, setVoucher] = useState(
     typeof contact.voucherSize === 'number' ? String(contact.voucherSize) : '',
+  );
+  // Tenant-only voucher expiration DATE. Stored as an ISO instant; the date input
+  // needs YYYY-MM-DD, so seed from the stored ISO's date part.
+  const [voucherExpiration, setVoucherExpiration] = useState(
+    str(contact.voucher_expiration_date).slice(0, 10),
   );
   const [company, setCompany] = useState(str(contact['company']));
   // Landlord preference defaults (the Preferences & notes card). Programs as a
@@ -313,6 +319,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           patch.voucherSize = n;
         }
       }
+      // Voucher expiration: dirty-tracked on the YYYY-MM-DD date part. A cleared
+      // value sends null (the server retires the voucher deadline); a set value is
+      // canonicalized to an ISO instant.
+      const initialVoucherExp = str(contact.voucher_expiration_date).slice(0, 10);
+      if (voucherExpiration !== initialVoucherExp) {
+        patch.voucher_expiration_date =
+          voucherExpiration.trim() === '' ? null : consentAtFromDate(voucherExpiration.trim());
+      }
       if (housingAuthority !== str(contact.housingAuthority)) patch.housingAuthority = housingAuthority;
       if (pets !== str(contact['pets'])) patch.pets = pets;
       if (evictions !== str(contact['evictions'])) patch.evictions = evictions;
@@ -465,6 +479,18 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               value={voucher}
               onChange={(e) => setVoucher(e.target.value)}
               placeholder="e.g. 2"
+            />
+          </label>
+        ) : null}
+
+        {isTenant ? (
+          <label className={styles.field}>
+            <span className={styles.label}>Voucher expiration date</span>
+            <input
+              className={styles.input}
+              type="date"
+              value={voucherExpiration}
+              onChange={(e) => setVoucherExpiration(e.target.value)}
             />
           </label>
         ) : null}

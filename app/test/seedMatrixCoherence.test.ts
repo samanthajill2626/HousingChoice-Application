@@ -33,6 +33,13 @@ const PLACEMENTS = ITEMS['placements'] ?? [];
 const TOURS = ITEMS['tours'] ?? [];
 const TOUR_REMINDERS = ITEMS['tourReminders'] ?? [];
 
+// placement-deadline-model: deadlines are first-class placementDeadlines items,
+// not raw next_deadline_* fields on the placement. Each active placement carries
+// exactly one item; terminal (moved_in/lost) placements carry none. The coherence
+// assertions below join a placement to its item by placementId.
+const DEADLINES = ITEMS['placementDeadlines'] ?? [];
+const deadlineOf = new Map(DEADLINES.map((d) => [d['placementId'] as string, d]));
+
 const ms = (v: unknown): number => Date.parse(String(v));
 const stageOf = (p: Record<string, unknown>) => p['stage'] as PlacementStage;
 const isActive = (p: Record<string, unknown>) =>
@@ -64,30 +71,37 @@ describe('matrix coherence: determinism', () => {
 // ---------------------------------------------------------------------------
 describe('matrix coherence: deadline type ↔ phase', () => {
   it('NO placement (any stage) carries a tour_reminder deadline', () => {
+    // No first-class deadline item is a tour_reminder…
+    for (const d of DEADLINES) {
+      expect(d['type'], `deadline ${d['deadlineId']} must not be tour_reminder`).not.toBe('tour_reminder');
+    }
+    // …and no placement carries a raw next_deadline slot at all (retired).
     for (const p of PLACEMENTS) {
       expect(
         p['next_deadline_type'],
-        `placement ${p['placementId']} must not be tour_reminder`,
-      ).not.toBe('tour_reminder');
+        `placement ${p['placementId']} carries no raw next_deadline slot`,
+      ).toBeUndefined();
     }
   });
 
-  it('every deadline-bearing placement has a type valid for its phase', () => {
-    for (const p of PLACEMENTS) {
-      const dt = p['next_deadline_type'] as string | undefined;
-      if (dt === undefined) continue;
-      const phase = STAGE_PHASE[stageOf(p)];
+  it('every deadline item has a type valid for its placement phase', () => {
+    for (const d of DEADLINES) {
+      const p = PLACEMENTS.find((x) => x['placementId'] === d['placementId']);
+      expect(p, `deadline ${d['deadlineId']} must join a placement`).toBeDefined();
+      const dt = d['type'] as string;
+      const phase = STAGE_PHASE[stageOf(p!)];
       const valid = PHASE_DEADLINE_TYPES[phase] as readonly string[];
       expect(
         valid.includes(dt),
-        `placement ${p['placementId']} (${stageOf(p)}/${phase}): '${dt}' ∉ [${valid.join(', ')}]`,
+        `placement ${p!['placementId']} (${stageOf(p!)}/${phase}): '${dt}' ∉ [${valid.join(', ')}]`,
       ).toBe(true);
     }
   });
 
   it('rta_window appears ONLY on RTA-phase placements', () => {
-    for (const p of PLACEMENTS) {
-      if (p['next_deadline_type'] !== 'rta_window') continue;
+    for (const d of DEADLINES) {
+      if (d['type'] !== 'rta_window') continue;
+      const p = PLACEMENTS.find((x) => x['placementId'] === d['placementId'])!;
       expect(STAGE_PHASE[stageOf(p)], `rta_window on ${p['placementId']}`).toBe('RTA');
     }
   });
@@ -98,11 +112,11 @@ describe('matrix coherence: deadline type ↔ phase', () => {
 // ---------------------------------------------------------------------------
 describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
   it('every deadline is on/after the placement entered its stage', () => {
-    for (const p of PLACEMENTS) {
-      if (p['next_deadline_at'] === undefined) continue;
+    for (const d of DEADLINES) {
+      const p = PLACEMENTS.find((x) => x['placementId'] === d['placementId'])!;
       expect(
-        ms(p['next_deadline_at']),
-        `placement ${p['placementId']}: next_deadline_at < stage_entered_at`,
+        ms(d['at']),
+        `placement ${p['placementId']}: deadline at < stage_entered_at`,
       ).toBeGreaterThanOrEqual(ms(p['stage_entered_at']));
     }
   });
@@ -111,10 +125,10 @@ describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
     // Spec §3 intent: only attention-flagged placements land past-due; all
     // others must be strictly in the future (an unflagged past-due deadline
     // reads as a bug in the dashboard).
-    const withDeadline = PLACEMENTS.filter((p) => p['next_deadline_at'] !== undefined);
+    const withDeadline = PLACEMENTS.filter((p) => deadlineOf.has(p['placementId'] as string));
     expect(withDeadline.length, 'matrix must include deadline-bearing placements').toBeGreaterThanOrEqual(1);
     for (const p of withDeadline) {
-      const dueMs = ms(p['next_deadline_at']);
+      const dueMs = ms(deadlineOf.get(p['placementId'] as string)!['at']);
       if (p['attention'] !== undefined) {
         expect(dueMs, `flagged placement ${p['placementId']} must be overdue (< now)`).toBeLessThan(NOW_MS);
       } else {
@@ -127,7 +141,7 @@ describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
     const flagged = PLACEMENTS.filter((p) => isActive(p) && p['attention'] !== undefined);
     expect(flagged.length, 'matrix must include ≥1 attention-flagged placement').toBeGreaterThanOrEqual(1);
     for (const p of flagged) {
-      const dueMs = ms(p['next_deadline_at']);
+      const dueMs = ms(deadlineOf.get(p['placementId'] as string)!['at']);
       expect(dueMs, `attention placement ${p['placementId']} must be past-due`).toBeLessThan(NOW_MS);
       // …but only by DAYS, not months (no more Jan-dated deadlines in July).
       const daysPast = (NOW_MS - dueMs) / (24 * 60 * 60 * 1000);
@@ -231,9 +245,7 @@ describe('matrix coherence: coverage retained', () => {
   });
 
   it('every phase-valid deadline type (excluding tour_reminder) appears ≥1 in the matrix', () => {
-    const present = new Set(
-      PLACEMENTS.map((p) => p['next_deadline_type'] as string | undefined).filter(Boolean),
-    );
+    const present = new Set(DEADLINES.map((d) => d['type'] as string));
     // Union of all phase sets = the placement-valid deadline types.
     const expected = new Set<string>();
     for (const types of Object.values(PHASE_DEADLINE_TYPES)) for (const t of types) expected.add(t);
@@ -249,13 +261,14 @@ describe('matrix coherence: coverage retained', () => {
 // ---------------------------------------------------------------------------
 describe('matrix coherence: previously-broken cases now pass', () => {
   it('a collect_rta placement carries an RTA-valid, correctly-dated deadline', () => {
-    const collectRta = PLACEMENTS.filter((p) => stageOf(p) === 'collect_rta' && p['next_deadline_type'] !== undefined);
+    const collectRta = PLACEMENTS.filter((p) => stageOf(p) === 'collect_rta' && deadlineOf.has(p['placementId'] as string));
     expect(collectRta.length, 'expected ≥1 deadline-bearing collect_rta placement').toBeGreaterThanOrEqual(1);
     for (const p of collectRta) {
-      const dt = p['next_deadline_type'] as string;
+      const d = deadlineOf.get(p['placementId'] as string)!;
+      const dt = d['type'] as string;
       expect(dt).not.toBe('tour_reminder');
       expect((PHASE_DEADLINE_TYPES['RTA'] as readonly string[]).includes(dt), `collect_rta deadline '${dt}' must be RTA-valid`).toBe(true);
-      expect(ms(p['next_deadline_at'])).toBeGreaterThanOrEqual(ms(p['stage_entered_at']));
+      expect(ms(d['at'])).toBeGreaterThanOrEqual(ms(p['stage_entered_at']));
     }
   });
 

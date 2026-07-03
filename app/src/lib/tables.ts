@@ -23,15 +23,14 @@
 // M0.4. Use tableName() from config.ts; never hardcode a physical name.
 //
 // GSI key attribute naming. The doc (§5) is the source for GSI NAMES but only
-// names a few key ATTRIBUTES (next_deadline_at/type, audit SK ts, messages SK
-// value shape ts#msgId); the rest are judgment calls locked HERE, by these
-// conventions (not deviations — the doc is silent; this module decides):
+// names a few key ATTRIBUTES (audit SK ts, messages SK value shape ts#msgId);
+// the rest are judgment calls locked HERE, by these conventions (not deviations
+// — the doc is silent; this module decides):
 //   - ID references reuse the owning table's key name: tenantId, unitId,
 //     landlordId (a contacts contactId), actorId (a users userId).
-//   - Data attributes follow the doc's snake_case item-attribute style
-//     (next_deadline_at and next_deadline_type are doc-specified §5 p.11).
-//   - Sparse GSIs (byTourDate, byNextDeadline) are sparse purely by data
-//     convention: the key attributes are simply ABSENT unless set.
+//   - Data attributes follow the doc's snake_case item-attribute style.
+//   - Sparse GSIs (byTourDate) are sparse purely by data convention: the key
+//     attributes are simply ABSENT unless set.
 
 /** DynamoDB scalar types usable as key attributes. */
 export type KeyAttributeType = 'S' | 'N' | 'B';
@@ -179,14 +178,12 @@ export const TABLES: readonly TableSpec[] = [
         hashKey: { name: 'tour_date', type: 'S' },
         sparse: true,
       },
-      // Sparse: every clock in the business hangs off next_deadline_at/type
-      // (doc §5) — "what needs attention right now?".
-      {
-        indexName: 'byNextDeadline',
-        hashKey: { name: 'next_deadline_type', type: 'S' },
-        rangeKey: { name: 'next_deadline_at', type: 'S' },
-        sparse: true,
-      },
+      // NOTE: the overloaded single next_deadline slot + its byNextDeadline GSI
+      // were RETIRED (placement-deadline-model refactor): deadlines are now
+      // first-class placementDeadlines items (below), and the internal "stuck"
+      // signal is DERIVED from time-in-stage — the two no longer compete for one
+      // slot. "What needs attention right now?" is answered by the
+      // placementDeadlines.byDueAt query.
     ],
     stream: 'NEW_AND_OLD_IMAGES', // stage transitions feed side effects (doc §5)
   },
@@ -368,6 +365,30 @@ export const TABLES: readonly TableSpec[] = [
         indexName: 'byDueAt',
         hashKey: { name: '_nudgePartition', type: 'S' },
         rangeKey: { name: 'dueAt', type: 'S' },
+      },
+    ],
+  },
+  {
+    // NEW in the placement-deadline-model refactor: first-class placement
+    // DEADLINE rows — one item per (placement, type), so a placement can track
+    // SEVERAL real due-dates at once (rta_window / voucher_expiration /
+    // follow_up) and readers surface whichever is soonest. Retires the
+    // overloaded single next_deadline slot + the placements.byNextDeadline GSI.
+    // Clones the placementNudges/tours byDueAt shape exactly.
+    //
+    // PK deadlineId is DETERMINISTIC (`${placementId}#${type}`) so arming is an
+    // idempotent upsert and retiring is a DeleteItem by key — no duplicates, no
+    // read-before-write. byPlacement enumerates a placement's deadlines (display
+    // + terminal clear); byDueAt (fixed 'deadlines' partition, range=at) answers
+    // "all due deadlines" in one soonest-first Query.
+    baseName: 'placementDeadlines',
+    hashKey: { name: 'deadlineId', type: 'S' },
+    gsis: [
+      { indexName: 'byPlacement', hashKey: { name: 'placementId', type: 'S' } },
+      {
+        indexName: 'byDueAt',
+        hashKey: { name: '_deadlinePartition', type: 'S' },
+        rangeKey: { name: 'at', type: 'S' },
       },
     ],
   },

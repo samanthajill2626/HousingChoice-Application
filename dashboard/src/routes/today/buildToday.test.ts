@@ -248,15 +248,24 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.tag).toBe('Placement · Awaiting approval');
   });
 
-  it('puts a stuck_placement in follow_ups', () => {
+  it('DEFERS derived-stuck to the server: a stale placement with no deadline yields no rows', () => {
+    // Stuck is no longer a next_deadline_type value — the backend derives it from
+    // time-in-stage (STAGE_STUCK_THRESHOLDS) and folds a "Stuck — needs a check"
+    // row into follow_ups on the authoritative /api/today. This FALLBACK omits the
+    // derivation (no importable threshold source here), so a long-stale placement
+    // carrying no deadline and no attention flag produces nothing.
     const items = buildTodayFromSources(
-      [placementOf({ placementId: 'stuck', stage: 'awaiting_approval', next_deadline_type: 'stuck_placement', next_deadline_at: at(-DAY) })],
+      [
+        placementOf({
+          placementId: 'stale',
+          stage: 'awaiting_approval',
+          stage_entered_at: at(-30 * DAY),
+        }),
+      ],
       [],
       NOW,
     );
-    const fu = items.find((i) => i.group === 'follow_ups');
-    expect(fu?.refId).toBe('stuck');
-    expect(fu?.why).toMatch(/stuck/i);
+    expect(items).toEqual([]);
   });
 
   it('returns groups in canonical order regardless of input order', () => {

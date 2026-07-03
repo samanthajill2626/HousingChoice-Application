@@ -354,17 +354,34 @@ describe('seed matrix: users', () => {
 // ---------------------------------------------------------------------------
 // 14. every_deadline_type ≥1
 // ---------------------------------------------------------------------------
-describe('seed matrix: next_deadline_type coverage', () => {
-  // `tour_reminder` is a TOURS concept (a tour is a separate entity in the
-  // `searching` phase); it is NEVER a valid placement next_deadline. So it is
-  // deliberately excluded from the placement-deadline coverage set.
-  const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'] as const;
+describe('seed matrix: placementDeadlines type coverage', () => {
+  // Deadlines are first-class placementDeadlines items now (placement-deadline-model):
+  // the three live types (tour_reminder / stuck_placement retired).
+  const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'follow_up'] as const;
+  const allDeadlines = PROFILE['placementDeadlines'] ?? [];
 
-  it('every placement next_deadline_type value appears ≥1 across all placements', () => {
-    const deadlineCounts = countByField(allPlacements, 'next_deadline_type');
+  it('every live deadline type appears ≥1 across all placementDeadlines items', () => {
+    const deadlineCounts = countByField(allDeadlines, 'type');
     for (const dt of DEADLINE_TYPES) {
       expect(deadlineCounts[dt] ?? 0, `deadline type '${dt}'`).toBeGreaterThanOrEqual(1);
     }
+    // No placement carries a stored next_deadline slot any more.
+    expect(allPlacements.every((p) => (p as Record<string, unknown>)['next_deadline_type'] === undefined)).toBe(true);
+  });
+
+  it('each item has a deterministic id and the fixed byDueAt partition', () => {
+    for (const d of allDeadlines) {
+      const item = d as Record<string, unknown>;
+      expect(item['deadlineId']).toBe(`${item['placementId']}#${item['type']}`);
+      expect(item['_deadlinePartition']).toBe('deadlines');
+    }
+  });
+
+  it('some tenants carry a voucher_expiration_date (the voucher-sync source field)', () => {
+    const withVoucher = allContacts.filter(
+      (c) => typeof (c as Record<string, unknown>)['voucher_expiration_date'] === 'string',
+    );
+    expect(withVoucher.length).toBeGreaterThanOrEqual(1);
   });
 
   it('NO placement anywhere carries a tour_reminder deadline (tours are a separate entity)', () => {

@@ -26,6 +26,10 @@ import {
 } from '../lib/statusModel.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -40,6 +44,8 @@ import { appEvents, type EventBus } from '../lib/events.js';
 export interface StatusTransitionRouterDeps {
   logger?: Logger;
   placementsRepo?: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model). */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
@@ -61,6 +67,8 @@ const DEFAULT_HISTORY_LIMIT = 50;
 export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
@@ -69,6 +77,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
     deps.service ??
     createStatusTransitionService({
       placementsRepo: placements,
+      placementDeadlinesRepo: placementDeadlines,
       unitsRepo: units,
       contactsRepo: contacts,
       auditRepo: audit,

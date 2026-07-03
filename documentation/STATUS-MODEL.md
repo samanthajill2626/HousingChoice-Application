@@ -241,8 +241,21 @@ not auto-dropping tenants yet.
   The **current** value is denormalized on the entity (so "what state now?" is a cheap
   read, never a scan); **history** is an append-only per-entity log queried by entity.
 - **Time in stage.** Each entity records when it entered its current stage, so
-  time-in-stage is computable. Per-stage thresholds drive **"stuck too long" nudges** —
-  the dominant reason placements die.
+  time-in-stage is computable. Per-stage thresholds drive **"stuck too long" flags** —
+  the dominant reason placements die. A **flag** is an *internal, staff-facing* signal
+  DERIVED from time-in-stage (`stage_entered_at` vs `STAGE_STUCK_THRESHOLDS`), not a
+  stored artifact and not an external SMS **nudge** (the `placementNudges` ladder is a
+  separate system — see [GLOSSARY.md](GLOSSARY.md) → "deadline, flag, nudge").
+- **Deadlines — first-class, one per type.** A placement's real due-dates are
+  first-class **`placementDeadlines`** items (one per `(placement, type)`:
+  `rta_window`, `voucher_expiration`, `follow_up`), not a single overloaded
+  `next_deadline` slot. Each type is armed/retired independently, and the placement
+  surfaces whichever is **soonest** (computed at read time; the flat
+  `next_deadline_type`/`next_deadline_at` wire shape is preserved as a computed
+  projection). Because the stuck **flag** is derived (above) rather than occupying a
+  deadline slot, a placement that is *both* on a hard clock *and* going stale now
+  surfaces on both queues at once — the two signals no longer suppress each other.
+  Full design: [placement-deadline-model spec](../docs/superpowers/specs/2026-07-03-placement-deadline-model-design.md).
 - **Lost reason — pick or write.** Choose a category
   (`stalled`, `no_contact`, `landlord_lost_rent`, `landlord_lost_inspection`,
   `tenant_withdrew`, `voucher_expired`, `other`) **or** free-write one (always

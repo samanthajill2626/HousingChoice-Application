@@ -1,8 +1,8 @@
-// M1.10 fast unit tests: placements repo PURE logic — the stage/deadline allowlists
-// and the UpdateExpression construction that the boards/relay/escalation paths
-// depend on (null→REMOVE for sparse keys; both-or-neither for the next_deadline
-// composite key). Real DynamoDB UpdateExpression SEMANTICS live in
-// placementsRepo.integration.test.ts (DynamoDB Local); these assert what we BUILD.
+// M1.10 fast unit tests: placements repo PURE logic — the stage/deadline
+// allowlists and the UpdateExpression construction that the boards/relay/
+// escalation paths depend on (null→REMOVE for sparse keys). Real DynamoDB
+// UpdateExpression SEMANTICS live in placementsRepo.integration.test.ts
+// (DynamoDB Local); these assert what we BUILD.
 import { UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
@@ -35,8 +35,12 @@ describe('placement stage + deadline allowlists', () => {
     expect(TERMINAL_STAGES.has('send_application')).toBe(false);
   });
 
-  it('isPlacementDeadlineType gates the byNextDeadline partition key', () => {
+  it('isPlacementDeadlineType gates the live deadline types (retired ones rejected)', () => {
     for (const t of PLACEMENT_DEADLINE_TYPES) expect(isPlacementDeadlineType(t)).toBe(true);
+    expect(PLACEMENT_DEADLINE_TYPES).toEqual(['rta_window', 'voucher_expiration', 'follow_up']);
+    // Retired types are no longer valid deadline types.
+    expect(isPlacementDeadlineType('tour_reminder')).toBe(false);
+    expect(isPlacementDeadlineType('stuck_placement')).toBe(false);
     expect(isPlacementDeadlineType('whenever')).toBe(false);
     expect(isPlacementDeadlineType(null)).toBe(false);
   });
@@ -107,51 +111,8 @@ describe('placementsRepo.update — SET non-null, REMOVE null, skip undefined', 
     expect(Object.values(last()!.input.ExpressionAttributeNames!)).toContain('updated_at');
   });
 
-  it('REFUSES to write the next_deadline composite key (must go through setNextDeadline)', async () => {
-    const { doc } = captureDoc();
-    const repo = repoWith(doc);
-    await expect(repo.update('placement-1', { next_deadline_at: '2026-07-01T00:00:00.000Z' })).rejects.toThrow(
-      /setNextDeadline/,
-    );
-    await expect(repo.update('placement-1', { next_deadline_type: 'rta_window' })).rejects.toThrow(
-      /setNextDeadline/,
-    );
-  });
-});
-
-describe('placementsRepo.setNextDeadline — both-or-neither composite key', () => {
-  it('SETs both next_deadline attributes together', async () => {
-    const { doc, last } = captureDoc();
-    await repoWith(doc).setNextDeadline('placement-1', {
-      type: 'rta_window',
-      at: '2026-06-16T00:00:00.000Z',
-    });
-    const cmd = last()!;
-    // Attributes are expression-aliased (#t/#a); the real names live in
-    // ExpressionAttributeNames, and BOTH must be SET (no REMOVE).
-    const names = Object.values(cmd.input.ExpressionAttributeNames!);
-    expect(names).toContain('next_deadline_type');
-    expect(names).toContain('next_deadline_at');
-    // Both must be BOUND in the SET clause (not merely declared) — guards
-    // against a regression that drops one half of the composite key.
-    expect(cmd.input.UpdateExpression).toContain('#t = :t');
-    expect(cmd.input.UpdateExpression).toContain('#a = :a');
-    expect(cmd.input.UpdateExpression).not.toContain('REMOVE');
-    const values = Object.values(cmd.input.ExpressionAttributeValues!);
-    expect(values).toContain('rta_window');
-    expect(values).toContain('2026-06-16T00:00:00.000Z');
-  });
-
-  it('REMOVEs both next_deadline attributes when cleared with null', async () => {
-    const { doc, last } = captureDoc();
-    await repoWith(doc).setNextDeadline('placement-1', null);
-    const cmd = last()!;
-    const expr = cmd.input.UpdateExpression!;
-    expect(expr).toContain('REMOVE');
-    const removed = Object.values(cmd.input.ExpressionAttributeNames!);
-    expect(removed).toContain('next_deadline_type');
-    expect(removed).toContain('next_deadline_at');
-    // Only updated_at is set on a clear — no stray deadline values bound.
-    expect(Object.values(cmd.input.ExpressionAttributeValues!)).not.toContain('rta_window');
-  });
+  // NOTE: the next_deadline composite slot + setNextDeadline are RETIRED
+  // (placement-deadline-model): deadlines are first-class placementDeadlines
+  // items now. See placementDeadlinesRepo.test.ts for their arm/retire/soonest
+  // semantics; update() has no special-cased deadline keys any more.
 });

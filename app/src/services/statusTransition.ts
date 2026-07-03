@@ -21,7 +21,6 @@ import {
   isLostReasonCategory,
   isPlacementStage,
   isTenantOverrideStatus,
-  STAGE_STUCK_THRESHOLDS,
   TERMINAL_STAGES,
   type InspectionOutcome,
   type LandlordStatus,
@@ -33,15 +32,12 @@ import {
 } from '../lib/statusModel.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
 import { type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  soonestDeadline,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
 import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
-
-/** The hard-clock deadline types that must NOT be clobbered by a stuck nudge. */
-const HARD_CLOCK_DEADLINE_TYPES: ReadonlySet<string> = new Set([
-  'rta_window',
-  'voucher_expiration',
-  'tour_reminder',
-]);
 
 /**
  * The RTA submission hard clock (Post-Tour & Application): entering
@@ -51,6 +47,8 @@ const RTA_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 export interface StatusTransitionDeps {
   placementsRepo: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model): arm/retire/clear. */
+  placementDeadlinesRepo: PlacementDeadlinesRepo;
   unitsRepo: UnitsRepo;
   contactsRepo: ContactsRepo;
   auditRepo: AuditRepo;
@@ -167,7 +165,7 @@ export interface StatusTransitionService {
 export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
-  const { placementsRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
+  const { placementsRepo, placementDeadlinesRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
   const { armStageNudge, closeRelayForLostPlacement } = deps;
   const log = deps.logger ?? defaultLogger;
 
@@ -231,41 +229,6 @@ export function createStatusTransitionService(
   ): Promise<void> {
     await deriveTenantStatus(tenantId, derived.tenantStatus);
     await deriveListingStatus(unitId, derived.listingStatus);
-  }
-
-  /**
-   * Schedule (or clear) the time-in-stage "stuck" nudge for a placement (§8).
-   * A placement has only ONE next_deadline slot, so we NEVER clobber a pending
-   * HARD-CLOCK deadline (rta_window/voucher_expiration/tour_reminder) — the
-   * stuck nudge is set only when no hard-clock deadline is currently pending.
-   * Terminal stages clear any pending stuck nudge. (See
-   * docs/issues/case-single-next-deadline-slot.md.)
-   */
-  async function scheduleStuckNudge(stored: PlacementItem, toStage: PlacementStage): Promise<void> {
-    const pendingType = stored.next_deadline_type;
-    if (TERMINAL_STAGES.has(toStage)) {
-      // Closure: the placement is closed (moved_in/lost) — ANY pending deadline
-      // is now moot (a stuck nudge OR a hard-clock rta_window/voucher_expiration/
-      // tour_reminder), so clear the single next_deadline slot unconditionally.
-      // Leaving a stale hard-clock deadline on a closed placement would fire a
-      // nudge for a deal that no longer exists.
-      if (pendingType !== undefined) {
-        await placementsRepo.setNextDeadline(stored.placementId, null);
-      }
-      return;
-    }
-    const threshold = STAGE_STUCK_THRESHOLDS[toStage];
-    if (threshold === undefined) return; // no threshold for this stage
-    // A hard-clock deadline owns the single slot — never overwrite it.
-    if (typeof pendingType === 'string' && HARD_CLOCK_DEADLINE_TYPES.has(pendingType)) {
-      log.info(
-        { placementId: stored.placementId, pendingType },
-        'stuck nudge deferred: a hard-clock deadline holds the next_deadline slot',
-      );
-      return;
-    }
-    const at = new Date(Date.now() + threshold).toISOString();
-    await placementsRepo.setNextDeadline(stored.placementId, { type: 'stuck_placement', at });
   }
 
   return {
@@ -365,46 +328,29 @@ export function createStatusTransitionService(
         await applyDerivation(existing.tenantId, existing.unitId, deriveStatuses(toStage));
       }
 
-      // 6) Time-in-stage nudge (uses the FRESH item so next_deadline_type is current).
-      // RTA 48h HARD CLOCK (Post-Tour & Application): entering
-      // `awaiting_landlord_submission` arms an `rta_window` deadline at +48h.
-      // A placement has ONE next_deadline slot, so we set the hard clock DIRECTLY
-      // here rather than via scheduleStuckNudge — scheduleStuckNudge reads the
-      // PRE-transition item's pending type, so on this fresh entry it would set a
-      // `stuck_placement` nudge that clobbers the clock we want. Every OTHER stage
-      // (including the terminal `lost`/`moved_in`, which rely on
-      // scheduleStuckNudge's slot-clearing) keeps the existing call unchanged.
-      if (toStage === 'awaiting_landlord_submission') {
-        await placementsRepo.setNextDeadline(placementId, {
-          type: 'rta_window',
-          at: new Date(Date.parse(now) + RTA_WINDOW_MS).toISOString(),
-        });
-      } else {
-        // `rta_window` is a STAGE-SCOPED clock OWNED by awaiting_landlord_submission
-        // — it exists only WHILE the placement sits in that stage, so LEAVING the
-        // stage retires it. Without this clear, the stale rta_window keeps the single
-        // next_deadline slot for the whole ~4-week authority window (soon-overdue on
-        // the Today board) AND blocks the destination stage's own stuck_placement
-        // nudge from arming (scheduleStuckNudge would hit its hard-clock defer). So on
-        // a NON-terminal exit FROM awaiting_landlord_submission, clear the slot FIRST,
-        // then feed scheduleStuckNudge the post-clear reality so it arms normally.
-        //
-        // This is DELIBERATELY narrow to rta_window and to leaving its owning stage:
-        // the OTHER hard clocks — `voucher_expiration` (tenant-level) and
-        // `tour_reminder` — are NOT stage-scoped and stay never-clobbered by stuck
-        // nudges. TERMINAL moves are excluded: scheduleStuckNudge's terminal branch
-        // already clears EVERYTHING there, and pre-clearing would be a redundant
-        // second write — the terminal path stays byte-identical in effect.
-        let view = updated;
-        if (
-          from === 'awaiting_landlord_submission' &&
-          updated.next_deadline_type === 'rta_window' &&
-          !TERMINAL_STAGES.has(toStage)
-        ) {
-          await placementsRepo.setNextDeadline(placementId, null);
-          view = { ...updated, next_deadline_type: undefined, next_deadline_at: undefined };
-        }
-        await scheduleStuckNudge(view, toStage);
+      // 6) Deadline items (placement-deadline-model). Each deadline type is its
+      // OWN placementDeadlines row keyed by (placement, type), so arming/retiring
+      // one NEVER touches another — the old single-slot clobber arbitration is
+      // gone. The internal "stuck" signal is NOT a deadline here: it is DERIVED
+      // from time-in-stage in today.ts, so it fires independently of any hard
+      // clock and nothing is armed for it.
+      //   - Terminal → clear ALL of the placement's deadlines (a closed deal has
+      //     no live clocks; belt to today.ts's read-time TERMINAL skip).
+      //   - Entering awaiting_landlord_submission → arm the rta_window 48h clock.
+      //   - Leaving awaiting_landlord_submission → retire the stage-scoped
+      //     rta_window (it exists only WHILE the placement sits in that stage).
+      // voucher_expiration is TENANT-level (contact-edit / create-path), NOT
+      // stage-scoped, so a stage move never re-arms or retires it here.
+      if (TERMINAL_STAGES.has(toStage)) {
+        await placementDeadlinesRepo.clearForPlacement(placementId);
+      } else if (toStage === 'awaiting_landlord_submission') {
+        await placementDeadlinesRepo.arm(
+          placementId,
+          'rta_window',
+          new Date(Date.parse(now) + RTA_WINDOW_MS).toISOString(),
+        );
+      } else if (from === 'awaiting_landlord_submission') {
+        await placementDeadlinesRepo.retire(placementId, 'rta_window');
       }
 
       // 7) Best-effort choke-point hooks (Post-Tour & Application). Both OPTIONAL
@@ -428,9 +374,12 @@ export function createStatusTransitionService(
       }
 
       // Emit + log (the legacy CRUD path emits placement.updated; mirror it, no PII).
+      // Attach the COMPUTED soonest deadline (the flat wire shape is preserved;
+      // its source is now the placementDeadlines items, not a stored slot).
       mergeContext({ placementId });
       const final = (await placementsRepo.getById(placementId)) ?? updated;
-      events.emit('placement.updated', toPlacementUpdatedEvent(final));
+      const deadlines = await placementDeadlinesRepo.listByPlacement(placementId);
+      events.emit('placement.updated', toPlacementUpdatedEvent(final, soonestDeadline(deadlines)));
       log.info({ placementId, from, to: toStage, source, ...(actor !== undefined && { actor }) }, 'placement stage transitioned');
       return final;
     },

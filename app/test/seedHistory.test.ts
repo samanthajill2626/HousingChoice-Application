@@ -742,6 +742,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
     const { createDocumentClient } = await import('../src/lib/dynamo.js');
     const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
     const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createPlacementDeadlinesRepo } = await import('../src/repos/placementDeadlinesRepo.js');
     const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
     const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
     const { createAuditRepo } = await import('../src/repos/auditRepo.js');
@@ -776,6 +777,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
       // Construct the REAL service from doc-backed repos + a throwaway event bus.
       const svc = createStatusTransitionService({
         placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        placementDeadlinesRepo: createPlacementDeadlinesRepo({ doc, env: testEnv }),
         unitsRepo: createUnitsRepo({ doc, env: testEnv }),
         contactsRepo: createContactsRepo({ doc, env: testEnv }),
         auditRepo: createAuditRepo({ doc, env: testEnv }),
@@ -832,6 +834,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
     const { createDocumentClient } = await import('../src/lib/dynamo.js');
     const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
     const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createPlacementDeadlinesRepo } = await import('../src/repos/placementDeadlinesRepo.js');
     const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
     const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
     const { createAuditRepo } = await import('../src/repos/auditRepo.js');
@@ -866,6 +869,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
 
       const svc = createStatusTransitionService({
         placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        placementDeadlinesRepo: createPlacementDeadlinesRepo({ doc, env: testEnv }),
         unitsRepo: createUnitsRepo({ doc, env: testEnv }),
         contactsRepo: createContactsRepo({ doc, env: testEnv }),
         auditRepo: createAuditRepo({ doc, env: testEnv }),
@@ -930,6 +934,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
     const { createDocumentClient } = await import('../src/lib/dynamo.js');
     const { createStatusTransitionService } = await import('../src/services/statusTransition.js');
     const { createPlacementsRepo } = await import('../src/repos/placementsRepo.js');
+    const { createPlacementDeadlinesRepo } = await import('../src/repos/placementDeadlinesRepo.js');
     const { createUnitsRepo } = await import('../src/repos/unitsRepo.js');
     const { createContactsRepo } = await import('../src/repos/contactsRepo.js');
     const { createAuditRepo } = await import('../src/repos/auditRepo.js');
@@ -963,6 +968,7 @@ describe.skipIf(!reachable)('seed history — generator ↔ real statusTransitio
 
       const svc = createStatusTransitionService({
         placementsRepo: createPlacementsRepo({ doc, env: testEnv }),
+        placementDeadlinesRepo: createPlacementDeadlinesRepo({ doc, env: testEnv }),
         unitsRepo: createUnitsRepo({ doc, env: testEnv }),
         contactsRepo: createContactsRepo({ doc, env: testEnv }),
         auditRepo: createAuditRepo({ doc, env: testEnv }),

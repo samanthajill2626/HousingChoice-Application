@@ -164,11 +164,14 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   // submitted): the handoff to Approval & Move-in. END of this sequence.
   await flow.teamMovesPlacementTo('Awaiting authority approval');
   await flow.expectPlacementStage('Awaiting authority approval');
-  // Fix-1 lifecycle: leaving awaiting_landlord_submission RETIRED the +48h
-  // rta_window and armed the destination's far-future stuck_placement instead.
-  // (A future rta_window never renders on Today — needs_you_now is bounded to
-  // deadlines due at/before now — so the submit-time clear is proven at the data
-  // layer here; the RENDERED overdue-deadline row lives on the BLOWN path below.)
+  // placement-deadline-model: leaving awaiting_landlord_submission RETIRED the +48h
+  // rta_window DEADLINE ITEM. Stuck is no longer a deadline that takes the slot — it
+  // is DERIVED from time-in-stage (no 'stuck_placement' deadline is armed) — so with
+  // no other deadline pending the computed flat next_deadline is now ABSENT. (The
+  // stuck signal surfaces via DERIVATION once time-in-stage passes the stage
+  // threshold, not the instant this move lands; that RENDERED coexistence — stuck in
+  // Follow-ups WHILE a hard clock is due in Needs-you-now — is proven in the
+  // deadline-model spec below.)
   await flow.expectRtaClockCleared();
 });
 
@@ -261,4 +264,55 @@ test('marked deviation — party backs out early at Awaiting receipt → Lost (b
   // The receipt-check nudge was canceled on Lost — a tick delivers nothing.
   await flow.devPlacementNudgeTick(hoursFromNow(48));
   await flow.expectNoOutboxMessageContaining(tenant, RECEIPT_NUDGE);
+});
+
+test('placement-deadline-model — voucher + rta_window coexist (soonest-wins on Needs-you-now) and derived-stuck coexists with a hard clock', async ({
+  page,
+  request,
+}) => {
+  test.slow(); // full tour reach + a nine-stage walk + several board reads.
+  const flow = new Scenario(page, request);
+  await reachConvertibleTour(flow, { tenant: 'Voucher', owner: 'Clock' });
+  await flow.teamConvertsTourToPlacement();
+
+  // (1) VOUCHER CLOCK. Staff records a PAST (expired) voucher date through the real
+  // contact form. The inline voucher sync (deadline-model §6) arms the
+  // `voucher_expiration` deadline on the active placement; being due, it surfaces in
+  // Needs-you-now as the placement's soonest hard clock.
+  await flow.teamSetsTenantVoucherExpiration(-2); // 2 days ago → expired/due
+  await flow.expectVoucherDeadlineOnBoard();
+
+  // (2) SOONEST-WINS. Walk (no skip) to Awaiting landlord submission — which arms the
+  // +48h rta_window — then BLOW rta to an instant EARLIER than the voucher. rta_window
+  // is now the placement's SOONEST due deadline, so Needs-you-now's single row for it
+  // reads "RTA window closing" (per-placement dedup keeps the soonest). The two
+  // deadline ITEMS are independent — the voucher is untouched underneath.
+  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting completion');
+  await flow.teamMovesPlacementTo('Awaiting approval');
+  await flow.teamMovesPlacementTo('Collect RTA');
+  await flow.teamMovesPlacementTo('Review RTA');
+  await flow.teamMovesPlacementTo('Send RTA to landlord');
+  await flow.teamMovesPlacementTo('Awaiting landlord submission');
+  // NB: rta_window arms at +48h (future), but the voucher is already due (2d ago), so
+  // the placement's computed SOONEST is still the voucher here — we don't assert
+  // expectRtaClockArmed (that asserts rta is the soonest, which is false with a due
+  // voucher pending). Blowing rta below to 5d ago makes IT the soonest.
+  await flow.devBlowRtaWindow(new Date(Date.now() - 5 * 86_400_000).toISOString()); // 5d ago < voucher (2d ago)
+  await flow.expectRtaDeadlineOnBoard();
+
+  // (3) RE-SURFACE. Leave the stage → rta_window is RETIRED (stage-scoped). With only
+  // the voucher left, the voucher clock re-surfaces as the placement's soonest due
+  // deadline on Needs-you-now.
+  await flow.teamMovesPlacementTo('Awaiting authority approval');
+  await flow.expectVoucherDeadlineOnBoard();
+
+  // (4) COEXISTENCE FIX. Make the placement STUCK (backdate stage_entered_at past the
+  // stage threshold). Derived-stuck fires from time-in-stage REGARDLESS of the pending
+  // hard clock: the placement now shows in Follow-ups (Stuck) AND Needs-you-now (the
+  // due voucher) at once — the two signals no longer suppress each other, which is the
+  // entire point of retiring the single overloaded deadline slot.
+  await flow.devMakePlacementStuck(20); // > the 10-day awaiting_authority_approval threshold
+  await flow.expectPlacementStuckInFollowUps();
+  await flow.expectVoucherDeadlineOnBoard();
 });

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -75,6 +75,34 @@ describe('ContactCreateForm', () => {
     // No 'role' key in the call
     const calledWith = createContact.mock.calls[0]?.[0] as Record<string, unknown>;
     expect('role' in calledWith).toBe(false);
+  });
+
+  it('a tenant voucher expiration date is sent as an ISO instant (and hidden for a landlord)', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'new-ve', type: 'tenant', firstName: 'Dana' });
+    setup();
+
+    // Landlord: no voucher expiration input.
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    expect(screen.queryByLabelText(/Voucher expiration date/i)).toBeNull();
+
+    // Tenant: the input appears and rides the create body as an ISO instant.
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.type(screen.getByLabelText(/First name/i), 'Dana');
+    fireEvent.change(screen.getByLabelText(/Voucher expiration date/i), {
+      target: { value: '2026-09-01' },
+    });
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+
+    await waitFor(() =>
+      expect(createContact).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tenant',
+          firstName: 'Dana',
+          voucher_expiration_date: '2026-09-01T00:00:00.000Z',
+        }),
+      ),
+    );
   });
 
   // ── Test 2: Other → role "Case worker" + base Tenant + relationship + custom field

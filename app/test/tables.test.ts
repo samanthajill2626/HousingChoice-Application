@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours + tourReminders (Tours feature), placementNudges (Post-Tour & Application)', () => {
+  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours + tourReminders (Tours feature), placementNudges (Post-Tour & Application), placementDeadlines (placement-deadline-model)', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -35,6 +35,7 @@ describe('tables.ts — the table contract', () => {
       'listing_sends',
       'tourReminders',
       'placementNudges',
+      'placementDeadlines',
       'tours',
     ]);
   });
@@ -146,18 +147,28 @@ describe('tables.ts — the table contract', () => {
     expect(t.stream).toBeUndefined();
   });
 
-  it('placements: PK placementId; GSIs byTenant, byUnit, byStage, byTourDate (sparse), byNextDeadline (sparse); stream on', () => {
+  it('placements: PK placementId; GSIs byTenant, byUnit, byStage, byTourDate (sparse); byNextDeadline RETIRED; stream on', () => {
     const t = spec('placements');
     expect(t.hashKey.name).toBe('placementId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byStage', 'byTourDate', 'byNextDeadline']);
+    // byNextDeadline is retired (placement-deadline-model): deadlines are
+    // first-class placementDeadlines items now.
+    expect(gsiNames(t)).toEqual(['byTenant', 'byUnit', 'byStage', 'byTourDate']);
     expect(t.gsis.find((g) => g.indexName === 'byTourDate')?.sparse).toBe(true);
-    expect(t.gsis.find((g) => g.indexName === 'byNextDeadline')?.sparse).toBe(true);
-    // doc-specified deadline attributes (§5: "next_deadline_at/type")
-    const byNextDeadline = t.gsis.find((g) => g.indexName === 'byNextDeadline');
-    expect(byNextDeadline?.hashKey.name).toBe('next_deadline_type');
-    expect(byNextDeadline?.rangeKey?.name).toBe('next_deadline_at');
+    expect(t.gsis.find((g) => g.indexName === 'byNextDeadline')).toBeUndefined();
     expect(t.stream).toBe('NEW_AND_OLD_IMAGES');
+  });
+
+  it('placementDeadlines: PK deadlineId; GSIs byPlacement, byDueAt (fixed partition + at range); no stream', () => {
+    const t = spec('placementDeadlines');
+    expect(t.hashKey.name).toBe('deadlineId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byPlacement', 'byDueAt']);
+    expect(t.gsis.find((g) => g.indexName === 'byPlacement')?.hashKey.name).toBe('placementId');
+    const byDueAt = t.gsis.find((g) => g.indexName === 'byDueAt');
+    expect(byDueAt?.hashKey.name).toBe('_deadlinePartition');
+    expect(byDueAt?.rangeKey?.name).toBe('at');
+    expect(t.stream).toBeUndefined();
   });
 
   it('invoices: PK invoiceId; GSIs byLandlord, byStatus', () => {

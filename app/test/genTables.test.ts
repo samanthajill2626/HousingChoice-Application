@@ -20,6 +20,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'listing_sends',
       'matches',
       'messages',
+      'placementDeadlines',
       'placementNudges',
       'placements',
       'pool_numbers',
@@ -155,8 +156,8 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'byUnit',
       'byStage',
       'byTourDate',
-      'byNextDeadline',
     ]);
+    expect(gsiNames('placementDeadlines')).toEqual(['byPlacement', 'byDueAt']);
     expect(gsiNames('invoices')).toEqual(['byLandlord', 'byStatus']);
     expect(gsiNames('users')).toEqual(['byEmail']);
     expect(gsiNames('audit_events')).toEqual(['byActor']);
@@ -169,11 +170,11 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       range_key: { name: 'unitId', type: 'S' },
     });
     expect(tables['contacts']?.range_key).toBeUndefined();
-    const byNextDeadline = tables['placements']?.gsis.find((g) => g.index_name === 'byNextDeadline');
-    expect(byNextDeadline).toEqual({
-      index_name: 'byNextDeadline',
-      hash_key: { name: 'next_deadline_type', type: 'S' },
-      range_key: { name: 'next_deadline_at', type: 'S' },
+    const byDueAt = tables['placementDeadlines']?.gsis.find((g) => g.index_name === 'byDueAt');
+    expect(byDueAt).toEqual({
+      index_name: 'byDueAt',
+      hash_key: { name: '_deadlinePartition', type: 'S' },
+      range_key: { name: 'at', type: 'S' },
     });
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
   });

@@ -2058,36 +2058,52 @@ export class Scenario {
   /**
    * [App] The inverse of {@link expectRtaClockArmed}: after LEAVING
    * awaiting_landlord_submission for a non-terminal stage, the stage-scoped
-   * rta_window clock is RETIRED and the destination stage's stuck_placement nudge
-   * takes the single next_deadline slot (the Fix-1 lifecycle). Proves the clock
-   * CLEARED — next_deadline_type is now 'stuck_placement', never the stale
-   * 'rta_window'. Load-bearing: pre-Fix-1 the rta_window persisted, so this fails.
+   * rta_window deadline is RETIRED (placement-deadline-model). Stuck is no longer a
+   * deadline that occupies the single slot — it is DERIVED from time-in-stage — and
+   * the 'stuck_placement' deadline type is GONE. So with no other deadline armed the
+   * computed flat next_deadline is now ABSENT (null): never the stale 'rta_window'
+   * and never a 'stuck_placement'. Load-bearing: pre-refactor the rta_window
+   * persisted OR a far-future 'stuck_placement' took the slot, so this fails on the
+   * old behavior. (The stuck signal surfaces via DERIVATION once time-in-stage
+   * exceeds the stage threshold — proven on the board in the deadline-model spec's
+   * coexistence walk — not the instant the placement enters its new stage.)
    */
   expectRtaClockCleared(): Promise<void> {
     const id = this.requireActivePlacementId();
     return step('App: the RTA clock cleared on leaving Awaiting landlord submission', async () => {
       const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
       expect(res.ok(), await res.text()).toBeTruthy();
-      const { placement } = (await res.json()) as { placement: { next_deadline_type?: string } };
+      const { placement } = (await res.json()) as {
+        placement: { next_deadline_type?: string | null; next_deadline_at?: string | null };
+      };
       expect(placement.next_deadline_type).not.toBe('rta_window');
-      expect(placement.next_deadline_type).toBe('stuck_placement');
+      expect(placement.next_deadline_type).not.toBe('stuck_placement');
+      // No deadline remains → the computed flat slot is null/absent (both fields).
+      expect(placement.next_deadline_type ?? null).toBeNull();
+      expect(placement.next_deadline_at ?? null).toBeNull();
     });
   }
 
   /**
    * [App, dev seam] Simulate the 48-HOUR RTA window ELAPSING: overwrite the
-   * placement's rta_window deadline to a PAST instant via POST
-   * /api/placements/:id/deadline { type, at }. Today compares next_deadline_at to
-   * the server WALL CLOCK (it cannot be ticked like a nudge), so a past instant is
-   * how we make the deadline due/overdue — the same moral trick as ticking a nudge
-   * `now`. Leaves the stage untouched (still Awaiting landlord submission) so the
-   * now-overdue clock surfaces on the board.
+   * placement's rta_window deadline ITEM to a PAST instant via the hermetic fixture
+   * seam POST /__dev/placements/:id/deadline-fixture { deadline: { type, at } }. The
+   * product manual /deadline route is follow_up-ONLY now (system clocks are
+   * off-limits there), and the transition service arms rta_window off the WALL clock
+   * at +48h — neither lets a test set a past instant. Today's listDue compares the
+   * deadline `at` to the server wall clock (it cannot be ticked like a nudge), so a
+   * past `at` is how we make the deadline due/overdue. Leaves the stage untouched
+   * (still Awaiting landlord submission) so the now-overdue clock surfaces on the
+   * board. `atIso` overrides the default (now − 60s): the voucher-coexistence walk
+   * blows it to an instant EARLIER than a pending voucher so rta_window wins
+   * "soonest".
    */
-  devBlowRtaWindow(): Promise<void> {
+  devBlowRtaWindow(atIso?: string): Promise<void> {
     const id = this.requireActivePlacementId();
+    const at = atIso ?? new Date(Date.now() - 60_000).toISOString();
     return step('App: force the 48h RTA window to blow (deadline → past)', async () => {
-      const res = await this.page.request.post(`${NEXT}/api/placements/${id}/deadline`, {
-        data: { type: 'rta_window', at: new Date(Date.now() - 60_000).toISOString() },
+      const res = await this.page.request.post(`${NEXT}/__dev/placements/${id}/deadline-fixture`, {
+        data: { deadline: { type: 'rta_window', at } },
       });
       expect(res.ok(), await res.text()).toBeTruthy();
     });
@@ -2133,6 +2149,93 @@ export class Scenario {
         timeout: 10_000,
       });
     });
+  }
+
+  /**
+   * [Team, MANUAL] Staff records the tenant's VOUCHER EXPIRATION DATE through the
+   * REAL contact edit form (the tenant-gated `type="date"` field), which PATCHes
+   * /api/contacts/:id. The inline voucher sync (placement-deadline-model §6) then
+   * arms/re-arms the `voucher_expiration` deadline on the tenant's active
+   * placements. `daysFromNow` is the day offset (negative = a PAST/expired voucher,
+   * which is DUE so it surfaces on the board; the date input is day-granular so
+   * consentAtFromDate stores it at that day's 00:00Z).
+   */
+  teamSetsTenantVoucherExpiration(daysFromNow: number): Promise<void> {
+    const placementId = this.requireActivePlacementId();
+    return step(`Team sets the tenant's voucher expiration date (${daysFromNow >= 0 ? '+' : ''}${daysFromNow}d)`, async () => {
+      const tenantId = await this.activePlacementTenantId(placementId);
+      const ymd = new Date(Date.now() + daysFromNow * 86_400_000).toISOString().slice(0, 10);
+      await this.page.goto(`${NEXT}/contacts/${tenantId}`);
+      await this.page.getByRole('button', { name: 'Edit contact details' }).click();
+      const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
+      await expect(dialog).toBeVisible();
+      await dialog.getByLabel('Voucher expiration date').fill(ymd);
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] The tenant's voucher clock surfaces on the Today board: a needs_you_now
+   * row for THIS placement (scoped by its /placements/:id link) reading "Voucher
+   * expiring". Proves the `voucher_expiration` deadline is the placement's SOONEST
+   * due hard clock (needs_you_now dedups per placement to the soonest).
+   */
+  expectVoucherDeadlineOnBoard(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the voucher deadline surfaces on the Today board', async () => {
+      await this.page.goto(`${NEXT}/`);
+      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      const needs = this.page.getByRole('list', { name: 'Needs you now' });
+      const row = needs.locator(`a[href="/placements/${id}"]`);
+      await expect(row).toBeVisible({ timeout: 10_000 });
+      await expect(row.getByText('Voucher expiring')).toBeVisible();
+    });
+  }
+
+  /**
+   * [App, dev seam] Backdate the placement's stage_entered_at to `daysAgo` days ago
+   * via the hermetic fixture seam POST /__dev/placements/:id/deadline-fixture
+   * { stageEnteredAt }. The DERIVED stuck flag (placement-deadline-model §5) is a
+   * pure function of time-in-stage vs STAGE_STUCK_THRESHOLDS[stage] — there is no
+   * tickable clock — so a past stage_entered_at is how a test makes a placement
+   * "stuck" without waiting days. Independent of any deadline (that is the point).
+   */
+  devMakePlacementStuck(daysAgo: number): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: backdate stage_entered_at (${daysAgo}d ago) so the placement is stuck`, async () => {
+      const res = await this.page.request.post(`${NEXT}/__dev/placements/${id}/deadline-fixture`, {
+        data: { stageEnteredAt: new Date(Date.now() - daysAgo * 86_400_000).toISOString() },
+      });
+      expect(res.ok(), await res.text()).toBeTruthy();
+    });
+  }
+
+  /**
+   * [App] The DERIVED stuck flag renders in Today's Follow-ups: a row for THIS
+   * placement (scoped by its /placements/:id link) reading "Stuck — needs a check".
+   * Load-bearing for the coexistence fix — the stuck row appears REGARDLESS of a
+   * pending hard clock (the same placement may sit in needs_you_now via a due
+   * deadline at the same time; the two signals no longer suppress each other).
+   */
+  expectPlacementStuckInFollowUps(): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step('App: the placement shows as Stuck in Follow-ups (derived)', async () => {
+      await this.page.goto(`${NEXT}/`);
+      await expect(this.page.getByRole('heading', { name: 'Today' })).toBeVisible();
+      const followUps = this.page.getByRole('list', { name: 'Follow-ups due' });
+      const row = followUps.locator(`a[href="/placements/${id}"]`);
+      await expect(row).toBeVisible({ timeout: 10_000 });
+      await expect(row.getByText('Stuck — needs a check')).toBeVisible();
+    });
+  }
+
+  /** The active placement's tenant contactId (read from the placement API). */
+  private async activePlacementTenantId(placementId: string): Promise<string> {
+    const res = await this.page.request.get(`${NEXT}/api/placements/${placementId}`);
+    expect(res.ok(), await res.text()).toBeTruthy();
+    const { placement } = (await res.json()) as { placement: { tenantId: string } };
+    return placement.tenantId;
   }
 
   /**

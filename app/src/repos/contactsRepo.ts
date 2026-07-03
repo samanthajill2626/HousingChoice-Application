@@ -142,6 +142,15 @@ export interface ContactItem {
   consent_method?: ConsentMethod;
   /** When consent was obtained (ISO 8601) — may differ from created_at. */
   consent_at?: string;
+  /**
+   * Staff-set tenant voucher expiration (ISO 8601) — the SOURCE of the
+   * `voucher_expiration` placement deadline (placement-deadline-model §6). Set via
+   * the contact create/triage API (allowlisted, canonicalized like consent_at);
+   * a change syncs the deadline onto the tenant's active placements. Tenant-only
+   * is a UI guarantee (not repo-gated). Distinct from the deadline TYPE
+   * `voucher_expiration` and the unrelated camelCase `voucherSize`.
+   */
+  voucher_expiration_date?: string;
   /** The disclosure version shown on the web form (e.g. `ctia-2026-06`);
    *  absent for non-form methods. */
   consent_version?: string;

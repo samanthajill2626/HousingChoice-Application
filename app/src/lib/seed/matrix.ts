@@ -23,6 +23,7 @@
 
 import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, STAGE_PHASE, STAGE_STUCK_THRESHOLDS, deriveStatuses, type PlacementStage, type PlacementPhase } from '../statusModel.js';
 import { TOUR_STATUSES, type TourStatus } from '../toursModel.js';
+import { deadlineIdFor } from '../../repos/placementDeadlinesRepo.js';
 
 // ---------------------------------------------------------------------------
 // Fixed past dates (byte-stable)
@@ -122,7 +123,9 @@ const matrixConsent = (i: number) => MATRIX_CONSENT_METHODS[i % MATRIX_CONSENT_M
 // ---------------------------------------------------------------------------
 // Deadline types
 // ---------------------------------------------------------------------------
-const DEADLINE_TYPES = ['tour_reminder', 'rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'] as const;
+// The three live deadline types (placement-deadline-model): tour_reminder /
+// stuck_placement are retired (tours are first-class; stuck is derived).
+const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'follow_up'] as const;
 type DeadlineType = typeof DEADLINE_TYPES[number];
 
 // A PLACEMENT deadline is never a tour_reminder — tours own that type. Making it
@@ -131,18 +134,21 @@ type PlacementDeadlineType = Exclude<DeadlineType, 'tour_reminder'>;
 
 /**
  * Phase → the deadline types that are plausible for a placement in that phase
- * (findings §A "deadline TYPE by phase"). `tour_reminder` is structurally absent
- * (PlacementDeadlineType excludes it); `rta_window` appears ONLY in the RTA phase.
- * Adding a new PlacementPhase is a typecheck error here — coverage by construction.
+ * (findings §A "deadline TYPE by phase"). Only the three LIVE deadline types
+ * survive (placement-deadline-model): `tour_reminder` is a tours concept and
+ * `stuck_placement` is now DERIVED from time-in-stage (never a stored deadline) —
+ * both are structurally absent from PlacementDeadlineType. `rta_window` appears
+ * ONLY in the RTA phase. Adding a new PlacementPhase is a typecheck error here —
+ * coverage by construction.
  */
 export const PHASE_DEADLINE_TYPES: Readonly<Record<PlacementPhase, readonly PlacementDeadlineType[]>> = {
-  'Application': ['voucher_expiration', 'follow_up', 'stuck_placement'],
-  'RTA': ['rta_window', 'voucher_expiration', 'stuck_placement', 'follow_up'],
-  'Inspection': ['stuck_placement', 'follow_up'],
-  'Rent Determination': ['stuck_placement', 'follow_up'],
-  'Contract': ['stuck_placement', 'follow_up'],
-  'Administrative': ['stuck_placement', 'follow_up'],
-  'Closure': ['follow_up', 'stuck_placement'],
+  'Application': ['voucher_expiration', 'follow_up'],
+  'RTA': ['rta_window', 'voucher_expiration', 'follow_up'],
+  'Inspection': ['follow_up'],
+  'Rent Determination': ['follow_up'],
+  'Contract': ['follow_up'],
+  'Administrative': ['follow_up'],
+  'Closure': ['follow_up'],
 };
 
 // ---------------------------------------------------------------------------
@@ -176,12 +182,10 @@ function journeyStart(stageEnteredAt: Date, stage: PlacementStage): string {
 }
 
 /** How long (ms) a given deadline type sits after stage entry (non-overdue rows). */
-function deadlineSpanMs(type: PlacementDeadlineType, stage: PlacementStage): number {
+function deadlineSpanMs(type: PlacementDeadlineType, _stage: PlacementStage): number {
   switch (type) {
     case 'rta_window':
       return 48 * HOUR_MS; // the 48h RTA clock
-    case 'stuck_placement':
-      return STAGE_STUCK_THRESHOLDS[stage] ?? 3 * DAY_MS;
     case 'follow_up':
       return Math.round(2.5 * DAY_MS); // ~2–3 days
     case 'voucher_expiration':
@@ -252,6 +256,8 @@ interface PlacementGroup {
   tenant: Record<string, unknown>;
   unit: Record<string, unknown>;
   placement: Record<string, unknown>;
+  /** First-class placementDeadlines item (placement-deadline-model), when armed. */
+  deadline?: Record<string, unknown>;
 }
 
 /**
@@ -331,8 +337,26 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         stage_entered_at: stageEnteredIso,
         stage_source: 'manual',
         created_at: createdAt,
-        next_deadline_type: dt,
-        next_deadline_at: nextDeadlineAt,
+        // No raw next_deadline slot (placement-deadline-model): the flat
+        // next_deadline_type/at are COMPUTED at read time from the first-class
+        // placementDeadlines item built just below. `dt`/`nextDeadlineAt` here only
+        // shape that item + the attention flag.
+      };
+
+      // Deadlines are first-class placementDeadlines items now (placement-deadline-
+      // model): build the item (deterministic id) from the now-relative type/date
+      // computed above instead of a stored next_deadline slot. `dt` is always a LIVE
+      // type (rta_window / voucher_expiration / follow_up) — stuck is DERIVED from
+      // time-in-stage, tours own tour_reminder — so every active row carries exactly
+      // one coherent deadline item.
+      const deadline: Record<string, unknown> = {
+        deadlineId: deadlineIdFor(placementId, dt),
+        placementId,
+        type: dt,
+        at: nextDeadlineAt,
+        _deadlinePartition: 'deadlines',
+        createdAt,
+        updatedAt: createdAt,
       };
 
       if (overdue) {
@@ -340,26 +364,32 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
         placementBase['attention'] = { reason: pool[counter % pool.length]!, at: nextDeadlineAt };
       }
 
+      // Cover the voucher-sync source field on ~1/3 of tenants (a fixed future
+      // date; distinct from the deadline TYPE and from voucherSize).
+      const tenant: Record<string, unknown> = {
+        contactId: tenantId,
+        type: 'tenant',
+        status: derived.tenantStatus,
+        status_source: 'derived',
+        phone: phoneBase(counter),
+        firstName: firstName(TENANT_FIRST, counter),
+        lastName: lastName(TENANT_LAST, counter + 3),
+        voucherSize: beds(counter),
+        housingAuthority: auth(counter),
+        porting: counter % 3 === 0,
+        consent_method: matrixConsent(counter),
+        consent_at: createdAt,
+        created_at: createdAt,
+      };
+      if (counter % 3 === 0) tenant['voucher_expiration_date'] = '2026-09-30T00:00:00.000Z';
+
       groups.push({
         tenantId,
         unitId,
         placementId,
         stage,
-        tenant: {
-          contactId: tenantId,
-          type: 'tenant',
-          status: derived.tenantStatus,
-          status_source: 'derived',
-          phone: phoneBase(counter),
-          firstName: firstName(TENANT_FIRST, counter),
-          lastName: lastName(TENANT_LAST, counter + 3),
-          voucherSize: beds(counter),
-          housingAuthority: auth(counter),
-          porting: counter % 3 === 0,
-          consent_method: matrixConsent(counter),
-          consent_at: createdAt,
-          created_at: createdAt,
-        },
+        deadline,
+        tenant,
         unit: {
           unitId,
           landlordId: 'contact-landlord-0001', // lean anchor landlord
@@ -1199,6 +1229,9 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
   ];
 
   const placements: Record<string, unknown>[] = placementGroups.map((g) => g.placement);
+  const placementDeadlines: Record<string, unknown>[] = placementGroups
+    .filter((g) => g.deadline !== undefined)
+    .map((g) => g.deadline as Record<string, unknown>);
   const tours: Record<string, unknown>[] = tourGroups.map((g) => g.tour);
   const tourReminders: Record<string, unknown>[] = tourGroups.flatMap((g) => g.reminders);
 
@@ -1206,6 +1239,7 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
     contacts,
     units,
     placements,
+    placementDeadlines,
     tours,
     tourReminders,
     pool_numbers: buildPoolNumbers(),

@@ -2,12 +2,12 @@
 // behind requireAuth via the /api mount (app.ts). VAs run the boards day-to-day,
 // so NO admin gate (same posture as units/contacts).
 //
-//   GET   /api/placements?stage=&tenantId=&unitId=&tourDate=&deadlineType=&before=&limit=&cursor=
+//   GET   /api/placements?stage=&tenantId=&unitId=&tourDate=&limit=&cursor=
 //                                       → { placements, nextCursor }
 //   POST  /api/placements { tenantId, unitId, stage?, placement_tag? }   → 201 { placement }
 //   GET   /api/placements/:placementId            → { placement } | 404
 //   PATCH /api/placements/:placementId { partial} → { placement } | 404
-//   POST  /api/placements/:placementId/deadline { type, at } | { clear:true }  → { placement } | 404
+//   POST  /api/placements/:placementId/deadline { type:'follow_up', at } | { clear:true }  → { placement } | 404
 //
 // A placement is "one deal, tour-interest → move-in" (doc §5). This router owns
 // the manual board lifecycle (Phase 1 is hand-touched parity — the operator sets
@@ -16,8 +16,9 @@
 //
 // Validation: a FIXED field allowlist (the H2-review fix — the route owns the
 // stage/key allowlist; the repo trusts it). stage is allowlisted (a GSI
-// partition key); the next_deadline composite key is REFUSED here and routed to
-// /deadline (it must move both-or-neither — placementsRepo.setNextDeadline).
+// partition key); a legacy next_deadline_* key on the PATCH body is REFUSED here
+// (deadlines are first-class placementDeadlines items now — set a manual
+// `follow_up` via /deadline; rta_window/voucher_expiration are system-managed).
 //
 // PII (doc §9): responses carry full placement docs to the authenticated client;
 // LOG LINES are placementId/stage/counts only — never the placement_tag (a name).
@@ -32,14 +33,19 @@ import type { AuthedRequest } from '../middleware/auth.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
-  type PlacementDeadline,
   type PlacementsPage,
   type PlacementsRepo,
   ConditionalCheckFailedException,
   createPlacementsRepo,
-  isPlacementDeadlineType,
   type ListPlacementsOpts,
 } from '../repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  soonestDeadline,
+  type PlacementDeadlineItem,
+  type PlacementDeadlinesRepo,
+  type SoonestDeadline,
+} from '../repos/placementDeadlinesRepo.js';
 import {
   createConversationsRepo,
   type ConversationParticipant,
@@ -73,6 +79,8 @@ export interface PlacementsRouterDeps {
   config?: AppConfig;
   logger?: Logger;
   placementsRepo?: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model): serialize + arm/retire. */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   auditRepo?: AuditRepo;
   events?: EventBus;
   /** M1.10c relay-on-placement — the placement-scoped "Set up relay thread" action. */
@@ -143,10 +151,10 @@ function parseLimit(raw: unknown): number | undefined {
 
 // --- Cursor (opaque to clients) --------------------------------------------
 // base64url(JSON) of the Query/Scan LastEvaluatedKey. A placement cursor is a
-// small flat object of string key attributes (placementId + maybe a GSI key, up
-// to 3 for the byNextDeadline composite). We validate the SHAPE (1..3 scalar
-// keys), not exact keys, since it varies by which index produced it — a
-// client-tampered cursor must never reach DynamoDB as a malformed key.
+// small flat object of string key attributes (placementId + maybe a GSI key). We
+// validate the SHAPE (1..3 scalar keys), not exact keys, since it varies by which
+// index produced it — a client-tampered cursor must never reach DynamoDB as a
+// malformed key.
 function encodeCursor(lastEvaluatedKey: Record<string, unknown>): string {
   return Buffer.from(JSON.stringify(lastEvaluatedKey), 'utf8').toString('base64url');
 }
@@ -285,26 +293,34 @@ function validatePlacementUpdate(body: unknown): Validation<Record<string, unkno
   return { ok: true, fields };
 }
 
-/** Validate POST /placements/:placementId/deadline → a PlacementDeadline or null (clear). */
-function validateDeadline(body: unknown): Validation<PlacementDeadline | null> {
+/**
+ * Validate POST /placements/:placementId/deadline. Manual deadline setting is
+ * restricted to `follow_up` ONLY: rta_window / voucher_expiration are
+ * SYSTEM-managed (armed by the transition service / contact-edit sync) and are
+ * off-limits to a manual set (placement-deadline-model §12). Returns the
+ * follow_up deadline to arm, or null to clear it.
+ */
+function validateDeadline(body: unknown): Validation<{ type: 'follow_up'; at: string } | null> {
   if (typeof body !== 'object' || body === null) return { ok: false, error: 'body must be an object' };
   const b = body as Record<string, unknown>;
   if (b['clear'] === true) return { ok: true, fields: null };
-  if (!isPlacementDeadlineType(b['type'])) {
-    return { ok: false, error: 'type must be one of the placement deadline types (or send { clear: true })' };
+  if (b['type'] !== 'follow_up') {
+    return { ok: false, error: 'type must be "follow_up" (or send { clear: true })' };
   }
   const at = b['at'];
   if (typeof at !== 'string' || at.length === 0 || Number.isNaN(Date.parse(at))) {
     return { ok: false, error: 'at must be an ISO 8601 timestamp' };
   }
-  // Canonicalize so the byNextDeadline range key sorts lexicographically.
-  return { ok: true, fields: { type: b['type'], at: new Date(at).toISOString() } };
+  // Canonicalize so the byDueAt range key sorts lexicographically.
+  return { ok: true, fields: { type: 'follow_up', at: new Date(at).toISOString() } };
 }
 
 export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const config = deps.config ?? loadConfig();
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
@@ -323,12 +339,58 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     deps.statusTransitionService ??
     createStatusTransitionService({
       placementsRepo: placements,
+      placementDeadlinesRepo: placementDeadlines,
       unitsRepo: units,
       contactsRepo: contacts,
       auditRepo: audit,
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
     });
+
+  /**
+   * Attach the COMPUTED soonest deadline onto a placement for a wire response.
+   * The flat next_deadline_type/next_deadline_at shape is preserved; its source
+   * is the placement's placementDeadlines items (no stored slot).
+   */
+  const withDeadline = (
+    p: PlacementItem,
+    soonest: SoonestDeadline | null,
+  ): PlacementItem => {
+    // Terminal-stage guard (parity with today.ts): a closed deal has NO live
+    // deadline. A straggler deadline row (a partial clearForPlacement failure, or
+    // a voucher-sync↔terminal-transition race) must NOT surface a chip on the
+    // card/detail — treat a terminal placement as having no deadline.
+    const effective = TERMINAL_STAGES.has(p.stage) ? null : soonest;
+    return {
+      ...p,
+      next_deadline_type: effective?.type,
+      next_deadline_at: effective?.at,
+    };
+  };
+
+  /** Emit placement.updated with the recomputed soonest deadline (one query). */
+  async function emitPlacementUpdated(placement: PlacementItem): Promise<void> {
+    const ds = await placementDeadlines.listByPlacement(placement.placementId);
+    events.emit('placement.updated', toPlacementUpdatedEvent(placement, soonestDeadline(ds)));
+  }
+
+  /**
+   * Best-effort: arm the tenant's voucher_expiration deadline on a freshly
+   * created placement, sourced from the tenant contact's voucher_expiration_date
+   * (the tenant-level clock — placement-deadline-model §6). A failure never fails
+   * the create (the placement is already persisted).
+   */
+  async function armVoucherFromTenant(placementId: string, tenantId: string): Promise<void> {
+    try {
+      const tenant = await contacts.getById(tenantId);
+      const date = tenant?.voucher_expiration_date;
+      if (typeof date === 'string' && date.length > 0) {
+        await placementDeadlines.arm(placementId, 'voucher_expiration', date);
+      }
+    } catch (err) {
+      log.error({ err, placementId }, 'create-path voucher arm failed (best-effort)');
+    }
+  }
 
   // BE2/C2: record one placement milestone against the tenant contact.
   // Best-effort — a log failure must NEVER fail the operator's board action (the
@@ -351,10 +413,12 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   const router = Router();
 
   // GET /api/placements — the boards' read. Exactly one filter is honored, most-
-  // specific first: deadlineType(+before) > tourDate > stage > tenantId >
-  // unitId; with no filter, a paginated Scan (the "all placements" kanban
-  // fallback). Each path is a single bounded Query (or the Scan), never an
-  // unbounded fan.
+  // specific first: tourDate > stage > tenantId > unitId; with no filter, a
+  // paginated Scan (the "all placements" kanban fallback). Each path is a single
+  // bounded Query (or the Scan), never an unbounded fan. Each returned placement
+  // carries its COMPUTED next_deadline_* (soonest of its placementDeadlines
+  // items), joined via ONE listAllPending() query (a placementId→soonest map),
+  // NOT one query per placement.
   router.get('/', async (req, res) => {
     const limit = parseLimit(req.query['limit']);
     if (limit === undefined) {
@@ -379,33 +443,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     const tenantId = req.query['tenantId'];
     const unitId = req.query['unitId'];
     const tourDate = req.query['tourDate'];
-    const deadlineType = req.query['deadlineType'];
-    const before = req.query['before'];
 
     let page: PlacementsPage;
-    if (typeof deadlineType === 'string' && deadlineType.length > 0) {
-      if (!isPlacementDeadlineType(deadlineType)) {
-        res.status(400).json({ error: 'deadlineType must be a known placement deadline type' });
-        return;
-      }
-      // The "due by" bound feeds the byNextDeadline RANGE key, which sorts
-      // LEXICOGRAPHICALLY — so it must be canonicalized to the SAME ISO 8601
-      // shape the writes use (placements set next_deadline_at via new Date().toISOString()).
-      // A bare-date or offset cutoff would otherwise mis-sort and silently drop
-      // same-day deadlines. Validate + canonicalize; 400 on a bad value.
-      let beforeAt: string | undefined;
-      if (before !== undefined) {
-        if (typeof before !== 'string' || before.length === 0 || Number.isNaN(Date.parse(before))) {
-          res.status(400).json({ error: 'before must be an ISO 8601 timestamp' });
-          return;
-        }
-        beforeAt = new Date(before).toISOString();
-      }
-      page = await placements.listByNextDeadline(deadlineType, {
-        ...opts,
-        ...(beforeAt !== undefined && { beforeAt }),
-      });
-    } else if (typeof tourDate === 'string' && tourDate.length > 0) {
+    if (typeof tourDate === 'string' && tourDate.length > 0) {
       if (!isValidYmd(tourDate)) {
         res.status(400).json({ error: 'tourDate must be a valid YYYY-MM-DD date' });
         return;
@@ -425,8 +465,21 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       page = await placements.list(opts);
     }
 
+    // Compute each placement's soonest deadline from ONE listAllPending() query
+    // (a placementId→soonest map), never one query per placement.
+    const pending = await placementDeadlines.listAllPending();
+    const byPlacement = new Map<string, PlacementDeadlineItem[]>();
+    for (const d of pending) {
+      const arr = byPlacement.get(d.placementId);
+      if (arr) arr.push(d);
+      else byPlacement.set(d.placementId, [d]);
+    }
+    const serialized = page.items.map((p) =>
+      withDeadline(p, soonestDeadline(byPlacement.get(p.placementId) ?? [])),
+    );
+
     res.json({
-      placements: page.items,
+      placements: serialized,
       nextCursor: page.lastEvaluatedKey !== undefined ? encodeCursor(page.lastEvaluatedKey) : null,
     });
   });
@@ -473,7 +526,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     });
     // BE2/C2: a new placement is a "placement opened" milestone on the tenant's timeline.
     await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
-    events.emit('placement.updated', toPlacementUpdatedEvent(created));
+    // Arm the tenant's voucher_expiration deadline from the contact date (best-effort).
+    await armVoucherFromTenant(created.placementId, created.tenantId);
+    await emitPlacementUpdated(created);
     // §7 derive-on-create: stamp the tenant + property coarse statuses for the
     // initial stage (override-gated, source 'derived'). Best-effort — a derived
     // write failure must NEVER fail the 201 (the placement is already persisted).
@@ -488,7 +543,8 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       { placementId: created.placementId, stage: created.stage, actor: req.user?.userId },
       'placement created via api',
     );
-    res.status(201).json({ placement: created });
+    const ds = await placementDeadlines.listByPlacement(created.placementId);
+    res.status(201).json({ placement: withDeadline(created, soonestDeadline(ds)) });
   });
 
   // POST /api/placements/from-tour — the Post-Tour & Application conversion.
@@ -636,7 +692,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       fromTourId: tour.tourId,
     });
     await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
-    events.emit('placement.updated', toPlacementUpdatedEvent(created));
+    // Arm the tenant's voucher_expiration deadline from the contact date (best-effort).
+    await armVoucherFromTenant(created.placementId, created.tenantId);
+    await emitPlacementUpdated(created);
     // §7 derive-on-create: stamp the tenant → placing (and property) coarse
     // statuses. Best-effort — a derived write failure must NEVER fail the 201.
     try {
@@ -646,7 +704,8 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     }
     const finalTour = await tours.get(tour.tourId);
     log.info({ placementId: created.placementId, tourId: tour.tourId }, 'tour converted to placement');
-    res.status(201).json({ placement: created, tour: finalTour });
+    const ds = await placementDeadlines.listByPlacement(created.placementId);
+    res.status(201).json({ placement: withDeadline(created, soonestDeadline(ds)), tour: finalTour });
   });
 
   // GET /api/placements/:placementId — one placement.
@@ -658,7 +717,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(404).json({ error: 'placement_not_found' });
       return;
     }
-    res.json({ placement: item });
+    // Attach the COMPUTED soonest deadline (its own placementDeadlines items).
+    const ds = await placementDeadlines.listByPlacement(placementId);
+    res.json({ placement: withDeadline(item, soonestDeadline(ds)) });
   });
 
   // PATCH /api/placements/:placementId — partial update (SET-merge; null clears a field).
@@ -737,16 +798,19 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       // restore this milestone from a tour-status change event.
     }
 
-    events.emit('placement.updated', toPlacementUpdatedEvent(item));
+    await emitPlacementUpdated(item);
     log.info(
       { placementId, fields: Object.keys(validation.fields).length, actor: req.user?.userId },
       'placement updated via api',
     );
-    res.json({ placement: item });
+    const ds = await placementDeadlines.listByPlacement(placementId);
+    res.json({ placement: withDeadline(item, soonestDeadline(ds)) });
   });
 
-  // POST /api/placements/:placementId/deadline — set/clear the next business-clock
-  // deadline (the byNextDeadline composite key; both-or-neither via the repo).
+  // POST /api/placements/:placementId/deadline — arm/clear a MANUAL `follow_up`
+  // deadline (a first-class placementDeadlines item). System-managed
+  // rta_window/voucher_expiration are off-limits here (validateDeadline gates to
+  // follow_up only). { clear: true } retires the follow_up.
   router.post('/:placementId/deadline', async (req: AuthedRequest, res) => {
     const placementId = String(req.params['placementId'] ?? '');
     mergeContext({ placementId });
@@ -755,26 +819,29 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(400).json({ error: validation.error });
       return;
     }
-    let item;
-    try {
-      item = await placements.setNextDeadline(placementId, validation.fields);
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'placement_not_found' });
-        return;
-      }
-      throw err;
+    // 404 an unknown placement (parity with the old setNextDeadline conditional).
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (validation.fields === null) {
+      await placementDeadlines.retire(placementId, 'follow_up');
+    } else {
+      await placementDeadlines.arm(placementId, 'follow_up', validation.fields.at);
     }
     await audit.append(`placements#${placementId}`, validation.fields === null ? 'placement_deadline_cleared' : 'placement_deadline_set', {
       actor: req.user?.userId,
       ...(validation.fields !== null && { deadlineType: validation.fields.type }),
     });
-    events.emit('placement.updated', toPlacementUpdatedEvent(item));
+    const ds = await placementDeadlines.listByPlacement(placementId);
+    const soonest = soonestDeadline(ds);
+    events.emit('placement.updated', toPlacementUpdatedEvent(item, soonest));
     log.info(
       { placementId, deadlineType: validation.fields?.type ?? null, actor: req.user?.userId },
       validation.fields === null ? 'placement deadline cleared via api' : 'placement deadline set via api',
     );
-    res.json({ placement: item });
+    res.json({ placement: withDeadline(item, soonest) });
   });
 
   // POST /api/placements/:placementId/relay — set up the placement's masked relay
@@ -882,7 +949,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       actor,
       conversationId: conversation.conversationId,
     });
-    events.emit('placement.updated', toPlacementUpdatedEvent(updatedPlacement));
+    await emitPlacementUpdated(updatedPlacement);
     log.info(
       { placementId, conversationId: conversation.conversationId, actor },
       'placement relay thread provisioned via api',

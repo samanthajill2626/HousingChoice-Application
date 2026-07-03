@@ -7,9 +7,9 @@ tool (and Workflow `agent()` calls) **inherit the parent session's model unless
 overridden** — when the main session runs on Fable, every un-pinned sub-agent
 silently multiplies Fable usage.
 
-- **Pass an explicit `model` on every sub-agent.** Default to **`sonnet`** for
+- **Pass an explicit `model` on every sub-agent.** Default to **`opus`** for
   the routine fan-outs (Explore sweeps, spec-conformance + adversarial reviewers,
-  audits, searches); use **`haiku`** for trivial mechanical sweeps.
+  audits, searches); use **`sonnet`** for trivial mechanical sweeps.
 - **Reserve Fable** for orchestrator-level work and tasks explicitly deemed
   high-importance (e.g. a subtle security-critical review or debugging session
   where the extra capability genuinely earns its cost). Using Fable on a

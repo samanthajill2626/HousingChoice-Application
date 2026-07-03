@@ -25,29 +25,27 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TENANT_ID = 'contact-tenant-0001'; // Tasha Nguyen
 const UNIT_A_ADDRESS = '1450 Joseph E. Boone Blvd NW'; // unit-0001 — has tour_process
 
-/** A future datetime-local string (HTML input format) for TODAY, one hour from now.
- *  Must be strictly in the future to pass the dialog's validation. */
-function futureDatetimeLocal(): string {
-  const d = new Date(Date.now() + 60 * 60 * 1000); // +1 h
+/** A datetime-local string (HTML input format, YYYY-MM-DDTHH:MM) at a fixed
+ *  wall-clock `hour`:`minute` on `base`'s LOCAL calendar date. Paired with a
+ *  pinned browser clock to schedule a tour at a deterministic in-day time (see the
+ *  "schedule WITH a time" test) — NOT `Date.now() + 1h`, which flaked near local
+ *  midnight (the tour rolled into tomorrow, out of the Today board's local-today
+ *  window). */
+function localDatetimeAt(base: Date, hour: number, minute: number): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
-  // datetime-local format: YYYY-MM-DDTHH:MM (no seconds, no timezone)
   return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}` +
+    `T${pad(hour)}:${pad(minute)}`
   );
-}
-
-/** Returns the ISO date for today in YYYY-MM-DD for the Tours today query. */
-function todayIso(): string {
-  const d = new Date();
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  // `exact: true` — match ONLY the <h1>Today</h1> board title, never the
+  // <h2>Tours today</h2> section heading (both contain the substring "today", so a
+  // non-exact match trips Playwright strict mode once that section renders).
+  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
 }
 
 // Reseed once before the entire describe block so every test starts clean.
@@ -88,6 +86,20 @@ test.describe('Tours page', () => {
   test('schedule WITH a time: appears in Upcoming + Today board under Tours today', async ({
     page,
   }) => {
+    // Pin the browser wall-clock to a FIXED mid-morning instant on today's local
+    // date so this test is deterministic at ANY real hour. WHY (do NOT revert to
+    // `Date.now() + 1h`): the Today board derives "today" from the *browser's* clock
+    // (useToday → localDayWindow(new Date())) and the Schedule dialog rejects a past
+    // datetime. With now+1h, a run after ~23:00 local scheduled the tour into
+    // *tomorrow* — so it fell outside the board's local-today window and the "Tours
+    // today" list never rendered (the near-midnight flake this fixes). Pinning to
+    // 09:00 and scheduling for 12:00 keeps the tour unambiguously *future* AND
+    // *today*. setFixedTime pins Date.now()/new Date() but keeps timers running
+    // (SSE/debounce), so the app behaves normally.
+    const base = new Date();
+    const pinnedNow = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 9, 0, 0, 0);
+    await page.clock.setFixedTime(pinnedNow);
+
     await devLogin(page);
 
     // Navigate to the seeded tenant's contact page.
@@ -113,8 +125,9 @@ test.describe('Tours page', () => {
     const tourTypeSelect = dialog.getByRole('combobox', { name: 'Tour type' });
     await expect(tourTypeSelect).toHaveValue('landlord_led');
 
-    // Set a future date/time for TODAY.
-    const futureTime = futureDatetimeLocal();
+    // Schedule for a FIXED time solidly inside today — noon local, comfortably
+    // future vs the pinned 09:00 and 12 h from both midnight boundaries.
+    const futureTime = localDatetimeAt(base, 12, 0);
     await dialog.getByLabel('Date and time').fill(futureTime);
 
     // Submit.
@@ -151,13 +164,13 @@ test.describe('Tours page', () => {
     await expect(tourLink).toHaveAttribute('href', `/tours/${tourId}`);
 
     // ── Today board — "Tours today" section shows this tour ──
-    // Navigate to Today, passing the local-day boundaries so the backend's
-    // tours_today window includes our new tour (scheduled 1 h from now, same day).
-    const ymd = todayIso();
-    const toursFrom = encodeURIComponent(`${ymd}T00:00:00.000Z`);
-    const toursTo = encodeURIComponent(`${ymd}T23:59:59.999Z`);
-    await page.goto(`${NEXT}/?day=${ymd}&toursFrom=${toursFrom}&toursTo=${toursTo}`);
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+    // The Today board derives "today" from the browser clock (useToday →
+    // localDayWindow) and IGNORES query params, so just navigate home; the pinned
+    // clock guarantees our noon tour is inside the board's local-today window.
+    // `exact: true` matches ONLY the <h1>Today</h1> title, not the <h2>Tours
+    // today</h2> section heading that now renders (both contain "today").
+    await page.goto(`${NEXT}/`);
+    await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
 
     // The "Tours today" section must exist and contain a link to this tour.
     const toursSection = page.getByRole('list', { name: 'Tours today' });
@@ -228,12 +241,14 @@ test.describe('Tours page', () => {
     await expect(bookingLink).toHaveAttribute('href', `/tours/${tourId}`);
 
     // ── Today board — "Tours today" section must NOT contain this tour ──
-    // A requested tour has no scheduledAt, so it is excluded from the window query.
-    const ymd = todayIso();
-    const toursFrom = encodeURIComponent(`${ymd}T00:00:00.000Z`);
-    const toursTo = encodeURIComponent(`${ymd}T23:59:59.999Z`);
-    await page.goto(`${NEXT}/?day=${ymd}&toursFrom=${toursFrom}&toursTo=${toursTo}`);
-    await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+    // A requested tour has no scheduledAt, so it is excluded from the tours_today
+    // window regardless of the clock. The board derives "today" from the browser
+    // clock (not query params), so navigate home. `exact: true` matches only the
+    // <h1>Today</h1> title, not the <h2>Tours today</h2> heading that the earlier
+    // scheduled-tour test leaves visible (its noon tour persists via the shared
+    // once-per-file reseed).
+    await page.goto(`${NEXT}/`);
+    await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
 
     // Either the "Tours today" section is absent entirely, or it doesn't contain
     // a link to the requested tour.

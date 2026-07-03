@@ -183,6 +183,19 @@ describe('GET /api/units/:id/activity (property Activity card)', () => {
     expect(res.body.events[0]).not.toHaveProperty('contactName');
   });
 
+  it('projects broadcast_sent and tour audit rows onto the activity wire', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u1');
+    await world.auditRepo.append('units#u1', 'broadcast_sent', { broadcastId: 'b9', tenantCount: 3 });
+    await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't5' });
+    const res = await authedGet(app, '/api/units/u1/activity');
+    expect(res.status).toBe(200);
+    const b = (res.body.events as Array<Record<string, unknown>>).find((e) => e.type === 'broadcast_sent');
+    expect(b).toMatchObject({ broadcastId: 'b9', tenantCount: 3 });
+    const t = (res.body.events as Array<Record<string, unknown>>).find((e) => e.type === 'tour_scheduled');
+    expect(t).toMatchObject({ tourId: 't5' });
+  });
+
   it('passes an unknown event type through honestly (open set, no payload leak)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-future');

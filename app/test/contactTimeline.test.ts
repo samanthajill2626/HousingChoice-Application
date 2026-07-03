@@ -472,6 +472,95 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
   });
 });
 
+// WS3 Task 3.2 — a LANDLORD contact's owned-property lifecycle audit is
+// interleaved into their person-centric timeline as milestone pins. Lifecycle
+// only (broadcasts / tours / listing-status / roster / listing-response); routine
+// field edits (unit_updated/created/deleted/restored) are NEVER surfaced. The
+// property-audit candidate keys on the RAW audit SK (`<ISO>#<rand>`) so its
+// merged cursor lives in the audit's own `before` lexical space (page-safe).
+describe('GET /api/contacts/:id/timeline — landlord property interleave', () => {
+  const authedGet = (app: Express, path: string) =>
+    request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+  it('merges owned-unit lifecycle audit into the landlord timeline, excluding field-edits', async () => {
+    const h = makeWebhookHarness();
+    const app = h.app;
+    const world = h.world;
+    world.contacts.push({
+      contactId: 'll1',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100009',
+      phones: [{ phone: '+15550100009', primary: true }],
+    });
+    world.units.set('u1', { unitId: 'u1', landlordId: 'll1', status: 'available' });
+    await world.auditRepo.append('units#u1', 'broadcast_sent', { broadcastId: 'b1', tenantCount: 4 });
+    await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't1' });
+    await world.auditRepo.append('units#u1', 'listing_status_changed', { to: 'under_application' });
+    await world.auditRepo.append('units#u1', 'unit_updated', { fields: ['rent_min'] }); // EXCLUDED
+
+    const res = await authedGet(app, '/api/contacts/ll1/timeline');
+    expect(res.status).toBe(200);
+
+    const ms = res.body.items.filter((i: { kind: string }) => i.kind === 'milestone');
+    // ONLY the three lifecycle rows interleave — the unit_updated field-edit is
+    // filtered out (never surfaced on any timeline; it stays in the audit trail).
+    expect(ms).toHaveLength(3);
+    const types = ms.map((m: { type: string }) => m.type);
+    expect(types).toContain('tour_scheduled'); // tour_* maps 1:1 to the same-named type
+    expect(types).not.toContain('unit_updated');
+
+    // The broadcast row deep-links to the broadcast, with the recipient count in
+    // its label. type reuses an existing member ('listing_sent'); refType carries
+    // the real deep-link target.
+    const bc = ms.find((m: { refType?: string }) => m.refType === 'broadcast');
+    expect(bc).toMatchObject({
+      kind: 'milestone',
+      type: 'listing_sent',
+      refType: 'broadcast',
+      refId: 'b1',
+      label: expect.stringContaining('4'),
+    });
+
+    const tr = ms.find((m: { refType?: string }) => m.refType === 'tour');
+    expect(tr).toMatchObject({ type: 'tour_scheduled', refType: 'tour', refId: 't1' });
+
+    // The status-change row humanizes the raw enum via LISTING_STATUS_LABELS,
+    // matching the property Activity card ('under_application' → 'Under application').
+    const st = ms.find((m: { type: string }) => m.type === 'stage_changed');
+    expect(st).toMatchObject({
+      type: 'stage_changed',
+      refType: 'unit',
+      refId: 'u1',
+      label: 'Property status → Under application',
+    });
+  });
+
+  it('does NOT interleave property activity for a tenant contact', async () => {
+    const h = makeWebhookHarness();
+    const app = h.app;
+    const world = h.world;
+    world.contacts.push({
+      contactId: 't1',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100010',
+      phones: [{ phone: '+15550100010', primary: true }],
+    });
+    // Even a (mis-owned) unit pointing at the tenant contact must NOT interleave.
+    world.units.set('u2', { unitId: 'u2', landlordId: 't1', status: 'available' });
+    await world.auditRepo.append('units#u2', 'broadcast_sent', { broadcastId: 'b2', tenantCount: 1 });
+
+    const res = await authedGet(app, '/api/contacts/t1/timeline');
+    expect(res.status).toBe(200);
+    expect(
+      res.body.items.filter(
+        (i: { kind: string; type?: string }) => i.kind === 'milestone' && i.type === 'listing_sent',
+      ),
+    ).toHaveLength(0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Part B server (scheduled-message-visibility, Task 4): the not-yet-sent
 // scheduled-send gather returned in a FIRST-PAGE-ONLY `upcoming[]` envelope.

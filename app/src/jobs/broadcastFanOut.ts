@@ -64,6 +64,7 @@ import {
   createListingSendsRepo,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
@@ -148,6 +149,8 @@ export interface BroadcastSendJobDeps {
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4: record the listing-send row per recipient sent (when unit-targeted). */
   listingSendsRepo?: ListingSendsRepo;
+  /** WS2: write a `broadcast_sent` unit-audit row on fan-out completion (best-effort). */
+  auditRepo?: AuditRepo;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   events?: EventBus;
@@ -178,6 +181,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
     const listingSends: ListingSendsRepo =
       deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+    const audit: AuditRepo = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
     sendMessage ??= createSendMessageService({
       config,
       logger: deps.logger,
@@ -410,7 +414,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           { broadcastId: payload.broadcastId, deferred: transientRemaining.length, attempt: payload.attempt },
           'broadcastFanOut: transient retry cap reached — remaining recipients marked failed',
         );
-        await finalize(broadcasts, events, payload.broadcastId, log);
+        await finalize(broadcasts, events, payload.broadcastId, log, audit);
         return;
       }
       await enqueue(
@@ -430,7 +434,7 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
     }
 
     // No recipients remain → terminal. markSent unless EVERY recipient failed.
-    await finalize(broadcasts, events, payload.broadcastId, log);
+    await finalize(broadcasts, events, payload.broadcastId, log, audit);
   });
 }
 
@@ -471,6 +475,7 @@ async function finalize(
   events: EventBus,
   broadcastId: string,
   log: Logger,
+  audit: AuditRepo,
 ): Promise<void> {
   const fresh = await broadcasts.getById(broadcastId);
   if (!fresh) {
@@ -478,6 +483,16 @@ async function finalize(
     return;
   }
   const total = Object.keys(fresh.recipients ?? {}).length;
+  // WS2: surface the send on the targeted property's Activity card. Best-effort —
+  // an audit failure must NEVER fail the fan-out (state is already persisted). A
+  // unit-less broadcast writes nothing. PII-safe log: ids/counts only.
+  if (typeof fresh.unitId === 'string' && fresh.unitId.length > 0) {
+    try {
+      await audit.append(`units#${fresh.unitId}`, 'broadcast_sent', { broadcastId, tenantCount: total });
+    } catch (err) {
+      log.error({ err, broadcastId }, 'broadcast_sent unit audit failed (best-effort)');
+    }
+  }
   const allFailed = total > 0 && fresh.stats.failed >= total;
   const finalItem: BroadcastItem = allFailed
     ? await broadcasts.markFailed(broadcastId, 'all recipients failed')

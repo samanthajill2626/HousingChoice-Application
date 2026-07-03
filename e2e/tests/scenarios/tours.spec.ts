@@ -267,3 +267,38 @@ test('no-show: booked (no group → 1:1 fallback) → check-in fires → logged 
   await flow.tickTourReminders();
   await flow.expectReminderTo1to1('confirmation', tenant, 2);
 });
+
+// Activity coverage: each surfaced tour transition dual-writes a tenant activity
+// event (→ contact timeline pin, deep-linked to the tour) + a units# audit row.
+// These two tests assert the TENANT-timeline surface for the lifecycle pins.
+test('activity coverage: booked + toured tour pins land on the tenant timeline (deep-linked to the tour)', async ({
+  page,
+  request,
+}) => {
+  const flow = new Scenario(page, request);
+  const { unit } = await searchingTenantOwnerUnit(flow, { tenant: 'Milestone', owner: 'Pinner' });
+
+  await flow.tenantAsksToTour(unit);
+  await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
+
+  // Book → 'scheduled' → a `tour_scheduled` pin.
+  await flow.teamBooksTour(tourSchedule());
+  await flow.expectTourMilestoneOnTenantTimeline('Tour scheduled');
+
+  // Mark toured → a `tour_took_place` pin.
+  await flow.teamMarksToured();
+  await flow.expectTourMilestoneOnTenantTimeline('Tour took place');
+});
+
+test('activity coverage: a canceled tour pins on the tenant timeline', async ({ page, request }) => {
+  const flow = new Scenario(page, request);
+  const { unit } = await searchingTenantOwnerUnit(flow, { tenant: 'Caller', owner: 'Offit' });
+
+  await flow.tenantAsksToTour(unit);
+  await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
+  await flow.teamBooksTour(tourSchedule());
+
+  // Cancel → a `tour_canceled` pin.
+  await flow.teamCancelsTour();
+  await flow.expectTourMilestoneOnTenantTimeline('Tour canceled');
+});

@@ -1158,7 +1158,12 @@ export type TimelineMilestoneType =
   | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
+  | 'tour_canceled'
+  | 'tour_no_show'
+  | 'tour_outcome'
   | 'stage_changed'
+  | 'contact_status_changed'
+  | 'opt_out_changed'
   | 'number_added'
   | 'added_to_group_text'
   | 'removed_from_group_text';
@@ -1331,7 +1336,9 @@ export interface SimilarUnit {
 
 /** One property Activity row. `type` is the audit event_type — an OPEN set;
  *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- *  listing_response_set, listing_status_changed, unit_deleted, unit_restored.
+ *  listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
+ *  tour_no_show, tour_canceled, tour_outcome.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */
@@ -1350,6 +1357,10 @@ export interface UnitActivityEvent {
   from?: string;
   to?: string;
   source?: string;
+  broadcastId?: string;
+  tenantCount?: number;
+  tourId?: string;
+  outcome?: string;
 }
 
 // --- Broadcasts (the "Share properties to tenants" surface) -----------------

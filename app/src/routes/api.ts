@@ -408,6 +408,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
+      // WS3 Task 3.2: a landlord's owned-property lifecycle interleave reads the
+      // shared audit trail (the units byLandlord GSI is forwarded below for the
+      // gather and shared by the interleave). Forward the RESOLVED `audit` local
+      // (same rationale as the gather repos below) so prod/e2e read a real repo.
+      auditRepo: audit,
       // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
       // timeline can project pending tour reminders + placement nudges. Forward the
       // RESOLVED locals (each `deps.X ?? create…` above), NOT `deps.X` — the router
@@ -571,6 +576,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
+      activityEventsRepo: activityEvents,
       events,
       // Post-Tour & Application (Task 5): arm the stage nudge ladder + close a
       // lost placement's relay thread from the ONE transition choke point.

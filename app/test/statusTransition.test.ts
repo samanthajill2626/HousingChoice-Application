@@ -876,3 +876,76 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(Date.parse(rows[0]!.at)).toBe(Date.parse(reentered.stage_entered_at!) + RTA_WINDOW_MS);
   });
 });
+
+function makeServiceWithActivity(world: FakeWorld): StatusTransitionService {
+  return createStatusTransitionService({
+    placementsRepo: world.placementsRepo,
+    unitsRepo: world.unitsRepo,
+    contactsRepo: world.contactsRepo,
+    auditRepo: world.auditRepo,
+    activityEventsRepo: world.activityEventsRepo,
+    events: world.events,
+    logger: createLogger({ destination: createLogCapture().stream }),
+  });
+}
+
+describe('statusTransition — contact_status_changed milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    // Landlord fixture — exercises the LANDLORD_STATUS_LABELS branch. Landlord
+    // statuses are needs_review|interested|active|parked (statusModel.ts:173).
+    await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'interested' });
+  });
+
+  it('records a contact_status_changed activity event on an explicit landlord status change', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'll-1', label: 'Status → Parked' }); // LANDLORD_STATUS_LABELS.parked
+    expect(ev[0].refType).toBeUndefined();
+  });
+
+  it('does NOT record when the status is unchanged (no-op)', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'interested', source: 'manual', actor: 'usr_va' });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
+  });
+
+  it('never throws out of setTenantStatus if the milestone write fails (best-effort)', async () => {
+    world.activityEventsRepo.record = async () => { throw new Error('boom'); };
+    const svc = makeServiceWithActivity(world);
+    await expect(svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
+  });
+});
+
+describe('statusTransition — placement stage milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it('records a stage_changed milestone on a non-terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'tenant-1', refType: 'placement', refId: p.placementId, label: expect.stringContaining('Collect RTA') });
+  });
+
+  it('records a placement_closed milestone (with lost category, no free text) on a terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    // Category MUST be a valid lost-reason category (statusModel.ts:303-311) or
+    // transitionPlacement drops it (isLostReasonCategory guard) → label omits it.
+    await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
+    const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0].label).toContain('tenant_withdrew');
+    expect(ev[0].label).not.toContain('secret note');
+  });
+});

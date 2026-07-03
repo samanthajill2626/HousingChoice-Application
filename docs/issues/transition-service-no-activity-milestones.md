@@ -3,11 +3,25 @@ id: transition-service-no-activity-milestones
 title: Status-transition service writes audit provenance but no activity-timeline milestones
 type: debt
 severity: med
-status: open
+status: resolved
 area: app/status-model
 created: 2026-06-19
+resolved: 2026-07-03
 refs: app/src/services/statusTransition.ts, app/src/routes/placements.ts
 ---
+
+**Resolution (2026-07-03).** Resolved by the activity-coverage feature. The
+status-transition service now has `activityEventsRepo` injected
+(`StatusTransitionDeps`, wired through `routes/statusTransition.ts` + `routes/api.ts`)
+and emits activity-timeline milestones alongside its `audit_events` provenance writes:
+`transitionPlacement` emits `stage_changed` (non-terminal) / `placement_closed`
+(terminal `moved_in`/`lost`, folding only the lost **category** into the label, never
+the free text) mapped via `STAGE_LABELS`; and `setTenantStatus` + `deriveTenantStatus`
+emit `contact_status_changed` (both explicit and derived changes, per product decision).
+All emitters are best-effort (a milestone write never fails the transition) and
+idempotent (only on a real `from !== to` change). See
+`app/src/services/statusTransition.ts` and
+`docs/superpowers/plans/2026-07-03-activity-coverage-implementation.md` (WS1).
 
 **Problem.** Before the status-model backend, a placement stage change went through
 `PATCH /api/placements/:id`, which emitted an **activity-timeline milestone**

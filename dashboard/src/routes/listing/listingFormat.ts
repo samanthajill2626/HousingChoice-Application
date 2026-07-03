@@ -81,6 +81,16 @@ export interface UnitActivityDescription {
   to?: string;
 }
 
+/** Human labels for the tour-lifecycle audit kinds surfaced on a property. */
+const TOUR_LABELS: Record<string, string> = {
+  tour_scheduled: 'Tour scheduled',
+  tour_rescheduled: 'Tour rescheduled',
+  tour_took_place: 'Tour took place',
+  tour_no_show: 'Tour no-show',
+  tour_canceled: 'Tour canceled',
+  tour_outcome: 'Tour outcome',
+};
+
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
  *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
 export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
@@ -88,6 +98,17 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
   const who = e.contactName ?? e.contactId;
   const contactLink =
     e.contactId !== undefined ? { to: `/contacts/${encodeURIComponent(e.contactId)}` } : {};
+  if (e.type === 'broadcast_sent') {
+    const n = typeof e.tenantCount === 'number' ? e.tenantCount : 0;
+    return {
+      label: `Broadcast to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+      ...(e.broadcastId ? { to: `/broadcasts/${e.broadcastId}` } : {}),
+    };
+  }
+  const tourLabel = TOUR_LABELS[e.type];
+  if (tourLabel !== undefined) {
+    return { label: tourLabel, ...(e.tourId ? { to: `/tours/${e.tourId}` } : {}) };
+  }
   switch (e.type) {
     case 'unit_created':
       return { label: 'Property created' };

@@ -475,6 +475,23 @@ describe('Timeline', () => {
     expect(screen.queryByRole('button', { name: /Retry/i })).not.toBeInTheDocument();
   });
 
+  it('renders a contact_status_changed milestone pin with its label', () => {
+    renderTimeline({ items: [
+      { kind: 'milestone', id: 'evt-1', at: '2026-07-03T10:00:00.000Z',
+        type: 'contact_status_changed', label: 'Status → Active' },
+    ] });
+    expect(screen.getByText('Status → Active')).toBeInTheDocument();
+  });
+
+  it('renders a tour_canceled milestone pin as a tour deep-link', () => {
+    renderTimeline({ items: [
+      { kind: 'milestone', id: 'evt-2', at: '2026-07-03T10:00:00.000Z',
+        type: 'tour_canceled', label: 'Tour canceled', refType: 'tour', refId: 't-9' },
+    ] });
+    const link = screen.getByRole('link', { name: /Tour canceled/ });
+    expect(link).toHaveAttribute('href', '/tours/t-9');
+  });
+
   // --- Pinned "Upcoming" scheduled-messages section ------------------------
   const SCHEDULED: TimelineScheduled = {
     kind: 'scheduled',

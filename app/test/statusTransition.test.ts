@@ -957,3 +957,33 @@ describe('statusTransition — contact_status_changed milestone', () => {
     await expect(svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
   });
 });
+
+describe('statusTransition — placement stage milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it('records a stage_changed milestone on a non-terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'tenant-1', refType: 'placement', refId: p.placementId, label: expect.stringContaining('Collect RTA') });
+  });
+
+  it('records a placement_closed milestone (with lost category, no free text) on a terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    // Category MUST be a valid lost-reason category (statusModel.ts:303-311) or
+    // transitionPlacement drops it (isLostReasonCategory guard) → label omits it.
+    await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
+    const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0].label).toContain('tenant_withdrew');
+    expect(ev[0].label).not.toContain('secret note');
+  });
+});

@@ -22,6 +22,7 @@ import {
   isPlacementStage,
   isTenantOverrideStatus,
   LANDLORD_STATUS_LABELS,
+  STAGE_LABELS,
   STAGE_STUCK_THRESHOLDS,
   TENANT_STATUS_LABELS,
   TERMINAL_STAGES,
@@ -192,6 +193,30 @@ export function createStatusTransitionService(
     }
   }
 
+  // Best-effort placement stage milestone on a REAL stage move. A terminal move
+  // posts `placement_closed` (with the VALIDATED lost CATEGORY only — never the
+  // free text); a non-terminal move posts `stage_changed`. Never throws out of
+  // the transition; PII-safe log (ids only, never the label).
+  async function recordStageMilestone(
+    tenantId: string,
+    placementId: string,
+    toStage: PlacementStage,
+    lostCategory: string | undefined,
+    lostHasText: boolean,
+  ): Promise<void> {
+    if (!activityEventsRepo || typeof tenantId !== 'string' || tenantId.length === 0) return;
+    try {
+      if (TERMINAL_STAGES.has(toStage)) {
+        const reason = lostCategory && lostCategory.length > 0 ? ` · ${lostCategory}` : (lostHasText ? ' · reason on file' : '');
+        await activityEventsRepo.record({ contactId: tenantId, type: 'placement_closed', label: `Placement closed · ${STAGE_LABELS[toStage]}${reason}`, refType: 'placement', refId: placementId });
+      } else {
+        await activityEventsRepo.record({ contactId: tenantId, type: 'stage_changed', label: `Stage → ${STAGE_LABELS[toStage]}`, refType: 'placement', refId: placementId });
+      }
+    } catch (err) {
+      log.error({ err, placementId }, 'placement stage milestone record failed (best-effort)');
+    }
+  }
+
   /**
    * Derived TENANT-status write (load → override-gate → no-op-gate →
    * update+audit). Best-effort: a failure NEVER throws out of the placement
@@ -352,6 +377,20 @@ export function createStatusTransitionService(
           lost_reason_category: updated.lost_reason.category,
         }),
       });
+
+      // 3b) Contact-timeline milestone on a REAL stage move (idempotent: only when
+      // the stage actually changed). Reads the VALIDATED stored lost reason
+      // (updated.lost_reason) — category ONLY, never the free text — mirroring
+      // placements.ts. Best-effort: never fails the transition.
+      if (from !== updated.stage) {
+        await recordStageMilestone(
+          existing.tenantId,
+          placementId,
+          toStage,
+          updated.lost_reason?.category,
+          typeof updated.lost_reason?.text === 'string' && updated.lost_reason.text.length > 0,
+        );
+      }
 
       // 4) final_rent (§4): written when `Awaiting rent acceptance` CLEARS — the
       // landlord accepts the determined rent — i.e. on the transition OUT of

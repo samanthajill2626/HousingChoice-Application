@@ -380,7 +380,31 @@ export function createStatusTransitionService(
           at: new Date(Date.parse(now) + RTA_WINDOW_MS).toISOString(),
         });
       } else {
-        await scheduleStuckNudge(updated, toStage);
+        // `rta_window` is a STAGE-SCOPED clock OWNED by awaiting_landlord_submission
+        // — it exists only WHILE the placement sits in that stage, so LEAVING the
+        // stage retires it. Without this clear, the stale rta_window keeps the single
+        // next_deadline slot for the whole ~4-week authority window (soon-overdue on
+        // the Today board) AND blocks the destination stage's own stuck_placement
+        // nudge from arming (scheduleStuckNudge would hit its hard-clock defer). So on
+        // a NON-terminal exit FROM awaiting_landlord_submission, clear the slot FIRST,
+        // then feed scheduleStuckNudge the post-clear reality so it arms normally.
+        //
+        // This is DELIBERATELY narrow to rta_window and to leaving its owning stage:
+        // the OTHER hard clocks — `voucher_expiration` (tenant-level) and
+        // `tour_reminder` — are NOT stage-scoped and stay never-clobbered by stuck
+        // nudges. TERMINAL moves are excluded: scheduleStuckNudge's terminal branch
+        // already clears EVERYTHING there, and pre-clearing would be a redundant
+        // second write — the terminal path stays byte-identical in effect.
+        let view = updated;
+        if (
+          from === 'awaiting_landlord_submission' &&
+          updated.next_deadline_type === 'rta_window' &&
+          !TERMINAL_STAGES.has(toStage)
+        ) {
+          await placementsRepo.setNextDeadline(placementId, null);
+          view = { ...updated, next_deadline_type: undefined, next_deadline_at: undefined };
+        }
+        await scheduleStuckNudge(view, toStage);
       }
 
       // 7) Best-effort choke-point hooks (Post-Tour & Application). Both OPTIONAL

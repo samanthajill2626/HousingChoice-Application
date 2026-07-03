@@ -19,7 +19,21 @@ import {
   type StatusTransitionService,
 } from '../src/services/statusTransition.js';
 import { STAGE_STUCK_THRESHOLDS } from '../src/lib/statusModel.js';
-import type { PlacementItem } from '../src/repos/placementsRepo.js';
+import type { PlacementDeadline, PlacementItem } from '../src/repos/placementsRepo.js';
+
+/**
+ * Wrap the fake's `setNextDeadline` to record every call (delegating to the real
+ * impl) so a test can assert BOTH the null-clear and the subsequent stuck set.
+ */
+function spyNextDeadline(world: FakeWorld): Array<{ placementId: string; deadline: PlacementDeadline | null }> {
+  const calls: Array<{ placementId: string; deadline: PlacementDeadline | null }> = [];
+  const orig = world.placementsRepo.setNextDeadline.bind(world.placementsRepo);
+  world.placementsRepo.setNextDeadline = async (placementId, deadline) => {
+    calls.push({ placementId, deadline });
+    return orig(placementId, deadline);
+  };
+  return calls;
+}
 
 function makeService(world: FakeWorld): StatusTransitionService {
   return createStatusTransitionService({
@@ -813,5 +827,90 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
       lostReason: { category: 'stalled' },
     });
     expect(updated.stage).toBe('lost');
+  });
+
+  // rta_window is a STAGE-SCOPED clock OWNED by awaiting_landlord_submission:
+  // leaving that stage must retire the clock. Without the scoped clear, the stale
+  // rta_window sat in the single next_deadline slot for the whole ~4-week authority
+  // window (soon-overdue on the Today board) AND blocked awaiting_authority_approval
+  // from arming its own stuck_placement nudge. These four guard the fix.
+  it('leaving awaiting_landlord_submission → awaiting_authority_approval CLEARS rta_window and ARMS the destination stuck nudge', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_rta_to_landlord',
+    });
+    // Enter awaiting_landlord_submission → arms the rta_window hard clock.
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
+    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('rta_window');
+
+    // Record every setNextDeadline call across the happy-path exit.
+    const calls = spyNextDeadline(world);
+    const before = Date.now();
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_authority_approval', source: 'manual' });
+
+    // The stale rta_window slot was explicitly cleared (setNextDeadline(id, null))…
+    expect(calls.some((k) => k.deadline === null && k.placementId === c.placementId)).toBe(true);
+    // …and then awaiting_authority_approval's OWN stuck_placement nudge armed.
+    expect(calls.some((k) => k.deadline?.type === 'stuck_placement')).toBe(true);
+
+    const after = await world.placementsRepo.getById(c.placementId);
+    expect(after!.next_deadline_type).toBe('stuck_placement');
+    const at = Date.parse(after!.next_deadline_at!);
+    const expected = before + STAGE_STUCK_THRESHOLDS.awaiting_authority_approval!;
+    expect(at).toBeGreaterThanOrEqual(expected - 5_000);
+    expect(at).toBeLessThanOrEqual(Date.now() + STAGE_STUCK_THRESHOLDS.awaiting_authority_approval! + 5_000);
+  });
+
+  it('leaving awaiting_landlord_submission → lost clears the slot EXACTLY ONCE (terminal path unchanged, no double-clear)', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_rta_to_landlord',
+    });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
+    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('rta_window');
+
+    const calls = spyNextDeadline(world);
+    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
+
+    // Terminal move clears the slot via scheduleStuckNudge's terminal branch ONLY —
+    // the scoped pre-clear must NOT also fire (that would be a redundant second write).
+    const clears = calls.filter((k) => k.deadline === null && k.placementId === c.placementId);
+    expect(clears).toHaveLength(1);
+    const after = await world.placementsRepo.getById(c.placementId);
+    expect(after!.next_deadline_type).toBeUndefined();
+    expect(after!.next_deadline_at).toBeUndefined();
+  });
+
+  it('a pending voucher_expiration hard clock is STILL deferred-to, never cleared by the stage-scoped rta_window logic', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
+    // voucher_expiration is tenant-level (not stage-scoped) — it must survive stage moves.
+    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'voucher_expiration', at: '2026-12-01T00:00:00.000Z' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'review_rta', source: 'manual' });
+    const after = await world.placementsRepo.getById(c.placementId);
+    expect(after!.next_deadline_type).toBe('voucher_expiration'); // untouched
+    expect(after!.next_deadline_at).toBe('2026-12-01T00:00:00.000Z');
+  });
+
+  it('re-entering awaiting_landlord_submission re-arms a FRESH +48h rta_window', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_rta_to_landlord',
+    });
+    // First entry, then leave (clearing the clock), then come back.
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_authority_approval', source: 'manual' });
+    const reentered = await svc.transitionPlacement(c.placementId, {
+      toStage: 'awaiting_landlord_submission',
+      source: 'manual',
+    });
+    expect(reentered.next_deadline_type).toBe('rta_window');
+    expect(Date.parse(reentered.next_deadline_at!)).toBe(Date.parse(reentered.stage_entered_at!) + RTA_WINDOW_MS);
   });
 });

@@ -111,7 +111,9 @@ function toRelatedUnit(
  * One property Activity row (the dashboard's Activity card) — a unit audit
  * event projected onto the wire. `type` is the audit event_type (an open set;
  * today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- * listing_response_set, listing_status_changed, unit_deleted, unit_restored).
+ * listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ * broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
+ * tour_no_show, tour_canceled, tour_outcome).
  * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
  * raw payload document (a future payload field can't leak through here).
  */
@@ -132,6 +134,10 @@ interface UnitActivityEvent {
   from?: string;
   to?: string;
   source?: string;
+  broadcastId?: string;
+  tenantCount?: number;
+  tourId?: string;
+  outcome?: string;
 }
 
 /** Project one audit row → the Activity wire shape (fixed-key whitelist). */
@@ -139,6 +145,8 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
   const p = e.payload ?? {};
   const str = (key: string): string | undefined =>
     typeof p[key] === 'string' ? (p[key] as string) : undefined;
+  const num = (key: string): number | undefined =>
+    typeof p[key] === 'number' ? (p[key] as number) : undefined;
   const fieldsRaw = p['fields'];
   const fields = Array.isArray(fieldsRaw)
     ? fieldsRaw.filter((f): f is string => typeof f === 'string')
@@ -159,6 +167,10 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
     ...(str('from') !== undefined && { from: str('from') }),
     ...(str('to') !== undefined && { to: str('to') }),
     ...(str('source') !== undefined && { source: str('source') }),
+    ...(str('broadcastId') !== undefined && { broadcastId: str('broadcastId') }),
+    ...(num('tenantCount') !== undefined && { tenantCount: num('tenantCount') }),
+    ...(str('tourId') !== undefined && { tourId: str('tourId') }),
+    ...(str('outcome') !== undefined && { outcome: str('outcome') }),
   };
 }
 

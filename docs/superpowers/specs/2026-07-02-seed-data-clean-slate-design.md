@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-07-02).** This document
+> describes how this work was *designed at the time of writing*. The clean-slate seed shipped to
+> `main` and its feature branch `feat/seed-clean-slate` + worktree were deleted on 2026-07-02.
+> **This file is NOT current documentation, and the live code may have drifted from it.** For
+> current truth read the code (`app/src/lib/seed/`) and the living docs. Kept only as a
+> point-in-time record of intent.
+
 # Seed data, clean slate — story cast + coverage matrix + live showcase
 
 **Date:** 2026-07-02 · **Status:** design (approved in brainstorm; implementation follows)

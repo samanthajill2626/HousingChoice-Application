@@ -7,6 +7,7 @@ import { test, expect, type Page } from '@playwright/test';
 // awaiting_inspection. Served on :5174 (the suite baseURL); targeted by
 // absolute URL for explicitness.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+const TENANT = 'contact-tenant-0001'; // Tasha Nguyen — the tenant on placement-0001
 
 // Log in as the seeded VA, then reset the seeded placement (placement-0001) back to
 // `awaiting_inspection` via an AUTHENTICATED request (session-safe, targeted) so
@@ -47,4 +48,14 @@ test('Placement detail: shows placement facts + history, and a transition adds a
   await expect(page.getByRole('heading', { name: /Determine rent/ })).toBeVisible();
   const history = page.getByRole('list', { name: 'Placement history' });
   await expect(history.getByRole('listitem').first()).toBeVisible();
+
+  // Activity coverage: the SAME transition also lands as a person-centric
+  // `stage_changed` milestone on the TENANT's timeline (placement-0001 is Tasha =
+  // contact-tenant-0001), deep-linking back to the placement. `.first()` tolerates
+  // the pins that accumulate across re-runs (each run + its reset transition).
+  await page.goto(`${NEXT}/contacts/${TENANT}`);
+  const timeline = page.getByRole('region', { name: 'Communications and activity' });
+  const stagePin = timeline.getByRole('link', { name: /Stage → Determine rent/ }).first();
+  await expect(stagePin).toBeVisible({ timeout: 10_000 });
+  await expect(stagePin).toHaveAttribute('href', '/placements/placement-0001');
 });

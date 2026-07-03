@@ -1653,6 +1653,28 @@ export class Scenario {
     return this.tourStatusAction('Mark no-show', 'No show', 'Team logs a no-show');
   }
 
+  /** [Team, MANUAL] Cancel the tour (TourDetail 'Cancel tour' control). */
+  teamCancelsTour(): Promise<void> {
+    return this.tourStatusAction('Cancel this tour', 'Canceled', 'Team cancels the tour');
+  }
+
+  /** [App] A tour-lifecycle milestone pin shows on the ACTIVE tenant's timeline,
+   *  deep-linking to the tour detail page. `label` is the rendered pin text
+   *  (e.g. 'Tour scheduled', 'Tour took place', 'Tour canceled'). Activity-coverage:
+   *  the tour transition dual-writes a tenant activity event + a units# audit row;
+   *  this asserts the tenant surface. `.first()` tolerates re-run accumulation. */
+  expectTourMilestoneOnTenantTimeline(label: string): Promise<void> {
+    const contactId = this.requireActiveContactId();
+    const tour = this.requireActiveTour();
+    return step(`App: '${label}' tour milestone on the tenant timeline`, async () => {
+      await this.page.goto(`${NEXT}/contacts/${contactId}`);
+      const timeline = this.page.getByRole('region', { name: 'Communications and activity' });
+      const pin = timeline.getByRole('link', { name: new RegExp(escapeRegExp(label)) }).first();
+      await expect(pin).toBeVisible({ timeout: 10_000 });
+      await expect(pin).toHaveAttribute('href', `/tours/${tour.tourId}`);
+    });
+  }
+
   /** [Team, MANUAL] Reschedule the tour to a new time — cancels the pending
    *  ladder and RE-ARMS it off the new time (asserted by a fresh confirmation). */
   teamReschedulesTour(times: TourTimes): Promise<void> {

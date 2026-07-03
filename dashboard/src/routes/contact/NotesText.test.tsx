@@ -20,8 +20,8 @@ function mockHeights(scrollHeight: number, clientHeight: number): void {
 
 afterEach(() => {
   // Remove the shadowing getters (the originals live on Element.prototype).
-  delete (HTMLElement.prototype as Record<string, unknown>)['scrollHeight'];
-  delete (HTMLElement.prototype as Record<string, unknown>)['clientHeight'];
+  delete (HTMLElement.prototype as unknown as Record<string, unknown>)['scrollHeight'];
+  delete (HTMLElement.prototype as unknown as Record<string, unknown>)['clientHeight'];
 });
 
 describe('NotesText', () => {

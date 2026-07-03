@@ -28,7 +28,12 @@ import { createToursRepo } from '../repos/toursRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
 import { createPlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
-import { createPlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  createPlacementsRepo,
+  isPlacementDeadlineType,
+  type PlacementDeadlineType,
+} from '../repos/placementsRepo.js';
+import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
 import { createUnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 
@@ -237,6 +242,75 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDuePlacementNudges(nowIso, placementNudgeDeps());
     log.info({ now: nowIso }, 'dev placement-nudge tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/placements/:placementId/deadline-fixture — hermetic e2e-only seam
+  // to shape a placement's DEADLINE MODEL directly (placement-deadline-model),
+  // bypassing the product gates a test cannot otherwise satisfy:
+  //   - the manual /api/placements/:id/deadline route is follow_up-ONLY (the system
+  //     clocks rta_window/voucher_expiration are off-limits there), and
+  //   - rta_window is armed by the transition service off the WALL clock at +48h,
+  //     which an e2e cannot advance.
+  // Two independent knobs (either/both):
+  //   { deadline: { type, at } } → arm ANY deadline type at an arbitrary instant
+  //        (e.g. force rta_window overdue: type:'rta_window', at:<past ISO>).
+  //   { stageEnteredAt: <ISO> }  → backdate stage_entered_at so the DERIVED stuck
+  //        flag (time-in-stage vs STAGE_STUCK_THRESHOLDS) fires without waiting days.
+  // Same triple-gate/hermetic-LOCAL-only construction as the tick seams above (the
+  // dev router only mounts behind lib/devRoutes.ts, structurally absent in every
+  // deployed env); json() is scoped to this route only.
+  let fixtureRepos: { placements: ReturnType<typeof createPlacementsRepo>; deadlines: ReturnType<typeof createPlacementDeadlinesRepo> } | undefined;
+  const deadlineFixtureRepos = () => {
+    fixtureRepos ??= {
+      placements: createPlacementsRepo({ logger: log }),
+      deadlines: createPlacementDeadlinesRepo({ logger: log }),
+    };
+    return fixtureRepos;
+  };
+  router.post('/__dev/placements/:placementId/deadline-fixture', json(), async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    const body = (req.body ?? {}) as { deadline?: unknown; stageEnteredAt?: unknown };
+
+    // Validate the (optional) deadline arm — type must be a live PlacementDeadlineType
+    // and `at` a parseable ISO 8601 instant (NORMALIZED like the tick seams).
+    let armType: PlacementDeadlineType | undefined;
+    let armAt: string | undefined;
+    if (body.deadline !== undefined) {
+      const d = body.deadline as { type?: unknown; at?: unknown };
+      if (!isPlacementDeadlineType(d.type) || typeof d.at !== 'string' || Number.isNaN(Date.parse(d.at))) {
+        res.status(400).json({ error: 'deadline must be { type: PlacementDeadlineType, at: ISO 8601 }' });
+        return;
+      }
+      armType = d.type;
+      armAt = new Date(d.at).toISOString();
+    }
+    // Validate the (optional) stage_entered_at backdate.
+    let stageEnteredAt: string | undefined;
+    if (body.stageEnteredAt !== undefined) {
+      if (typeof body.stageEnteredAt !== 'string' || Number.isNaN(Date.parse(body.stageEnteredAt))) {
+        res.status(400).json({ error: 'stageEnteredAt must be a valid ISO 8601 datetime' });
+        return;
+      }
+      stageEnteredAt = new Date(body.stageEnteredAt).toISOString();
+    }
+
+    const { placements, deadlines } = deadlineFixtureRepos();
+    const placement = await placements.getById(placementId);
+    if (!placement) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (armType !== undefined && armAt !== undefined) {
+      await deadlines.arm(placementId, armType, armAt);
+    }
+    if (stageEnteredAt !== undefined) {
+      await placements.update(placementId, { stage_entered_at: stageEnteredAt });
+    }
+    log.info(
+      { placementId, deadlineType: armType ?? null, backdatedStage: stageEnteredAt !== undefined },
+      'dev deadline-fixture applied',
+    );
+    res.status(200).json({ ok: true });
   });
 
   return router;

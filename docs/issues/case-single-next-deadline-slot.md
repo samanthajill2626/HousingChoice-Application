@@ -3,11 +3,26 @@ id: case-single-next-deadline-slot
 title: A placement has one next_deadline slot, so stuck_placement nudges yield to hard-clock deadlines
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-06-19
+resolved: 2026-07-03
 refs: app/src/repos/placementsRepo.ts, app/src/services/statusTransition.ts:scheduleStuckNudge
 ---
+
+> **RESOLVED (2026-07-03) — placement-deadline-model refactor.** The single
+> overloaded `next_deadline` slot (and the `byNextDeadline` GSI + `setNextDeadline`)
+> is retired. Real due-dates are now first-class **`placementDeadlines`** items (one
+> per `(placement, type)`; the placement surfaces the soonest, with the flat
+> `next_deadline_*` wire shape preserved as a computed projection). The internal
+> **stuck flag** moved OUT of deadlines entirely — it is now DERIVED from
+> time-in-stage in `today.ts` (`scheduleStuckNudge` deleted), so a placement on a
+> hard clock AND going stale surfaces on **both** queues at once (no more deferral).
+> Design + plan:
+> [spec](../superpowers/specs/2026-07-03-placement-deadline-model-design.md),
+> [plan](../superpowers/plans/2026-07-03-placement-deadline-model.md). Coexistence is
+> pinned by e2e (`e2e/tests/scenarios/post-tour-application.spec.ts` — the
+> voucher + rta_window + derived-stuck walk).
 
 **Problem.** A placement carries exactly ONE `next_deadline` slot (the
 `byNextDeadline` composite GSI key — `next_deadline_type` +

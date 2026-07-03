@@ -2369,8 +2369,14 @@ export class Scenario {
       await this.page.goto(`${NEXT}/placements/${id}`);
       const box = this.page.getByRole('checkbox', { name });
       await expect(box).toBeVisible({ timeout: 10_000 });
-      await box.check();
-      await expect(box).toBeChecked();
+      // The checkbox is a CONTROLLED input whose `checked` is driven by the
+      // placement row: a click PATCHes the placement and only flips once the
+      // async round-trip resolves + re-renders. So Playwright's strict `check()`
+      // (which asserts the state changed immediately) sees React revert the
+      // native toggle and fails. Click only when not already checked, then poll
+      // `toBeChecked` (retries through the PATCH + re-render).
+      if (!(await box.isChecked())) await box.click();
+      await expect(box).toBeChecked({ timeout: 10_000 });
     });
   }
 
@@ -2379,10 +2385,21 @@ export class Scenario {
    * complete_paperwork → Awaiting move-in via the readiness modal (always
    * confirmable; it carries the "LIF not marked" advisory when applicable). We
    * simply confirm past it. Asserts the destination stage renders.
+   *
+   * `opts.lifUnconfirmed` asserts the LIF advisory state IN the modal before
+   * confirming (the diagram's "noting unconfirmed LIF for a LIF-eligible
+   * tenant"): `true` → the "LIF is not marked" alert MUST be present (a
+   * LIF-eligible tenant with LIF unticked); `false` → NO such alert (a
+   * non-LIF-eligible tenant). Omitted → no advisory assertion.
    */
-  teamConfirmsMoveInReady(): Promise<void> {
+  teamConfirmsMoveInReady(opts?: { lifUnconfirmed?: boolean }): Promise<void> {
     return step('Team confirms move-in ready → Awaiting move-in', async () => {
       const dialog = await this.openMovePrompt('Awaiting move-in', 'Confirm move-in ready');
+      if (opts?.lifUnconfirmed === true) {
+        await expect(dialog.getByRole('alert')).toContainText('LIF is not marked', { timeout: 10_000 });
+      } else if (opts?.lifUnconfirmed === false) {
+        await expect(dialog.getByRole('alert')).toHaveCount(0);
+      }
       await this.confirmMovePrompt(dialog, 'Awaiting move-in');
     });
   }

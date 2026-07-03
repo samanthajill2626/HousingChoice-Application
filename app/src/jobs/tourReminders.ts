@@ -45,7 +45,7 @@ import { isMemberSuppressed } from './relayFanOut.js';
 // Canned reminder text
 // ---------------------------------------------------------------------------
 
-const REMINDER_BODIES: Record<ReminderKind, string> = {
+export const REMINDER_BODIES: Record<ReminderKind, string> = {
   confirmation: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
   day_before: '[AUTO] Reminder: your property tour is tomorrow.',
   morning_of: '[AUTO] Good morning! Your property tour is today.',

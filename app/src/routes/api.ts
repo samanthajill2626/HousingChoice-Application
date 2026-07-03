@@ -83,6 +83,7 @@ import { createSystemRouter } from './system.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
+import { createTourRemindersRouter } from './tourReminders.js';
 import { type ToursRepo } from '../repos/toursRepo.js';
 import { type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
@@ -433,6 +434,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // tour_took_place milestone on the toured transition (Post-Tour & Application).
       activityEventsRepo: activityEvents,
       events,
+    }),
+  );
+  // Tour reminders read endpoint (scheduled-message-visibility). Mounted at
+  // /tours too — its only path is GET /:tourId/reminders, a DISTINCT segment
+  // from the tours router's routes above (GET /:tourId matches a single
+  // segment, never /:tourId/reminders), so the two never collide.
+  router.use(
+    '/tours',
+    createTourRemindersRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      conversationsRepo: conversations,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

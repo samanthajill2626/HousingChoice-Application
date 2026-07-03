@@ -1,6 +1,19 @@
 ## Claude Code
 
-## Terminology (read before naming domain concepts)
+## Sub-agent model selection — use Fable SPARINGLY (usage limits)
+
+We are hitting usage limits on the Fable model. Sub-agents spawned via the Agent
+tool (and Workflow `agent()` calls) **inherit the parent session's model unless
+overridden** — when the main session runs on Fable, every un-pinned sub-agent
+silently multiplies Fable usage.
+
+- **Pass an explicit `model` on every sub-agent.** Default to **`opus`** for
+  the routine fan-outs (Explore sweeps, spec-conformance + adversarial reviewers,
+  audits, searches); use **`sonnet`** for trivial mechanical sweeps.
+- **Reserve Fable** for orchestrator-level work and tasks explicitly deemed
+  high-importance (e.g. a subtle security-critical review or debugging session
+  where the extra capability genuinely earns its cost). Using Fable on a
+  sub-agent must be a deliberate, stated choice — never the silent default.
 
 One entity, three labels by audience. The "single dwelling a single household can
 lease and move into" is **always `unit` in code/data**. Human-facing copy uses:

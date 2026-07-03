@@ -1,0 +1,67 @@
+---
+title: Housing Choice — Post-Tour and Application (Phase 1)
+---
+sequenceDiagram
+    autonumber
+    actor T as Tenant
+    participant A as Housing Choice App
+    participant S as Team
+    actor L as Landlord/PM
+    Note over T,S: The app owns the phone number. Every call/text flows Tenant to Team and Landlord to Team THROUGH the app (both directions).<br/>Notes marked [AUTO] are app automation. [MANUAL] is a person (Team) acting.
+    Note over T,L: Picks up from the Tours exit gate — the tenant said YES, move forward (the tour is convertible). Ends when the landlord submits the RTA to the housing authority.
+    Note over T,L: The placement is the spine. Stages name the NEXT outstanding action. EVERY stage transition in this span is stamped below — the tests must move the placement into and out of each stage without skipping any.
+    Note over T,L: The masked RELAY group from the tour continues as the channel all the way through the placement. No new or unmasked group text is created.
+
+    Note over S,A: [MANUAL] Convert the tour into a placement — same tenant and unit, linked back to the tour. Quiet record-keeping: no announcement. The landlord first hears about it when the application starts moving.
+    Note over A: [AUTO] On conversion — the placement is born at stage Send application. Tenant moves Searching to Placing. The property reads Under application. The tour closes as converted and its masked relay thread now belongs to the placement.
+
+    Note over T,L: APPLICATION. How the application moves follows the property application_process captured at landlord onboarding — never standardized. The diagram shows the uniform shape.
+    S->>A: Send the application to the tenant (per the property process)
+    A->>T: Deliver the application (link or instructions)
+    Note over A: [MANUAL] Stage — Send application to Awaiting receipt
+    Note over A: [AUTO] Sending the application arms the follow-up nudge ladder. Each awaiting stage gets its chase — received, completed, landlord received, approved — with stall escalation. Stalls surface on the Today board
+    A-->>T: [AUTO] Nudge — did you receive the application
+    T->>A: Got it
+    A->>S: Relay the receipt
+    Note over A: [MANUAL] Stage — Awaiting receipt to Awaiting completion
+    T->>A: Completed the application
+    A->>S: Relay the completion
+    S->>A: Send the completed application to the landlord (per the property process)
+    A->>L: Deliver the completed application
+    L->>A: Received — reviewing
+    A->>S: Relay
+    Note over A: [MANUAL] Stage — Awaiting completion to Awaiting approval (only AFTER the completed application is in the landlord hands)
+    alt Landlord approves
+        L->>A: Approved
+        A->>S: Relay the approval
+        Note over A: [MANUAL] Stage — Awaiting approval to Collect RTA
+    else Landlord denies — marked deviation, not elaborated here
+        Note over T,L: Placement LOST. Tenant returns to Searching and re-matches (back to Sending Unit). Property returns to Available. Full denial handling is a separate future sequence if needed.
+    end
+
+    Note over T,L: RTA — the per-unit Request for Tenancy Approval cycle (distinct from the tenant-level RTA-in-hand gate from onboarding).
+    S->>A: Ask the tenant for the RTA paperwork
+    A->>T: Deliver the ask
+    T->>A: RTA documents (photos or files, MMS)
+    A->>S: Relay the documents
+    Note over A: [MANUAL] Stage — Collect RTA to Review RTA
+    Note over S,A: [MANUAL] Review the RTA — confirm all documents are in order
+    Note over A: [MANUAL] Stage — Review RTA to Send RTA to landlord
+    S->>A: Send the RTA package to the landlord
+    A->>L: Deliver the RTA package
+    Note over A: [MANUAL] Stage — Send RTA to landlord to Awaiting landlord submission
+    Note over A: [AUTO] Entering Awaiting landlord submission arms the 48-HOUR submission clock — a deadline on the placement. It surfaces on the Today board and alerts as it approaches or blows
+    A-->>L: [AUTO] Nudge — the 48-hour window is closing
+    alt Landlord submits within 48 hours
+        L->>A: Submitted the RTA to the housing authority
+        A->>S: Relay the submission
+        Note over A: [MANUAL] Stage — Awaiting landlord submission to Awaiting authority approval
+    else 48 hours blown — marked deviation, not elaborated here
+        Note over A: [AUTO] Deadline alert fires
+        S->>A: Nudge the landlord — recommit to submitting
+        A->>L: Deliver the nudge
+        Note over T,L: Recommit and submit late, or the placement is LOST. Full escalation handling is a separate future sequence if needed.
+    end
+
+    Note over T,L: MARKED DEVIATION (any stage) — either party backs out entirely. The placement is LOST from wherever it stands. Tenant returns to Searching (re-match). Property returns to Available. The relay thread closes.
+    Note over T,L: Handoff to Approval and Move-in (separate) — the placement sits at Awaiting authority approval: the roughly 4-week housing authority window (inspection, rent determination, LIF, lease, move-in). The SAME masked relay group remains the channel.

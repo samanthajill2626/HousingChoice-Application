@@ -25,6 +25,17 @@ self-serve-portal. Factor the shared tail (eligibility intake → RTA gate →
 parked/handoff) into ONE helper (`intakeAndRtaTail`) invoked at the end of each path so
 it isn't duplicated.
 
+**Happy-path-first scoping for LONG sequences (founder rule, 2026-07-03).** Long
+sequences (Post-Tour & Application onward) do not model every non-happy path. The
+happy path is REQUIRED; deviations that pull off it are **marked** — shown with their
+exit (e.g. "placement LOST → tenant re-matches"), not elaborated. A *marked* deviation
+gets a test asserting the exit state, not the full downstream handling. Unwieldy
+branches are pulled out as their own separate sequences later — the diagram's writeup
+must list which deviations were marked vs deferred so nothing silently disappears.
+Corollary for stage-laddered sequences: when the diagram stamps entity stage
+transitions (e.g. the placement ladder), the tests must move the entity into and out
+of **every stamped stage in order, skipping none** — a skipped stamp is a spec failure.
+
 ### 3. Map each arrow/note to a verb
 The scenario spec reads as the diagram; the only infrastructure is the **step library**
 [`e2e/scenarios/steps.ts`](../e2e/scenarios/steps.ts) — a typed `Scenario` class of

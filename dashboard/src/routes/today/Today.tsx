@@ -38,16 +38,18 @@ function Row({ item }: { item: TodayItem }): React.JSX.Element {
   const hasMeta = Boolean(item.urgency) || Boolean(item.tag);
   return (
     <li className={styles.rowItem}>
-      <Link to={hrefFor(item)} className={styles.row}>
+      <Link
+        to={hrefFor(item)}
+        className={`${styles.row} ${item.attention ? styles.flagged : ''}`}
+      >
+        {/* Attention flag = an amber severity stripe down the card's left edge (CSS,
+         *  ::before on .flagged). It's decorative, so announce it to screen readers
+         *  with visually-hidden text here. */}
+        {item.attention ? <span className={styles.srOnly}>Needs attention</span> : null}
         {/* Text block (who · why). On a tight content pane it stacks above the meta
-         *  chips (container query in the CSS) so the "why" never gets crushed.
-         *  The attention dot is anchored to the name (absolutely, in the row's left
-         *  gutter) so it centres on the name and never shifts the why/chips lines. */}
+         *  chips (container query in the CSS) so the "why" never gets crushed. */}
         <span className={styles.main}>
-          <span className={styles.who}>
-            {item.attention ? <span className={styles.dot} aria-label="Needs attention" /> : null}
-            {item.who}
-          </span>
+          <span className={styles.who}>{item.who}</span>
           <span className={styles.why}>{item.why}</span>
         </span>
         {hasMeta ? (

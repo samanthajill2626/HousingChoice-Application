@@ -142,3 +142,24 @@
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
 }
+
+/* Next-deadline value: the clock label + date, then a colored relative phrase
+ * ("overdue" red / "due in Nd" amber) mirroring the Today queue's urgency badge. */
+.deadline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.deadlineOverdue {
+  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-xs);
+}
+
+.deadlineSoon {
+  color: var(--c-warning);
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-xs);
+}

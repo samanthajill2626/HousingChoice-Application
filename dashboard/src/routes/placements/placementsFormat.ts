@@ -8,11 +8,42 @@ import {
   TENANT_STATUS_LABELS,
   type Contact,
   type ListingStatus,
+  type PlacementDeadlineType,
   type PlacementStage,
   type TenantStatus,
   type UnitItem,
 } from '../../api/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+
+/** Noun labels for a placement's next-deadline clock (staff-facing). */
+export const DEADLINE_TYPE_LABEL: Record<PlacementDeadlineType, string> = {
+  tour_reminder: 'Tour reminder',
+  rta_window: 'RTA window',
+  voucher_expiration: 'Voucher expiration',
+  stuck_placement: 'Stuck placement',
+  follow_up: 'Follow-up',
+};
+
+/**
+ * A relative phrase for a deadline instant vs now: "overdue" once it's at/past,
+ * else "due in Nm/Nh/Nd". Coarse buckets mirror the Today queue's urgency badge
+ * (app/src/routes/today.ts urgencyOf) so the detail page and the queue agree.
+ */
+export function deadlineRelative(
+  iso: string,
+  now: number = Date.now(),
+): { text: string; overdue: boolean } {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return { text: '', overdue: false };
+  const ms = at - now;
+  if (ms <= 0) return { text: 'overdue', overdue: true };
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return { text: `due in ${minutes}m`, overdue: false };
+  const hours = Math.ceil(ms / 3_600_000);
+  if (hours < 48) return { text: `due in ${hours}h`, overdue: false };
+  const days = Math.ceil(ms / 86_400_000);
+  return { text: `due in ${days}d`, overdue: false };
+}
 
 /** The tenant's display name for a placement, or the tenant id when the contact
  *  isn't loaded. */

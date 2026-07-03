@@ -73,13 +73,13 @@
 /* --- Row card ------------------------------------------------------------- */
 
 .row {
+  position: relative; /* anchors the attention stripe (.flagged::before) */
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  /* Extra left gutter reserves room for the attention dot, so dotted and
-   * undotted rows' text align in one column (the dot lives in this gutter). */
-  padding-left: var(--sp-5);
+  /* Clip the left stripe to the card's rounded corners. */
+  overflow: hidden;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
@@ -101,20 +101,32 @@
   outline-offset: 2px;
 }
 
-/* The attention dot is anchored to the NAME (absolutely positioned in the row's
- * left gutter): it stays vertically centred on the name in both the one-line and
- * stacked layouts, and — being out of flow — never nudges the why/chips lines or
- * misaligns dotted vs. undotted rows. */
-.dot {
+/* Attention flag = an amber severity stripe down the card's LEFT edge. It reads
+ * as "flagged" at a glance, can't be confused with the round nav category dots,
+ * and carries the whole row (identical one-line or stacked). Absolute + full
+ * height so it never shifts the row's text; .row's overflow:hidden clips it to
+ * the card radius. Amber (warning) — distinct from the red "overdue" time chip. */
+.flagged::before {
+  content: '';
   position: absolute;
-  top: 50%;
-  right: 100%;
-  margin-right: var(--sp-2);
-  transform: translateY(-50%);
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-pill);
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
   background: var(--c-warning);
+}
+
+/* Visually-hidden text (the stripe itself is decorative CSS, invisible to AT). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Text block: who + why on one line (wide), stacked (tight). flex:1 + min-width:0
@@ -128,7 +140,6 @@
 }
 
 .who {
-  position: relative; /* anchor for the absolutely-positioned attention dot */
   flex: 0 0 auto;
   font-weight: var(--fw-semibold);
   color: var(--c-text);

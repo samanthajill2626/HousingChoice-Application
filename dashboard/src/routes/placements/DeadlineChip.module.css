@@ -1,0 +1,23 @@
+/* DeadlineChip — a compact urgency pill. Overdue reuses the Today badge's red
+ * tint; a soon deadline reads as a soft amber (warning) pill. Tokens only. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.overdue {
+  background: color-mix(in srgb, var(--c-danger) 12%, transparent);
+  color: var(--c-danger);
+}
+
+.soon {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+}

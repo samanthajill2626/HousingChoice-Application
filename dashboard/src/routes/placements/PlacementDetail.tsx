@@ -30,7 +30,14 @@ import { Button, Spinner } from '../../ui/index.js';
 import { Card, EmptyRow, KV } from '../contact/Card.js';
 import { formatMoney } from '../listing/listingFormat.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { dateTime, historyTitle, shortDate, summarizeHistory } from './placementsFormat.js';
+import {
+  DEADLINE_TYPE_LABEL,
+  dateTime,
+  deadlineRelative,
+  historyTitle,
+  shortDate,
+  summarizeHistory,
+} from './placementsFormat.js';
 import { gateFor, type TransitionGate } from './transitionGate.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
@@ -186,6 +193,19 @@ export function PlacementDetail(): React.JSX.Element {
   const listing = unit ? formatAddress(unit.address) || placement.unitId : placement.unitId;
   const lostReason = formatLostReason(placement.lost_reason);
   const finalRent = formatMoney(unit?.final_rent);
+  // The placement's single next-deadline clock (the same field that drives the
+  // Today queue's "overdue" badge). Both-or-neither composite, so `at` present ⇒
+  // `type` present; guard the label lookup anyway.
+  const deadline =
+    typeof placement.next_deadline_at === 'string'
+      ? {
+          label: placement.next_deadline_type
+            ? DEADLINE_TYPE_LABEL[placement.next_deadline_type] ?? placement.next_deadline_type
+            : 'Deadline',
+          when: dateTime(placement.next_deadline_at),
+          rel: deadlineRelative(placement.next_deadline_at),
+        }
+      : null;
 
   return (
     <div className={styles.page}>
@@ -238,6 +258,23 @@ export function PlacementDetail(): React.JSX.Element {
               k="In stage since"
               v={placement.stage_entered_at ? dateTime(placement.stage_entered_at) : '—'}
             />
+            {deadline ? (
+              <KV
+                k="Next deadline"
+                v={
+                  <span className={styles.deadline}>
+                    {deadline.label} · {deadline.when}
+                    {deadline.rel.text ? (
+                      <span
+                        className={deadline.rel.overdue ? styles.deadlineOverdue : styles.deadlineSoon}
+                      >
+                        {deadline.rel.text}
+                      </span>
+                    ) : null}
+                  </span>
+                }
+              />
+            ) : null}
             {placement.tour_date ? <KV k="Tour date" v={shortDate(placement.tour_date)} /> : null}
             {placement.inspection_outcome ? (
               <KV k="Inspection" v={placement.inspection_outcome === 'pass' ? 'Pass' : 'Fail'} />

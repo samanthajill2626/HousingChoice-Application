@@ -48,8 +48,8 @@ import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/acti
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
-import { type UnitsRepo } from '../repos/unitsRepo.js';
-import { type PlacementsRepo } from '../repos/placementsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -85,8 +85,8 @@ import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
 import { createTourRemindersRouter } from './tourReminders.js';
-import { type ToursRepo } from '../repos/toursRepo.js';
-import { type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
 /** Refusal code → HTTP status for the send endpoint. */
@@ -265,6 +265,19 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // ladder on every move; the relay lifecycle closes a LOST placement's masked
   // thread. Both are best-effort inside the transition service.
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
+  // gather walks these five scheduled-send repos. Default-construct them here (the
+  // same `?? create…` pattern as conversations/messages above) so the gather is
+  // LIVE in production/e2e — the production composition root (index.ts) calls
+  // buildApp with NO `api` deps, so nothing was injecting them and the gather was
+  // permanently gated off. Each factory only builds a client object (no network at
+  // construction); the gather itself is best-effort/try-caught in the router, so a
+  // repo miss yields an empty `upcoming[]`, never a 500. `placementNudges` above is
+  // reused (not rebuilt). Tests that inject fakes via `deps.X` still win through `??`.
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const poolNumbersForLifecycle =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const relayLifecycle = createPlacementRelayLifecycle({
@@ -381,16 +394,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       messagesRepo: messages,
       activityEventsRepo: activityEvents,
       // Task 4 "Upcoming" gather: forward the five scheduled-send repos so the
-      // timeline can project pending tour reminders + placement nudges. Forwarded
-      // CONDITIONALLY (mirroring the pattern used across this file) and never
-      // default-constructed here — a live DynamoDB default would break the
-      // in-memory unit tests; the router gates the gather off unless all five are
-      // present. buildApp already threads all five into deps.
-      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
-      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
-      ...(deps.placementNudgesRepo !== undefined && { placementNudgesRepo: deps.placementNudgesRepo }),
-      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
-      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // timeline can project pending tour reminders + placement nudges. Forward the
+      // RESOLVED locals (each `deps.X ?? create…` above), NOT `deps.X` — the router
+      // only runs the gather when ALL five are present, and the production
+      // composition root (index.ts) passes NO `api` deps, so forwarding `deps.X`
+      // here left them undefined and the gather permanently off in prod/e2e. The
+      // locals default-construct real repos (best-effort/try-caught in the router),
+      // while tests injecting fakes still win through the `??`.
+      toursRepo: tours,
+      tourRemindersRepo: tourReminders,
+      placementNudgesRepo: placementNudges,
+      placementsRepo: placements,
+      unitsRepo: units,
       config,
     }),
   );

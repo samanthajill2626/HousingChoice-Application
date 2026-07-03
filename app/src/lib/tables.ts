@@ -353,6 +353,25 @@ export const TABLES: readonly TableSpec[] = [
     ],
   },
   {
+    // NEW in Post-Tour & Application feature: durable nudge rows for the
+    // placement-nudge poll job (the stage-keyed application chase ladder).
+    // Clones the tourReminders shape exactly: the poll queries byDueAt (fixed
+    // 'nudges' partition, range=dueAt) for rows due at or before now; byPlacement
+    // lets cancel-for-placement enumerate all a placement's rows efficiently.
+    baseName: 'placementNudges',
+    hashKey: { name: 'nudgeId', type: 'S' },
+    gsis: [
+      { indexName: 'byPlacement', hashKey: { name: 'placementId', type: 'S' } },
+      {
+        // Poll query: all pending nudges due at or before now.
+        // Fixed partition 'nudges' so a single-partition Query covers all rows.
+        indexName: 'byDueAt',
+        hashKey: { name: '_nudgePartition', type: 'S' },
+        rangeKey: { name: 'dueAt', type: 'S' },
+      },
+    ],
+  },
+  {
     // NEW in Tours feature (NOT in the doc §5 9-table model — README deviation):
     // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
     // from placements — a tenant stays `searching`; no touring stage. Four read

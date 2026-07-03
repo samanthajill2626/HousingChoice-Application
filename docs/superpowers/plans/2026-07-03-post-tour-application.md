@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-07-03).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` (including the post-review fix wave: rta_window stage-scoped clear, atomic conversion
+> claim, rendered Today-board asserts, landlord 1:1 create-on-demand) and its feature branch +
+> worktree were deleted during worktree cleanup. **This file is NOT current documentation, and
+> the live code may have drifted from it. Do not treat it as authoritative guidance on how the
+> system should be built or how it behaves today.** For current truth read the code and the
+> living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/post-tour-application-sequence.mermaid` + writeup).
 # Post-Tour & Application Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

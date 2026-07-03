@@ -9,7 +9,7 @@
 // don't have yet, which is exactly the bug this fixes.
 import type { PlacementItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
-import { Card, CardAction, CardInlineAction, Chips, EmptyRow, KV, PendingPanel, Row } from './Card.js';
+import { Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, Row } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -51,8 +51,7 @@ export function UnknownFile({
   // them if a navigator linked one before triaging).
   const myPlacements = tenantPlacements(placements, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
-  const prefs =
-    typeof contact.notes === 'string' && contact.notes.trim() ? [contact.notes.trim()] : [];
+  const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
 
   return (
     <>
@@ -124,8 +123,8 @@ export function UnknownFile({
           )
         }
       >
-        {prefs.length > 0 ? (
-          <Chips items={prefs} />
+        {notes ? (
+          <NotesText text={notes} />
         ) : (
           <PendingPanel note="No preferences yet — added manually for now." />
         )}

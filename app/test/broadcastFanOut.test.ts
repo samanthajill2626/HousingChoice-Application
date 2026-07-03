@@ -130,6 +130,7 @@ function wireHandler(world: FakeWorld, logger = createLogger({ destination: crea
     messagesRepo: world.messagesRepo,
     unitsRepo: world.unitsRepo,
     sendMessageService,
+    auditRepo: world.auditRepo,
     activityEventsRepo: world.activityEventsRepo,
     listingSendsRepo: world.listingSendsRepo,
     events: world.events,
@@ -199,6 +200,32 @@ describe('broadcast.send (M1.8a)', () => {
     const evt = world.emitted.find((e) => e.event === 'broadcast.updated');
     expect(evt).toBeDefined();
     expect((evt!.payload as { status: string }).status).toBe('sent');
+  });
+
+  it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });
+    seedUnit(world); // unitId 'unit-1'
+    seedBroadcast(world, [alice, bob]); // unitId 'unit-1', 2 recipients
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    const rows = world.auditEvents.filter(
+      (e) => e.entityKey === 'units#unit-1' && e.event_type === 'broadcast_sent',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload).toMatchObject({ broadcastId: 'bcast-1', tenantCount: 2 });
+  });
+
+  it('writes NO units# broadcast_sent audit row for a unit-less broadcast', async () => {
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedBroadcast(world, [alice], { unitId: undefined, body_template: 'Hello there' });
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(0);
   });
 
   it('skips an opted-out recipient (skipped_opted_out++), NO token spent, NO send', async () => {

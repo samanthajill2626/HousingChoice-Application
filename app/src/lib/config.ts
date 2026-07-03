@@ -171,6 +171,38 @@ export interface AppConfig {
   publicRateLimitMax: number;
   publicRateLimitWindowMs: number;
   /**
+   * Per-user rate limit on the manual 1:1 send route
+   * (POST /api/conversations/:id/messages, routes/api.ts) — every request is a
+   * real SMS from the business number, so a runaway dashboard loop or stuck
+   * retry must be bounded (RATE_LIMIT_MANUAL_SEND_PER_MIN, default 30/min per
+   * user). Sliding-window, in-memory (middleware/rateLimit.ts).
+   */
+  rateLimitManualSendPerMin: number;
+  /**
+   * Per-user rate limit on the broadcast send route
+   * (POST /api/broadcasts/:id/send, routes/broadcasts.ts) — each request
+   * triggers a whole audience FAN-OUT, the most expensive single click in the
+   * app (RATE_LIMIT_BROADCAST_SEND_PER_MIN, default 5/min per user).
+   */
+  rateLimitBroadcastSendPerMin: number;
+  /**
+   * Per-user rate limit on the call-originate route
+   * (POST /api/contacts/:id/call, routes/voiceApi.ts) — every request rings
+   * TWO real phones (the navigator's cell, then the contact) and spends Twilio
+   * voice minutes (RATE_LIMIT_ORIGINATE_PER_MIN, default 10/min per user).
+   */
+  rateLimitOriginatePerMin: number;
+  /**
+   * Per-user rate limit on cell verify-start
+   * (POST /api/users/me/cell/verify-start, routes/voiceApi.ts) — each request
+   * sends a code SMS to ANY number the staffer typed (SMS-bombing an arbitrary
+   * phone is the abuse case) and resets the code-guess attempt budget, so it
+   * gets the tightest ceiling (RATE_LIMIT_VERIFY_START_MAX, default 3 per
+   * window; RATE_LIMIT_VERIFY_START_WINDOW_MS, default 180000 = 3 min).
+   */
+  rateLimitVerifyStartMax: number;
+  rateLimitVerifyStartWindowMs: number;
+  /**
    * A2P outbound throttle (M1.7): tokens/sec the shared TokenBucket admits
    * before the worker dispatches each relay-fan-out / broadcast job
    * (A2P_RATE_LIMIT_PER_SEC, default 1.0). DELIBERATELY conservative — below
@@ -458,6 +490,42 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  // Per-user rate limits on the authenticated send/call-cost routes (2026-07-02
+  // hardening) — same fail-fast idiom as the public limiter above: safe code
+  // defaults so nothing is required to boot; an explicitly-set bad value
+  // refuses to start (a typo'd ceiling on a money-spending route must never
+  // silently become "unlimited" or NaN).
+  const rateLimitManualSendPerMin = Number(env.RATE_LIMIT_MANUAL_SEND_PER_MIN ?? 30);
+  if (!Number.isInteger(rateLimitManualSendPerMin) || rateLimitManualSendPerMin <= 0) {
+    throw new Error(
+      `RATE_LIMIT_MANUAL_SEND_PER_MIN must be a positive integer, got: ${env.RATE_LIMIT_MANUAL_SEND_PER_MIN}`,
+    );
+  }
+  const rateLimitBroadcastSendPerMin = Number(env.RATE_LIMIT_BROADCAST_SEND_PER_MIN ?? 5);
+  if (!Number.isInteger(rateLimitBroadcastSendPerMin) || rateLimitBroadcastSendPerMin <= 0) {
+    throw new Error(
+      `RATE_LIMIT_BROADCAST_SEND_PER_MIN must be a positive integer, got: ${env.RATE_LIMIT_BROADCAST_SEND_PER_MIN}`,
+    );
+  }
+  const rateLimitOriginatePerMin = Number(env.RATE_LIMIT_ORIGINATE_PER_MIN ?? 10);
+  if (!Number.isInteger(rateLimitOriginatePerMin) || rateLimitOriginatePerMin <= 0) {
+    throw new Error(
+      `RATE_LIMIT_ORIGINATE_PER_MIN must be a positive integer, got: ${env.RATE_LIMIT_ORIGINATE_PER_MIN}`,
+    );
+  }
+  const rateLimitVerifyStartMax = Number(env.RATE_LIMIT_VERIFY_START_MAX ?? 3);
+  if (!Number.isInteger(rateLimitVerifyStartMax) || rateLimitVerifyStartMax <= 0) {
+    throw new Error(
+      `RATE_LIMIT_VERIFY_START_MAX must be a positive integer, got: ${env.RATE_LIMIT_VERIFY_START_MAX}`,
+    );
+  }
+  const rateLimitVerifyStartWindowMs = Number(env.RATE_LIMIT_VERIFY_START_WINDOW_MS ?? 180_000);
+  if (!Number.isInteger(rateLimitVerifyStartWindowMs) || rateLimitVerifyStartWindowMs <= 0) {
+    throw new Error(
+      `RATE_LIMIT_VERIFY_START_WINDOW_MS must be a positive integer (ms), got: ${env.RATE_LIMIT_VERIFY_START_WINDOW_MS}`,
+    );
+  }
+
   // A2P outbound throttle (M1.7). NOT fail-fast: a bad/missing value falls
   // back to the conservative 1.0 msg/sec default (texting is core — a throttle
   // typo must never take the app down). An explicitly-set-but-invalid value
@@ -618,6 +686,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sseMaxConnections,
     publicRateLimitMax,
     publicRateLimitWindowMs,
+    rateLimitManualSendPerMin,
+    rateLimitBroadcastSendPerMin,
+    rateLimitOriginatePerMin,
+    rateLimitVerifyStartMax,
+    rateLimitVerifyStartWindowMs,
     a2pRateLimitPerSec,
     sessionSecret: env.SESSION_SECRET ?? DEV_SESSION_SECRET_DEFAULT,
     googleClientId: env.GOOGLE_CLIENT_ID,

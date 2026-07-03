@@ -1,7 +1,14 @@
-// Reusable in-memory rate limiter (M1.5) — the abuse fence on the PUBLIC,
-// unauthenticated /public surface (housing-fair intake + flyer). Public routes
-// are money-spending (the housing-fair form sends an SMS) and authentication
-// can't gate them, so a per-IP request cap is the first line of defense.
+// Reusable in-memory rate limiters. TWO fences live here:
+//
+//   createRateLimit (M1.5)      — fixed-window, per-IP: the abuse fence on the
+//     PUBLIC, unauthenticated /public surface (housing-fair intake + flyer).
+//   createUserRateLimit (2026-07-02) — sliding-window, per-USER: the spend
+//     fence on the AUTHENTICATED send/call-cost routes (manual send, broadcast
+//     send, call originate, cell verify-start). See the section below.
+//
+// Public routes are money-spending (the housing-fair form sends an SMS) and
+// authentication can't gate them, so a per-IP request cap is the first line of
+// defense.
 //
 // Algorithm: a FIXED-WINDOW counter per client key. Each key holds a count and
 // a window-reset timestamp; the (windowCount + 1)th request inside one window
@@ -27,6 +34,7 @@
 // fallback covers local/dev where there is no proxy.
 import type { Request, RequestHandler } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { AuthedRequest } from './auth.js';
 
 export interface RateLimitOptions {
   /** Max requests allowed per window per client key. */
@@ -110,6 +118,111 @@ export function createRateLimit(opts: RateLimitOptions): RequestHandler {
     }
 
     state.count += 1;
+    next();
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Per-USER limiter for the AUTHENTICATED send/call-cost routes (2026-07-02
+// hardening — docs/superpowers/specs/2026-07-02-api-rate-limiting-design.md).
+// Keyed (routeKey, userId), NOT per IP: staff share office IPs, and every wired
+// route sits behind requireAuth, so the session user is the meaningful actor.
+//
+// Algorithm: a SLIDING-WINDOW counter — per key we keep the in-window request
+// timestamps; each request first evicts entries older than windowMs, then
+// admits iff fewer than `max` remain. Sliding (vs the fixed window above) so a
+// burst can never double the ceiling by straddling a window boundary — these
+// routes spend real money (SMS sends, ringing calls), so the bound must hold
+// over ANY windowMs-long span.
+//
+// *** SINGLE-INSTANCE ASSUMPTION (load-bearing, on purpose) ***
+// Same as createRateLimit above: the map lives in this one app process's
+// memory, which is correct because the whole platform deploys as a single app
+// process. Multi-instance scaling would let a user get N requests PER instance
+// — the upgrade path is a shared store (Redis, or DynamoDB conditional
+// updates); note it, don't build it.
+// ---------------------------------------------------------------------------
+
+export interface UserRateLimitOptions {
+  /**
+   * Constant per wiring (e.g. 'manual_send') — names the bucket in logs and
+   * keeps two limiters on different routes from ever sharing quota (each
+   * createUserRateLimit() call also owns its OWN map, like createRateLimit).
+   */
+  routeKey: string;
+  /** Max requests allowed per sliding window per user. */
+  max: number;
+  /** Window length in milliseconds. */
+  windowMs: number;
+  logger?: Logger;
+}
+
+/**
+ * Build a per-user sliding-window rate-limit middleware. Mount AFTER
+ * requireAuth and BEFORE the route handler, so a limited request performs NO
+ * side effect (no SMS dispatched, no state touched).
+ *
+ * On limit (the LOCKED contract the dashboard builds to): HTTP 429, body
+ * `{ error: 'rate_limited' }`, and a `Retry-After` header carrying the integer
+ * seconds until the OLDEST in-window request ages out (when the window admits
+ * again). Never a silent drop.
+ *
+ * A request with NO session user answers 401 — it must NEVER fall back to an
+ * IP or a shared bucket (sessions would share/steal each other's quota).
+ * Unreachable behind requireAuth; belt-and-braces.
+ */
+export function createUserRateLimit(opts: UserRateLimitOptions): RequestHandler {
+  const { routeKey, max, windowMs } = opts;
+  const log = opts.logger ?? defaultLogger;
+  // userId → in-window request timestamps, oldest first. (routeKey needs no
+  // place in the key: this map is private to ONE limiter on ONE route.)
+  const hits = new Map<string, number[]>();
+
+  // Periodic sweep: users who stop calling leave their last window's
+  // timestamps behind — evict aged entries and PRUNE EMPTY KEYS so the map
+  // never grows unbounded across users. unref() so the timer never holds the
+  // process open. (The request path below also evicts + prunes on access.)
+  const sweep = setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+    for (const [key, stamps] of hits) {
+      const live = stamps.filter((t) => t > cutoff);
+      if (live.length === 0) hits.delete(key);
+      else if (live.length !== stamps.length) hits.set(key, live);
+    }
+  }, windowMs);
+  sweep.unref();
+
+  return (req, res, next) => {
+    const userId = (req as AuthedRequest).user?.userId;
+    if (userId === undefined) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    // Evict expired timestamps (sliding window). Stamps are appended in time
+    // order, so everything from the first in-window index onward survives.
+    const prior = hits.get(userId) ?? [];
+    let firstLive = 0;
+    while (firstLive < prior.length && (prior[firstLive] as number) <= cutoff) firstLive += 1;
+    const live = firstLive > 0 ? prior.slice(firstLive) : prior;
+
+    if (live.length >= max) {
+      // Retry-After = seconds until the OLDEST in-window request expires (the
+      // earliest instant a new request can be admitted).
+      const oldest = live[0] as number;
+      const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      // PII: IDs and numbers ONLY — never a phone or a request body.
+      log.warn({ routeKey, userId, max, windowMs }, 'per-user rate limit exceeded');
+      if (firstLive > 0) hits.set(userId, live); // persist the eviction
+      res.status(429).json({ error: 'rate_limited' });
+      return;
+    }
+
+    live.push(now);
+    hits.set(userId, live);
     next();
   };
 }

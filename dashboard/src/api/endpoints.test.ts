@@ -20,6 +20,7 @@ import {
   setListingStatus,
   setTenantStatus,
   transitionPlacement,
+  updatePlacement,
   validateLostReason,
 } from './endpoints.js';
 
@@ -135,6 +136,16 @@ it('setListingStatus PATCHes listing-status and unwraps { unit }', async () => {
     body: { toStatus: 'off_market', source: 'manual' },
   });
   expect(u).toEqual({ unitId: 'u1', status: 'off_market' });
+});
+
+it('updatePlacement PATCHes /api/placements/:id and unwraps { placement }', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1', lease_signed: true } });
+  const p = await updatePlacement('k1', { lease_signed: true });
+  expect(request).toHaveBeenCalledWith('/api/placements/k1', {
+    method: 'PATCH',
+    body: { lease_signed: true },
+  });
+  expect(p).toEqual({ placementId: 'k1', lease_signed: true });
 });
 
 it('createPlacementFromTour POSTs { tourId } and returns the { placement, tour } envelope', async () => {

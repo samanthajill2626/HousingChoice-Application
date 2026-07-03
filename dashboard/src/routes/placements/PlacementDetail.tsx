@@ -18,6 +18,7 @@ import {
   getContact,
   getUnit,
   transitionPlacement,
+  updatePlacement,
   useEventStream,
   type PlacementItem,
   type PlacementUpdatedEvent,
@@ -154,6 +155,19 @@ export function PlacementDetail(): React.JSX.Element {
     [placementId, setPlacement],
   );
 
+  // Toggle a complete-paperwork checklist field (lease_signed / lif /
+  // move_in_details): PATCH the placement and apply the returned row in place
+  // (instant feedback before the placement.updated refetch reconciles).
+  const togglePaperwork = useCallback(
+    (field: 'lease_signed' | 'lif' | 'move_in_details', checked: boolean) => {
+      setError(null);
+      void updatePlacement(placementId, { [field]: checked })
+        .then((updated) => setPlacement(updated))
+        .catch(() => setError('We couldn’t save that — please try again.'));
+    },
+    [placementId, setPlacement],
+  );
+
   // NOTE: this per-stage picker intentionally allows moving a TERMINAL placement
   // (moved_in / lost) back to an active stage — treated as an allowed "re-open".
   // We deliberately do NOT block it here.
@@ -279,9 +293,23 @@ export function PlacementDetail(): React.JSX.Element {
             {placement.inspection_outcome ? (
               <KV k="Inspection" v={placement.inspection_outcome === 'pass' ? 'Pass' : 'Fail'} />
             ) : null}
+            {placement.inspection_date ? (
+              <KV k="Inspection date" v={shortDate(placement.inspection_date)} />
+            ) : null}
             {finalRent ? <KV k="Final rent" v={`${finalRent}/mo`} /> : null}
+            {typeof placement.rent_determined === 'number' ? (
+              <KV k="Determined rent" v={`${formatMoney(placement.rent_determined)}/mo`} />
+            ) : null}
             {lostReason ? <KV k="Lost reason" v={lostReason} /> : null}
           </Card>
+
+          {placement.stage === 'complete_paperwork' ? (
+            <PaperworkCard
+              placement={placement}
+              lifEligible={tenant?.lifEligible === true}
+              onToggle={togglePaperwork}
+            />
+          ) : null}
 
           <HistoryPanel placementId={placementId} />
         </div>
@@ -296,15 +324,71 @@ export function PlacementDetail(): React.JSX.Element {
         />
       ) : null}
 
-      {pending !== null && (pending.gate === 'finalRent' || pending.gate === 'inspectionOutcome') ? (
+      {pending !== null &&
+      (pending.gate === 'finalRent' ||
+        pending.gate === 'inspectionOutcome' ||
+        pending.gate === 'moveInReady') ? (
         <MovePromptModal
-          mode={pending.gate === 'finalRent' ? 'finalRent' : 'inspectionOutcome'}
+          mode={pending.gate}
+          {...(pending.gate === 'moveInReady' && {
+            lifPending: tenant?.lifEligible === true && placement.lif !== true,
+          })}
           onClose={() => setPending(null)}
           onConfirm={(result) => runTransition(pending.toStage, result)}
           busy={busy}
         />
       ) : null}
     </div>
+  );
+}
+
+/** The complete-paperwork checklist (rendered only at `complete_paperwork`):
+ *  Lease signed + Move-in details shared always; the LIF row only when the tenant
+ *  is LIF-eligible (with a "confirm if included" hint), N/A otherwise. Each toggle
+ *  PATCHes the placement via the parent's `onToggle`. */
+function PaperworkCard({
+  placement,
+  lifEligible,
+  onToggle,
+}: {
+  placement: PlacementItem;
+  lifEligible: boolean;
+  onToggle: (field: 'lease_signed' | 'lif' | 'move_in_details', checked: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <Card title="Paperwork">
+      <label className={styles.checkRow}>
+        <input
+          type="checkbox"
+          checked={placement.lease_signed === true}
+          onChange={(e) => onToggle('lease_signed', e.target.checked)}
+        />
+        <span className={styles.checkText}>Lease signed</span>
+      </label>
+      <label className={styles.checkRow}>
+        <input
+          type="checkbox"
+          checked={placement.move_in_details === true}
+          onChange={(e) => onToggle('move_in_details', e.target.checked)}
+        />
+        <span className={styles.checkText}>Move-in details shared</span>
+      </label>
+      {lifEligible ? (
+        <label className={styles.checkRow}>
+          <input
+            type="checkbox"
+            checked={placement.lif === true}
+            onChange={(e) => onToggle('lif', e.target.checked)}
+          />
+          <span className={styles.checkText}>
+            LIF
+            <span className={styles.checkHint}>Confirm if included</span>
+          </span>
+        </label>
+      ) : (
+        <p className={styles.checkNa}>LIF — not applicable for this tenant.</p>
+      )}
+    </Card>
   );
 }
 

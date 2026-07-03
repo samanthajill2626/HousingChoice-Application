@@ -238,6 +238,20 @@ export async function transitionPlacement(
   return res.placement;
 }
 
+/** PATCH /api/placements/:id � partial update (SET-merge; only changed fields
+ *  sent). Used for the complete-paperwork checklist toggles (lease_signed / lif /
+ *  move_in_details). Returns the updated placement (unwrapped from { placement }). */
+export async function updatePlacement(
+  placementId: string,
+  patch: { lease_signed?: boolean; lif?: boolean; move_in_details?: boolean },
+): Promise<PlacementItem> {
+  const res = await request<{ placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}`,
+    { method: 'PATCH', body: patch },
+  );
+  return res.placement;
+}
+
 /** GET /api/placements/:placementId/history � the placement's provenance trail (newest
  *  first). Unwrapped from { history }. */
 export async function getPlacementHistory(

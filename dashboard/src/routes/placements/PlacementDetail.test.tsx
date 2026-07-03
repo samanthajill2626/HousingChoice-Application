@@ -8,6 +8,7 @@ const getPlacement = vi.fn();
 const getUnit = vi.fn();
 const getContact = vi.fn();
 const transitionPlacement = vi.fn();
+const updatePlacement = vi.fn();
 const getPlacementHistory = vi.fn();
 // Capture the SSE handlers the page (and its History panel) register so a test
 // can fire a placement.updated event.
@@ -21,6 +22,7 @@ vi.mock('../../api/index.js', async () => {
     getUnit: (...a: unknown[]) => getUnit(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
+    updatePlacement: (...a: unknown[]) => updatePlacement(...a),
     getPlacementHistory: (...a: unknown[]) => getPlacementHistory(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers.push(h);
@@ -67,6 +69,7 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ contactId: 't1', type: 'tenant', firstName: 'Tasha', lastName: 'Nguyen' });
   transitionPlacement.mockReset();
+  updatePlacement.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
   streamHandlers = [];
 });
@@ -218,5 +221,89 @@ describe('PlacementDetail', () => {
     });
     // No refetch for an unrelated placement.
     expect(getPlacement).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the inspection date + determined rent rows when present', async () => {
+    getPlacement.mockResolvedValue({
+      ...CASE,
+      inspection_date: '2026-06-20',
+      rent_determined: 1450,
+    });
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting inspection/ });
+    expect(screen.getByText('Inspection date')).toBeInTheDocument();
+    expect(screen.getByText('Determined rent')).toBeInTheDocument();
+    expect(screen.getByText('$1,450/mo')).toBeInTheDocument();
+  });
+
+  it('shows the paperwork checklist at complete_paperwork, with LIF only for a LIF-eligible tenant', async () => {
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    getContact.mockResolvedValue({
+      contactId: 't1',
+      type: 'tenant',
+      firstName: 'Tasha',
+      lastName: 'Nguyen',
+      lifEligible: true,
+    });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+    expect(screen.getByRole('checkbox', { name: 'Lease signed' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Move-in details shared' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /LIF/ })).toBeInTheDocument();
+  });
+
+  it('omits the LIF checkbox when the tenant is not LIF-eligible', async () => {
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    // tenant has no lifEligible flag (default beforeEach contact)
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+    expect(screen.getByRole('checkbox', { name: 'Lease signed' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /LIF/ })).not.toBeInTheDocument();
+  });
+
+  it('does not render the paperwork checklist outside complete_paperwork', async () => {
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting inspection/ });
+    expect(screen.queryByRole('checkbox', { name: 'Lease signed' })).not.toBeInTheDocument();
+  });
+
+  it('toggling a paperwork checkbox PATCHes the placement with that field', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    updatePlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork', lease_signed: true });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+
+    await user.click(screen.getByRole('checkbox', { name: 'Lease signed' }));
+    await waitFor(() => expect(updatePlacement).toHaveBeenCalledWith('c1', { lease_signed: true }));
+  });
+
+  it('the moveInReady gate confirms (with the LIF-pending note) then transitions to awaiting_move_in', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    getContact.mockResolvedValue({
+      contactId: 't1',
+      type: 'tenant',
+      firstName: 'Tasha',
+      lastName: 'Nguyen',
+      lifEligible: true,
+    });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_move_in' });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_move_in');
+    expect(screen.getByRole('heading', { name: 'Confirm move-in ready' })).toBeInTheDocument();
+    // LIF-eligible tenant with lif unset → the pending note shows.
+    expect(screen.getByText(/LIF is not marked/i)).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_move_in',
+        source: 'manual',
+      }),
+    );
   });
 });

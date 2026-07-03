@@ -28,6 +28,7 @@ import {
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
+import { createUserRateLimit } from '../middleware/rateLimit.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createConversationsRepo,
@@ -527,8 +528,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // participant_phone (the pool number). The team-send branch below persists
   // ONE outbound message and fans it out to ALL members FROM the pool number
   // via relay.fanOut, returning the same outcome shape as the 1:1 path.
-  router.post('/conversations/:conversationId/messages', async (req, res) => {
-    const { conversationId } = req.params;
+  //
+  // Per-user spend fence (2026-07-02 hardening): every request here is a real
+  // SMS, so the send POST — and ONLY the send POST (not reads, not mark-read,
+  // not retry) — sits behind a sliding-window per-user limiter. ONE instance,
+  // created with the router (per-request creation would reset the window).
+  const manualSendLimiter = createUserRateLimit({
+    routeKey: 'manual_send',
+    max: config.rateLimitManualSendPerMin,
+    windowMs: 60_000,
+    logger: log,
+  });
+  router.post('/conversations/:conversationId/messages', manualSendLimiter, async (req, res) => {
+    // NOTE: with a middleware ahead of the handler, Express's typings no longer
+    // narrow req.params from the path literal — coerce like voiceApi.ts does.
+    const conversationId = String(req.params['conversationId'] ?? '');
     mergeContext({ conversationId });
     const payload = (req.body ?? {}) as { body?: unknown; mediaUrls?: unknown };
 

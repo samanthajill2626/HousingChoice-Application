@@ -25,6 +25,7 @@ import { type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { flyerUrl } from '../lib/mergeFields.js';
 import type { AuthedRequest } from '../middleware/auth.js';
+import { createUserRateLimit } from '../middleware/rateLimit.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { BROADCAST_SEND_JOB } from '../jobs/broadcastFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -356,9 +357,23 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   });
 
   // POST /api/broadcasts/:id/send — snapshot the audience, mark sending, enqueue.
-  router.post('/broadcasts/:broadcastId/send', async (req, res) => {
+  //
+  // Per-user spend fence (2026-07-02 hardening): each request triggers a whole
+  // audience fan-out — the most expensive single click in the app — so the send
+  // POST (and only the send POST; draft/preview/results stay unmetered) sits
+  // behind a sliding-window per-user limiter. ONE instance, created with the
+  // router.
+  const broadcastSendLimiter = createUserRateLimit({
+    routeKey: 'broadcast_send',
+    max: config.rateLimitBroadcastSendPerMin,
+    windowMs: 60_000,
+    logger: log,
+  });
+  router.post('/broadcasts/:broadcastId/send', broadcastSendLimiter, async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId ?? 'unknown';
-    const { broadcastId } = req.params;
+    // NOTE: with a middleware ahead of the handler, Express's typings no longer
+    // narrow req.params from the path literal — coerce like voiceApi.ts does.
+    const broadcastId = String(req.params['broadcastId'] ?? '');
     mergeContext({});
     const broadcast = await broadcasts.getById(broadcastId);
     if (!broadcast) {

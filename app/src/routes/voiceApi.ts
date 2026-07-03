@@ -25,6 +25,7 @@ import {
   renderCellVerifySms,
 } from '../lib/cellVerification.js';
 import type { AuthedRequest } from '../middleware/auth.js';
+import { createUserRateLimit } from '../middleware/rateLimit.js';
 import { createUsersRepo, type UserItem, type UsersRepo } from '../repos/usersRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { type ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -103,7 +104,18 @@ export function createVoiceCallRouter(deps: VoiceCallRouterDeps = {}): Router {
   const router = Router();
 
   // POST /api/contacts/:contactId/call { phone? } → 200 { callSid } (contract 1).
-  router.post('/:contactId/call', async (req: AuthedRequest, res) => {
+  //
+  // Per-user spend fence (2026-07-02 hardening): every request rings TWO real
+  // phones (navigator cell, then the contact) and spends Twilio voice minutes —
+  // sliding-window per-user limiter, ONE instance created with the router, so a
+  // 429'd request places NO call.
+  const originateLimiter = createUserRateLimit({
+    routeKey: 'originate',
+    max: config.rateLimitOriginatePerMin,
+    windowMs: 60_000,
+    logger: log,
+  });
+  router.post('/:contactId/call', originateLimiter, async (req: AuthedRequest, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
     const userId = req.user?.userId;
@@ -186,7 +198,20 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
   });
 
   // POST /api/users/me/cell/verify-start { cell } → 200 { ok:true } (contract 2).
-  router.post('/me/cell/verify-start', async (req: AuthedRequest, res) => {
+  //
+  // Per-user spend fence (2026-07-02 hardening; resolves
+  // docs/issues/voice-verify-start-rate-limit.md): each request SMSes a code to
+  // ANY number the staffer typed AND resets the code-guess attempt budget, so
+  // it gets the tightest ceiling (default 3 per 3 min). The limiter runs
+  // BEFORE the handler: a 429'd request sends NO SMS and leaves the
+  // pending-verification state (code hash / expiry / attempts) untouched.
+  const verifyStartLimiter = createUserRateLimit({
+    routeKey: 'verify_start',
+    max: config.rateLimitVerifyStartMax,
+    windowMs: config.rateLimitVerifyStartWindowMs,
+    logger: log,
+  });
+  router.post('/me/cell/verify-start', verifyStartLimiter, async (req: AuthedRequest, res) => {
     const userId = req.user?.userId;
     if (userId === undefined) {
       res.status(401).json({ error: 'unauthorized' });

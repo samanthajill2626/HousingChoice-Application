@@ -117,6 +117,18 @@ const childEnv = {
   // funnels + missing welcomes. Raise the ceiling for the hermetic suite ONLY
   // (this never touches a deployed env); an externally-set value still wins.
   PUBLIC_RATE_LIMIT_MAX: process.env.PUBLIC_RATE_LIMIT_MAX ?? '100000',
+  // Same story for the per-USER limits on the authenticated send/call-cost
+  // routes (manual send / broadcast send / originate / cell verify-start):
+  // production defaults are right for humans, but the whole e2e suite drives
+  // those routes as the ONE seeded dev-login user within minutes — so the
+  // suite would trip ceilings a real staffer never could. Raise them for the
+  // hermetic stack ONLY; an externally-set value still wins (that's how a
+  // focused rate-limit spec would pin a tiny ceiling). Window vars keep their
+  // code defaults — the max is what matters at 100000.
+  RATE_LIMIT_MANUAL_SEND_PER_MIN: process.env.RATE_LIMIT_MANUAL_SEND_PER_MIN ?? '100000',
+  RATE_LIMIT_BROADCAST_SEND_PER_MIN: process.env.RATE_LIMIT_BROADCAST_SEND_PER_MIN ?? '100000',
+  RATE_LIMIT_ORIGINATE_PER_MIN: process.env.RATE_LIMIT_ORIGINATE_PER_MIN ?? '100000',
+  RATE_LIMIT_VERIFY_START_MAX: process.env.RATE_LIMIT_VERIFY_START_MAX ?? '100000',
   // --- fake-twilio (HTTP-seam messaging mock) ---
   // The app runs the REAL Twilio driver (MESSAGING_DRIVER=twilio) but is pointed
   // at the in-process fake host via TWILIO_API_BASE_URL, so the production

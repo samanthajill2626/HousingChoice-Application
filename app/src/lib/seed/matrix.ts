@@ -8,8 +8,10 @@
 // DATES: placements are NOW-RELATIVE and coherent by construction — matrixItems
 // takes an injected `now` (as seedLive does) and derives every placement date
 // from it (stage_entered_at, created_at, next_deadline_at, moved_in ordering).
-// Given a fixed `now` the output is deterministic. The tours generator still
-// uses the fixed-past `pastDate` pool (rewritten now-relative by Task 2); all
+// TOURS + their reminder ladders are ALSO now-relative (buildToursMatrix(now)):
+// upcoming tours are future-dated with a pending day_before that never live-fires,
+// past tours have all-terminal reminders — every instant derived from `now` by
+// real date arithmetic. Given a fixed `now` the output is deterministic. All
 // other standalone builders keep their fixed-past ISO constants.
 //
 // §7 tripwire: every placement's linked tenant + unit carry the status that
@@ -146,7 +148,8 @@ export const PHASE_DEADLINE_TYPES: Readonly<Record<PlacementPhase, readonly Plac
 // ---------------------------------------------------------------------------
 // Now-relative date toolkit (deterministic given `now`)
 // ---------------------------------------------------------------------------
-const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
 const daysAgo = (now: Date, d: number): string => new Date(now.getTime() - d * DAY_MS).toISOString();
@@ -280,7 +283,6 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
       const unitId = stableId('unit', tag, rep);
       const placementId = stableId('placement', tag, rep);
       const derived = deriveStatuses(stage);
-      const fi = counter;
       const phase = STAGE_PHASE[stage];
 
       // Deterministic per-placement choices.
@@ -345,8 +347,8 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
           status: derived.tenantStatus,
           status_source: 'derived',
           phone: phoneBase(counter),
-          firstName: firstName(TENANT_FIRST, fi),
-          lastName: lastName(TENANT_LAST, fi),
+          firstName: firstName(TENANT_FIRST, counter),
+          lastName: lastName(TENANT_LAST, counter + 3),
           voucherSize: beds(counter),
           housingAuthority: auth(counter),
           porting: counter % 3 === 0,
@@ -737,18 +739,49 @@ function buildLandlordsMatrix(): LandlordGroup[] {
 }
 
 // ---------------------------------------------------------------------------
-// Tours matrix — every TOUR_STATUS ×2
-// 'no_show' tours include a sent no_show_checkin reminder row.
-// 'requested' tours have ZERO reminder rows.
-// Other terminal/past tours have sent reminder rows.
+// Tours matrix — every TOUR_STATUS ×2, NOW-RELATIVE + coherent by construction
+// (findings §B). Every tour's whole timeline is derived from the injected `now`
+// by real date arithmetic — never the fixed pastDate pool (which reordered time
+// via index wraparound and live-fired stale reminders).
+//
+// Per status:
+//   - requested  — TIMELESS: no scheduledAt, ZERO reminder rows (invariant).
+//   - scheduled/confirmed — UPCOMING (scheduledAt = now + Ndays): a SENT
+//     confirmation (armed at creation) + a PENDING day_before whose dueAt =
+//     scheduledAt − 24h ≥ now, so listDue(now) never returns it (no live-fire).
+//   - toured/no_show/canceled/closed — recent PAST (scheduledAt = now − Ndays):
+//     ALL reminders terminal. day_before sent at its dueAt (= scheduledAt − 24h);
+//     no_show adds a sent no_show_checkin at scheduledAt + 30m; canceled's
+//     day_before is canceled (canceledAt between its dueAt and scheduledAt).
+//   - toured/closed carry the SAME exit-gate shape the route + cast + conversion
+//     read: outcome + moveForward + convertible (convertible === moveForward).
+//
+// Invariants (asserted in seedMatrixCoherence.test.ts): requested ⇒ 0 reminders;
+// createdAt ≤ scheduledAt; per reminder createdAt ≤ dueAt ≤ (sentAt ?? canceledAt
+// ?? ∞); and the load-bearing one — NO pending reminder has dueAt < now.
 // ---------------------------------------------------------------------------
 interface TourGroup {
   tour: Record<string, unknown>;
   reminders: Record<string, unknown>[];
 }
 
-function buildToursMatrix(availableUnitIds: string[], searchingTenantIds: string[]): TourGroup[] {
+// Upcoming statuses are future-dated; the rest of the non-requested statuses are
+// recent-past. Day offsets are indexed by (rep − 1) for per-rep variety.
+const UPCOMING_TOUR_STATUSES: ReadonlySet<TourStatus> = new Set<TourStatus>(['scheduled', 'confirmed']);
+const UPCOMING_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
+  scheduled: [3, 5],
+  confirmed: [2, 4],
+};
+const PAST_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
+  toured: [4, 6],
+  no_show: [3, 5],
+  canceled: [5, 7],
+  closed: [8, 10],
+};
+
+function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenantIds: string[]): TourGroup[] {
   const groups: TourGroup[] = [];
+  const nowMs = now.getTime();
   let counter = 0;
   let unitIdx = 0;
   let tenantIdx = 0;
@@ -756,105 +789,127 @@ function buildToursMatrix(availableUnitIds: string[], searchingTenantIds: string
   const pickUnit = () => availableUnitIds[unitIdx++ % Math.max(1, availableUnitIds.length)] ?? 'unit-mx-tourable-01';
   const pickTenant = () => searchingTenantIds[tenantIdx++ % Math.max(1, searchingTenantIds.length)] ?? 'tenant-mx-searching-standalone-01';
 
+  const iso = (msVal: number) => new Date(msVal).toISOString();
+
   for (const status of TOUR_STATUSES) {
     for (let rep = 1; rep <= 2; rep++) {
       counter++;
       const tourId = `tour-mx-${status.replace(/_/g, '-')}-${String(rep).padStart(2, '0')}`;
       const unitId = pickUnit();
       const tenantId = pickTenant();
-      const createdAt = pastDate(counter);
+      const tourType = counter % 3 === 0 ? 'pm_team' : counter % 3 === 1 ? 'landlord_led' : 'self_guided';
       const reminders: Record<string, unknown>[] = [];
+
+      // --- requested: timeless, zero reminders (invariant) -------------------
+      if (status === 'requested') {
+        const createdAt = iso(nowMs - (2 + rep) * DAY_MS); // 3–4 days ago
+        groups.push({
+          tour: { tourId, tenantId, unitId, status, tourType, createdAt, updatedAt: createdAt },
+          reminders,
+        });
+        continue;
+      }
+
+      // --- non-requested: a real scheduled time + a coherent reminder ladder --
+      const upcoming = UPCOMING_TOUR_STATUSES.has(status);
+      let scheduledMs: number;
+      let createdMs: number;
+      if (upcoming) {
+        const off = UPCOMING_TOUR_DAYS[status]![rep - 1]!;
+        scheduledMs = nowMs + off * DAY_MS;      // future
+        createdMs = nowMs - (2 + rep) * DAY_MS;  // booked a few days ago
+      } else {
+        const off = PAST_TOUR_DAYS[status]![rep - 1]!;
+        scheduledMs = nowMs - off * DAY_MS;      // recent past
+        createdMs = scheduledMs - (2 + rep) * DAY_MS; // booked before the tour
+      }
+      const scheduledAt = iso(scheduledMs);
+      const createdAt = iso(createdMs);
+      const dayBeforeDueAt = iso(scheduledMs - 24 * HOUR_MS); // computeDueAt('day_before') parity
 
       const tour: Record<string, unknown> = {
         tourId,
         tenantId,
         unitId,
         status,
-        tourType: counter % 3 === 0 ? 'pm_team' : counter % 3 === 1 ? 'landlord_led' : 'self_guided',
+        tourType,
         createdAt,
         updatedAt: createdAt,
-        _schedPartition: 'tours', // needed for byScheduledAt GSI when scheduledAt present
+        scheduledAt,
+        _schedPartition: 'tours', // sparse byScheduledAt GSI membership
       };
 
-      if (status === 'requested') {
-        // INVARIANT: no scheduledAt, no reminder rows
-        delete tour['_schedPartition']; // omit — no scheduledAt on requested
+      // Confirmation is armed at creation and sent immediately — always terminal.
+      reminders.push({
+        reminderId: `rem-mx-${tourId}-conf`,
+        tourId,
+        kind: 'confirmation',
+        dueAt: createdAt,
+        sentAt: createdAt,
+        _reminderPartition: 'reminders',
+        createdAt,
+      });
+
+      if (upcoming) {
+        // day_before is PENDING but its dueAt (scheduledAt − 24h) is ≥ now, so
+        // listDue(now) never returns it — the live-fire bug cannot recur.
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          // sentAt / canceledAt absent = pending (dueAt is in the future)
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+      } else if (status === 'canceled') {
+        // Canceled between the day_before due instant and the scheduled time: the
+        // pending day_before was canceled (never sent). canceledAt sits between its
+        // dueAt and scheduledAt (and after createdAt).
+        const canceledAt = iso(scheduledMs - 6 * HOUR_MS);
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          canceledAt,
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+        tour['canceledAt'] = canceledAt;
+        tour['updatedAt'] = canceledAt;
       } else {
-        // All non-requested tours have a scheduled time (past)
-        const scheduledAt = pastDate(counter + 1);
-        tour['scheduledAt'] = scheduledAt;
+        // toured / no_show / closed — day_before was SENT at its due instant.
+        reminders.push({
+          reminderId: `rem-mx-${tourId}-dbf`,
+          tourId,
+          kind: 'day_before',
+          dueAt: dayBeforeDueAt,
+          sentAt: dayBeforeDueAt,
+          _reminderPartition: 'reminders',
+          createdAt,
+        });
+        tour['updatedAt'] = scheduledAt;
 
         if (status === 'no_show') {
-          // Write a sent no_show_checkin reminder row (archive; sentAt set)
-          const remId = `rem-mx-${tourId}-nsc`;
+          const checkinDueAt = iso(scheduledMs + 30 * MINUTE_MS); // computeDueAt('no_show_checkin')
           reminders.push({
-            reminderId: remId,
+            reminderId: `rem-mx-${tourId}-nsc`,
             tourId,
             kind: 'no_show_checkin',
-            dueAt: scheduledAt, // sent around the scheduled time + 30m (simplified to same ts)
-            sentAt: pastDate(counter + 2),
+            dueAt: checkinDueAt,
+            sentAt: checkinDueAt,
             _reminderPartition: 'reminders',
             createdAt,
           });
-        } else if (status === 'scheduled' || status === 'confirmed') {
-          // Scheduled/confirmed: write pending reminder rows (dueAt in future relative to a past creation)
-          // We still use past dates for byte stability, but sentAt is absent (pending)
-          const remId1 = `rem-mx-${tourId}-conf`;
-          reminders.push({
-            reminderId: remId1,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter), // sent immediately on creation
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-          const remId2 = `rem-mx-${tourId}-dbf`;
-          reminders.push({
-            reminderId: remId2,
-            tourId,
-            kind: 'day_before',
-            dueAt: pastDate(counter + 1),
-            // sentAt absent = pending
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'toured') {
-          tour['outcome'] = rep === 1 ? 'move_forward' : 'not_a_fit';
-          tour['moveForward'] = rep === 1;
-          tour['convertible'] = rep === 1;
-          // Archived — write a sent confirmation reminder
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'closed') {
-          tour['outcome'] = rep === 1 ? 'move_forward' : 'not_a_fit';
-          tour['moveForward'] = rep === 1;
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            sentAt: pastDate(counter),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-        } else if (status === 'canceled') {
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-conf`,
-            tourId,
-            kind: 'confirmation',
-            dueAt: pastDate(counter),
-            canceledAt: pastDate(counter + 1),
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
+          tour['updatedAt'] = checkinDueAt;
+        } else {
+          // toured / closed carry the exit-gate decision the route/conversion read:
+          // outcome + moveForward + convertible (convertible === moveForward===true).
+          const moveForward = rep === 1;
+          tour['outcome'] = moveForward ? 'move_forward' : 'not_a_fit';
+          tour['moveForward'] = moveForward;
+          tour['convertible'] = moveForward;
         }
       }
 
@@ -1111,7 +1166,7 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
     'tenant-mx-searching-standalone-01',
   ];
 
-  const tourGroups = buildToursMatrix(availableUnitIds, searchingTenantIds);
+  const tourGroups = buildToursMatrix(now, availableUnitIds, searchingTenantIds);
   const landlordGroups = buildLandlordsMatrix();
 
   // Flatten everything by table

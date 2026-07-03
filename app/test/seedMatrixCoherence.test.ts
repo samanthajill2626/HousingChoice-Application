@@ -21,6 +21,8 @@ import {
   deriveStatuses,
   type PlacementStage,
 } from '../src/lib/statusModel.js';
+import { TOUR_STATUSES, type TourStatus } from '../src/lib/toursModel.js';
+import { historyItems } from '../src/lib/seed/history.js';
 
 // A fixed clock — every date in the matrix derives from this instant.
 const NOW = new Date('2026-07-03T12:00:00.000Z');
@@ -28,11 +30,23 @@ const NOW_MS = NOW.getTime();
 
 const ITEMS = matrixItems(NOW);
 const PLACEMENTS = ITEMS['placements'] ?? [];
+const TOURS = ITEMS['tours'] ?? [];
+const TOUR_REMINDERS = ITEMS['tourReminders'] ?? [];
 
 const ms = (v: unknown): number => Date.parse(String(v));
 const stageOf = (p: Record<string, unknown>) => p['stage'] as PlacementStage;
 const isActive = (p: Record<string, unknown>) =>
   stageOf(p) !== 'moved_in' && stageOf(p) !== 'lost';
+
+// Tour helpers.
+const tourStatusOf = (t: Record<string, unknown>) => t['status'] as TourStatus;
+const remindersOf = (tourId: string) => TOUR_REMINDERS.filter((r) => r['tourId'] === tourId);
+const isPending = (r: Record<string, unknown>) => r['sentAt'] === undefined && r['canceledAt'] === undefined;
+/** The terminal instant of a reminder (sentAt ?? canceledAt), or +∞ when pending. */
+const terminalMs = (r: Record<string, unknown>): number =>
+  r['sentAt'] !== undefined ? ms(r['sentAt']) : r['canceledAt'] !== undefined ? ms(r['canceledAt']) : Infinity;
+const UPCOMING_TOUR = new Set<TourStatus>(['scheduled', 'confirmed']);
+const PAST_TOUR = new Set<TourStatus>(['toured', 'no_show', 'canceled', 'closed']);
 
 // ---------------------------------------------------------------------------
 // Determinism
@@ -238,6 +252,171 @@ describe('matrix coherence: previously-broken cases now pass', () => {
       const u = units.get(p['unitId'] as string);
       expect(t?.['status'], `tenant status for ${p['placementId']}`).toBe(derived.tenantStatus);
       expect(u?.['status'], `unit status for ${p['placementId']}`).toBe(derived.listingStatus);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Minor (Task 1 review, folded here): active placements entered their stage in
+// the past — no now-relative placement is dated in the future.
+// ---------------------------------------------------------------------------
+describe('matrix coherence: active placement stage_entered_at ≤ now', () => {
+  it('every ACTIVE placement entered its stage on/before now', () => {
+    const actives = PLACEMENTS.filter(isActive);
+    expect(actives.length, 'matrix must include active placements').toBeGreaterThanOrEqual(2);
+    for (const p of actives) {
+      expect(
+        ms(p['stage_entered_at']),
+        `active placement ${p['placementId']}: stage_entered_at > now`,
+      ).toBeLessThanOrEqual(NOW_MS);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOURS + reminders — now-relative and coherent (findings §B)
+// ---------------------------------------------------------------------------
+describe('matrix coherence: tour coverage + requested invariant', () => {
+  it('every TOUR_STATUS appears ≥2 times', () => {
+    const counts: Record<string, number> = {};
+    for (const t of TOURS) counts[tourStatusOf(t)] = (counts[tourStatusOf(t)] ?? 0) + 1;
+    for (const status of TOUR_STATUSES) {
+      expect(counts[status] ?? 0, `tour status '${status}'`).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it("'requested' tours are timeless (no scheduledAt) and carry ZERO reminders", () => {
+    const requested = TOURS.filter((t) => tourStatusOf(t) === 'requested');
+    expect(requested.length).toBeGreaterThanOrEqual(2);
+    for (const t of requested) {
+      expect(t['scheduledAt'], `requested ${t['tourId']} must have no scheduledAt`).toBeUndefined();
+      expect(t['_schedPartition'], `requested ${t['tourId']} must not be on the scheduled GSI`).toBeUndefined();
+      expect(remindersOf(t['tourId'] as string).length, `requested ${t['tourId']} reminder count`).toBe(0);
+    }
+  });
+});
+
+describe('matrix coherence: tour timeline ordering', () => {
+  it('createdAt ≤ scheduledAt for every non-requested tour (no wraparound)', () => {
+    for (const t of TOURS) {
+      if (tourStatusOf(t) === 'requested') continue;
+      expect(
+        ms(t['createdAt']),
+        `tour ${t['tourId']}: createdAt > scheduledAt`,
+      ).toBeLessThanOrEqual(ms(t['scheduledAt']));
+    }
+  });
+
+  it('upcoming tours are future-dated; past tours are past-dated', () => {
+    for (const t of TOURS) {
+      const status = tourStatusOf(t);
+      if (UPCOMING_TOUR.has(status)) {
+        expect(ms(t['scheduledAt']), `upcoming ${t['tourId']} must be in the future`).toBeGreaterThan(NOW_MS);
+      } else if (PAST_TOUR.has(status)) {
+        expect(ms(t['scheduledAt']), `past ${t['tourId']} must be in the past`).toBeLessThan(NOW_MS);
+      }
+    }
+  });
+
+  it('every reminder respects createdAt ≤ dueAt ≤ (sentAt ?? canceledAt ?? ∞)', () => {
+    expect(TOUR_REMINDERS.length).toBeGreaterThanOrEqual(1);
+    for (const r of TOUR_REMINDERS) {
+      const created = ms(r['createdAt']);
+      const due = ms(r['dueAt']);
+      expect(created, `reminder ${r['reminderId']}: createdAt > dueAt`).toBeLessThanOrEqual(due);
+      expect(due, `reminder ${r['reminderId']}: dueAt > terminal (sentAt/canceledAt)`).toBeLessThanOrEqual(terminalMs(r));
+    }
+  });
+});
+
+describe('matrix coherence: the load-bearing live-fire invariant', () => {
+  it('NO pending reminder has dueAt < now (would live-fire on the next poll)', () => {
+    const offenders = TOUR_REMINDERS.filter((r) => isPending(r) && ms(r['dueAt']) < NOW_MS);
+    expect(
+      offenders.map((r) => `${r['reminderId']}@${r['dueAt']}`),
+      'pending reminders with dueAt in the past would be re-sent by runDueTourReminders',
+    ).toEqual([]);
+  });
+
+  it('upcoming tours have a PENDING day_before whose dueAt ≥ now; past tours have ALL reminders terminal', () => {
+    for (const t of TOURS) {
+      const status = tourStatusOf(t);
+      const rems = remindersOf(t['tourId'] as string);
+      if (UPCOMING_TOUR.has(status)) {
+        const dayBefore = rems.find((r) => r['kind'] === 'day_before');
+        expect(dayBefore, `upcoming ${t['tourId']} must have a day_before reminder`).toBeDefined();
+        expect(isPending(dayBefore!), `upcoming ${t['tourId']} day_before must be pending`).toBe(true);
+        expect(ms(dayBefore!['dueAt']), `upcoming ${t['tourId']} day_before dueAt ≥ now`).toBeGreaterThanOrEqual(NOW_MS);
+      } else if (PAST_TOUR.has(status)) {
+        for (const r of rems) {
+          expect(isPending(r), `past ${t['tourId']} reminder ${r['reminderId']} must be terminal`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('no_show tours carry a sent no_show_checkin at scheduledAt + 30m', () => {
+    const noShows = TOURS.filter((t) => tourStatusOf(t) === 'no_show');
+    expect(noShows.length).toBeGreaterThanOrEqual(2);
+    for (const t of noShows) {
+      const nsc = remindersOf(t['tourId'] as string).find((r) => r['kind'] === 'no_show_checkin');
+      expect(nsc, `no_show ${t['tourId']} must have a no_show_checkin`).toBeDefined();
+      expect(nsc!['sentAt'], `no_show_checkin ${t['tourId']} must be sent`).toBeDefined();
+      expect(ms(nsc!['dueAt']) - ms(t['scheduledAt']), `no_show_checkin dueAt offset`).toBe(30 * 60 * 1000);
+    }
+  });
+});
+
+describe('matrix coherence: convertible representation is consistent (toured ↔ closed)', () => {
+  it('every toured/closed tour sets outcome+moveForward+convertible with convertible === (moveForward===true)', () => {
+    const decided = TOURS.filter((t) => tourStatusOf(t) === 'toured' || tourStatusOf(t) === 'closed');
+    expect(decided.length, 'expected ≥4 decided tours (toured×2 + closed×2)').toBeGreaterThanOrEqual(4);
+    for (const t of decided) {
+      expect(t['outcome'], `${t['tourId']} must have an outcome`).toBeDefined();
+      expect(typeof t['moveForward'], `${t['tourId']} moveForward is a boolean`).toBe('boolean');
+      // The unified shape: convertible mirrors the moveForward decision (what the
+      // conversion route + /tours UI read).
+      expect(t['convertible'], `${t['tourId']} convertible must mirror moveForward`).toBe(t['moveForward'] === true);
+      const expectedOutcome = t['moveForward'] === true ? 'move_forward' : 'not_a_fit';
+      expect(t['outcome'], `${t['tourId']} outcome ↔ moveForward`).toBe(expectedOutcome);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// History coherence — the merged history.ts trails follow the now-relative
+// placements automatically (findings §Interaction). No history.ts edit; we only
+// assert its output over the now-relative matrix is now-relative + consistent.
+// ---------------------------------------------------------------------------
+describe('matrix coherence: generated history is now-relative + consistent with the placement', () => {
+  const history = historyItems(ITEMS);
+  const tsIso = (ts: unknown): string => String(ts).split('#')[0]!;
+
+  it("a sample placement's audit trail ends at stage_entered_at and every hop is < now", () => {
+    const sample = PLACEMENTS.find((p) => p['placementId'] === 'placement-mx-awaiting-inspection-01');
+    expect(sample, 'sample placement must exist').toBeDefined();
+    const trail = history.audit_events.filter(
+      (r) => r.entityKey === `placements#${sample!['placementId']}` && r.event_type === 'placement_stage_changed',
+    );
+    expect(trail.length, 'sample placement must have a multi-hop trail').toBeGreaterThanOrEqual(2);
+    const hopMs = trail.map((r) => Date.parse(tsIso(r.ts))).sort((a, b) => a - b);
+    // Final hop == the now-relative stage_entered_at (the trail anchors on it).
+    expect(hopMs[hopMs.length - 1]).toBe(ms(sample!['stage_entered_at']));
+    // Every hop is strictly in the past, and monotonically increasing.
+    for (let i = 0; i < hopMs.length; i++) {
+      expect(hopMs[i], `hop ${i} must be < now`).toBeLessThan(NOW_MS);
+      if (i > 0) expect(hopMs[i]!, `hop ${i} monotonic`).toBeGreaterThan(hopMs[i - 1]!);
+    }
+  });
+
+  it("that tenant's activity timeline is now-relative (every milestone at < now, ≤ stage entry)", () => {
+    const sample = PLACEMENTS.find((p) => p['placementId'] === 'placement-mx-awaiting-inspection-01')!;
+    const tenantId = sample['tenantId'] as string;
+    const timeline = history.activity_events.filter((r) => r.contactId === tenantId);
+    expect(timeline.length, `tenant ${tenantId} must have milestones`).toBeGreaterThanOrEqual(1);
+    for (const r of timeline) {
+      expect(ms(r.at), `milestone ${r.eventId} at < now`).toBeLessThan(NOW_MS);
+      expect(ms(r.at), `milestone ${r.eventId} at ≤ stage_entered_at`).toBeLessThanOrEqual(ms(sample['stage_entered_at']));
     }
   });
 });

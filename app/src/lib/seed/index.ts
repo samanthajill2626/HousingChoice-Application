@@ -4,7 +4,7 @@
 // - 'lean' (default): writes exactly the canonical SEED fixtures (byte-identical
 //   on re-runs; same PutCommand idempotency as the legacy seedData.ts runner).
 //   Also stamps the inbound-voice-line holder (both profiles; idempotent).
-// - 'full': lean + castItems() + matrixItems() merged in; then seedLive().
+// - 'full': lean + castItems() + matrixItems() merged in; then seedLive() + seedMedia().
 //
 // The holder stamp is folded into both profiles so devReset's separate
 // seedInboundVoiceLineHolder call remains a harmless no-op double-stamp.
@@ -19,6 +19,7 @@ import { SEED } from './lean.js';
 import { castItems } from './cast.js';
 import { matrixItems } from './matrix.js';
 import { seedLive } from './live.js';
+import { seedMedia } from './media.js';
 
 export { SEED } from './lean.js';
 
@@ -138,6 +139,8 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
 
   if (profile === 'full') {
     await seedLive(endpoint, new Date());
+    // Seed the two cast media objects (MinIO); fail-soft when MinIO is unreachable.
+    await seedMedia();
   }
 
   // Fold in the inbound-voice-line holder stamp (both profiles; idempotent).

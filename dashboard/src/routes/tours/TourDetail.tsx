@@ -307,6 +307,12 @@ export function TourDetail(): React.JSX.Element {
         </dl>
       </section>
 
+      {/* TODO(scheduled-message-visibility): render a "Reminders" panel here — the
+          armed ladder (confirmation/day_before/morning_of/en_route/no_show_checkin)
+          with each rung's state (upcoming w/ fire time · sent-at · canceled) and the
+          NEXT reminder. Needs a GET /api/tours/:id/reminders route over the existing
+          tourRemindersRepo.listByTour (none exists yet). */}
+
       {actionError !== null ? <p role="alert">{actionError}</p> : null}
 
       {/* Book — a 'requested' tour has no time yet; booking sets one and arms reminders. */}

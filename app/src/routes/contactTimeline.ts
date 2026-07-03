@@ -115,6 +115,10 @@ interface TimelineMilestone extends TimelineBase {
   refId?: string;
 }
 type TimelineItem = TimelineMessage | TimelineCall | TimelineMilestone;
+// TODO(scheduled-message-visibility): add a future `kind: 'scheduled'` member here
+// and merge not-yet-sent scheduled outbound sends (tour reminders, placement
+// nudges — see the candidate-gather in the route handler) into the timeline so a
+// pending text shows up as a FUTURE item (body + send time) before it fires.
 
 /** A candidate carries its global comparison key alongside the wire item. */
 interface Candidate {
@@ -339,6 +343,10 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
 
     // 4. Candidate gather — fetch limit+1 from EACH source, all bounded
     //    `< boundaryKey`, so the merge can decide whether more pages remain.
+    // TODO(scheduled-message-visibility): also gather this contact's not-yet-sent
+    // scheduled sends here (tourRemindersRepo.listByTour + placementNudgesRepo,
+    // for this contact's conversation(s)) as future `kind:'scheduled'` candidates —
+    // reflecting send-time suppression (opt-out/manual/breaker) honestly.
     const candidates: Candidate[] = [];
 
     if (wantMessage || wantCall) {

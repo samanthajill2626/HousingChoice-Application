@@ -147,6 +147,26 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       }
       inspectionOutcome = b['inspectionOutcome'];
     }
+    // inspectionDate (when supplied) must be a non-empty string; the service writes
+    // it only on the schedule_inspection exit.
+    let inspectionDate: string | undefined;
+    if (b['inspectionDate'] !== undefined) {
+      if (typeof b['inspectionDate'] !== 'string' || b['inspectionDate'].length === 0) {
+        res.status(400).json({ error: 'inspectionDate must be a non-empty date string' });
+        return;
+      }
+      inspectionDate = b['inspectionDate'];
+    }
+    // rentDetermined (when supplied) must be a finite number > 0 (the authority's
+    // determined rent); the service writes it only on the determine_rent exit.
+    let rentDetermined: number | undefined;
+    if (b['rentDetermined'] !== undefined) {
+      if (typeof b['rentDetermined'] !== 'number' || !Number.isFinite(b['rentDetermined']) || b['rentDetermined'] <= 0) {
+        res.status(400).json({ error: 'rentDetermined must be a finite number > 0' });
+        return;
+      }
+      rentDetermined = b['rentDetermined'];
+    }
 
     // A `lost` move always captures a reason (§7 "pick OR write — always
     // available"): require at least a valid category OR non-empty free text.
@@ -167,6 +187,8 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
         ...(lostReason !== undefined && { lostReason }),
         ...(finalRent !== undefined && { finalRent }),
         ...(inspectionOutcome !== undefined && { inspectionOutcome }),
+        ...(inspectionDate !== undefined && { inspectionDate }),
+        ...(rentDetermined !== undefined && { rentDetermined }),
         ...(req.user?.userId !== undefined && { actor: req.user.userId }),
       });
       log.info({ placementId, toStage: b['toStage'], source: b['source'], actor: req.user?.userId }, 'placement transition via api');

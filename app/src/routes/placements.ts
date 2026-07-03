@@ -218,6 +218,8 @@ function validatePlacementCreate(
 // on a `lost` move), never a free string set through this legacy CRUD PATCH.
 const STRING_FIELDS = ['placement_tag', 'lease_date', 'move_in_date', 'notes'] as const;
 const OBJECT_FIELDS = ['application', 'rta'] as const;
+// The complete-paperwork checklist toggles (Approval & Move-in). Each optional.
+const BOOL_FIELDS = ['lease_signed', 'lif', 'move_in_details'] as const;
 
 /** Validate PATCH /placements/:placementId. Allowlist + per-field type checks. */
 function validatePlacementUpdate(body: unknown): Validation<Record<string, unknown>> {
@@ -265,6 +267,13 @@ function validatePlacementUpdate(body: unknown): Validation<Record<string, unkno
     if ((OBJECT_FIELDS as readonly string[]).includes(key)) {
       if (value !== null && (typeof value !== 'object' || Array.isArray(value))) {
         return { ok: false, error: `${key} must be an object or null` };
+      }
+      fields[key] = value;
+      continue;
+    }
+    if ((BOOL_FIELDS as readonly string[]).includes(key)) {
+      if (typeof value !== 'boolean') {
+        return { ok: false, error: `${key} must be a boolean` };
       }
       fields[key] = value;
       continue;

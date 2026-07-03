@@ -151,6 +151,25 @@ describe('placements API (M1.10b)', () => {
     expect(world.auditEvents.some((a) => a.event_type === 'placement_updated')).toBe(true);
   });
 
+  it('PATCH accepts the paperwork checklist booleans', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'complete_paperwork' });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, {
+      lease_signed: true,
+      move_in_details: true,
+      lif: false,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.placement.lease_signed).toBe(true);
+    expect(res.body.placement.move_in_details).toBe(true);
+    expect(res.body.placement.lif).toBe(false);
+  });
+
+  it('PATCH rejects a non-boolean checklist value', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'complete_paperwork' });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, { lease_signed: 'yes' });
+    expect(res.status).toBe(400);
+  });
+
   it('PATCH REFUSES a stage write (§8: stage moves go through the transition route)', async () => {
     const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
     // Even a VALID stage is rejected via legacy CRUD — the ONLY way to change a

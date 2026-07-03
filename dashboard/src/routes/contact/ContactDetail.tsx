@@ -94,6 +94,10 @@ export function ContactDetail(): React.JSX.Element {
   const [pendingConsentSend, setPendingConsentSend] = useState<
     { conversationId: string; body: string; replyToPhone?: string } | null
   >(null);
+  // Bumped when a post-consent retry actually SENDS, so the Timeline composer
+  // clears the draft it restored on the 409 refusal (the retry runs out-of-band
+  // of the composer's own send, which is what clears the draft on a normal send).
+  const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The current navigator's voice self-view — gates the masked-call control on
@@ -409,6 +413,7 @@ export function ContactDetail(): React.JSX.Element {
             onSend={onSend}
             onRetry={onRetry}
             optedOut={optedOut}
+            clearDraftSignal={clearDraftSignal}
           />
         </div>
         <div
@@ -550,7 +555,13 @@ export function ContactDetail(): React.JSX.Element {
             setContact(updated);
             setPendingConsentSend(null);
             if (retry !== null) {
-              void postSend(retry.conversationId, retry.body, retry.replyToPhone);
+              // On a successful retry, clear the composer draft the 409 restored.
+              // On another refusal, leave it (the message is preserved), and the
+              // no-op rejection handler avoids an unhandled promise rejection.
+              void postSend(retry.conversationId, retry.body, retry.replyToPhone).then(
+                () => setClearDraftSignal((n) => n + 1),
+                () => {},
+              );
             }
           }}
         />

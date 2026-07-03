@@ -8,7 +8,7 @@
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
 // first (roles/labels) so it's testable.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   TimelineCall,
@@ -87,6 +87,12 @@ export interface TimelineProps {
   /** Contact is on the Do-Not-Contact list (sms_opt_out) — show a standing note
    *  at the composer so it's clear BEFORE sending (the send is refused too). */
   optedOut?: boolean;
+  /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
+   *  consent modal records consent, then retries the send out-of-band of the
+   *  composer). The composer restored its draft on the 409 refusal, so it must
+   *  re-clear it on that success — a plain send clears optimistically; this one
+   *  can't, because its success happens outside handleSend. */
+  clearDraftSignal?: number;
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
@@ -349,11 +355,21 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onSend,
     onRetry,
     optedOut,
+    clearDraftSignal,
   } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  // A deferred send (post-consent retry) landed: clear the draft the 409 refusal
+  // restored, matching a normal successful send. Guarded so the initial 0 is inert.
+  useEffect(() => {
+    if (clearDraftSignal) {
+      setDraft('');
+      setSendError(null);
+    }
+  }, [clearDraftSignal]);
   // The reply box starts one line and grows to fit the draft (up to its CSS
   // max-height); a manual drag-resize overrides that until the draft clears.
   const replyRef = useAutoGrowTextarea(draft);

@@ -532,6 +532,10 @@ describe('ContactDetail', () => {
       await waitFor(() =>
         expect(screen.queryByRole('dialog', { name: /Record consent before texting/i })).not.toBeInTheDocument(),
       );
+      // Regression: once the retry SENDS, the composer must clear — the draft was
+      // restored on the 409 refusal, and the out-of-band retry has to re-clear it
+      // (a plain successful send clears the box; this deferred one must too).
+      await waitFor(() => expect(screen.getByLabelText('Reply message')).toHaveValue(''));
     });
 
     it('Cancel aborts the send (no PATCH, no retry) and the message stays in the box', async () => {

@@ -565,6 +565,61 @@ export interface ToursPage {
   tours: Tour[];
 }
 
+// --- Tour reminder ladder (scheduled-message-visibility) ---------------------
+
+/** The five reminder rungs of a tour's ladder (mirrors the app-side ReminderKind). */
+export type ReminderKind =
+  | 'confirmation'
+  | 'day_before'
+  | 'morning_of'
+  | 'en_route'
+  | 'no_show_checkin';
+
+/**
+ * One rung of a tour's reminder ladder (GET /api/tours/:tourId/reminders).
+ * Mirrors the server's TourReminderView shape verbatim (Task 2).
+ */
+export interface TourReminderView {
+  reminderId: string;
+  kind: ReminderKind;
+  /** ISO 8601 — when the rung is due to fire. */
+  dueAt: string;
+  state: 'upcoming' | 'sent' | 'canceled';
+  /** ISO 8601 — when it was sent (present when state === 'sent'). */
+  sentAt?: string;
+  /** ISO 8601 — when it was canceled (present when state === 'canceled'). */
+  canceledAt?: string;
+  body: string;
+  /** Present when the rung is armed but will be skipped at fire time. */
+  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+}
+
+/** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
+export interface TourRemindersPage {
+  reminders: TourReminderView[];
+  /** The next reminder due to fire (highlight it in the UI). Absent when none upcoming. */
+  next?: TourReminderView;
+}
+
+/** Human-readable labels for the reminder rungs (staff-facing). */
+export const REMINDER_KIND_LABELS: Readonly<Record<ReminderKind, string>> = {
+  confirmation: 'Confirmation',
+  day_before: 'Day before',
+  morning_of: 'Morning of',
+  en_route: 'En route',
+  no_show_checkin: 'No-show check-in',
+};
+
+/** Human-readable phrasings for why an armed rung will be skipped (staff-facing). */
+export const REMINDER_SUPPRESSION_LABELS: Readonly<
+  Record<NonNullable<TourReminderView['suppression']>['reason'], string>
+> = {
+  sms_sending_disabled: 'SMS sending is off',
+  contact_opted_out: 'contact opted out',
+  manual_mode: 'manual mode',
+  stale_stage: 'tour no longer at this stage',
+};
+
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
 export interface PlacementAttention {
   reason: string;

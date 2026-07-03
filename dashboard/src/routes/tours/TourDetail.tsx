@@ -27,6 +27,7 @@ import {
   type TourOutcome,
   type TourStatus,
 } from '../../api/index.js';
+import { RemindersPanel } from './RemindersPanel.js';
 
 /** Format a scheduledAt ISO datetime for human-readable display. */
 function formatScheduledAt(iso: string): string {
@@ -307,11 +308,10 @@ export function TourDetail(): React.JSX.Element {
         </dl>
       </section>
 
-      {/* TODO(scheduled-message-visibility): render a "Reminders" panel here — the
-          armed ladder (confirmation/day_before/morning_of/en_route/no_show_checkin)
-          with each rung's state (upcoming w/ fire time · sent-at · canceled) and the
-          NEXT reminder. Needs a GET /api/tours/:id/reminders route over the existing
-          tourRemindersRepo.listByTour (none exists yet). */}
+      {/* The armed reminder ladder (confirmation/day_before/morning_of/en_route/
+          no_show_checkin) — each rung's state (upcoming w/ fire time · sent-at ·
+          canceled), the NEXT reminder highlighted, and any will-be-skipped note. */}
+      <RemindersPanel tourId={tour.tourId} />
 
       {actionError !== null ? <p role="alert">{actionError}</p> : null}
 

@@ -1556,6 +1556,29 @@ export function createFakeWorld(): FakeWorld {
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
+    async claimConversion(tourId, value) {
+      // Mirror the conditional write: exists AND no convertedPlacementId yet.
+      // The check-and-set is synchronous within this async tick (no internal
+      // await between them), so two concurrent callers can never both win.
+      const t = toursMap.get(tourId);
+      if (!t || t.convertedPlacementId !== undefined) {
+        throw new TourConditionalCheckFailedException({
+          message: `claimConversion: slot taken or no tour ${tourId}`,
+          $metadata: {},
+        });
+      }
+      t.convertedPlacementId = value;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
+    async releaseConversionClaim(tourId, value) {
+      // Best-effort conditional REMOVE: only while our sentinel still holds.
+      const t = toursMap.get(tourId);
+      if (!t || t.convertedPlacementId !== value) return;
+      delete t.convertedPlacementId;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
   };
 
   const tourRemindersMap = new Map<string, TourReminderItem>();

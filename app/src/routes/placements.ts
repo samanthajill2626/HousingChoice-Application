@@ -21,6 +21,7 @@
 //
 // PII (doc §9): responses carry full placement docs to the authenticated client;
 // LOG LINES are placementId/stage/counts only — never the placement_tag (a name).
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
@@ -516,6 +517,10 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(409).json({ error: 'tour_not_convertible' });
       return;
     }
+    // Fast-path 409: an already-converted (or mid-conversion) tour short-circuits
+    // BEFORE any write — this saves the conditional claim below. `typeof string`
+    // also matches the `pending:<uuid>` sentinel a concurrent claim writes, so a
+    // convert racing behind a still-in-flight one still 409s here when it can.
     if (typeof tour['convertedPlacementId'] === 'string') {
       res.status(409).json({ error: 'tour_already_converted' });
       return;
@@ -531,24 +536,88 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       return;
     }
 
+    // ── ATOMIC CONVERSION CLAIM — closes the from-tour double-create race. ──
+    // The fast-path read-check above is check-then-act: two concurrent POSTs can
+    // BOTH read an unconverted tour and both proceed. The conditional claim
+    // below (attribute_not_exists via toursRepo.claimConversion) lets exactly ONE
+    // win; the loser's ConditionalCheckFailedException maps to 409. The sentinel
+    // is UNIQUE per request so every release below is value-guarded — it can only
+    // ever remove OUR OWN claim, never a co-winner's or the finalized id.
+    //
+    // Ordering (each pre-finalize failure RELEASES the claim so a retry is clean):
+    //   1. Guards above (404s, convertible, fast-path 409).
+    //   2. claimConversion(sentinel)                — CCFE → 409 (race loser).
+    //   3. cancelTourReminders                      — fail → release + rethrow.
+    //   4. placements.create                        — fail → release + rethrow.
+    //   5. finalize patch (replace sentinel w/ id)  — fail → release + LOUD log.
+    //   6. best-effort tail (rebind/audit/…)        — never fails the 201.
+    const sentinel = `pending:${randomUUID()}`;
+    try {
+      await tours.claimConversion(tour.tourId, sentinel);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        // The loser of the race (or a second convert) lands here — one 201, one 409.
+        res.status(409).json({ error: 'tour_already_converted' });
+        return;
+      }
+      throw err; // Express 5 forwards async throws to the error handler (500).
+    }
+
+    // The tour is now CLAIMED (convertedPlacementId = sentinel). Cancel reminders
+    // BEFORE creating/finalizing: canceling reminders on a still-unconverted tour
+    // is benign retry residue, but a live reminder firing on a CONVERTED tour
+    // would not be — so cancel must precede finalize. Fail → release + rethrow.
+    try {
+      await cancelTourReminders(tour.tourId, { tourRemindersRepo: reminders, logger: log });
+    } catch (err) {
+      await tours.releaseConversionClaim(tour.tourId, sentinel);
+      throw err;
+    }
+
     // Create the placement at the ladder's first rung, carrying the tour
     // provenance (fromTourId) and — when the tour had a masked relay thread —
-    // the group_thread link so the thread survives the conversion.
-    const created = await placements.create({
-      tenantId: tour.tenantId,
-      unitId: tour.unitId,
-      stage: 'send_application',
-      stage_entered_at: new Date().toISOString(),
-      stage_source: 'manual',
-      fromTourId: tour.tourId,
-      ...(typeof tour.groupThreadId === 'string' && { group_thread: tour.groupThreadId }),
-    });
+    // the group_thread link so the thread survives the conversion. Fail →
+    // release the claim so a retry converts cleanly.
+    let created;
+    try {
+      created = await placements.create({
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
+        stage: 'send_application',
+        stage_entered_at: new Date().toISOString(),
+        stage_source: 'manual',
+        fromTourId: tour.tourId,
+        ...(typeof tour.groupThreadId === 'string' && { group_thread: tour.groupThreadId }),
+      });
+    } catch (err) {
+      await tours.releaseConversionClaim(tour.tourId, sentinel);
+      throw err;
+    }
     mergeContext({ placementId: created.placementId });
 
-    // Finalize the tour BEFORE returning — stamping convertedPlacementId is what
-    // makes a second convert 409.
-    await tours.patch(tour.tourId, { status: 'closed', convertedPlacementId: created.placementId });
-    await cancelTourReminders(tour.tourId, { tourRemindersRepo: reminders, logger: log });
+    // Finalize the tour: REPLACE the sentinel with the real placementId and close
+    // it. On failure the placement already exists but the tour is left claimed by
+    // the sentinel — attempt to release it (so a retry can re-convert) and log
+    // LOUDLY with the orphan placementId. ACCEPTED RESIDUE: a retry after a
+    // finalize-failure creates a SECOND placement; the orphan is findable via its
+    // fromTourId + this loud log.
+    try {
+      await tours.patch(tour.tourId, { status: 'closed', convertedPlacementId: created.placementId });
+    } catch (err) {
+      try {
+        await tours.releaseConversionClaim(tour.tourId, sentinel);
+      } catch (relErr) {
+        log.error(
+          { err: relErr, tourId: tour.tourId, orphanPlacementId: created.placementId },
+          'convert: finalize-failure claim release ALSO failed',
+        );
+      }
+      log.error(
+        { err, tourId: tour.tourId, orphanPlacementId: created.placementId },
+        'convert: FINALIZE FAILED after placement created — ORPHAN placement (findable via fromTourId)',
+      );
+      throw err;
+    }
 
     // Re-parent the masked relay thread (metadata-only; pool + members preserved).
     if (typeof tour.groupThreadId === 'string') {

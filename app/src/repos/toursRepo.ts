@@ -149,6 +149,22 @@ export interface ToursRepo {
    * conversation id written since). Best-effort — a lost condition is a no-op.
    */
   releaseGroupThreadClaim(tourId: string, value: string): Promise<void>;
+  /**
+   * Atomically CLAIM the tour's conversion slot (Post-Tour → placement): sets
+   * convertedPlacementId to `value` ONLY when none exists yet. Throws
+   * ConditionalCheckFailedException when the slot is already taken (or the tour
+   * is missing) — the atomic half of the one-placement-per-tour guard, so two
+   * concurrent POST /from-tour requests can never both create a placement
+   * (mirror of claimGroupThread).
+   */
+  claimConversion(tourId: string, value: string): Promise<void>;
+  /**
+   * Release a conversion claim made by claimConversion when the conversion
+   * FAILS before finalize: removes convertedPlacementId ONLY while it still
+   * equals `value` (never clobbers the finalized placementId, or a newer claim,
+   * written since). Best-effort — a lost condition is a no-op.
+   */
+  releaseConversionClaim(tourId: string, value: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +362,47 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         throw err;
       }
       log.info({ tourId }, 'tour group-thread claim released (provisioning failed)');
+    },
+
+    async claimConversion(tourId, value) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { tourId },
+          UpdateExpression: 'SET #cp = :v, #updatedAt = :now',
+          // Atomic one-placement-per-tour: only the FIRST claimant wins; a
+          // concurrent /from-tour POST loses here BEFORE any placement row is
+          // created (mirrors claimGroupThread).
+          ConditionExpression: 'attribute_exists(tourId) AND attribute_not_exists(#cp)',
+          ExpressionAttributeNames: { '#cp': 'convertedPlacementId', '#updatedAt': 'updatedAt' },
+          ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
+        }),
+      );
+      log.info({ tourId }, 'tour conversion slot claimed');
+    },
+
+    async releaseConversionClaim(tourId, value) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId },
+            UpdateExpression: 'REMOVE #cp SET #updatedAt = :now',
+            // Only release OUR sentinel — never clobber the finalized
+            // placementId (or a newer claim) written since.
+            ConditionExpression: '#cp = :v',
+            ExpressionAttributeNames: { '#cp': 'convertedPlacementId', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeValues: { ':v': value, ':now': new Date().toISOString() },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId }, 'conversion claim release lost (superseded) — no-op');
+          return;
+        }
+        throw err;
+      }
+      log.info({ tourId }, 'tour conversion claim released (conversion failed)');
     },
   };
 }

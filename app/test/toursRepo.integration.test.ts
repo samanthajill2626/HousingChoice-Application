@@ -361,4 +361,52 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     // should not throw — it may return any non-error result
     expect(Array.isArray(result)).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // Atomic conversion claim (Post-Tour double-create race guard) — mirrors the
+  // claimGroupThread/releaseGroupThreadClaim conditional-write idiom.
+  // -------------------------------------------------------------------------
+
+  it('claimConversion: first claim wins; a second concurrent claim throws ConditionalCheckFailedException', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    const tour = await tours.create({
+      tenantId: 'contact-claim-1',
+      unitId: 'unit-claim-1',
+      tourType: 'landlord_led',
+    });
+
+    await tours.claimConversion(tour.tourId, 'pending:aaa');
+    expect((await tours.get(tour.tourId))!.convertedPlacementId).toBe('pending:aaa');
+
+    // The slot is taken — a second claimant (the race loser) is rejected.
+    await expect(tours.claimConversion(tour.tourId, 'pending:bbb')).rejects.toBeInstanceOf(Err);
+    // The FIRST claimant still holds the slot (never clobbered).
+    expect((await tours.get(tour.tourId))!.convertedPlacementId).toBe('pending:aaa');
+  });
+
+  it('claimConversion throws ConditionalCheckFailedException for a missing tour (attribute_exists guard)', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    await expect(tours.claimConversion('tour-ghost-claim', 'pending:x')).rejects.toBeInstanceOf(Err);
+  });
+
+  it('releaseConversionClaim removes ONLY while the value matches (lost condition = no-op)', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-rel-1',
+      unitId: 'unit-rel-1',
+      tourType: 'landlord_led',
+    });
+    await tours.claimConversion(tour.tourId, 'pending:mine');
+
+    // A mismatched value is a NO-OP (never clobbers a newer claim / finalized id).
+    await tours.releaseConversionClaim(tour.tourId, 'pending:other');
+    expect((await tours.get(tour.tourId))!.convertedPlacementId).toBe('pending:mine');
+
+    // The matching value releases the slot.
+    await tours.releaseConversionClaim(tour.tourId, 'pending:mine');
+    expect((await tours.get(tour.tourId))!.convertedPlacementId).toBeUndefined();
+
+    // Slot is free again — a fresh claim succeeds (attribute_not_exists true again).
+    await tours.claimConversion(tour.tourId, 'pending:again');
+    expect((await tours.get(tour.tourId))!.convertedPlacementId).toBe('pending:again');
+  });
 });

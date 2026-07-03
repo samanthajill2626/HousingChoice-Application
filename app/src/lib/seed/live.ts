@@ -29,6 +29,7 @@ import { tableName } from '../config.js';
 import { armTourReminders } from '../../jobs/tourReminders.js';
 import { createTourRemindersRepo } from '../../repos/tourRemindersRepo.js';
 import { deriveStatuses } from '../statusModel.js';
+import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
 
 // ---------------------------------------------------------------------------
@@ -439,6 +440,29 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     console.log(
       `  seeded   tourReminders (live tour-confirmed): ${armedConfirmed.length} reminder${armedConfirmed.length === 1 ? '' : 's'}`,
     );
+
+    // Now-relative lifecycle history: reuse the SAME deterministic generator the
+    // full profile uses (historyItems), anchored to the live entities' now-relative
+    // stage_entered_at / created_at. So the overdue-RTA + follow-up placements (and
+    // their derived tenant/unit side-effects + the tours' timeline milestones) carry
+    // now-relative audit trails + Contact Timeline milestones — no fixed calendar
+    // dates. Written directly (mirroring the reminder-row writes above). These rows
+    // are intentionally NOT byte-stable (their instants track `now`), consistent with
+    // the rest of live.ts. historyItems does not mutate its input.
+    const history = historyItems(staticItems);
+    for (const [base, rows] of [
+      ['audit_events', history.audit_events],
+      ['activity_events', history.activity_events],
+    ] as const) {
+      if (rows.length === 0) continue;
+      const table = tableName(base);
+      for (const item of rows) {
+        await doc.send(new PutCommand({ TableName: table, Item: item }));
+      }
+      console.log(
+        `  seeded   ${table} (live): ${rows.length} row${rows.length === 1 ? '' : 's'}`,
+      );
+    }
   } finally {
     doc.destroy();
   }

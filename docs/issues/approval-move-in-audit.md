@@ -3,7 +3,7 @@ id: approval-move-in-audit
 title: Approval & Move-in — live-stack conformance audit + data-model decision (Task 1 gate)
 type: decision
 severity: med
-status: open
+status: in-progress
 area: app
 created: 2026-07-03
 refs: app/src/lib/statusModel.ts:48, app/src/services/statusTransition.ts:308, app/src/services/statusTransition.ts:339, app/src/repos/placementsRepo.ts:126, app/src/routes/placements.ts, dashboard/src/routes/placements/transitionGate.ts:17, dashboard/src/routes/placements/MovePromptModal.tsx:15, app/src/repos/contactsRepo.ts:170
@@ -104,5 +104,5 @@ already writes, typed rendering on `PlacementDetail`, and consistency with the
 established `inspection_outcome`/`final_rent` shape. The bag's only edge — no interface
 change — is outweighed by the loss of type safety and validation.
 
-**Status:** awaiting ratification. Do not start Task 2 until ratified. On ratification,
-set this to `in-progress`; on merge, `resolved`.
+**Status:** RATIFIED by Cameron (2026-07-03) — first-class typed fields. Build proceeds
+per the plan (Tasks 2–10). On merge, set this to `resolved`.

@@ -9,19 +9,21 @@
 //   byUnit         (unitId)
 //   byStage        (stage)               — the kanban column
 //   byTourDate     (tour_date, SPARSE)   — YYYY-MM-DD; only when a tour is set
-//   byNextDeadline (next_deadline_type + next_deadline_at, SPARSE composite)
-//                                         — "what needs attention right now?"
 // Everything else (tour history, the four-rung application ladder, RTA/approval
 // data, lease/move-in dates, the attention flag) is a free-form attribute, so
 // schema churn during the build needs no migration — exactly the §5 posture.
 //
+// DEADLINES ARE FIRST-CLASS ITEMS NOW (placement-deadline-model refactor): the
+// overloaded single next_deadline slot + its byNextDeadline GSI were RETIRED.
+// Real due-dates live in the placementDeadlines table (one item per
+// (placement, type); see placementDeadlinesRepo), and the internal "stuck"
+// signal is DERIVED from stage_entered_at — the two no longer compete for one
+// slot.
+//
 // SPARSE-KEY DISCIPLINE (what the in-memory fakes can't catch — the lesson from
 // the broadcasts overlap bug): a sparse GSI key attribute must be ABSENT (not
-// null/empty) to drop out of its index, and a COMPOSITE sparse key
-// (next_deadline_type + next_deadline_at) must be set/cleared BOTH-or-NEITHER or
-// the index row is malformed. So `update` maps an explicit `null` to a REMOVE
-// (clears tour_date → drops from byTourDate), and the next_deadline pair only
-// moves through `setNextDeadline`, which writes or removes both atomically.
+// null/empty) to drop out of its index. So `update` maps an explicit `null` to a
+// REMOVE (clears tour_date → drops from byTourDate).
 //
 // PII (doc §9): NEVER log names/phones/bodies — placementId/tenantId/unitId/stage/
 // counts only.
@@ -51,18 +53,20 @@ import type { RepoDeps } from './conversationsRepo.js';
 export { TERMINAL_STAGES };
 
 /**
- * The business-clock deadline types (doc §5: "voucher expiration, the RTA
- * 48-hour window, stuck-placement alerts, tour reminders"). A placement carries
- * at most ONE next_deadline — the single most-urgent pending clock — so the
- * byNextDeadline GSI answers "what needs attention right now?" in one query per
- * type. Bounded so the GSI partition key stays queryable. (Escalation from a
- * failed send is a separate `attention` flag, not a deadline — see PlacementItem.)
+ * The real business-clock deadline types (placement-deadline-model refactor).
+ * Each is a hard clock where something must actually be done by an instant:
+ *   - rta_window          the landlord must submit the RTA within 48h
+ *   - voucher_expiration  the tenant's voucher expires
+ *   - follow_up           a staff "come back to this by X" reminder
+ * Materialized as first-class placementDeadlines items (one per (placement,
+ * type)). The former `tour_reminder` deadline is RETIRED (tours are first-class);
+ * the former `stuck_placement` "resurface this" hook is no longer a deadline —
+ * it is DERIVED from time-in-stage (see today.ts). Escalation from a failed send
+ * is a separate `attention` flag, not a deadline (see PlacementItem).
  */
 export const PLACEMENT_DEADLINE_TYPES = [
-  'tour_reminder',
   'rta_window',
   'voucher_expiration',
-  'stuck_placement',
   'follow_up',
 ] as const;
 
@@ -70,7 +74,7 @@ export type PlacementDeadlineType = (typeof PLACEMENT_DEADLINE_TYPES)[number];
 
 const PLACEMENT_DEADLINE_TYPE_SET: ReadonlySet<string> = new Set(PLACEMENT_DEADLINE_TYPES);
 
-/** Type guard: is `x` a known deadline type (route allowlist for the GSI key)? */
+/** Type guard: is `x` a known deadline type (route/repo allowlist)? */
 export function isPlacementDeadlineType(x: unknown): x is PlacementDeadlineType {
   return typeof x === 'string' && PLACEMENT_DEADLINE_TYPE_SET.has(x);
 }
@@ -83,13 +87,6 @@ export function isPlacementDeadlineType(x: unknown): x is PlacementDeadlineType 
 export interface PlacementAttention {
   reason: string;
   /** ISO 8601 — when the flag was raised. */
-  at: string;
-}
-
-/** The next business-clock deadline (the byNextDeadline composite key pair). */
-export interface PlacementDeadline {
-  type: PlacementDeadlineType;
-  /** ISO 8601. */
   at: string;
 }
 
@@ -112,10 +109,6 @@ export interface PlacementItem {
    * when no tour is scheduled (cleared via update({ tour_date: null })).
    */
   tour_date?: string;
-  /** byNextDeadline GSI (SPARSE composite hash): set/cleared via setNextDeadline. */
-  next_deadline_type?: PlacementDeadlineType;
-  /** byNextDeadline GSI (SPARSE composite range), ISO 8601: set via setNextDeadline. */
-  next_deadline_at?: string;
   /** The placement's relay group conversationId (set when the relay is set up). */
   group_thread?: string;
   /** Operator label, mirrored onto the relay pool number (poolNumbers tag). */
@@ -170,14 +163,6 @@ export interface ListPlacementsOpts {
   exclusiveStartKey?: Record<string, unknown>;
 }
 
-/** byNextDeadline query options: bound the range to "due by" a cutoff. */
-export interface ListByNextDeadlineOpts extends ListPlacementsOpts {
-  /** Only deadlines AT or BEFORE this ISO 8601 instant (the "due now" window). */
-  beforeAt?: string;
-  /** Sort by next_deadline_at; default ascending (soonest first). */
-  scanIndexForward?: boolean;
-}
-
 /**
  * Create input: tenantId + unitId + stage are required; everything else flows
  * through as a flexible-document attribute. placementId/created_at are
@@ -200,21 +185,8 @@ export interface PlacementsRepo {
    * (tour_date) or the attention flag, since a key attribute must be ABSENT, not
    * null, to drop from its index. updated_at is always bumped. Returns ALL_NEW.
    * Throws ConditionalCheckFailedException for unknown placements.
-   *
-   * THROWS if `patch` contains next_deadline_type/next_deadline_at: the
-   * byNextDeadline COMPOSITE key must move both-or-neither, so it only goes
-   * through setNextDeadline. A half-set key is a silently-unqueryable index row
-   * (a deadline clock that never fires) — so this is a hard guard, not a
-   * convention. (The route still owns the stage/key allowlist, like unitsRepo.)
    */
   update(placementId: string, patch: Record<string, unknown>): Promise<PlacementItem>;
-  /**
-   * Set or clear the next-deadline composite key atomically (both attributes or
-   * neither). Passing `null` REMOVEs both (drops the placement from
-   * byNextDeadline). Returns ALL_NEW. Throws ConditionalCheckFailedException for
-   * unknown placements.
-   */
-  setNextDeadline(placementId: string, deadline: PlacementDeadline | null): Promise<PlacementItem>;
   /** All placements for a tenant via the byTenant GSI. */
   listByTenant(tenantId: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
   /** All placements on a unit via the byUnit GSI. */
@@ -223,15 +195,6 @@ export interface PlacementsRepo {
   listByStage(stage: PlacementStage, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
   /** All placements whose CURRENT tour is on a given date via the byTourDate GSI. */
   listByTourDate(tourDate: string, opts?: ListPlacementsOpts): Promise<PlacementsPage>;
-  /**
-   * Placements with a pending deadline of a given type, soonest-first, via the
-   * byNextDeadline GSI — "what needs attention right now?" (doc §5). Optionally
-   * bounded to those due AT or BEFORE a cutoff (opts.beforeAt).
-   */
-  listByNextDeadline(
-    type: PlacementDeadlineType,
-    opts?: ListByNextDeadlineOpts,
-  ): Promise<PlacementsPage>;
   /**
    * Unfiltered paginated Scan — the board's "all placements" fallback. ACCEPTED
    * at this scale (doc §5.1: the working set is hundreds of small items).
@@ -316,13 +279,6 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue; // omitted → untouched
-        if (key === 'next_deadline_type' || key === 'next_deadline_at') {
-          // Both-or-neither composite key — never a half-set (silently
-          // unqueryable) index row. Fail fast; callers use setNextDeadline.
-          throw new Error(
-            'placementsRepo.update: set next_deadline via setNextDeadline (composite key must move both-or-neither)',
-          );
-        }
         const nameKey = `#k${i}`;
         names[nameKey] = key;
         if (value === null) {
@@ -356,41 +312,6 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
       return Attributes as PlacementItem;
     },
 
-    async setNextDeadline(placementId, deadline) {
-      // Both-or-neither: SET both composite-key attributes together, or REMOVE
-      // both — never a half-set key (which would be an unqueryable index row).
-      const names: Record<string, string> = {
-        '#t': 'next_deadline_type',
-        '#a': 'next_deadline_at',
-        '#updatedAt': 'updated_at',
-      };
-      const values: Record<string, unknown> = { ':now': new Date().toISOString() };
-      let updateExpression: string;
-      if (deadline === null) {
-        updateExpression = 'SET #updatedAt = :now REMOVE #t, #a';
-      } else {
-        values[':t'] = deadline.type;
-        values[':a'] = deadline.at;
-        updateExpression = 'SET #t = :t, #a = :a, #updatedAt = :now';
-      }
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { placementId },
-          UpdateExpression: updateExpression,
-          ConditionExpression: 'attribute_exists(placementId)',
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info(
-        { placementId, deadlineType: deadline?.type ?? null },
-        deadline === null ? 'placement next-deadline cleared' : 'placement next-deadline set',
-      );
-      return Attributes as PlacementItem;
-    },
-
     async listByTenant(tenantId, opts = {}) {
       return queryIndex('byTenant', 'tenantId', tenantId, opts);
     },
@@ -405,34 +326,6 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
 
     async listByTourDate(tourDate, opts = {}) {
       return queryIndex('byTourDate', 'tour_date', tourDate, opts);
-    },
-
-    async listByNextDeadline(type, opts = {}) {
-      const hasBefore = typeof opts.beforeAt === 'string';
-      const input: QueryCommandInput = {
-        TableName: table,
-        IndexName: 'byNextDeadline',
-        KeyConditionExpression: hasBefore
-          ? '#t = :t AND #a <= :before'
-          : '#t = :t',
-        ExpressionAttributeNames: hasBefore
-          ? { '#t': 'next_deadline_type', '#a': 'next_deadline_at' }
-          : { '#t': 'next_deadline_type' },
-        ExpressionAttributeValues: hasBefore
-          ? { ':t': type, ':before': opts.beforeAt }
-          : { ':t': type },
-        // Soonest-first by default (the range key is next_deadline_at).
-        ScanIndexForward: opts.scanIndexForward ?? true,
-        ...(opts.limit !== undefined && { Limit: opts.limit }),
-        ...(opts.exclusiveStartKey !== undefined && {
-          ExclusiveStartKey: opts.exclusiveStartKey as QueryCommandInput['ExclusiveStartKey'],
-        }),
-      };
-      const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));
-      return {
-        items: (Items ?? []) as PlacementItem[],
-        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
-      };
     },
 
     async list(opts = {}) {

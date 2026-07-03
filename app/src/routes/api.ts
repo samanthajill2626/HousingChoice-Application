@@ -49,6 +49,10 @@ import { type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { type UnitsRepo } from '../repos/unitsRepo.js';
 import { type PlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
 import { type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
@@ -156,6 +160,8 @@ export interface ApiRouterDeps {
   unitsRepo?: UnitsRepo;
   /** M1.10 boards/placements — injected in tests; default to the real repo. */
   placementsRepo?: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model) — injected in tests. */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   /** Tours — injected in tests; default to the real repo. */
   toursRepo?: ToursRepo;
   /** Tour reminders — injected in tests; default to the real repo. */
@@ -263,6 +269,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // ladder on every move; the relay lifecycle closes a LOST placement's masked
   // thread. Both are best-effort inside the transition service.
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  // First-class placement deadlines (placement-deadline-model): shared across the
+  // placements / status-transition / today / contacts sub-routers so arm/retire
+  // and the computed next_deadline read all hit ONE repo.
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const poolNumbersForLifecycle =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const relayLifecycle = createPlacementRelayLifecycle({
@@ -364,6 +375,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       listingSendsRepo: listingSends,
       // Task 4: vocabulary auto-suggest.
       ...(deps.contactVocabularyRepo !== undefined && { vocabularyRepo: deps.contactVocabularyRepo }),
+      // Voucher sync (placement-deadline-model §6): a voucher_expiration_date edit
+      // upserts/retires the voucher deadline on the tenant's active placements.
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementDeadlinesRepo: placementDeadlines,
       events,
     }),
   );
@@ -484,6 +499,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       config,
       logger: deps.logger,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementDeadlinesRepo: placementDeadlines,
       conversationsRepo: conversations,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
@@ -508,6 +524,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     createStatusTransitionRouter({
       logger: deps.logger,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementDeadlinesRepo: placementDeadlines,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
@@ -533,6 +550,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       conversationsRepo: conversations,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementDeadlinesRepo: placementDeadlines,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
     }),

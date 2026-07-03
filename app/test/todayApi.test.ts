@@ -13,7 +13,7 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
-import type { PlacementItem } from '../src/repos/placementsRepo.js';
+import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { urgencyOf, type TodayItem, type TodayResponse } from '../src/routes/today.js';
@@ -37,13 +37,36 @@ describe('today action-queue API (BE6/C7)', () => {
     world.contacts.push(item);
     return item;
   };
-  const seedPlacement = (c: Partial<PlacementItem> & { placementId: string; tenantId: string }): PlacementItem => {
+  // Deadlines are first-class placementDeadlines items now: a `next_deadline_*`
+  // shorthand on the seed arms a real item into the fake deadlines map (the
+  // placement itself no longer stores a deadline slot).
+  const seedPlacement = (
+    c: Partial<PlacementItem> & {
+      placementId: string;
+      tenantId: string;
+      next_deadline_type?: string;
+      next_deadline_at?: string;
+    },
+  ): PlacementItem => {
+    const { next_deadline_type, next_deadline_at, ...rest } = c;
     const item: PlacementItem = {
       stage: 'awaiting_inspection',
       unitId: 'unit-1',
-      ...c,
+      ...rest,
     } as PlacementItem;
     world.placements.set(item.placementId, item);
+    if (typeof next_deadline_type === 'string' && typeof next_deadline_at === 'string') {
+      const deadlineId = `${item.placementId}#${next_deadline_type}`;
+      world.placementDeadlines.set(deadlineId, {
+        deadlineId,
+        placementId: item.placementId,
+        type: next_deadline_type as PlacementDeadlineType,
+        at: next_deadline_at,
+        _deadlinePartition: 'deadlines',
+        createdAt: next_deadline_at,
+        updatedAt: next_deadline_at,
+      });
+    }
     return item;
   };
   const seedConversation = (conv: ConversationItem): ConversationItem => {
@@ -211,7 +234,7 @@ describe('today action-queue API (BE6/C7)', () => {
       placementId: 'placement-future',
       tenantId: 't-future',
       stage: 'awaiting_inspection',
-      next_deadline_type: 'tour_reminder',
+      next_deadline_type: 'voucher_expiration',
       next_deadline_at: iso(2 * 3_600_000), // 2h out → not due yet
     });
     seedPlacement({
@@ -385,7 +408,7 @@ describe('today action-queue API (BE6/C7)', () => {
       placementId: 'placement-missing-who',
       tenantId: 't-missing',
       stage: 'awaiting_inspection',
-      next_deadline_type: 'tour_reminder',
+      next_deadline_type: 'rta_window',
       next_deadline_at: iso(-1000),
     });
     const items = await getItems();
@@ -454,7 +477,7 @@ describe('today action-queue API (BE6/C7)', () => {
       placementId: 'placement-lost-fu',
       tenantId: 't-lostfu',
       stage: 'lost',
-      next_deadline_type: 'stuck_placement',
+      next_deadline_type: 'follow_up',
       next_deadline_at: iso(-60_000),
     });
     seedPlacement({
@@ -469,6 +492,45 @@ describe('today action-queue API (BE6/C7)', () => {
     const ids = follow.map((i) => i.refId);
     expect(ids).toContain('placement-live-fu');
     expect(ids).not.toContain('placement-lost-fu');
+  });
+
+  // INVARIANT (placement-deadline-model): the DERIVED stuck signal is independent
+  // of any hard clock — a placement past its stage threshold appears in follow_ups
+  // REGARDLESS of a pending rta_window (so it can be in BOTH groups); a stale
+  // placement with NO deadline appears only in follow_ups.
+  it('derived-stuck coexists with a hard clock: a stuck placement with a due rta_window is in BOTH groups', async () => {
+    seedTenant('t-both', 'Both', 'Groups');
+    seedTenant('t-stale', 'Stale', 'Only');
+    // send_application threshold is 3d — entered 5 days ago → stuck. Also a due rta_window.
+    seedPlacement({
+      placementId: 'placement-both',
+      tenantId: 't-both',
+      stage: 'send_application',
+      stage_entered_at: iso(-5 * 86_400_000),
+      next_deadline_type: 'rta_window',
+      next_deadline_at: iso(-3_600_000), // overdue hard clock
+    });
+    // A stale placement with NO deadline → follow_ups (derived stuck) only.
+    seedPlacement({
+      placementId: 'placement-stale',
+      tenantId: 't-stale',
+      stage: 'send_application',
+      stage_entered_at: iso(-5 * 86_400_000),
+    });
+
+    const items = await getItems();
+    const needsIds = items.filter((i) => i.group === 'needs_you_now').map((i) => i.refId);
+    const followIds = items.filter((i) => i.group === 'follow_ups').map((i) => i.refId);
+
+    // placement-both is in needs_you_now (rta hard clock) AND follow_ups (stuck).
+    expect(needsIds).toContain('placement-both');
+    expect(followIds).toContain('placement-both');
+    // placement-stale (no deadline) is ONLY in follow_ups, and NOT in needs_you_now.
+    expect(followIds).toContain('placement-stale');
+    expect(needsIds).not.toContain('placement-stale');
+    // The stuck rows carry the flag-vs-nudge copy.
+    const stuckRow = items.find((i) => i.refId === 'placement-stale')!;
+    expect(stuckRow.why).toBe('Stuck — needs a check');
   });
 
   // --- FIX B: relay_group threads never surface in unreplied --------------------

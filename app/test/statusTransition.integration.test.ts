@@ -4,7 +4,8 @@
 //     lifecycle onto the contact's unified `status`, the DERIVED listing status
 //     onto units, and a real audit_events row.
 //   • auditRepo.listByEntity reads the provenance back NEWEST-FIRST.
-//   • the stuck_placement next-deadline round-trips through the byNextDeadline GSI.
+//   • entering awaiting_landlord_submission arms an rta_window placementDeadlines
+//     item that round-trips through the byDueAt GSI.
 //   • an OVERRIDE state (manual on_hold) pins against a later DERIVED transition,
 //     while a manually-set BASELINE state is overwritten by derivation
 //     (2026-06-19 state-based gating decision).
@@ -20,6 +21,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
+import { createPlacementDeadlinesRepo } from '../src/repos/placementDeadlinesRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createUnitsRepo } from '../src/repos/unitsRepo.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
@@ -46,7 +48,7 @@ if (!reachable) {
   );
 }
 
-const TABLES = ['placements', 'contacts', 'units', 'audit_events'] as const;
+const TABLES = ['placements', 'placementDeadlines', 'contacts', 'units', 'audit_events'] as const;
 
 describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway prefix)', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -55,11 +57,13 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
   const logger = createLogger({ destination: createLogCapture().stream });
 
   const placements = createPlacementsRepo({ doc, env: testEnv, logger });
+  const placementDeadlines = createPlacementDeadlinesRepo({ doc, env: testEnv, logger });
   const contacts = createContactsRepo({ doc, env: testEnv, logger });
   const units = createUnitsRepo({ doc, env: testEnv, logger });
   const audit = createAuditRepo({ doc, env: testEnv, logger });
   const svc = createStatusTransitionService({
     placementsRepo: placements,
+    placementDeadlinesRepo: placementDeadlines,
     unitsRepo: units,
     contactsRepo: contacts,
     auditRepo: audit,
@@ -128,20 +132,25 @@ describe.skipIf(!reachable)('statusTransition against DynamoDB Local (throwaway 
     expect((tenantDerived[0]!.payload as { to: string }).to).toBe('placing');
   });
 
-  it('the stuck_placement next-deadline round-trips through the byNextDeadline GSI', async () => {
+  it('entering awaiting_landlord_submission arms an rta_window item that round-trips through byDueAt', async () => {
     const tenantId = `contact-${randomUUID().slice(0, 8)}`;
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     await contacts.create({ contactId: tenantId, type: 'tenant' });
     await units.create({ unitId, landlordId: 'll-1', status: 'available' });
-    const c = await placements.create({ tenantId, unitId, stage: 'send_application' });
+    const c = await placements.create({ tenantId, unitId, stage: 'send_rta_to_landlord' });
 
-    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
 
-    const stored = await placements.getById(c.placementId);
-    expect(stored!.next_deadline_type).toBe('stuck_placement');
-    // Queryable via the byNextDeadline GSI (due-by a far cutoff finds it).
-    const page = await placements.listByNextDeadline('stuck_placement', { beforeAt: '2099-01-01T00:00:00.000Z' });
-    expect(page.items.some((x) => x.placementId === c.placementId)).toBe(true);
+    // The rta_window item exists on the placement (byPlacement GSI)...
+    const rows = await placementDeadlines.listByPlacement(c.placementId);
+    expect(rows.map((r) => r.type)).toEqual(['rta_window']);
+    // ...and is queryable via the byDueAt GSI (due-by a far cutoff finds it).
+    const due = await placementDeadlines.listDue('2099-01-01T00:00:00.000Z');
+    expect(due.some((d) => d.placementId === c.placementId && d.type === 'rta_window')).toBe(true);
+
+    // Leaving the stage retires it (independent DeleteItem).
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_authority_approval', source: 'manual' });
+    expect(await placementDeadlines.listByPlacement(c.placementId)).toHaveLength(0);
   });
 
   it('an OVERRIDE state (manual on_hold) pins against a later DERIVED transition', async () => {

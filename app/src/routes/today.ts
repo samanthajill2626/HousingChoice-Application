@@ -27,10 +27,12 @@
 // operator's browser). A richer date-navigable queue is a separate, frontend-
 // driven contract question (not built here).
 //
-// Every repo read is a bounded GSI Query (never a Scan): listByNextDeadline (per
-// deadline type), tours listByScheduledRange, listByLastActivity({status:'open'}), and
-// listByType (the unknown/needs_review triage partition). Each fetch is capped and
-// a log.warn fires if a cap is hit (no silent truncation).
+// Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
+// listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
+// non-terminal stage — attention + derived-stuck), tours listByScheduledRange,
+// listByLastActivity({status:'open'}), and listByType (the unknown/needs_review
+// triage partition). Each fetch is capped and a log.warn fires if a cap is hit
+// (no silent truncation).
 //
 // PII (doc §9): responses carry who/why to the authed client; LOG LINES are
 // counts/IDs only.
@@ -39,10 +41,20 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createPlacementsRepo,
   type PlacementDeadlineType,
+  type PlacementItem,
   type PlacementsRepo,
   TERMINAL_STAGES,
 } from '../repos/placementsRepo.js';
-import { PLACEMENT_STAGES, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
+import {
+  createPlacementDeadlinesRepo,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
+import {
+  PLACEMENT_STAGES,
+  STAGE_LABELS,
+  STAGE_STUCK_THRESHOLDS,
+  type PlacementStage,
+} from '../lib/statusModel.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -82,6 +94,8 @@ export interface TodayResponse {
 export interface TodayRouterDeps {
   logger?: Logger;
   placementsRepo?: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model). */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
   toursRepo?: ToursRepo;
@@ -91,17 +105,13 @@ export interface TodayRouterDeps {
 
 /**
  * The "hard clock" deadline types whose due/overdue instant lands a placement in
- * needs_you_now (the spec's business-clock examples). The remaining deadline
- * types (stuck_placement, follow_up) are the follow_ups group.
+ * needs_you_now (the spec's business-clock examples). The remaining live type
+ * (follow_up) plus the DERIVED stuck signal are the follow_ups group.
  */
-const HARD_CLOCK_DEADLINE_TYPES: readonly PlacementDeadlineType[] = [
-  'tour_reminder',
+const HARD_CLOCK_DEADLINE_TYPES: ReadonlySet<PlacementDeadlineType> = new Set([
   'rta_window',
   'voucher_expiration',
-];
-
-/** The stuck-placement / due-follow-up deadline types → the follow_ups group. */
-const FOLLOW_UP_DEADLINE_TYPES: readonly PlacementDeadlineType[] = ['stuck_placement', 'follow_up'];
+]);
 
 /** The contact triage statuses that make an untriaged inbound (needs_you_now). */
 const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']);
@@ -115,12 +125,13 @@ const GROUP_FETCH_LIMIT = 100;
 
 /** A human-friendly per-deadline-type label used in `why`. */
 const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
-  tour_reminder: 'Tour reminder',
   rta_window: 'RTA window closing',
   voucher_expiration: 'Voucher expiring',
-  stuck_placement: 'Stuck placement',
   follow_up: 'Follow-up due',
 };
+
+/** The `why` copy for a DERIVED (time-in-stage) stuck placement. */
+const STUCK_WHY = 'Stuck — needs a check';
 
 /**
  * The human label for a stage — the centralized STAGE_LABELS map (single source
@@ -222,6 +233,8 @@ function parseToursWindow(
 export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
@@ -279,6 +292,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       return contact ? isDeleted(contact) : false;
     };
 
+    // A bounded placement cache: a due deadline joins to its placement to read
+    // stage/tenant (the placementDeadlines item deliberately does NOT denormalize
+    // them, so a stage change never rewrites deadline rows). Cache so each
+    // placement is point-read at most once. A lookup failure degrades to skip
+    // (never a 500).
+    const placementCache = new Map<string, PlacementItem | undefined>();
+    const getPlacement = async (placementId: string): Promise<PlacementItem | undefined> => {
+      if (placementCache.has(placementId)) return placementCache.get(placementId);
+      let placement: PlacementItem | undefined;
+      try {
+        placement = await placements.getById(placementId);
+      } catch (err) {
+        log.warn({ err, placementId }, 'today: placement hydration failed (best-effort)');
+        placement = undefined;
+      }
+      placementCache.set(placementId, placement);
+      return placement;
+    };
+
     /** Warn (never silently truncate) when a group's bounded fetch hit the cap. */
     const warnIfCapped = (group: string, count: number): void => {
       if (count >= GROUP_FETCH_LIMIT) {
@@ -286,85 +318,124 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     };
 
-    // Track which placements are already placed (de-dupe across groups by the most
-    // relevant group: needs_you_now > tours_today > follow_ups).
-    const placedPlacementIds = new Set<string>();
+    // De-dupe is PER-GROUP now (placement-deadline-model): a placement MAY appear
+    // in BOTH needs_you_now (a due hard clock) AND follow_ups (derived stuck) —
+    // the two are independent signals and must not suppress each other. Within a
+    // group a placement appears once.
+    const needsYouNowIds = new Set<string>();
+    const followUpsIds = new Set<string>();
 
     const needsYouNow: Ranked[] = [];
     const toursToday: Ranked[] = [];
     const unreplied: Ranked[] = [];
     const followUps: Ranked[] = [];
 
-    // --- needs_you_now: due/overdue HARD-CLOCK deadlines ---------------------
-    // One bounded GSI Query per hard-clock type, bounded to those due AT/BEFORE
-    // now (beforeAt) — soonest-first by the index range key.
-    for (const type of HARD_CLOCK_DEADLINE_TYPES) {
-      const page = await placements.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
-      warnIfCapped(`needs_you_now:${type}`, page.items.length);
-      for (const c of page.items) {
-        // Terminal placements (moved_in/lost) are off the boards — a lingering
-        // deadline that was never cleared on the transition must not surface.
-        if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedPlacementIds.has(c.placementId)) continue;
-        placedPlacementIds.add(c.placementId);
-        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
-        const who = (await resolveName(c.tenantId)) ?? c.tenantId;
-        const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
-        const item: TodayItem = {
-          group: 'needs_you_now',
-          refType: 'placement',
-          refId: c.placementId,
-          who,
-          why: DEADLINE_WHY[type],
-          urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Placement · ${stageLabel(c.stage)}`,
-        };
-        needsYouNow.push({ item, at: Number.isNaN(at) ? now : at });
-      }
+    // --- due deadlines: ONE byDueAt Query, bucket by type --------------------
+    // listDue returns every deadline due AT/BEFORE now across all placements in
+    // ONE query, soonest-first. Join each to its placement (skip TERMINAL_STAGES
+    // — the read-time guard that also neutralizes any straggler row — and deleted
+    // tenants), then bucket: rta_window/voucher_expiration → needs_you_now;
+    // follow_up → follow_ups. Soonest-first ⇒ the first row per (placement,group)
+    // is the most urgent, so per-group dedup keeps the right one.
+    const dueDeadlines = await placementDeadlines.listDue(nowIso, { limit: GROUP_FETCH_LIMIT });
+    warnIfCapped('deadlines', dueDeadlines.length);
+    for (const d of dueDeadlines) {
+      const placement = await getPlacement(d.placementId);
+      if (!placement) continue; // orphan deadline (placement gone) → skip
+      if (TERMINAL_STAGES.has(placement.stage)) continue; // closed deal → off the boards
+      const isHardClock = HARD_CLOCK_DEADLINE_TYPES.has(d.type);
+      const groupIds = isHardClock ? needsYouNowIds : followUpsIds;
+      if (groupIds.has(d.placementId)) continue; // per-group dedup (soonest already won)
+      if (await isDeletedContact(placement.tenantId)) continue; // deleted tenant → off the boards
+      groupIds.add(d.placementId);
+      const who = (await resolveName(placement.tenantId)) ?? placement.tenantId;
+      const at = Date.parse(d.at);
+      const item: TodayItem = {
+        group: isHardClock ? 'needs_you_now' : 'follow_ups',
+        refType: 'placement',
+        refId: d.placementId,
+        who,
+        why: DEADLINE_WHY[d.type],
+        urgency: urgencyOf(d.at, now),
+        tag: `Placement · ${stageLabel(placement.stage)}`,
+      };
+      (isHardClock ? needsYouNow : followUps).push({ item, at: Number.isNaN(at) ? now : at });
     }
 
-    // --- needs_you_now: attention (escalation) placements --------------------
-    // The attention flag has no GSI of its own; the spec's escalation set is
-    // "active placements" flagged for a human. We surface them via the byStage GSI
-    // over the non-terminal stages (a bounded Query per stage, never a Scan) and
-    // filter to those carrying `attention`. A placement already placed by a deadline
-    // above is left there (de-dupe) but PROMOTED to attention:true.
+    // --- byStage scan: attention (needs_you_now) + DERIVED stuck (follow_ups) --
+    // One bounded Query per non-terminal stage (never a Scan) does double duty:
+    //   (a) attention flag → needs_you_now (an escalated placement; PROMOTE to
+    //       attention:true if it's already there via a due deadline).
+    //   (b) DERIVED stuck → follow_ups: a placement whose time-in-stage exceeds
+    //       STAGE_STUCK_THRESHOLDS[stage] is "stuck" — a pure function of state,
+    //       no stored artifact, firing REGARDLESS of any pending hard clock (so a
+    //       placement can be in needs_you_now AND follow_ups). This replaces the
+    //       old stored `stuck_placement` deadline (scheduleStuckNudge is gone).
     // Derive the non-terminal stages from the central model (never a hardcoded
     // copy of the ladder — it must track PLACEMENT_STAGES automatically).
     const ATTENTION_STAGES: readonly PlacementStage[] = PLACEMENT_STAGES.filter(
       (s) => !TERMINAL_STAGES.has(s),
     );
+    const isStuck = (c: PlacementItem): boolean => {
+      const threshold = STAGE_STUCK_THRESHOLDS[c.stage];
+      if (threshold === undefined || typeof c.stage_entered_at !== 'string') return false;
+      const entered = Date.parse(c.stage_entered_at);
+      return !Number.isNaN(entered) && now - entered >= threshold;
+    };
     for (const stage of ATTENTION_STAGES) {
       const page = await placements.listByStage(stage, { limit: GROUP_FETCH_LIMIT });
       warnIfCapped(`attention:${stage}`, page.items.length);
       for (const c of page.items) {
-        if (!c.attention || typeof c.attention !== 'object') continue;
-        if (placedPlacementIds.has(c.placementId)) {
-          // Already in needs_you_now via a deadline — just flag attention.
-          const existing = needsYouNow.find((r) => r.item.refId === c.placementId);
-          if (existing) existing.item.attention = true;
-          continue;
+        // Cache the placement we just loaded so any deadline join reuses it.
+        if (!placementCache.has(c.placementId)) placementCache.set(c.placementId, c);
+
+        // (a) attention flag → needs_you_now.
+        if (c.attention && typeof c.attention === 'object') {
+          if (needsYouNowIds.has(c.placementId)) {
+            // Already in needs_you_now via a deadline — just flag attention.
+            const existing = needsYouNow.find((r) => r.item.refId === c.placementId);
+            if (existing) existing.item.attention = true;
+          } else if (!(await isDeletedContact(c.tenantId))) {
+            needsYouNowIds.add(c.placementId);
+            const who = (await resolveName(c.tenantId)) ?? c.tenantId;
+            const reason =
+              typeof (c.attention as { reason?: unknown }).reason === 'string'
+                ? (c.attention as { reason: string }).reason
+                : 'Escalated';
+            needsYouNow.push({
+              item: {
+                group: 'needs_you_now',
+                refType: 'placement',
+                refId: c.placementId,
+                who,
+                why: reason,
+                urgency: 'Escalated',
+                tag: `Placement · ${stageLabel(c.stage)}`,
+                attention: true,
+              },
+              // Attention-only (no deadline) sorts among the overdue/most-urgent.
+              at: now,
+            });
+          }
         }
-        placedPlacementIds.add(c.placementId);
-        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
-        const who = (await resolveName(c.tenantId)) ?? c.tenantId;
-        const reason =
-          typeof (c.attention as { reason?: unknown }).reason === 'string'
-            ? ((c.attention as { reason: string }).reason)
-            : 'Escalated';
-        const item: TodayItem = {
-          group: 'needs_you_now',
-          refType: 'placement',
-          refId: c.placementId,
-          who,
-          why: reason,
-          urgency: 'Escalated',
-          tag: `Placement · ${stageLabel(c.stage)}`,
-          attention: true,
-        };
-        // Attention-only (no deadline) is treated as "now" so it sorts among the
-        // overdue/most-urgent items.
-        needsYouNow.push({ item, at: now });
+
+        // (b) DERIVED stuck → follow_ups (independent of any hard clock).
+        if (isStuck(c) && !followUpsIds.has(c.placementId) && !(await isDeletedContact(c.tenantId))) {
+          followUpsIds.add(c.placementId);
+          const who = (await resolveName(c.tenantId)) ?? c.tenantId;
+          followUps.push({
+            item: {
+              group: 'follow_ups',
+              refType: 'placement',
+              refId: c.placementId,
+              who,
+              why: STUCK_WHY,
+              tag: `Placement · ${stageLabel(c.stage)}`,
+            },
+            // Stuck rows share "now" ordering (no deadline instant of their own).
+            at: now,
+          });
+        }
       }
     }
 
@@ -396,31 +467,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
-    // --- follow_ups: stuck / due follow-up deadlines (the soft-clock types) ---
-    for (const type of FOLLOW_UP_DEADLINE_TYPES) {
-      const page = await placements.listByNextDeadline(type, { beforeAt: nowIso, limit: GROUP_FETCH_LIMIT });
-      warnIfCapped(`follow_ups:${type}`, page.items.length);
-      for (const c of page.items) {
-        // Terminal placements (moved_in/lost) are off the boards — a lingering
-        // deadline that was never cleared on the transition must not surface.
-        if (TERMINAL_STAGES.has(c.stage)) continue;
-        if (placedPlacementIds.has(c.placementId)) continue; // already needs_you_now / tours_today
-        placedPlacementIds.add(c.placementId);
-        if (await isDeletedContact(c.tenantId)) continue; // deleted tenant → off the boards
-        const who = (await resolveName(c.tenantId)) ?? c.tenantId;
-        const at = typeof c.next_deadline_at === 'string' ? Date.parse(c.next_deadline_at) : now;
-        const item: TodayItem = {
-          group: 'follow_ups',
-          refType: 'placement',
-          refId: c.placementId,
-          who,
-          why: 'Follow-up due',
-          urgency: typeof c.next_deadline_at === 'string' ? urgencyOf(c.next_deadline_at, now) : 'due',
-          tag: `Placement · ${stageLabel(c.stage)}`,
-        };
-        followUps.push({ item, at: Number.isNaN(at) ? now : at });
-      }
-    }
+    // (follow_ups is assembled above: due `follow_up` deadlines from the byDueAt
+    // query + DERIVED stuck rows from the byStage scan.)
 
     // --- conversations: ONE bounded inbox Query (byLastActivity, open) --------
     // Untriaged inbounds (unknown_1to1 + unread) → needs_you_now (refType

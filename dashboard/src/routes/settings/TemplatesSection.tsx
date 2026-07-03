@@ -205,7 +205,7 @@ export function TemplatesSection(): React.JSX.Element {
               disabled={disabled}
               onChange={(e) => update('missedCallAutoTextEnabled', e.target.checked)}
             />
-            <span>Send the missed-call auto-text automatically</span>
+            <span>Send the missed-call text automatically</span>
           </label>
 
           {/* Quick replies (chip list) */}

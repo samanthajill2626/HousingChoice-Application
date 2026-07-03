@@ -10,6 +10,8 @@
 // conversation participant_phone. The drift-alarm test (app/test/seedPersonaDrift.test.ts)
 // enforces the alignment.
 
+import { CAST_RECORDING_KEY, CAST_PHOTO_KEY } from './media.js';
+
 // ---------------------------------------------------------------------------
 // Fixed past timestamps (byte-stable across reseeds)
 // ---------------------------------------------------------------------------
@@ -966,7 +968,6 @@ const C_PARKED_LL = contactId(SLUG_PARKED_LL);
 const CONV_PARKED_LL = convId(SLUG_PARKED_LL);
 
 // The recording S3 key is referenced here; the actual object is seeded in Task 5.
-const PARKED_LL_RECORDING_KEY = 'media/cast/call-recordings/parked-landlord-call.mp3';
 
 const parkedLandlord = {
   contact: {
@@ -1013,7 +1014,7 @@ const parkedLandlord = {
       call_duration: 183,
       masked: false,
       call_party_label: 'Landlord Lead',
-      recording_s3_key: PARKED_LL_RECORDING_KEY,
+      recording_s3_key: CAST_RECORDING_KEY,
       recording_duration: 183,
       ts: C7,
     },
@@ -1052,8 +1053,6 @@ const CONV_MID_INTAKE_LL = convId(SLUG_MID_INTAKE_LL);
 const UNIT_MID_INTAKE = unitId(SLUG_MID_INTAKE_LL);
 
 // MMS photo media key — the actual object is seeded in Task 5.
-const MMS_PHOTO_S3_KEY = 'media/cast/unit-photos/mid-intake-unit-exterior.jpg';
-
 const midIntakeUnitLandlord = {
   contact: {
     contactId: C_MID_INTAKE_LL,
@@ -1134,7 +1133,7 @@ const midIntakeUnitLandlord = {
       author: 'landlord',
       body: 'Here is the exterior.',
       delivery_status: 'delivered',
-      media_attachments: [{ s3Key: MMS_PHOTO_S3_KEY, contentType: 'image/jpeg' }],
+      media_attachments: [{ s3Key: CAST_PHOTO_KEY, contentType: 'image/jpeg' }],
       ts: CE,
     },
     {

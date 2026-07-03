@@ -24,6 +24,7 @@
 // is implemented — they will only get easier to satisfy, not harder.
 import { describe, expect, it } from 'vitest';
 import { SEED } from '../src/lib/seedData.js';
+import { castItems } from '../src/lib/seed/cast.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
 import {
   PLACEMENT_STAGES,
@@ -47,7 +48,12 @@ function buildFullProfile(): Record<string, Record<string, unknown>[]> {
     full[base] = [...items];
   }
 
-  // Matrix layer (castItems is still a stub — Task 3)
+  // Cast layer (Task 3 personas)
+  for (const [base, items] of Object.entries(castItems())) {
+    full[base] = [...(full[base] ?? []), ...items];
+  }
+
+  // Matrix layer
   for (const [base, items] of Object.entries(matrixItems())) {
     full[base] = [...(full[base] ?? []), ...items];
   }
@@ -381,6 +387,75 @@ describe('seed matrix: pool numbers and relay conversations', () => {
     const relayConvIds = new Set(allConversations.filter((c) => c['type'] === 'relay_group').map((c) => c['conversationId'] as string));
     for (const id of poolConvIds) {
       expect(relayConvIds.has(id), `pool number assigned_conversation_id '${id}' must match a relay_group conversation`).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. One-primary / phone-pointer invariants (Task 3 plan promised)
+//
+// For every contact row (lean + cast + matrix) that carries a phones[] array:
+//   a. Exactly ONE entry has primary: true.
+//   b. Every non-primary phone number has a corresponding phoneref#<E164> pointer
+//      row in the contacts table (contactId = `phoneref#<phone>`, phone_ref: true,
+//      phone_ref_owner = owning contactId).
+// ---------------------------------------------------------------------------
+describe('seed full profile: one-primary / phone-pointer invariants', () => {
+  // Separate true contact rows from phoneref pointer rows
+  const realContacts = allContacts.filter(
+    (c) => typeof c['contactId'] === 'string' && !(c['contactId'] as string).startsWith('phoneref#'),
+  );
+  const pointerRows = allContacts.filter(
+    (c) => typeof c['contactId'] === 'string' && (c['contactId'] as string).startsWith('phoneref#'),
+  );
+
+  it('every contact with phones[] has exactly one primary: true entry', () => {
+    for (const contact of realContacts) {
+      const phones = contact['phones'] as Array<{ phone: string; primary: boolean }> | undefined;
+      if (!phones) continue;
+      const primaryCount = phones.filter((p) => p.primary === true).length;
+      expect(
+        primaryCount,
+        `contact '${contact['contactId']}' has ${primaryCount} primary phones (expected exactly 1)`,
+      ).toBe(1);
+    }
+  });
+
+  it('every non-primary phone has a phoneref# pointer row', () => {
+    for (const contact of realContacts) {
+      const phones = contact['phones'] as Array<{ phone: string; primary: boolean }> | undefined;
+      if (!phones) continue;
+      const nonPrimary = phones.filter((p) => p.primary !== true);
+      for (const { phone } of nonPrimary) {
+        const pointerId = `phoneref#${phone}`;
+        const pointer = pointerRows.find((r) => r['contactId'] === pointerId);
+        expect(
+          pointer,
+          `non-primary phone '${phone}' on contact '${contact['contactId']}' is missing a pointer row (contactId='${pointerId}')`,
+        ).toBeDefined();
+        expect(pointer!['phone_ref'], `pointer row '${pointerId}' must have phone_ref: true`).toBe(true);
+        expect(
+          pointer!['phone_ref_owner'],
+          `pointer row '${pointerId}' must have phone_ref_owner = '${contact['contactId']}'`,
+        ).toBe(contact['contactId']);
+      }
+    }
+  });
+
+  it('the searching tenant (multi-phone cast contact) has exactly one primary and a pointer row for its second number', () => {
+    const searching = realContacts.find((c) => c['contactId'] === 'contact-cast-searching-tenant');
+    expect(searching, 'searching tenant must exist in the full profile').toBeDefined();
+    const phones = searching!['phones'] as Array<{ phone: string; primary: boolean }> | undefined;
+    expect(phones, 'searching tenant must have a phones[] array').toBeDefined();
+    const primaryCount = phones!.filter((p) => p.primary === true).length;
+    expect(primaryCount, 'searching tenant: exactly one primary phone').toBe(1);
+    const nonPrimaryPhones = phones!.filter((p) => p.primary !== true);
+    expect(nonPrimaryPhones.length, 'searching tenant: at least one non-primary phone').toBeGreaterThanOrEqual(1);
+    for (const { phone } of nonPrimaryPhones) {
+      const pointer = pointerRows.find((r) => r['contactId'] === `phoneref#${phone}`);
+      expect(pointer, `searching tenant: pointer row for '${phone}' must exist`).toBeDefined();
+      expect(pointer!['phone_ref']).toBe(true);
+      expect(pointer!['phone_ref_owner']).toBe('contact-cast-searching-tenant');
     }
   });
 });

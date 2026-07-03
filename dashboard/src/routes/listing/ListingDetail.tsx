@@ -8,9 +8,9 @@
 //           properties � Similar properties.
 //   BOTTOM (full width) � Photos.
 // Real panels come from existing endpoints (unit, placements, units, the landlord
-// contact, the unit audit trail for Activity); slices an older deployed backend
-// doesn't serve yet (recipients / similar / activity 404s) degrade to an honest
-// "Arrives with the backend" pending state. Nothing is fabricated.
+// contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
+// honest "Arrives with the backend" pending state, and "Activity" serves the unit
+// audit trail (pending only on an older backend). Nothing is fabricated.
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { deleteUnit, restoreUnit } from '../../api/index.js';

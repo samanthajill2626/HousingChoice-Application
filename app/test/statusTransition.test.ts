@@ -15,9 +15,11 @@ import {
   createStatusTransitionService,
   EntityNotFoundError,
   TransitionRefusedError,
+  type StatusTransitionDeps,
   type StatusTransitionService,
 } from '../src/services/statusTransition.js';
 import { STAGE_STUCK_THRESHOLDS } from '../src/lib/statusModel.js';
+import type { PlacementItem } from '../src/repos/placementsRepo.js';
 
 function makeService(world: FakeWorld): StatusTransitionService {
   return createStatusTransitionService({
@@ -27,6 +29,22 @@ function makeService(world: FakeWorld): StatusTransitionService {
     auditRepo: world.auditRepo,
     events: world.events,
     logger: createLogger({ destination: createLogCapture().stream }),
+  });
+}
+
+/** Build the service with optional choke-point hooks (Post-Tour & Application). */
+function makeServiceWith(
+  world: FakeWorld,
+  hooks: Pick<StatusTransitionDeps, 'armStageNudge' | 'closeRelayForLostPlacement'>,
+): StatusTransitionService {
+  return createStatusTransitionService({
+    placementsRepo: world.placementsRepo,
+    unitsRepo: world.unitsRepo,
+    contactsRepo: world.contactsRepo,
+    auditRepo: world.auditRepo,
+    events: world.events,
+    logger: createLogger({ destination: createLogCapture().stream }),
+    ...hooks,
   });
 }
 
@@ -660,5 +678,140 @@ describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
     const after = await world.placementsRepo.getById(c.placementId);
     expect(after!.next_deadline_type).toBeUndefined();
     expect(after!.next_deadline_at).toBeUndefined();
+  });
+});
+
+// Task 5 (Post-Tour & Application): the transition choke point ALSO (a) arms the
+// RTA 48h hard clock on entering awaiting_landlord_submission, (b) invokes the
+// optional armStageNudge hook (stage-application nudge ladder) on every move, and
+// (c) invokes the optional closeRelayForLostPlacement hook on a lost move. Both
+// hooks are best-effort and OPTIONAL — absent, behavior is identical to before
+// (proven by every test above, none of which pass hooks).
+describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)', () => {
+  const RTA_WINDOW_MS = 48 * 60 * 60 * 1000;
+  let world: FakeWorld;
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it('entering awaiting_landlord_submission arms rta_window at EXACTLY now+48h and sets NO stuck nudge', async () => {
+    const svc = makeService(world); // no hooks — the RTA clock is unconditional
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_rta_to_landlord',
+    });
+    const updated = await svc.transitionPlacement(c.placementId, {
+      toStage: 'awaiting_landlord_submission',
+      source: 'manual',
+    });
+    // The hard clock owns the single slot — NOT a stuck_placement nudge.
+    expect(updated.next_deadline_type).toBe('rta_window');
+    // stage_entered_at and the rta_window deadline derive from the SAME `now`, so
+    // the deadline is exactly stage-entry + 48h (deterministic, no tolerance).
+    expect(Date.parse(updated.next_deadline_at!)).toBe(Date.parse(updated.stage_entered_at!) + RTA_WINDOW_MS);
+  });
+
+  it('the RTA clock is NOT clobbered by a stuck nudge (scheduleStuckNudge is skipped for that stage)', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_rta_to_landlord',
+    });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
+    const after = await world.placementsRepo.getById(c.placementId);
+    expect(after!.next_deadline_type).toBe('rta_window');
+  });
+
+  it('entering awaiting_receipt invokes armStageNudge with the UPDATED placement + toStage + an ISO now', async () => {
+    const calls: Array<{ placement: PlacementItem; toStage: string; nowIso: string }> = [];
+    const svc = makeServiceWith(world, {
+      armStageNudge: async (placement, toStage, nowIso) => {
+        calls.push({ placement, toStage, nowIso });
+      },
+    });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_receipt', source: 'manual' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.toStage).toBe('awaiting_receipt');
+    // The hook gets the POST-transition placement (stage already advanced).
+    expect(calls[0]!.placement.placementId).toBe(c.placementId);
+    expect(calls[0]!.placement.stage).toBe('awaiting_receipt');
+    // now is a real ISO 8601 string.
+    expect(calls[0]!.nowIso).toBe(new Date(calls[0]!.nowIso).toISOString());
+  });
+
+  it('a lost move invokes closeRelayForLostPlacement AND still clears the deadline slot (terminal behavior preserved)', async () => {
+    const closed: PlacementItem[] = [];
+    const armed: Array<{ placement: PlacementItem; toStage: string }> = [];
+    const svc = makeServiceWith(world, {
+      closeRelayForLostPlacement: async (placement) => {
+        closed.push(placement);
+      },
+      armStageNudge: async (placement, toStage) => {
+        armed.push({ placement, toStage });
+      },
+    });
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'awaiting_approval',
+      group_thread: 'conv-relay-1',
+    });
+    // Give it a pending stuck deadline so we can prove the terminal move clears it.
+    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'stuck_placement', at: '2026-09-01T00:00:00.000Z' });
+
+    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
+
+    // The relay-close hook fired once, with the POST-transition (lost) placement.
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.stage).toBe('lost');
+    expect(closed[0]!.group_thread).toBe('conv-relay-1');
+    // Terminal slot-clearing is unchanged: the pending deadline is gone.
+    const after = await world.placementsRepo.getById(c.placementId);
+    expect(after!.next_deadline_type).toBeUndefined();
+    expect(after!.next_deadline_at).toBeUndefined();
+    // The arm hook ALSO fires on lost (its cancel-only path retires pending rows).
+    expect(armed).toHaveLength(1);
+    expect(armed[0]!.toStage).toBe('lost');
+  });
+
+  it('closeRelayForLostPlacement is NOT invoked on a non-lost move', async () => {
+    const closed: PlacementItem[] = [];
+    const svc = makeServiceWith(world, {
+      closeRelayForLostPlacement: async (placement) => {
+        closed.push(placement);
+      },
+    });
+    const c = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'send_application',
+      group_thread: 'conv-relay-1',
+    });
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_receipt', source: 'manual' });
+    expect(closed).toHaveLength(0);
+  });
+
+  it('a hook that throws NEVER fails the transition (best-effort)', async () => {
+    const svc = makeServiceWith(world, {
+      armStageNudge: async () => {
+        throw new Error('boom');
+      },
+      closeRelayForLostPlacement: async () => {
+        throw new Error('boom');
+      },
+    });
+    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_approval' });
+    const updated = await svc.transitionPlacement(c.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+      lostReason: { category: 'stalled' },
+    });
+    expect(updated.stage).toBe('lost');
   });
 });

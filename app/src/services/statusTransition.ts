@@ -43,6 +43,12 @@ const HARD_CLOCK_DEADLINE_TYPES: ReadonlySet<string> = new Set([
   'tour_reminder',
 ]);
 
+/**
+ * The RTA submission hard clock (Post-Tour & Application): entering
+ * `awaiting_landlord_submission` gives the landlord 48h to submit the RTA.
+ */
+const RTA_WINDOW_MS = 48 * 60 * 60 * 1000;
+
 export interface StatusTransitionDeps {
   placementsRepo: PlacementsRepo;
   unitsRepo: UnitsRepo;
@@ -50,6 +56,19 @@ export interface StatusTransitionDeps {
   auditRepo: AuditRepo;
   events: EventBus;
   logger?: Logger;
+  /**
+   * OPTIONAL best-effort hook (Post-Tour & Application): re-key the stage-keyed
+   * application nudge ladder to `toStage` on every placement move. Receives the
+   * POST-transition placement + the transition `nowIso`. A failure is caught +
+   * logged and NEVER fails the transition; absent, the transition is unchanged.
+   */
+  armStageNudge?: (placement: PlacementItem, toStage: PlacementStage, nowIso: string) => Promise<void>;
+  /**
+   * OPTIONAL best-effort hook (Post-Tour & Application): close the placement's
+   * masked relay thread when the deal is LOST. Invoked ONLY on a move to `lost`,
+   * with the POST-transition placement. Best-effort like `armStageNudge`.
+   */
+  closeRelayForLostPlacement?: (placement: PlacementItem) => Promise<void>;
 }
 
 export interface TransitionPlacementInput {
@@ -149,6 +168,7 @@ export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
   const { placementsRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
+  const { armStageNudge, closeRelayForLostPlacement } = deps;
   const log = deps.logger ?? defaultLogger;
 
   /**
@@ -346,7 +366,42 @@ export function createStatusTransitionService(
       }
 
       // 6) Time-in-stage nudge (uses the FRESH item so next_deadline_type is current).
-      await scheduleStuckNudge(updated, toStage);
+      // RTA 48h HARD CLOCK (Post-Tour & Application): entering
+      // `awaiting_landlord_submission` arms an `rta_window` deadline at +48h.
+      // A placement has ONE next_deadline slot, so we set the hard clock DIRECTLY
+      // here rather than via scheduleStuckNudge — scheduleStuckNudge reads the
+      // PRE-transition item's pending type, so on this fresh entry it would set a
+      // `stuck_placement` nudge that clobbers the clock we want. Every OTHER stage
+      // (including the terminal `lost`/`moved_in`, which rely on
+      // scheduleStuckNudge's slot-clearing) keeps the existing call unchanged.
+      if (toStage === 'awaiting_landlord_submission') {
+        await placementsRepo.setNextDeadline(placementId, {
+          type: 'rta_window',
+          at: new Date(Date.parse(now) + RTA_WINDOW_MS).toISOString(),
+        });
+      } else {
+        await scheduleStuckNudge(updated, toStage);
+      }
+
+      // 7) Best-effort choke-point hooks (Post-Tour & Application). Both OPTIONAL
+      // and wrapped so a hook failure NEVER fails the transition. They run AFTER
+      // the stage patch + derived writes, on the POST-transition placement.
+      //  - closeRelayForLostPlacement: close the masked relay thread on a lost deal.
+      //  - armStageNudge: re-key the stage-application nudge ladder to the new stage.
+      if (toStage === 'lost' && closeRelayForLostPlacement !== undefined) {
+        try {
+          await closeRelayForLostPlacement(updated);
+        } catch (err) {
+          log.error({ err, placementId }, 'lost relay-close hook failed (best-effort)');
+        }
+      }
+      if (armStageNudge !== undefined) {
+        try {
+          await armStageNudge(updated, toStage, now);
+        } catch (err) {
+          log.error({ err, placementId }, 'stage-nudge arm hook failed (best-effort)');
+        }
+      }
 
       // Emit + log (the legacy CRUD path emits placement.updated; mirror it, no PII).
       mergeContext({ placementId });

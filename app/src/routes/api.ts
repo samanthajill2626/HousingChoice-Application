@@ -56,7 +56,10 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { type PushService } from '../services/pushService.js';
-import { type PoolNumbersService } from '../services/poolNumbers.js';
+import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
+import { createPlacementRelayLifecycle } from '../services/placementRelayLifecycle.js';
+import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
+import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import {
   RELAY_FANOUT_JOB,
@@ -166,6 +169,12 @@ export interface ApiRouterDeps {
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
   contactsRepoForRelay?: ContactsRepo;
+  /**
+   * Post-Tour & Application (Task 5) — durable placement-nudge rows. Injected in
+   * tests (a no-network fake); defaults to the real repo. Feeds the choke-point
+   * `armStageNudge` hook wired onto the transition service.
+   */
+  placementNudgesRepo?: PlacementNudgesRepo;
   /** M1.8a share-broadcast — injected in tests; default to the real repo/service. */
   broadcastsRepo?: BroadcastsRepo;
   audienceResolutionService?: AudienceResolutionService;
@@ -249,6 +258,19 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // listings-sent endpoints, written by the response PATCH. Shared across the
   // sub-routers below.
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  // Post-Tour & Application (Task 5): the choke-point side effects wired onto the
+  // ONE transition service. `armStageNudge` re-keys the stage-application nudge
+  // ladder on every move; the relay lifecycle closes a LOST placement's masked
+  // thread. Both are best-effort inside the transition service.
+  const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  const poolNumbersForLifecycle =
+    deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const relayLifecycle = createPlacementRelayLifecycle({
+    conversationsRepo: conversations,
+    poolNumbersService: poolNumbersForLifecycle,
+    auditRepo: audit,
+    ...(deps.logger !== undefined && { logger: deps.logger }),
+  });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   // Voice Phase 1: the originate route + self cell verify-start need a messaging
@@ -490,6 +512,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
       events,
+      // Post-Tour & Application (Task 5): arm the stage nudge ladder + close a
+      // lost placement's relay thread from the ONE transition choke point.
+      armStageNudge: (placement, toStage, nowIso) =>
+        armNudgeForStage(placement, toStage, nowIso, {
+          placementNudgesRepo: placementNudges,
+          ...(deps.logger !== undefined && { logger: deps.logger }),
+        }),
+      closeRelayForLostPlacement: relayLifecycle.closeForLost,
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only

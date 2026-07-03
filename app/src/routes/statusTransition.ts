@@ -32,6 +32,7 @@ import {
   createStatusTransitionService,
   EntityNotFoundError,
   TransitionRefusedError,
+  type StatusTransitionDeps,
   type StatusTransitionService,
 } from '../services/statusTransition.js';
 import { appEvents, type EventBus } from '../lib/events.js';
@@ -43,6 +44,13 @@ export interface StatusTransitionRouterDeps {
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   events?: EventBus;
+  /**
+   * Post-Tour & Application choke-point hooks (optional, best-effort). Forwarded
+   * straight into the transition service so every stage/status write goes through
+   * the ONE service WITH the nudge-arm + lost-relay-close side effects wired.
+   */
+  armStageNudge?: StatusTransitionDeps['armStageNudge'];
+  closeRelayForLostPlacement?: StatusTransitionDeps['closeRelayForLostPlacement'];
   /** Test seam: inject the assembled service directly. */
   service?: StatusTransitionService;
 }
@@ -66,6 +74,10 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       auditRepo: audit,
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
+      ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),
+      ...(deps.closeRelayForLostPlacement !== undefined && {
+        closeRelayForLostPlacement: deps.closeRelayForLostPlacement,
+      }),
     });
 
   const router = Router();

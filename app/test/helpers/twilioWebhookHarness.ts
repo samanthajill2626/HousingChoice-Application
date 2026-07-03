@@ -82,6 +82,11 @@ import {
   type ToursRepo,
 } from '../../src/repos/toursRepo.js';
 import { type TourReminderItem, type TourRemindersRepo } from '../../src/repos/tourRemindersRepo.js';
+import {
+  type NudgeKind,
+  type PlacementNudgeItem,
+  type PlacementNudgesRepo,
+} from '../../src/repos/placementNudgesRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import {
   type PushNotification,
@@ -193,6 +198,9 @@ export interface FakeWorld {
   /** In-memory tour reminders (Tours feature, Task 4), keyed by reminderId. */
   tourRemindersMap: Map<string, TourReminderItem>;
   tourRemindersRepo: TourRemindersRepo;
+  /** In-memory placement nudges (Post-Tour & Application, Task 3/5), keyed by nudgeId. */
+  placementNudgesMap: Map<string, PlacementNudgeItem>;
+  placementNudgesRepo: PlacementNudgesRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1596,6 +1604,53 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory placement nudges (Post-Tour & Application, Task 3/5): mirror the
+  // durable-row repo's contract (a rename-clone of tourReminders) so the
+  // choke-point armStageNudge hook runs with NO DynamoDB/network in unit tests.
+  const placementNudgesMap = new Map<string, PlacementNudgeItem>();
+  let nudgeCounter = 0;
+  const placementNudgesRepo: PlacementNudgesRepo = {
+    async create(input: { placementId: string; kind: NudgeKind; dueAt: string }) {
+      const now = new Date().toISOString();
+      const item: PlacementNudgeItem = {
+        nudgeId: `nudge-${++nudgeCounter}`,
+        placementId: input.placementId,
+        kind: input.kind,
+        dueAt: input.dueAt,
+        _nudgePartition: 'nudges',
+        createdAt: now,
+      };
+      placementNudgesMap.set(item.nudgeId, { ...item });
+      return { ...item };
+    },
+    async listByPlacement(placementId: string) {
+      return [...placementNudgesMap.values()]
+        .filter((n) => n.placementId === placementId)
+        .map((n) => ({ ...n }));
+    },
+    async listDue(now: string) {
+      return [...placementNudgesMap.values()]
+        .filter((n) => n.dueAt <= now && n.sentAt === undefined && n.canceledAt === undefined)
+        .map((n) => ({ ...n }));
+    },
+    async claimSend(nudgeId: string, claimedAt: string) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined) return false;
+      n.sentAt = claimedAt;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
+    async cancelForPlacement(placementId: string) {
+      const now = new Date().toISOString();
+      for (const n of placementNudgesMap.values()) {
+        if (n.placementId === placementId && n.sentAt === undefined && n.canceledAt === undefined) {
+          n.canceledAt = now;
+          placementNudgesMap.set(n.nudgeId, n);
+        }
+      }
+    },
+  };
+
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
       sent.push(params);
@@ -1710,6 +1765,8 @@ export function createFakeWorld(): FakeWorld {
     toursRepo,
     tourRemindersMap,
     tourRemindersRepo,
+    placementNudgesMap,
+    placementNudgesRepo,
   };
 }
 
@@ -1824,6 +1881,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       broadcastsRepo: world.broadcastsRepo,
       toursRepo: world.toursRepo,
       tourRemindersRepo: world.tourRemindersRepo,
+      // Post-Tour & Application (Task 5): the choke-point armStageNudge hook runs
+      // against this no-network fake instead of the real DynamoDB repo.
+      placementNudgesRepo: world.placementNudgesRepo,
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).

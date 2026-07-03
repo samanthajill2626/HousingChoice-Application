@@ -10,14 +10,18 @@
 //
 // The seed data and seedAll() function live in src/lib/seedData.ts so they
 // can also be imported from within the app's src/ rootDir (e.g. devReset.ts).
+//
+// SEED_PROFILE env: 'full' seeds the extended cast + matrix + live items on top
+// of the lean base; omit (or any other value) for lean-only (default).
 import { seedAll, LOCAL_DEFAULT_ENDPOINT } from '../src/lib/seedData.js';
 
 export { seedAll, LOCAL_DEFAULT_ENDPOINT };
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
-console.log(`db:seed — writing fixed-ID seed items at ${endpoint} (idempotent)`);
+const profile = process.env.SEED_PROFILE === 'full' ? 'full' : 'lean';
+console.log(`db:seed — writing fixed-ID seed items at ${endpoint} (idempotent, profile: ${profile})`);
 try {
-  const count = await seedAll(endpoint);
+  const count = await seedAll(endpoint, profile);
   console.log(`db:seed — done (${count} items)`);
 } catch (err) {
   console.error('db:seed failed — are the tables created? (npm run db:start && npm run db:create)');

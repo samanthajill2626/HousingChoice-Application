@@ -166,6 +166,49 @@ a.li:focus-visible {
   color: var(--c-resp-wait);
 }
 
+/* --- Notes (full-text, clamped with Show more) ----------------------------- */
+
+.notes {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  line-height: 1.5;
+  /* Notes are PROSE: preserve the author's newlines (the old chip collapsed
+   * them), and break long unbroken strings rather than overflowing the card. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Collapsed: clamp to 6 lines (the toggle below reveals the rest). */
+.notesClamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  overflow: hidden;
+}
+
+.notesToggle {
+  margin-top: var(--sp-1);
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--c-brand);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.notesToggle:hover {
+  text-decoration: underline;
+}
+
+.notesToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 /* --- Preference chips ----------------------------------------------------- */
 
 .chips {

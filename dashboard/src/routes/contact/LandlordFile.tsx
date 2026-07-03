@@ -22,6 +22,7 @@ import {
   Chips,
   EmptyRow,
   KV,
+  NotesText,
   PendingPanel,
   Row,
   responseClass,
@@ -147,7 +148,7 @@ export function LandlordFile({
             {programs.length > 0 ? <Chips items={programs} /> : null}
             {leaseTerms !== '' ? <KV k="Lease terms" v={leaseTerms} /> : null}
             {petPolicy !== '' ? <KV k="Pet policy" v={petPolicy} /> : null}
-            {notes !== '' ? <KV k="Notes" v={notes} /> : null}
+            {notes !== '' ? <NotesText text={notes} /> : null}
           </>
         ) : (
           <PendingPanel note="No preferences yet — use + Add to record accepted programs, lease terms, a pet policy, or a note." />

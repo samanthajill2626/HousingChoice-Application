@@ -76,6 +76,7 @@ import {
   normalizeCustomFields,
 } from './contactProfile.js';
 import { Modal } from './Modal.js';
+import { LANDLORD_ONBOARDING_HINTS } from './landlordOnboarding.js';
 import styles from './ContactEditForm.module.css';
 
 export interface ContactEditFormProps {
@@ -685,38 +686,62 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 placeholder="e.g. 1450"
               />
             </label>
-            <label className={styles.checkboxField}>
-              <input
-                type="checkbox"
-                checked={registeredLandlord}
-                onChange={(e) => setRegisteredLandlord(e.target.checked)}
-              />
-              <span className={styles.label}>Registered landlord</span>
-            </label>
-            <label className={styles.checkboxField}>
-              <input
-                type="checkbox"
-                checked={rtaWithin48h}
-                onChange={(e) => setRtaWithin48h(e.target.checked)}
-              />
-              <span className={styles.label}>Submits RTA within 48h</span>
-            </label>
-            <label className={styles.checkboxField}>
-              <input
-                type="checkbox"
-                checked={passInspection}
-                onChange={(e) => setPassInspection(e.target.checked)}
-              />
-              <span className={styles.label}>Passes inspection first try</span>
-            </label>
-            <label className={styles.checkboxField}>
-              <input
-                type="checkbox"
-                checked={incomeIncludesVoucher}
-                onChange={(e) => setIncomeIncludesVoucher(e.target.checked)}
-              />
-              <span className={styles.label}>Voucher counts as income</span>
-            </label>
+            <div className={styles.checkboxHinted}>
+              <label className={styles.checkboxField}>
+                <input
+                  type="checkbox"
+                  checked={registeredLandlord}
+                  onChange={(e) => setRegisteredLandlord(e.target.checked)}
+                  aria-describedby="obh-registered"
+                />
+                <span className={styles.label}>Registered landlord</span>
+              </label>
+              <p id="obh-registered" className={styles.hint}>
+                {LANDLORD_ONBOARDING_HINTS.registered_landlord}
+              </p>
+            </div>
+            <div className={styles.checkboxHinted}>
+              <label className={styles.checkboxField}>
+                <input
+                  type="checkbox"
+                  checked={rtaWithin48h}
+                  onChange={(e) => setRtaWithin48h(e.target.checked)}
+                  aria-describedby="obh-rta48"
+                />
+                <span className={styles.label}>Submits RTA within 48h</span>
+              </label>
+              <p id="obh-rta48" className={styles.hint}>
+                {LANDLORD_ONBOARDING_HINTS.rta_within_48h}
+              </p>
+            </div>
+            <div className={styles.checkboxHinted}>
+              <label className={styles.checkboxField}>
+                <input
+                  type="checkbox"
+                  checked={passInspection}
+                  onChange={(e) => setPassInspection(e.target.checked)}
+                  aria-describedby="obh-inspection"
+                />
+                <span className={styles.label}>Passes inspection first try</span>
+              </label>
+              <p id="obh-inspection" className={styles.hint}>
+                {LANDLORD_ONBOARDING_HINTS.pass_inspection_first_try}
+              </p>
+            </div>
+            <div className={styles.checkboxHinted}>
+              <label className={styles.checkboxField}>
+                <input
+                  type="checkbox"
+                  checked={incomeIncludesVoucher}
+                  onChange={(e) => setIncomeIncludesVoucher(e.target.checked)}
+                  aria-describedby="obh-voucher"
+                />
+                <span className={styles.label}>Voucher counts as income</span>
+              </label>
+              <p id="obh-voucher" className={styles.hint}>
+                {LANDLORD_ONBOARDING_HINTS.income_includes_voucher}
+              </p>
+            </div>
             <label className={styles.field}>
               <span className={styles.label}>Park reason</span>
               <textarea

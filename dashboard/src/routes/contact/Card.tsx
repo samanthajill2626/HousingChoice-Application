@@ -86,12 +86,29 @@ export function EmptyRow({ children }: { children: React.ReactNode }): React.JSX
   return <p className={styles.empty}>{children}</p>;
 }
 
-/** A key/value detail row (the Details card). */
-export function KV({ k, v }: { k: string; v: React.ReactNode }): React.JSX.Element {
-  return (
+/** A key/value detail row (the Details card). An optional `hint` renders a small
+ *  muted caption under the row — for fields whose meaning isn't obvious from the
+ *  label alone (e.g. the landlord-onboarding criteria). */
+export function KV({
+  k,
+  v,
+  hint,
+}: {
+  k: string;
+  v: React.ReactNode;
+  hint?: string;
+}): React.JSX.Element {
+  const row = (
     <div className={styles.kv}>
       <span className={styles.k}>{k}</span>
       <span className={styles.v}>{v}</span>
+    </div>
+  );
+  if (!hint) return row;
+  return (
+    <div className={styles.kvHinted}>
+      {row}
+      <p className={styles.kvHint}>{hint}</p>
     </div>
   );
 }

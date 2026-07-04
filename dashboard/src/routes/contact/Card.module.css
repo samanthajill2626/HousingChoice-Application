@@ -98,6 +98,25 @@
   color: var(--c-text);
 }
 
+/* A KV row plus a muted caption beneath it (KV `hint`) — for jargon fields whose
+ * label alone doesn't explain them (e.g. landlord-onboarding criteria). */
+.kvHinted {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 0 var(--sp-2);
+}
+
+.kvHinted > .kv {
+  margin: 0;
+}
+
+.kvHint {
+  margin: 2px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  line-height: 1.4;
+}
+
 /* --- List rows (Placements / Tours / Properties / Listings-sent) ----------- */
 
 .li {

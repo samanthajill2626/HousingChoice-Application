@@ -28,6 +28,23 @@
   gap: var(--sp-2);
 }
 
+/* A checkbox with a help line beneath it. The hint is a SIBLING of the <label>
+ * (not inside it) + linked via aria-describedby, so it reads as a description and
+ * doesn't pollute the checkbox's accessible name. Indented to sit under the label,
+ * clear of the box. */
+.checkboxHinted {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hint {
+  margin: 0 0 0 calc(1.1rem + var(--sp-2));
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  line-height: 1.4;
+}
+
 .label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);

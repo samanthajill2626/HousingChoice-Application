@@ -17,6 +17,7 @@ import {
   ApiError,
   assignInbox,
   getInbox,
+  markConversationRead,
   markInboxRead,
   useEventStream,
   type InboxFilter,
@@ -52,8 +53,10 @@ const PAGE_LIMIT = 30;
  *  burst of conversation.updated events into one refetch (matches useToday). */
 const REFETCH_DEBOUNCE_MS = 300;
 
-/** Stable identity for a row: contactId for contacts, phone for unknowns. */
+/** Stable identity for a row: conversationId for relay groups, contactId for
+ *  contacts, phone for unknowns. The three prefixes never collide. */
 export function rowKey(row: InboxRowData): string {
+  if (row.kind === 'relay_group') return `g:${row.conversationId ?? ''}`;
   return row.kind === 'contact' ? `c:${row.contactId ?? ''}` : `u:${row.phone ?? ''}`;
 }
 
@@ -183,15 +186,25 @@ export function useInbox(filter: InboxFilter): InboxState {
     (row: InboxRowData) => {
       if (row.unreadCount === 0) return;
       const key = rowKey(row);
-      const target =
-        row.kind === 'contact' && row.contactId !== undefined
-          ? ({ contactId: row.contactId } as const)
-          : row.phone !== undefined
-            ? ({ phone: row.phone } as const)
-            : undefined;
-      if (target === undefined) return; // unaddressable → don't fake success
+      // Resolve the read action per KIND (bail if unaddressable — don't fake
+      // success). A relay_group row marks read through its OWN conversation
+      // (POST /api/conversations/:id/read), NOT the contact/phone fan-out.
+      let read: (() => Promise<void>) | undefined;
+      if (row.kind === 'relay_group') {
+        if (row.conversationId !== undefined) {
+          const conversationId = row.conversationId;
+          read = () => markConversationRead(conversationId);
+        }
+      } else if (row.kind === 'contact' && row.contactId !== undefined) {
+        const contactId = row.contactId;
+        read = () => markInboxRead({ contactId });
+      } else if (row.phone !== undefined) {
+        const phone = row.phone;
+        read = () => markInboxRead({ phone });
+      }
+      if (read === undefined) return; // unaddressable → don't fake success
       setPatch(key, { unreadCount: 0 });
-      markInboxRead(target)
+      read()
         .then(() => {
           genRef.current += 1; // commit wins over any in-flight pre-commit refetch
           // Commit to base so clearing the patch doesn't reveal a stale count.

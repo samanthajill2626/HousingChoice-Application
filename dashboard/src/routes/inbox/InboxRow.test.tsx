@@ -116,4 +116,42 @@ describe('InboxRow', () => {
     renderRow(mkRow({ channel: 'call', preview: 'Missed call' }));
     expect(screen.getByText('Call')).toBeInTheDocument();
   });
+
+  it('renders a relay_group row with a Group text chip, linking to the conversation view', () => {
+    renderRow(
+      mkRow({
+        kind: 'relay_group',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Keisha & Lars',
+        preview: 'See you at 3',
+        conversationId: 'conv-g1',
+        status: 'open',
+      }),
+    );
+    const link = screen.getByRole('link', { name: /With Keisha & Lars/ });
+    expect(link).toHaveAttribute('href', '/conversations/conv-g1');
+    expect(screen.getByText('Group text')).toBeInTheDocument();
+    expect(within(link).getByText(/See you at 3/)).toBeInTheDocument();
+    // Group rows never offer assign (no contactId).
+    expect(screen.queryByRole('button', { name: /assign/i })).not.toBeInTheDocument();
+  });
+
+  it('flags a closed relay_group row', () => {
+    renderRow(
+      mkRow({
+        kind: 'relay_group',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Keisha & Lars',
+        conversationId: 'conv-g1',
+        status: 'closed',
+      }),
+    );
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+  });
 });

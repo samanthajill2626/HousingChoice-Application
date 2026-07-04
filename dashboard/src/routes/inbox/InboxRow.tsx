@@ -26,9 +26,13 @@ const CHANNEL_LABEL: Record<InboxChannel, string> = {
   call: 'Call',
 };
 
-/** The deep-link target: contact rows → the contact page; unknown rows → the
- *  Contacts ▸ Unknown triage list, deep-linked with the number. */
+/** The deep-link target: contact rows → the contact page; relay_group rows → the
+ *  conversation view; unknown rows → the Contacts ▸ Unknown triage list,
+ *  deep-linked with the number. */
 function hrefFor(row: InboxRowData): string {
+  if (row.kind === 'relay_group' && row.conversationId !== undefined) {
+    return `/conversations/${row.conversationId}`;
+  }
   if (row.kind === 'contact' && row.contactId !== undefined) {
     return `/contacts/${row.contactId}`;
   }
@@ -45,6 +49,10 @@ export function InboxRow({
 }: InboxRowProps): React.JSX.Element {
   const unread = row.unreadCount > 0;
   const canAssign = row.kind === 'contact' && row.contactId !== undefined && currentUserId !== undefined;
+  const isRelay = row.kind === 'relay_group';
+  // The channel/kind chip: contact/unknown rows show the latest item's channel
+  // (Text/Photo/Call); a relay_group row has no channel — show "Group text".
+  const kindLabel = isRelay ? 'Group text' : row.channel ? CHANNEL_LABEL[row.channel] : '';
 
   // Swipe-to-reveal (mobile). Keyboard/pointer users reach the same buttons via
   // Tab (focus-within reveals them in CSS); swipe is an ADDITIONAL affordance.
@@ -71,8 +79,12 @@ export function InboxRow({
         <Link className={styles.main} to={hrefFor(row)} onClick={() => onOpen(row)}>
           {row.role ? <span className={`${styles.dot} ${styles[`dot_${row.role}`] ?? ''}`} aria-hidden="true" /> : null}
           <span className={styles.head}>
-            <span className={`${styles.name} ${unread ? styles.bold : ''}`}>{row.name}</span>
-            <span className={styles.channel}>{CHANNEL_LABEL[row.channel]}</span>
+            <span className={`${styles.name} ${unread ? styles.bold : ''}`}>
+              {isRelay ? <span aria-hidden="true">👥 </span> : null}
+              {row.name}
+            </span>
+            <span className={styles.channel}>{kindLabel}</span>
+            {isRelay && row.status === 'closed' ? <span className={styles.tag}>Closed</span> : null}
             {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.assignment ? (

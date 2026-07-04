@@ -68,9 +68,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // authenticated /api setup calls below (the bare `request` fixture has none).
     await devLogin(page);
 
-    // A2P/CTIA (spec §4): seeded Tasha (contact-tenant-0001) carries no consent, so
-    // she'd be fenced out of the preview (badged no-consent, not "Already sent").
-    // Record consent so she remains a normal already-sent candidate row.
+    // A2P/CTIA (spec §4): seeded Tasha (contact-tenant-0001) now carries inbound_text
+    // consent from her seeded inbound reply, so she's already a normal already-sent
+    // candidate row (not badged no-consent). This PATCH is now a redundant no-op —
+    // kept so the test stays robust regardless of the seed's consent state.
     const tashaConsent = await page.request.patch(`${NEXT}/api/contacts/${TASHA}`, {
       data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
     });

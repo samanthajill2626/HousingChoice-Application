@@ -28,6 +28,16 @@
   gap: var(--sp-2);
 }
 
+/* A small ⓘ next to a checkbox label — reveals the field's help on mouseover
+ * (title tooltip) instead of an always-on line. aria-hidden keeps it out of the
+ * checkbox's accessible name; the real description rides an aria-describedby
+ * srLabel sibling. */
+.info {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  cursor: help;
+}
+
 .label {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);

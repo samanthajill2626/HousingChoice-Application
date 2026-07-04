@@ -98,6 +98,15 @@
   color: var(--c-text);
 }
 
+/* A small ⓘ hover affordance next to a KV key (KV `hint`) — reveals the field's
+ * explanation on mouseover instead of an always-on caption. */
+.info {
+  margin-left: var(--sp-1);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  cursor: help;
+}
+
 /* --- List rows (Placements / Tours / Properties / Listings-sent) ----------- */
 
 .li {

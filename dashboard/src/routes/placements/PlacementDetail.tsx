@@ -7,7 +7,7 @@
 // awaiting_rent_acceptance → finalRent; OUT of awaiting_inspection →
 // inspectionOutcome). A history panel (usePlacementHistory) renders the audit rows
 // newest-first with "load more".
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   PLACEMENT_STAGES,
@@ -516,13 +516,14 @@ function DateRecorder({
 }): React.JSX.Element {
   const [value, setValue] = useState(initial);
   const { busy, err, record } = useRecorder<string>(onRecord);
+  const id = useId();
   return (
     <Card title="Inspection">
-      <label className={styles.stageDataLabel} htmlFor="sd-inspection-date">
+      <label className={styles.stageDataLabel} htmlFor={id}>
         {label}
       </label>
       <input
-        id="sd-inspection-date"
+        id={id}
         type="date"
         className={styles.stageDataInput}
         value={value}
@@ -551,15 +552,16 @@ function MoneyRecorder({
 }): React.JSX.Element {
   const [value, setValue] = useState(initial !== undefined ? String(initial) : '');
   const { busy, err, record } = useRecorder<number>(onRecord);
+  const id = useId();
   const amount = Number(value);
   const valid = value.trim() !== '' && Number.isFinite(amount) && amount > 0;
   return (
     <Card title={title}>
-      <label className={styles.stageDataLabel} htmlFor="sd-money">
+      <label className={styles.stageDataLabel} htmlFor={id}>
         {label}
       </label>
       <input
-        id="sd-money"
+        id={id}
         type="number"
         min="1"
         inputMode="numeric"
@@ -584,6 +586,10 @@ function OutcomeRecorder({
 }): React.JSX.Element {
   const [value, setValue] = useState<InspectionOutcome | undefined>(current);
   const { busy, err, record } = useRecorder<InspectionOutcome>(onRecord);
+  // A group name distinct from the move modal's `inspection-outcome` — both can be
+  // mounted at awaiting_inspection (the recorder card + the move dialog), and a
+  // shared name would merge them into one document-wide radio group.
+  const group = useId();
   return (
     <Card title="Inspection">
       <fieldset className={styles.stageDataFieldset}>
@@ -591,7 +597,7 @@ function OutcomeRecorder({
         <label className={styles.checkRow}>
           <input
             type="radio"
-            name="inspection-outcome"
+            name={group}
             checked={value === 'pass'}
             onChange={() => setValue('pass')}
           />
@@ -600,7 +606,7 @@ function OutcomeRecorder({
         <label className={styles.checkRow}>
           <input
             type="radio"
-            name="inspection-outcome"
+            name={group}
             checked={value === 'fail'}
             onChange={() => setValue('fail')}
           />

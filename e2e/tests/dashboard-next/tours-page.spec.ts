@@ -55,7 +55,7 @@ test.beforeAll(async ({ request }) => {
 });
 
 test.describe('Tours page', () => {
-  test('nav: Tours appears after Placements in the Workspace nav and routes to /tours', async ({
+  test('nav: Tours appears before Placements in the Workspace nav and routes to /tours', async ({
     page,
   }) => {
     await devLogin(page);
@@ -68,14 +68,16 @@ test.describe('Tours page', () => {
     await expect(placements).toBeVisible();
     await expect(tours).toBeVisible();
 
-    // DOM ordering: the Tours link appears AFTER the Placements link in the nav.
+    // DOM ordering: the Tours link appears BEFORE the Placements link in the nav
+    // (Workspace was reordered 2026-07-04 → …Properties · Tours · Placements; see
+    // dashboard/src/app/nav.ts).
     const placementsIndex = await placements.evaluate(
       (el) => Array.from(el.closest('nav')!.querySelectorAll('a')).indexOf(el as HTMLAnchorElement),
     );
     const toursIndex = await tours.evaluate(
       (el) => Array.from(el.closest('nav')!.querySelectorAll('a')).indexOf(el as HTMLAnchorElement),
     );
-    expect(toursIndex).toBeGreaterThan(placementsIndex);
+    expect(toursIndex).toBeLessThan(placementsIndex);
 
     // The link routes to /tours and renders the Tours heading.
     await tours.click();

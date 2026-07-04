@@ -55,7 +55,7 @@ test('Inbox: inline Assign to me → "Assigned · You" + Assigned-to-me filter; 
 
   // Live, no reload: the row shows the assignment as "You" (current user), and it
   // appears under the "Assigned to me" filter.
-  await expect(row.getByText(/Assigned · You/i)).toBeVisible();
+  await expect(row.getByText(/Assigned - You/i)).toBeVisible();
   await page.getByRole('tab', { name: 'Assigned to me' }).click();
   await expect(page.getByRole('link', { name: /Tasha Nguyen/ })).toBeVisible();
 
@@ -63,5 +63,5 @@ test('Inbox: inline Assign to me → "Assigned · You" + Assigned-to-me filter; 
   await page.getByRole('tab', { name: 'All' }).click();
   await row.hover();
   await row.getByRole('button', { name: /Unassign/i }).click();
-  await expect(row.getByText(/Assigned · You/i)).toHaveCount(0);
+  await expect(row.getByText(/Assigned - You/i)).toHaveCount(0);
 });

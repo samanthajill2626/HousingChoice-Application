@@ -1448,8 +1448,11 @@ export class Scenario {
       // id. exact:true — a loose 'Group thread' also matches the link text
       // 'View group thread' (strict-mode violation, seen live).
       await expect(this.page.getByText('Group thread', { exact: true })).toBeVisible();
+      // The link now targets the relay-group CONVERSATION view (/conversations/:id)
+      // — the dead /inbox link was repointed (relay-group-view §8); its aria-label
+      // dropped "in inbox" to match.
       await expect(
-        this.page.getByRole('link', { name: 'Open group thread in inbox' }),
+        this.page.getByRole('link', { name: 'Open group thread' }),
       ).toBeVisible();
     });
   }
@@ -1457,11 +1460,11 @@ export class Scenario {
   /**
    * [App→Team] The tour's masked group shows on a contact's file: the "Group
    * texts" card lists the membership row, named for the OTHER member
-   * ("With <name>"), linking to the owning tour's detail page. `contactId`
+   * ("With <name>"), linking to the relay-group CONVERSATION view. `contactId`
    * picks whose file to open (defaults to the active contact — the tenant).
    */
   expectGroupOnContactFile(other: Contact, contactId?: string): Promise<void> {
-    const tour = this.requireActiveTour();
+    const tour = this.requireActiveTourGroup();
     const id = contactId ?? this.requireActiveContactId();
     return step('Team sees the group text on the contact file (Group texts card)', async () => {
       await this.page.goto(`${NEXT}/contacts/${id}`);
@@ -1471,12 +1474,13 @@ export class Scenario {
       await expect(card).toBeVisible();
       // The row's accessible name is "With <other member(s)> · <count> members";
       // anchor on the named-for-the-other-member label, then assert the link
-      // target is THIS tour's detail page (the group's owner).
+      // target is the group's CONVERSATION view (repointed from the owner tour
+      // page — relay-group-view §8).
       const row = card.getByRole('link', {
         name: new RegExp(`^With .*${escapeRegExp(displayNameOf(other))}`),
       });
       await expect(row).toBeVisible();
-      await expect(row).toHaveAttribute('href', `/tours/${tour.tourId}`);
+      await expect(row).toHaveAttribute('href', `/conversations/${tour.groupThreadId}`);
     });
   }
 

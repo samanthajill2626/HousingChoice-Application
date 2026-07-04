@@ -151,14 +151,19 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     res.status(200).json({ messages: items });
   });
 
-  // POST /__dev/reseed — wipe local tables (incl. outbox) and re-seed.
-  router.post('/__dev/reseed', async (_req, res) => {
-    await resetLocalData({ config, logger: log });
+  // POST /__dev/reseed[?profile=full] — wipe local tables (incl. outbox) and
+  // re-seed. `profile` defaults to 'lean' (the byte-stable e2e/dev world);
+  // `?profile=full` additionally seeds the extended cast + matrix + live items,
+  // which the relay-group-view e2e needs for the live relay group
+  // (`conv-live-relay-group`). Dev-only surface (triple-gated), additive.
+  router.post('/__dev/reseed', async (req, res) => {
+    const profile = req.query['profile'] === 'full' ? 'full' : 'lean';
+    await resetLocalData({ config, logger: log, profile });
     // The users table was wiped + reseeded, so every cached epoch is now stale
     // (a prior sign-out may have bumped one). Drop them all, else a freshly-minted
     // post-reseed dev-login session is rejected (cookie epoch ≠ stale cached epoch).
     deps.sessionEpochCache?.clear();
-    res.status(200).json({ ok: true });
+    res.status(200).json({ ok: true, profile });
   });
 
   // POST /__dev/tour-reminders/tick { now? } — the deterministic e2e seam for

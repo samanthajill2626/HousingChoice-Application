@@ -8,7 +8,7 @@ import {
   ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
-import { seedAll, seedInboundVoiceLineHolder, SEED_INBOUND_VOICE_CELL } from './seedData.js';
+import { seedAll, seedInboundVoiceLineHolder, SEED_INBOUND_VOICE_CELL, type SeedProfile } from './seedData.js';
 import { tableName, type AppConfig } from './config.js';
 import { createDynamoClient, createDocumentClient } from './dynamo.js';
 import { TABLES } from './tables.js';
@@ -46,9 +46,19 @@ async function clearTable(
   } while (startKey);
 }
 
-export async function resetLocalData(deps: { config: AppConfig; logger?: Logger }): Promise<void> {
+export async function resetLocalData(deps: {
+  config: AppConfig;
+  logger?: Logger;
+  /** Seed profile to re-seed with. Defaults to 'lean' (the byte-stable e2e/dev
+   *  world). 'full' additionally seeds the extended cast + matrix + live items —
+   *  used by the relay-group-view e2e, which needs the live relay group
+   *  (`conv-live-relay-group`) that only the full profile provides. Dev-only
+   *  seam; the safety guard above still restricts this to a hermetic local stack. */
+  profile?: SeedProfile;
+}): Promise<void> {
   const { config } = deps;
   const log = deps.logger ?? defaultLogger;
+  const profile: SeedProfile = deps.profile ?? 'lean';
   const prefix = tableName(''); // the TABLE_PREFIX
   // Safety guard: only allow reseed against a hermetic local DynamoDB stack.
   // The prefix must be the lane-0 dev prefix (hc-local-) OR a per-lane e2e
@@ -66,7 +76,7 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
   for (const base of bases) {
     await clearTable(doc, client, tableName(base));
   }
-  const count = await seedAll(config.dynamodbEndpoint);
+  const count = await seedAll(config.dynamodbEndpoint, profile);
   // LOCAL dev/e2e convenience ONLY: stamp the founder/admin as the inbound-voice-line
   // holder so inbound-bridge e2e tests pass without a manual UI assignment. The seed
   // cell is the hardcoded `SEED_INBOUND_VOICE_CELL` fake (no env var — the deprecated
@@ -78,7 +88,7 @@ export async function resetLocalData(deps: { config: AppConfig; logger?: Logger 
     SEED_INBOUND_VOICE_CELL,
   );
   log.info(
-    { tables: bases.length, seeded: count, inboundVoiceLineStamped: stampedInboundLine },
+    { tables: bases.length, seeded: count, profile, inboundVoiceLineStamped: stampedInboundLine },
     'resetLocalData: cleared + reseeded',
   );
 }

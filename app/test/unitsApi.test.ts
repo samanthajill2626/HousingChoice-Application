@@ -349,22 +349,38 @@ describe('PATCH /api/units/:unitId', () => {
     expect(bad.status).toBe(400);
   });
 
-  it('REFUSES status and final_rent via CRUD PATCH (§8: status routes through listing-status; final_rent is service-only)', async () => {
+  it('REFUSES status via CRUD PATCH (§8: status routes through listing-status)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { status: 'available' });
     // status is not CRUD-writable — listing-status changes go through
-    // PATCH /api/units/:unitId/listing-status; final_rent is written only by the
-    // transition service on rent acceptance.
-    for (const body of [{ status: 'occupied' }, { final_rent: 1800 }]) {
-      const res = await request(app)
-        .patch('/api/units/unit-1')
-        .set('x-origin-verify', SECRET)
-        .set('cookie', TEST_SESSION_COOKIE)
-        .send(body);
-      expect(res.status, JSON.stringify(body)).toBe(400);
-    }
+    // PATCH /api/units/:unitId/listing-status.
+    const res = await request(app)
+      .patch('/api/units/unit-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ status: 'occupied' });
+    expect(res.status).toBe(400);
     // The status is untouched.
     expect(world.units.get('unit-1')!.status).toBe('available');
+  });
+
+  it('PATCH accepts final_rent — recordable in place at rent acceptance (still also written by the acceptance move)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-fr', { status: 'available' });
+    const ok = await request(app)
+      .patch('/api/units/unit-fr')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ final_rent: 1875 });
+    expect(ok.status).toBe(200);
+    expect(ok.body.unit.final_rent).toBe(1875);
+    // The 'number' kind still enforces finite & >= 0, so a non-number is 400.
+    const bad = await request(app)
+      .patch('/api/units/unit-fr')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ final_rent: 'lots' });
+    expect(bad.status).toBe(400);
   });
 
   it('404s an unknown unit and writes no audit event', async () => {

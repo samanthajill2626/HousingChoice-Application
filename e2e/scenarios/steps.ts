@@ -2443,20 +2443,30 @@ export class Scenario {
   }
 
   /**
-   * [Team, MANUAL] Record the inspection outcome on the move OUT of Awaiting
-   * inspection. The outcome is captured on the exit regardless of destination;
-   * the destination follows the outcome per the diagram: a `pass` advances to
-   * Determine rent, a `fail` sends the landlord back to re-inspect (Schedule
-   * inspection). Selecting the target opens the outcome modal; pick Pass/Fail,
-   * confirm, and assert the resulting stage.
+   * [Team, MANUAL] Record the inspection outcome on the MOVE out of Awaiting
+   * inspection (the move still asks pass/fail). Scoped to the move dialog — the
+   * in-place recorder card also has Pass/Fail radios. Used for the happy-path pass.
    */
   teamRecordsInspectionOutcome(outcome: 'pass' | 'fail'): Promise<void> {
     const radioName = outcome === 'pass' ? 'Pass' : 'Fail';
-    const toStage = outcome === 'pass' ? 'Determine rent' : 'Schedule inspection';
-    return step(`Team records inspection outcome → ${radioName}`, async () => {
-      const dialog = await this.openMovePrompt(toStage, 'Record inspection outcome');
+    return step(`Team records inspection outcome (on the move) → ${radioName}`, async () => {
+      const dialog = await this.openMovePrompt('Determine rent', 'Record inspection outcome');
       await dialog.getByRole('radio', { name: radioName }).check();
-      await this.confirmMovePrompt(dialog, toStage);
+      await this.confirmMovePrompt(dialog, 'Determine rent');
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Record the inspection outcome IN PLACE via the StageDataCard at
+   * Awaiting inspection — NO stage move (the placement stays put; the outcome is a
+   * recorded fact). The recorder card's Pass/Fail radios are the only radios on the
+   * page when no move dialog is open.
+   */
+  teamRecordsInspectionOutcomeInPlace(outcome: 'pass' | 'fail'): Promise<void> {
+    const radioName = outcome === 'pass' ? 'Pass' : 'Fail';
+    return step(`Team records inspection outcome IN PLACE → ${radioName}`, async () => {
+      await this.page.getByRole('radio', { name: radioName }).check();
+      await this.page.getByRole('button', { name: 'Record inspection outcome' }).click();
     });
   }
 

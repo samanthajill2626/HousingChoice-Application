@@ -231,11 +231,11 @@ test('marked deviation — inspection FAILS at Awaiting inspection → Lost (lan
   await flow.teamMovesPlacementToWithInspectionDate(INSPECTION_DATE);
   await flow.expectPlacementStage('Awaiting inspection');
 
-  // Inspection fails → the outcome `fail` is RECORDED on the awaiting_inspection
-  // exit (the landlord re-inspects — back to Schedule inspection, the diagram's
-  // marked deviation), exercising the fail data path end-to-end...
-  await flow.teamRecordsInspectionOutcome('fail');
-  await flow.expectPlacementStage('Schedule inspection');
+  // Inspection fails → the outcome `fail` is RECORDED IN PLACE at Awaiting
+  // inspection — no stage move; the failed outcome is a fact recorded on the
+  // placement (the diagram's marked deviation), exercising the in-place data path...
+  await flow.teamRecordsInspectionOutcomeInPlace('fail');
+  await flow.expectPlacementStage('Awaiting inspection');
   expect((await getPlacement(page, placementId)).inspection_outcome).toBe('fail');
 
   // ...then the placement is LOST with landlord_lost_inspection (the marked exit).

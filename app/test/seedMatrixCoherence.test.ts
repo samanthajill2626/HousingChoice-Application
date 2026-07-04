@@ -18,6 +18,7 @@ import {
 import {
   PLACEMENT_STAGES,
   STAGE_PHASE,
+  STAGE_STUCK_THRESHOLDS,
   deriveStatuses,
   type PlacementStage,
 } from '../src/lib/statusModel.js';
@@ -121,19 +122,18 @@ describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
     }
   });
 
-  it('attention-flagged deadlines are OVERDUE (< now); every non-flagged deadline is UPCOMING (> now)', () => {
-    // Spec §3 intent: only attention-flagged placements land past-due; all
-    // others must be strictly in the future (an unflagged past-due deadline
-    // reads as a bug in the dashboard).
+  it('every attention-flagged deadline is OVERDUE (< now)', () => {
+    // Attention is DECOUPLED from overdue-ness (quadrant model): a flagged row is
+    // always overdue (it's already in needs_you_now, an overdue hard clock), so
+    // "attention ⟹ overdue" still holds. The REVERSE ("non-flagged ⟹ upcoming")
+    // is intentionally GONE — an overdue `follow_up` (due_followup role) is NOT
+    // flagged yet lands in follow_ups. Quadrant coverage is asserted below.
     const withDeadline = PLACEMENTS.filter((p) => deadlineOf.has(p['placementId'] as string));
     expect(withDeadline.length, 'matrix must include deadline-bearing placements').toBeGreaterThanOrEqual(1);
     for (const p of withDeadline) {
+      if (p['attention'] === undefined) continue;
       const dueMs = ms(deadlineOf.get(p['placementId'] as string)!['at']);
-      if (p['attention'] !== undefined) {
-        expect(dueMs, `flagged placement ${p['placementId']} must be overdue (< now)`).toBeLessThan(NOW_MS);
-      } else {
-        expect(dueMs, `unflagged placement ${p['placementId']} must be upcoming (> now)`).toBeGreaterThan(NOW_MS);
-      }
+      expect(dueMs, `flagged placement ${p['placementId']} must be overdue (< now)`).toBeLessThan(NOW_MS);
     }
   });
 
@@ -146,6 +146,99 @@ describe('matrix coherence: deadline date ≥ stage_entered_at', () => {
       // …but only by DAYS, not months (no more Jan-dated deadlines in July).
       const daysPast = (NOW_MS - dueMs) / (24 * 60 * 60 * 1000);
       expect(daysPast, `attention placement ${p['placementId']} overdue by ${daysPast}d`).toBeLessThan(30);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deliberate deadline×stuck QUADRANT coverage (the headline of this rewrite)
+// ---------------------------------------------------------------------------
+describe('matrix coherence: deadline×stuck quadrant coverage', () => {
+  // Derive stuck EXACTLY as today.ts does (now − stage_entered_at ≥ threshold).
+  const isStuck = (p: Record<string, unknown>): boolean => {
+    const threshold = STAGE_STUCK_THRESHOLDS[stageOf(p)];
+    if (threshold === undefined) return false;
+    const entered = ms(p['stage_entered_at']);
+    return !Number.isNaN(entered) && NOW_MS - entered >= threshold;
+  };
+  const hasDeadline = (p: Record<string, unknown>): boolean => deadlineOf.has(p['placementId'] as string);
+  const actives = PLACEMENTS.filter(isActive);
+
+  it('covers all FOUR quadrants ≥1 each (deadline×stuck)', () => {
+    const deadlineNotStuck = actives.filter((p) => hasDeadline(p) && !isStuck(p));
+    const stuckNoDeadline = actives.filter((p) => !hasDeadline(p) && isStuck(p));
+    const both = actives.filter((p) => hasDeadline(p) && isStuck(p));
+    const neither = actives.filter((p) => !hasDeadline(p) && !isStuck(p));
+    expect(deadlineNotStuck.length, 'quadrant (a) deadline & not stuck').toBeGreaterThanOrEqual(1);
+    expect(stuckNoDeadline.length, 'quadrant (b) stuck & no deadline').toBeGreaterThanOrEqual(1);
+    expect(both.length, 'quadrant (c) both deadline & stuck').toBeGreaterThanOrEqual(1);
+    expect(neither.length, 'quadrant (d) neither').toBeGreaterThanOrEqual(1);
+  });
+
+  it('has a due HARD-CLOCK example: an overdue rta_window/voucher on a NON-stuck App/RTA placement', () => {
+    const hardClock = actives.filter((p) => {
+      if (isStuck(p)) return false;
+      const d = deadlineOf.get(p['placementId'] as string);
+      if (!d) return false;
+      const type = d['type'] as string;
+      return (type === 'rta_window' || type === 'voucher_expiration') && ms(d['at']) < NOW_MS;
+    });
+    expect(hardClock.length, 'a due, non-stuck hard-clock placement (needs_you_now, not follow_ups)').toBeGreaterThanOrEqual(1);
+  });
+
+  it('has a stuck-no-deadline example (follow_ups via DERIVED stuck only)', () => {
+    const stuckOnly = actives.filter((p) => isStuck(p) && !hasDeadline(p));
+    expect(stuckOnly.length, 'a derived-stuck placement carrying NO deadline item').toBeGreaterThanOrEqual(1);
+  });
+
+  it('has an OVERDUE follow_up that is NOT attention-flagged (lands in follow_ups only)', () => {
+    // The key decoupling fix: an overdue follow_up must not be attention-flagged.
+    const overdueUnflaggedFollowup = actives.filter((p) => {
+      const d = deadlineOf.get(p['placementId'] as string);
+      if (!d || d['type'] !== 'follow_up') return false;
+      return ms(d['at']) < NOW_MS && p['attention'] === undefined;
+    });
+    expect(overdueUnflaggedFollowup.length, 'an overdue, UNFLAGGED follow_up').toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Voucher coherence: voucher_expiration deadline ⟺ tenant.voucher_expiration_date
+// ---------------------------------------------------------------------------
+describe('matrix coherence: voucher_expiration_date ⟺ voucher deadline', () => {
+  const tenantsById = new Map(
+    (ITEMS['contacts'] ?? [])
+      .filter((c) => c['type'] === 'tenant')
+      .map((c) => [c['contactId'] as string, c]),
+  );
+  const placementById = new Map(PLACEMENTS.map((p) => [p['placementId'] as string, p]));
+
+  it('every voucher_expiration deadline pins its tenant voucher_expiration_date to deadline.at', () => {
+    const voucherDeadlines = DEADLINES.filter((d) => d['type'] === 'voucher_expiration');
+    expect(voucherDeadlines.length, 'matrix must include ≥1 voucher_expiration deadline').toBeGreaterThanOrEqual(1);
+    for (const d of voucherDeadlines) {
+      const p = placementById.get(d['placementId'] as string);
+      expect(p, `voucher deadline ${d['deadlineId']} must join a placement`).toBeDefined();
+      const t = tenantsById.get(p!['tenantId'] as string);
+      expect(t, `tenant for ${p!['placementId']} must exist`).toBeDefined();
+      expect(t!['voucher_expiration_date'], `tenant for ${p!['placementId']} voucher_expiration_date == deadline.at`).toBe(d['at']);
+    }
+  });
+
+  it('NO tenant carries voucher_expiration_date unless its placement has a voucher_expiration deadline', () => {
+    // Build the set of tenantIds whose placement carries a voucher deadline.
+    const voucherTenantIds = new Set(
+      DEADLINES.filter((d) => d['type'] === 'voucher_expiration')
+        .map((d) => placementById.get(d['placementId'] as string))
+        .filter((p): p is Record<string, unknown> => p !== undefined)
+        .map((p) => p['tenantId'] as string),
+    );
+    for (const t of tenantsById.values()) {
+      if (t['voucher_expiration_date'] === undefined) continue;
+      expect(
+        voucherTenantIds.has(t['contactId'] as string),
+        `tenant ${t['contactId']} carries voucher_expiration_date but its placement has NO voucher deadline`,
+      ).toBe(true);
     }
   });
 });

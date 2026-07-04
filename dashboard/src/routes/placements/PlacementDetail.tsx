@@ -350,6 +350,12 @@ export function PlacementDetail(): React.JSX.Element {
         pending.gate === 'moveInReady') ? (
         <MovePromptModal
           mode={pending.gate}
+          initial={{
+            finalRent: unit?.final_rent,
+            inspectionOutcome: placement.inspection_outcome,
+            inspectionDate: placement.inspection_date,
+            rentDetermined: placement.rent_determined,
+          }}
           {...(pending.gate === 'moveInReady' && {
             lifPending: tenant?.lifEligible === true && placement.lif !== true,
           })}

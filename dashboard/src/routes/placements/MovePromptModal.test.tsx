@@ -116,3 +116,45 @@ describe('MovePromptModal (moveInReady)', () => {
     expect(screen.getByText(/LIF is not marked/i)).toBeInTheDocument();
   });
 });
+
+describe('MovePromptModal (prefill from recorded value)', () => {
+  it('prefills finalRent so the move confirms without re-entry', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(
+      <MovePromptModal
+        mode="finalRent"
+        initial={{ finalRent: 1875 }}
+        onClose={() => {}}
+        onConfirm={onConfirm}
+      />,
+    );
+    expect(screen.getByLabelText('Final contract rent (monthly)')).toHaveValue(1875);
+    await user.click(screen.getByRole('button', { name: 'Confirm move' }));
+    expect(onConfirm).toHaveBeenCalledWith({ finalRent: 1875 });
+  });
+
+  it('prefills the determined rent and the inspection date', () => {
+    render(
+      <MovePromptModal
+        mode="rentDetermined"
+        initial={{ rentDetermined: 1850 }}
+        onClose={() => {}}
+        onConfirm={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText('Determined rent (monthly)')).toHaveValue(1850);
+  });
+
+  it('prefills a recorded inspection outcome', () => {
+    render(
+      <MovePromptModal
+        mode="inspectionOutcome"
+        initial={{ inspectionOutcome: 'fail' }}
+        onClose={() => {}}
+        onConfirm={() => {}}
+      />,
+    );
+    expect(screen.getByRole('radio', { name: 'Fail' })).toBeChecked();
+  });
+});

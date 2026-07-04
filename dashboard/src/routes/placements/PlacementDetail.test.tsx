@@ -194,6 +194,9 @@ describe('PlacementDetail', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_hap_contract');
     const dialog = screen.getByRole('dialog');
     const input = within(dialog).getByLabelText(/Final contract rent/i);
+    // The modal prefills the recorded final_rent (in-place stage-data); clear it
+    // to exercise the ≤0 rejection.
+    await user.clear(input);
     await user.type(input, '0');
     expect(within(dialog).getByRole('button', { name: 'Confirm move' })).toBeDisabled();
     expect(transitionPlacement).not.toHaveBeenCalled();

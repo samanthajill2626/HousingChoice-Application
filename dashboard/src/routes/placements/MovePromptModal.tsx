@@ -33,6 +33,9 @@ export interface MovePromptModalProps {
   busy?: boolean;
   /** moveInReady only: the tenant is LIF-eligible but LIF is not yet marked. */
   lifPending?: boolean;
+  /** Prefill the input from what's already recorded (in-place stage-data), so the
+   *  move still ASKS but never forces re-entry. Per-mode; unrelated keys ignored. */
+  initial?: MovePromptResult;
 }
 
 /** Parse the rent input to a positive number, or null when invalid (≤0 / NaN). */
@@ -56,11 +59,14 @@ export function MovePromptModal({
   onConfirm,
   busy = false,
   lifPending = false,
+  initial,
 }: MovePromptModalProps): React.JSX.Element {
-  const [rent, setRent] = useState('');
-  const [outcome, setOutcome] = useState<InspectionOutcome | ''>('');
-  const [inspectionDate, setInspectionDate] = useState('');
-  const [determinedRent, setDeterminedRent] = useState('');
+  const [rent, setRent] = useState(initial?.finalRent !== undefined ? String(initial.finalRent) : '');
+  const [outcome, setOutcome] = useState<InspectionOutcome | ''>(initial?.inspectionOutcome ?? '');
+  const [inspectionDate, setInspectionDate] = useState(initial?.inspectionDate ?? '');
+  const [determinedRent, setDeterminedRent] = useState(
+    initial?.rentDetermined !== undefined ? String(initial.rentDetermined) : '',
+  );
   const rentId = useId();
   const groupId = useId();
   const dateId = useId();

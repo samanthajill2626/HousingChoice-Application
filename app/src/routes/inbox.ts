@@ -20,8 +20,12 @@
 // is the opaque base64url of the raw byLastActivity LastEvaluatedKey — the same
 // scheme GET /api/conversations uses.
 //
-// relay_group conversations are EXCLUDED — C8 has no group row kind (the group
-// text lives in its own surface; the Inbox is a per-contact lens).
+// relay_group conversations are a SECOND row source (kind='relay_group'):
+// masked group-text threads carry last_activity_at / status / unread_count /
+// last_message_preview just like a 1:1, so they are folded into the same feed
+// (queried via conversationsRepo.listRelayGroups, NOT the contact pager) and
+// merge-sorted by last_activity_at. To keep paging split-proof they are emitted
+// ONLY on the first page and additively — see the merge note in aggregateInbox.
 //
 // Hydration (name / role / placementContext / assignment / channel / direction /
 // preview) is BEST-EFFORT and bounded to the page: every external lookup is
@@ -51,8 +55,10 @@ import {
 } from '../repos/placementsRepo.js';
 import {
   createConversationsRepo,
+  getOwner,
   type ConversationItem,
   type ConversationsRepo,
+  type RelayOwner,
 } from '../repos/conversationsRepo.js';
 import {
   contactPhones,
@@ -71,19 +77,23 @@ export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
 export type InboxChannel = 'sms' | 'mms' | 'call';
 
 export interface InboxRow {
-  kind: 'contact' | 'unknown';
+  kind: 'contact' | 'unknown' | 'relay_group';
   contactId?: string; // present when kind='contact'
-  phone?: string; // E.164; the number (esp. for unknown rows)
-  name: string; // contact name, or formatted number when unknown
+  phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
+  name: string; // contact name, formatted number (unknown), or the group label (relay_group)
   role?: 'tenant' | 'landlord' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
-  unreadCount: number; // aggregate across ALL of the contact's numbers
-  preview: string; // latest item's text as a preview (UI shows one line, ellipsized)
-  channel: InboxChannel; // channel of the latest item
-  direction: 'inbound' | 'outbound'; // 'outbound' → render "You: …"
+  unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
+  preview: string; // latest item's text as a preview (relay: last_message_preview)
+  channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
+  direction?: 'inbound' | 'outbound'; // 'outbound' → "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
   assignment?: { userId: string; name: string }; // the Assigned chip
-  needsTriage: boolean; // true for untriaged unknowns
+  needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  // --- relay_group only (present iff kind === 'relay_group') --------------------
+  conversationId?: string; // the relay conversation id → route /conversations/:conversationId
+  status?: 'open' | 'closed'; // the relay group's lifecycle status
+  owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 
 export interface InboxPage {
@@ -381,7 +391,10 @@ export async function aggregateInbox(
    * caller owns the page-fill / boundary bookkeeping.
    */
   const rowForConversation = async (conv: ConversationItem): Promise<InboxRow | undefined> => {
-    if (conv.type === 'relay_group') return undefined; // C8 has no group row kind
+    // relay_group threads are emitted by the SEPARATE relay source (relayRowFor
+    // via listRelayGroups), never by the contact pager — so skip them here to
+    // guarantee they can't be double-counted.
+    if (conv.type === 'relay_group') return undefined;
 
     const phone = conv.participant_phone;
     let contact: ContactItem | undefined;
@@ -460,6 +473,57 @@ export async function aggregateInbox(
     };
   };
 
+  /**
+   * Build the relay_group row for one relay conversation. Relay groups are the
+   * SECOND row source (queried via listRelayGroups, not the contact pager).
+   * Label precedence mirrors the dashboard's GroupTextsCard.groupLabel: other
+   * member names → operator tag → formatted pool number → "Group text".
+   *
+   * PII: the returned row carries names/preview to the authed client (like the
+   * contact rows); log lines stay counts/IDs only.
+   */
+  const relayRowFor = async (conv: ConversationItem): Promise<InboxRow> => {
+    const memberNames = (conv.participants ?? [])
+      .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
+      .filter((n) => n.length > 0);
+    // GOTCHA: the operator tag rides ConversationItem's index signature under
+    // the key `placement_tag` (NOT `tag`) and is untyped — read it defensively.
+    const tag = typeof conv.placement_tag === 'string' ? conv.placement_tag.trim() : '';
+    let label: string;
+    if (memberNames.length > 0) {
+      label = `With ${memberNames.join(' & ')}`;
+    } else if (tag.length > 0) {
+      label = tag;
+    } else if (typeof conv.pool_number === 'string' && conv.pool_number.length > 0) {
+      label = formatPhoneForDisplay(conv.pool_number) ?? conv.pool_number;
+    } else {
+      label = 'Group text';
+    }
+
+    const preview =
+      typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '';
+    const status: 'open' | 'closed' = conv.status === 'closed' ? 'closed' : 'open';
+
+    let assignment: { userId: string; name: string } | undefined;
+    if (typeof conv.assignment === 'string' && conv.assignment.length > 0) {
+      const name = await resolveUserName(conv.assignment);
+      assignment = { userId: conv.assignment, name };
+    }
+
+    return {
+      kind: 'relay_group',
+      conversationId: conv.conversationId,
+      name: label,
+      unreadCount: unreadOf(conv),
+      preview,
+      lastActivityAt: conv.last_activity_at,
+      status,
+      owner: getOwner(conv),
+      ...(assignment !== undefined && { assignment }),
+      needsTriage: false, // relay rows never need triage (never under the "unknown" filter)
+    };
+  };
+
   const rows: InboxRow[] = [];
   let nextCursor: string | null = null;
   // The resume key for the CURRENT fetch batch (the cursor passed in, then each
@@ -524,7 +588,56 @@ export async function aggregateInbox(
     chunkStartKey = chunk.lastEvaluatedKey;
   }
 
-  log.info({ filter, count: rows.length, hasMore: nextCursor !== null }, 'inbox feed assembled');
+  // --- Relay-group rows: the second source, folded in split-proof ------------
+  // The contact pager above NEVER emits relay rows (rowForConversation skips
+  // type==='relay_group'). We merge relay rows ONLY on the FIRST page (cursor
+  // absent) and ADDITIVELY — they don't consume the contact pager's limit /
+  // cursor accounting. That makes paging provably safe:
+  //   • no double-serve — later pages (cursor present) omit relay rows entirely;
+  //   • no drop — every relay row lands on page 1 (bounded by listRelayGroups'
+  //     page budget, whose `truncated` flag we surface rather than silently drop);
+  //   • no dedupe needed — relay rows key by conversationId, disjoint from the
+  //     contact/unknown rows.
+  // Trade-off: a relay group whose last activity predates the page-1 boundary
+  // still sorts onto page 1 (relay groups are active surfaces, so in practice
+  // they cluster near the top). Only OPEN groups are surfaced — matching the
+  // rest of the feed, which is open-only.
+  let relayCount = 0;
+  if (startKey === undefined) {
+    let relayResult: { items: ConversationItem[]; truncated: boolean };
+    try {
+      relayResult = await conversations.listRelayGroups('open');
+    } catch (err) {
+      log.warn({ err }, 'inbox: relay-group list failed (best-effort)');
+      relayResult = { items: [], truncated: false };
+    }
+    if (relayResult.truncated) {
+      // No silent truncation — surface it (counts only; never a phone/body).
+      log.warn(
+        { returned: relayResult.items.length },
+        'inbox: relay-group list truncated by the page budget — some groups omitted',
+      );
+    }
+    const relayRows: InboxRow[] = [];
+    for (const conv of relayResult.items) {
+      const row = await relayRowFor(conv);
+      if (passesFilter(row)) relayRows.push(row);
+    }
+    if (relayRows.length > 0) {
+      rows.push(...relayRows);
+      // Re-sort the page newest-first (stable) so relay rows interleave with the
+      // contact/unknown rows by last_activity_at.
+      rows.sort((a, b) =>
+        a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
+      );
+      relayCount = relayRows.length;
+    }
+  }
+
+  log.info(
+    { filter, count: rows.length, relayCount, hasMore: nextCursor !== null },
+    'inbox feed assembled',
+  );
   return { rows, nextCursor };
 }
 

@@ -76,6 +76,14 @@ function makeDeps(seed: Seed): InboxRouterDeps {
       async findByParticipantPhone(phone: string) {
         return seed.conversations.filter((c) => c.participant_phone === phone);
       },
+      // Mirrors the real repo: one relay status partition, newest-activity-first.
+      // The in-memory walk never pages, so `truncated` is always false here.
+      async listRelayGroups(status: 'open' | 'closed') {
+        const items = seed.conversations
+          .filter((c) => c.type === 'relay_group' && c.status === status)
+          .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
+        return { items, truncated: false };
+      },
     } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
     contactsRepo: {
       async findByPhone(phone: string) {
@@ -112,6 +120,26 @@ function conv(overrides: Partial<ConversationItem> & { conversationId: string; p
     status: 'open',
     type: 'tenant_1to1',
     ai_mode: 'auto',
+    created_at: overrides.last_activity_at,
+    ...overrides,
+  };
+}
+
+/**
+ * A relay_group conversation, shaped like the well-formed live seed group
+ * `conv-live-relay-group` (participants carry `name`; pool number fronts the
+ * thread; owner is a tour/placement). NOT the malformed cast.ts fixtures.
+ */
+function relayConv(
+  overrides: Partial<ConversationItem> & { conversationId: string; last_activity_at: string },
+): ConversationItem {
+  const poolNumber = overrides.pool_number ?? overrides.participant_phone ?? '+15550160001';
+  return {
+    status: 'open',
+    type: 'relay_group',
+    ai_mode: 'manual',
+    participant_phone: poolNumber,
+    pool_number: poolNumber,
     created_at: overrides.last_activity_at,
     ...overrides,
   };
@@ -195,20 +223,115 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(unknown.rows[0]!.contactId).toBe('c-unk');
   });
 
-  it('relay_group conversations are excluded from the feed', async () => {
+  it('relay_group conversations now surface as a kind:"relay_group" row alongside 1:1 rows', async () => {
     const deps = makeDeps({
       contacts: [],
       conversations: [
-        conv({ conversationId: 'conv-relay', participant_phone: '+15550009000', last_activity_at: '2026-06-12T10:00:00.000Z', type: 'relay_group', pool_number: '+15550009000' }),
+        relayConv({
+          conversationId: 'conv-live-relay-group',
+          pool_number: '+15550160001',
+          last_activity_at: '2026-06-12T10:00:00.000Z',
+          participants: [
+            { contactId: 'c-a', phone: '+15550000101', name: 'Diana Osei' },
+            { contactId: 'c-b', phone: '+15550000102', name: 'Gloria Mensah' },
+          ],
+          owner: { type: 'tour', id: 'tour-1' },
+          last_message_preview: '[AUTO] Tour group opened.',
+          unread_count: 2,
+        }),
         conv({ conversationId: 'conv-y', participant_phone: '+14049824978', last_activity_at: '2026-06-11T10:00:00.000Z', type: 'unknown_1to1' }),
       ],
     });
 
     const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
 
-    expect(page.rows).toHaveLength(1);
-    expect(page.rows[0]!.phone).toBe('+14049824978');
-    expect(page.rows.some((r) => r.phone === '+15550009000')).toBe(false);
+    expect(page.rows).toHaveLength(2);
+    const relay = page.rows.find((r) => r.kind === 'relay_group')!;
+    expect(relay).toMatchObject({
+      kind: 'relay_group',
+      conversationId: 'conv-live-relay-group',
+      name: 'With Diana Osei & Gloria Mensah', // member names win the label
+      unreadCount: 2,
+      preview: '[AUTO] Tour group opened.',
+      status: 'open',
+      owner: { type: 'tour', id: 'tour-1' },
+      needsTriage: false,
+    });
+    // Relay rows carry NO phone / channel / direction.
+    expect(relay.phone).toBeUndefined();
+    expect(relay.channel).toBeUndefined();
+    expect(relay.direction).toBeUndefined();
+  });
+
+  it('relay label precedence: member names → placement_tag → formatted pool number → "Group text"', async () => {
+    const base = { last_activity_at: '2026-06-12T10:00:00.000Z' };
+    const tagOnly = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+      contacts: [],
+      conversations: [relayConv({ conversationId: 'r-tag', pool_number: '+15550160001', placement_tag: '123 Maple tour', ...base })],
+    }));
+    expect(tagOnly.rows[0]!.name).toBe('123 Maple tour');
+
+    const poolOnly = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+      contacts: [],
+      conversations: [relayConv({ conversationId: 'r-pool', pool_number: '+15550160001', ...base })],
+    }));
+    // formatPhoneForDisplay renders the pool number.
+    expect(poolOnly.rows[0]!.name).toBe('(555) 016-0001');
+
+    const emptyGroup = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+      contacts: [],
+      // No members, no tag, no pool number → the "Group text" fallback.
+      conversations: [relayConv({ conversationId: 'r-bare', pool_number: '', participant_phone: 'x', ...base })],
+    }));
+    expect(emptyGroup.rows[0]!.name).toBe('Group text');
+  });
+
+  it('relay rows merge-sort with contact/unknown rows by last_activity_at (newest first)', async () => {
+    const deps = makeDeps({
+      contacts: [
+        { contactId: 'c-1', type: 'tenant', phone: '+15550000001' },
+        { contactId: 'c-2', type: 'tenant', phone: '+15550000002' },
+      ],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: '2026-06-14T10:00:00.000Z' }), // newest
+        relayConv({ conversationId: 'r-mid', pool_number: '+15550160001', last_activity_at: '2026-06-13T10:00:00.000Z',
+          participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
+        conv({ conversationId: 'conv-2', participant_phone: '+15550000002', last_activity_at: '2026-06-12T10:00:00.000Z' }), // oldest
+      ],
+    });
+
+    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    expect(page.rows.map((r) => r.contactId ?? r.conversationId)).toEqual(['c-1', 'r-mid', 'c-2']);
+  });
+
+  it('relay filter matrix: in "all"+"unread" (when unread>0); NEVER in "unknown"; in "mine" only when assigned to the user', async () => {
+    const seed: Seed = {
+      contacts: [{ contactId: 'c-unk', type: 'unknown', phone: '+14049824978' }],
+      conversations: [
+        relayConv({ conversationId: 'r-unread', pool_number: '+15550160001', last_activity_at: '2026-06-14T10:00:00.000Z', unread_count: 3,
+          participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
+        relayConv({ conversationId: 'r-mine', pool_number: '+15550160002', last_activity_at: '2026-06-13T10:00:00.000Z', assignment: 'u-1',
+          participants: [{ contactId: 'c-y', phone: '+15550000202', name: 'Lars' }] }),
+        conv({ conversationId: 'conv-unk', participant_phone: '+14049824978', last_activity_at: '2026-06-12T10:00:00.000Z', type: 'unknown_1to1', unread_count: 1 }),
+      ],
+    };
+
+    const all = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps(seed));
+    expect(all.rows.filter((r) => r.kind === 'relay_group').map((r) => r.conversationId).sort())
+      .toEqual(['r-mine', 'r-unread']);
+
+    const unread = await aggregateInbox({ filter: 'unread', limit: 25, userId: 'u-1' }, makeDeps(seed));
+    // r-unread (unread 3) qualifies; r-mine (unread 0) does not.
+    expect(unread.rows.filter((r) => r.kind === 'relay_group').map((r) => r.conversationId)).toEqual(['r-unread']);
+
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25, userId: 'u-1' }, makeDeps(seed));
+    // NO relay row ever appears under "unknown" — only the untriaged 1:1.
+    expect(unknown.rows.every((r) => r.kind !== 'relay_group')).toBe(true);
+    expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
+
+    const mine = await aggregateInbox({ filter: 'mine', limit: 25, userId: 'u-1' }, makeDeps(seed));
+    expect(mine.rows.map((r) => r.conversationId)).toEqual(['r-mine']);
+    expect(mine.rows[0]!.assignment).toEqual({ userId: 'u-1', name: 'u-1' }); // fake users repo → id fallback
   });
 
   it('rows are newest-activity-first', async () => {
@@ -376,6 +499,54 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
     }
     expect(seen.sort()).toEqual(['c-1', 'c-2', 'c-3', 'c-4', 'c-5']);
     expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('relay rows are paging-safe: emitted ONCE (first page only), never dropped, never double-served', async () => {
+    // Four single-number contacts + two relay groups; page through at limit=2.
+    // Relay rows are additive on page 1 only, so across all pages each relay
+    // group and each contact must appear EXACTLY once (no split / no duplicate /
+    // no drop).
+    function mixedSeed(): Seed {
+      return {
+        contacts: [
+          { contactId: 'c-1', type: 'tenant', phone: '+15550000001' },
+          { contactId: 'c-2', type: 'tenant', phone: '+15550000002' },
+          { contactId: 'c-3', type: 'tenant', phone: '+15550000003' },
+          { contactId: 'c-4', type: 'tenant', phone: '+15550000004' },
+        ],
+        conversations: [
+          conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: '2026-06-14T10:00:00.000Z' }), // T10
+          relayConv({ conversationId: 'r-1', pool_number: '+15550160001', last_activity_at: '2026-06-13T22:00:00.000Z', // T9.5
+            participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
+          conv({ conversationId: 'conv-2', participant_phone: '+15550000002', last_activity_at: '2026-06-13T10:00:00.000Z' }), // T9
+          conv({ conversationId: 'conv-3', participant_phone: '+15550000003', last_activity_at: '2026-06-12T10:00:00.000Z' }), // T8
+          conv({ conversationId: 'conv-4', participant_phone: '+15550000004', last_activity_at: '2026-06-11T10:00:00.000Z' }), // T7
+          relayConv({ conversationId: 'r-2', pool_number: '+15550160002', last_activity_at: '2026-06-10T22:00:00.000Z', // T6.5
+            participants: [{ contactId: 'c-y', phone: '+15550000202', name: 'Lars' }] }),
+        ],
+      };
+    }
+
+    const seen: string[] = [];
+    const relayIdsByPage: string[][] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      const page = await aggregateInbox(
+        { filter: 'all', limit: 2, userId: 'u-1', ...(cursor !== undefined && { cursor }) },
+        makeDeps(mixedSeed()),
+      );
+      for (const r of page.rows) seen.push((r.contactId ?? r.conversationId)!);
+      relayIdsByPage.push(page.rows.filter((r) => r.kind === 'relay_group').map((r) => r.conversationId!));
+      if (page.nextCursor === null) break;
+      cursor = page.nextCursor;
+    }
+
+    // Every contact AND every relay group appears exactly once — no drop, no dup.
+    expect(seen.slice().sort()).toEqual(['c-1', 'c-2', 'c-3', 'c-4', 'r-1', 'r-2']);
+    expect(new Set(seen).size).toBe(seen.length);
+    // Relay rows are confined to the FIRST page; every later page has none.
+    expect(relayIdsByPage[0]!.slice().sort()).toEqual(['r-1', 'r-2']);
+    for (const relayIds of relayIdsByPage.slice(1)) expect(relayIds).toEqual([]);
   });
 
   it('a malformed cursor is rejected (the route maps it to 400, never a 500)', async () => {

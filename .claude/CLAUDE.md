@@ -100,8 +100,13 @@ bitten us at review time more than once).
 
 - **Before declaring a branch done / requesting review or merge:** merge the latest
   `main` into your branch (`git merge main`, or rebase), resolve any conflicts keeping
-  BOTH sides' intent, then re-run the full suite (`npm test` + `npm run e2e`) green on
-  the updated base. "Green" only counts against current `main`.
+  BOTH sides' intent, then re-run the full gates — **`npm run typecheck` + `npm test` +
+  `npm run e2e`** — green on the updated base. "Green" only counts against current `main`.
+- **`npm run typecheck` is a REQUIRED gate — do not skip it.** `npm test` and `npm run
+  e2e` run through esbuild/tsx, which strips types WITHOUT type-checking, so a red
+  `tsc` (e.g. a strict `noUncheckedIndexedAccess` `ev[0]` nit in a test file) passes the
+  runtime suites and slips onto `main`, breaking every later branch's typecheck. Running
+  the tests green is NOT proof the types check. Always run `npm run typecheck` too.
 - **If that surfaces conflicts, or you're unsure whether to sync mid-build, ASK first** —
   e.g. "`main` has advanced N commits since I branched; should I merge it in before I
   continue / before I finish?" Don't silently finish on a stale base.

@@ -46,6 +46,11 @@ import {
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo, TERMINAL_STAGES } from '../../repos/placementsRepo.js';
 import {
+  createPlacementDeadlinesRepo,
+  soonestDeadline,
+  type PlacementDeadlinesRepo,
+} from '../../repos/placementDeadlinesRepo.js';
+import {
   createConversationsRepo,
   type ConversationItem,
   type ConversationsRepo,
@@ -138,6 +143,12 @@ export interface TwilioWebhookDeps {
   auditRepo?: AuditRepo;
   /** M1.10c failed-send escalation: flag the linked placement's attention flag. */
   placementsRepo?: PlacementsRepo;
+  /**
+   * First-class placement deadlines (placement-deadline-model): the escalation
+   * emit recomputes the placement's soonest deadline so the event PRESERVES the
+   * pending deadline chip instead of nulling it. Injected in tests.
+   */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
@@ -163,6 +174,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
@@ -183,7 +196,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       const c = await placements.getById(placementId);
       if (!c || TERMINAL_STAGES.has(c.stage)) return; // only active placements escalate
       const updated = await placements.update(placementId, { attention: { reason, at: new Date().toISOString() } });
-      events.emit('placement.updated', toPlacementUpdatedEvent(updated));
+      // Recompute the soonest deadline so the event PRESERVES the placement's
+      // pending rta_window/voucher_expiration chip. This escalation only raises
+      // `attention` — it never arms/retires a deadline — so emitting with NO
+      // `next` (null) would blank a live chip on the dashboard's in-place patch.
+      const ds = await placementDeadlines.listByPlacement(placementId);
+      events.emit('placement.updated', toPlacementUpdatedEvent(updated, soonestDeadline(ds)));
       log.warn(
         { event: 'placement_escalation', placementId, conversationId, reason },
         'failed send on an active placement — attention flag raised',

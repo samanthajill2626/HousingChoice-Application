@@ -280,6 +280,35 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
     expect(world.emitted.some((e) => e.event === 'placement.updated')).toBe(true);
   });
 
+  it('the escalation event PRESERVES the placement\'s pending deadline chip (not null)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const placementId = await seedRelayLeg('awaiting_approval');
+    // A pending hard-clock deadline the board is showing. The escalation only
+    // raises `attention` — it must NOT blank the chip. Regression guard: the emit
+    // recomputes the soonest deadline instead of emitting `next: null` (which the
+    // dashboard's in-place patch would have used to blank a live rta_window chip).
+    await world.placementDeadlinesRepo.arm(placementId, 'rta_window', '2026-07-20T00:00:00.000Z');
+    world.emitted.length = 0;
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/status',
+      statusParams({ MessageSid: 'SMleg-bob', MessageStatus: 'failed', ErrorCode: '30007' }),
+    );
+    expect(res.status).toBe(200);
+
+    const evt = world.emitted.find((e) => e.event === 'placement.updated');
+    expect(evt).toBeDefined();
+    const payload = evt!.payload as {
+      attention: boolean;
+      next_deadline_type: string | null;
+      next_deadline_at: string | null;
+    };
+    expect(payload.attention).toBe(true); // the escalation DID raise attention…
+    expect(payload.next_deadline_type).toBe('rta_window'); // …and PRESERVED the chip
+    expect(payload.next_deadline_at).toBe('2026-07-20T00:00:00.000Z');
+  });
+
   it('a failed relay leg on a TERMINAL placement does NOT escalate (the deal is closed)', async () => {
     const { app } = makeWebhookHarness({ world });
     const placementId = await seedRelayLeg('lost');

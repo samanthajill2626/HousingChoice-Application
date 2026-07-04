@@ -4,9 +4,10 @@
 // overwrites a manual pin; manual overwrites derived); tenant-status writes
 // (the RTA-in-hand gate was REMOVED 2026-06-19 — → searching always applies);
 // porting as a tenant flag (never a stage); final_rent on rent acceptance; Lost
-// from any stage (structured reason + the bounce-back guard); and the §8
-// time-in-stage stuck nudge (incl. NOT clobbering a hard-clock deadline,
-// terminal clearing).
+// from any stage (structured reason + the bounce-back guard); and the deadline
+// items the transition arms/retires (rta_window on entering/leaving
+// awaiting_landlord_submission; clearForPlacement on terminal). The stuck signal
+// is DERIVED in today.ts now — the transition arms NO stuck deadline.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogger } from '../src/lib/logger.js';
@@ -18,26 +19,19 @@ import {
   type StatusTransitionDeps,
   type StatusTransitionService,
 } from '../src/services/statusTransition.js';
-import { STAGE_STUCK_THRESHOLDS } from '../src/lib/statusModel.js';
-import type { PlacementDeadline, PlacementItem } from '../src/repos/placementsRepo.js';
+import { soonestDeadline } from '../src/repos/placementDeadlinesRepo.js';
+import type { PlacementItem } from '../src/repos/placementsRepo.js';
 
-/**
- * Wrap the fake's `setNextDeadline` to record every call (delegating to the real
- * impl) so a test can assert BOTH the null-clear and the subsequent stuck set.
- */
-function spyNextDeadline(world: FakeWorld): Array<{ placementId: string; deadline: PlacementDeadline | null }> {
-  const calls: Array<{ placementId: string; deadline: PlacementDeadline | null }> = [];
-  const orig = world.placementsRepo.setNextDeadline.bind(world.placementsRepo);
-  world.placementsRepo.setNextDeadline = async (placementId, deadline) => {
-    calls.push({ placementId, deadline });
-    return orig(placementId, deadline);
-  };
-  return calls;
+/** The soonest deadline's type on a placement (or undefined when none), via the fake repo. */
+async function deadlineTypeOf(world: FakeWorld, placementId: string): Promise<string | undefined> {
+  const rows = await world.placementDeadlinesRepo.listByPlacement(placementId);
+  return soonestDeadline(rows)?.type;
 }
 
 function makeService(world: FakeWorld): StatusTransitionService {
   return createStatusTransitionService({
     placementsRepo: world.placementsRepo,
+    placementDeadlinesRepo: world.placementDeadlinesRepo,
     unitsRepo: world.unitsRepo,
     contactsRepo: world.contactsRepo,
     auditRepo: world.auditRepo,
@@ -53,6 +47,7 @@ function makeServiceWith(
 ): StatusTransitionService {
   return createStatusTransitionService({
     placementsRepo: world.placementsRepo,
+    placementDeadlinesRepo: world.placementDeadlinesRepo,
     unitsRepo: world.unitsRepo,
     contactsRepo: world.contactsRepo,
     auditRepo: world.auditRepo,
@@ -661,6 +656,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
     };
     const pagedSvc = createStatusTransitionService({
       placementsRepo: pagedRepo as typeof world.placementsRepo,
+      placementDeadlinesRepo: world.placementDeadlinesRepo,
       unitsRepo: world.unitsRepo,
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
@@ -679,7 +675,7 @@ describe('statusTransition — Lost from any stage (§7)', () => {
   });
 });
 
-describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
+describe('statusTransition — deadline items (no stored stuck nudge)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;
 
@@ -690,46 +686,32 @@ describe('statusTransition — time-in-stage stuck nudge (§8)', () => {
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('sets a stuck_placement next-deadline at ~now + the stage threshold', async () => {
+  it('a non-RTA stage move arms NO deadline (stuck is DERIVED in today.ts now)', async () => {
     const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    const before = Date.now();
-    const updated = await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
-    expect(updated.next_deadline_type).toBe('stuck_placement');
-    const at = Date.parse(updated.next_deadline_at!);
-    const expected = before + STAGE_STUCK_THRESHOLDS.awaiting_hap_contract!;
-    // Within a generous window (scheduling computes now+threshold).
-    expect(at).toBeGreaterThanOrEqual(expected - 5_000);
-    expect(at).toBeLessThanOrEqual(Date.now() + STAGE_STUCK_THRESHOLDS.awaiting_hap_contract! + 5_000);
+    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_hap_contract', source: 'manual' });
+    // No stored stuck_placement deadline — the transition arms nothing here.
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
   });
 
-  it('does NOT clobber a pending HARD-CLOCK deadline (rta_window) with a stuck nudge', async () => {
+  it('a non-RTA stage move leaves an independent hard clock (rta_window) intact', async () => {
     const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
-    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
+    // A pending rta_window item on a stage that does NOT own it (independent).
+    await world.placementDeadlinesRepo.arm(c.placementId, 'rta_window', '2026-09-01T00:00:00.000Z');
     await svc.transitionPlacement(c.placementId, { toStage: 'review_rta', source: 'manual' });
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBe('rta_window'); // untouched
-    expect(after!.next_deadline_at).toBe('2026-09-01T00:00:00.000Z');
+    const rows = await world.placementDeadlinesRepo.listByPlacement(c.placementId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.type).toBe('rta_window'); // untouched (not the owning stage)
+    expect(rows[0]!.at).toBe('2026-09-01T00:00:00.000Z');
   });
 
-  it('a terminal stage clears a pending stuck nudge', async () => {
-    const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
-    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_approval', source: 'manual' });
-    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('stuck_placement');
-    await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'no_contact' } });
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBeUndefined();
-    expect(after!.next_deadline_at).toBeUndefined();
-  });
-
-  it('a terminal stage clears a pending HARD-CLOCK deadline too (closed placement → slot moot)', async () => {
+  it('a terminal stage clears ALL of a placement’s deadlines (clearForPlacement)', async () => {
     const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
-    // A hard-clock rta_window deadline holds the single slot.
-    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'rta_window', at: '2026-09-01T00:00:00.000Z' });
-    // Going terminal must clear it — a closed deal never fires a deadline nudge.
+    // Two independent hard clocks pending.
+    await world.placementDeadlinesRepo.arm(c.placementId, 'rta_window', '2026-09-01T00:00:00.000Z');
+    await world.placementDeadlinesRepo.arm(c.placementId, 'voucher_expiration', '2026-12-01T00:00:00.000Z');
     await svc.transitionPlacement(c.placementId, { toStage: 'moved_in', source: 'manual' });
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBeUndefined();
-    expect(after!.next_deadline_at).toBeUndefined();
+    // A closed deal never fires a deadline — everything cleared.
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
   });
 });
 
@@ -749,7 +731,7 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('entering awaiting_landlord_submission arms rta_window at EXACTLY now+48h and sets NO stuck nudge', async () => {
+  it('entering awaiting_landlord_submission arms an rta_window item at EXACTLY stage-entry+48h', async () => {
     const svc = makeService(world); // no hooks — the RTA clock is unconditional
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
@@ -760,14 +742,15 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
       toStage: 'awaiting_landlord_submission',
       source: 'manual',
     });
-    // The hard clock owns the single slot — NOT a stuck_placement nudge.
-    expect(updated.next_deadline_type).toBe('rta_window');
+    const rows = await world.placementDeadlinesRepo.listByPlacement(c.placementId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.type).toBe('rta_window');
     // stage_entered_at and the rta_window deadline derive from the SAME `now`, so
     // the deadline is exactly stage-entry + 48h (deterministic, no tolerance).
-    expect(Date.parse(updated.next_deadline_at!)).toBe(Date.parse(updated.stage_entered_at!) + RTA_WINDOW_MS);
+    expect(Date.parse(rows[0]!.at)).toBe(Date.parse(updated.stage_entered_at!) + RTA_WINDOW_MS);
   });
 
-  it('the RTA clock is NOT clobbered by a stuck nudge (scheduleStuckNudge is skipped for that stage)', async () => {
+  it('the rta_window item is the placement’s soonest deadline after entering the stage', async () => {
     const svc = makeService(world);
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
@@ -775,8 +758,7 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
       stage: 'send_rta_to_landlord',
     });
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBe('rta_window');
+    expect(await deadlineTypeOf(world, c.placementId)).toBe('rta_window');
   });
 
   it('entering awaiting_receipt invokes armStageNudge with the UPDATED placement + toStage + an ISO now', async () => {
@@ -797,7 +779,7 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(calls[0]!.nowIso).toBe(new Date(calls[0]!.nowIso).toISOString());
   });
 
-  it('a lost move invokes closeRelayForLostPlacement AND still clears the deadline slot (terminal behavior preserved)', async () => {
+  it('a lost move invokes closeRelayForLostPlacement AND clears all deadline items (terminal behavior preserved)', async () => {
     const closed: PlacementItem[] = [];
     const armed: Array<{ placement: PlacementItem; toStage: string }> = [];
     const svc = makeServiceWith(world, {
@@ -814,8 +796,8 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
       stage: 'awaiting_approval',
       group_thread: 'conv-relay-1',
     });
-    // Give it a pending stuck deadline so we can prove the terminal move clears it.
-    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'stuck_placement', at: '2026-09-01T00:00:00.000Z' });
+    // Give it a pending deadline so we can prove the terminal move clears it.
+    await world.placementDeadlinesRepo.arm(c.placementId, 'follow_up', '2026-09-01T00:00:00.000Z');
 
     await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
 
@@ -823,10 +805,8 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(closed).toHaveLength(1);
     expect(closed[0]!.stage).toBe('lost');
     expect(closed[0]!.group_thread).toBe('conv-relay-1');
-    // Terminal slot-clearing is unchanged: the pending deadline is gone.
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBeUndefined();
-    expect(after!.next_deadline_at).toBeUndefined();
+    // Terminal clearing is unchanged in effect: the pending deadline is gone.
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
     // The arm hook ALSO fires on lost (its cancel-only path retires pending rows).
     expect(armed).toHaveLength(1);
     expect(armed[0]!.toStage).toBe('lost');
@@ -868,11 +848,10 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
   });
 
   // rta_window is a STAGE-SCOPED clock OWNED by awaiting_landlord_submission:
-  // leaving that stage must retire the clock. Without the scoped clear, the stale
-  // rta_window sat in the single next_deadline slot for the whole ~4-week authority
-  // window (soon-overdue on the Today board) AND blocked awaiting_authority_approval
-  // from arming its own stuck_placement nudge. These four guard the fix.
-  it('leaving awaiting_landlord_submission → awaiting_authority_approval CLEARS rta_window and ARMS the destination stuck nudge', async () => {
+  // leaving that stage must RETIRE the item (a plain independent DeleteItem — no
+  // slot-clobber dance any more). The destination stage arms NOTHING (stuck is
+  // derived in today.ts). These guard the retire + the independence.
+  it('leaving awaiting_landlord_submission → awaiting_authority_approval RETIRES rta_window (and arms nothing)', async () => {
     const svc = makeService(world);
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
@@ -881,27 +860,15 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     });
     // Enter awaiting_landlord_submission → arms the rta_window hard clock.
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
-    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('rta_window');
+    expect(await deadlineTypeOf(world, c.placementId)).toBe('rta_window');
 
-    // Record every setNextDeadline call across the happy-path exit.
-    const calls = spyNextDeadline(world);
-    const before = Date.now();
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_authority_approval', source: 'manual' });
 
-    // The stale rta_window slot was explicitly cleared (setNextDeadline(id, null))…
-    expect(calls.some((k) => k.deadline === null && k.placementId === c.placementId)).toBe(true);
-    // …and then awaiting_authority_approval's OWN stuck_placement nudge armed.
-    expect(calls.some((k) => k.deadline?.type === 'stuck_placement')).toBe(true);
-
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBe('stuck_placement');
-    const at = Date.parse(after!.next_deadline_at!);
-    const expected = before + STAGE_STUCK_THRESHOLDS.awaiting_authority_approval!;
-    expect(at).toBeGreaterThanOrEqual(expected - 5_000);
-    expect(at).toBeLessThanOrEqual(Date.now() + STAGE_STUCK_THRESHOLDS.awaiting_authority_approval! + 5_000);
+    // The rta_window item is retired; no stuck deadline is armed at the destination.
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
   });
 
-  it('leaving awaiting_landlord_submission → lost clears the slot EXACTLY ONCE (terminal path unchanged, no double-clear)', async () => {
+  it('leaving awaiting_landlord_submission → lost clears via clearForPlacement (terminal path unchanged)', async () => {
     const svc = makeService(world);
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
@@ -909,46 +876,114 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
       stage: 'send_rta_to_landlord',
     });
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
-    expect((await world.placementsRepo.getById(c.placementId))!.next_deadline_type).toBe('rta_window');
+    expect(await deadlineTypeOf(world, c.placementId)).toBe('rta_window');
 
-    const calls = spyNextDeadline(world);
     await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
-
-    // Terminal move clears the slot via scheduleStuckNudge's terminal branch ONLY —
-    // the scoped pre-clear must NOT also fire (that would be a redundant second write).
-    const clears = calls.filter((k) => k.deadline === null && k.placementId === c.placementId);
-    expect(clears).toHaveLength(1);
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBeUndefined();
-    expect(after!.next_deadline_at).toBeUndefined();
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
   });
 
-  it('a pending voucher_expiration hard clock is STILL deferred-to, never cleared by the stage-scoped rta_window logic', async () => {
+  it('a pending voucher_expiration is NEVER touched by a stage move (tenant-level, not stage-scoped)', async () => {
     const svc = makeService(world);
     const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'collect_rta' });
-    // voucher_expiration is tenant-level (not stage-scoped) — it must survive stage moves.
-    await world.placementsRepo.setNextDeadline(c.placementId, { type: 'voucher_expiration', at: '2026-12-01T00:00:00.000Z' });
+    // voucher_expiration is tenant-level — a stage move must not re-arm or retire it.
+    await world.placementDeadlinesRepo.arm(c.placementId, 'voucher_expiration', '2026-12-01T00:00:00.000Z');
     await svc.transitionPlacement(c.placementId, { toStage: 'review_rta', source: 'manual' });
-    const after = await world.placementsRepo.getById(c.placementId);
-    expect(after!.next_deadline_type).toBe('voucher_expiration'); // untouched
-    expect(after!.next_deadline_at).toBe('2026-12-01T00:00:00.000Z');
+    const rows = await world.placementDeadlinesRepo.listByPlacement(c.placementId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.type).toBe('voucher_expiration'); // untouched
+    expect(rows[0]!.at).toBe('2026-12-01T00:00:00.000Z');
   });
 
-  it('re-entering awaiting_landlord_submission re-arms a FRESH +48h rta_window', async () => {
+  it('re-entering awaiting_landlord_submission re-arms a FRESH +48h rta_window item', async () => {
     const svc = makeService(world);
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
       unitId: 'unit-1',
       stage: 'send_rta_to_landlord',
     });
-    // First entry, then leave (clearing the clock), then come back.
+    // First entry, then leave (retiring the clock), then come back.
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_landlord_submission', source: 'manual' });
     await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_authority_approval', source: 'manual' });
     const reentered = await svc.transitionPlacement(c.placementId, {
       toStage: 'awaiting_landlord_submission',
       source: 'manual',
     });
-    expect(reentered.next_deadline_type).toBe('rta_window');
-    expect(Date.parse(reentered.next_deadline_at!)).toBe(Date.parse(reentered.stage_entered_at!) + RTA_WINDOW_MS);
+    const rows = await world.placementDeadlinesRepo.listByPlacement(c.placementId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.type).toBe('rta_window');
+    expect(Date.parse(rows[0]!.at)).toBe(Date.parse(reentered.stage_entered_at!) + RTA_WINDOW_MS);
+  });
+});
+
+function makeServiceWithActivity(world: FakeWorld): StatusTransitionService {
+  return createStatusTransitionService({
+    placementsRepo: world.placementsRepo,
+    unitsRepo: world.unitsRepo,
+    contactsRepo: world.contactsRepo,
+    auditRepo: world.auditRepo,
+    activityEventsRepo: world.activityEventsRepo,
+    events: world.events,
+    logger: createLogger({ destination: createLogCapture().stream }),
+  });
+}
+
+describe('statusTransition — contact_status_changed milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    // Landlord fixture — exercises the LANDLORD_STATUS_LABELS branch. Landlord
+    // statuses are needs_review|interested|active|parked (statusModel.ts:173).
+    await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'interested' });
+  });
+
+  it('records a contact_status_changed activity event on an explicit landlord status change', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'll-1', label: 'Status → Parked' }); // LANDLORD_STATUS_LABELS.parked
+    expect(ev[0].refType).toBeUndefined();
+  });
+
+  it('does NOT record when the status is unchanged (no-op)', async () => {
+    const svc = makeServiceWithActivity(world);
+    await svc.setTenantStatus('ll-1', { toStatus: 'interested', source: 'manual', actor: 'usr_va' });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
+  });
+
+  it('never throws out of setTenantStatus if the milestone write fails (best-effort)', async () => {
+    world.activityEventsRepo.record = async () => { throw new Error('boom'); };
+    const svc = makeServiceWithActivity(world);
+    await expect(svc.setTenantStatus('ll-1', { toStatus: 'parked', source: 'manual' })).resolves.toBeTruthy();
+  });
+});
+
+describe('statusTransition — placement stage milestone', () => {
+  let world: FakeWorld;
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it('records a stage_changed milestone on a non-terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    await svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
+    const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ contactId: 'tenant-1', refType: 'placement', refId: p.placementId, label: expect.stringContaining('Collect RTA') });
+  });
+
+  it('records a placement_closed milestone (with lost category, no free text) on a terminal move', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    // Category MUST be a valid lost-reason category (statusModel.ts:303-311) or
+    // transitionPlacement drops it (isLostReasonCategory guard) → label omits it.
+    await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
+    const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0].label).toContain('tenant_withdrew');
+    expect(ev[0].label).not.toContain('secret note');
   });
 });

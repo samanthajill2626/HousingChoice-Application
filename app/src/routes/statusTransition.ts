@@ -24,8 +24,13 @@ import {
   isTransitionSource,
   statusAllowlistFor,
 } from '../lib/statusModel.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -40,9 +45,12 @@ import { appEvents, type EventBus } from '../lib/events.js';
 export interface StatusTransitionRouterDeps {
   logger?: Logger;
   placementsRepo?: PlacementsRepo;
+  /** First-class placement deadlines (placement-deadline-model). */
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   unitsRepo?: UnitsRepo;
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
+  activityEventsRepo?: ActivityEventsRepo;
   events?: EventBus;
   /**
    * Post-Tour & Application choke-point hooks (optional, best-effort). Forwarded
@@ -61,17 +69,22 @@ const DEFAULT_HISTORY_LIMIT = 50;
 export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const service =
     deps.service ??
     createStatusTransitionService({
       placementsRepo: placements,
+      placementDeadlinesRepo: placementDeadlines,
       unitsRepo: units,
       contactsRepo: contacts,
       auditRepo: audit,
+      activityEventsRepo: activityEvents,
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
       ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),

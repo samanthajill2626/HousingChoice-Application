@@ -162,6 +162,37 @@ describe('describeUnitActivity', () => {
     ).toEqual({ label: 'Status changed to Available' });
   });
 
+  it('describes broadcast_sent with a recipient count and a broadcast deep-link', () => {
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 5 }))).toEqual({
+      label: 'Broadcast to 5 tenants',
+      to: '/broadcasts/b1',
+    });
+  });
+
+  it('pluralizes the recipient count (1 → tenant) and omits the link when no broadcastId', () => {
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 1 }))).toEqual({
+      label: 'Broadcast to 1 tenant',
+    });
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'Broadcast to 0 tenants' });
+  });
+
+  it('describes tour lifecycle rows with tour deep-links', () => {
+    expect(describeUnitActivity(evt({ type: 'tour_scheduled', tourId: 't2' }))).toEqual({
+      label: 'Tour scheduled',
+      to: '/tours/t2',
+    });
+    expect(describeUnitActivity(evt({ type: 'tour_rescheduled', tourId: 't2' }))).toMatchObject({
+      label: 'Tour rescheduled',
+      to: '/tours/t2',
+    });
+    expect(describeUnitActivity(evt({ type: 'tour_took_place', tourId: 't2' }))).toMatchObject({ label: 'Tour took place' });
+    expect(describeUnitActivity(evt({ type: 'tour_no_show', tourId: 't2' }))).toMatchObject({ label: 'Tour no-show' });
+    expect(describeUnitActivity(evt({ type: 'tour_canceled', tourId: 't2' }))).toMatchObject({ label: 'Tour canceled' });
+    expect(describeUnitActivity(evt({ type: 'tour_outcome', tourId: 't2' }))).toMatchObject({ label: 'Tour outcome' });
+    // No tourId → no deep-link.
+    expect(describeUnitActivity(evt({ type: 'tour_canceled' }))).toEqual({ label: 'Tour canceled' });
+  });
+
   it('humanizes an unknown event type (open set — never a blank row)', () => {
     expect(describeUnitActivity(evt({ type: 'unit_frobnicated' }))).toEqual({ label: 'Unit frobnicated' });
   });

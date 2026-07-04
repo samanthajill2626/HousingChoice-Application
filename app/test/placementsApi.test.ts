@@ -1,8 +1,9 @@
 // Placements + boards API (M1.10b) — CRUD, the board list filters (by stage /
-// tenant / unit / tourDate / deadlineType), stage advance + tour clear via
-// PATCH, and the composite next-deadline endpoint. Runs on the shared in-memory
-// world (the harness placementsRepo fake), authed via the real sealed session cookie
-// next to the origin secret.
+// tenant / unit / tourDate), stage advance + tour clear via PATCH, the COMPUTED
+// next_deadline_* serialization, and the manual follow_up deadline endpoint
+// (placement-deadline-model). Runs on the shared in-memory world (the harness
+// placementsRepo + placementDeadlinesRepo fakes), authed via the real sealed
+// session cookie next to the origin secret.
 import { beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
 import request from 'supertest';
@@ -115,26 +116,53 @@ describe('placements API (M1.10b)', () => {
     expect((await authedGet('/api/placements?tourDate=2026-07-01')).body.placements).toHaveLength(1);
 
     expect((await authedGet('/api/placements?stage=bogus')).status).toBe(400);
-    expect((await authedGet('/api/placements?deadlineType=whenever')).status).toBe(400);
+    // The ?deadlineType= filter is RETIRED (placement-deadline-model): an unknown
+    // query param is simply ignored → the unfiltered list (200), never a 400.
+    expect((await authedGet('/api/placements?deadlineType=whenever')).status).toBe(200);
     expect((await authedGet('/api/placements?tourDate=2026-13-45')).status).toBe(400); // impossible date
     expect((await authedGet('/api/placements?limit=0')).status).toBe(400);
     expect((await authedGet('/api/placements?cursor=not-base64-json')).status).toBe(400);
   });
 
-  it('GET /api/placements?deadlineType=&before= bounds the due-by window (canonicalized) and 400s a bad before', async () => {
-    const due = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-due', stage: 'awaiting_authority_approval' });
-    await world.placementsRepo.setNextDeadline(due.placementId, { type: 'rta_window', at: '2026-06-16T08:00:00.000Z' });
-    const later = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-later', stage: 'awaiting_authority_approval' });
-    await world.placementsRepo.setNextDeadline(later.placementId, { type: 'rta_window', at: '2026-06-20T00:00:00.000Z' });
+  it('GET /api/placements serializes the COMPUTED soonest next_deadline_* (from placementDeadlines)', async () => {
+    const p = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-due', stage: 'awaiting_authority_approval' });
+    // Two independent deadline items — the serializer picks the soonest.
+    await world.placementDeadlinesRepo.arm(p.placementId, 'rta_window', '2026-06-16T08:00:00.000Z');
+    await world.placementDeadlinesRepo.arm(p.placementId, 'voucher_expiration', '2026-09-01T00:00:00.000Z');
+    // A second placement with no deadlines → null next_deadline.
+    const bare = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-bare', stage: 'send_application' });
 
-    // Cutoff between the two → only the earlier (due) placement is returned.
-    const res = await authedGet('/api/placements?deadlineType=rta_window&before=2026-06-17T00:00:00.000Z');
+    const res = await authedGet('/api/placements');
     expect(res.status).toBe(200);
-    expect(res.body.placements).toHaveLength(1);
-    expect(res.body.placements[0].placementId).toBe(due.placementId);
+    const rows = res.body.placements as Array<{ placementId: string; next_deadline_type?: string; next_deadline_at?: string }>;
+    const dueRow = rows.find((r) => r.placementId === p.placementId)!;
+    expect(dueRow.next_deadline_type).toBe('rta_window'); // soonest of the two
+    expect(dueRow.next_deadline_at).toBe('2026-06-16T08:00:00.000Z');
+    const bareRow = rows.find((r) => r.placementId === bare.placementId)!;
+    expect(bareRow.next_deadline_type ?? null).toBeNull();
+  });
 
-    // A bad before → 400 (never a silently-wrong window).
-    expect((await authedGet('/api/placements?deadlineType=rta_window&before=not-a-date')).status).toBe(400);
+  it('a TERMINAL placement with a straggler deadline serializes next_deadline_* as null (list + detail)', async () => {
+    // A closed deal that still has a lingering deadline row (reachable via a
+    // partial clearForPlacement failure or a voucher-sync↔terminal-transition
+    // race). The serializer must treat a terminal placement as having NO
+    // deadline — parity with today.ts's read-time TERMINAL_STAGES skip.
+    const terminal = await world.placementsRepo.create({ tenantId: 't', unitId: 'u-term', stage: 'moved_in' });
+    await world.placementDeadlinesRepo.arm(terminal.placementId, 'voucher_expiration', '2026-08-01T00:00:00.000Z');
+
+    // List path (listAllPending → map).
+    const list = await authedGet('/api/placements');
+    expect(list.status).toBe(200);
+    const listRow = (list.body.placements as Array<{ placementId: string; next_deadline_type?: string; next_deadline_at?: string }>)
+      .find((r) => r.placementId === terminal.placementId)!;
+    expect(listRow.next_deadline_type ?? null).toBeNull();
+    expect(listRow.next_deadline_at ?? null).toBeNull();
+
+    // Detail path (listByPlacement).
+    const detail = await authedGet(`/api/placements/${terminal.placementId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.placement.next_deadline_type ?? null).toBeNull();
+    expect(detail.body.placement.next_deadline_at ?? null).toBeNull();
   });
 
   it('PATCH /api/placements/:placementId clears tour_date with null and emits (stage is NOT writable here)', async () => {
@@ -204,29 +232,36 @@ describe('placements API (M1.10b)', () => {
     expect((evt!.payload as { attention: boolean }).attention).toBe(false);
   });
 
-  it('POST /api/placements/:placementId/deadline sets then clears the composite deadline, with validation + 404', async () => {
+  it('POST /api/placements/:placementId/deadline arms then clears a follow_up item, with validation + 404', async () => {
     const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'awaiting_authority_approval' });
 
     const set = await authedPost(`/api/placements/${c.placementId}/deadline`, {
-      type: 'rta_window',
+      type: 'follow_up',
       at: '2026-06-16T12:00:00.000Z',
     });
     expect(set.status).toBe(200);
-    expect(set.body.placement.next_deadline_type).toBe('rta_window');
+    expect(set.body.placement.next_deadline_type).toBe('follow_up');
     expect(set.body.placement.next_deadline_at).toBe('2026-06-16T12:00:00.000Z');
-    // Now queryable via the deadline board filter.
-    expect((await authedGet('/api/placements?deadlineType=rta_window')).body.placements).toHaveLength(1);
+    // The item is a real placementDeadlines row.
+    expect((await world.placementDeadlinesRepo.listByPlacement(c.placementId)).map((d) => d.type)).toEqual(['follow_up']);
 
     const clear = await authedPost(`/api/placements/${c.placementId}/deadline`, { clear: true });
     expect(clear.status).toBe(200);
-    expect(clear.body.placement.next_deadline_type).toBeUndefined();
-    expect(clear.body.placement.next_deadline_at).toBeUndefined();
+    expect(clear.body.placement.next_deadline_type ?? null).toBeNull();
+    expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
 
+    // Manual set is follow_up-ONLY: system-managed types are refused (400).
+    expect(
+      (await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'rta_window', at: '2026-06-16T12:00:00.000Z' })).status,
+    ).toBe(400);
+    expect(
+      (await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'voucher_expiration', at: '2026-06-16T12:00:00.000Z' })).status,
+    ).toBe(400);
     // Validation: bad type / bad timestamp.
     expect(
       (await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'whenever', at: '2026-06-16T12:00:00.000Z' })).status,
     ).toBe(400);
-    expect((await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'rta_window', at: 'not-a-date' })).status).toBe(400);
+    expect((await authedPost(`/api/placements/${c.placementId}/deadline`, { type: 'follow_up', at: 'not-a-date' })).status).toBe(400);
     // 404 unknown placement.
     expect((await authedPost('/api/placements/placement-ghost/deadline', { clear: true })).status).toBe(404);
   });
@@ -408,6 +443,7 @@ describe('placements API — derive-on-create (§7)', () => {
       '/api/placements',
       createPlacementsRouter({
         placementsRepo: isolated.placementsRepo,
+        placementDeadlinesRepo: isolated.placementDeadlinesRepo,
         unitsRepo: isolated.unitsRepo,
         contactsRepo: isolated.contactsRepo,
         auditRepo: isolated.auditRepo,

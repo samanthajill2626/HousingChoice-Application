@@ -471,14 +471,13 @@ export function formatLostReason(lr: LostReason | undefined): string {
   return cat || text;
 }
 
-/** The business-clock deadline types (doc §5): the single most-urgent pending
- *  clock a placement carries. */
-export type PlacementDeadlineType =
-  | 'tour_reminder'
-  | 'rta_window'
-  | 'voucher_expiration'
-  | 'stuck_placement'
-  | 'follow_up';
+/** The business-clock deadline types (doc §5). Each is a first-class deadline
+ *  ITEM the server materializes; `next_deadline_type`/`next_deadline_at` carry the
+ *  SOONEST of a placement's items (computed server-side). `tour_reminder` and
+ *  `stuck_placement` are retired — stuck is now DERIVED from time-in-stage
+ *  server-side, never a deadline value. MIRRORS app placementsRepo
+ *  PLACEMENT_DEADLINE_TYPES. */
+export type PlacementDeadlineType = 'rta_window' | 'voucher_expiration' | 'follow_up';
 
 // NOTE: PlacementTour is retired — placement.tours[] has no real data and is
 // being removed. Use the first-class Tour entity (Tour / getTours / getTour etc.)
@@ -878,6 +877,8 @@ export interface ContactCreate {
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */
   consent_note?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). Only meaningful on a tenant. */
+  voucher_expiration_date?: string;
 }
 
 // --- Contacts (legacy reuse — verbatim from the proven contract) -------------
@@ -922,6 +923,10 @@ export interface Contact {
   consent_note?: string;
   /** Actor userId when staff-entered; unset for automatic methods. */
   consent_captured_by?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). When set on a tenant, the
+   *  backend materializes a `voucher_expiration` placement-deadline on the
+   *  tenant's active placements. */
+  voucher_expiration_date?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
   /** Landlord/PM company name (editable). */
@@ -1007,6 +1012,9 @@ export interface ContactPatch {
   consent_at?: string;
   /** Optional free-text note ("said OK to texts at fair"). */
   consent_note?: string;
+  /** Staff-set voucher expiration DATE (ISO 8601). Sent as an ISO instant to set,
+   *  or `null` to clear. Only meaningful on a tenant contact. */
+  voucher_expiration_date?: string | null;
 }
 
 /** GET /api/contacts page (the records list — the Contacts list views read the
@@ -1159,7 +1167,12 @@ export type TimelineMilestoneType =
   | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
+  | 'tour_canceled'
+  | 'tour_no_show'
+  | 'tour_outcome'
   | 'stage_changed'
+  | 'contact_status_changed'
+  | 'opt_out_changed'
   | 'number_added'
   | 'added_to_group_text'
   | 'removed_from_group_text';
@@ -1332,7 +1345,9 @@ export interface SimilarUnit {
 
 /** One property Activity row. `type` is the audit event_type — an OPEN set;
  *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- *  listing_response_set, listing_status_changed, unit_deleted, unit_restored.
+ *  listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
+ *  tour_no_show, tour_canceled, tour_outcome.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */
@@ -1351,6 +1366,10 @@ export interface UnitActivityEvent {
   from?: string;
   to?: string;
   source?: string;
+  broadcastId?: string;
+  tenantCount?: number;
+  tourId?: string;
+  outcome?: string;
 }
 
 // --- Broadcasts (the "Share properties to tenants" surface) -----------------

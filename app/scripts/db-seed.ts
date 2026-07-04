@@ -3,9 +3,11 @@
 // Fixed IDs + plain PutItem = safe to re-run forever (same items overwrite
 // themselves; no duplicates). Data is realistic-but-fake (+1555 phones,
 // example.com emails) and deliberately exercises EVERY GSI in lib/tables.ts,
-// including the sparse placements indexes (tour_date / next_deadline_*) and the
-// matches TTL attribute. IDs cross-reference coherently: the placement joins the
-// seeded tenant + unit, the invoice bills the seeded landlord, etc.
+// including the sparse placements tour_date index, the first-class
+// placementDeadlines items (byPlacement / byDueAt), and the matches TTL
+// attribute. IDs cross-reference coherently: the placement joins the seeded
+// tenant + unit, its deadlines join the placement, the invoice bills the seeded
+// landlord, etc.
 // Targets DYNAMODB_ENDPOINT (default http://localhost:8000) — never AWS.
 //
 // The seed data and seedAll() function live in src/lib/seedData.ts so they

@@ -366,3 +366,52 @@ describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)',
     expect(res.status).toBe(400);
   });
 });
+
+// Local authed(app) helper — mirrors the raw header/cookie pattern used above
+// (there is no shared `authed`; toursApi.test.ts defines its own per-file).
+function authed(app: Parameters<typeof request>[0]) {
+  return {
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    patch: (path: string) =>
+      request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+  };
+}
+
+describe('opt_out_changed milestone on opt-out routes', () => {
+  it('records an opt_out_changed milestone on SMS opt-out toggle (both directions)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c1', type: 'tenant', phone: '+15550100001' } as ContactItem);
+    await authed(app).post('/api/contacts/c1/opt-out').send({ optOut: true }).expect(200);
+    await authed(app).post('/api/contacts/c1/opt-out').send({ optOut: false }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'opt_out_changed');
+    expect(ev.map((e) => e.label)).toEqual(['Marked Do Not Contact', 'Do Not Contact cleared']);
+  });
+
+  it('records an opt_out_changed milestone on voice opt-out toggle (both directions)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c2', type: 'tenant', phone: '+15550100002' } as ContactItem);
+    await authed(app).post('/api/contacts/c2/voice-opt-out').send({ optOut: true }).expect(200);
+    await authed(app).post('/api/contacts/c2/voice-opt-out').send({ optOut: false }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'opt_out_changed');
+    expect(ev.map((e) => e.label)).toEqual(['Marked Do Not Call', 'Do Not Call cleared']);
+  });
+});
+
+describe('contact_status_changed milestone on the edit-form status write', () => {
+  it('records a contact_status_changed milestone when the edit form changes a landlord status', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'll1', type: 'landlord', status: 'needs_review' } as ContactItem);
+    await authed(app).patch('/api/contacts/ll1').send({ status: 'active' }).expect(200);
+    const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0].label).toContain('Active');
+  });
+
+  it('records NO status milestone when the edit does not change status', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'll2', type: 'landlord', status: 'active', firstName: 'A' } as ContactItem);
+    await authed(app).patch('/api/contacts/ll2').send({ firstName: 'B' }).expect(200);
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
+  });
+});

@@ -184,4 +184,43 @@ test.describe('Contact detail — header actions + edit', () => {
     await page.getByRole('button', { name: 'More actions' }).click();
     await expect(page.getByRole('menuitem', { name: /Mark Do-Not-Contact/i })).toBeVisible();
   });
+
+  // Activity coverage: the opt-out routes emit `opt_out_changed` activity events
+  // (SMS Do-Not-Contact + voice Do-Not-Call are independent channels), which the
+  // server-assembled timeline renders as milestone pins. They carry no refType →
+  // plain pins (getByText, not a link). `.first()` tolerates re-run accumulation.
+  test('opt-out toggles (SMS + voice) surface as milestone pins on the timeline', async ({ page }) => {
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts/${TENANT}`);
+    await expect(page.getByRole('heading', { name: 'Details' })).toBeVisible();
+    const timeline = page.getByRole('region', { name: 'Communications and activity' });
+
+    // Mark Do-Not-Contact (SMS) …
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /Mark Do-Not-Contact/i }).click();
+    // … and Do-Not-Call (voice, independent of the SMS opt-out).
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /Mark Do-Not-Call/i }).click();
+
+    // Both land on the timeline after a refetch.
+    await page.reload();
+    await expect(timeline.getByText('Marked Do Not Contact').first()).toBeVisible({ timeout: 10_000 });
+    await expect(timeline.getByText('Marked Do Not Call').first()).toBeVisible();
+
+    // Cleanup — clear both so the seeded tenant stays messageable/callable for
+    // other specs; the clears ALSO pin ("… cleared", append-only history).
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /Allow SMS \(clear opt-out\)/i }).click();
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /Allow calls \(clear do-not-call\)/i }).click();
+
+    await page.reload();
+    await expect(timeline.getByText('Do Not Contact cleared').first()).toBeVisible({ timeout: 10_000 });
+    await expect(timeline.getByText('Do Not Call cleared').first()).toBeVisible();
+
+    // Back to messageable + callable (the menu offers to mark again).
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await expect(page.getByRole('menuitem', { name: /Mark Do-Not-Contact/i })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /Mark Do-Not-Call/i })).toBeVisible();
+  });
 });

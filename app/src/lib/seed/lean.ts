@@ -69,6 +69,13 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // 2026-06-19 product decision REMOVED the RTA-in-hand→searching gate, so
       // `porting` no longer blocks any transition (the admin advances tenants).
       porting: false,
+      // A2P/CTIA consent: her inbound reply (messages msg-0002 at T1, "Yes! Could we
+      // do Saturday morning?") confers inbound_text consent per the app's own
+      // auto-consent rule (services/contactCapture + webhooks/twilio) — so a proactive
+      // send to her is NOT hard-blocked by the JIT consent gate. consent_at = the
+      // instant of that first inbound message.
+      consent_method: 'inbound_text',
+      consent_at: T1,
       created_at: T0,
     },
     {
@@ -81,6 +88,14 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       lead_status: 'registered',
       contract_status: 'signed',
       authorities_served: ['atlanta_housing', 'ga_dca'],
+      // A2P/CTIA consent: a registered + contract-signed active landlord was
+      // onboarded through a human conversation (and, in the full profile, texts us
+      // inbound in the cast relay-group tours) — so he carries consent and proactive
+      // texts to him are not JIT-gated. verbal_phone reflects the human onboarding
+      // (his earliest consent basis, at contact creation). Renee (the HA staffer
+      // below) is left with NO consent: she has no message thread with us.
+      consent_method: 'verbal_phone',
+      consent_at: T0,
       created_at: T0,
     },
     {
@@ -210,12 +225,13 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       stage: 'awaiting_inspection', // byStage
       stage_entered_at: T2, // §8 time-in-stage basis
       stage_source: 'manual', // §8 provenance
-      // Deadline: `awaiting_inspection` is the Inspection phase — tours are a
-      // separate entity in the `searching` phase, so a placement here NEVER carries
-      // a `tour_reminder`. The time-in-stage "stuck" nudge is the correct clock
-      // (stage_entered_at T2 + the 10-day awaiting_inspection threshold).
-      next_deadline_type: 'stuck_placement', // byNextDeadline HASH (sparse)
-      next_deadline_at: '2026-06-11T14:05:45.000Z', // byNextDeadline RANGE (T2 + 10d)
+      // No placement deadline: `awaiting_inspection` is the Inspection phase — tours
+      // are a separate first-class entity in the `searching` phase, so a placement
+      // here NEVER carries a `tour_reminder` (nor a tour_date/tour_history). Real
+      // deadlines are now first-class placementDeadlines items, and the "stuck" clock
+      // is DERIVED from time-in-stage (stage_entered_at T2 + the awaiting_inspection
+      // threshold), not a stored deadline — so no raw next_deadline_* fields and no
+      // placementDeadlines item belong here.
       group_thread: IDS.conversation,
       created_at: T2,
     },

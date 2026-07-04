@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 
 // Property Activity card (:5174) against the real backend — proves the unit
 // audit trail round-trip: a real edit (PATCH /api/units/:id) writes a
@@ -28,6 +28,134 @@ async function editUtilities(page: Page, value: string): Promise<void> {
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
 }
+
+/** A run-unique consented tenant (voucherSize 2). Consent so a broadcast reaches
+ *  them (no JIT gate). Returns the id we send to. */
+async function createConsentedTenant(
+  request: APIRequestContext,
+  firstName: string,
+): Promise<{ contactId: string; phone: string }> {
+  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const res = await request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'tenant', firstName, lastName: 'Actcov', phone, voucherSize: 2 },
+  });
+  expect(res.ok()).toBeTruthy();
+  const contactId = (await res.json()).contact.contactId as string;
+  const consent = await request.patch(`${NEXT}/api/contacts/${contactId}`, {
+    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+  });
+  expect(consent.ok()).toBeTruthy();
+  return { contactId, phone };
+}
+
+/** A run-unique landlord contact. */
+async function createLandlord(request: APIRequestContext, firstName: string): Promise<string> {
+  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const res = await request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'landlord', firstName, lastName: 'Actcov', phone },
+  });
+  expect(res.ok()).toBeTruthy();
+  return (await res.json()).contact.contactId as string;
+}
+
+/** A run-unique available 2-BR property owned by `landlordId`. */
+async function createAvailableUnit(request: APIRequestContext, landlordId: string): Promise<string> {
+  const line1 = `${`${Date.now()}`.slice(-6)} Activity Ave NW`;
+  const res = await request.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId,
+      jurisdiction: 'atlanta_housing',
+      beds: 2,
+      rent_min: 1500,
+      rent_max: 1600,
+      address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
+    },
+  });
+  expect(res.ok()).toBeTruthy();
+  const unitId = (await res.json()).unit.unitId as string;
+  const pub = await request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+    data: { toStatus: 'available', source: 'manual' },
+  });
+  expect(pub.ok()).toBeTruthy();
+  return unitId;
+}
+
+test.describe('Property detail — broadcast + tour Activity rows (activity coverage)', () => {
+  test('a broadcast and a scheduled+canceled tour surface as deep-linked Activity rows', async ({
+    page,
+  }) => {
+    // dev-login FIRST so page.request carries the session cookie for the /api setup.
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+
+    // Own infra: a landlord, an available 2-BR property, two consented tenants.
+    const landlordId = await createLandlord(req, `Owner${stamp}`);
+    const unitId = await createAvailableUnit(req, landlordId);
+    const t1 = await createConsentedTenant(req, `Actone${stamp}`);
+    const t2 = await createConsentedTenant(req, `Acttwo${stamp}`);
+
+    // Broadcast to the property (explicit recipients) → on fan-out completion the
+    // worker writes a units# `broadcast_sent` audit row (SQS-driven, no dev tick).
+    const draft = await req.post(`${NEXT}/api/broadcasts`, {
+      data: {
+        unitId,
+        body_template: `Open house ${stamp} at [Address]`,
+        audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
+      },
+    });
+    expect(draft.ok()).toBeTruthy();
+    const broadcastId = (await draft.json()).broadcastId as string;
+    const send = await req.post(`${NEXT}/api/broadcasts/${broadcastId}/send`, {
+      data: { recipientContactIds: [t1.contactId, t2.contactId] },
+    });
+    expect(send.ok()).toBeTruthy();
+
+    // A scheduled tour on the same property, then canceled → two units# audit rows
+    // (written synchronously by the tour create + PATCH handlers).
+    const tourRes = await req.post(`${NEXT}/api/tours`, {
+      data: { tenantId: t1.contactId, unitId, scheduledAt: '2026-09-15T15:00:00.000Z', tourType: 'self_guided' },
+    });
+    expect(tourRes.ok()).toBeTruthy();
+    const tourId = (await tourRes.json()).tour.tourId as string;
+    const cancel = await req.patch(`${NEXT}/api/tours/${tourId}`, { data: { status: 'canceled' } });
+    expect(cancel.ok()).toBeTruthy();
+
+    // The fan-out is async — poll the activity API for the broadcast row's arrival.
+    await expect
+      .poll(
+        async () => {
+          const res = await req.get(`${NEXT}/api/units/${unitId}/activity`);
+          if (!res.ok()) return false;
+          const events = (await res.json()).events as Array<{ type: string }>;
+          return events.some((e) => e.type === 'broadcast_sent');
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    // The UI Activity card now shows all three rows, deep-linked.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const activity = page.locator('section', { has: page.getByRole('heading', { name: 'Activity' }) });
+    await expect(activity).toBeVisible();
+
+    const bcast = activity.getByRole('link', { name: /Broadcast to 2 tenants/ });
+    await expect(bcast).toBeVisible();
+    await expect(bcast).toHaveAttribute('href', `/broadcasts/${broadcastId}`);
+
+    const scheduled = activity.getByRole('link', { name: /Tour scheduled/ }).first();
+    await expect(scheduled).toBeVisible();
+    await expect(scheduled).toHaveAttribute('href', `/tours/${tourId}`);
+
+    const canceled = activity.getByRole('link', { name: /Tour canceled/ }).first();
+    await expect(canceled).toBeVisible();
+    await expect(canceled).toHaveAttribute('href', `/tours/${tourId}`);
+
+    // Clicking the broadcast row navigates to that broadcast.
+    await bcast.click();
+    await expect(page).toHaveURL(new RegExp(`/broadcasts/${broadcastId}$`));
+  });
+});
 
 test.describe('Property detail — Activity card (unit audit trail)', () => {
   test('a real edit surfaces as a "Property updated" Activity row after reload', async ({ page }) => {

@@ -93,6 +93,23 @@ label for every audience** ("placement") — there is no audience-specific synon
 > case", "test case") and the unrelated tenant field `caseworker` are **not** this
 > entity and are left as-is.
 
+### Placement signals: deadline, flag, nudge (do not conflate)
+
+Three distinct "this placement needs attention" signals. They were once tangled
+(a stuck placement rode the single deadline slot and mis-used the word "nudge");
+the placement-deadline-model refactor separated them
+([spec](../docs/superpowers/specs/2026-07-03-placement-deadline-model-design.md)):
+
+| Term | Audience | Means | Mechanism |
+|---|---|---|---|
+| **Deadline** | — | A real due-date: something must be done by an instant. | First-class `placementDeadlines` items (one per `(placement, type)`: `rta_window`, `voucher_expiration`, `follow_up`); the soonest is surfaced. Due deadlines land in Today's `needs_you_now` (hard clocks) or `follow_ups` (`follow_up`). |
+| **Flag** | **Staff (internal)** | "This placement has gone quiet — *we* should check on it." | **DERIVED** from time-in-stage (`stage_entered_at` vs `STAGE_STUCK_THRESHOLDS`); no stored artifact. Folds a "Stuck — needs a check" row into Today's `follow_ups`. Fires **independently** of any deadline (a placement can be flagged AND on a hard clock at once). |
+| **Nudge** | **External (tenant/landlord)** | An outbound SMS to get *them* to act (submit the RTA, complete the application). | The `placementNudges` ladder (`armStageNudge` / `NUDGE_RUNGS` / `jobs/placementNudges.ts`) — a wholly separate system, **correctly** keeps the word "nudge". |
+
+**Naming rule:** the internal "we should look at this" signal is a **flag**, never a
+"nudge". "Nudge" is reserved for the *external* SMS ladder. (Historically the internal
+path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
+
 ---
 
 ## Feature & label notes

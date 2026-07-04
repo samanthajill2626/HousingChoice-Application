@@ -55,7 +55,12 @@ import {
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
-import { type PlacementDeadline, type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
+import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
+import {
+  deadlineIdFor,
+  type PlacementDeadlineItem,
+  type PlacementDeadlinesRepo,
+} from '../../src/repos/placementDeadlinesRepo.js';
 import {
   buildTsEventId,
   type ActivityEventItem,
@@ -170,6 +175,9 @@ export interface FakeWorld {
   /** In-memory placements (M1.10), keyed by placementId. */
   placements: Map<string, PlacementItem>;
   placementsRepo: PlacementsRepo;
+  /** In-memory placement deadlines (placement-deadline-model), keyed by deadlineId. */
+  placementDeadlines: Map<string, PlacementDeadlineItem>;
+  placementDeadlinesRepo: PlacementDeadlinesRepo;
   /** In-memory activity events (BE2/C2), in insert order. */
   activityEvents: ActivityEventItem[];
   activityEventsRepo: ActivityEventsRepo;
@@ -1102,10 +1110,11 @@ export function createFakeWorld(): FakeWorld {
   };
 
   // In-memory placements (M1.10): mirror the repo's contractual semantics —
-  // generate-id create, SET-merge update with null→REMOVE + the next_deadline
-  // composite-key REFUSAL, both-or-neither setNextDeadline, conditional 404, and
+  // generate-id create, SET-merge update with null→REMOVE, conditional 404, and
   // the GSI-shaped list queries. (Cursor pagination is integration-tested in
   // placementsRepo.integration.test.ts; this fake slices by limit only.)
+  // Deadlines are first-class placementDeadlines items now (see the fake repo
+  // below) — the old next_deadline slot + setNextDeadline are gone.
   const placements = new Map<string, PlacementItem>();
   let placementCounter = 0;
   // Mirror the byTenant/byUnit GSI's keyset pagination (parity with the real
@@ -1157,24 +1166,8 @@ export function createFakeWorld(): FakeWorld {
       if (!c) throw conditionalCheckFailed(`update: no placement ${placementId}`);
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
-        if (key === 'next_deadline_type' || key === 'next_deadline_at') {
-          throw new Error('placementsRepo.update: set next_deadline via setNextDeadline');
-        }
         if (value === null) delete c[key];
         else c[key] = value;
-      }
-      c.updated_at = new Date().toISOString();
-      return { ...c };
-    },
-    async setNextDeadline(placementId, deadline: PlacementDeadline | null) {
-      const c = placements.get(placementId);
-      if (!c) throw conditionalCheckFailed(`setNextDeadline: no placement ${placementId}`);
-      if (deadline === null) {
-        delete c.next_deadline_type;
-        delete c.next_deadline_at;
-      } else {
-        c.next_deadline_type = deadline.type;
-        c.next_deadline_at = deadline.at;
       }
       c.updated_at = new Date().toISOString();
       return { ...c };
@@ -1195,25 +1188,62 @@ export function createFakeWorld(): FakeWorld {
       const items = [...placements.values()].filter((c) => c.tour_date === tourDate).slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
     },
-    async listByNextDeadline(type, opts = {}) {
-      const items = [...placements.values()]
-        // Composite SPARSE key: a row exists in byNextDeadline only when BOTH
-        // attrs are present — mirror the real GSI (never a half-set), so the fake
-        // can't admit a state production can't represent.
-        .filter((c) => c.next_deadline_type === type && typeof c.next_deadline_at === 'string')
-        .filter((c) =>
-          opts.beforeAt === undefined ? true : (c.next_deadline_at as string) <= opts.beforeAt,
-        )
-        .sort((a, b) => {
-          const cmp = (a.next_deadline_at as string) < (b.next_deadline_at as string) ? -1 : 1;
-          return (opts.scanIndexForward ?? true) ? cmp : -cmp;
-        })
-        .slice(0, opts.limit ?? 50);
-      return { items: items.map((c) => ({ ...c })) };
-    },
     async list(opts = {}) {
       const items = [...placements.values()].slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
+    },
+  };
+
+  // In-memory placement deadlines (placement-deadline-model): mirror the repo's
+  // contract — DETERMINISTIC-id upsert (arm overwrites the single (placement,
+  // type) row), delete-by-key retire, byPlacement enumeration, byDueAt due-now
+  // query (soonest-first), and clearForPlacement (terminal). Keyed by deadlineId.
+  const placementDeadlinesMap = new Map<string, PlacementDeadlineItem>();
+  const placementDeadlinesRepo: PlacementDeadlinesRepo = {
+    async arm(placementId, type, at) {
+      const now = new Date().toISOString();
+      const id = deadlineIdFor(placementId, type);
+      const existing = placementDeadlinesMap.get(id);
+      const item: PlacementDeadlineItem = {
+        deadlineId: id,
+        placementId,
+        type,
+        at,
+        _deadlinePartition: 'deadlines',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      placementDeadlinesMap.set(id, item);
+      return { ...item };
+    },
+    async retire(placementId, type) {
+      placementDeadlinesMap.delete(deadlineIdFor(placementId, type));
+    },
+    async listByPlacement(placementId) {
+      return [...placementDeadlinesMap.values()]
+        .filter((d) => d.placementId === placementId)
+        .map((d) => ({ ...d }));
+    },
+    async clearForPlacement(placementId) {
+      for (const d of [...placementDeadlinesMap.values()]) {
+        if (d.placementId === placementId) placementDeadlinesMap.delete(d.deadlineId);
+      }
+    },
+    async listDue(nowIso, opts = {}) {
+      const items = [...placementDeadlinesMap.values()]
+        .filter((d) => d.at <= nowIso)
+        .sort((a, b) => {
+          const cmp = a.at < b.at ? -1 : a.at > b.at ? 1 : 0;
+          return (opts.scanIndexForward ?? true) ? cmp : -cmp;
+        });
+      return (opts.limit === undefined ? items : items.slice(0, opts.limit)).map((d) => ({ ...d }));
+    },
+    async listAllPending(opts = {}) {
+      const items = [...placementDeadlinesMap.values()].sort((a, b) => {
+        const cmp = a.at < b.at ? -1 : a.at > b.at ? 1 : 0;
+        return (opts.scanIndexForward ?? true) ? cmp : -cmp;
+      });
+      return (opts.limit === undefined ? items : items.slice(0, opts.limit)).map((d) => ({ ...d }));
     },
   };
 
@@ -1771,6 +1801,8 @@ export function createFakeWorld(): FakeWorld {
     unitsRepo,
     placements,
     placementsRepo,
+    placementDeadlines: placementDeadlinesMap,
+    placementDeadlinesRepo,
     activityEvents,
     activityEventsRepo,
     listingSends,
@@ -1900,6 +1932,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactVocabularyRepo: world.vocabularyRepo,
       unitsRepo: world.unitsRepo,
       placementsRepo: world.placementsRepo,
+      placementDeadlinesRepo: world.placementDeadlinesRepo,
       activityEventsRepo: world.activityEventsRepo,
       listingSendsRepo: world.listingSendsRepo,
       broadcastsRepo: world.broadcastsRepo,
@@ -1964,6 +1997,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       auditRepo: world.auditRepo,
       placementsRepo: world.placementsRepo,
+      // placement-deadline-model: the escalation emit recomputes the soonest
+      // deadline so the pending chip is PRESERVED (not nulled) on attention raise.
+      placementDeadlinesRepo: world.placementDeadlinesRepo,
       // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
       unitsRepo: world.unitsRepo,
       broadcastsRepo: world.broadcastsRepo,

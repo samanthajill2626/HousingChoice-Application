@@ -37,6 +37,8 @@ import {
   type ActivityEventsRepo,
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
+import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   contactPhones,
   createContactsRepo,
@@ -61,6 +63,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import type { PlacementStage } from '../lib/statusModel.js';
+import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
   REMINDER_BODIES,
   resolveUsableGroup,
@@ -75,7 +78,6 @@ import {
 import { type NudgeKind, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
-import { type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   evaluateScheduledSendSuppression,
   type ScheduledSuppression,
@@ -88,16 +90,22 @@ export interface ContactTimelineRouterDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   activityEventsRepo?: ActivityEventsRepo;
+  /** A landlord contact's owned units (byLandlord GSI) — shared by the
+   *  property-activity interleave AND the scheduled-send landlord nudge walk. */
+  unitsRepo?: UnitsRepo;
+  /** Per-unit audit trail read (bounded Query per owned unit) — the landlord
+   *  property-activity lifecycle source. */
+  auditRepo?: AuditRepo;
   // Scheduled-send gather (Part B) — the not-yet-sent tour reminders + placement
   // nudges surfaced in the first-page `upcoming[]` bucket. All five must be
   // present for the gather to run; when any is absent the bucket is `[]` (the
   // gather never default-constructs a DynamoDB repo, so injecting-less callers —
-  // e.g. the in-memory unit-test app — simply skip it).
+  // e.g. the in-memory unit-test app — simply skip it). `unitsRepo` above is the
+  // fifth (shared with the property-activity interleave).
   toursRepo?: ToursRepo;
   tourRemindersRepo?: TourRemindersRepo;
   placementNudgesRepo?: PlacementNudgesRepo;
   placementsRepo?: PlacementsRepo;
-  unitsRepo?: UnitsRepo;
 }
 
 // --- C2 wire shapes (VERBATIM — the frontend imports identical field names) --
@@ -178,6 +186,29 @@ interface Candidate {
 
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
+
+/** Bound the landlord property-activity fan-out (byLandlord Query limit + N cap). */
+const MAX_LANDLORD_UNITS = 25;
+
+/**
+ * The property-audit event_types a LANDLORD's timeline surfaces (human decision,
+ * 2026-07-03): lifecycle only. Routine field-edit churn
+ * (`unit_created`/`unit_updated`/`unit_deleted`/`unit_restored`) stays in the
+ * audit trail as provenance but is NEVER interleaved.
+ */
+const LANDLORD_FEED_TYPES: ReadonlySet<string> = new Set([
+  'broadcast_sent',
+  'tour_scheduled',
+  'tour_rescheduled',
+  'tour_took_place',
+  'tour_no_show',
+  'tour_canceled',
+  'tour_outcome',
+  'listing_status_changed',
+  'unit_contact_added',
+  'unit_contact_removed',
+  'listing_response_set',
+]);
 
 const ALL_KINDS = ['message', 'call', 'milestone', 'scheduled'] as const;
 type TimelineKind = (typeof ALL_KINDS)[number];
@@ -350,6 +381,120 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
     ...(e.refType !== undefined && { refType: e.refType }),
     ...(e.refId !== undefined && { refId: e.refId }),
   };
+}
+
+/**
+ * Map a tour AUDIT `event_type` → the closest existing milestone
+ * `ActivityEventType`. The frontend renders a milestone by its `type` (colour +
+ * deep-link kind), so a milestone `type` MUST be an existing member — never a
+ * raw audit string. `tour_rescheduled` has no dedicated member → reuse
+ * `tour_scheduled`; the rest map 1:1 to the same-named member. The human wording
+ * lives in the `label` (see `tourAuditLabel`).
+ */
+function mapTourAuditToMilestoneType(auditType: string): ActivityEventType {
+  switch (auditType) {
+    case 'tour_took_place':
+      return 'tour_took_place';
+    case 'tour_no_show':
+      return 'tour_no_show';
+    case 'tour_canceled':
+      return 'tour_canceled';
+    case 'tour_outcome':
+      return 'tour_outcome';
+    case 'tour_scheduled':
+    case 'tour_rescheduled':
+    default:
+      return 'tour_scheduled';
+  }
+}
+
+/** Human label for a tour AUDIT `event_type` (carries the wording; type drives colour). */
+function tourAuditLabel(auditType: string): string {
+  switch (auditType) {
+    case 'tour_rescheduled':
+      return 'Tour rescheduled';
+    case 'tour_took_place':
+      return 'Tour took place';
+    case 'tour_no_show':
+      return 'Tour no-show';
+    case 'tour_canceled':
+      return 'Tour canceled';
+    case 'tour_outcome':
+      return 'Tour outcome';
+    case 'tour_scheduled':
+    default:
+      return 'Tour scheduled';
+  }
+}
+
+/**
+ * Map ONE owned-unit audit row → a `TimelineMilestone` for the landlord's
+ * timeline, or `null` when the row is not a surfaced lifecycle type. The milestone
+ * `type` REUSES an existing `ActivityEventType` (colour/link only); the `label`
+ * carries the human wording; `refType`/`refId` deep-link out (broadcast → the
+ * broadcast, tour → the tour, else the property/unit). PII-safe: labels/ids only,
+ * never a phone/body. `id` = the raw audit SK (`<ISO>#<rand>`) so the merged
+ * cursor lives in the SAME lexical space as the audit `before` bound (page-safe).
+ */
+function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone | null {
+  const p = (e.payload ?? {}) as Record<string, unknown>;
+  const at = typeof e.ts === 'string' ? atOf(e.ts) : '';
+  const id = typeof e.ts === 'string' ? e.ts : `${unitId}-${e.event_type}`;
+  const base = { kind: 'milestone' as const, id, at };
+  switch (e.event_type) {
+    case 'broadcast_sent': {
+      const n = typeof p['tenantCount'] === 'number' ? p['tenantCount'] : 0;
+      return {
+        ...base,
+        type: 'listing_sent',
+        label: `Broadcast to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+        refType: 'broadcast',
+        ...(typeof p['broadcastId'] === 'string' && { refId: p['broadcastId'] }),
+      };
+    }
+    case 'tour_scheduled':
+    case 'tour_rescheduled':
+    case 'tour_took_place':
+    case 'tour_no_show':
+    case 'tour_canceled':
+    case 'tour_outcome':
+      return {
+        ...base,
+        type: mapTourAuditToMilestoneType(e.event_type),
+        label: tourAuditLabel(e.event_type),
+        refType: 'tour',
+        ...(typeof p['tourId'] === 'string' && { refId: p['tourId'] }),
+      };
+    case 'listing_status_changed': {
+      const to = typeof p['to'] === 'string' ? p['to'] : '';
+      return {
+        ...base,
+        type: 'stage_changed',
+        label: `Property status → ${(LISTING_STATUS_LABELS as Record<string, string>)[to] ?? to}`,
+        refType: 'unit',
+        refId: unitId,
+      };
+    }
+    case 'unit_contact_added':
+    case 'unit_contact_removed':
+      return {
+        ...base,
+        type: e.event_type === 'unit_contact_added' ? 'added_to_group_text' : 'removed_from_group_text',
+        label: e.event_type === 'unit_contact_added' ? 'Property contact added' : 'Property contact removed',
+        refType: 'unit',
+        refId: unitId,
+      };
+    case 'listing_response_set':
+      return {
+        ...base,
+        type: 'listing_reviewed',
+        label: `Tenant response · ${typeof p['response'] === 'string' ? p['response'] : ''}`,
+        refType: 'unit',
+        refId: unitId,
+      };
+    default:
+      return null;
+  }
 }
 
 /** The five repos the scheduled-send gather walks. */
@@ -530,6 +675,8 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
 
   // Scheduled-send gather repos (Part B): used ONLY when ALL are injected — we
   // deliberately do NOT default-construct them (a default would open a live
@@ -635,6 +782,47 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       });
       for (const e of items) {
         candidates.push({ globalKey: e.tsEventId, item: toTimelineMilestone(e) });
+      }
+
+      // Landlord-only: interleave each OWNED property's LIFECYCLE audit as
+      // milestone pins so staff see property events chronologically beside the
+      // texts. Bounded N+1 fan-out (no scan): 1 byLandlord Query + 1 bounded
+      // audit Query per unit, capped at MAX_LANDLORD_UNITS. Best-effort — a
+      // failed per-unit read degrades that unit, never the whole timeline. Each
+      // property candidate keys on the RAW audit SK (`r.ts`, `<ISO>#<rand>`) so
+      // its merged cursor lives in the SAME lexical space as the audit `before`
+      // bound below — a double-nested `${at}#${id}` would break page-2 paging.
+      if (contact.type === 'landlord') {
+        // Best-effort: a `listByLandlord` GSI failure (throttle/unavailable) must
+        // degrade the property interleave to nothing, NEVER fail the whole timeline
+        // — mirrors the scheduled-gather fallback below. PII-safe log (ids only).
+        try {
+          const owned = await units.listByLandlord(contactId, { limit: MAX_LANDLORD_UNITS });
+          if (owned.items.length >= MAX_LANDLORD_UNITS) {
+            log.warn({ contactId, count: owned.items.length }, 'landlord property fan-out capped');
+          }
+          for (const u of owned.items) {
+            let rows: AuditEvent[];
+            try {
+              rows = await audit.listByEntity(`units#${u.unitId}`, {
+                limit: limit + 1,
+                ...(boundaryKey !== undefined && { before: boundaryKey }),
+              });
+            } catch (err) {
+              log.error({ err, contactId, unitId: u.unitId }, 'landlord property audit read failed (best-effort)');
+              continue;
+            }
+            for (const r of rows) {
+              if (!LANDLORD_FEED_TYPES.has(r.event_type)) continue;
+              const ms = unitAuditToMilestone(u.unitId, r);
+              if (ms !== null && typeof r.ts === 'string') {
+                candidates.push({ globalKey: r.ts, item: ms });
+              }
+            }
+          }
+        } catch (err) {
+          log.error({ err, contactId }, 'landlord property interleave failed (best-effort) — timeline continues without property pins');
+        }
       }
     }
 

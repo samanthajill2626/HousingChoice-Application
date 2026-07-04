@@ -64,6 +64,15 @@ the new tables started empty. BE1/BE5/BE6 added NO schema — multi-phone is an 
 `contacts` (phone-pointer items live in the existing table), and media/similar/today are read-only
 aggregations over existing tables.
 
+**Placement deadline-model schema — NOT YET APPLIED (as of 2026-07-03; feature branch `feat/placement-deadline-model` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| First-class deadlines | `placementDeadlines` | **new table** — PK `deadlineId` (`${placementId}#${type}`), GSI `byPlacement` (hash `placementId`), GSI `byDueAt` (fixed hash `_deadlinePartition` + range `at`) | one-query Today `needs_you_now`/`follow_ups`; computed `next_deadline` chip; `voucher_expiration` clock |
+| Single-slot retirement | `placements` (existing) | **GSI drop** — `byNextDeadline` | the overloaded single `next_deadline` slot is retired (superseded by `placementDeadlines`) |
+
+Both are in the regenerated `tables.auto.tfvars.json` files. **Online** operations — no recreate, **no data migration**: the new table starts empty, and any old `next_deadline_type`/`next_deadline_at` attributes left on existing placement rows simply go unread (flexible-doc). Post-merge on **dev**: `npm run plan -- dev` (review the `placementDeadlines` add + `byNextDeadline` drop) → `npm run apply -- dev`. **No reseed/backfill** — deployed envs hold no demo fixtures (`db:seed` targets DynamoDB Local only, never AWS), so the new table starts empty and dev placement deadlines simply **accrue naturally** as placements enter `awaiting_landlord_submission` (rta_window) and as tenant voucher dates are set. (To exercise the feature with seed data, reseed a **local** stack — `npm run dev -- --local --seeded`, or a running `e2e:session` + `npm run e2e:reseed` — both target DynamoDB Local.) **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

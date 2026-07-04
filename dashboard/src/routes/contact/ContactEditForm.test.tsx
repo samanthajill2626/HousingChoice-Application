@@ -131,6 +131,41 @@ describe('ContactEditForm', () => {
     expect(updateContact).toHaveBeenCalledWith('k1', { voucherSize: 3 });
   });
 
+  it('shows a voucher expiration date input for a tenant only', () => {
+    const { unmount } = render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText(/Voucher expiration date/i)).toBeInTheDocument();
+    unmount();
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByLabelText(/Voucher expiration date/i)).toBeNull();
+  });
+
+  it('PATCHes a set voucher expiration date as an ISO instant', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/Voucher expiration date/i), {
+      target: { value: '2026-08-15' },
+    });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', {
+        voucher_expiration_date: '2026-08-15T00:00:00.000Z',
+      }),
+    );
+  });
+
+  it('PATCHes null to CLEAR a previously-set voucher expiration date', async () => {
+    const user = userEvent.setup();
+    const withExp: Contact = { ...TENANT, voucher_expiration_date: '2026-08-15T00:00:00.000Z' };
+    updateContact.mockResolvedValue({ ...withExp });
+    render(<ContactEditForm contact={withExp} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/Voucher expiration date/i), { target: { value: '' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', { voucher_expiration_date: null }),
+    );
+  });
+
   it('surfaces a save failure and stays open', async () => {
     const user = userEvent.setup();
     updateContact.mockRejectedValue(new Error('boom'));

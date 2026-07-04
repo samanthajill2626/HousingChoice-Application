@@ -14,17 +14,31 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { parseContactName } from '../lib/contactName.js';
-import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
+import {
+  appEvents,
+  toConversationUpdatedEvent,
+  toPlacementUpdatedEvent,
+  type EventBus,
+} from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
+  LANDLORD_STATUS_LABELS,
   LANDLORD_STATUSES,
   NON_TENANT_STATUSES,
   statusAllowlistFor,
+  TENANT_STATUS_LABELS,
   TENANT_STATUSES,
+  TERMINAL_STAGES,
 } from '../lib/statusModel.js';
+import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  soonestDeadline,
+  type PlacementDeadlinesRepo,
+} from '../repos/placementDeadlinesRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
@@ -77,6 +91,13 @@ export interface ContactsRouterDeps {
   listingSendsRepo?: ListingSendsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   vocabularyRepo?: ContactVocabularyRepo;
+  /**
+   * Voucher sync (placement-deadline-model §6): a voucher_expiration_date edit
+   * upserts/retires the `voucher_expiration` deadline on the tenant's ACTIVE
+   * placements. Default to the real repos.
+   */
+  placementsRepo?: PlacementsRepo;
+  placementDeadlinesRepo?: PlacementDeadlinesRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -185,6 +206,27 @@ function applyConsentFields(
     return { error: 'consent_captured_by is set by the server, not the client' };
   }
   return { hasConsent };
+}
+
+/**
+ * Validate + canonicalize the optional `voucher_expiration_date`
+ * (placement-deadline-model §6) with the placements idiom: an empty string or
+ * null CLEARS it (→ null, a REMOVE), any other value must parse as a date and is
+ * canonicalized to ISO 8601; anything else is a 400. Returns `{ value }` (string
+ * or null) when the field was present, `undefined` when absent (untouched), or
+ * `{ error }` on a bad value. Not type-gated (mirrors voucherSize/consent_at;
+ * tenant-only stays a UI guarantee).
+ */
+function parseVoucherExpirationDate(
+  b: Record<string, unknown>,
+): { value: string | null } | { error: string } | undefined {
+  if (!('voucher_expiration_date' in b)) return undefined;
+  const v = b['voucher_expiration_date'];
+  if (v === null || v === '') return { value: null }; // clear
+  if (typeof v !== 'string' || Number.isNaN(Date.parse(v))) {
+    return { error: 'voucher_expiration_date must be an ISO 8601 date string (or empty to clear)' };
+  }
+  return { value: new Date(v).toISOString() };
 }
 
 /**
@@ -525,6 +567,15 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
   if ('consent_at' in patch) changedFields.push('consent_at');
   if ('consent_note' in patch) changedFields.push('consent_note');
 
+  // Voucher expiration date (placement-deadline-model §6) — the SOURCE of the
+  // voucher_expiration placement deadline; the PATCH handler syncs it after the write.
+  const voucher = parseVoucherExpirationDate(b);
+  if (voucher !== undefined) {
+    if ('error' in voucher) return { error: voucher.error };
+    patch['voucher_expiration_date'] = voucher.value; // string | null (null → REMOVE)
+    changedFields.push('voucher_expiration_date');
+  }
+
   if (changedFields.length === 0) {
     return { error: 'no updatable fields supplied' };
   }
@@ -712,6 +763,16 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   if ('error' in consent) return { error: consent.error };
   Object.assign(item, consentOut);
 
+  // Voucher expiration date (placement-deadline-model §6). On create there is no
+  // placement yet to arm — the placement create-path reads this field when a
+  // placement is later opened. Only STORE a real date; an empty/null clear is a
+  // no-op on create (nothing to remove).
+  const voucher = parseVoucherExpirationDate(b);
+  if (voucher !== undefined) {
+    if ('error' in voucher) return { error: voucher.error };
+    if (voucher.value !== null) item.voucher_expiration_date = voucher.value;
+  }
+
   return {
     item,
     ...(phone !== undefined && { phone }),
@@ -729,6 +790,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const vocabulary = deps.vocabularyRepo ?? createContactVocabularyRepo({ logger: deps.logger });
+  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const placementDeadlines =
+    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -1068,6 +1132,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
+    // Read the pre-update contact ONCE, up front: it backs the type-scoped status
+    // re-validation and the 404 checks below, and lets the post-update milestone
+    // emit diff `status` against its prior value without a second fetch. Snapshot
+    // the prior status as a primitive NOW — `contacts.update` may return/mutate the
+    // same object graph, so reading `stored.status` after the write is unreliable.
+    const stored = await contacts.getById(contactId);
+    const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
+
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
     const newType = parsed.patch['type'];
     const convType = isContactType(newType) ? conversationTypeFor(newType) : undefined;
@@ -1078,7 +1150,6 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact's effective type so a tenant lifecycle value can't be written onto
     // a non-tenant (and vice-versa). 404 unknown contacts as the update would.
     if ('status' in parsed.patch && !('type' in parsed.patch)) {
-      const stored = await contacts.getById(contactId);
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
         return;
@@ -1113,7 +1184,6 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // an invalid (type, status) pair. tenant/landlord are handled by the
     // auto-advance above; unknown returns to the 'needs_review' front door.
     if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
-      const stored = await contacts.getById(contactId);
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
         return;
@@ -1132,6 +1202,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       parsed.changedFields.push('consent_captured_by');
     }
 
+    // Capture the PRIOR stored voucher date BEFORE the write so the voucher
+    // sync below can fire only on a REAL change (see the sync block). Read once,
+    // and only when the PATCH actually touches voucher_expiration_date.
+    const priorVoucherDate =
+      'voucher_expiration_date' in parsed.patch
+        ? (await contacts.getById(contactId))?.voucher_expiration_date
+        : undefined;
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -1141,6 +1219,50 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         return;
       }
       throw err;
+    }
+
+    // VOUCHER SYNC (placement-deadline-model §6): when this PATCH changed
+    // voucher_expiration_date, upsert/retire the `voucher_expiration` deadline on
+    // the tenant's ACTIVE (non-terminal) placements and emit a placement.updated
+    // (recomputed soonest) for each. BEST-EFFORT after the contact write — a
+    // placement hiccup NEVER fails the PATCH (log.warn on failure). A `null`
+    // patch value (cleared) retires; a string value (re)arms.
+    if ('voucher_expiration_date' in parsed.patch) {
+      const raw = parsed.patch['voucher_expiration_date'];
+      const date = typeof raw === 'string' ? raw : undefined; // null → clear
+      // Only sync on a REAL change: canonicalize the NEW value and the PRIOR
+      // stored one identically (a valid date → its ISO instant; absent/'' → the
+      // cleared sentinel) and compare. A raw-API caller that merely echoes the
+      // same voucher_expiration_date must NOT trigger redundant arm/retire writes
+      // + placement.updated SSE fan-out on every active placement.
+      const canonicalVoucher = (v: unknown): string | undefined =>
+        typeof v === 'string' && v.length > 0 && !Number.isNaN(Date.parse(v))
+          ? new Date(v).toISOString()
+          : undefined;
+      const voucherChanged = canonicalVoucher(raw) !== canonicalVoucher(priorVoucherDate);
+      if (voucherChanged) {
+        try {
+          let exclusiveStartKey: Record<string, unknown> | undefined;
+          do {
+            const page = await placements.listByTenant(contactId, {
+              ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+            });
+            for (const p of page.items) {
+              if (TERMINAL_STAGES.has(p.stage)) continue; // terminal untouched
+              if (date !== undefined) {
+                await placementDeadlines.arm(p.placementId, 'voucher_expiration', date);
+              } else {
+                await placementDeadlines.retire(p.placementId, 'voucher_expiration');
+              }
+              const ds = await placementDeadlines.listByPlacement(p.placementId);
+              events.emit('placement.updated', toPlacementUpdatedEvent(p, soonestDeadline(ds)));
+            }
+            exclusiveStartKey = page.lastEvaluatedKey;
+          } while (exclusiveStartKey !== undefined);
+        } catch (err) {
+          log.warn({ err, contactId }, 'voucher deadline sync failed (best-effort)');
+        }
+      }
     }
 
     // DENORMALIZE (Cluster D): the inbox is one Query and the conversation row
@@ -1179,6 +1301,23 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       ...(propagatedConversations > 0 && { propagatedConversations, conversationType: convType }),
     });
+
+    // Best-effort contact-timeline milestone on a REAL status change from the
+    // edit form (closes the gap the transition-service path doesn't cover). The
+    // handler may auto-set `status` even when the client didn't send it; the
+    // `!== stored.status` diff guard suppresses a no-op milestone in that case.
+    if (typeof parsed.patch.status === 'string' && stored && parsed.patch.status !== priorStatus) {
+      const labels = stored.type === 'landlord' ? LANDLORD_STATUS_LABELS : TENANT_STATUS_LABELS;
+      try {
+        await activityEvents.record({
+          contactId,
+          type: 'contact_status_changed',
+          label: `Status → ${(labels as Record<string, string>)[parsed.patch.status] ?? parsed.patch.status}`,
+        });
+      } catch (err) {
+        log.error({ err, contactId }, 'contact_status_changed (edit) milestone record failed (best-effort)');
+      }
+    }
     log.info(
       { contactId, fields: parsed.changedFields, propagatedConversations, actor: req.user?.userId },
       'contact triaged',
@@ -1291,6 +1430,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       optOut,
       actor: req.user?.userId,
     });
+    // Best-effort contact-timeline milestone (never fails the toggle route).
+    try {
+      await activityEvents.record({
+        contactId,
+        type: 'opt_out_changed',
+        label: optOut ? 'Marked Do Not Contact' : 'Do Not Contact cleared',
+      });
+    } catch (err) {
+      log.error({ err, contactId }, 'opt_out_changed (sms) milestone record failed (best-effort)');
+    }
     log.info({ contactId, optOut, actor: req.user?.userId }, 'contact sms_opt_out toggled');
     // Reflect the new flag without a second round-trip.
     res.json({ contact: withPhones({ ...existing, sms_opt_out: optOut }) });
@@ -1328,6 +1477,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       optOut,
       actor: req.user?.userId,
     });
+    // Best-effort contact-timeline milestone (never fails the toggle route).
+    try {
+      await activityEvents.record({
+        contactId,
+        type: 'opt_out_changed',
+        label: optOut ? 'Marked Do Not Call' : 'Do Not Call cleared',
+      });
+    } catch (err) {
+      log.error({ err, contactId }, 'opt_out_changed (voice) milestone record failed (best-effort)');
+    }
     log.info({ contactId, optOut, actor: req.user?.userId }, 'contact voice_opt_out toggled');
     res.json({ contact: withPhones({ ...existing, voice_opt_out: optOut }) });
   });

@@ -164,16 +164,27 @@ export interface PlacementUpdatedEvent {
   updated_at: string | null;
 }
 
-/** THE one placement.updated payload builder — every emit site uses it (no drift). */
-export function toPlacementUpdatedEvent(item: PlacementItem): PlacementUpdatedEvent {
+/**
+ * THE one placement.updated payload builder — every emit site uses it (no drift).
+ *
+ * The wire keeps the FLAT `next_deadline_type` / `next_deadline_at` shape the
+ * dashboard consumes, but the SOURCE moved from a stored slot to a COMPUTED value
+ * (placement-deadline-model refactor): callers pass `next` = the soonest of the
+ * placement's placementDeadlines items (via placementDeadlinesRepo.soonestDeadline),
+ * or null/omitted when there is none. No stored next_deadline_* fields survive.
+ */
+export function toPlacementUpdatedEvent(
+  item: PlacementItem,
+  next?: { type: string; at: string } | null,
+): PlacementUpdatedEvent {
   return {
     placementId: item.placementId,
     tenantId: item.tenantId,
     unitId: item.unitId,
     stage: item.stage,
     tour_date: item.tour_date ?? null,
-    next_deadline_type: item.next_deadline_type ?? null,
-    next_deadline_at: item.next_deadline_at ?? null,
+    next_deadline_type: next?.type ?? null,
+    next_deadline_at: next?.at ?? null,
     group_thread: item.group_thread ?? null,
     // != null covers both absent (cleared → REMOVE) and a stray null. This
     // boolean is load-bearing: the boards flip a placement's attention badge live

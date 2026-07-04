@@ -49,6 +49,9 @@ export function ContactCreateForm({
   const [phone, setPhone] = useState('');
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [voucher, setVoucher] = useState('');
+  // Tenant-only voucher expiration DATE (YYYY-MM-DD from the date input). Empty →
+  // nothing sent. On submit it's converted to an ISO instant.
+  const [voucherExpiration, setVoucherExpiration] = useState('');
   const [company, setCompany] = useState('');
 
   // Collapsible editors: track whether the user has opted in
@@ -134,6 +137,10 @@ export function ContactCreateForm({
       if (Number.isInteger(n) && n >= 0 && n <= 12) {
         body['voucherSize'] = n;
       }
+    }
+
+    if (isTenant && voucherExpiration.trim()) {
+      body['voucher_expiration_date'] = consentAtFromDate(voucherExpiration.trim());
     }
 
     if (isLandlordOrPm && company.trim()) {
@@ -270,6 +277,18 @@ export function ContactCreateForm({
               value={voucher}
               onChange={(e) => setVoucher(e.target.value)}
               placeholder="e.g. 2"
+            />
+          </label>
+        ) : null}
+
+        {isTenant ? (
+          <label className={styles.field}>
+            <span className={styles.label}>Voucher expiration date</span>
+            <input
+              className={styles.input}
+              type="date"
+              value={voucherExpiration}
+              onChange={(e) => setVoucherExpiration(e.target.value)}
             />
           </label>
         ) : null}

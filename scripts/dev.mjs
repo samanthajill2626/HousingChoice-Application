@@ -255,8 +255,18 @@ if (mode === 'local') {
   console.log(`dev — step 2/${localSteps}: MinIO local S3 container`);
   await ensureS3Started();
   if (seedEnabled) {
-    console.log(`dev — step 3/${localSteps}: tables + media bucket`);
-    await runTsx('app/scripts/db-create.ts');
+    // DROP + recreate the tables BEFORE seeding. `db-seed` writes fixed-ID items
+    // with PutCommand (overwrite-by-key), so it can UPDATE an existing row but
+    // never DELETE one the new seed no longer writes. Without a reset, any row a
+    // prior boot/reseed left that the current full seed SUPERSEDES persists as a
+    // stale fixture — e.g. seed/history.ts dedups lean's legacy single-hop
+    // `placement_stage_changed` out of its write set, but a lean row left by an
+    // earlier `/__dev/reseed` would linger, showing a duplicate/contradictory
+    // history hop on placement-0001. A fresh slate each `--seeded` boot is the
+    // fix (same rationale as the no-seed branch below; --reset is localhost-gated
+    // inside db-create.ts, and re-create restores the current schema + GSIs too).
+    console.log(`dev — step 3/${localSteps}: tables (reset — fresh slate) + media bucket`);
+    await runTsx('app/scripts/db-create.ts', ['--reset']);
     await runTsx('app/scripts/s3-create.ts');
     console.log(`dev — step 4/${localSteps}: seed data (--seeded, profile: full)`);
     await runTsx('app/scripts/db-seed.ts', [], { SEED_PROFILE: 'full' });

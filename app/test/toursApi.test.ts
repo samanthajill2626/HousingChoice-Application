@@ -396,6 +396,148 @@ describe('PATCH → toured records the tour_took_place activity milestone', () =
 });
 
 // ============================================================================
+// Tour lifecycle → tenant activity timeline + property (unit) audit (WS4)
+// Dual-write on create-scheduled AND each surfaced PATCH transition.
+// ============================================================================
+
+describe('PATCH/POST /api/tours — activity + property audit propagation', () => {
+  function seedUnit(world: FakeWorld): void {
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'c-ll',
+      status: 'available',
+      jurisdiction: 'DCA',
+      beds: 2,
+      baths: 1,
+      rent_min: 1200,
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  async function seedScheduledTour(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    world: FakeWorld,
+  ): Promise<string> {
+    seedUnit(world);
+    const res = await authed(app).post('/api/tours').send(BASE_CREATE_BODY); // status 'scheduled'
+    expect(res.status).toBe(201);
+    return res.body.tour.tourId as string;
+  }
+
+  it('emits tour_scheduled activity + units# tour_scheduled audit on create-scheduled', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+    ).toHaveLength(1);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_scheduled',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('emits NOTHING on a timeless (requested) create', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    expect(res.status).toBe(201);
+    expect(res.body.tour.status).toBe('requested');
+    expect(world.activityEvents.filter((e) => e.type === 'tour_scheduled')).toHaveLength(0);
+    expect(world.auditEvents.filter((e) => e.event_type === 'tour_scheduled')).toHaveLength(0);
+  });
+
+  it('emits tour_canceled to tenant + property on cancel, once (idempotent)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' }).expect(200);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' }).expect(200); // re-write, no re-emit
+    expect(world.activityEvents.filter((e) => e.type === 'tour_canceled')).toHaveLength(1);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_canceled',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('emits tour_no_show to tenant + property on the no_show transition', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
+    expect(world.activityEvents.filter((e) => e.type === 'tour_no_show')).toHaveLength(1);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_no_show',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('emits tour_scheduled/tour_rescheduled audit on a reschedule (time-only change)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_rescheduled',
+      ),
+    ).toHaveLength(1);
+    // The tenant activity for a reschedule is the tour_scheduled type.
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+    ).toHaveLength(2); // one on create + one on reschedule
+  });
+
+  it('emits tour_took_place and tour_outcome on the toured→outcome path', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true })
+      .expect(200);
+    expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(1);
+    expect(world.activityEvents.filter((e) => e.type === 'tour_outcome')).toHaveLength(1);
+    expect(
+      world.activityEvents.find((e) => e.type === 'tour_outcome')?.label,
+    ).toContain('moved forward');
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_took_place',
+      ),
+    ).toHaveLength(1);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_outcome',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('is idempotent on the exit gate: a second identical outcome PATCH does not re-emit', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedScheduledTour(app, world);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false })
+      .expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false })
+      .expect(200);
+    expect(world.activityEvents.filter((e) => e.type === 'tour_outcome')).toHaveLength(1);
+    expect(
+      world.activityEvents.find((e) => e.type === 'tour_outcome')?.label,
+    ).toContain('not a fit');
+  });
+});
+
+// ============================================================================
 // Whole-branch-review hardening — transition guards, effective-status reminder
 // side effects, scheduledAt canonicalization, exit-gate status coupling
 // ============================================================================

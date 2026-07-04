@@ -7,6 +7,7 @@
 // landlord's file. Mirrors EligibilityIntakeCard (the tenant sibling).
 import type { Contact } from '../../api/index.js';
 import { Card, KV } from './Card.js';
+import { LANDLORD_ONBOARDING_HINTS } from './landlordOnboarding.js';
 
 export interface LandlordOnboardingCardProps {
   contact: Pick<
@@ -27,7 +28,7 @@ const yesNo = (v: boolean): string => (v ? 'Yes' : 'No');
 export function LandlordOnboardingCard({
   contact,
 }: LandlordOnboardingCardProps): React.JSX.Element | null {
-  const rows: Array<{ k: string; v: string }> = [];
+  const rows: Array<{ k: string; v: string; hint?: string }> = [];
 
   if (contact.contract_status) {
     rows.push({
@@ -39,16 +40,32 @@ export function LandlordOnboardingCard({
     rows.push({ k: 'Expected rent', v: String(contact.expected_rent) });
   }
   if (typeof contact.registered_landlord === 'boolean') {
-    rows.push({ k: 'Registered landlord', v: yesNo(contact.registered_landlord) });
+    rows.push({
+      k: 'Registered landlord',
+      v: yesNo(contact.registered_landlord),
+      hint: LANDLORD_ONBOARDING_HINTS.registered_landlord,
+    });
   }
   if (typeof contact.rta_within_48h === 'boolean') {
-    rows.push({ k: 'Submits RTA within 48h', v: yesNo(contact.rta_within_48h) });
+    rows.push({
+      k: 'Submits RTA within 48h',
+      v: yesNo(contact.rta_within_48h),
+      hint: LANDLORD_ONBOARDING_HINTS.rta_within_48h,
+    });
   }
   if (typeof contact.pass_inspection_first_try === 'boolean') {
-    rows.push({ k: 'Passes inspection first try', v: yesNo(contact.pass_inspection_first_try) });
+    rows.push({
+      k: 'Passes inspection first try',
+      v: yesNo(contact.pass_inspection_first_try),
+      hint: LANDLORD_ONBOARDING_HINTS.pass_inspection_first_try,
+    });
   }
   if (typeof contact.income_includes_voucher === 'boolean') {
-    rows.push({ k: 'Voucher counts as income', v: yesNo(contact.income_includes_voucher) });
+    rows.push({
+      k: 'Voucher counts as income',
+      v: yesNo(contact.income_includes_voucher),
+      hint: LANDLORD_ONBOARDING_HINTS.income_includes_voucher,
+    });
   }
   // The park reason is only meaningful when the lead is actually parked.
   if (contact.status === 'parked' && contact.park_reason) {
@@ -60,7 +77,7 @@ export function LandlordOnboardingCard({
   return (
     <Card title="Landlord onboarding">
       {rows.map((r) => (
-        <KV key={r.k} k={r.k} v={r.v} />
+        <KV key={r.k} k={r.k} v={r.v} {...(r.hint !== undefined && { hint: r.hint })} />
       ))}
     </Card>
   );

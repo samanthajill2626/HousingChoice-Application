@@ -2,9 +2,9 @@
 // SPARSE-KEY semantics the in-memory fakes cannot validate:
 //   • null→REMOVE actually drops a placement from the sparse byTourDate index
 //     (a key attribute set to null would be REJECTED; it must be ABSENT).
-//   • setNextDeadline writes/removes the byNextDeadline COMPOSITE key
-//     both-or-neither, and the range query (#a <= :before) works.
 //   • the combined `SET … REMOVE …` expression raises no ValidationException.
+//   • first-class placementDeadlines arm/retire/listDue/clearForPlacement over
+//     the real byPlacement + byDueAt GSIs (placement-deadline-model).
 // Plus the CRUD + each GSI, mirroring unitsRepo.integration.
 //
 // Self-skipping like the other integration suites: when nothing answers at
@@ -19,6 +19,10 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createPlacementsRepo } from '../src/repos/placementsRepo.js';
+import {
+  createPlacementDeadlinesRepo,
+  soonestDeadline,
+} from '../src/repos/placementDeadlinesRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -46,13 +50,20 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
   const doc = createDocumentClient({ endpoint });
   const logger = createLogger({ destination: createLogCapture().stream });
   const placements = createPlacementsRepo({ doc, env: testEnv, logger });
+  const deadlines = createPlacementDeadlinesRepo({ doc, env: testEnv, logger });
 
   beforeAll(async () => {
     await ensureTable(client, getTableSpec('placements'), tableName('placements', testEnv));
+    await ensureTable(
+      client,
+      getTableSpec('placementDeadlines'),
+      tableName('placementDeadlines', testEnv),
+    );
   }, 120_000);
 
   afterAll(async () => {
     await deleteTableIfExists(client, tableName('placements', testEnv));
+    await deleteTableIfExists(client, tableName('placementDeadlines', testEnv));
     doc.destroy();
     client.destroy();
   }, 120_000);
@@ -161,34 +172,37 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
     expect(afterClear.items.some((x) => x.placementId === c.placementId)).toBe(false);
   });
 
-  it('setNextDeadline writes the composite key (queryable, range-bounded) and clears both on null', async () => {
-    const type = 'rta_window' as const;
+  it('placementDeadlines: arm is queryable+range-bounded (byDueAt), retire drops it', async () => {
     const c = await placements.create({
       tenantId: 'contact-tenant-4',
       unitId: 'unit-4',
       stage: 'awaiting_authority_approval',
     });
-    // Not in byNextDeadline until a deadline is set.
-    const beforeSet = await placements.listByNextDeadline(type);
-    expect(beforeSet.items.some((x) => x.placementId === c.placementId)).toBe(false);
+    // Not due until armed.
+    const beforeArm = await deadlines.listDue('2026-06-17T00:00:00.000Z');
+    expect(beforeArm.some((d) => d.placementId === c.placementId)).toBe(false);
 
     const at = '2026-06-16T12:00:00.000Z';
-    const withDeadline = await placements.setNextDeadline(c.placementId, { type, at });
-    expect(withDeadline.next_deadline_type).toBe(type);
-    expect(withDeadline.next_deadline_at).toBe(at);
+    const armed = await deadlines.arm(c.placementId, 'rta_window', at);
+    expect(armed.deadlineId).toBe(`${c.placementId}#rta_window`);
+    expect(armed.at).toBe(at);
 
     // Range query: due AT or BEFORE a cutoff after `at` finds it; before `at` doesn't.
-    const dueByLater = await placements.listByNextDeadline(type, { beforeAt: '2026-06-17T00:00:00.000Z' });
-    expect(dueByLater.items.some((x) => x.placementId === c.placementId)).toBe(true);
-    const dueByEarlier = await placements.listByNextDeadline(type, { beforeAt: '2026-06-15T00:00:00.000Z' });
-    expect(dueByEarlier.items.some((x) => x.placementId === c.placementId)).toBe(false);
+    const dueByLater = await deadlines.listDue('2026-06-17T00:00:00.000Z');
+    expect(dueByLater.some((d) => d.placementId === c.placementId)).toBe(true);
+    const dueByEarlier = await deadlines.listDue('2026-06-15T00:00:00.000Z');
+    expect(dueByEarlier.some((d) => d.placementId === c.placementId)).toBe(false);
 
-    // Clear both: drops out of byNextDeadline (sparse composite key absent).
-    const cleared = await placements.setNextDeadline(c.placementId, null);
-    expect(cleared.next_deadline_type).toBeUndefined();
-    expect(cleared.next_deadline_at).toBeUndefined();
-    const afterClear = await placements.listByNextDeadline(type);
-    expect(afterClear.items.some((x) => x.placementId === c.placementId)).toBe(false);
+    // byPlacement enumerates it; soonestDeadline computes over it.
+    const rows = await deadlines.listByPlacement(c.placementId);
+    expect(rows).toHaveLength(1);
+    expect(soonestDeadline(rows)).toEqual({ type: 'rta_window', at });
+
+    // Retire: drops out of byDueAt + byPlacement.
+    await deadlines.retire(c.placementId, 'rta_window');
+    const afterRetire = await deadlines.listDue('2026-06-17T00:00:00.000Z');
+    expect(afterRetire.some((d) => d.placementId === c.placementId)).toBe(false);
+    expect(await deadlines.listByPlacement(c.placementId)).toHaveLength(0);
   });
 
   it('lists via each single-key GSI and the unfiltered Scan', async () => {
@@ -245,10 +259,7 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
     expect(pages).toBeGreaterThanOrEqual(3); // really paginated
   });
 
-  it('paginates the COMPOSITE byNextDeadline GSI via LastEvaluatedKey (4-attr cursor round-trip)', async () => {
-    // 'voucher_expiration' is used by no other test, so this partition holds
-    // exactly our three — soonest-first, distinct instants.
-    const type = 'voucher_expiration' as const;
+  it('placementDeadlines.listDue walks the whole byDueAt partition soonest-first', async () => {
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
       const c = await placements.create({
@@ -256,24 +267,16 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
         unitId: `unit-vt-${i}`,
         stage: 'awaiting_approval',
       });
-      await placements.setNextDeadline(c.placementId, { type, at: `2026-09-0${i + 1}T00:00:00.000Z` });
+      // Distinct instants, all in the PAST relative to the cutoff below.
+      await deadlines.arm(c.placementId, 'voucher_expiration', `2026-09-0${i + 1}T00:00:00.000Z`);
       ids.push(c.placementId);
     }
-    const collected: string[] = [];
-    let cursor: Record<string, unknown> | undefined;
-    let pages = 0;
-    do {
-      const page = await placements.listByNextDeadline(type, {
-        limit: 1,
-        ...(cursor !== undefined && { exclusiveStartKey: cursor }),
-      });
-      collected.push(...page.items.map((x) => x.placementId));
-      cursor = page.lastEvaluatedKey;
-      pages += 1;
-    } while (cursor !== undefined && pages < 10);
-
-    expect(ids.every((id) => collected.includes(id))).toBe(true);
-    expect(new Set(collected).size).toBe(collected.length); // composite cursor never dupes
-    expect(pages).toBeGreaterThanOrEqual(3);
+    // One soonest-first walk of the fixed 'deadlines' partition (pages internally).
+    const due = await deadlines.listDue('2026-12-31T00:00:00.000Z');
+    const ours = due.filter((d) => ids.includes(d.placementId));
+    expect(ours.map((d) => d.placementId)).toEqual(ids); // soonest-first, no gaps/dupes
+    // listAllPending returns them too (whole partition, unbounded by `now`).
+    const all = await deadlines.listAllPending();
+    expect(ids.every((id) => all.some((d) => d.placementId === id))).toBe(true);
   });
 });

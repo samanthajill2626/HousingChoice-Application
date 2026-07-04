@@ -69,6 +69,13 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       // 2026-06-19 product decision REMOVED the RTA-in-hand→searching gate, so
       // `porting` no longer blocks any transition (the admin advances tenants).
       porting: false,
+      // A2P/CTIA consent: her inbound reply (messages msg-0002 at T1, "Yes! Could we
+      // do Saturday morning?") confers inbound_text consent per the app's own
+      // auto-consent rule (services/contactCapture + webhooks/twilio) — so a proactive
+      // send to her is NOT hard-blocked by the JIT consent gate. consent_at = the
+      // instant of that first inbound message.
+      consent_method: 'inbound_text',
+      consent_at: T1,
       created_at: T0,
     },
     {
@@ -81,6 +88,14 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       lead_status: 'registered',
       contract_status: 'signed',
       authorities_served: ['atlanta_housing', 'ga_dca'],
+      // A2P/CTIA consent: a registered + contract-signed active landlord was
+      // onboarded through a human conversation (and, in the full profile, texts us
+      // inbound in the cast relay-group tours) — so he carries consent and proactive
+      // texts to him are not JIT-gated. verbal_phone reflects the human onboarding
+      // (his earliest consent basis, at contact creation). Renee (the HA staffer
+      // below) is left with NO consent: she has no message thread with us.
+      consent_method: 'verbal_phone',
+      consent_at: T0,
       created_at: T0,
     },
     {

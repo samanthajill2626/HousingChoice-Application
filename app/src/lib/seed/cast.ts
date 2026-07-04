@@ -94,7 +94,8 @@ const RELAY_POOL_PHONE = '+15550150101';
 // ---------------------------------------------------------------------------
 // CAST PERSONA 1: Unknown Texter
 // Triage front door: type=unknown, status=needs_review
-// One inbound SMS in an unknown_1to1 conversation; no consent yet.
+// One inbound SMS in an unknown_1to1 conversation → inbound_text auto-consent
+// (the inbound text confers it; triage state is independent of consent).
 // sms_opt_out: true (one of the required flag demo targets)
 // ---------------------------------------------------------------------------
 const SLUG_UNKNOWN = 'unknown-texter';
@@ -112,6 +113,10 @@ const unknownTexter = {
     sms_opt_out: true, // flag demo: blocked proactive-send
     capture_source: 'inbound_sms',
     captured_at: C0,
+    // Auto-consent: their inbound text (msg-cast-unk-001 at C0) confers inbound_text
+    // per the app's rule. The unknown/needs_review triage state is independent of it.
+    consent_method: 'inbound_text',
+    consent_at: C0,
     created_at: C0,
   },
   conversation: {
@@ -876,6 +881,9 @@ const neverSignedLandlord = {
     contract_status: 'unsigned',
     expected_rent: 1700,
     registered_landlord: true,
+    // Auto-consent: her inbound reply (msg-cast-nsign-002 at C2) confers inbound_text.
+    consent_method: 'inbound_text',
+    consent_at: C2,
     created_at: C1,
   },
   conversation: {
@@ -979,6 +987,11 @@ const parkedLandlord = {
     lastName: 'Cordova',
     park_reason: 'A property manager, not the owner',
     voice_opt_out: true, // flag demo: do-not-call set after parking
+    // Auto-consent: his inbound reply (msg-cast-park-003 at CB) confers inbound_text.
+    // (The C7 masked call is OUTBOUND — confers nothing; voice_opt_out is independent
+    // of SMS consent.)
+    consent_method: 'inbound_text',
+    consent_at: CB,
     created_at: C7,
   },
   conversation: {
@@ -1069,6 +1082,9 @@ const midIntakeUnitLandlord = {
     pass_inspection_first_try: true,
     income_includes_voucher: true,
     authorities_served: ['atlanta_housing'],
+    // Auto-consent: her inbound reply (msg-cast-milu-002 at CD) confers inbound_text.
+    consent_method: 'inbound_text',
+    consent_at: CD,
     created_at: CC,
   },
   unit: {

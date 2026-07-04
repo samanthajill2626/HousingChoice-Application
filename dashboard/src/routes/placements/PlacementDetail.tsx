@@ -52,6 +52,11 @@ interface PendingMove {
   gate: TransitionGate;
 }
 
+// The distinct phases in ladder order - the "Move to" picker groups its stages
+// under these as <optgroup> headings, so the sub-stages read within their phase
+// (Application / RTA / Inspection / ...) instead of one flat list.
+const PLACEMENT_PHASES_ORDERED = [...new Set(PLACEMENT_STAGES.map((s) => STAGE_PHASE[s]))];
+
 export function PlacementDetail(): React.JSX.Element {
   const { placementId = '' } = useParams<{ placementId: string }>();
   // Consolidated load state keyed by forId — loading is DERIVED during render
@@ -251,11 +256,21 @@ export function PlacementDetail(): React.JSX.Element {
               }}
             >
               <option value="">Move to…</option>
-              {PLACEMENT_STAGES.filter((s) => s !== placement.stage).map((s) => (
-                <option key={s} value={s}>
-                  {STAGE_LABELS[s]}
-                </option>
-              ))}
+              {PLACEMENT_PHASES_ORDERED.map((ph) => {
+                const stages = PLACEMENT_STAGES.filter(
+                  (s) => STAGE_PHASE[s] === ph && s !== placement.stage,
+                );
+                if (stages.length === 0) return null;
+                return (
+                  <optgroup key={ph} label={ph}>
+                    {stages.map((s) => (
+                      <option key={s} value={s}>
+                        {STAGE_LABELS[s]}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </label>
         </div>

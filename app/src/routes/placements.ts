@@ -73,7 +73,7 @@ import {
   TERMINAL_STAGES,
   type PlacementItem,
 } from '../repos/placementsRepo.js';
-import { isPlacementStage, STAGE_LABELS } from '../lib/statusModel.js';
+import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -284,6 +284,31 @@ function validatePlacementUpdate(body: unknown): Validation<Record<string, unkno
         return { ok: false, error: `${key} must be a boolean` };
       }
       fields[key] = value;
+      continue;
+    }
+    // In-place stage-data (Approval & Move-in): the value-shape check lives here;
+    // the STAGE guard (only settable at the field's own stage) is enforced in the
+    // PATCH handler, which has the loaded placement. Mirrors the transition
+    // service's captures (inspection_date / rent_determined / inspection_outcome).
+    if (key === 'inspection_date') {
+      if (typeof value !== 'string' || value.length === 0) {
+        return { ok: false, error: 'inspection_date must be a non-empty date string' };
+      }
+      fields['inspection_date'] = value;
+      continue;
+    }
+    if (key === 'rent_determined') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return { ok: false, error: 'rent_determined must be a finite number > 0' };
+      }
+      fields['rent_determined'] = value;
+      continue;
+    }
+    if (key === 'inspection_outcome') {
+      if (!isInspectionOutcome(value)) {
+        return { ok: false, error: 'inspection_outcome must be pass or fail' };
+      }
+      fields['inspection_outcome'] = value;
       continue;
     }
     if (key === 'tours') {
@@ -744,6 +769,27 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // changing, a tour_date newly set, a tour gaining an outcome) — milestones
     // are emitted only for genuine changes, never on a no-op write.
     const before: PlacementItem | undefined = await placements.getById(placementId);
+    // In-place stage-data guard (Approval & Move-in): these fields are recordable
+    // WITHOUT a stage move, but only while the placement sits at the stage they
+    // belong to (mirrors the tour exit-gate's toured-only 409). Value shape was
+    // validated above; here we reject a right-shaped value written at the wrong
+    // stage. An absent `before` falls through to the update's 404.
+    if (before !== undefined) {
+      const STAGE_SCOPED: Record<string, PlacementStage> = {
+        inspection_date: 'schedule_inspection',
+        inspection_outcome: 'awaiting_inspection',
+        rent_determined: 'determine_rent',
+      };
+      for (const [field, requiredStage] of Object.entries(STAGE_SCOPED)) {
+        if (validation.fields[field] !== undefined && before.stage !== requiredStage) {
+          res.status(409).json({
+            error: 'illegal_stage_data',
+            detail: `${field} can only be recorded while the placement is at ${STAGE_LABELS[requiredStage]} (current: ${STAGE_LABELS[before.stage]})`,
+          });
+          return;
+        }
+      }
+    }
     let item;
     try {
       item = await placements.update(placementId, validation.fields);

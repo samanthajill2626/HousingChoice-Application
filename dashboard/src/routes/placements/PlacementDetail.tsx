@@ -7,7 +7,7 @@
 // awaiting_rent_acceptance → finalRent; OUT of awaiting_inspection →
 // inspectionOutcome). A history panel (usePlacementHistory) renders the audit rows
 // newest-first with "load more".
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   PLACEMENT_STAGES,
@@ -18,7 +18,10 @@ import {
   getContact,
   getUnit,
   transitionPlacement,
+  updatePlacement,
+  updateUnit,
   useEventStream,
+  type InspectionOutcome,
   type PlacementItem,
   type PlacementUpdatedEvent,
   type Contact,
@@ -77,6 +80,11 @@ export function PlacementDetail(): React.JSX.Element {
     },
     [placementId],
   );
+
+  // Apply an updated unit in place (after an in-place final_rent edit returns it).
+  const setUnit = useCallback((next: UnitItem) => {
+    setLoaded((prev) => ({ ...prev, unit: next }));
+  }, []);
 
   // Fetch (or refetch) the full placement bundle. No synchronous loading reset — on a
   // placementId change loading is DERIVED during render (forId mismatch); a live
@@ -143,6 +151,8 @@ export function PlacementDetail(): React.JSX.Element {
         ...(extra.lostReason !== undefined && { lostReason: extra.lostReason }),
         ...(extra.finalRent !== undefined && { finalRent: extra.finalRent }),
         ...(extra.inspectionOutcome !== undefined && { inspectionOutcome: extra.inspectionOutcome }),
+        ...(extra.inspectionDate !== undefined && { inspectionDate: extra.inspectionDate }),
+        ...(extra.rentDetermined !== undefined && { rentDetermined: extra.rentDetermined }),
       })
         .then((updated) => setPlacement(updated))
         .catch(() => setError('That move was rejected — please try again.'))
@@ -150,6 +160,19 @@ export function PlacementDetail(): React.JSX.Element {
           setBusy(false);
           setPending(null);
         });
+    },
+    [placementId, setPlacement],
+  );
+
+  // Toggle a complete-paperwork checklist field (lease_signed / lif /
+  // move_in_details): PATCH the placement and apply the returned row in place
+  // (instant feedback before the placement.updated refetch reconciles).
+  const togglePaperwork = useCallback(
+    (field: 'lease_signed' | 'lif' | 'move_in_details', checked: boolean) => {
+      setError(null);
+      void updatePlacement(placementId, { [field]: checked })
+        .then((updated) => setPlacement(updated))
+        .catch(() => setError('We couldn’t save that — please try again.'));
     },
     [placementId, setPlacement],
   );
@@ -279,9 +302,32 @@ export function PlacementDetail(): React.JSX.Element {
             {placement.inspection_outcome ? (
               <KV k="Inspection" v={placement.inspection_outcome === 'pass' ? 'Pass' : 'Fail'} />
             ) : null}
+            {placement.inspection_date ? (
+              <KV k="Inspection date" v={shortDate(placement.inspection_date)} />
+            ) : null}
             {finalRent ? <KV k="Final rent" v={`${finalRent}/mo`} /> : null}
+            {typeof placement.rent_determined === 'number' ? (
+              <KV k="Determined rent" v={`${formatMoney(placement.rent_determined)}/mo`} />
+            ) : null}
             {lostReason ? <KV k="Lost reason" v={lostReason} /> : null}
           </Card>
+
+          <StageDataCard
+            placement={placement}
+            unit={unit}
+            onRecordPlacement={(patch) => updatePlacement(placementId, patch).then(setPlacement)}
+            onRecordFinalRent={(amount) =>
+              updateUnit(placement.unitId, { final_rent: amount }).then(setUnit)
+            }
+          />
+
+          {placement.stage === 'complete_paperwork' ? (
+            <PaperworkCard
+              placement={placement}
+              lifEligible={tenant?.lifEligible === true}
+              onToggle={togglePaperwork}
+            />
+          ) : null}
 
           <HistoryPanel placementId={placementId} />
         </div>
@@ -296,15 +342,282 @@ export function PlacementDetail(): React.JSX.Element {
         />
       ) : null}
 
-      {pending !== null && (pending.gate === 'finalRent' || pending.gate === 'inspectionOutcome') ? (
+      {pending !== null &&
+      (pending.gate === 'finalRent' ||
+        pending.gate === 'inspectionOutcome' ||
+        pending.gate === 'inspectionDate' ||
+        pending.gate === 'rentDetermined' ||
+        pending.gate === 'moveInReady') ? (
         <MovePromptModal
-          mode={pending.gate === 'finalRent' ? 'finalRent' : 'inspectionOutcome'}
+          mode={pending.gate}
+          initial={{
+            finalRent: unit?.final_rent,
+            inspectionOutcome: placement.inspection_outcome,
+            inspectionDate: placement.inspection_date,
+            rentDetermined: placement.rent_determined,
+          }}
+          {...(pending.gate === 'moveInReady' && {
+            lifPending: tenant?.lifEligible === true && placement.lif !== true,
+          })}
           onClose={() => setPending(null)}
           onConfirm={(result) => runTransition(pending.toStage, result)}
           busy={busy}
         />
       ) : null}
     </div>
+  );
+}
+
+/** The complete-paperwork checklist (rendered only at `complete_paperwork`):
+ *  Lease signed + Move-in details shared always; the LIF row only when the tenant
+ *  is LIF-eligible (with a "confirm if included" hint), N/A otherwise. Each toggle
+ *  PATCHes the placement via the parent's `onToggle`. */
+function PaperworkCard({
+  placement,
+  lifEligible,
+  onToggle,
+}: {
+  placement: PlacementItem;
+  lifEligible: boolean;
+  onToggle: (field: 'lease_signed' | 'lif' | 'move_in_details', checked: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <Card title="Paperwork">
+      <label className={styles.checkRow}>
+        <input
+          type="checkbox"
+          checked={placement.lease_signed === true}
+          onChange={(e) => onToggle('lease_signed', e.target.checked)}
+        />
+        <span className={styles.checkText}>Lease signed</span>
+      </label>
+      <label className={styles.checkRow}>
+        <input
+          type="checkbox"
+          checked={placement.move_in_details === true}
+          onChange={(e) => onToggle('move_in_details', e.target.checked)}
+        />
+        <span className={styles.checkText}>Move-in details shared</span>
+      </label>
+      {lifEligible ? (
+        <label className={styles.checkRow}>
+          <input
+            type="checkbox"
+            checked={placement.lif === true}
+            onChange={(e) => onToggle('lif', e.target.checked)}
+          />
+          <span className={styles.checkText}>
+            LIF
+            <span className={styles.checkHint}>Confirm if included</span>
+          </span>
+        </label>
+      ) : (
+        <p className={styles.checkNa}>LIF — not applicable for this tenant.</p>
+      )}
+    </Card>
+  );
+}
+
+/** In-place stage-data entry (Approval & Move-in): at each data-bearing stage the
+ *  team can RECORD that stage's value WITHOUT a stage move (the move still asks,
+ *  prefilled). Prefilled from what's on file. inspection_date / inspection_outcome
+ *  / rent_determined PATCH the placement (the server 409s a wrong-stage write); the
+ *  accepted final_rent PATCHes the unit. Rendered null outside the four stages. */
+function StageDataCard({
+  placement,
+  unit,
+  onRecordPlacement,
+  onRecordFinalRent,
+}: {
+  placement: PlacementItem;
+  unit: UnitItem | null;
+  onRecordPlacement: (patch: {
+    inspection_date?: string;
+    inspection_outcome?: InspectionOutcome;
+    rent_determined?: number;
+  }) => Promise<unknown>;
+  onRecordFinalRent: (amount: number) => Promise<unknown>;
+}): React.JSX.Element | null {
+  switch (placement.stage) {
+    case 'schedule_inspection':
+      return (
+        <DateRecorder
+          label="Inspection date"
+          buttonLabel="Record inspection date"
+          initial={placement.inspection_date ?? ''}
+          onRecord={(value) => onRecordPlacement({ inspection_date: value })}
+        />
+      );
+    case 'awaiting_inspection':
+      return (
+        <OutcomeRecorder
+          current={placement.inspection_outcome}
+          onRecord={(outcome) => onRecordPlacement({ inspection_outcome: outcome })}
+        />
+      );
+    case 'determine_rent':
+      return (
+        <MoneyRecorder
+          title="Rent determination"
+          label="Determined rent (monthly)"
+          buttonLabel="Record determined rent"
+          initial={placement.rent_determined}
+          onRecord={(amount) => onRecordPlacement({ rent_determined: amount })}
+        />
+      );
+    case 'awaiting_rent_acceptance':
+      return (
+        <MoneyRecorder
+          title="Rent acceptance"
+          label="Accepted rent (monthly)"
+          buttonLabel="Record accepted rent"
+          initial={unit?.final_rent}
+          onRecord={onRecordFinalRent}
+        />
+      );
+    default:
+      return null;
+  }
+}
+
+/** Shared record lifecycle for the stage-data recorders: busy + error + the async
+ *  save (errors surface inline, never throw out). */
+function useRecorder<T>(onRecord: (v: T) => Promise<unknown>): {
+  busy: boolean;
+  err: string | null;
+  record: (v: T) => Promise<void>;
+} {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const record = async (v: T): Promise<void> => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await onRecord(v);
+    } catch {
+      setErr('We couldn’t save that — please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, err, record };
+}
+
+function DateRecorder({
+  label,
+  buttonLabel,
+  initial,
+  onRecord,
+}: {
+  label: string;
+  buttonLabel: string;
+  initial: string;
+  onRecord: (value: string) => Promise<unknown>;
+}): React.JSX.Element {
+  const [value, setValue] = useState(initial);
+  const { busy, err, record } = useRecorder<string>(onRecord);
+  const id = useId();
+  return (
+    <Card title="Inspection">
+      <label className={styles.stageDataLabel} htmlFor={id}>
+        {label}
+      </label>
+      <input
+        id={id}
+        type="date"
+        className={styles.stageDataInput}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <Button onClick={() => value && void record(value)} disabled={busy || value === ''}>
+        {buttonLabel}
+      </Button>
+      {err ? <p role="alert">{err}</p> : null}
+    </Card>
+  );
+}
+
+function MoneyRecorder({
+  title,
+  label,
+  buttonLabel,
+  initial,
+  onRecord,
+}: {
+  title: string;
+  label: string;
+  buttonLabel: string;
+  initial: number | undefined;
+  onRecord: (amount: number) => Promise<unknown>;
+}): React.JSX.Element {
+  const [value, setValue] = useState(initial !== undefined ? String(initial) : '');
+  const { busy, err, record } = useRecorder<number>(onRecord);
+  const id = useId();
+  const amount = Number(value);
+  const valid = value.trim() !== '' && Number.isFinite(amount) && amount > 0;
+  return (
+    <Card title={title}>
+      <label className={styles.stageDataLabel} htmlFor={id}>
+        {label}
+      </label>
+      <input
+        id={id}
+        type="number"
+        min="1"
+        inputMode="numeric"
+        className={styles.stageDataInput}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <Button onClick={() => valid && void record(amount)} disabled={busy || !valid}>
+        {buttonLabel}
+      </Button>
+      {err ? <p role="alert">{err}</p> : null}
+    </Card>
+  );
+}
+
+function OutcomeRecorder({
+  current,
+  onRecord,
+}: {
+  current: InspectionOutcome | undefined;
+  onRecord: (outcome: InspectionOutcome) => Promise<unknown>;
+}): React.JSX.Element {
+  const [value, setValue] = useState<InspectionOutcome | undefined>(current);
+  const { busy, err, record } = useRecorder<InspectionOutcome>(onRecord);
+  // A group name distinct from the move modal's `inspection-outcome` — both can be
+  // mounted at awaiting_inspection (the recorder card + the move dialog), and a
+  // shared name would merge them into one document-wide radio group.
+  const group = useId();
+  return (
+    <Card title="Inspection">
+      <fieldset className={styles.stageDataFieldset}>
+        <legend className={styles.stageDataLabel}>Inspection outcome</legend>
+        <label className={styles.checkRow}>
+          <input
+            type="radio"
+            name={group}
+            checked={value === 'pass'}
+            onChange={() => setValue('pass')}
+          />
+          <span className={styles.checkText}>Pass</span>
+        </label>
+        <label className={styles.checkRow}>
+          <input
+            type="radio"
+            name={group}
+            checked={value === 'fail'}
+            onChange={() => setValue('fail')}
+          />
+          <span className={styles.checkText}>Fail</span>
+        </label>
+      </fieldset>
+      <Button onClick={() => value && void record(value)} disabled={busy || value === undefined}>
+        Record inspection outcome
+      </Button>
+      {err ? <p role="alert">{err}</p> : null}
+    </Card>
   );
 }
 

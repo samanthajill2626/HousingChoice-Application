@@ -179,6 +179,66 @@ describe('placements API (M1.10b)', () => {
     expect(world.auditEvents.some((a) => a.event_type === 'placement_updated')).toBe(true);
   });
 
+  it('PATCH accepts the paperwork checklist booleans', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'complete_paperwork' });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, {
+      lease_signed: true,
+      move_in_details: true,
+      lif: false,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.placement.lease_signed).toBe(true);
+    expect(res.body.placement.move_in_details).toBe(true);
+    expect(res.body.placement.lif).toBe(false);
+  });
+
+  it('PATCH rejects a non-boolean checklist value', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'complete_paperwork' });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, { lease_signed: 'yes' });
+    expect(res.status).toBe(400);
+  });
+
+  // --- In-place stage-data entry (Approval & Move-in) -----------------------
+  // Each stage-scoped datum is recordable IN PLACE while the placement sits at
+  // its stage (mirrors the tour exit-gate's toured-only guard), WITHOUT a move.
+  it('PATCH records inspection_outcome in place at awaiting_inspection (200, no stage move)', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'awaiting_inspection' });
+    const res = await authedPatch(`/api/placements/${c.placementId}`, { inspection_outcome: 'fail' });
+    expect(res.status).toBe(200);
+    expect(res.body.placement.inspection_outcome).toBe('fail');
+    expect(res.body.placement.stage).toBe('awaiting_inspection');
+  });
+
+  it('PATCH 409s recording inspection_outcome at the WRONG stage', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'determine_rent' });
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { inspection_outcome: 'pass' })).status).toBe(409);
+  });
+
+  it('PATCH records inspection_date at schedule_inspection; 409 elsewhere', async () => {
+    const ok = await world.placementsRepo.create({ tenantId: 't', unitId: 'u1', stage: 'schedule_inspection' });
+    const okRes = await authedPatch(`/api/placements/${ok.placementId}`, { inspection_date: '2026-07-20' });
+    expect(okRes.status).toBe(200);
+    expect(okRes.body.placement.inspection_date).toBe('2026-07-20');
+    const bad = await world.placementsRepo.create({ tenantId: 't', unitId: 'u2', stage: 'awaiting_inspection' });
+    expect((await authedPatch(`/api/placements/${bad.placementId}`, { inspection_date: '2026-07-20' })).status).toBe(409);
+  });
+
+  it('PATCH records rent_determined at determine_rent; 409 elsewhere; 400 on non-positive', async () => {
+    const ok = await world.placementsRepo.create({ tenantId: 't', unitId: 'u1', stage: 'determine_rent' });
+    const okRes = await authedPatch(`/api/placements/${ok.placementId}`, { rent_determined: 1850 });
+    expect(okRes.status).toBe(200);
+    expect(okRes.body.placement.rent_determined).toBe(1850);
+    const bad = await world.placementsRepo.create({ tenantId: 't', unitId: 'u2', stage: 'schedule_inspection' });
+    expect((await authedPatch(`/api/placements/${bad.placementId}`, { rent_determined: 1850 })).status).toBe(409);
+    // Value validation runs before the stage guard, so an invalid amount is 400 even at the right stage.
+    expect((await authedPatch(`/api/placements/${ok.placementId}`, { rent_determined: 0 })).status).toBe(400);
+  });
+
+  it('PATCH rejects an invalid inspection_outcome value with 400', async () => {
+    const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'awaiting_inspection' });
+    expect((await authedPatch(`/api/placements/${c.placementId}`, { inspection_outcome: 'maybe' })).status).toBe(400);
+  });
+
   it('PATCH REFUSES a stage write (§8: stage moves go through the transition route)', async () => {
     const c = await world.placementsRepo.create({ tenantId: 't', unitId: 'u', stage: 'send_application' });
     // Even a VALID stage is rejected via legacy CRUD — the ONLY way to change a

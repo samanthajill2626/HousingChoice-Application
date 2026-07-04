@@ -25,9 +25,10 @@ type FieldKind = 'string' | 'number' | 'boolean' | 'string[]' | 'pets' | 'addres
  *
  * `status` is DELIBERATELY not here (§8: every property-status change routes
  * through the ONE transition service so status_source provenance is stamped —
- * use PATCH /api/units/:unitId/listing-status). `final_rent` is NOT writable
- * either: it is written ONLY by the transition service on rent acceptance (§4),
- * never set arbitrarily through CRUD. The unit-CREATE path stamps the initial
+ * use PATCH /api/units/:unitId/listing-status). `final_rent` (the accepted
+ * contract rent) IS writable here (Approval & Move-in): the team can record it
+ * in place at rent acceptance rather than being forced to enter it only on the
+ * acceptance move — which still also writes it (§4). The unit-CREATE path stamps the initial
  * `status` + `status_source` separately (routes/units.ts), since create is not
  * a transition but still needs the denormalized provenance initialized.
  */
@@ -42,6 +43,10 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   subzone: 'string',
   rent_min: 'number',
   rent_max: 'number',
+  // The accepted contract rent (Approval & Move-in). Writable in place at rent
+  // acceptance; the acceptance move still writes it too. The 'number' kind
+  // enforces finite & >= 0.
+  final_rent: 'number',
   payment_standard: 'number',
   deposit: 'number',
   lif: 'number',

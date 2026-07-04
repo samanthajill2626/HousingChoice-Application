@@ -523,6 +523,44 @@ describe('statusTransition — final_rent on rent acceptance (§4)', () => {
   });
 });
 
+describe('statusTransition — inspection_date + rent_determined captures (Approval & Move-in)', () => {
+  let world: FakeWorld;
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  it('captures inspection_date on schedule_inspection → awaiting_inspection', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({ tenantId: 't1', unitId: 'u1', stage: 'schedule_inspection' });
+    const updated = await svc.transitionPlacement(c.placementId, {
+      toStage: 'awaiting_inspection', source: 'manual', inspectionDate: '2026-07-20',
+    });
+    expect(updated.inspection_date).toBe('2026-07-20');
+  });
+
+  it('captures rent_determined on determine_rent → awaiting_rent_acceptance', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({ tenantId: 't1', unitId: 'u1', stage: 'determine_rent' });
+    const updated = await svc.transitionPlacement(c.placementId, {
+      toStage: 'awaiting_rent_acceptance', source: 'manual', rentDetermined: 1850,
+    });
+    expect(updated.rent_determined).toBe(1850);
+  });
+
+  it('ignores inspectionDate / rentDetermined on an unrelated move', async () => {
+    const svc = makeService(world);
+    const c = await world.placementsRepo.create({ tenantId: 't1', unitId: 'u1', stage: 'awaiting_hap_contract' });
+    const updated = await svc.transitionPlacement(c.placementId, {
+      toStage: 'complete_paperwork', source: 'manual', inspectionDate: '2026-07-20', rentDetermined: 1850,
+    });
+    expect(updated.inspection_date).toBeUndefined();
+    expect(updated.rent_determined).toBeUndefined();
+  });
+});
+
 describe('statusTransition — Lost from any stage (§7)', () => {
   let world: FakeWorld;
   let svc: StatusTransitionService;

@@ -190,6 +190,10 @@ export interface TransitionInput {
   finalRent?: number;
   /** Written only on the move OUT of awaiting_inspection. */
   inspectionOutcome?: InspectionOutcome;
+  /** Inspection date (YYYY-MM-DD), written on the move OUT of awaiting_inspection. */
+  inspectionDate?: string;
+  /** Determined rent (>0), written on the move OUT of determine_rent. */
+  rentDetermined?: number;
 }
 
 /** True when a lost reason is acceptable to the backend: a category OR non-empty
@@ -211,6 +215,8 @@ export function buildTransitionBody(input: TransitionInput): Record<string, unkn
     ...(input.lostReason !== undefined && { lostReason: input.lostReason }),
     ...(input.finalRent !== undefined && { finalRent: input.finalRent }),
     ...(input.inspectionOutcome !== undefined && { inspectionOutcome: input.inspectionOutcome }),
+    ...(input.inspectionDate !== undefined && { inspectionDate: input.inspectionDate }),
+    ...(input.rentDetermined !== undefined && { rentDetermined: input.rentDetermined }),
   };
 }
 
@@ -228,6 +234,29 @@ export async function transitionPlacement(
   const res = await request<{ placement: PlacementItem }>(
     `/api/placements/${encodeURIComponent(placementId)}/transition`,
     { method: 'POST', body: buildTransitionBody(input) },
+  );
+  return res.placement;
+}
+
+/** PATCH /api/placements/:id � partial update (SET-merge; only changed fields
+ *  sent). Used for the complete-paperwork checklist toggles (lease_signed / lif /
+ *  move_in_details). Returns the updated placement (unwrapped from { placement }). */
+export async function updatePlacement(
+  placementId: string,
+  patch: {
+    lease_signed?: boolean;
+    lif?: boolean;
+    move_in_details?: boolean;
+    // In-place stage-data (Approval & Move-in) — the server 409s any of these
+    // written at the wrong stage; value shapes match the placement fields.
+    inspection_date?: string;
+    rent_determined?: number;
+    inspection_outcome?: InspectionOutcome;
+  },
+): Promise<PlacementItem> {
+  const res = await request<{ placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}`,
+    { method: 'PATCH', body: patch },
   );
   return res.placement;
 }

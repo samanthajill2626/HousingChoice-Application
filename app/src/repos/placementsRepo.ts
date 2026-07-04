@@ -141,6 +141,17 @@ export interface PlacementItem {
    * tenant.
    */
   lost_reason?: LostReason;
+  /** Approval & Move-in — the LANDLORD-scheduled HQS inspection date (ISO date). */
+  inspection_date?: string;
+  /** Approval & Move-in — the authority's DETERMINED rent (pre-acceptance; distinct
+   *  from the accepted final_rent written onto the unit on rent acceptance). */
+  rent_determined?: number;
+  /** Approval & Move-in — Complete-paperwork checklist (unordered). lease_signed +
+   *  move_in_details are required; lif is conditional on the tenant's lifEligible
+   *  and optional even then. */
+  lease_signed?: boolean;
+  lif?: boolean;
+  move_in_details?: boolean;
   lease_date?: string;
   move_in_date?: string;
   /** Free-text placement-level note the operator keeps on the board. */

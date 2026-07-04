@@ -7,7 +7,14 @@
 // isolation so the board/detail just react to the returned gate.
 import type { PlacementStage } from '../../api/index.js';
 
-export type TransitionGate = 'none' | 'lost' | 'finalRent' | 'inspectionOutcome';
+export type TransitionGate =
+  | 'none'
+  | 'lost'
+  | 'finalRent'
+  | 'inspectionOutcome'
+  | 'inspectionDate'
+  | 'rentDetermined'
+  | 'moveInReady';
 
 /** Which gating prompt (if any) a from→to stage move requires. A no-op move
  *  (from === to) needs nothing. */
@@ -16,5 +23,8 @@ export function gateFor(from: PlacementStage, to: PlacementStage): TransitionGat
   if (to === 'lost') return 'lost';
   if (from === 'awaiting_rent_acceptance') return 'finalRent';
   if (from === 'awaiting_inspection') return 'inspectionOutcome';
+  if (from === 'schedule_inspection' && to === 'awaiting_inspection') return 'inspectionDate';
+  if (from === 'determine_rent' && to === 'awaiting_rent_acceptance') return 'rentDetermined';
+  if (from === 'complete_paperwork' && to === 'awaiting_move_in') return 'moveInReady';
   return 'none';
 }

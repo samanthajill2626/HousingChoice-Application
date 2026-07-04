@@ -105,6 +105,37 @@ describe('status-model transition routes', () => {
       expect(res.body.error).toBe('inspectionOutcome must be pass or fail');
     });
 
+    it('accepts inspectionDate on the schedule_inspection → awaiting_inspection move and persists it', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'schedule_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
+        toStage: 'awaiting_inspection',
+        source: 'manual',
+        inspectionDate: '2026-07-20',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.placement.inspection_date).toBe('2026-07-20');
+    });
+
+    it('400s an empty inspectionDate at the route', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'schedule_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
+        toStage: 'awaiting_inspection',
+        source: 'manual',
+        inspectionDate: '',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('inspectionDate must be a non-empty date string');
+    });
+
+    it('400s a non-positive / non-numeric rentDetermined at the route', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'determine_rent' });
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', rentDetermined: 0 })).status).toBe(400);
+      expect((await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', rentDetermined: -5 })).status).toBe(400);
+      const nan = await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'awaiting_rent_acceptance', source: 'manual', rentDetermined: 'lots' });
+      expect(nan.status).toBe(400);
+      expect(nan.body.error).toBe('rentDetermined must be a finite number > 0');
+    });
+
     it('records a lost transition with the structured reason; emits placement.updated WITHOUT the free text (no PII)', async () => {
       const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
       const res = await authedPost(`/api/placements/${c.placementId}/transition`, {

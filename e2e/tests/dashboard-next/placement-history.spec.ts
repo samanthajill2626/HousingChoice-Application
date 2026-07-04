@@ -41,8 +41,11 @@ test('Placement detail: shows placement facts + history, and a transition adds a
   // prompt → confirm. This records a transition the history then reflects.
   await page.getByRole('combobox', { name: 'Move to stage' }).selectOption('determine_rent');
   await expect(page.getByRole('heading', { name: 'Record inspection outcome' })).toBeVisible();
-  await page.getByRole('radio', { name: 'Pass' }).click();
-  await page.getByRole('button', { name: 'Confirm move' }).click();
+  // Scope to the move dialog — the in-place inspection recorder card (shown at
+  // awaiting_inspection) also has a Pass/Fail radio.
+  const outcomeDialog = page.getByRole('dialog');
+  await outcomeDialog.getByRole('radio', { name: 'Pass' }).click();
+  await outcomeDialog.getByRole('button', { name: 'Confirm move' }).click();
 
   // The stage advanced and the history list shows at least one row (newest-first).
   await expect(page.getByRole('heading', { name: /Determine rent/ })).toBeVisible();

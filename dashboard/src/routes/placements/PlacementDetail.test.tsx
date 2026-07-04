@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -8,6 +8,8 @@ const getPlacement = vi.fn();
 const getUnit = vi.fn();
 const getContact = vi.fn();
 const transitionPlacement = vi.fn();
+const updatePlacement = vi.fn();
+const updateUnit = vi.fn();
 const getPlacementHistory = vi.fn();
 // Capture the SSE handlers the page (and its History panel) register so a test
 // can fire a placement.updated event.
@@ -21,6 +23,8 @@ vi.mock('../../api/index.js', async () => {
     getUnit: (...a: unknown[]) => getUnit(...a),
     getContact: (...a: unknown[]) => getContact(...a),
     transitionPlacement: (...a: unknown[]) => transitionPlacement(...a),
+    updatePlacement: (...a: unknown[]) => updatePlacement(...a),
+    updateUnit: (...a: unknown[]) => updateUnit(...a),
     getPlacementHistory: (...a: unknown[]) => getPlacementHistory(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers.push(h);
@@ -67,6 +71,8 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ contactId: 't1', type: 'tenant', firstName: 'Tasha', lastName: 'Nguyen' });
   transitionPlacement.mockReset();
+  updatePlacement.mockReset();
+  updateUnit.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
   streamHandlers = [];
 });
@@ -109,8 +115,11 @@ describe('PlacementDetail', () => {
     // M4: the Tenant link shows the contact NAME, not the raw id.
     expect(screen.getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute('href', '/contacts/t1');
     expect(screen.getByRole('link', { name: '12 Oak St' })).toHaveAttribute('href', '/listings/u1');
-    expect(screen.getByText('Pass')).toBeInTheDocument();
-    expect(screen.getByText('$1,550/mo')).toBeInTheDocument();
+    // Scope to the summary "Placement" card — the awaiting_inspection stage also
+    // renders the in-place inspection recorder, which has its own Pass control.
+    const placementCard = screen.getByRole('heading', { name: 'Placement' }).closest('section') as HTMLElement;
+    expect(within(placementCard).getByText('Pass')).toBeInTheDocument();
+    expect(within(placementCard).getByText('$1,550/mo')).toBeInTheDocument();
   });
 
   it('M4: degrades the Tenant link to the raw id when the contact cannot be loaded', async () => {
@@ -163,8 +172,10 @@ describe('PlacementDetail', () => {
     expect(screen.getByRole('heading', { name: 'Record inspection outcome' })).toBeInTheDocument();
     expect(transitionPlacement).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole('radio', { name: 'Fail' }));
-    await user.click(screen.getByRole('button', { name: 'Confirm move' }));
+    // Scope to the move dialog — the in-place recorder also has Pass/Fail radios.
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('radio', { name: 'Fail' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
     await waitFor(() =>
       expect(transitionPlacement).toHaveBeenCalledWith('c1', {
         toStage: 'determine_rent',
@@ -183,9 +194,60 @@ describe('PlacementDetail', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_hap_contract');
     const dialog = screen.getByRole('dialog');
     const input = within(dialog).getByLabelText(/Final contract rent/i);
+    // The modal prefills the recorded final_rent (in-place stage-data); clear it
+    // to exercise the ≤0 rejection.
+    await user.clear(input);
     await user.type(input, '0');
     expect(within(dialog).getByRole('button', { name: 'Confirm move' })).toBeDisabled();
     expect(transitionPlacement).not.toHaveBeenCalled();
+  });
+
+  it('the move into awaiting_inspection prompts for the inspection date, forwarding it', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'schedule_inspection' });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_inspection' });
+    renderAt();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Schedule inspection/ })).toBeInTheDocument());
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_inspection');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Schedule inspection' })).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    const input = within(dialog).getByLabelText(/Inspection date/i);
+    fireEvent.change(input, { target: { value: '2026-07-20' } });
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_inspection',
+        source: 'manual',
+        inspectionDate: '2026-07-20',
+      }),
+    );
+  });
+
+  it('the move into awaiting_rent_acceptance prompts for the determined rent, forwarding it', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
+    renderAt();
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Determine rent/ })).toBeInTheDocument());
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_rent_acceptance');
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Confirm determined rent' })).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    const input = within(dialog).getByLabelText(/Determined rent/i);
+    await user.type(input, '1850');
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_rent_acceptance',
+        source: 'manual',
+        rentDetermined: 1850,
+      }),
+    );
   });
 
   it('live-updates the page fields when a placement.updated event for this placement arrives', async () => {
@@ -218,5 +280,145 @@ describe('PlacementDetail', () => {
     });
     // No refetch for an unrelated placement.
     expect(getPlacement).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the inspection date + determined rent rows when present', async () => {
+    getPlacement.mockResolvedValue({
+      ...CASE,
+      inspection_date: '2026-06-20',
+      rent_determined: 1450,
+    });
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting inspection/ });
+    expect(screen.getByText('Inspection date')).toBeInTheDocument();
+    expect(screen.getByText('Determined rent')).toBeInTheDocument();
+    expect(screen.getByText('$1,450/mo')).toBeInTheDocument();
+  });
+
+  it('shows the paperwork checklist at complete_paperwork, with LIF only for a LIF-eligible tenant', async () => {
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    getContact.mockResolvedValue({
+      contactId: 't1',
+      type: 'tenant',
+      firstName: 'Tasha',
+      lastName: 'Nguyen',
+      lifEligible: true,
+    });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+    expect(screen.getByRole('checkbox', { name: 'Lease signed' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Move-in details shared' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /LIF/ })).toBeInTheDocument();
+  });
+
+  it('omits the LIF checkbox when the tenant is not LIF-eligible', async () => {
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    // tenant has no lifEligible flag (default beforeEach contact)
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+    expect(screen.getByRole('checkbox', { name: 'Lease signed' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /LIF/ })).not.toBeInTheDocument();
+  });
+
+  it('does not render the paperwork checklist outside complete_paperwork', async () => {
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting inspection/ });
+    expect(screen.queryByRole('checkbox', { name: 'Lease signed' })).not.toBeInTheDocument();
+  });
+
+  it('toggling a paperwork checkbox PATCHes the placement with that field', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    updatePlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork', lease_signed: true });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+
+    await user.click(screen.getByRole('checkbox', { name: 'Lease signed' }));
+    await waitFor(() => expect(updatePlacement).toHaveBeenCalledWith('c1', { lease_signed: true }));
+  });
+
+  // --- In-place stage-data entry (StageDataCard) ---------------------------
+  it('records the inspection outcome in place at awaiting_inspection (PATCH, no move)', async () => {
+    const user = userEvent.setup();
+    // default CASE stage is awaiting_inspection
+    updatePlacement.mockResolvedValue({ ...CASE, inspection_outcome: 'fail' });
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting inspection/ });
+    await user.click(screen.getByRole('radio', { name: 'Fail' }));
+    await user.click(screen.getByRole('button', { name: /Record inspection outcome/ }));
+    await waitFor(() => expect(updatePlacement).toHaveBeenCalledWith('c1', { inspection_outcome: 'fail' }));
+    expect(transitionPlacement).not.toHaveBeenCalled();
+  });
+
+  it('records the inspection date in place at schedule_inspection (PATCH placement)', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'schedule_inspection' });
+    updatePlacement.mockResolvedValue({ ...CASE, stage: 'schedule_inspection', inspection_date: '2026-07-20' });
+    renderAt();
+    await screen.findByRole('heading', { name: /Schedule inspection/ });
+    await user.type(screen.getByLabelText('Inspection date'), '2026-07-20');
+    await user.click(screen.getByRole('button', { name: /Record inspection date/ }));
+    await waitFor(() => expect(updatePlacement).toHaveBeenCalledWith('c1', { inspection_date: '2026-07-20' }));
+  });
+
+  it('records the determined rent in place at determine_rent (PATCH placement)', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    updatePlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent', rent_determined: 1850 });
+    renderAt();
+    await screen.findByRole('heading', { name: /Determine rent/ });
+    await user.type(screen.getByLabelText('Determined rent (monthly)'), '1850');
+    await user.click(screen.getByRole('button', { name: /Record determined rent/ }));
+    await waitFor(() => expect(updatePlacement).toHaveBeenCalledWith('c1', { rent_determined: 1850 }));
+  });
+
+  it('records the accepted final rent in place at awaiting_rent_acceptance (PATCH the unit)', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
+    updateUnit.mockResolvedValue({ ...UNIT, final_rent: 1875 });
+    renderAt();
+    await screen.findByRole('heading', { name: /Awaiting rent acceptance/ });
+    const input = screen.getByLabelText('Accepted rent (monthly)');
+    await user.clear(input);
+    await user.type(input, '1875');
+    await user.click(screen.getByRole('button', { name: /Record accepted rent/ }));
+    await waitFor(() => expect(updateUnit).toHaveBeenCalledWith('u1', { final_rent: 1875 }));
+  });
+
+  it('does not render the stage-data card outside its data stages', async () => {
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+    expect(screen.queryByRole('button', { name: /Record inspection outcome/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Record accepted rent/ })).not.toBeInTheDocument();
+  });
+
+  it('the moveInReady gate confirms (with the LIF-pending note) then transitions to awaiting_move_in', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'complete_paperwork' });
+    getContact.mockResolvedValue({
+      contactId: 't1',
+      type: 'tenant',
+      firstName: 'Tasha',
+      lastName: 'Nguyen',
+      lifEligible: true,
+    });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_move_in' });
+    renderAt();
+    await screen.findByRole('heading', { name: /Complete paperwork/ });
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_move_in');
+    expect(screen.getByRole('heading', { name: 'Confirm move-in ready' })).toBeInTheDocument();
+    // LIF-eligible tenant with lif unset → the pending note shows.
+    expect(screen.getByText(/LIF is not marked/i)).toBeInTheDocument();
+    expect(transitionPlacement).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('c1', {
+        toStage: 'awaiting_move_in',
+        source: 'manual',
+      }),
+    );
   });
 });

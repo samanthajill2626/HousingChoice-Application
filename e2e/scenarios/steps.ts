@@ -90,6 +90,12 @@ function formatUsPhone(e164: string): string {
   return `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6, 10)}`;
 }
 
+/** Mirror of the dashboard's formatMoney (listingFormat.ts) — "$1,450" — so a
+ *  rendered rent value (e.g. "$1,450/mo") can be asserted by exact visible text. */
+function formatMoneyLabel(amount: number): string {
+  return `$${Math.round(amount).toLocaleString('en-US')}`;
+}
+
 // ==== Tour scheduling + reminder-ladder vocabulary (tours-sequence) ==========
 
 /** Escape a literal string for embedding in a RegExp. */
@@ -2412,6 +2418,276 @@ export class Scenario {
     });
   }
 
+  // ==== Approval & Move-in verbs (documentation/approval-and-move-in-…) =======
+  // The 6th/final placements sequence: authority-approval → move-in. Team drives
+  // every stage move through the REAL PlacementDetail "Move to…" picker; four
+  // moves are GATED by a MovePromptModal (a role="dialog" named by its title):
+  //   - schedule_inspection → awaiting_inspection   ⇒ inspectionDate (date input)
+  //   - OUT of awaiting_inspection (→ determine_rent) ⇒ inspectionOutcome (pass/fail)
+  //   - determine_rent → awaiting_rent_acceptance   ⇒ rentDetermined (money input)
+  //   - OUT of awaiting_rent_acceptance (→ awaiting_hap_contract) ⇒ finalRent (money)
+  //   - complete_paperwork → awaiting_move_in       ⇒ moveInReady (confirm, maybe LIF)
+  // Un-gated moves reuse teamMovesPlacementTo / expectPlacementStage. Derivations
+  // write the entity STATUS directly (no derivedStatus): at awaiting_move_in the
+  // property reads 'finalizing'; at moved_in the property reads 'occupied' and the
+  // tenant reads 'placed' — read those via the API + the rendered label.
+
+  /**
+   * [Team, MANUAL] Move schedule_inspection → Awaiting inspection, filling the
+   * gated Schedule-inspection date modal (the landlord's scheduled inspection
+   * date, `YYYY-MM-DD`). Asserts the destination stage renders.
+   */
+  teamMovesPlacementToWithInspectionDate(date: string): Promise<void> {
+    return step(`Team moves the placement → Awaiting inspection (inspection ${date})`, async () => {
+      const dialog = await this.openMovePrompt('Awaiting inspection', 'Schedule inspection');
+      await dialog.getByLabel('Inspection date').fill(date);
+      await this.confirmMovePrompt(dialog, 'Awaiting inspection');
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Record the inspection outcome on the MOVE out of Awaiting
+   * inspection (the move still asks pass/fail). Scoped to the move dialog — the
+   * in-place recorder card also has Pass/Fail radios. Used for the happy-path pass.
+   */
+  teamRecordsInspectionOutcome(outcome: 'pass' | 'fail'): Promise<void> {
+    const radioName = outcome === 'pass' ? 'Pass' : 'Fail';
+    return step(`Team records inspection outcome (on the move) → ${radioName}`, async () => {
+      const dialog = await this.openMovePrompt('Determine rent', 'Record inspection outcome');
+      await dialog.getByRole('radio', { name: radioName }).check();
+      await this.confirmMovePrompt(dialog, 'Determine rent');
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Record the inspection outcome IN PLACE via the StageDataCard at
+   * Awaiting inspection — NO stage move (the placement stays put; the outcome is a
+   * recorded fact). The recorder card's Pass/Fail radios are the only radios on the
+   * page when no move dialog is open.
+   */
+  teamRecordsInspectionOutcomeInPlace(outcome: 'pass' | 'fail'): Promise<void> {
+    const radioName = outcome === 'pass' ? 'Pass' : 'Fail';
+    return step(`Team records inspection outcome IN PLACE → ${radioName}`, async () => {
+      await this.page.getByRole('radio', { name: radioName }).check();
+      await this.page.getByRole('button', { name: 'Record inspection outcome' }).click();
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Move determine_rent → Awaiting rent acceptance, filling the
+   * gated determined-rent money modal (the rent the authority determined).
+   */
+  teamMovesPlacementToWithRentDetermined(amount: number): Promise<void> {
+    return step(`Team moves the placement → Awaiting rent acceptance (determined ${formatMoneyLabel(amount)})`, async () => {
+      const dialog = await this.openMovePrompt('Awaiting rent acceptance', 'Confirm determined rent');
+      await dialog.getByLabel('Determined rent (monthly)').fill(String(amount));
+      await this.confirmMovePrompt(dialog, 'Awaiting rent acceptance');
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Accept the rent on the move OUT of Awaiting rent acceptance →
+   * Awaiting HAP contract, filling the existing finalRent money modal (the
+   * accepted contract rent, written onto the property/unit). Must be > 0.
+   */
+  teamAcceptsRent(finalAmount: number): Promise<void> {
+    return step(`Team accepts rent → Awaiting HAP contract (final ${formatMoneyLabel(finalAmount)})`, async () => {
+      const dialog = await this.openMovePrompt('Awaiting HAP contract', 'Confirm final rent');
+      await dialog.getByLabel('Final contract rent (monthly)').fill(String(finalAmount));
+      await this.confirmMovePrompt(dialog, 'Awaiting HAP contract');
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Tick a complete-paperwork checklist item on PlacementDetail
+   * (rendered only at `complete_paperwork`). Each toggle PATCHes the placement;
+   * the LIF row exists only for a LIF-eligible tenant. Idempotent (`.check()`).
+   */
+  teamTicksPaperwork(item: 'lease' | 'moveInDetails' | 'lif'): Promise<void> {
+    const name = item === 'lease' ? /Lease signed/ : item === 'moveInDetails' ? /Move-in details shared/ : /LIF/;
+    return step(`Team ticks paperwork: ${item}`, async () => {
+      const id = this.requireActivePlacementId();
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      const box = this.page.getByRole('checkbox', { name });
+      await expect(box).toBeVisible({ timeout: 10_000 });
+      // The checkbox is a CONTROLLED input whose `checked` is driven by the
+      // placement row: a click PATCHes the placement and only flips once the
+      // async round-trip resolves + re-renders. So Playwright's strict `check()`
+      // (which asserts the state changed immediately) sees React revert the
+      // native toggle and fails. Click only when not already checked, then poll
+      // `toBeChecked` (retries through the PATCH + re-render).
+      if (!(await box.isChecked())) await box.click();
+      await expect(box).toBeChecked({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [Team, MANUAL] Confirm the placement is ready for move-in — the move
+   * complete_paperwork → Awaiting move-in via the readiness modal (always
+   * confirmable; it carries the "LIF not marked" advisory when applicable). We
+   * simply confirm past it. Asserts the destination stage renders.
+   *
+   * `opts.lifUnconfirmed` asserts the LIF advisory state IN the modal before
+   * confirming (the diagram's "noting unconfirmed LIF for a LIF-eligible
+   * tenant"): `true` → the "LIF is not marked" alert MUST be present (a
+   * LIF-eligible tenant with LIF unticked); `false` → NO such alert (a
+   * non-LIF-eligible tenant). Omitted → no advisory assertion.
+   */
+  teamConfirmsMoveInReady(opts?: { lifUnconfirmed?: boolean }): Promise<void> {
+    return step('Team confirms move-in ready → Awaiting move-in', async () => {
+      const dialog = await this.openMovePrompt('Awaiting move-in', 'Confirm move-in ready');
+      if (opts?.lifUnconfirmed === true) {
+        await expect(dialog.getByRole('alert')).toContainText('LIF is not marked', { timeout: 10_000 });
+      } else if (opts?.lifUnconfirmed === false) {
+        await expect(dialog.getByRole('alert')).toHaveCount(0);
+      }
+      await this.confirmMovePrompt(dialog, 'Awaiting move-in');
+    });
+  }
+
+  /**
+   * [App] The scheduled inspection date persisted on the placement (API) AND the
+   * "Inspection date" row surfaces in the Placement card. The rendered date value
+   * is timezone-sensitive (shortDate parses the bare `YYYY-MM-DD` as UTC), so the
+   * API pins the exact value and the UI check asserts the row RENDERED.
+   */
+  expectInspectionDateShown(date: string): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: inspection date ${date} recorded on the placement`, async () => {
+      const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { placement } = (await res.json()) as { placement: { inspection_date?: string } };
+      expect(placement.inspection_date).toBe(date);
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Placement' }) });
+      await expect(card.getByText('Inspection date')).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] The determined rent persisted on the placement (API) AND Team SEES it in
+   * the Placement card as "$<amount>/mo" (formatMoney; deterministic).
+   */
+  expectDeterminedRentShown(amount: number): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: determined rent ${formatMoneyLabel(amount)} shown on the placement`, async () => {
+      const res = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { placement } = (await res.json()) as { placement: { rent_determined?: number } };
+      expect(placement.rent_determined).toBe(amount);
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Placement' }) });
+      await expect(card.getByText(`${formatMoneyLabel(amount)}/mo`)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] The accepted final rent persisted on the property/unit (API — final_rent
+   * lives on the linked unit) AND Team SEES it in the Placement card as
+   * "$<amount>/mo" (the detail page reads unit.final_rent).
+   */
+  expectFinalRentShown(amount: number): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: final rent ${formatMoneyLabel(amount)} shown on the placement`, async () => {
+      const pRes = await this.page.request.get(`${NEXT}/api/placements/${id}`);
+      expect(pRes.ok(), await pRes.text()).toBeTruthy();
+      const { placement } = (await pRes.json()) as { placement: { unitId: string } };
+      const uRes = await this.page.request.get(`${NEXT}/api/units/${placement.unitId}`);
+      expect(uRes.ok(), await uRes.text()).toBeTruthy();
+      const { unit } = (await uRes.json()) as { unit: { final_rent?: number } };
+      expect(unit.final_rent).toBe(amount);
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Placement' }) });
+      await expect(card.getByText(`${formatMoneyLabel(amount)}/mo`)).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] The complete-paperwork checklist renders on PlacementDetail: "Lease
+   * signed" + "Move-in details shared" checkboxes are always present; the LIF row
+   * is a checkbox only when the tenant is LIF-eligible (`lif:true`), otherwise the
+   * honest "LIF — not applicable for this tenant." line (no checkbox). Scoped to
+   * the Paperwork card.
+   */
+  expectPaperworkChecklist(opts: { lif: boolean }): Promise<void> {
+    const id = this.requireActivePlacementId();
+    return step(`App: the paperwork checklist renders (LIF ${opts.lif ? 'row' : 'N/A'})`, async () => {
+      await this.page.goto(`${NEXT}/placements/${id}`);
+      const card = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Paperwork' }) });
+      await expect(card.getByRole('checkbox', { name: /Lease signed/ })).toBeVisible({ timeout: 10_000 });
+      await expect(card.getByRole('checkbox', { name: /Move-in details shared/ })).toBeVisible();
+      if (opts.lif) {
+        await expect(card.getByRole('checkbox', { name: /LIF/ })).toBeVisible();
+      } else {
+        await expect(card.getByRole('checkbox', { name: /LIF/ })).toHaveCount(0);
+        await expect(card.getByText(/LIF — not applicable/)).toBeVisible();
+      }
+    });
+  }
+
+  /**
+   * [App] The move into awaiting_move_in DERIVED the property to Finalizing:
+   * unit.status === 'finalizing' (API) AND Team SEES the "Finalizing" badge in the
+   * property-detail header (scoped to the h1, mirroring expectUnitUnderApplication).
+   */
+  expectPropertyFinalizing(unit: Unit): Promise<void> {
+    return step('App: property reads Finalizing', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { unit: u } = (await res.json()) as { unit: { status?: string } };
+      expect(u.status).toBe('finalizing');
+      await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
+      await expect(
+        this.page.getByRole('heading', { level: 1 }).getByText('Finalizing', { exact: true }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] Move-in DERIVED the property to Occupied: unit.status === 'occupied'
+   * (API) AND Team SEES the "Occupied" badge in the property-detail header.
+   */
+  expectPropertyOccupied(unit: Unit): Promise<void> {
+    return step('App: property reads Occupied', async () => {
+      const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { unit: u } = (await res.json()) as { unit: { status?: string } };
+      expect(u.status).toBe('occupied');
+      await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
+      await expect(
+        this.page.getByRole('heading', { level: 1 }).getByText('Occupied', { exact: true }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /**
+   * [App] Move-in DERIVED the tenant to Placed: contact.status === 'placed' (API)
+   * AND Team SEES 'Placed' in the tenant Details card. Resolves the tenant by
+   * phone (self-contained — not reliant on which contact is currently active).
+   */
+  expectTenantPlaced(tenant: Tenant): Promise<void> {
+    return step('App: tenant derived to Placed on move-in', async () => {
+      const id = await this.findTenantContactIdByPhone(tenant.phone);
+      const res = await this.page.request.get(`${NEXT}/api/contacts/${id}`);
+      expect(res.ok(), await res.text()).toBeTruthy();
+      const { contact } = (await res.json()) as { contact: { status?: string } };
+      expect(contact.status).toBe('placed');
+      await this.page.goto(`${NEXT}/contacts/${id}`);
+      const details = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Details' }) });
+      await expect(details.getByText('Placed')).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
   // ==== Scheduled-message visibility verbs ====================================
   // documentation/…/scheduled-message-visibility. Two surfaces:
   //   - Part A: the tour Reminders panel on /tours/:id — the armed ladder, each
@@ -2596,6 +2872,40 @@ export class Scenario {
   private async saveEditDialog(dialog: import('@playwright/test').Locator): Promise<void> {
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+  }
+
+  /** Open the PlacementDetail "Move to…" picker on the active placement, select
+   *  `stageLabel` (a STAGE_LABELS display string) — which opens the gated
+   *  MovePromptModal — and return the modal (a role="dialog" named `dialogName`,
+   *  its title). Navigates to the placement first, mirroring teamMovesPlacementTo. */
+  private async openMovePrompt(
+    stageLabel: string,
+    dialogName: string,
+  ): Promise<import('@playwright/test').Locator> {
+    const id = this.requireActivePlacementId();
+    await this.page.goto(`${NEXT}/placements/${id}`);
+    const picker = this.page.getByRole('combobox', { name: 'Move to stage' });
+    await expect(picker).toBeVisible({ timeout: 10_000 });
+    await picker.selectOption({ label: stageLabel });
+    const dialog = this.page.getByRole('dialog', { name: dialogName });
+    await expect(dialog).toBeVisible();
+    return dialog;
+  }
+
+  /** Confirm a MovePromptModal ("Confirm move") and wait for it to close. When
+   *  `expectedStageLabel` is given, assert the PlacementDetail h1 renders that
+   *  destination stage (substring — the h1 carries a trailing phase span). */
+  private async confirmMovePrompt(
+    dialog: import('@playwright/test').Locator,
+    expectedStageLabel?: string,
+  ): Promise<void> {
+    await dialog.getByRole('button', { name: 'Confirm move' }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    if (expectedStageLabel !== undefined) {
+      await expect(
+        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(expectedStageLabel)) }),
+      ).toBeVisible({ timeout: 10_000 });
+    }
   }
 
   /** Publish a unit to `available` via the listing-status route. */

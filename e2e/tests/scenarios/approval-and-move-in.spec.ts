@@ -231,9 +231,14 @@ test('marked deviation — inspection FAILS at Awaiting inspection → Lost (lan
   await flow.teamMovesPlacementToWithInspectionDate(INSPECTION_DATE);
   await flow.expectPlacementStage('Awaiting inspection');
 
-  // Inspection fails → the marked exit is LOST with landlord_lost_inspection. (The
-  // move to `lost` takes the Lost modal — which takes precedence over the outcome
-  // gate — so this is the deterministic Lost exit the writeup encodes.)
+  // Inspection fails → the outcome `fail` is RECORDED on the awaiting_inspection
+  // exit (the landlord re-inspects — back to Schedule inspection, the diagram's
+  // marked deviation), exercising the fail data path end-to-end...
+  await flow.teamRecordsInspectionOutcome('fail');
+  await flow.expectPlacementStage('Schedule inspection');
+  expect((await getPlacement(page, placementId)).inspection_outcome).toBe('fail');
+
+  // ...then the placement is LOST with landlord_lost_inspection (the marked exit).
   await flow.teamMovesPlacementTo('Lost', { lostReason: 'Failed inspection' });
   await flow.expectPlacementLost();
   expect((await getPlacement(page, placementId)).lost_reason).toMatchObject({

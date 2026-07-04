@@ -2319,16 +2319,19 @@ export class Scenario {
 
   /**
    * [Team, MANUAL] Record the inspection outcome on the move OUT of Awaiting
-   * inspection — select the "Determine rent" target (which opens the outcome
-   * modal), pick Pass/Fail, confirm. No destination-stage assert: a `fail` may
-   * route somewhere other than Determine rent (Task 10 asserts the stage).
+   * inspection. The outcome is captured on the exit regardless of destination;
+   * the destination follows the outcome per the diagram: a `pass` advances to
+   * Determine rent, a `fail` sends the landlord back to re-inspect (Schedule
+   * inspection). Selecting the target opens the outcome modal; pick Pass/Fail,
+   * confirm, and assert the resulting stage.
    */
   teamRecordsInspectionOutcome(outcome: 'pass' | 'fail'): Promise<void> {
     const radioName = outcome === 'pass' ? 'Pass' : 'Fail';
+    const toStage = outcome === 'pass' ? 'Determine rent' : 'Schedule inspection';
     return step(`Team records inspection outcome → ${radioName}`, async () => {
-      const dialog = await this.openMovePrompt('Determine rent', 'Record inspection outcome');
+      const dialog = await this.openMovePrompt(toStage, 'Record inspection outcome');
       await dialog.getByRole('radio', { name: radioName }).check();
-      await this.confirmMovePrompt(dialog);
+      await this.confirmMovePrompt(dialog, toStage);
     });
   }
 

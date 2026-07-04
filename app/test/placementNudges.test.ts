@@ -37,10 +37,10 @@ import type {
 import { SendRefusedError } from '../src/services/sendMessage.js';
 import {
   armNudgeForStage,
-  NUDGE_RUNGS,
   runDuePlacementNudges,
   type RunDuePlacementNudgesDeps,
 } from '../src/jobs/placementNudges.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 const FIXED_CREATED = '2026-07-03T00:00:00.000Z';
 
@@ -324,7 +324,7 @@ describe('runDuePlacementNudges', () => {
     await runDuePlacementNudges(NOW, deps);
     expect(send.sent).toHaveLength(1);
     expect(send.sent[0]!.conversationId).toBe('conv-tenant-1');
-    expect(send.sent[0]!.body).toBe(NUDGE_RUNGS.awaiting_receipt!.body);
+    expect(send.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
     expect(send.sent[0]!.author).toBe('teammate');
     expect(send.sent[0]!.automated).toBe(true);
   });
@@ -360,7 +360,7 @@ describe('runDuePlacementNudges', () => {
     await runDuePlacementNudges(NOW, deps);
     expect(send.sent).toHaveLength(1);
     expect(send.sent[0]!.conversationId).toBe('conv-landlord-1');
-    expect(send.sent[0]!.body).toBe(NUDGE_RUNGS.awaiting_approval!.body);
+    expect(send.sent[0]!.body).toBe(resolveMessage('nudge.approval_check'));
   });
 
   it('claim-wins-once: when claimSend returns false, no send happens', async () => {
@@ -470,7 +470,7 @@ describe('runDuePlacementNudges', () => {
     // ...and the nudge was sent into that new conversation.
     expect(send.sent).toHaveLength(1);
     expect(send.sent[0]!.conversationId).toBe(created[0]!.conversationId);
-    expect(send.sent[0]!.body).toBe(NUDGE_RUNGS.awaiting_approval!.body);
+    expect(send.sent[0]!.body).toBe(resolveMessage('nudge.approval_check'));
     expect(send.sent[0]!.automated).toBe(true);
   });
 

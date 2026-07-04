@@ -65,11 +65,11 @@ import {
 import type { PlacementStage } from '../lib/statusModel.js';
 import { LISTING_STATUS_LABELS } from '../lib/statusModel.js';
 import {
-  REMINDER_BODIES,
   resolveUsableGroup,
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
+import { resolveMessage } from '../messages/index.js';
 import {
   type ReminderKind,
   type TourReminderItem,
@@ -231,7 +231,11 @@ const NUDGE_RUNG_BY_KIND: Map<NudgeKind, NudgeRungInfo> = (() => {
   const map = new Map<NudgeKind, NudgeRungInfo>();
   for (const [stage, rung] of Object.entries(NUDGE_RUNGS)) {
     if (rung === undefined) continue;
-    map.set(rung.kind, { stage: stage as PlacementStage, recipient: rung.recipient, body: rung.body });
+    map.set(rung.kind, {
+      stage: stage as PlacementStage,
+      recipient: rung.recipient,
+      body: resolveMessage(`nudge.${rung.kind}`),
+    });
   }
   return map;
 })();
@@ -609,7 +613,7 @@ async function gatherUpcoming(params: {
             at: row.dueAt,
             source: 'tour_reminder',
             reminderKind: row.kind,
-            body: REMINDER_BODIES[row.kind],
+            body: resolveMessage(`tour.${row.kind}`),
             ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
             ...(suppression !== undefined && { suppression }),
             refType: 'tour',

@@ -33,6 +33,7 @@ import { buildTsMsgId, type MessageItem } from '../src/repos/messagesRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 const POOL = '+15550109000';
 const ALICE = '+15550100001';
@@ -399,7 +400,7 @@ describe('relay body/intro composition (M1.7)', () => {
     // Every intro (named or count-phrasing) leads with the registered brand + STOP.
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
       const body = composeIntroBody(names);
-      expect(body.startsWith('Tenant Place LLC. Reply STOP to opt out.')).toBe(true);
+      expect(body.startsWith(resolveMessage('relay.identity'))).toBe(true);
     }
   });
 });

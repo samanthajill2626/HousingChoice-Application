@@ -15,6 +15,7 @@ import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -411,9 +412,8 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
   // statusTransition choke point armed (mirrors the tour-reminder tick exactly).
   const FIXED_NOW = '2026-07-13T10:00:00.000Z';
   const TENANT_PHONE = '+15550400001';
-  // Canned rung body (jobs/placementNudges.ts NUDGE_RUNGS.awaiting_receipt).
-  const RECEIPT_BODY =
-    '[AUTO] Just checking in — did the rental application come through? Let us know if you need it re-sent.';
+  // Canned rung body (catalog `nudge.receipt_check`).
+  const RECEIPT_BODY = resolveMessage('nudge.receipt_check');
 
   /** Harness app + dev router sharing ONE world: the tick drains the world's
    *  placementNudges rows through the SAME repos and the 1:1 send lands on

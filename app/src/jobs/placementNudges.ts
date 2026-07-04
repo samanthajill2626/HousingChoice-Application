@@ -40,6 +40,7 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import { resolveMessage } from '../messages/index.js';
 
 // ---------------------------------------------------------------------------
 // The ladder: stage → the single nudge rung armed on entry.
@@ -49,35 +50,33 @@ interface NudgeRung {
   kind: NudgeKind;
   recipient: 'tenant' | 'landlord';
   delayMs: number;
-  body: string;
 }
 
 const HOUR = 60 * 60 * 1000;
 
+// The nudge BODY now lives in the message catalog (id `nudge.<kind>`); the rung
+// keeps only its routing/timing (kind/recipient/delayMs). Resolve the body via
+// resolveMessage(`nudge.${rung.kind}`) at the send/preview sites.
 export const NUDGE_RUNGS: Partial<Record<PlacementStage, NudgeRung>> = {
   awaiting_receipt: {
     kind: 'receipt_check',
     recipient: 'tenant',
     delayMs: 24 * HOUR,
-    body: '[AUTO] Just checking in — did the rental application come through? Let us know if you need it re-sent.',
   },
   awaiting_completion: {
     kind: 'completion_check',
     recipient: 'tenant',
     delayMs: 24 * HOUR,
-    body: '[AUTO] How is the application coming along? Text us here if you are stuck on anything.',
   },
   awaiting_approval: {
     kind: 'approval_check',
     recipient: 'landlord',
     delayMs: 24 * HOUR,
-    body: '[AUTO] Checking in — any decision yet on the application we sent over?',
   },
   awaiting_landlord_submission: {
     kind: 'rta_window_closing',
     recipient: 'landlord',
     delayMs: 36 * HOUR,
-    body: '[AUTO] Friendly reminder — the 48-hour RTA window is closing. Have you been able to submit it?',
   },
 };
 
@@ -376,7 +375,7 @@ async function processNudgeRow(
   try {
     await deps.sendMessageService({
       conversationId: conv.conversationId,
-      body: rung.body,
+      body: resolveMessage(`nudge.${rung.kind}`),
       author: 'teammate',
       automated: true,
     });

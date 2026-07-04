@@ -14,6 +14,7 @@ import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createContactTimelineRouter } from '../src/routes/contactTimeline.js';
+import { resolveMessage } from '../src/messages/index.js';
 import type { AppConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -568,10 +569,9 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 // (no DynamoDB) so the gather's three walks + suppression are exercised.
 // ---------------------------------------------------------------------------
 
-const CONFIRMATION_BODY =
-  "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
-const DAY_BEFORE_BODY = '[AUTO] Reminder: your property tour is tomorrow.';
-const APPROVAL_BODY = '[AUTO] Checking in — any decision yet on the application we sent over?';
+const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
+const DAY_BEFORE_BODY = resolveMessage('tour.day_before');
+const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 
 describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
   function makeGatherHarness(): { world: FakeWorld; app: Express } {

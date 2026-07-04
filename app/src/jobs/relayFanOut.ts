@@ -38,8 +38,9 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { RELAY_INTRO_IDENTITY, SMS_BRAND_NAME } from '../lib/smsCompliance.js';
+import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
+import { resolveMessage } from '../messages/index.js';
 import { defineJobHandler, enqueue } from './jobs.js';
 
 export const RELAY_FANOUT_JOB = 'relay.fanOut';
@@ -178,7 +179,10 @@ export function composeIntroBody(memberNames: (string | undefined)[]): string {
                 : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
           return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
         })();
-  return `${RELAY_INTRO_IDENTITY} ${connection}`;
+  // The RELAY_INTRO_IDENTITY prefix + a space is folded into the `relay.intro`
+  // catalog default; the count-plurality / Oxford-list `connection` string feeds
+  // the {members} token. Net sent text is byte-identical to before.
+  return resolveMessage('relay.intro', { members: connection });
 }
 
 export interface RelayIntroPayload {

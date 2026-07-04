@@ -21,7 +21,7 @@
 import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { REMINDER_BODIES } from '../jobs/tourReminders.js';
+import { resolveMessage } from '../messages/index.js';
 import {
   createTourRemindersRepo,
   type ReminderKind,
@@ -106,7 +106,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           kind: row.kind,
           dueAt: row.dueAt,
           state,
-          body: REMINDER_BODIES[row.kind],
+          body: resolveMessage(`tour.${row.kind}`),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(state === 'upcoming' && suppression !== undefined && { suppression }),

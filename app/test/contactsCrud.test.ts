@@ -405,7 +405,7 @@ describe('contact_status_changed milestone on the edit-form status write', () =>
     await authed(app).patch('/api/contacts/ll1').send({ status: 'active' }).expect(200);
     const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
     expect(ev).toHaveLength(1);
-    expect(ev[0].label).toContain('Active');
+    expect(ev[0]!.label).toContain('Active');
   });
 
   it('records NO status milestone when the edit does not change status', async () => {

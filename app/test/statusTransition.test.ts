@@ -905,7 +905,7 @@ describe('statusTransition — contact_status_changed milestone', () => {
     const ev = world.activityEvents.filter((e) => e.type === 'contact_status_changed');
     expect(ev).toHaveLength(1);
     expect(ev[0]).toMatchObject({ contactId: 'll-1', label: 'Status → Parked' }); // LANDLORD_STATUS_LABELS.parked
-    expect(ev[0].refType).toBeUndefined();
+    expect(ev[0]!.refType).toBeUndefined();
   });
 
   it('does NOT record when the status is unchanged (no-op)', async () => {
@@ -946,7 +946,7 @@ describe('statusTransition — placement stage milestone', () => {
     await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
     const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
     expect(ev).toHaveLength(1);
-    expect(ev[0].label).toContain('tenant_withdrew');
-    expect(ev[0].label).not.toContain('secret note');
+    expect(ev[0]!.label).toContain('tenant_withdrew');
+    expect(ev[0]!.label).not.toContain('secret note');
   });
 });

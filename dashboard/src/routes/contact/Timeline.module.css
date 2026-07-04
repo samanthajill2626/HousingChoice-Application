@@ -512,6 +512,16 @@ a.pill:focus-visible {
   font-style: italic;
 }
 
+/* Relay group (M1.7): the sender attribution line above a relayed message body —
+ * a member's name (an inbound member message) or "Team" (a team reply). Absent on
+ * a 1:1 bubble, so the 1:1 timeline is visually unchanged. */
+.relaySender {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-subtle);
+  margin-bottom: 2px;
+}
+
 .replyBox {
   width: 100%;
   /* One line by default (rows=1); useAutoGrowTextarea grows it to fit the draft

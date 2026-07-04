@@ -238,6 +238,39 @@ export interface ConversationsPage {
   nextCursor: string | null;
 }
 
+/** The owning entity of a relay_group thread. MIRRORS app/src/repos/
+ *  conversationsRepo.ts `RelayOwner` (getOwner) — a tour/placement reference, or
+ *  `{ type: null }` for a standalone/unowned group. Keep in sync. */
+export type RelayOwner = { type: 'tour' | 'placement'; id: string } | { type: null };
+
+/** GET /api/conversations/:id → { conversation }. The RAW ConversationItem the
+ *  relay-group view's header band reads — a SUPERSET of ConversationSummary that
+ *  carries the relay lifecycle fields (status/pool_number/owner/placement_tag)
+ *  the Group card needs. Do NOT substitute ConversationSummary (it lacks these).
+ *
+ *  GOTCHA: the operator tag rides ConversationItem's index signature under the
+ *  key `placement_tag` (NOT `tag`) and is untyped on the server — read it here.
+ *  `status` is `'open' | 'closed'` for a relay_group; a 1:1 only ever writes
+ *  `'open'`. The index signature carries anything extra the server projects. */
+export interface ConversationHeader {
+  conversationId: string;
+  type: ConversationType;
+  /** relay_group: 'open' | 'closed'; 1:1: 'open'. */
+  status: string;
+  /** External participant's phone / synthetic pool placeholder (E.164). */
+  participant_phone: string;
+  participants?: ConversationParticipant[];
+  /** The masked pool number fronting a relay_group (absent once closed / on 1:1). */
+  pool_number?: string;
+  /** The owning tour/placement, or `{ type: null }` / absent when standalone. */
+  owner?: RelayOwner;
+  /** Operator tag stamped at provisioning — NOTE the `placement_tag` key. */
+  placement_tag?: string;
+  /** Optimistic-concurrency version for the roster (absent until first mutation). */
+  participants_version?: number;
+  [key: string]: unknown;
+}
+
 // --- Placements / boards (M1.10) (legacy reuse — verbatim) ------------------
 // Copied unchanged from the legacy dashboard. The Today fallback
 // reads `stage`, `tour_date`, `next_deadline_type`, `next_deadline_at`,
@@ -1203,6 +1236,10 @@ export interface TimelineMessage extends TimelineBase {
    *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
    *  on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /** Relay group (M1.7): who authored a relayed message — a member's key
+   *  (contactId, else `phone#<E164>`) or the `'team'` sentinel (a team reply).
+   *  The relay-group view resolves it to a sender name; absent on 1:1 messages. */
+  relay_sender_key?: string;
 }
 export interface TimelineCall extends TimelineBase {
   kind: 'call';
@@ -1522,20 +1559,30 @@ export interface BroadcastUpdatedEvent {
 export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
 export type InboxChannel = 'sms' | 'mms' | 'call';
 
+/** One inbox row. A single WIDENED interface (not a union) mirroring the app's
+ *  `InboxRow` (app/src/routes/inbox.ts) VERBATIM: `channel`/`direction` are
+ *  OPTIONAL (a relay_group row omits them); the relay-only fields
+ *  (`conversationId`/`status`/`owner`) are present iff `kind === 'relay_group'`;
+ *  the group label rides the shared `name` field (formatted "With A & B"). Keep
+ *  in sync with the backend contract. */
 export interface InboxRow {
-  kind: 'contact' | 'unknown';
+  kind: 'contact' | 'unknown' | 'relay_group';
   contactId?: string; // present when kind='contact'
-  phone?: string; // E.164; the number (esp. for unknown rows)
-  name: string; // contact name, or formatted number when unknown
+  phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
+  name: string; // contact name, formatted number (unknown), or the group label (relay_group)
   role?: 'tenant' | 'landlord' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
-  unreadCount: number; // aggregate across ALL of the contact's numbers
-  preview: string; // latest item's text as a preview (UI shows one line, ellipsized)
-  channel: InboxChannel; // channel of the latest item
-  direction: 'inbound' | 'outbound'; // 'outbound' → render "You: …"
+  unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
+  preview: string; // latest item's text as a preview (relay: last_message_preview)
+  channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
+  direction?: 'inbound' | 'outbound'; // 'outbound' → render "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
   assignment?: { userId: string; name: string }; // the Assigned chip
-  needsTriage: boolean; // true for untriaged unknowns
+  needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  // --- relay_group only (present iff kind === 'relay_group') --------------------
+  conversationId?: string; // the relay conversation id → route /conversations/:conversationId
+  status?: 'open' | 'closed'; // the relay group's lifecycle status
+  owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 
 export interface InboxPage {

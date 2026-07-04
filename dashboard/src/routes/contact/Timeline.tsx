@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
+  ConversationParticipant,
   TimelineCall,
   TimelineItem,
   TimelineMessage,
@@ -99,6 +100,40 @@ export interface TimelineProps {
    *  re-clear it on that success — a plain send clears optimistically; this one
    *  can't, because its success happens outside handleSend. */
   clearDraftSignal?: number;
+  /** Relay group (M1.7): the current roster. When present, relayed message
+   *  bubbles resolve their `relay_sender_key` → a member name (or "Team") and an
+   *  outbound relay bubble shows a per-member "delivered N/M" summary. Absent on a
+   *  1:1 contact timeline → those bubbles are visually unchanged. */
+  relayRoster?: ConversationParticipant[];
+  /** Relay group is closed — show a standing note at the composer (sending is
+   *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
+  relayClosed?: boolean;
+}
+
+/** The relay member key convention (MIRRORS app relayMemberKey): the member's
+ *  contactId when set, else `phone#<E164>`. */
+function relayMemberKey(member: ConversationParticipant): string {
+  return member.contactId && member.contactId.length > 0
+    ? member.contactId
+    : `phone#${member.phone}`;
+}
+
+/** Resolve a relayed message's sender label: the `'team'` sentinel → "Team"; a
+ *  member key → that member's name (roster lookup); otherwise undefined (no
+ *  attribution line). Only meaningful for a relay bubble (relay_sender_key set). */
+function relaySenderLabel(
+  senderKey: string | undefined,
+  roster: ConversationParticipant[] | undefined,
+): string | undefined {
+  if (senderKey === undefined || senderKey.length === 0) return undefined;
+  if (senderKey === 'team') return 'Team';
+  for (const m of roster ?? []) {
+    if (relayMemberKey(m) === senderKey) {
+      const name = m.name?.trim();
+      return name && name.length > 0 ? name : undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
@@ -161,9 +196,12 @@ function MilestonePin({ ms }: { ms: TimelineMilestone }): React.JSX.Element {
 function MessageBubble({
   msg,
   onRetry,
+  relayRoster,
 }: {
   msg: TimelineMessage;
   onRetry?: (msg: TimelineMessage) => void;
+  /** Present in the relay-group view → enables sender attribution + delivered N/M. */
+  relayRoster?: ConversationParticipant[];
 }): React.JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
@@ -194,6 +232,22 @@ function MessageBubble({
   const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
     (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
   ).length;
+  // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
+  // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery as
+  // "delivered N/M" (N terminal-delivered of M fanned-out) from the SAME map the
+  // opted-out note reads. GUARDED to relay + outbound so a 1:1 bubble (no
+  // delivery_recipients) is visually unchanged.
+  const relaySlots = msg.delivery_recipients ? Object.values(msg.delivery_recipients) : null;
+  const deliveredSummary =
+    outbound && relaySlots !== null && relaySlots.length > 0
+      ? {
+          delivered: relaySlots.filter((r) => r.status === 'delivered').length,
+          total: relaySlots.length,
+        }
+      : null;
+  // Relay attribution: who authored this relayed message ("Team" or a member's
+  // name). Undefined on a 1:1 bubble (no relay_sender_key) → no attribution line.
+  const senderLabel = relaySenderLabel(msg.relay_sender_key, relayRoster);
   const toneClass = delivery
     ? ({
         neutral: styles.toneNeutral,
@@ -216,6 +270,9 @@ function MessageBubble({
       className={`${styles.bubble} ${outbound ? styles.out : styles.in} ${revealed ? styles.revealed ?? '' : ''}`}
       onClick={toggleMeta}
     >
+      {senderLabel !== undefined ? (
+        <div className={styles.relaySender ?? ''}>{senderLabel}</div>
+      ) : null}
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
       {attachments.length > 0 ? (
         sid ? (
@@ -271,6 +328,11 @@ function MessageBubble({
           >
             {delivery.label}
             {reason !== undefined ? ` - ${reason}` : ''}
+          </span>
+        ) : null}
+        {deliveredSummary !== null ? (
+          <span className={`${styles.status} ${styles.toneNeutral ?? ''}`}>
+            delivered {deliveredSummary.delivered}/{deliveredSummary.total}
           </span>
         ) : null}
       </div>
@@ -335,13 +397,15 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
 function StreamItem({
   item,
   onRetry,
+  relayRoster,
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
+  relayRoster?: ConversationParticipant[];
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
-      return <MessageBubble msg={item} onRetry={onRetry} />;
+      return <MessageBubble msg={item} onRetry={onRetry} {...(relayRoster !== undefined && { relayRoster })} />;
     case 'call':
       return <CallCard call={item} />;
     case 'milestone':
@@ -369,6 +433,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onRetry,
     optedOut,
     clearDraftSignal,
+    relayRoster,
+    relayClosed,
   } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
@@ -534,7 +600,12 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               <div key={`cluster-${ci}`} className={styles.day}>
                 {cluster.label ? <div className={styles.divider}>{cluster.label}</div> : null}
                 {cluster.items.map((item, ii) => (
-                  <StreamItem key={`${item.kind}:${item.id}:${ii}`} item={item} onRetry={onRetrySurfaced} />
+                  <StreamItem
+                    key={`${item.kind}:${item.id}:${ii}`}
+                    item={item}
+                    onRetry={onRetrySurfaced}
+                    {...(relayRoster !== undefined && { relayRoster })}
+                  />
                 ))}
               </div>
             ))
@@ -556,6 +627,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         {optedOut ? (
           <p className={styles.optOutNote} role="note">
             ⛔ On the Do-Not-Contact list — texting is disabled for this contact.
+          </p>
+        ) : null}
+        {relayClosed ? (
+          <p className={styles.optOutNote} role="note">
+            🔒 This group is closed — reopen it to send.
           </p>
         ) : null}
         <label className={styles.srOnly} htmlFor="reply-box">

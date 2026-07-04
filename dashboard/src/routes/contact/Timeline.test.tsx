@@ -536,3 +536,58 @@ describe('Timeline', () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe('Timeline relay-group annotations', () => {
+  const ROSTER = [
+    { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },
+    { contactId: 'c2', phone: '+14045550112', name: 'Lars Landlord' },
+  ];
+
+  const RELAY_OUT: TimelineItem = {
+    kind: 'message',
+    id: 'r1',
+    at: '2026-06-08T09:20:00',
+    conversationId: 'g1',
+    tsMsgId: 'r1',
+    direction: 'outbound',
+    author: 'teammate',
+    type: 'sms',
+    delivery_status: 'sent',
+    body: 'Team reply to the group',
+    relay_sender_key: 'team',
+    delivery_recipients: {
+      c1: { status: 'delivered' },
+      c2: { status: 'sent' },
+    },
+  };
+
+  it('shows a "delivered N/M" summary on an outbound relay bubble', () => {
+    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+    expect(screen.getByText('delivered 1/2')).toBeInTheDocument();
+    // Team attribution.
+    expect(screen.getByText('Team')).toBeInTheDocument();
+  });
+
+  it('attributes an inbound relay bubble to the sending member', () => {
+    const inbound: TimelineItem = {
+      kind: 'message',
+      id: 'r2',
+      at: '2026-06-08T09:25:00',
+      conversationId: 'g1',
+      tsMsgId: 'r2',
+      direction: 'inbound',
+      author: 'tenant',
+      type: 'sms',
+      delivery_status: 'delivered',
+      body: 'Thanks!',
+      relay_sender_key: 'c1',
+    };
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+    expect(screen.getByText('Keisha Kane')).toBeInTheDocument();
+  });
+
+  it('leaves a 1:1 bubble unchanged (no delivered summary, no attribution)', () => {
+    renderTimeline({ items: [MESSAGE_OUT] });
+    expect(screen.queryByText(/^delivered \d+\/\d+$/)).not.toBeInTheDocument();
+  });
+});

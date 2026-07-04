@@ -1,0 +1,169 @@
+/* twoPaneShell — the shared responsive shell for a detail page: a dark header
+ * band over a comms-LEFT / details-RIGHT two-pane body, with a segmented toggle
+ * at narrow widths (≤860px) that swaps which pane shows. Extracted from
+ * ContactDetail.module.css so ContactDetail AND ConversationDetail (the relay-
+ * group view) share ONE definition of the layout + breakpoint. Both consume
+ * these classes (ContactDetail via `composes:`, ConversationDetail by importing
+ * this module directly). Only the LAYOUT lives here — page-specific header
+ * decoration (avatar, pills, facts, call/kebab buttons) stays on each page's own
+ * module. All values from ui/tokens.css; the two panes scroll independently. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* --- Header band ---------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-header-bg);
+  color: var(--c-header-text);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.name {
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-lg);
+  color: var(--c-header-text);
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+/* --- Body (two panes) ----------------------------------------------------- */
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.left {
+  flex: 1.4;
+  min-width: 0;
+  display: flex;
+}
+
+.right {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--c-bg);
+  /* Bleed the scroller into the AppFrame content's RIGHT padding (var(--sp-5)) so
+   * its native scrollbar sits out in that edge gutter instead of flush against the
+   * cards. The cards keep their position via .rightInner's padding below. */
+  margin-right: calc(-1 * var(--sp-5));
+}
+
+/* The actual card column. Its right padding is the gutter between the cards and
+ * the bled scrollbar; the left padding separates them from the comms pane (it's
+ * dropped on narrow widths where there's no comms pane beside it). */
+.rightInner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5) var(--sp-3) var(--sp-3);
+}
+
+/* --- Narrow-width segmented toggle --------------------------------------- */
+
+.segMobile {
+  display: none;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.segBtn,
+.segOn {
+  font-size: var(--fs-sm);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-4);
+  cursor: pointer;
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
+.segOn {
+  background: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+  border-color: var(--c-nav-bg);
+}
+
+.segBtn:focus-visible,
+.segOn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Wide screens: both panes show; the mobile toggle + hide classes are inert. */
+.paneActive,
+.paneHidden {
+  /* default (wide): visible */
+}
+
+@media (max-width: 860px) {
+  /* Header: the actions drop to their own row so the identity gets the full
+   * width beside any leading element — otherwise wide action buttons starve the
+   * name column and a phone-number "name" shreds into stacked blocks. Below 860
+   * the nav is still a sidebar, so the content is already narrow enough to hit
+   * this. */
+  .header {
+    flex-wrap: wrap;
+  }
+  .identity {
+    flex: 1 1 auto;
+  }
+  .nameRow {
+    flex-wrap: wrap;
+  }
+  .actions {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+  .segMobile {
+    display: flex;
+  }
+  .body {
+    flex-direction: column;
+  }
+  .left,
+  .right {
+    flex: 1;
+    /* In the column layout the panes' main axis is vertical, so their default
+     * min-height:auto would refuse to shrink below content — ballooning comms to
+     * full height, pushing the reply box off-screen and forcing a page scroll on
+     * top of the stream's own scroll (double scrollbar). min-height:0 lets the
+     * pane shrink to the bounded body height so the stream scrolls internally. */
+    min-height: 0;
+  }
+  /* Single column: there's no comms pane beside the details pane, so drop its
+   * left inset — the AppFrame content padding (24px) is the only gutter needed. */
+  .rightInner {
+    padding-left: 0;
+  }
+  .paneHidden {
+    display: none;
+  }
+}

@@ -23,6 +23,8 @@ import type {
   ContactTimelinePage,
   ContactType,
   ContactVocabulary,
+  ConversationHeader,
+  ConversationParticipant,
   ConversationsPage,
   DevLoginResult,
   HistoryRow,
@@ -369,6 +371,98 @@ export function retryMessage(
     )}/retry`,
     { method: 'POST' },
   );
+}
+
+// --- Conversation header + relay-group management (/api/conversations) ------
+// The relay-group conversation view (/conversations/:id). GET the rich header,
+// read/manage the roster, and close/reopen. The header is the RAW ConversationItem
+// (ConversationHeader) — NOT the denormalized ConversationSummary. The roster
+// routes live on the relay-groups router (mounted at /api); a non-relay id 404s
+// the member/close routes (relay_group_not_found).
+
+/** GET /api/conversations/:id → { conversation }. The rich header (type / status /
+ *  pool_number / owner / placement_tag / participants) the relay-group view reads;
+ *  unwrapped here. Throws ApiError(404) when the conversation is missing. */
+export async function getConversation(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<ConversationHeader> {
+  const res = await request<{ conversation: ConversationHeader }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.conversation;
+}
+
+/** GET /api/conversations/:id/members → { members }. The relay group's current
+ *  roster (unwrapped). 404 relay_group_not_found for a non-relay / missing id. */
+export async function getConversationMembers(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.members;
+}
+
+/** POST /api/conversations/:id/members { phone, contactId?, name? } → { members }.
+ *  Idempotent add; returns the updated roster. Throws ApiError(409 roster_conflict)
+ *  on an optimistic-concurrency collision (the caller refetches the roster). */
+export async function addConversationMember(
+  conversationId: string,
+  member: { phone: string; contactId?: string; name?: string },
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    {
+      method: 'POST',
+      body: {
+        phone: member.phone,
+        ...(member.contactId !== undefined && { contactId: member.contactId }),
+        ...(member.name !== undefined && { name: member.name }),
+      },
+    },
+  );
+  return res.members;
+}
+
+/** DELETE /api/conversations/:id/members/:phone → { members }. Idempotent remove;
+ *  returns the updated roster. Throws ApiError(409 roster_conflict) on a collision. */
+export async function removeConversationMember(
+  conversationId: string,
+  phone: string,
+): Promise<ConversationParticipant[]> {
+  const res = await request<{ members: ConversationParticipant[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(phone)}`,
+    { method: 'DELETE' },
+  );
+  return res.members;
+}
+
+/** PATCH /api/conversations/:id/close { closed } → { conversation }. Closing
+ *  releases the pool number; reopening (closed=false) provisions a fresh one and
+ *  re-intros members. Returns the updated header. */
+export async function closeConversation(
+  conversationId: string,
+  closed: boolean,
+): Promise<ConversationHeader> {
+  const res = await request<{ conversation: ConversationHeader }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/close`,
+    { method: 'PATCH', body: { closed } },
+  );
+  return res.conversation;
+}
+
+/** POST /api/conversations/:id/read — zero the conversation's unread counter
+ *  (the operator opened the thread). Used by the relay-group view on view; the
+ *  1:1 mark-read stays the contact fan-out (markInboxRead). */
+export function markConversationRead(conversationId: string, signal?: AbortSignal): Promise<void> {
+  return request<void>(`/api/conversations/${encodeURIComponent(conversationId)}/read`, {
+    method: 'POST',
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** POST /api/units - create a unit (property) under a landlord. The body carries

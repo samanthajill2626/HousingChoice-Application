@@ -61,7 +61,7 @@ export interface ActivityEventItem {
   /** ISO 8601 — when the milestone happened (the timeline sort key). */
   at: string;
   type: ActivityEventType;
-  /** Human text, e.g. "Tour took place · Toured". May carry a name — never logged. */
+  /** Human text, e.g. "Tour took place - Toured". May carry a name — never logged. */
   label: string;
   /** Deep-link target type (link-out only; never inline content). */
   refType?: ActivityEventRefType;

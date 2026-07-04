@@ -1,5 +1,5 @@
 // BroadcastsList tests (§8) — the /broadcasts nav surface. Covers: rows render
-// (status pill · audience · delivered/total · date); the ?status= filter tabs
+// (status pill - audience - delivered/total - date); the ?status= filter tabs
 // re-query; "New broadcast" → composer; a row → Results; a draft row → composer
 // resume (?draftId=); cursor "Load more".
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -66,7 +66,7 @@ describe('BroadcastsList — rows', () => {
     renderList();
     const list = await screen.findByRole('list', { name: 'Broadcasts' });
     expect(within(list).getByText('Sent')).toBeInTheDocument();
-    expect(within(list).getByText('Tenants · 2-BR')).toBeInTheDocument();
+    expect(within(list).getByText('Tenants - 2-BR')).toBeInTheDocument();
     expect(within(list).getByText('3/4 delivered')).toBeInTheDocument();
   });
 

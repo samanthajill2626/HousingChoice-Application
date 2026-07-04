@@ -1,7 +1,7 @@
 // FlagPills — the go-live readiness flags (doc §6). Each flag renders as an
 // accessible pill: a label + a text state (state is NEVER conveyed by colour
 // alone). The two A2P kill-switches (smsSendingEnabled, relayLiveProvisioning),
-// when OFF, show an amber "Off · pre-A2P" pill — the EXPECTED pre-launch state,
+// when OFF, show an amber "Off - pre-A2P" pill — the EXPECTED pre-launch state,
 // deliberately distinct from a red/error pill and clearly labeled. The
 // the push flag reads on/off; env + driver are info pills. Flags always load
 // (no AWS call).
@@ -56,12 +56,12 @@ export function FlagPills(): React.JSX.Element {
           {/* A2P kill-switches: OFF is the EXPECTED pre-launch state (amber, not red). */}
           <Pill
             label="SMS sending"
-            state={flags.smsSendingEnabled ? 'On' : 'Off · pre-A2P'}
+            state={flags.smsSendingEnabled ? 'On' : 'Off - pre-A2P'}
             tone={flags.smsSendingEnabled ? 'on' : 'preA2p'}
           />
           <Pill
             label="Relay provisioning"
-            state={flags.relayLiveProvisioning ? 'On' : 'Off · pre-A2P'}
+            state={flags.relayLiveProvisioning ? 'On' : 'Off - pre-A2P'}
             tone={flags.relayLiveProvisioning ? 'on' : 'preA2p'}
           />
           <Pill

@@ -357,7 +357,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         who,
         why: DEADLINE_WHY[d.type],
         urgency: urgencyOf(d.at, now),
-        tag: `Placement · ${stageLabel(placement.stage)}`,
+        tag: `Placement - ${stageLabel(placement.stage)}`,
       };
       (isHardClock ? needsYouNow : followUps).push({ item, at: Number.isNaN(at) ? now : at });
     }
@@ -410,7 +410,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
                 who,
                 why: reason,
                 urgency: 'Escalated',
-                tag: `Placement · ${stageLabel(c.stage)}`,
+                tag: `Placement - ${stageLabel(c.stage)}`,
                 attention: true,
               },
               // Attention-only (no deadline) sorts among the overdue/most-urgent.
@@ -430,7 +430,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
               refId: c.placementId,
               who,
               why: STUCK_WHY,
-              tag: `Placement · ${stageLabel(c.stage)}`,
+              tag: `Placement - ${stageLabel(c.stage)}`,
             },
             // Stuck rows share "now" ordering (no deadline instant of their own).
             at: now,

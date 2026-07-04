@@ -411,7 +411,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // CONCURRENCY fan-out: chunk the ids and Promise.all each chunk, capping
       // in-flight getById round-trips at FETCH_CONCURRENCY. The raw list is
       // already capped at MAX_BROADCAST_RECIPIENTS pre-fetch (parse guard), so
-      // this only trims request latency (sequential awaits were 7–15s on a
+      // this only trims request latency (sequential awaits were 7-15s on a
       // 1500-id send) — it does NOT change which contacts survive. The fences,
       // de-dupe, contactKey convention, empty→400, and cap below are identical.
       const FETCH_CONCURRENCY = 50;

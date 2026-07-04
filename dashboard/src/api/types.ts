@@ -1,7 +1,7 @@
 // API entity types — the dashboard's view of the wire shapes it exchanges with
 // the backend (/api, /auth). Mirrors the server contract exactly. This file
 // starts with the auth shapes (B0.3); page phases extend it with the legacy
-// reuse + the §API Contract types (C1–C7) from the build plan.
+// reuse + the §API Contract types (C1-C7) from the build plan.
 
 /** Team role. admin = the founder role; va = virtual assistant. */
 export type UserRole = 'admin' | 'va';
@@ -176,7 +176,7 @@ export interface TodayItem {
   who: string; // display name / phone
   why: string; // "RTA window closing"
   urgency?: string; // "2h left"
-  tag?: string; // "Placement · Touring"
+  tag?: string; // "Placement - Touring"
   attention?: boolean;
 }
 export interface TodayResponse {
@@ -1216,7 +1216,7 @@ export interface TimelineCall extends TimelineBase {
 export interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
   type: TimelineMilestoneType;
-  label: string; // human text, e.g. "Tour took place · Toured"
+  label: string; // human text, e.g. "Tour took place - Toured"
   refType?: 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
   refId?: string; // deep-link target (links out, no inline content)
 }

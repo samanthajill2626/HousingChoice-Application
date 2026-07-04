@@ -1,6 +1,6 @@
 // FlagPills tests — the go-live readiness pills (doc §6). State is conveyed by
 // TEXT (queryable), never colour alone: the two A2P kill-switches show an amber
-// "Off · pre-A2P" pill when OFF; push reads on/off; env + driver
+// "Off - pre-A2P" pill when OFF; push reads on/off; env + driver
 // are info pills. Mocks the api layer's getSystemFlags.
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -33,12 +33,12 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
 describe('FlagPills', () => {
-  it('renders both A2P kill-switches as "Off · pre-A2P" when OFF (by accessible TEXT, not colour)', async () => {
+  it('renders both A2P kill-switches as "Off - pre-A2P" when OFF (by accessible TEXT, not colour)', async () => {
     getSystemFlags.mockResolvedValue(flags({ smsSendingEnabled: false, relayLiveProvisioning: false }));
     render(<FlagPills />);
 
     // Each disabled kill-switch surfaces the pre-A2P text — TWO of them.
-    await waitFor(() => expect(screen.getAllByText('Off · pre-A2P')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByText('Off - pre-A2P')).toHaveLength(2));
     // The label/value pairing is legible (SMS sending + Relay provisioning present).
     expect(screen.getByText('SMS sending')).toBeInTheDocument();
     expect(screen.getByText('Relay provisioning')).toBeInTheDocument();
@@ -48,7 +48,7 @@ describe('FlagPills', () => {
     getSystemFlags.mockResolvedValue(flags({ smsSendingEnabled: true, relayLiveProvisioning: true }));
     render(<FlagPills />);
     await waitFor(() => expect(screen.getAllByText('On')).toHaveLength(2));
-    expect(screen.queryByText('Off · pre-A2P')).not.toBeInTheDocument();
+    expect(screen.queryByText('Off - pre-A2P')).not.toBeInTheDocument();
   });
 
   it('shows push Configured/Not configured by text', async () => {

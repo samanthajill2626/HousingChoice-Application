@@ -23,7 +23,7 @@ describe('formatMoney', () => {
 
 describe('formatRent', () => {
   it('renders a range when min != max', () => {
-    expect(formatRent(1400, 1600)).toBe('$1,400–1,600');
+    expect(formatRent(1400, 1600)).toBe('$1,400-1,600');
   });
   it('renders a single value when only one side or equal', () => {
     expect(formatRent(1400, undefined)).toBe('$1,400');
@@ -70,7 +70,7 @@ describe('buildListingFacts', () => {
       jurisdiction: 'Atlanta',
     };
     expect(buildListingFacts(u, 'Porter Properties')).toBe(
-      '2 BR · 1 BA · $1,400–1,600/mo · West End, Atlanta · Porter Properties',
+      '2 BR - 1 BA - $1,400-1,600/mo - West End, Atlanta - Porter Properties',
     );
   });
   it('omits absent parts and the landlord when unknown', () => {
@@ -127,11 +127,11 @@ describe('describeUnitActivity', () => {
       describeUnitActivity(
         evt({ type: 'unit_contact_added', contactId: 'c1', contactName: 'Pat Manager', role: 'pm' }),
       ),
-    ).toEqual({ label: 'Contact added', sub: 'Pat Manager · Property manager', to: '/contacts/c1' });
+    ).toEqual({ label: 'Contact added', sub: 'Pat Manager - Property manager', to: '/contacts/c1' });
     // Unresolved contact → the id stands in; unknown role humanizes.
     expect(
       describeUnitActivity(evt({ type: 'unit_contact_added', contactId: 'c2', role: 'site_agent' })),
-    ).toEqual({ label: 'Contact added', sub: 'c2 · Site agent', to: '/contacts/c2' });
+    ).toEqual({ label: 'Contact added', sub: 'c2 - Site agent', to: '/contacts/c2' });
     expect(
       describeUnitActivity(evt({ type: 'unit_contact_removed', contactId: 'c1', contactName: 'Pat Manager' })),
     ).toEqual({ label: 'Contact removed', sub: 'Pat Manager', to: '/contacts/c1' });
@@ -142,7 +142,7 @@ describe('describeUnitActivity', () => {
       describeUnitActivity(
         evt({ type: 'listing_response_set', contactId: 'c1', contactName: 'Tina Renter', response: 'not_a_fit' }),
       ),
-    ).toEqual({ label: 'Tenant response · Not a fit', sub: 'Tina Renter', to: '/contacts/c1' });
+    ).toEqual({ label: 'Tenant response - Not a fit', sub: 'Tina Renter', to: '/contacts/c1' });
   });
 
   it('describes status changes via the property-status labels, flagging derived ones', () => {
@@ -155,7 +155,7 @@ describe('describeUnitActivity', () => {
       describeUnitActivity(
         evt({ type: 'listing_status_changed', from: 'available', to: 'under_application', source: 'derived' }),
       ),
-    ).toEqual({ label: 'Status changed to Under application', sub: 'from Available · automatic' });
+    ).toEqual({ label: 'Status changed to Under application', sub: 'from Available - automatic' });
     // No from recorded → no sub-line.
     expect(
       describeUnitActivity(evt({ type: 'listing_status_changed', to: 'available' })),

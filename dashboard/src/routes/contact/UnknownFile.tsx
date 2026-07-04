@@ -50,7 +50,7 @@ export function UnknownFile({
   // Placements that reference this contact (none expected for a fresh inbound, but show
   // them if a navigator linked one before triaging).
   const myPlacements = tenantPlacements(placements, contact.contactId);
-  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
+  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
 
   return (
@@ -99,7 +99,7 @@ export function UnknownFile({
               {phoneList || '—'}
               {onManagePhones ? (
                 <>
-                  {' · '}
+                  {' - '}
                   <CardInlineAction onClick={onManagePhones} label="Manage phone numbers">
                     Manage
                   </CardInlineAction>

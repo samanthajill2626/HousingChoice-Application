@@ -45,7 +45,7 @@ export function bedroomPhrase(beds: number): string {
 }
 
 /** A human audience summary for a list row / results header, e.g.
- *  "Tenants · 2-BR · Atlanta Housing". Always leads with "Tenants" (the only
+ *  "Tenants - 2-BR - Atlanta Housing". Always leads with "Tenants" (the only
  *  audience M1.8 targets); appends the size + authority narrowers when set. */
 export function audienceSummary(filter: AudienceFilter): string {
   const parts: string[] = ['Tenants'];
@@ -53,7 +53,7 @@ export function audienceSummary(filter: AudienceFilter): string {
   if (filter.housing_authority !== undefined && filter.housing_authority.length > 0) {
     parts.push(filter.housing_authority);
   }
-  return parts.join(' · ');
+  return parts.join(' - ');
 }
 
 /** Broadcast status → a human label. */

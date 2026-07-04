@@ -829,11 +829,11 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
                     ? 'reason on file'
                     : '')
               : '';
-          const reason = reasonText.length > 0 ? ` · ${reasonText}` : '';
+          const reason = reasonText.length > 0 ? ` - ${reasonText}` : '';
           await recordPlacementMilestone(
             tenantId,
             'placement_closed',
-            `Placement closed · ${stageLabel(item.stage)}${reason}`,
+            `Placement closed - ${stageLabel(item.stage)}${reason}`,
             placementId,
           );
         } else {
@@ -846,7 +846,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         item.tour_date.length > 0 &&
         item.tour_date !== before.tour_date
       ) {
-        await recordPlacementMilestone(tenantId, 'tour_scheduled', `Tour scheduled · ${item.tour_date}`, placementId);
+        await recordPlacementMilestone(tenantId, 'tour_scheduled', `Tour scheduled - ${item.tour_date}`, placementId);
       }
       // NOTE: tour_took_place milestone was derived from placement.tours[], which
       // is retired. When re-implemented against the first-class tours API,

@@ -1,7 +1,7 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
-// status) · Preferences & notes · Properties sent (C4) · Tours · Placements · Group
-// texts · Media (C5). Placements + Tours + Properties-sent + Group texts are REAL
+// status) - Preferences & notes - Properties sent (C4) - Tours - Placements - Group
+// texts - Media (C5). Placements + Tours + Properties-sent + Group texts are REAL
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
@@ -101,7 +101,7 @@ export function TenantFile({
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myPlacements = tenantPlacements(placements, contact.contactId);
-  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
+  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
   const housingAuthority = contact.housingAuthority ?? '—';
   const currentAddress = formatAddress(contact.address) || '—';
@@ -131,7 +131,7 @@ export function TenantFile({
               {phoneList || '—'}
               {onManagePhones ? (
                 <>
-                  {' · '}
+                  {' - '}
                   <CardInlineAction onClick={onManagePhones} label="Manage phone numbers">
                     Manage
                   </CardInlineAction>
@@ -157,7 +157,7 @@ export function TenantFile({
                 '—'
               )}
               {contact.porting === true ? (
-                <span className={responseClass.muted}> · Porting</span>
+                <span className={responseClass.muted}> - Porting</span>
               ) : null}
             </>
           }
@@ -224,7 +224,7 @@ export function TenantFile({
             <Row
               key={t.tourId}
               to={`/tours/${t.tourId}`}
-              label={`${unitLabel(unitMap, t.unitId)} · ${
+              label={`${unitLabel(unitMap, t.unitId)} - ${
                 t.scheduledAt !== undefined
                   ? new Date(t.scheduledAt).toLocaleDateString()
                   : 'Not booked'

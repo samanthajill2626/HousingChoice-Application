@@ -167,7 +167,7 @@ describe('ContactDetail', () => {
     expect(screen.getAllByText('Landlord').length).toBeGreaterThanOrEqual(1);
     // The landlord's own unit shows in the Properties card.
     await waitFor(() =>
-      expect(screen.getByRole('link', { name: /1450 Joseph Blvd · 2BR/ })).toBeInTheDocument(),
+      expect(screen.getByRole('link', { name: /1450 Joseph Blvd - 2BR/ })).toBeInTheDocument(),
     );
   });
 

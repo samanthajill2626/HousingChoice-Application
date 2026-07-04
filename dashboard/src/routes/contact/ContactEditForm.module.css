@@ -67,7 +67,7 @@
   outline-offset: 1px;
 }
 
-/* Address group — a labelled stack of street / unit / city·state·zip. */
+/* Address group — a labelled stack of street / unit / city-state-zip. */
 .fieldset {
   display: flex;
   flex-direction: column;

@@ -217,8 +217,8 @@ export function createStatusTransitionService(
     if (!activityEventsRepo || typeof tenantId !== 'string' || tenantId.length === 0) return;
     try {
       if (TERMINAL_STAGES.has(toStage)) {
-        const reason = lostCategory && lostCategory.length > 0 ? ` · ${lostCategory}` : (lostHasText ? ' · reason on file' : '');
-        await activityEventsRepo.record({ contactId: tenantId, type: 'placement_closed', label: `Placement closed · ${STAGE_LABELS[toStage]}${reason}`, refType: 'placement', refId: placementId });
+        const reason = lostCategory && lostCategory.length > 0 ? ` - ${lostCategory}` : (lostHasText ? ' - reason on file' : '');
+        await activityEventsRepo.record({ contactId: tenantId, type: 'placement_closed', label: `Placement closed - ${STAGE_LABELS[toStage]}${reason}`, refType: 'placement', refId: placementId });
       } else {
         await activityEventsRepo.record({ contactId: tenantId, type: 'stage_changed', label: `Stage → ${STAGE_LABELS[toStage]}`, refType: 'placement', refId: placementId });
       }

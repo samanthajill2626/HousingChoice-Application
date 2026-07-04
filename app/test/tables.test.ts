@@ -1,5 +1,5 @@
 // M0.3 contract tests for lib/tables.ts: all 9 tables, exact PK/SK and GSI
-// names per architecture doc v2.12 §5 (p.11–12), streams on messages+placements,
+// names per architecture doc v2.12 §5 (p.11-12), streams on messages+placements,
 // TTL on matches, and the TABLE_PREFIX name resolution helper.
 //
 // These assertions ARE the contract Terraform must mirror in M0.4 — if one of

@@ -492,7 +492,7 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
       return {
         ...base,
         type: 'listing_reviewed',
-        label: `Tenant response · ${typeof p['response'] === 'string' ? p['response'] : ''}`,
+        label: `Tenant response - ${typeof p['response'] === 'string' ? p['response'] : ''}`,
         refType: 'unit',
         refId: unitId,
       };

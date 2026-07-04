@@ -256,7 +256,7 @@ describe('ListingDetail', () => {
     });
     renderAt();
     // The response event links out to the tenant's contact file.
-    expect(screen.getByRole('link', { name: /Tenant response · Interested/ })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /Tenant response - Interested/ })).toHaveAttribute(
       'href',
       '/contacts/c-t1',
     );
@@ -401,7 +401,7 @@ describe('ListingDetail', () => {
     await user.click(screen.getByRole('button', { name: /More actions/i }));
     await user.click(screen.getByRole('menuitem', { name: /Delete property/i }));
 
-    // A confirm dialog appears � nothing deleted yet.
+    // A confirm dialog appears - nothing deleted yet.
     expect(screen.getByRole('dialog', { name: /Delete property\?/i })).toBeInTheDocument();
     expect(deleteUnit).not.toHaveBeenCalled();
 

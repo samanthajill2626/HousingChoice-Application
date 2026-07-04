@@ -170,8 +170,8 @@ export function buildTodayFromSources(
 
   for (const c of placements) {
     // `?? c.stage` guards an unknown stage (PlacementItem is a flexible server doc) so
-    // the tag never renders "Placement · undefined".
-    const tag = `Placement · ${STAGE_LABELS[c.stage] ?? c.stage}`;
+    // the tag never renders "Placement - undefined".
+    const tag = `Placement - ${STAGE_LABELS[c.stage] ?? c.stage}`;
     const deadlineType = c.next_deadline_type;
     const isFollowUp = deadlineType !== undefined && FOLLOW_UP_DEADLINES.has(deadlineType);
 
@@ -257,7 +257,7 @@ export function buildTodayFromSources(
           refId: contactRefId(conv),
           who: conversationWho(conv),
           why: 'New inbound — untriaged',
-          tag: 'Contact · Unknown',
+          tag: 'Contact - Unknown',
           attention: true,
         },
         sortAt: null,
@@ -274,7 +274,7 @@ export function buildTodayFromSources(
         refId: is1to1 ? contactRefId(conv) : conv.conversationId,
         who: conversationWho(conv),
         why: conv.preview ?? 'Unread message',
-        tag: `Contact · ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,
+        tag: `Contact - ${CONTACT_TYPE_LABELS[conv.type] ?? conv.type}`,
       });
     }
   }

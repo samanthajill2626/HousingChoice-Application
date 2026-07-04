@@ -16,7 +16,7 @@
 //
 // Pure function, no I/O, no logging.
 
-/** E.164 shape: `+` then 1–15 digits, first digit non-zero (ITU-T E.164). */
+/** E.164 shape: `+` then 1-15 digits, first digit non-zero (ITU-T E.164). */
 const E164_RE = /^\+[1-9]\d{1,14}$/;
 
 /**

@@ -451,7 +451,7 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
         const closed = mile.find((r) => r.type === 'placement_closed')!;
         expect(closed).toBeDefined();
         expect(iso(closed.tsEventId)).toBe(iso(String(p['stage_entered_at'])));
-        expect(closed.label.startsWith(`Placement closed · ${STAGE_LABELS[stage]}`)).toBe(true);
+        expect(closed.label.startsWith(`Placement closed - ${STAGE_LABELS[stage]}`)).toBe(true);
       }
     }
     // The alignment assertions must have actually run against both hop-milestone kinds.
@@ -478,7 +478,7 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     for (const r of rows) expect(r.contactId).toBe(toured!['tenantId']);
     const tookPlace = rows.find((r) => r.type === 'tour_took_place')!;
     // activityEventsRepo.ts:59 documents this exact label shape.
-    expect(tookPlace.label).toBe(`Tour took place · ${TOUR_STATUS_LABELS['toured']}`);
+    expect(tookPlace.label).toBe(`Tour took place - ${TOUR_STATUS_LABELS['toured']}`);
     expect(tookPlace.refType).toBe('unit');
     expect(tookPlace.refId).toBe(toured!['unitId']);
     expect(iso(tookPlace.tsEventId)).toBe(iso(String(toured!['scheduledAt'])));
@@ -502,7 +502,7 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     expect(sent.refId).toBe(send!['unitId']);
     expect(iso(sent.tsEventId)).toBe(iso(String(send!['sentAt'])));
     const reviewed = rows.find((r) => r.type === 'listing_reviewed')!;
-    expect(reviewed.label).toBe('Property reviewed · Interested'); // units.ts:708
+    expect(reviewed.label).toBe('Property reviewed - Interested'); // units.ts:708
     // a no_reply send has no review milestone
     const noReply = LISTING_SENDS.find((s) => s['response'] === 'no_reply');
     if (noReply) {

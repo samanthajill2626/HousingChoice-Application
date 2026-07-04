@@ -92,7 +92,7 @@ const BED_SIZES = [1, 2, 3, 4] as const;
 const beds = (i: number) => BED_SIZES[i % BED_SIZES.length]!;
 
 const TOUR_PROCESSES = [
-  'Self-guided lockbox; available Mon–Fri 9–5. Text to request code.',
+  'Self-guided lockbox; available Mon-Fri 9-5. Text to request code.',
   'Contact landlord at least 24h in advance to schedule a walkthrough.',
   'Property manager leads all tours; call to book.',
   'Self-guided with lockbox combo sent day of tour.',
@@ -389,7 +389,7 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
           stageEnteredAt = new Date(now.getTime() - 2 * DAY_MS);
           const validTypes = PHASE_DEADLINE_TYPES[phase];
           deadlineType = validTypes[counter % validTypes.length]!;
-          deadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2–4 weeks out
+          deadlineAt = daysFromNow(now, 14 + (counter % 14)); // 2-4 weeks out
           if (deadlineType === 'voucher_expiration') voucherExpirationDate = deadlineAt;
           break;
         }
@@ -497,7 +497,7 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
     const unitId = stableId('unit', stage, rep);
     const placementId = stableId('placement', stage, rep);
     const derived = deriveStatuses(stage);
-    // Moved in ~2–3 weeks ago; lease signed ~2 weeks before that.
+    // Moved in ~2-3 weeks ago; lease signed ~2 weeks before that.
     const moveInDate = daysAgo(now, 12 + rep * 4).slice(0, 10); // date-only (rep1: 16d, rep2: 20d ago)
     const leaseDate = daysAgo(now, 26 + rep * 4).slice(0, 10); // date-only (rep1: 30d, rep2: 34d ago)
     // Entered the terminal moved_in stage at move-in; journey began well before.
@@ -562,7 +562,7 @@ function buildPlacementsMatrix(now: Date): PlacementGroup[] {
     const unitId = stableId('unit', stage, rep);
     const placementId = stableId('placement', stage, rep);
     const derived = deriveStatuses(stage);
-    const stageEnteredAt = new Date(now.getTime() - (5 + rep * 3) * DAY_MS); // 8–11 days ago
+    const stageEnteredAt = new Date(now.getTime() - (5 + rep * 3) * DAY_MS); // 8-11 days ago
     const createdAt = journeyStart(stageEnteredAt, stage);
     // Alternate category sets for the two lost placements
     const lostCategory = rep === 1 ? LOST_CATEGORIES_A[0] : LOST_CATEGORIES_B[0];
@@ -667,7 +667,7 @@ function buildUnitsMatrix(placementGroups: PlacementGroup[]): UnitGroup[] {
   }
 
   // ~6 explicitly tourable 'available' units (distinct from any produced above)
-  // spread across authorities, beds 1–4, and all three tour-process types
+  // spread across authorities, beds 1-4, and all three tour-process types
   const tourableSpecs = [
     { authority: 'atlanta_housing', beds: 1, processType: 'self_guided' },
     { authority: 'ga_dca', beds: 2, processType: 'landlord_led' },
@@ -678,7 +678,7 @@ function buildUnitsMatrix(placementGroups: PlacementGroup[]): UnitGroup[] {
   ] as const;
 
   const TOURL_PROCESSES_BY_TYPE: Record<string, string> = {
-    self_guided: 'Self-guided lockbox; available daily 8am–6pm. Text for the code.',
+    self_guided: 'Self-guided lockbox; available daily 8am-6pm. Text for the code.',
     landlord_led: 'Contact landlord 24h ahead to schedule a guided walkthrough.',
     pm_team: 'Property management team shows the unit; call to set appointment.',
   };
@@ -919,7 +919,7 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
 
       // --- requested: timeless, zero reminders (invariant) -------------------
       if (status === 'requested') {
-        const createdAt = iso(nowMs - (2 + rep) * DAY_MS); // 3–4 days ago
+        const createdAt = iso(nowMs - (2 + rep) * DAY_MS); // 3-4 days ago
         groups.push({
           tour: { tourId, tenantId, unitId, status, tourType, createdAt, updatedAt: createdAt },
           reminders,

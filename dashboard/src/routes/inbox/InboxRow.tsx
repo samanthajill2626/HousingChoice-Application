@@ -77,7 +77,7 @@ export function InboxRow({
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
             {row.assignment ? (
               <span className={styles.assigned}>
-                Assigned · {row.assignment.userId === currentUserId ? 'You' : row.assignment.name}
+                Assigned - {row.assignment.userId === currentUserId ? 'You' : row.assignment.name}
               </span>
             ) : null}
           </span>

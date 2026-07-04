@@ -159,7 +159,7 @@ export function TemplatesSection(): React.JSX.Element {
         </div>
       ) : (
         <form className={styles.form} onSubmit={(e) => void onSave(e)}>
-          {/* Pre-ring pause (0–10s) */}
+          {/* Pre-ring pause (0-10s) */}
           <label className={styles.field}>
             <span className={styles.fieldLabel}>Pre-ring pause (seconds)</span>
             <input
@@ -178,7 +178,7 @@ export function TemplatesSection(): React.JSX.Element {
               }}
             />
             <span className={styles.hint}>
-              How far ahead the founder push lands before the bridge dials (0–10).
+              How far ahead the founder push lands before the bridge dials (0-10).
             </span>
           </label>
 

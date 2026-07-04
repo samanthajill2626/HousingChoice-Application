@@ -537,16 +537,16 @@ export function entityHistory(
 // MIRRORS of the real writers' type/label/refType (never invented):
 //   • placement_opened  routes/placements.ts:465  ("Placement opened", ref placement)
 //   • stage_changed     routes/placements.ts:556  ("Stage → <label>",  ref placement)
-//   • placement_closed  routes/placements.ts:552  ("Placement closed · <stage>[ · <cat>]")
+//   • placement_closed  routes/placements.ts:552  ("Placement closed - <stage>[ - <cat>]")
 //   • listing_sent      jobs/broadcastFanOut.ts:309 ("Property sent", ref unit)
-//   • listing_reviewed  routes/units.ts:708        ("Property reviewed · <resp>", ref unit)
+//   • listing_reviewed  routes/units.ts:708        ("Property reviewed - <resp>", ref unit)
 //   • number_added      routes/contacts.ts:1473    ("Number added", no ref)
 //   • tour_scheduled/tour_took_place — tours emit NO milestone at runtime today
 //     (research §WRITE-SHAPES.3: tour_took_place retired, tour_scheduled only from the
 //     legacy placement tour_date path). We materialize them directly from the tour
 //     entity so a tenant's timeline reflects their tour journey; labels follow the
-//     legacy `Tour scheduled · <date>` shape (placements.ts:565) and the repo's own
-//     documented `Tour took place · Toured` example (activityEventsRepo.ts:59).
+//     legacy `Tour scheduled - <date>` shape (placements.ts:565) and the repo's own
+//     documented `Tour took place - Toured` example (activityEventsRepo.ts:59).
 // Deterministic evt-* ids (hash8 of row identity) — the byte-stable analog of the
 // repo's random `evt-<uuid>`, extending matrix's deterministic evt-mx-… pattern.
 // ---------------------------------------------------------------------------
@@ -583,7 +583,7 @@ function makeActivityRow(
 }
 
 /**
- * The terminal-stage `Placement closed · …` reason suffix, CATEGORY-ONLY — a
+ * The terminal-stage `Placement closed - …` reason suffix, CATEGORY-ONLY — a
  * verbatim mirror of routes/placements.ts:539-548 (never fold the free text, which
  * is PII, into a stored label; when only text exists use the static "reason on file").
  */
@@ -599,7 +599,7 @@ function closedReasonSuffix(placement: Record<string, unknown>, stage: Placement
       : typeof text === 'string' && text.length > 0
         ? 'reason on file'
         : '';
-  return reasonText.length > 0 ? ` · ${reasonText}` : '';
+  return reasonText.length > 0 ? ` - ${reasonText}` : '';
 }
 
 /**
@@ -624,7 +624,7 @@ export function placementMilestones(placement: Record<string, unknown>): Activit
     if (TERMINAL_STAGES.has(stage)) {
       const reason = closedReasonSuffix(placement, stage);
       rows.push(
-        makeActivityRow(tenantId, at, 'placement_closed', `Placement closed · ${STAGE_LABELS[stage]}${reason}`, ref),
+        makeActivityRow(tenantId, at, 'placement_closed', `Placement closed - ${STAGE_LABELS[stage]}${reason}`, ref),
       );
     } else {
       rows.push(makeActivityRow(tenantId, at, 'stage_changed', `Stage → ${STAGE_LABELS[stage]}`, ref));
@@ -658,15 +658,15 @@ export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
   const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;
   const rows: ActivityRow[] = [];
   // The booking happened at tour creation (these seed tours are created already-
-  // scheduled); label follows the legacy `Tour scheduled · <date>` shape.
+  // scheduled); label follows the legacy `Tour scheduled - <date>` shape.
   const bookedAt = createdAt !== '' ? createdAt : scheduledAt;
   rows.push(
-    makeActivityRow(tenantId, bookedAt, 'tour_scheduled', `Tour scheduled · ${scheduledAt.slice(0, 10)}`, ref),
+    makeActivityRow(tenantId, bookedAt, 'tour_scheduled', `Tour scheduled - ${scheduledAt.slice(0, 10)}`, ref),
   );
   if (TOUR_TOOK_PLACE.has(status)) {
     // The tour happened at its scheduled time; label = the `toured` transition.
     rows.push(
-      makeActivityRow(tenantId, scheduledAt, 'tour_took_place', `Tour took place · ${TOUR_STATUS_LABELS['toured']}`, ref),
+      makeActivityRow(tenantId, scheduledAt, 'tour_took_place', `Tour took place - ${TOUR_STATUS_LABELS['toured']}`, ref),
     );
   }
   return rows;
@@ -674,8 +674,8 @@ export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
 
 /** interested/not_a_fit → the reviewed-response label (routes/units.ts:708). */
 const LISTING_REVIEW_LABEL: Readonly<Record<string, string>> = {
-  interested: 'Property reviewed · Interested',
-  not_a_fit: 'Property reviewed · Not a fit',
+  interested: 'Property reviewed - Interested',
+  not_a_fit: 'Property reviewed - Not a fit',
 };
 
 /**

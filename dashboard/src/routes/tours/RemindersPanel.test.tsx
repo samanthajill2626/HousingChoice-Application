@@ -78,7 +78,7 @@ describe('RemindersPanel', () => {
     } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
     await waitFor(() => expect(screen.getByText('Confirmation')).toBeInTheDocument());
-    expect(screen.getByText(/Sent ·/i)).toBeInTheDocument();
+    expect(screen.getByText(/Sent -/i)).toBeInTheDocument();
   });
 
   it('highlights the NEXT rung with aria-current and a "Next" tag', async () => {

@@ -4,7 +4,7 @@
 // (→ the full Contacts list) with three filtered children: Tenants / Landlords /
 // Unknown (untriaged inbounds). Settings sits in the footer.
 // 2026-07-02: Tours added to Workspace after Placements — founder-approved amendment to the locked nav.
-// 2026-07-04: Workspace reordered → Today · Contacts (+children) · Properties · Tours · Placements.
+// 2026-07-04: Workspace reordered → Today - Contacts (+children) - Properties - Tours - Placements.
 //
 // `end` marks an exact-match link (react-router NavLink `end`) so a parent route
 // isn't highlighted while a child route is active.

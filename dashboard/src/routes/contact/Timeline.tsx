@@ -175,7 +175,7 @@ function MessageBubble({
     formatTime(msg.at),
   ]
     .filter(Boolean)
-    .join(' · ');
+    .join(' - ');
   const attachments = msg.media_attachments ?? [];
   // Mirrored MMS attachments are served by the AUTHED same-origin endpoint
   // (the session cookie rides along) — never the provider URL or a data: URI.
@@ -203,7 +203,7 @@ function MessageBubble({
       }[delivery.tone] ?? '')
     : '';
 
-  // The transport · number · time line is hidden by default; a click/tap on the
+  // The transport - number - time line is hidden by default; a click/tap on the
   // bubble reveals it (the grouped time labels give the at-a-glance time). Don't
   // toggle while the user is selecting text in the bubble.
   const toggleMeta = (): void => {
@@ -270,7 +270,7 @@ function MessageBubble({
             {...(reason !== undefined && { title: reason })}
           >
             {delivery.label}
-            {reason !== undefined ? ` · ${reason}` : ''}
+            {reason !== undefined ? ` - ${reason}` : ''}
           </span>
         ) : null}
       </div>
@@ -311,7 +311,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
     call.party_phone ? formatPhone(call.party_phone) : null,
   ]
     .filter(Boolean)
-    .join(' · ');
+    .join(' - ');
 
   return (
     <div className={styles.callcard}>
@@ -409,7 +409,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
 
   // Group items into clusters (iMessage-style): a new cluster starts on a new day
   // OR a gap > 1h from the previous item. Each cluster gets a centered time label —
-  // new day → "Mon Jun 1 · 10:00a"; same-day gap → "1:30p". Items are already
+  // new day → "Mon Jun 1 - 10:00a"; same-day gap → "1:30p". Items are already
   // chronological from the hook.
   const clusters = useMemo(() => {
     const GAP_MS = 60 * 60 * 1000; // 1 hour
@@ -425,7 +425,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       if (out.length === 0 || newDay || bigGap) {
         const time = formatTime(item.at);
         const label =
-          out.length === 0 || newDay ? `${formatDayDivider(item.at)} · ${time}` : time;
+          out.length === 0 || newDay ? `${formatDayDivider(item.at)} - ${time}` : time;
         out.push({ label, items: [item] });
       } else {
         out[out.length - 1]!.items.push(item);

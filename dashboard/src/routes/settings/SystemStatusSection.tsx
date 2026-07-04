@@ -6,7 +6,7 @@
 //
 // A11y: a real <h2> + per-block headings, status conveyed by text (not colour
 // alone), labeled controls, role="alert" on load errors. The two A2P kill-
-// switches show an amber "Off · pre-A2P" pill when off — the EXPECTED pre-launch
+// switches show an amber "Off - pre-A2P" pill when off — the EXPECTED pre-launch
 // state, visually distinct from a red error.
 import { FlagPills } from './FlagPills.js';
 import { AlarmGrid } from './AlarmGrid.js';

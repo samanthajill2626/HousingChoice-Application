@@ -34,7 +34,7 @@ describe('mergeFields (M1.8a)', () => {
   });
 
   it('formatRent renders a range, a single value, or empty', () => {
-    expect(formatRent(unit({ rent_min: 1200, rent_max: 1500 }))).toBe('$1200–$1500');
+    expect(formatRent(unit({ rent_min: 1200, rent_max: 1500 }))).toBe('$1200-$1500');
     expect(formatRent(unit({ rent_min: 1200, rent_max: 1200 }))).toBe('$1200');
     expect(formatRent(unit({ rent_min: 1200, rent_max: undefined }))).toBe('$1200');
     expect(formatRent(unit({ rent_min: undefined, rent_max: undefined }))).toBe('');
@@ -48,7 +48,7 @@ describe('mergeFields (M1.8a)', () => {
       'Maria',
     );
     expect(out).toBe(
-      `Hi Maria! A 2bd at 123 Main St, Springfield, IL 60000 for $1200–$1500. See ${BASE}/p/unit-7`,
+      `Hi Maria! A 2bd at 123 Main St, Springfield, IL 60000 for $1200-$1500. See ${BASE}/p/unit-7`,
     );
   });
 

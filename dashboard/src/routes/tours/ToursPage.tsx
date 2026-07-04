@@ -2,10 +2,10 @@
 //
 //   Upcoming  — tours in the next 30 days (from=start-of-today, to=+30d),
 //               grouped by local date (soonest first; "Today" label for today).
-//               Row: tenant name · property (unit address) · time · status · type.
+//               Row: tenant name - property (unit address) - time - status - type.
 //
 //   Needs booking — time-less tours (status='requested'), oldest first.
-//               Row: tenant name · property · status · type (no time column).
+//               Row: tenant name - property - status - type (no time column).
 //
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference

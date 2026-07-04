@@ -38,7 +38,7 @@ type Stage =
 
 function rentRange(flyer: Pick<PublicFlyer, 'rent_min' | 'rent_max'>): string | null {
   const { rent_min: min, rent_max: max } = flyer;
-  if (min !== null && max !== null) return min === max ? `$${min}` : `$${min}–$${max}`;
+  if (min !== null && max !== null) return min === max ? `$${min}` : `$${min}-$${max}`;
   if (min !== null) return `From $${min}`;
   if (max !== null) return `Up to $${max}`;
   return null;
@@ -52,7 +52,7 @@ function neighborhood(flyer: Pick<PublicFlyer, 'area' | 'subzone'>): string | nu
 function addressLines(a: PublicFlyerDetails['address']): string | null {
   const street = [a.line1, a.line2].filter(Boolean).join(', ');
   const cityLine = [a.city, a.state].filter(Boolean).join(', ');
-  const full = [street, cityLine, a.zip].filter((p) => p && p !== '').join(' · ');
+  const full = [street, cityLine, a.zip].filter((p) => p && p !== '').join(' - ');
   return full === '' ? null : full;
 }
 

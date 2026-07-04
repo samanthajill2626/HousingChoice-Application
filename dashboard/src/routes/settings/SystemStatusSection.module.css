@@ -119,7 +119,7 @@
   color: var(--c-evt-green-text);
 }
 
-/* Amber "Off · pre-A2P": the EXPECTED pre-launch state — distinct from red. */
+/* Amber "Off - pre-A2P": the EXPECTED pre-launch state — distinct from red. */
 .pillPreA2p {
   background: var(--c-evt-amber-bg);
   border-color: var(--c-evt-amber-border);

@@ -286,7 +286,7 @@ export function PlacementDetail(): React.JSX.Element {
                 k="Next deadline"
                 v={
                   <span className={styles.deadline}>
-                    {deadline.label} · {deadline.when}
+                    {deadline.label} - {deadline.when}
                     {deadline.rel.text ? (
                       <span
                         className={deadline.rel.overdue ? styles.deadlineOverdue : styles.deadlineSoon}

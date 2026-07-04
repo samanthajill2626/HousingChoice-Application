@@ -25,7 +25,7 @@ describe('audienceSummary', () => {
     expect(audienceSummary({ contact_type: 'tenant' })).toBe('Tenants');
     expect(
       audienceSummary({ contact_type: 'tenant', bedroomSize: 2, housing_authority: 'Atlanta' }),
-    ).toBe('Tenants · 2-BR · Atlanta');
+    ).toBe('Tenants - 2-BR - Atlanta');
   });
 });
 

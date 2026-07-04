@@ -87,7 +87,7 @@ describe('AudienceFilters — seam + excluded note', () => {
     expect(add).toBeDisabled();
   });
 
-  it('renders the always-excluded note (opted-out · unreachable)', () => {
+  it('renders the always-excluded note (opted-out - unreachable)', () => {
     render(<Harness />);
     expect(screen.getByText(/Always excluded:/i)).toBeInTheDocument();
     expect(screen.getByText('opted-out')).toBeInTheDocument();
@@ -114,7 +114,7 @@ describe('AudienceFilters — live reach', () => {
 });
 
 /** Find a button by its leading label text within a group (chips carry an extra
- *  "· matches property" span we don't want to over-match). */
+ *  "- matches property" span we don't want to over-match). */
 function within2(container: HTMLElement, label: string): HTMLElement {
   const btn = Array.from(container.querySelectorAll('button')).find((b) =>
     (b.textContent ?? '').trim().startsWith(label),

@@ -41,7 +41,7 @@ export function ClosedArea({ placements, tenantName, listingAddress }: ClosedAre
                 <span className={styles.listing}>{listingAddress(c.unitId)}</span>
                 <span className={styles.stage}>
                   {STAGE_LABELS[c.stage] ?? c.stage}
-                  {reason ? ` · ${reason}` : ''}
+                  {reason ? ` - ${reason}` : ''}
                 </span>
               </Link>
             </li>

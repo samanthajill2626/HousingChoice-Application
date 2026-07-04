@@ -1,6 +1,6 @@
 // ContactDetail — the shared shell for the contact detail page (tenant /
-// landlord / untriaged). A near-black header band (avatar · name · KIND pill ·
-// facts · Call ▾ · ⋯) over a two-pane body: comms-LEFT (the Timeline) / file-RIGHT.
+// landlord / untriaged). A near-black header band (avatar - name - KIND pill -
+// facts - Call ▾ - ⋯) over a two-pane body: comms-LEFT (the Timeline) / file-RIGHT.
 //
 // KIND, not a binary: a three-way `kind` (landlord/pm → landlord, unknown →
 // unknown, else → tenant) chooses the file pane (TenantFile / LandlordFile /
@@ -631,6 +631,6 @@ export function ContactDetail(): React.JSX.Element {
         parts.push(contact!['housingAuthority'] as string);
       }
     }
-    return parts.join(' · ');
+    return parts.join(' - ');
   }
 }

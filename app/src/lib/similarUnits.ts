@@ -102,7 +102,7 @@ function scorePrograms(target: UnitItem, c: UnitItem): number {
 
 /**
  * Compose a short, deterministic human summary from the dimensions that scored
- * high — e.g. "2 bed · Same area · Accepts HCV, VASH". Always leads with the
+ * high — e.g. "2 bed - Same area - Accepts HCV, VASH". Always leads with the
  * candidate's bed count (the primary signal) when known.
  */
 function buildSummary(
@@ -124,7 +124,7 @@ function buildSummary(
   // an available unit with no comparable attributes), fall back to a neutral,
   // non-empty label rather than ''.
   if (parts.length === 0) return 'Available unit';
-  return parts.join(' · ');
+  return parts.join(' - ');
 }
 
 /**

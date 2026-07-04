@@ -1,6 +1,6 @@
 // Today — the home action queue (§B1). Renders the prioritized, entity-anchored
-// queue from useToday() as grouped sections of white row cards (who · why · an
-// optional red urgency chip · a "Placement · Touring"-style tag · an amber attention
+// queue from useToday() as grouped sections of white row cards (who - why - an
+// optional red urgency chip - a "Placement - Touring"-style tag - an amber attention
 // dot), each row a link to its placement/contact/conversation. Empty groups are
 // skipped; loading shows a Spinner, error an inline message, all-empty a
 // friendly "all caught up" state. Matches the locked mockup structure in the new
@@ -46,7 +46,7 @@ function Row({ item }: { item: TodayItem }): React.JSX.Element {
          *  ::before on .flagged). It's decorative, so announce it to screen readers
          *  with visually-hidden text here. */}
         {item.attention ? <span className={styles.srOnly}>Needs attention</span> : null}
-        {/* Text block (who · why). On a tight content pane it stacks above the meta
+        {/* Text block (who - why). On a tight content pane it stacks above the meta
          *  chips (container query in the CSS) so the "why" never gets crushed. */}
         <span className={styles.main}>
           <span className={styles.who}>{item.who}</span>

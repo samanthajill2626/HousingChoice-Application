@@ -1,4 +1,4 @@
-// Typed endpoint functions � one per route. Every function returns a typed
+// Typed endpoint functions - one per route. Every function returns a typed
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
 import { request } from './client.js';
@@ -58,28 +58,28 @@ import type {
 
 // --- Auth (/auth) -----------------------------------------------------------
 
-/** GET /auth/me � the current principal, or throws ApiError(401) when anonymous. */
+/** GET /auth/me - the current principal, or throws ApiError(401) when anonymous. */
 export function getMe(signal?: AbortSignal): Promise<Me> {
   return request<Me>('/auth/me', { ...(signal !== undefined && { signal }) });
 }
 
-/** POST /auth/logout � global session revocation (204). */
+/** POST /auth/logout - global session revocation (204). */
 export function logout(): Promise<void> {
   return request<void>('/auth/logout', { method: 'POST' });
 }
 
-/** The login URL � a plain navigation (the server drives the OAuth dance).
+/** The login URL - a plain navigation (the server drives the OAuth dance).
  *  Not a fetch: use it as an <a href> / window.location.assign(loginUrl()). */
 export function loginUrl(): string {
   return '/auth/login';
 }
 
 // --- Today (/api) -----------------------------------------------------------
-// The server-assembled action queue (�API Contract C7). When the backend slice
+// The server-assembled action queue (API Contract C7). When the backend slice
 // isn't live yet this 404s; useToday catches ApiError(404) and assembles the
 // same shape client-side from getPlacements() + getConversations().
 
-/** GET /api/today � the server-assembled Today queue, or throws ApiError(404)
+/** GET /api/today - the server-assembled Today queue, or throws ApiError(404)
  *  until the backend slice lands (the caller falls back to the client build).
  *  `day` = the operator's LOCAL calendar date (YYYY-MM-DD); the timezone-agnostic
  *  server uses it ONLY to choose the tours_today group (omitting it makes the
@@ -105,9 +105,9 @@ export function getToday(
   return request<TodayResponse>(path, { ...(signal !== undefined && { signal }) });
 }
 
-/** GET /api/placements � the placement board (the Today fallback's deadline/tour/attention
+/** GET /api/placements - the placement board (the Today fallback's deadline/tour/attention
  *  source). The server pages; pass `cursor` to fetch the next page (the
- *  placement board pages through ALL of them � see usePlacements). Other callers
+ *  placement board pages through ALL of them - see usePlacements). Other callers
  *  (Today / property / contact-file) read only the first page (no cursor). */
 export function getPlacements(signal?: AbortSignal, cursor?: string): Promise<PlacementsPage> {
   return request<PlacementsPage>('/api/placements', {
@@ -116,7 +116,7 @@ export function getPlacements(signal?: AbortSignal, cursor?: string): Promise<Pl
   });
 }
 
-/** GET /api/placements/:placementId � a single placement record (the placement detail page + the
+/** GET /api/placements/:placementId - a single placement record (the placement detail page + the
  *  history view). Wrapped under { placement } on the wire; unwrapped here. */
 export async function getPlacement(placementId: string, signal?: AbortSignal): Promise<PlacementItem> {
   const res = await request<{ placement: PlacementItem }>(`/api/placements/${encodeURIComponent(placementId)}`, {
@@ -220,7 +220,7 @@ export function buildTransitionBody(input: TransitionInput): Record<string, unkn
   };
 }
 
-/** POST /api/placements/:placementId/transition � move a placement to a new stage through
+/** POST /api/placements/:placementId/transition - move a placement to a new stage through
  *  the transition service. A `lost` move requires lostReason.category OR
  *  non-empty text (validated client-side, then server-side). Returns the updated
  *  placement (unwrapped from { placement }). */
@@ -238,7 +238,7 @@ export async function transitionPlacement(
   return res.placement;
 }
 
-/** PATCH /api/placements/:id � partial update (SET-merge; only changed fields
+/** PATCH /api/placements/:id - partial update (SET-merge; only changed fields
  *  sent). Used for the complete-paperwork checklist toggles (lease_signed / lif /
  *  move_in_details). Returns the updated placement (unwrapped from { placement }). */
 export async function updatePlacement(
@@ -261,7 +261,7 @@ export async function updatePlacement(
   return res.placement;
 }
 
-/** GET /api/placements/:placementId/history � the placement's provenance trail (newest
+/** GET /api/placements/:placementId/history - the placement's provenance trail (newest
  *  first). Unwrapped from { history }. */
 export async function getPlacementHistory(
   placementId: string,
@@ -278,8 +278,8 @@ export async function getPlacementHistory(
   return res.history;
 }
 
-/** PATCH /api/contacts/:contactId/tenant-status � set a tenant's lifecycle
- *  status through the transition service (applies provenance/derivation �
+/** PATCH /api/contacts/:contactId/tenant-status - set a tenant's lifecycle
+ *  status through the transition service (applies provenance/derivation -
  *  NEVER use a plain contact PATCH for tenant lifecycle). Returns the updated
  *  contact (unwrapped from { contact }). */
 export async function setTenantStatus(
@@ -301,7 +301,7 @@ export async function setTenantStatus(
   return res.contact;
 }
 
-/** PATCH /api/units/:unitId/listing-status � set a property's lifecycle status
+/** PATCH /api/units/:unitId/listing-status - set a property's lifecycle status
  *  through the transition service (status is NOT writable via a plain unit
  *  PATCH). Returns the updated unit (unwrapped from { unit }). */
 export async function setListingStatus(
@@ -322,7 +322,7 @@ export async function setListingStatus(
   return res.unit;
 }
 
-/** GET /api/conversations � the inbox rows (the Today fallback's unread +
+/** GET /api/conversations - the inbox rows (the Today fallback's unread +
  *  untriaged source). */
 export function getConversations(signal?: AbortSignal): Promise<ConversationsPage> {
   return request<ConversationsPage>('/api/conversations', {
@@ -330,7 +330,7 @@ export function getConversations(signal?: AbortSignal): Promise<ConversationsPag
   });
 }
 
-/** GET /api/conversations/:id/messages � newest-first page of a conversation's
+/** GET /api/conversations/:id/messages - newest-first page of a conversation's
  *  messages (the contact timeline FALLBACK's source). The server wraps the page
  *  under { messages }; we unwrap it here so callers get a plain Message[]. */
 export async function getConversationMessages(
@@ -344,7 +344,7 @@ export async function getConversationMessages(
   return res.messages;
 }
 
-/** POST /api/conversations/:id/messages � a manual human send (the reply box). */
+/** POST /api/conversations/:id/messages - a manual human send (the reply box). */
 export function sendMessage(
   conversationId: string,
   body: { body?: string; mediaUrls?: string[] },
@@ -355,7 +355,7 @@ export function sendMessage(
   );
 }
 
-/** POST /api/conversations/:id/messages/:providerSid/retry � re-send a FAILED
+/** POST /api/conversations/:id/messages/:providerSid/retry - re-send a FAILED
  *  outbound message (the Retry button). The server re-reads the original by its
  *  provider SID (resending body + media correctly) and stamps `retry_of` so the
  *  timeline collapses the stale failed bubble. */
@@ -371,7 +371,7 @@ export function retryMessage(
   );
 }
 
-/** POST /api/units � create a unit (property) under a landlord. The body carries
+/** POST /api/units - create a unit (property) under a landlord. The body carries
  *  the owning landlordId plus the writable unit fields; the server validates them
  *  against a strict allowlist + types and stamps the initial status ('setup').
  *  Returns the created unit (unwrapped from { unit }). */
@@ -380,7 +380,7 @@ export async function createUnit(body: Record<string, unknown>): Promise<UnitIte
   return res.unit;
 }
 
-/** GET /api/units � the unit records. The landlord file filters this by
+/** GET /api/units - the unit records. The landlord file filters this by
  *  landlordId === contactId to show the landlord's own properties; the property
  *  page reuses it for "Related properties" (same landlord). `deleted: true` returns
  *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them. */
@@ -397,7 +397,7 @@ export function getUnits(
   });
 }
 
-/** GET /api/units/:id � a single unit record (the property detail page header +
+/** GET /api/units/:id - a single unit record (the property detail page header +
  *  details + photos). Wrapped under { unit } on the wire; unwrapped here. */
 export async function getUnit(unitId: string, signal?: AbortSignal): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
@@ -406,7 +406,7 @@ export async function getUnit(unitId: string, signal?: AbortSignal): Promise<Uni
   return res.unit;
 }
 
-/** PATCH /api/units/:id � partial update (SET-merge; only changed fields sent).
+/** PATCH /api/units/:id - partial update (SET-merge; only changed fields sent).
  *  The server validates against a strict field allowlist + types. Returns the
  *  updated unit (wrapped under { unit }). */
 export async function updateUnit(
@@ -420,7 +420,7 @@ export async function updateUnit(
   return res.unit;
 }
 
-/** DELETE /api/units/:id � SOFT-delete the property (stamp deleted_at). The record
+/** DELETE /api/units/:id - SOFT-delete the property (stamp deleted_at). The record
  *  + all data are retained; it's hidden from the lists and can be restored.
  *  Returns the updated (deleted) unit. */
 export async function deleteUnit(unitId: string): Promise<UnitItem> {
@@ -430,7 +430,7 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
   return res.unit;
 }
 
-/** POST /api/units/:id/restore � clear deleted_at, bringing a soft-deleted property
+/** POST /api/units/:id/restore - clear deleted_at, bringing a soft-deleted property
  *  back into the normal views. Returns the updated unit. */
 export async function restoreUnit(unitId: string): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
@@ -440,7 +440,7 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
   return res.unit;
 }
 
-/** GET /api/units/:id/related (�C3) � duplex-sibling / same-landlord properties.
+/** GET /api/units/:id/related (C3) - duplex-sibling / same-landlord properties.
  *  404s until BE3 lands ? the property page degrades to a same-landlord FALLBACK
  *  it derives from getUnits(). */
 export async function getUnitRelated(
@@ -454,7 +454,7 @@ export async function getUnitRelated(
   return res.related;
 }
 
-/** GET /api/units/:id/recipients (�C4) � the "Sent to tenants" rows (recipients
+/** GET /api/units/:id/recipients (C4) - the "Sent to tenants" rows (recipients
  *  + responses). 404s until BE4 lands ? the panel renders a "pending backend"
  *  state. */
 export async function getUnitRecipients(
@@ -468,7 +468,7 @@ export async function getUnitRecipients(
   return res.recipients;
 }
 
-/** GET /api/units/:id/similar (�C6) � available comps ranked by similarity.
+/** GET /api/units/:id/similar (C6) - available comps ranked by similarity.
  *  404s until BE6 lands ? the "Similar properties" panel renders a "pending
  *  backend" state. */
 export async function getUnitSimilar(
@@ -499,12 +499,12 @@ export async function getUnitActivity(
 // --- Contacts (/api/contacts) -----------------------------------------------
 // The contact detail page (B2 tenant / B3 landlord). getContact exists today
 // (legacy Contact, single `phone`); the timeline / listings-sent / media slices
-// (C2/C4/C5) 404 until BE1�BE5 land, so callers degrade gracefully.
+// (C2/C4/C5) 404 until BE1-BE5 land, so callers degrade gracefully.
 
-/** GET /api/contacts � the records list (the Contacts list views' source). The
+/** GET /api/contacts - the records list (the Contacts list views' source). The
  *  server REQUIRES a `type` filter (unless an exact `phone` lookup is given), so
  *  callers fetch one type at a time; the "all Contacts" view fans out per type
- *  and merges. First page only (the server pages via nextCursor) � the list
+ *  and merges. First page only (the server pages via nextCursor) - the list
  *  views note this transitional limitation. */
 export function getContacts(
   params: { type?: ContactType; status?: string; cursor?: string; deleted?: boolean } = {},
@@ -522,7 +522,7 @@ export function getContacts(
   });
 }
 
-/** GET /api/contacts/:id � the contact record (the detail page header + file).
+/** GET /api/contacts/:id - the contact record (the detail page header + file).
  *  Wrapped under { contact } on the wire; unwrapped here. */
 export async function getContact(contactId: string, signal?: AbortSignal): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -532,7 +532,7 @@ export async function getContact(contactId: string, signal?: AbortSignal): Promi
   return res.contact;
 }
 
-/** GET /api/contacts/:id/timeline (�C2) � the server-merged person-centric
+/** GET /api/contacts/:id/timeline (C2) - the server-merged person-centric
  *  timeline. 404s until BE2 lands; useContactTimeline catches that and assembles
  *  a message-only fallback from the contact's conversations. `kinds` filters
  *  (e.g. 'message,call' for the "Comms only" toggle). */
@@ -550,7 +550,7 @@ export function getContactTimeline(
   );
 }
 
-/** GET /api/contacts/:id/listings-sent (�C4) � the "Properties sent" rows. 404s
+/** GET /api/contacts/:id/listings-sent (C4) - the "Properties sent" rows. 404s
  *  until BE4 lands ? the panel renders a "pending backend" state. */
 export async function getContactListingsSent(
   contactId: string,
@@ -563,7 +563,7 @@ export async function getContactListingsSent(
   return res.sent;
 }
 
-/** GET /api/contacts/:id/media (�C5) � aggregated comms media. 404s until BE5
+/** GET /api/contacts/:id/media (C5) - aggregated comms media. 404s until BE5
  *  lands ? the "Media from comms" panel renders a "pending backend" state. */
 export async function getContactMedia(
   contactId: string,
@@ -592,7 +592,7 @@ export async function getContactRelayGroups(
 
 // --- Contact mutations (edit / triage / phones / opt-out) -------------------
 
-/** PATCH /api/contacts/:id � edit/triage a contact. Send only the changed fields
+/** PATCH /api/contacts/:id - edit/triage a contact. Send only the changed fields
  *  (the server SET-merges). Returns the updated contact (unwrapped). */
 export async function updateContact(contactId: string, patch: ContactPatch): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -602,14 +602,14 @@ export async function updateContact(contactId: string, patch: ContactPatch): Pro
   return res.contact;
 }
 
-/** POST /api/contacts � create a brand-new contact record. Returns the new
+/** POST /api/contacts - create a brand-new contact record. Returns the new
  *  contact (unwrapped from { contact }). */
 export async function createContact(body: ContactCreate): Promise<Contact> {
   const res = await request<{ contact: Contact }>('/api/contacts', { method: 'POST', body });
   return res.contact;
 }
 
-/** GET /api/contacts/vocabulary � the operator-configured pick-lists used by
+/** GET /api/contacts/vocabulary - the operator-configured pick-lists used by
  *  the contact creation form (roles, relationship roles, custom field labels).
  *  Unwrapped from { vocabulary }. */
 export async function getContactVocabulary(signal?: AbortSignal): Promise<ContactVocabulary> {
@@ -619,7 +619,7 @@ export async function getContactVocabulary(signal?: AbortSignal): Promise<Contac
   return res.vocabulary;
 }
 
-/** POST /api/contacts/:id/phones � add a number to the contact's roster (idempotent
+/** POST /api/contacts/:id/phones - add a number to the contact's roster (idempotent
  *  upsert). Returns the updated contact with the canonical `phones[]`. */
 export async function addContactPhone(
   contactId: string,
@@ -633,7 +633,7 @@ export async function addContactPhone(
   return res.contact;
 }
 
-/** PATCH /api/contacts/:id/phones/:phone � set a number primary and/or relabel it.
+/** PATCH /api/contacts/:id/phones/:phone - set a number primary and/or relabel it.
  *  Returns the updated contact with the canonical `phones[]`. */
 export async function updateContactPhone(
   contactId: string,
@@ -647,7 +647,7 @@ export async function updateContactPhone(
   return res.contact;
 }
 
-/** DELETE /api/contacts/:id/phones/:phone � remove a non-primary number. Returns
+/** DELETE /api/contacts/:id/phones/:phone - remove a non-primary number. Returns
  *  the updated contact with the canonical `phones[]`. */
 export async function removeContactPhone(contactId: string, phone: string): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -657,7 +657,7 @@ export async function removeContactPhone(contactId: string, phone: string): Prom
   return res.contact;
 }
 
-/** POST /api/contacts/:id/opt-out � mark the contact Do-Not-Contact (sms_opt_out)
+/** POST /api/contacts/:id/opt-out - mark the contact Do-Not-Contact (sms_opt_out)
  *  or clear it. Returns the updated contact. */
 export async function setContactOptOut(contactId: string, optOut: boolean): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -700,7 +700,7 @@ export async function originateCall(
   });
 }
 
-/** DELETE /api/contacts/:id � SOFT-delete the contact (stamp deleted_at). The
+/** DELETE /api/contacts/:id - SOFT-delete the contact (stamp deleted_at). The
  *  record + all data are retained; it's hidden from lists/inbox/today and can be
  *  restored. Returns the updated (deleted) contact. */
 export async function deleteContact(contactId: string): Promise<Contact> {
@@ -722,7 +722,7 @@ export async function ensureContactConversation(contactId: string): Promise<stri
   return res.conversation.conversationId;
 }
 
-/** POST /api/contacts/:id/restore � clear deleted_at, bringing a soft-deleted
+/** POST /api/contacts/:id/restore - clear deleted_at, bringing a soft-deleted
  *  contact back into the normal views. Returns the updated contact. */
 export async function restoreContact(contactId: string): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
@@ -738,7 +738,7 @@ export async function restoreContact(contactId: string): Promise<Contact> {
 // decide whether to surface the dev-login affordance at all; it MUST fail closed
 // (any non-200 / non-{dev:true} / error ? unavailable).
 
-/** GET /__dev/ping � availability probe for the hermetic dev router. Resolves
+/** GET /__dev/ping - availability probe for the hermetic dev router. Resolves
  *  `true` only on 200 with a `{ dev: true }` body; resolves `false` for any
  *  non-200, network/transport error, or malformed body (never throws). */
 export async function devPing(signal?: AbortSignal): Promise<boolean> {
@@ -752,18 +752,18 @@ export async function devPing(signal?: AbortSignal): Promise<boolean> {
   }
 }
 
-/** POST /auth/dev-login � log in as a dev user (sets the session cookie). The
+/** POST /auth/dev-login - log in as a dev user (sets the session cookie). The
  *  server auto-provisions the user if missing, so this works on an unseeded
  *  local DB too (known personas keep their role; others default to admin). */
 export function devLogin(email = 'va@example.com'): Promise<DevLoginResult> {
   return request<DevLoginResult>('/auth/dev-login', { method: 'POST', body: { email } });
 }
 
-// --- Inbox (/api/inbox) (�API Contract C8) ----------------------------------
+// --- Inbox (/api/inbox) (API Contract C8) ----------------------------------
 // The entity-centric inbox feed + its read/assign mutations. GET 404s until the
 // BE7/C8 backend slice lands ? useInbox catches that and degrades to 'pending'.
 
-/** GET /api/inbox � one page of inbox rows for a filter (newest-activity-first,
+/** GET /api/inbox - one page of inbox rows for a filter (newest-activity-first,
  *  one row per contact). Throws ApiError(404) until the backend slice lands. */
 export function getInbox(
   params: { filter?: InboxFilter; cursor?: string; limit?: number } = {},
@@ -775,8 +775,8 @@ export function getInbox(
   });
 }
 
-/** POST /api/inbox/:contactId/read (contact rows) � or POST /api/inbox/read
- *  { phone } (unknown rows, keyed by number) � mark the comms read. */
+/** POST /api/inbox/:contactId/read (contact rows) - or POST /api/inbox/read
+ *  { phone } (unknown rows, keyed by number) - mark the comms read. */
 export function markInboxRead(
   target: { contactId: string } | { phone: string },
   signal?: AbortSignal,
@@ -794,7 +794,7 @@ export function markInboxRead(
   });
 }
 
-/** POST /api/inbox/:contactId/assign { userId } � set (userId) or clear
+/** POST /api/inbox/:contactId/assign { userId } - set (userId) or clear
  *  (userId=null) the contact row's assignment. */
 export function assignInbox(
   contactId: string,
@@ -1116,7 +1116,7 @@ export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tou
 
 /** GET /api/tours/:tourId/reminders — the armed reminder ladder for a tour
  *  (confirmation / day_before / morning_of / en_route / no_show_checkin), each
- *  rung's state (upcoming · sent · canceled) plus the NEXT rung to fire. Returns
+ *  rung's state (upcoming - sent - canceled) plus the NEXT rung to fire. Returns
  *  { reminders, next? } as-is (no unwrap). */
 export async function getTourReminders(
   tourId: string,

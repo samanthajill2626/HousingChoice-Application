@@ -309,7 +309,7 @@ export function TourDetail(): React.JSX.Element {
       </section>
 
       {/* The armed reminder ladder (confirmation/day_before/morning_of/en_route/
-          no_show_checkin) — each rung's state (upcoming w/ fire time · sent-at ·
+          no_show_checkin) — each rung's state (upcoming w/ fire time - sent-at -
           canceled), the NEXT reminder highlighted, and any will-be-skipped note. */}
       <RemindersPanel tourId={tour.tourId} />
 

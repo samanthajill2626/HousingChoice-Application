@@ -63,7 +63,7 @@ describe('buildTodayFromSources', () => {
     expect(item?.refType).toBe('placement');
     expect(item?.refId).toBe('k1');
     expect(item?.urgency).toBe('2h left');
-    expect(item?.tag).toBe('Placement · Schedule inspection');
+    expect(item?.tag).toBe('Placement - Schedule inspection');
     expect(item?.why).toMatch(/RTA/i);
   });
 
@@ -110,7 +110,7 @@ describe('buildTodayFromSources', () => {
     expect(items[0]?.group).toBe('needs_you_now');
     expect(items[0]?.attention).toBe(true);
     expect(items[0]?.why).toMatch(/Send failed/);
-    expect(items[0]?.tag).toBe('Placement · Awaiting approval');
+    expect(items[0]?.tag).toBe('Placement - Awaiting approval');
   });
 
   it('treats an untriaged unknown_1to1 as needs_you_now, linking to the contact page', () => {
@@ -133,7 +133,7 @@ describe('buildTodayFromSources', () => {
     expect(unk?.refType).toBe('contact');
     expect(unk?.refId).toBe('ct-unknown-1');
     expect(unk?.attention).toBe(true);
-    expect(unk?.tag).toBe('Contact · Unknown');
+    expect(unk?.tag).toBe('Contact - Unknown');
     // Falls back to a formatted phone when there's no display name.
     expect(unk?.who).toBe('(404) 010-0007');
     expect(unk?.why).toMatch(/untriaged/i);
@@ -218,7 +218,7 @@ describe('buildTodayFromSources', () => {
     expect(u?.refId).toBe('L1'); // → /contacts/L1
     expect(u?.who).toBe('James Porter');
     expect(u?.why).toBe('Is the 2BR still open?');
-    expect(u?.tag).toBe('Contact · Landlord');
+    expect(u?.tag).toBe('Contact - Landlord');
   });
 
   it('does not put a read conversation anywhere', () => {
@@ -245,7 +245,7 @@ describe('buildTodayFromSources', () => {
     );
     expect(items).toHaveLength(1);
     expect(items[0]?.group).toBe('follow_ups');
-    expect(items[0]?.tag).toBe('Placement · Awaiting approval');
+    expect(items[0]?.tag).toBe('Placement - Awaiting approval');
   });
 
   it('DEFERS derived-stuck to the server: a stale placement with no deadline yields no rows', () => {
@@ -321,7 +321,7 @@ describe('buildTodayFromSources', () => {
       [],
       NOW,
     );
-    expect(items[0]?.tag).toBe('Placement · archived');
+    expect(items[0]?.tag).toBe('Placement - archived');
     expect(items[0]?.why).toBe('Deadline');
     expect(items[0]?.why).not.toContain('undefined');
     expect(items[0]?.tag).not.toContain('undefined');

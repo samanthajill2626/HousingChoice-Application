@@ -1,4 +1,4 @@
-// ReplyTargetPicker — the reply box's "Reply sends to <number> · change ▾" line.
+// ReplyTargetPicker — the reply box's "Reply sends to <number> - change ▾" line.
 // For a single-number contact it's just a label. For a multi-number contact the
 // "change ▾" opens a popover to pick which number's thread to send into (each
 // number is its own 1:1 conversation). Popover idiom matches the app header menu.
@@ -49,7 +49,7 @@ export function ReplyTargetPicker({
       {replyToLabel ? ` (${replyToLabel})` : ''}
       {canPick ? (
         <>
-          {' · '}
+          {' - '}
           <button
             type="button"
             className={styles.changeBtn}

@@ -4,8 +4,8 @@
 // same four routes (the nav links are shortcuts; the active tab mirrors `filter`),
 // a NEW CONTACT button opens the create dialog (ContactCreateForm), and each row's
 // badge is `displayKind` = role ?? type — a custom kind ("Case worker") shows its
-// role while filing under its base type. Accessible records list (heading · search
-// · rows linking to the contact detail page); tokens + CSS Modules. See
+// role while filing under its base type. Accessible records list (heading - search
+// - rows linking to the contact detail page); tokens + CSS Modules. See
 // 2026-06-18-extensible-contact-creation-design.md.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -18,7 +18,7 @@ import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
 
 export interface ContactsListProps {
-  /** Which audience to show � route-driven (App.tsx). */
+  /** Which audience to show - route-driven (App.tsx). */
   filter: ContactsFilter;
 }
 

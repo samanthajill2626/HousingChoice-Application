@@ -1,12 +1,12 @@
-// ListingDetail � the Listing detail page (�B4), the locked v4 mockup. A
-// near-black header band (address � status badge � facts � "?? Broadcast to
+// ListingDetail - the Listing detail page (B4), the locked v4 mockup. A
+// near-black header band (address - status badge - facts - "?? Broadcast to
 // tenants" + Edit + ?) over a two-column body and a full-width Photos gallery:
-//   LEFT  � a small hero image � a flyer line (View flyer ? + Copy public link)
-//           � Property details (with Accepted vouchers as a BULLETED list) � Tour
-//           & application process � Activity.
-//   RIGHT � Contacts roster � Sent to tenants � Placements on this property � Related
-//           properties � Similar properties.
-//   BOTTOM (full width) � Photos.
+//   LEFT  - a small hero image - a flyer line (View flyer ? + Copy public link)
+//           - Property details (with Accepted vouchers as a BULLETED list) - Tour
+//           & application process - Activity.
+//   RIGHT - Contacts roster - Sent to tenants - Placements on this property - Related
+//           properties - Similar properties.
+//   BOTTOM (full width) - Photos.
 // Real panels come from existing endpoints (unit, placements, units, the landlord
 // contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" serves the unit
@@ -87,7 +87,7 @@ export function ListingDetail(): React.JSX.Element {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  // Property-status write � goes through the transition service (status is NOT
+  // Property-status write - goes through the transition service (status is NOT
   // writable via a plain unit PATCH). On success apply the returned unit in
   // place (no refetch) and clear any prior error. On failure surface an inline
   // error (the select reverts to the unit's stored status, so without feedback a
@@ -101,7 +101,7 @@ export function ListingDetail(): React.JSX.Element {
         setStatusError(null);
       })
       .catch(() => {
-        setStatusError("Couldn't update the property status � please try again.");
+        setStatusError("Couldn't update the property status - please try again.");
       })
       .finally(() => setStatusBusy(false));
   }
@@ -148,7 +148,7 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   // Soft-delete (reversible). Deleting is confirmed first, then the property drops
-  // out of the normal views � so on success we navigate back to the Properties list
+  // out of the normal views - so on success we navigate back to the Properties list
   // (it can be restored from the Deleted tab). Restore stays on the page and
   // applies the returned unit in place so the Deleted banner clears.
   const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
@@ -162,7 +162,7 @@ export function ListingDetail(): React.JSX.Element {
         void navigate('/listings');
       })
       .catch(() => {
-        setDeleteError("Couldn't delete � please try again.");
+        setDeleteError("Couldn't delete - please try again.");
         setDeleteBusy(false);
       });
   };
@@ -243,7 +243,7 @@ export function ListingDetail(): React.JSX.Element {
       {deleted ? (
         <div className={styles.deletedBanner} role="status">
           <span>
-            This property is <strong>deleted</strong> � hidden from the properties and the
+            This property is <strong>deleted</strong> - hidden from the properties and the
             landlord&apos;s file. Its data is retained.
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
@@ -296,14 +296,14 @@ export function ListingDetail(): React.JSX.Element {
             }
           >
             <div className={styles.detailGrid}>
-              <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || '�'} />
-              <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '�'} />
-              <KV k="Payment standard" v={formatMoney(unit.payment_standard) || '�'} />
-              <KV k="Deposit" v={formatMoney(unit.deposit) || '�'} />
-              <KV k="Jurisdiction" v={unit.jurisdiction ?? '�'} />
-              <KV k="Utilities" v={unit.utilities ?? '�'} />
-              <KV k="Accessibility" v={unit.accessibility ?? '�'} />
-              <KV k="Pets" v={unit.pets ?? '�'} />
+              <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || '—'} />
+              <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '—'} />
+              <KV k="Payment standard" v={formatMoney(unit.payment_standard) || '—'} />
+              <KV k="Deposit" v={formatMoney(unit.deposit) || '—'} />
+              <KV k="Jurisdiction" v={unit.jurisdiction ?? '—'} />
+              <KV k="Utilities" v={unit.utilities ?? '—'} />
+              <KV k="Accessibility" v={unit.accessibility ?? '—'} />
+              <KV k="Pets" v={unit.pets ?? '—'} />
               <KV k="Application fee" v={formatMoney(unit.application_fee) || '—'} />
               <KV
                 k="Same-day RTA"
@@ -370,7 +370,7 @@ export function ListingDetail(): React.JSX.Element {
                   const d = describeUnitActivity(e);
                   const when = [formatDayDivider(e.at), formatTime(e.at)]
                     .filter(Boolean)
-                    .join(' · ');
+                    .join(' - ');
                   return (
                     <Row
                       key={e.id}
@@ -407,14 +407,14 @@ export function ListingDetail(): React.JSX.Element {
                   label={
                     <span>
                       {r.name ?? r.contactId}
-                      {r.primaryVoice ? <span className={styles.primaryStar}> ? primary</span> : null}
+                      {r.primaryVoice ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}
-                        {r.company ? ` � ${r.company}` : ''}
+                        {r.company ? ` - ${r.company}` : ''}
                       </span>
                     </span>
                   }
-                  right={<span className={styles.openLink}>Open ?</span>}
+                  right={<span className={styles.openLink}>Open</span>}
                 />
               ))
             )}
@@ -482,7 +482,7 @@ export function ListingDetail(): React.JSX.Element {
                     }
                     right={
                       <span className={STATUS_DOT[r.status] ?? responseClass.muted}>
-                        ? {statusLabel(r.status)}
+                        {statusLabel(r.status)}
                       </span>
                     }
                   />
@@ -523,7 +523,7 @@ export function ListingDetail(): React.JSX.Element {
         </div>
       </div>
 
-      {/* BOTTOM � full-width Photos */}
+      {/* BOTTOM - full-width Photos */}
       <section className={styles.photos}>
         <h2 className={styles.photosHeading}>Photos</h2>
         <div className={styles.gallery}>
@@ -593,14 +593,14 @@ export function ListingDetail(): React.JSX.Element {
                 Cancel
               </Button>
               <Button variant="danger" size="sm" type="button" onClick={onConfirmDelete} disabled={deleteBusy}>
-                {deleteBusy ? 'Deleting�' : 'Delete'}
+                {deleteBusy ? 'Deleting...' : 'Delete'}
               </Button>
             </>
           }
         >
           <p>
             <strong>{address}</strong> will be hidden from the properties and the landlord&apos;s
-            file. Nothing is erased � you can restore it from the Properties <em>Deleted</em> view.
+            file. Nothing is erased - you can restore it from the Properties <em>Deleted</em> view.
           </p>
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>

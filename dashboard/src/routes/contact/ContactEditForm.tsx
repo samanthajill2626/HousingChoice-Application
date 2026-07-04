@@ -1,10 +1,10 @@
-// ContactEditForm � the edit dialog for a contact's details. Type + role are
+// ContactEditForm - the edit dialog for a contact's details. Type + role are
 // editable via the SAME KindPicker the create dialog uses, but kept collapsed
 // behind a "Change type" button (retyping a contact is rare) so the common edit
 // stays compact. The resolved kind drives the type-aware fields: name + status +
 // notes for everyone, voucher size for tenants, company for landlords/PMs, plus
 // Relationships + Custom fields. Dirty-tracked: only the changed fields are
-// PATCHed (the server SET-merges, so an untouched field is never blanked) �
+// PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
 import { useState } from 'react';
@@ -51,7 +51,7 @@ function validStatusesForType(type: ContactType): readonly string[] {
 
 /** The status to start with (and to reset to) for a type, given the contact's
  *  stored status. Keeps the selection VALID for the type: a stored value that's
- *  off-list for the type falls back to that type's front door � tenant ?
+ *  off-list for the type falls back to that type's front door - tenant ?
  *  'needs_review'; landlord ? keep the stored lead value if valid, else
  *  'needs_review'; non-tenant ? keep 'active' if that's what was stored, else
  *  'needs_review'. Never surfaces an off-list value as a selectable option. */
@@ -118,7 +118,7 @@ function str(v: unknown): string {
 export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
   const vocab = useContactVocabulary();
 
-  // Type + role together � a KindPicker value, kept collapsed behind "Change type"
+  // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
   // LIVE kind so the type-specific fields swap the moment the base type changes.
   const [kind, setKind] = useState<KindPickerValue>({
@@ -240,7 +240,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     if (firstName !== str(contact.firstName)) patch.firstName = firstName;
     if (lastName !== str(contact.lastName)) patch.lastName = lastName;
     // For TENANTS the status (and porting) is written via setTenantStatus (which
-    // applies provenance/derivation) � NOT this plain PATCH, which would bypass
+    // applies provenance/derivation) - NOT this plain PATCH, which would bypass
     // it. Non-tenant status may ride the plain PATCH. Compare against the initial
     // VALID selection (the stored value normalized to the type's valid set), so
     // an off-list stored value doesn't masquerade as a no-op change.
@@ -296,12 +296,12 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
     }
 
-    // Relationships � only send if the normalized form changed.
+    // Relationships - only send if the normalized form changed.
     const normRel = normalizeRelationships(relRows);
     const initRel = normalizeRelationships(contact.relationships ?? []);
     if (JSON.stringify(normRel) !== JSON.stringify(initRel)) patch.relationships = normRel;
 
-    // Custom fields � only send if the normalized form changed.
+    // Custom fields - only send if the normalized form changed.
     const normCf = normalizeCustomFields(cfRows);
     const initCf = normalizeCustomFields(contact.customFields ?? []);
     if (JSON.stringify(normCf) !== JSON.stringify(initCf)) patch.customFields = normCf;
@@ -371,7 +371,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     setSaving(true);
     setError(null);
     try {
-      // Field edits (name, notes, voucher, address, �) ride the plain PATCH.
+      // Field edits (name, notes, voucher, address, -) ride the plain PATCH.
       let updated: Contact = contact;
       if (Object.keys(result).length > 0) {
         updated = await updateContact(contact.contactId, result);
@@ -379,7 +379,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       // Tenant lifecycle status + porting go through setTenantStatus so
       // provenance/derivation apply. The returned contact supersedes the PATCH's.
       // toStatus is GUARANTEED valid here (the selection is kept in the tenant
-      // set), but narrow defensively � never cast an unchecked value, and fall
+      // set), but narrow defensively - never cast an unchecked value, and fall
       // back to the front door if somehow off-list.
       if (tenantStatusChanged) {
         const toStatus: TenantStatus = isTenantStatus(status) ? status : 'needs_review';
@@ -391,7 +391,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       }
       onSaved(updated);
     } catch {
-      setError("Couldn't save � please try again.");
+      setError("Couldn't save - please try again.");
       setSaving(false);
     }
   }
@@ -400,13 +400,13 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   // its base record type, else just the base type label.
   const savedRole = str(contact.role).trim();
   const currentKindLabel = savedRole
-    ? `${savedRole} � ${CONTACT_TYPE_LABEL[contact.type]}`
+    ? `${savedRole} - ${CONTACT_TYPE_LABEL[contact.type]}`
     : CONTACT_TYPE_LABEL[contact.type];
   // Save is blocked only while a type change is mid-flight with no base picked
   // (KindPicker "Other" before choosing Tenant/Landlord ? kind.type null).
   const canSave = !saving && kind.type !== null;
 
-  // Status options for the live type � ALWAYS just that type's valid set (no
+  // Status options for the live type - ALWAYS just that type's valid set (no
   // off-list value is ever prepended). The selected `status` is guaranteed to be
   // a member (seeded valid; re-derived on type change), so the select never shows
   // nor submits an off-list/type-invalid value.
@@ -422,7 +422,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
             Cancel
           </Button>
           <Button variant="primary" size="sm" type="submit" form="contact-edit-form" disabled={!canSave}>
-            {saving ? 'Saving�' : 'Save'}
+            {saving ? 'Saving...' : 'Save'}
           </Button>
         </>
       }
@@ -449,7 +449,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           </label>
         </div>
 
-        {/* Type � collapsed to a summary + "Change type"; expands to the full
+        {/* Type - collapsed to a summary + "Change type"; expands to the full
             KindPicker (the same control the create dialog uses). */}
         {changingType ? (
           <div className={styles.fieldset}>

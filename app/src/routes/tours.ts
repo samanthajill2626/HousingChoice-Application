@@ -547,7 +547,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         t,
         'tour_outcome',
         'tour_outcome',
-        `Tour outcome · ${newMoveForward === true ? 'moved forward' : 'not a fit'}`,
+        `Tour outcome - ${newMoveForward === true ? 'moved forward' : 'not a fit'}`,
       );
     }
 

@@ -15,12 +15,12 @@ export function formatMoney(amount: number | undefined): string {
   return `$${Math.round(amount).toLocaleString('en-US')}`;
 }
 
-/** A rent label from rent_min/rent_max: "$1,400–1,600", "$1,400", or "" when
+/** A rent label from rent_min/rent_max: "$1,400-1,600", "$1,400", or "" when
  *  neither is set. The high end drops the "$" (it shares the low end's). */
 export function formatRent(min: number | undefined, max: number | undefined): string {
   const lo = formatMoney(min);
   const hi = max !== undefined && !Number.isNaN(max) ? Math.round(max).toLocaleString('en-US') : '';
-  if (lo && hi && min !== max) return `${lo}–${hi}`;
+  if (lo && hi && min !== max) return `${lo}-${hi}`;
   if (lo) return lo;
   if (hi) return `$${hi}`;
   return '';
@@ -41,8 +41,8 @@ export function statusLabel(status: string): string {
   return LISTING_STATUS_LABELS[status as ListingStatus] ?? humanize(status);
 }
 
-/** The header facts subline: "2 BR · 1 BA · $1,400–1,600/mo · West End, Atlanta
- *  · Porter Properties". Only present parts are joined. `landlordName` is the
+/** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End, Atlanta
+ *  - Porter Properties". Only present parts are joined. `landlordName` is the
  *  resolved landlord/company, appended last when known. */
 export function buildListingFacts(unit: UnitItem, landlordName?: string): string {
   const parts: string[] = [];
@@ -53,7 +53,7 @@ export function buildListingFacts(unit: UnitItem, landlordName?: string): string
   const area = [unit.area, unit.jurisdiction].filter((p) => typeof p === 'string' && p).join(', ');
   if (area) parts.push(area);
   if (landlordName) parts.push(landlordName);
-  return parts.join(' · ');
+  return parts.join(' - ');
 }
 
 /** True when a media entry looks like a resolvable URL (http/https/blob or a
@@ -119,7 +119,7 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     case 'unit_contact_added': {
       const role =
         e.role !== undefined ? (ROLE_LABEL[e.role as keyof typeof ROLE_LABEL] ?? humanize(e.role)) : undefined;
-      const sub = [who, role].filter(Boolean).join(' · ');
+      const sub = [who, role].filter(Boolean).join(' - ');
       return { label: 'Contact added', ...(sub && { sub }), ...contactLink };
     }
     case 'unit_contact_removed':
@@ -127,7 +127,7 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     case 'listing_response_set': {
       const response = e.response !== undefined ? humanize(e.response) : undefined;
       return {
-        label: response !== undefined ? `Tenant response · ${response}` : 'Tenant response',
+        label: response !== undefined ? `Tenant response - ${response}` : 'Tenant response',
         ...(who !== undefined && { sub: who }),
         ...contactLink,
       };
@@ -135,7 +135,7 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     case 'listing_status_changed': {
       const to = e.to !== undefined ? statusLabel(e.to) : undefined;
       const from = e.from !== undefined ? statusLabel(e.from) : undefined;
-      const auto = e.source === 'derived' ? ' · automatic' : '';
+      const auto = e.source === 'derived' ? ' - automatic' : '';
       return {
         label: to !== undefined ? `Status changed to ${to}` : 'Status changed',
         ...(from !== undefined && { sub: `from ${from}${auto}` }),

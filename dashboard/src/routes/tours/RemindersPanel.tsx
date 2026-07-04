@@ -2,7 +2,7 @@
 // under the Status/Scheduled block. Fetches GET /api/tours/:tourId/reminders
 // and renders each rung (confirmation / day_before / morning_of / en_route /
 // no_show_checkin) as a row: a human kind label, a state chip (upcoming =
-// amber with relative fire time · sent = green with the absolute sent-at ·
+// amber with relative fire time - sent = green with the absolute sent-at -
 // canceled = muted, struck-through), the body as secondary text, and — when
 // the rung is armed-but-will-be-skipped — a "Will be skipped — <reason>" note.
 // The NEXT rung to fire is highlighted.
@@ -25,7 +25,7 @@ function StateChip({ rung }: { rung: TourReminderView }): React.JSX.Element {
     const when = rung.sentAt !== undefined ? dateTime(rung.sentAt) : '';
     return (
       <span className={`${styles.chip} ${styles.sent}`}>
-        {when ? `Sent · ${when}` : 'Sent'}
+        {when ? `Sent - ${when}` : 'Sent'}
       </span>
     );
   }

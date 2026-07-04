@@ -65,7 +65,7 @@ const MILESTONE: TimelineItem = {
   id: 'ms1',
   at: '2026-06-08T08:00:00',
   type: 'placement_opened',
-  label: 'Placement opened · 1450 Joseph Blvd',
+  label: 'Placement opened - 1450 Joseph Blvd',
   refType: 'placement',
   refId: 'k1',
 };
@@ -83,13 +83,13 @@ describe('Timeline', () => {
     renderTimeline({ items: [MESSAGE_IN, MESSAGE_OUT] });
     expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();
     expect(screen.getByText('Welcome! I will send options.')).toBeInTheDocument();
-    // The meta line carries transport · number · time.
-    expect(screen.getByText(/SMS · \(404\) 010-0007 · 9:14a/)).toBeInTheDocument();
+    // The meta line carries transport - number - time.
+    expect(screen.getByText(/SMS - \(404\) 010-0007 - 9:14a/)).toBeInTheDocument();
   });
 
-  it('renders a cluster label (day · time) for the first message', () => {
+  it('renders a cluster label (day - time) for the first message', () => {
     renderTimeline({ items: [MESSAGE_IN] });
-    expect(screen.getByText(/Mon Jun 8 · 9:14a/)).toBeInTheDocument();
+    expect(screen.getByText(/Mon Jun 8 - 9:14a/)).toBeInTheDocument();
   });
 
   it('starts a new cluster with a time-only label after a >1h same-day gap', () => {
@@ -101,7 +101,7 @@ describe('Timeline', () => {
       body: 'later message',
     };
     renderTimeline({ items: [MESSAGE_IN, later] });
-    expect(screen.getByText(/Mon Jun 8 · 9:14a/)).toBeInTheDocument(); // first cluster: day · time
+    expect(screen.getByText(/Mon Jun 8 - 9:14a/)).toBeInTheDocument(); // first cluster: day - time
     expect(screen.getByText('1:30p')).toBeInTheDocument(); // second cluster: time only
   });
 
@@ -128,7 +128,7 @@ describe('Timeline', () => {
       id: 'ms-tour',
       at: '2026-06-08T08:00:00',
       type: 'tour_took_place',
-      label: 'Tour took place · Toured',
+      label: 'Tour took place - Toured',
       refType: 'tour',
       refId: 'tour-55',
     };
@@ -333,7 +333,7 @@ describe('Timeline', () => {
     };
     const onRetry = vi.fn();
     renderTimeline({ items: [failed], onRetry });
-    expect(screen.getByText(/Failed · Carrier filtered the message/)).toBeInTheDocument();
+    expect(screen.getByText(/Failed - Carrier filtered the message/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
@@ -378,7 +378,7 @@ describe('Timeline', () => {
     renderTimeline({ items: [failed, retry], onRetry });
 
     // The stale failed bubble + its Retry are gone; the delivered retry remains.
-    expect(screen.queryByText('Failed · Carrier filtered the message')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed - Carrier filtered the message')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Retry sending/i })).not.toBeInTheDocument();
     expect(screen.getByText('Delivered')).toBeInTheDocument();
     // The body text appears exactly once (one surviving bubble, not two).

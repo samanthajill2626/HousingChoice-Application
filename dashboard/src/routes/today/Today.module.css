@@ -1,5 +1,5 @@
 /* Today action queue — grouped sections of white row cards. Visual structure
- * matches the locked mockup (who · why · red urgency chip · tag · amber
+ * matches the locked mockup (who - why - red urgency chip - tag - amber
  * attention dot) rendered in the new design language: light content area, all
  * values from ui/tokens.css (never hard-coded). */
 
@@ -213,7 +213,7 @@
     flex: 1 1 100%;
     flex-wrap: wrap;
   }
-  /* A long tag ("Placement · Awaiting landlord submission") wraps inside its chip
+  /* A long tag ("Placement - Awaiting landlord submission") wraps inside its chip
    * rather than running off the edge on the narrowest phones. */
   .tag {
     white-space: normal;

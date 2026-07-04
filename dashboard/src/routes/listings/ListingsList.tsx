@@ -1,6 +1,6 @@
 // ListingsList — the Listings list view (§IA: Workspace ▸ Listings). FIRST-PASS
-// / pending-design: a clean, conventional, accessible records list (heading ·
-// search box · a list of rows linking to the listing detail page) in the new
+// / pending-design: a clean, conventional, accessible records list (heading -
+// search box - a list of rows linking to the listing detail page) in the new
 // design language (tokens + CSS Modules). Reuses the listing format helpers
 // (shortAddress / statusLabel / formatBedsBaths / formatRent). Not the final
 // visual design — deliberately low-risk.

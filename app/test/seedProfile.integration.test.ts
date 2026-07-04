@@ -122,7 +122,7 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
   it('full ⊇ lean: full profile count is >= lean count', async () => {
     // Run a second seedAll with full profile — items already written are
     // idempotently overwritten; stubs currently add nothing extra, so counts
-    // are equal now (Tasks 2–4 will add more). The superset assertion holds
+    // are equal now (Tasks 2-4 will add more). The superset assertion holds
     // in all future states too.
     const fullCount = await seedAll(endpoint, 'full');
     expect(fullCount).toBeGreaterThanOrEqual(LEAN_TOTAL);

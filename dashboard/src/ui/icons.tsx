@@ -2,7 +2,7 @@
 // they inherit the surrounding text color. Decorative: each is aria-hidden, so
 // the nav link / button text carries the accessible name (don't rely on an icon
 // for a control's label). Sized via the `size` prop (default 18). Geometry is
-// crisp at 16–20px (round caps/joins, consistent stroke).
+// crisp at 16-20px (round caps/joins, consistent stroke).
 
 function Svg({ children, size = 18 }: { children: React.ReactNode; size?: number }): React.JSX.Element {
   return (

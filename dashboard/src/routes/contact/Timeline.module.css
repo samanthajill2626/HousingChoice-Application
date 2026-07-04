@@ -210,7 +210,7 @@
   margin-top: var(--sp-1);
 }
 
-/* The transport · number · time line is HIDDEN by default (messaging-app style);
+/* The transport - number - time line is HIDDEN by default (messaging-app style);
  * a click/tap on the bubble reveals it (.revealed). The cluster labels give the
  * at-a-glance time; this is the precise per-message detail. The line never breaks
  * mid-value; the status chip wraps below if a reason makes the row too long. */

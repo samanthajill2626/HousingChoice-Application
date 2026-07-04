@@ -2,7 +2,7 @@
 // 9-table model + `settings`, added in M1.4 — see the README deviations row
 // 2026-06-12: CO2's founder-editable templates need a DB home).
 //
-// CONTRACTUAL (architecture doc v2.12 §5, p.11–12): table base names, key
+// CONTRACTUAL (architecture doc v2.12 §5, p.11-12): table base names, key
 // schemas (PK/SK), GSI names, stream settings (messages, placements), and the
 // matches TTL. Everything else about items is a flexible document — only keys
 // and GSI key attributes are contractual; schema churn needs no migrations.

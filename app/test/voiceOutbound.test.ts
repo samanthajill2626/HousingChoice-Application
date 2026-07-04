@@ -1,5 +1,5 @@
 // Voice Phase 1 (backend) golden suite — the OUTBOUND masked-calling direction
-// (spec §5–§9). Driven through the REAL app (buildApp) + the world fakes:
+// (spec §5-§9). Driven through the REAL app (buildApp) + the world fakes:
 //   - originate happy path (rings NAVIGATOR cell, from BUSINESS, persists an
 //     outbound call entry) + the two 409 guards (no verified cell; voice_opt_out)
 //     that place NO call;

@@ -25,7 +25,7 @@ const SUPPRESSION_COPY: Readonly<
   stale_stage: 'no longer applies',
 };
 
-/** The fire-time line: while the send is still in the future, "sends <relative> ·
+/** The fire-time line: while the send is still in the future, "sends <relative> -
  *  <absolute>"; once it's at/past due (the worker just hasn't run yet), the
  *  honest "sending shortly". */
 function fireTimeLabel(at: string, now: number): string {
@@ -34,7 +34,7 @@ function fireTimeLabel(at: string, now: number): string {
   // deadlineRelative yields "due in Nh" — drop the "due " so it reads "sends in Nh".
   const rel = deadlineRelative(at, now).text.replace(/^due /, '');
   const abs = dateTime(at);
-  return [`sends ${rel}`, abs].filter(Boolean).join(' · ');
+  return [`sends ${rel}`, abs].filter(Boolean).join(' - ');
 }
 
 export function ScheduledCard({

@@ -717,7 +717,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     // Emit listing_reviewed ONLY on a real change to a reviewed response.
     if (changed && (response === 'interested' || response === 'not_a_fit')) {
-      const label = response === 'interested' ? 'Property reviewed · Interested' : 'Property reviewed · Not a fit';
+      const label = response === 'interested' ? 'Property reviewed - Interested' : 'Property reviewed - Not a fit';
       try {
         await activityEvents.record({
           contactId,

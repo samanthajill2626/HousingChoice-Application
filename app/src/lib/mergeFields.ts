@@ -33,7 +33,7 @@ export function formatRent(unit: UnitItem | undefined): string {
   const min = typeof unit.rent_min === 'number' && Number.isFinite(unit.rent_min) ? unit.rent_min : undefined;
   const max = typeof unit.rent_max === 'number' && Number.isFinite(unit.rent_max) ? unit.rent_max : undefined;
   if (min !== undefined && max !== undefined) {
-    return min === max ? `$${min}` : `$${min}–$${max}`;
+    return min === max ? `$${min}` : `$${min}-$${max}`;
   }
   if (min !== undefined) return `$${min}`;
   if (max !== undefined) return `$${max}`;

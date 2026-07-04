@@ -139,7 +139,7 @@ describe('TenantFile', () => {
     const allLinks = screen.getAllByRole('link');
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-req');
     expect(tourDetailLink).toBeDefined();
-    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*·.*Not booked/);
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Not booked/);
     expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
     // The rendered status label, not the raw enum.
     expect(screen.getByText('Requested')).toBeInTheDocument();
@@ -216,7 +216,7 @@ describe('LandlordFile', () => {
 
   it('renders the landlord properties with status, linking to the property route', () => {
     renderIt();
-    const link = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA · 2BR/ });
+    const link = screen.getByRole('link', { name: /1450 Joseph Blvd, Atlanta, GA - 2BR/ });
     expect(link).toHaveAttribute('href', '/listings/u1');
     expect(screen.getByText('Available')).toBeInTheDocument();
     expect(screen.getByText('Occupied')).toBeInTheDocument();
@@ -302,7 +302,7 @@ describe('LandlordFile', () => {
     const allLinks = screen.getAllByRole('link');
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L2');
     expect(tourDetailLink).toBeDefined();
-    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*·.*Not booked/);
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Not booked/);
     expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });

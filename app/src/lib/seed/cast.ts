@@ -68,7 +68,7 @@ const listingSendId = (unit: string, tenant: string) => `${unitId(unit)}#${conta
 
 // ---------------------------------------------------------------------------
 // Phone numbers — +1555010010X block (0101..0109)
-// Never collides with lean (+15550100001–3) or matrix (+15550200XXX).
+// Never collides with lean (+15550100001-3) or matrix (+15550200XXX).
 // ---------------------------------------------------------------------------
 const PHONES = {
   unknownTexter:     '+15550100101',
@@ -455,7 +455,7 @@ const searchingTenant = {
     last_activity_at: CQ,
     type: 'relay_group',
     participants: [C_SEARCHING, 'contact-landlord-0001'],
-    participant_display_name: 'Tour Group – Monique Everett',
+    participant_display_name: 'Tour Group - Monique Everett',
     last_message_preview: "Hello! I'm Monique Everett. Looking forward to seeing the place.",
     pool_number: RELAY_POOL_PHONE,
     ai_mode: 'manual',
@@ -699,7 +699,7 @@ const touredYesTenant = {
     last_activity_at: CY,
     type: 'relay_group',
     participants: [C_TOURED_YES, 'contact-landlord-0001'],
-    participant_display_name: 'Tour Group – Brianna Whitfield',
+    participant_display_name: 'Tour Group - Brianna Whitfield',
     last_message_preview: 'See you at 2pm Saturday!',
     pool_number: RELAY_POOL_TOURED,
     ai_mode: 'manual',

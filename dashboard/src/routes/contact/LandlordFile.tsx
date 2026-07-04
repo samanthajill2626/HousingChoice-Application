@@ -1,7 +1,7 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
-// tenant file; the cards center on the units they own: Details (role/company) ·
-// Preferences · Properties (their units, with status) · Tours on their properties ·
-// Placements on their units · Group texts · Media. Properties + Placements + Tours +
+// tenant file; the cards center on the units they own: Details (role/company) -
+// Preferences - Properties (their units, with status) - Tours on their properties -
+// Placements on their units - Group texts - Media. Properties + Placements + Tours +
 // Group texts are REAL (from /api/units + /api/placements + /api/tours?unitId= +
 // /api/contacts/:id/relay-groups); Preferences render the contact's
 // accepts_programs/lease_terms/pet_policy + notes.
@@ -66,10 +66,10 @@ function landlordStatusLabel(status: string): string {
   return contactStatusLabel('landlord', status);
 }
 
-/** A unit row label: "address · NBR" when both are known. */
+/** A unit row label: "address - NBR" when both are known. */
 function unitRowLabel(unit: UnitItem): string {
   const addr = formatAddress(unit.address) || unit.unitId;
-  const beds = typeof unit.beds === 'number' ? ` · ${unit.beds}BR` : '';
+  const beds = typeof unit.beds === 'number' ? ` - ${unit.beds}BR` : '';
   return `${addr}${beds}`;
 }
 
@@ -90,7 +90,7 @@ export function LandlordFile({
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myPlacements = landlordPlacements(placements, units, contact.contactId);
-  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' · ');
+  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const company = typeof contact['company'] === 'string' ? contact['company'] : '—';
   // Preferences & notes — the landlord's person-level defaults (their properties'
   // per-unit facts live on the units). Programs as chips, the two policies as KV
@@ -126,7 +126,7 @@ export function LandlordFile({
               {phoneList || '—'}
               {onManagePhones ? (
                 <>
-                  {' · '}
+                  {' - '}
                   <CardInlineAction onClick={onManagePhones} label="Manage phone numbers">
                     Manage
                   </CardInlineAction>
@@ -201,7 +201,7 @@ export function LandlordFile({
               <Row
                 key={t.tourId}
                 to={`/tours/${t.tourId}`}
-                label={`${addr} · ${
+                label={`${addr} - ${
                   t.scheduledAt !== undefined
                     ? new Date(t.scheduledAt).toLocaleDateString()
                     : 'Not booked'

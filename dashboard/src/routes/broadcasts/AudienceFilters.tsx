@@ -2,7 +2,7 @@
 // centerpiece). v1 ships two criteria: a prominent VoucherSize chip control
 // (bedroomSize 0..4) and a HousingAuthority text input; the disabled "+ Add
 // filter" seam is the placeholder for future criteria (neighborhood,
-// accessibility…). The always-on hard fences (opted-out · unreachable) are noted
+// accessibility…). The always-on hard fences (opted-out - unreachable) are noted
 // as informational text (the server enforces them — never sent by the client).
 // A live reach count + truncated warning surface the resolved audience size.
 //
@@ -86,7 +86,7 @@ export function AudienceFilters({
                 onClick={() => pickSize(choice.value)}
               >
                 {choice.label}
-                {isMatch ? <span className={styles.matchTag}> · matches property</span> : null}
+                {isMatch ? <span className={styles.matchTag}> - matches property</span> : null}
               </button>
             );
           })}
@@ -126,7 +126,7 @@ export function AudienceFilters({
       </button>
 
       <p className={styles.excludedNote}>
-        Always excluded: <strong>opted-out</strong> · <strong>unreachable</strong>
+        Always excluded: <strong>opted-out</strong> - <strong>unreachable</strong>
       </p>
 
       {/* Live reach. */}

@@ -61,7 +61,7 @@ describe('Today', () => {
           who: 'Tasha Williams',
           why: 'RTA window closing',
           urgency: '2h left',
-          tag: 'Placement · Touring',
+          tag: 'Placement - Touring',
         },
         {
           group: 'needs_you_now',
@@ -69,7 +69,7 @@ describe('Today', () => {
           refId: 'cv1',
           who: '(404) 010-0007',
           why: 'New inbound — untriaged',
-          tag: 'Contact · Unknown',
+          tag: 'Contact - Unknown',
           attention: true,
         },
         {
@@ -78,7 +78,7 @@ describe('Today', () => {
           refId: 'ct1',
           who: 'James Porter',
           why: 'Is the 2BR still open?',
-          tag: 'Contact · Landlord',
+          tag: 'Contact - Landlord',
         },
       ],
     };
@@ -95,7 +95,7 @@ describe('Today', () => {
     expect(placementLink).toHaveAttribute('href', '/placements/k1');
     expect(within(placementLink).getByText('RTA window closing')).toBeInTheDocument();
     expect(within(placementLink).getByText('2h left')).toBeInTheDocument();
-    expect(within(placementLink).getByText('Placement · Touring')).toBeInTheDocument();
+    expect(within(placementLink).getByText('Placement - Touring')).toBeInTheDocument();
 
     // refType drives the link target: conversation → /conversations/:id.
     expect(screen.getByRole('link', { name: /\(404\) 010-0007/ })).toHaveAttribute(

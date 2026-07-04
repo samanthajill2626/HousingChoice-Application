@@ -18,10 +18,10 @@ const BASE: TimelineScheduled = {
 };
 
 describe('ScheduledCard', () => {
-  it('renders the future fire-time line: "sends <relative> · <absolute>" + the body', () => {
+  it('renders the future fire-time line: "sends <relative> - <absolute>" + the body', () => {
     render(<ScheduledCard item={BASE} now={NOW} />);
-    // Future branch → "sends in 3h · <absolute>", NOT "sending shortly".
-    const fire = screen.getByText(/^sends in 3h · /);
+    // Future branch → "sends in 3h - <absolute>", NOT "sending shortly".
+    const fire = screen.getByText(/^sends in 3h - /);
     expect(fire).toBeInTheDocument();
     expect(screen.queryByText(/sending shortly/)).not.toBeInTheDocument();
     expect(screen.getByText('Reminder: your tour is tomorrow at 2pm.')).toBeInTheDocument();

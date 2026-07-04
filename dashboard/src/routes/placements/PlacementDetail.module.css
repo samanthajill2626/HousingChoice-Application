@@ -169,6 +169,27 @@
   color: var(--c-text-subtle);
 }
 
+/* In-place stage-data recorders (inspection date / outcome / rent). */
+.stageDataLabel {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  margin-bottom: var(--sp-1);
+}
+
+.stageDataInput {
+  display: block;
+  width: 100%;
+  max-width: 16rem;
+  margin-bottom: var(--sp-3);
+}
+
+.stageDataFieldset {
+  border: 0;
+  margin: 0 0 var(--sp-2);
+  padding: 0;
+}
+
 .checkNa {
   margin: 0;
   padding: var(--sp-2) 0;

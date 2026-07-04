@@ -243,7 +243,16 @@ export async function transitionPlacement(
  *  move_in_details). Returns the updated placement (unwrapped from { placement }). */
 export async function updatePlacement(
   placementId: string,
-  patch: { lease_signed?: boolean; lif?: boolean; move_in_details?: boolean },
+  patch: {
+    lease_signed?: boolean;
+    lif?: boolean;
+    move_in_details?: boolean;
+    // In-place stage-data (Approval & Move-in) — the server 409s any of these
+    // written at the wrong stage; value shapes match the placement fields.
+    inspection_date?: string;
+    rent_determined?: number;
+    inspection_outcome?: InspectionOutcome;
+  },
 ): Promise<PlacementItem> {
   const res = await request<{ placement: PlacementItem }>(
     `/api/placements/${encodeURIComponent(placementId)}`,

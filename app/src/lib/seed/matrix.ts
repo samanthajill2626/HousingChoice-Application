@@ -291,12 +291,18 @@ interface PlacementGroup {
  *   - stage_entered_at = now − (a plausible time in the current stage).
  *   - created_at = journeyStart(stage_entered_at, stage) (backdated over prior
  *     stages; == stage_entered_at only for send_application).
- *   - next_deadline_type ∈ PHASE_DEADLINE_TYPES[phase] (never tour_reminder;
- *     rta_window only in RTA), picked deterministically per placement.
- *   - next_deadline_at derived from the type; attention-flagged rows land a few
- *     days PAST now (genuinely overdue → needs_you_now / follow_ups), others
- *     upcoming. Invariant: next_deadline_at ≥ stage_entered_at.
- *   - attention.reason ∈ attentionReasonPool(stage).
+ *   - Each active placement gets a deterministic showcase ROLE (per (stage,rep))
+ *     so the Today board deliberately demonstrates the deadline×stuck quadrants:
+ *     due_hard / due_followup / stuck_only / both / upcoming / calm. Most rows are
+ *     calm/upcoming (off-board) so Today reads cleanly; `stuck_only`/`calm` carry
+ *     NO placementDeadlines item (stuck is DERIVED from time-in-stage).
+ *   - When a deadline IS armed: type ∈ PHASE_DEADLINE_TYPES[phase] (never
+ *     tour_reminder; rta_window only in RTA); `at` ≥ stage_entered_at. A
+ *     voucher_expiration deadline is materialized from the tenant's
+ *     voucher_expiration_date (== the deadline `at`).
+ *   - attention is DECOUPLED from overdue-ness: flagged only on the `both` rows +
+ *     the first `due_hard` row (already in needs_you_now); reason ∈
+ *     attentionReasonPool(stage).
  */
 function buildPlacementsMatrix(now: Date): PlacementGroup[] {
   const groups: PlacementGroup[] = [];

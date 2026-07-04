@@ -252,9 +252,9 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   const FIXED_NOW = '2026-07-13T10:00:00.000Z';
   const SCHEDULED_AT = '2026-07-15T10:00:00.000Z';
   const TENANT_PHONE = '+15550300001';
-  // Canned rung bodies (jobs/tourReminders.ts REMINDER_BODIES).
-  const CONFIRMATION_BODY = "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
-  const DAY_BEFORE_BODY = '[AUTO] Reminder: your property tour is tomorrow.';
+  // Rung bodies sourced from the message catalog (single source of truth).
+  const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
+  const DAY_BEFORE_BODY = resolveMessage('tour.day_before');
 
   /** Harness app + dev router sharing ONE world: /api/tours arms reminder rows
    *  against the world fakes and the tick drains them through the SAME repos —

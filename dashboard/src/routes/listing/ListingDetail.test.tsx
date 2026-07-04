@@ -121,8 +121,10 @@ describe('ListingDetail', () => {
     expect(within(heading).getByText('Available')).toBeInTheDocument();
     expect(screen.getByText((t) => t.includes('2 BR') && t.includes('1 BA') && t.includes('$1,400') && t.includes('1,600/mo'))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Broadcast to tenants/ })).toBeInTheDocument();
-    // Edit now lives under the ? menu, not as a header button.
-    expect(screen.queryByRole('button', { name: /Edit/ })).not.toBeInTheDocument();
+    // Edit is not a standalone HEADER button — it's under the ? menu — but it IS
+    // available inline on the Property details + Tour & application cards (two
+    // real, clickable CardAction buttons; the ? menu's Edit is hidden until open).
+    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(2);
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
 

@@ -22,7 +22,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Card, CardAction, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
@@ -285,7 +285,16 @@ export function ListingDetail(): React.JSX.Element {
             )}
           </div>
 
-          <Card title="Property details" aside="Edit">
+          <Card
+            title="Property details"
+            aside={
+              deleted ? undefined : (
+                <CardAction onClick={() => setEditing(true)} label="Edit property details">
+                  Edit
+                </CardAction>
+              )
+            }
+          >
             <div className={styles.detailGrid}>
               <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || '�'} />
               <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '�'} />
@@ -332,7 +341,16 @@ export function ListingDetail(): React.JSX.Element {
             </div>
           </Card>
 
-          <Card title="Tour & application process" aside="Edit">
+          <Card
+            title="Tour & application process"
+            aside={
+              deleted ? undefined : (
+                <CardAction onClick={() => setEditing(true)} label="Edit tour & application process">
+                  Edit
+                </CardAction>
+              )
+            }
+          >
             {unit.tour_process || unit.application_process ? (
               <div className={styles.process}>
                 {unit.tour_process ? <p>{unit.tour_process}</p> : null}

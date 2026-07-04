@@ -15,7 +15,7 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
-import { REMINDER_BODIES } from '../src/jobs/tourReminders.js';
+import { resolveMessage } from '../src/messages/index.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -112,7 +112,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
 
     // Bodies are the canned rung text.
     for (const r of reminders) {
-      expect(r.body).toBe(REMINDER_BODIES[r.kind]);
+      expect(r.body).toBe(resolveMessage(`tour.${r.kind}`));
       // No suppression estimate on a non-self_guided tour (Task 2 scope).
       expect(r.suppression).toBeUndefined();
     }

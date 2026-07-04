@@ -40,18 +40,7 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { isMemberSuppressed } from './relayFanOut.js';
-
-// ---------------------------------------------------------------------------
-// Canned reminder text
-// ---------------------------------------------------------------------------
-
-export const REMINDER_BODIES: Record<ReminderKind, string> = {
-  confirmation: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
-  day_before: '[AUTO] Reminder: your property tour is tomorrow.',
-  morning_of: '[AUTO] Good morning! Your property tour is today.',
-  en_route: '[AUTO] Your tour is coming up soon. Text us when you\'re on the way!',
-  no_show_checkin: '[AUTO] Hi! We noticed you may have missed your tour. Want to reschedule?',
-};
+import { resolveMessage } from '../messages/index.js';
 
 // ---------------------------------------------------------------------------
 // armTourReminders
@@ -287,7 +276,7 @@ async function processReminderRow(
     return;
   }
 
-  const body = REMINDER_BODIES[row.kind];
+  const body = resolveMessage(`tour.${row.kind}`);
 
   // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two
   // concurrent poll ticks both see the same due row but only the first to claim
@@ -429,7 +418,7 @@ async function sendGroupReminder(
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
-  const body = REMINDER_BODIES[row.kind];
+  const body = resolveMessage(`tour.${row.kind}`);
 
   // CLAIM-BEFORE-SEND (same atomic claim as the 1:1 path): claim ONCE for the
   // whole group — losing the claim (concurrent tick / cancel) skips silently.

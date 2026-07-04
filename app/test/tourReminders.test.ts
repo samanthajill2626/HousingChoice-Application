@@ -30,6 +30,7 @@ import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { armTourReminders, cancelTourReminders, runDueTourReminders } from '../src/jobs/tourReminders.js';
+import { resolveMessage } from '../src/messages/index.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -204,8 +205,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // So only confirmation + day_before should have fired.
     expect(world.sent).toHaveLength(2);
     const sentBodies = world.sent.map((s) => s.body);
-    expect(sentBodies).toContain("[AUTO] Your tour is confirmed. We'll send reminders as it approaches.");
-    expect(sentBodies).toContain('[AUTO] Reminder: your property tour is tomorrow.');
+    expect(sentBodies).toContain(resolveMessage('tour.confirmation'));
+    expect(sentBodies).toContain(resolveMessage('tour.day_before'));
 
     // All sent rows should have sentAt stamped.
     const rows = await tourReminders.listByTour(tour.tourId);
@@ -523,8 +524,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // at these polls, and fresh per-test worlds so send counts are isolated.
   // ===========================================================================
 
-  const CONFIRMATION_BODY =
-    "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.";
+  const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
 
   /** Adapter spy for the GROUP route: records direct sends; never a network. */
   function createAdapterSpy(opts: { failFor?: string[] } = {}): {

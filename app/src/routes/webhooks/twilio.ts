@@ -30,12 +30,10 @@ import {
 // inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import {
-  HELP_REPLY,
   OPT_IN_KEYWORDS,
   OPT_OUT_KEYWORDS,
-  STOP_CONFIRMATION,
-  WELCOME_SMS,
 } from '../../lib/smsCompliance.js';
+import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import {
@@ -44,6 +42,7 @@ import {
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo, TERMINAL_STAGES } from '../../repos/placementsRepo.js';
 import {
   createPlacementDeadlinesRepo,
@@ -151,6 +150,12 @@ export interface TwilioWebhookDeps {
   placementDeadlinesRepo?: PlacementDeadlinesRepo;
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
+  /**
+   * Org settings — read at the START/opt-in keyword reply so it honors the
+   * operator's `welcomeText` override (resolveWithSettings('welcome.sms')),
+   * matching the housing-fair path. Injectable in tests; the real repo otherwise.
+   */
+  settingsRepo?: SettingsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /**
@@ -173,6 +178,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
@@ -631,7 +637,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (isHelp) {
         // HELP: no suppression change. Reply the filed HELP copy (declares no
         // phone number — verified in lib/smsCompliance.ts + its test).
-        keywordReply = HELP_REPLY;
+        keywordReply = resolveMessage('keyword.help');
       } else if (optedOut || optedIn) {
         // The CONVERSATION flag is always written — a STOP from a phone with
         // no contact record yet (auto-capture is M1.2) must still suppress
@@ -694,7 +700,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           });
         }
         // The filed reply for the matched keyword (rides the TwiML response).
-        keywordReply = optedOut ? STOP_CONFIRMATION : WELCOME_SMS;
+        // STOP → the compliance-locked confirmation; opt-in/START → the welcome,
+        // resolved through settings so an operator `welcomeText` override is
+        // honored (§7 — matches the housing-fair path; today's raw-constant use
+        // ignored the override).
+        keywordReply = optedOut
+          ? resolveMessage('keyword.stop')
+          : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
       }
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed — message persisted, flag NOT updated');

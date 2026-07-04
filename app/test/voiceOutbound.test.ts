@@ -38,6 +38,7 @@ import {
   TEST_SESSION_USER,
 } from './helpers/authSession.js';
 import { hashCellVerifyCode } from '../src/lib/cellVerification.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 /** A recording outbound-queue adapter that captures enqueued jobs without dispatching them. */
 class RecordingOutboundQueue implements OutboundQueueAdapter {
@@ -273,8 +274,9 @@ describe('POST /webhooks/twilio/voice/outbound-bridge (spec §5)', () => {
     expect(res.status).toBe(200);
     const xml = res.text;
     expect(xml).toContain('<Gather');
-    expect(xml).toContain('Press 1 to connect');
-    expect(xml).toContain('Tenant (Jane D.)');
+    // The whisper copy comes from the catalog (single source of truth), with the
+    // masked target label interpolated (never a phone).
+    expect(xml).toContain(resolveMessage('voice.whisper_outbound', { targetLabel: 'Tenant (Jane D.)' }));
     // The whisper-gate action carries ONLY the opaque conversationId + outbound=1.
     expect(xml).toContain('/webhooks/twilio/voice/whisper-gate');
     expect(xml).toContain('outbound=1');

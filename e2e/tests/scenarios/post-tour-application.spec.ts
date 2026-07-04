@@ -32,13 +32,16 @@ import {
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
+// The four nudge bodies, sourced from the app message catalog (the single source
+// of truth) so a body reword can't silently drift the assertions apart. Import
+// the PURE catalog module (no repo/AWS deps). Full bodies still satisfy the
+// `…Containing` outbox assertions below.
+import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 
-// Distinctive substrings of the four nudge bodies (app/src/jobs/placementNudges.ts
-// NUDGE_RUNGS) — pinned here so a body reword breaks the test loudly.
-const RECEIPT_NUDGE = 'did the rental application come through';
-const COMPLETION_NUDGE = 'How is the application coming along';
-const APPROVAL_NUDGE = 'any decision yet on the application';
-const RTA_CLOSING_NUDGE = 'the 48-hour RTA window is closing';
+const RECEIPT_NUDGE = MESSAGE_CATALOG['nudge.receipt_check'].default;
+const COMPLETION_NUDGE = MESSAGE_CATALOG['nudge.completion_check'].default;
+const APPROVAL_NUDGE = MESSAGE_CATALOG['nudge.approval_check'].default;
+const RTA_CLOSING_NUDGE = MESSAGE_CATALOG['nudge.rta_window_closing'].default;
 
 // Opt-in end-of-test pause for eyeballing the live dashboard (gated on E2E_PAUSE),
 // mirroring the sibling scenario specs.

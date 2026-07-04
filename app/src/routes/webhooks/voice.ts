@@ -43,6 +43,7 @@ import { loadConfig, type AppConfig } from '../../lib/config.js';
 import { formatPhoneForDisplay } from '../../lib/phone.js';
 import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
+import { resolveMessage } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import {
   createContactsRepo,
@@ -413,9 +414,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       );
       sendTwiml(
         res,
-        maskedSayHangup(
-          'Thank you for calling Housing Choice. Please send us a text message, and we will get back to you.',
-        ),
+        maskedSayHangup(resolveMessage('voice.greeting_no_holder')),
       );
       return;
     }
@@ -433,9 +432,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.info({ callSid: CallSid }, 'founder triage: caller is the dialed cell — not bridging to self');
       sendTwiml(
         res,
-        maskedSayHangup(
-          'Thanks for calling Housing Choice. Please reach us from a different line, or send a text message. Goodbye.',
-        ),
+        maskedSayHangup(resolveMessage('voice.self_call')),
       );
       return;
     }
@@ -473,7 +470,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     if (decision !== 'ring-founder') {
       // Unreachable today (decideFounderRouting only returns 'ring-founder') —
       // the shape the deferred ring-through rules will use to refuse a bridge.
-      sendTwiml(res, maskedSayHangup('Sorry, no one is available to take your call right now.'));
+      sendTwiml(res, maskedSayHangup(resolveMessage('voice.founder_refuse')));
       return;
     }
 
@@ -736,9 +733,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.info({ callSid: CallSid, reason, masked: true }, 'masked inbound call refused — no bridge');
       sendTwiml(
         res,
-        maskedSayHangup(
-          'Sorry, this Housing Choice connection is no longer available. Please send us a text message instead.',
-        ),
+        maskedSayHangup(resolveMessage('voice.thread_closed')),
       );
       return;
     }
@@ -749,7 +744,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     if (decision !== 'bridge') {
       // Unreachable today (decideRouting only returns 'bridge') — the shape the
       // deferred ring-through rules will use to refuse a bridge.
-      sendTwiml(res, maskedSayHangup('Sorry, this Housing Choice connection is not available right now.'));
+      sendTwiml(res, maskedSayHangup(resolveMessage('voice.masked_refuse')));
       return;
     }
 
@@ -957,7 +952,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.warn({ callSid: parentCallSid }, 'outbound bridge: target unresolved from conversationId — hanging up');
       sendTwiml(
         res,
-        maskedSayHangup('Sorry, this Housing Choice call is no longer available. Goodbye.'),
+        maskedSayHangup(resolveMessage('voice.outbound_unavailable')),
       );
       return;
     }
@@ -973,7 +968,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       `&outbound=1`;
     const vr = new VoiceResponse();
     const gather = vr.gather({ numDigits: 1, timeout: 8, action: gateUrl, method: 'POST' });
-    gather.say(`Calling ${target.label}. Press 1 to connect.`);
+    gather.say(resolveMessage('voice.whisper_outbound', { targetLabel: target.label }));
     // No input within the timeout → hang up (never auto-bridge — press-1 is the
     // explicit accept that blocks the navigator's carrier voicemail).
     vr.hangup();
@@ -994,7 +989,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   router.post('/whisper', verifySignature, (req, res) => {
     const params = asParams(req.body);
     const q = req.query as Record<string, string | undefined>;
-    const callerLabel = typeof q['callerLabel'] === 'string' ? q['callerLabel'] : 'a Housing Choice contact';
+    const callerLabel =
+      typeof q['callerLabel'] === 'string' ? q['callerLabel'] : resolveMessage('voice.caller_label_default');
     const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
     const parentCallSid = typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
     // leg=founder selects the founder-bridge whisper copy (M1.9b): the founder
@@ -1023,8 +1019,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the team).
     gather.say(
       isFounderLeg
-        ? `You have a Housing Choice call from ${callerLabel}. Press 1 to accept.`
-        : `You have a Housing Choice call from ${callerLabel}. Press 1 to accept, or press 0 to reach the team.`,
+        ? resolveMessage('voice.whisper_founder', { callerLabel })
+        : resolveMessage('voice.whisper_relay', { callerLabel }),
     );
     // No input within the timeout → fall through to hangup so the bridge is
     // never completed to a carrier voicemail (the caller then hears no-answer).
@@ -1173,7 +1169,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         log.info({ callSid: parentCallSid, gate: 'team', masked: true }, 'masked whisper gate: press-0 — dialing team');
       } else {
         // No team number configured — say + hangup rather than leak/await.
-        vr.say('Sorry, the team is not reachable right now. Please try again later.');
+        vr.say(resolveMessage('voice.team_unreachable'));
         vr.hangup();
         log.warn({ callSid: parentCallSid, gate: 'team' }, 'masked whisper gate: press-0 but no team number configured');
       }
@@ -1367,9 +1363,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the caller's number (no <Number>/callerId echoed here).
     const reply = new VoiceResponse();
     if (isMissed) {
-      reply.say(
-        'Sorry we missed your call. Please send us a text message and we will get right back to you. Goodbye.',
-      );
+      reply.say(resolveMessage('voice.missed_call_goodbye'));
       reply.hangup();
     }
     sendTwiml(res, reply);

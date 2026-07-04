@@ -22,6 +22,9 @@ import {
   legPhones,
   uniqueVoicePhone,
 } from '../fixtures/voiceSetup.js';
+// The single source of truth for automated-message copy. Import the PURE catalog
+// module (no repo/AWS deps) so the e2e bundle stays light.
+import { MESSAGE_CATALOG } from '../../app/src/messages/catalog.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
 // config load from the lane resolver). Fall back to the lane-0 dev default so
@@ -115,14 +118,14 @@ export type ReminderKind =
   | 'en_route'
   | 'no_show_checkin';
 
-/** VERBATIM rung bodies (app/src/jobs/tourReminders.ts REMINDER_BODIES) — the
- *  test-pinned contract; asserted by exact body equality in the fake threads. */
+/** Rung bodies sourced from the app message catalog (the single source of truth)
+ *  — asserted by exact body equality in the fake threads. */
 export const TOUR_REMINDER_BODIES: Record<ReminderKind, string> = {
-  confirmation: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
-  day_before: '[AUTO] Reminder: your property tour is tomorrow.',
-  morning_of: '[AUTO] Good morning! Your property tour is today.',
-  en_route: "[AUTO] Your tour is coming up soon. Text us when you're on the way!",
-  no_show_checkin: '[AUTO] Hi! We noticed you may have missed your tour. Want to reschedule?',
+  confirmation: MESSAGE_CATALOG['tour.confirmation'].default,
+  day_before: MESSAGE_CATALOG['tour.day_before'].default,
+  morning_of: MESSAGE_CATALOG['tour.morning_of'].default,
+  en_route: MESSAGE_CATALOG['tour.en_route'].default,
+  no_show_checkin: MESSAGE_CATALOG['tour.no_show_checkin'].default,
 };
 
 /** The staff-facing rung labels the Reminders panel renders (verbatim mirror of

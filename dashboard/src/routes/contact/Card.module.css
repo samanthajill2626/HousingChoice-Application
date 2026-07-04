@@ -20,16 +20,20 @@
   font-weight: var(--fw-semibold);
 }
 
+/* The plain (non-interactive) aside — a count chip like "3" on a card heading.
+ * MUTED, never brand-blue: blue is reserved for things you can click (the .asideBtn
+ * action below / links). A blue count reads as a link that goes nowhere. */
 .aside {
   margin-left: auto;
-  color: var(--c-brand);
+  color: var(--c-text-subtle);
   font-size: var(--fs-xs);
   font-weight: var(--fw-regular);
   text-transform: none;
   letter-spacing: 0;
 }
 
-/* A clickable variant of `.aside` (CardAction) — a text button, same look. */
+/* The clickable heading action (CardAction) — a text button. Brand-blue BECAUSE
+ * it's interactive (it underlines on hover). */
 .asideBtn {
   margin-left: auto;
   background: transparent;

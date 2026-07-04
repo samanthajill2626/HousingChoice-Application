@@ -95,7 +95,7 @@ export const STAGE_PHASE: Readonly<Record<PlacementStage, PlacementPhase>> = {
  */
 export const STAGE_LABELS: Readonly<Record<PlacementStage, string>> = {
   send_application: 'Send application',
-  awaiting_receipt: 'Awaiting receipt',
+  awaiting_receipt: 'Awaiting receipt confirmation',
   awaiting_completion: 'Awaiting completion',
   awaiting_approval: 'Awaiting approval',
   collect_rta: 'Collect RTA',

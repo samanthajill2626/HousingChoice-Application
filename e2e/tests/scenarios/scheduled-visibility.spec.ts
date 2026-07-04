@@ -197,7 +197,7 @@ test('(e) tenant nudge: a placement at Awaiting receipt shows an Upcoming nudge 
 
   // Send application → Awaiting receipt arms the [AUTO] receipt-check nudge 1:1 to
   // the TENANT (~24h out) — it surfaces as a pinned Upcoming "Nudge" item.
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.expectUpcomingItem(tenantId, { bodyContains: RECEIPT_NUDGE, source: 'placement_nudge' });
 
   // Tick ~25h past the transition → the nudge fires 1:1 and leaves Upcoming.

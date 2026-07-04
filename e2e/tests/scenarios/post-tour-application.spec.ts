@@ -130,7 +130,7 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   // --- Application block ---------------------------------------------------
   // Send application → Awaiting receipt: the [AUTO] receipt-check nudge fires 1:1
   // to the TENANT ~24h later.
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.devPlacementNudgeTick(hoursFromNow(25));
   await flow.expectOutboxMessageContaining(tenant, RECEIPT_NUDGE);
 
@@ -188,7 +188,7 @@ test('marked deviation — landlord denies at Awaiting approval → Lost (tenant
   await flow.landlordTexts(owner, 'Reviewing.');
 
   await flow.teamConvertsTourToPlacement();
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.teamMovesPlacementTo('Awaiting completion');
   await flow.teamMovesPlacementTo('Awaiting approval');
 
@@ -220,7 +220,7 @@ test('marked deviation — 48h window BLOWN at Awaiting landlord submission → 
 
   await flow.teamConvertsTourToPlacement();
   // Walk to Awaiting landlord submission (no skip).
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.teamMovesPlacementTo('Awaiting completion');
   await flow.teamMovesPlacementTo('Awaiting approval');
   await flow.teamMovesPlacementTo('Collect RTA');
@@ -255,7 +255,7 @@ test('marked deviation — party backs out early at Awaiting receipt → Lost (b
   const { tenant, unit } = await reachConvertibleTour(flow, { tenant: 'Quitter', owner: 'Host' });
 
   await flow.teamConvertsTourToPlacement();
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
 
   // Party backs out (marked deviation) — Lost is reachable from ANY stage.
   await flow.teamMovesPlacementTo('Lost', { lostReason: 'Tenant withdrew' });
@@ -290,7 +290,7 @@ test('placement-deadline-model — voucher + rta_window coexist (soonest-wins on
   // is now the placement's SOONEST due deadline, so Needs-you-now's single row for it
   // reads "RTA window closing" (per-placement dedup keeps the soonest). The two
   // deadline ITEMS are independent — the voucher is untouched underneath.
-  await flow.teamMovesPlacementTo('Awaiting receipt');
+  await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.teamMovesPlacementTo('Awaiting completion');
   await flow.teamMovesPlacementTo('Awaiting approval');
   await flow.teamMovesPlacementTo('Collect RTA');

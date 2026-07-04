@@ -54,7 +54,7 @@ const INSPECTION_DATE = '2026-08-15';
 // The application/RTA ladder rungs (Post-Tour & Application) walked bare to reach
 // this sequence's entry state. Proven labels from post-tour-application.spec.ts.
 const PTA_LADDER = [
-  'Awaiting receipt',
+  'Awaiting receipt confirmation',
   'Awaiting completion',
   'Awaiting approval',
   'Collect RTA',

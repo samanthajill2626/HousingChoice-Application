@@ -918,6 +918,7 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
 function makeServiceWithActivity(world: FakeWorld): StatusTransitionService {
   return createStatusTransitionService({
     placementsRepo: world.placementsRepo,
+    placementDeadlinesRepo: world.placementDeadlinesRepo,
     unitsRepo: world.unitsRepo,
     contactsRepo: world.contactsRepo,
     auditRepo: world.auditRepo,

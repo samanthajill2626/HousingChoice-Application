@@ -168,6 +168,33 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(page.rows[0]!.contactId).toBeUndefined();
   });
 
+  it('a type="unknown" CONTACT (untriaged inbound WITH a record) → needsTriage:true and appears under the "unknown" filter', async () => {
+    // Regression: the seed models untriaged inbound as a type=unknown contact, so
+    // findByPhone resolves it (needsTriage was hardcoded false for contact rows) →
+    // it was excluded from the "unknown" filter even though it needs triage.
+    const contact: ContactItem = {
+      contactId: 'c-unk',
+      type: 'unknown',
+      firstName: 'Alexis',
+      lastName: 'Monroe',
+      phone: '+15550009999',
+      phones: [{ phone: '+15550009999', primary: true }],
+    };
+    const deps = makeDeps({
+      contacts: [contact],
+      conversations: [
+        conv({ conversationId: 'conv-u', participant_phone: '+15550009999', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1, type: 'unknown_1to1' }),
+      ],
+    });
+
+    const all = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    expect(all.rows[0]).toMatchObject({ kind: 'contact', contactId: 'c-unk', role: 'unknown', needsTriage: true });
+
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25, userId: 'u-1' }, deps);
+    expect(unknown.rows).toHaveLength(1);
+    expect(unknown.rows[0]!.contactId).toBe('c-unk');
+  });
+
   it('relay_group conversations are excluded from the feed', async () => {
     const deps = makeDeps({
       contacts: [],

@@ -438,12 +438,17 @@ export async function aggregateInbox(
     }
 
     emittedContacts.add(contact.contactId);
+    // A type='unknown' contact IS an untriaged inbound (it just already has a
+    // record) — so it needs triage and belongs under the "unknown" filter, exactly
+    // like a no-contact number. Keying triage off the ROLE (not "no contact
+    // record") is what makes both cases surface.
+    const role = roleFromContact(contact);
     return {
       kind: 'contact',
       contactId: contact.contactId,
       phone: maxConv.participant_phone,
       name: nameFromContact(contact) ?? formatPhoneForDisplay(phone) ?? phone,
-      role: roleFromContact(contact),
+      role,
       ...(placementContext !== undefined && { placementContext }),
       unreadCount: unreadSum,
       preview,
@@ -451,7 +456,7 @@ export async function aggregateInbox(
       direction,
       lastActivityAt: maxConv.last_activity_at,
       ...(assignment !== undefined && { assignment }),
-      needsTriage: false,
+      needsTriage: role === 'unknown',
     };
   };
 

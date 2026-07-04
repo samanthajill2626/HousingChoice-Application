@@ -41,6 +41,7 @@ import {
 } from './helpers/twilioWebhookHarness.js';
 import { TEST_ADMIN_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
 // The inbound-voice-line HOLDER's verified cell — the number inbound calls ring.
@@ -482,7 +483,7 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/xml');
     expect(res.text).toContain('<Say');
-    expect(res.text).toContain('Sorry we missed your call');
+    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
     expect(res.text).toContain('<Hangup');
     expect(res.text).not.toContain(CALLER); // never the caller's number
   });
@@ -547,7 +548,7 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.pushSends.filter((p) => p.notification.kind === 'missed_call')).toHaveLength(1);
     expect(world.sent).toHaveLength(1); // the auto-text fired
     // The caller hears the goodbye (answers + cleanly ends the leg → no loop).
-    expect(res.text).toContain('Sorry we missed your call');
+    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
     expect(res.text).toContain('<Hangup');
   });
 

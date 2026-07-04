@@ -7,6 +7,7 @@ import {
   hashCellVerifyCode,
   renderCellVerifySms,
 } from '../src/lib/cellVerification.js';
+import { resolveMessage } from '../src/messages/index.js';
 
 describe('generateCellVerifyCode', () => {
   it('is always exactly 6 numeric digits (incl. leading zeros)', () => {
@@ -42,6 +43,10 @@ describe('renderCellVerifySms', () => {
     const body = renderCellVerifySms('111111');
     expect(body).toContain('HousingChoice');
     expect(body).toContain('10 minutes');
+  });
+
+  it('is a thin wrapper over the catalog verify.cell_code message', () => {
+    expect(renderCellVerifySms('427193')).toBe(resolveMessage('verify.cell_code', { code: '427193' }));
   });
 });
 

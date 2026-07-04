@@ -10,6 +10,7 @@
 // PII posture (spec §9): the verification CODE is a secret — it is stored only
 // as a sha256 hash on the user record and must NEVER be logged.
 import { createHash, randomInt } from 'node:crypto';
+import { resolveMessage } from '../messages/index.js';
 
 /** How long a generated code is valid, in ms (10 minutes). */
 export const CELL_VERIFY_TTL_MS = 10 * 60 * 1000;
@@ -40,5 +41,5 @@ export function hashCellVerifyCode(code: string): string {
  * verification (not A2P marketing/consumer messaging), so no opt-out footer.
  */
 export function renderCellVerifySms(code: string): string {
-  return `Your HousingChoice verification code is ${code}. It expires in 10 minutes.`;
+  return resolveMessage('verify.cell_code', { code });
 }

@@ -11,16 +11,24 @@ import {
 
 /**
  * Substitute `{token}` for each ALLOWED token that actually appears in the
- * template. A declared token present in the template but missing from `vars` is
- * a DEFECT (throws — never silently blanks). Tokens NOT in `allowed` are left
- * untouched. A declared token that does not appear in the template needs no
- * value (e.g. welcome.sms declares {firstName} for override use, but the default
- * copy does not personalize).
+ * template. Tokens NOT in `allowed` are left untouched. A declared token that
+ * does not appear in the template needs no value (e.g. welcome.sms declares
+ * {firstName} for override use, but the default copy does not personalize).
+ *
+ * A declared token present in the template but missing from `vars`:
+ * - in a catalog DEFAULT (`strict`): a genuine coding defect — throws. A default
+ *   is code-controlled; if it declares a token the call site must supply it, and
+ *   the tests catch a forgotten one.
+ * - in an operator OVERRIDE (`!strict`): degrades to empty. Operator template
+ *   data must NEVER crash a send path — a personalized welcomeText that uses
+ *   {firstName} can fire on a path with no name (the START/keyword reply), and
+ *   the confirmation must still go out rather than silently throwing.
  */
 function interpolate(
   template: string,
   vars: Record<string, string> | undefined,
   allowed: readonly string[],
+  strict: boolean,
 ): string {
   let out = template;
   for (const token of allowed) {
@@ -28,7 +36,11 @@ function interpolate(
     if (!out.includes(needle)) continue;
     const value = vars?.[token];
     if (typeof value !== 'string') {
-      throw new Error(`resolveMessage: missing interpolation var "${token}"`);
+      if (strict) {
+        throw new Error(`resolveMessage: missing interpolation var "${token}"`);
+      }
+      out = out.split(needle).join('');
+      continue;
     }
     out = out.split(needle).join(value);
   }
@@ -47,9 +59,12 @@ export function resolveMessage(
 ): string {
   const def = MESSAGE_CATALOG[id];
   const override = def.editable ? overrides?.[id] : undefined;
-  const template =
-    typeof override === 'string' && override.length > 0 ? override : def.default;
-  return interpolate(template, vars, def.vars);
+  const usingOverride = typeof override === 'string' && override.length > 0;
+  const template = usingOverride ? override : def.default;
+  // Strict (throw on a missing declared token) only for code-controlled
+  // DEFAULTS; operator OVERRIDES degrade gracefully so their template can never
+  // crash a send path (see interpolate).
+  return interpolate(template, vars, def.vars, !usingOverride);
 }
 
 /**

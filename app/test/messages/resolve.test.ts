@@ -53,10 +53,26 @@ describe('resolveMessage', () => {
     expect(out).toBe('Hi Keisha Keisha! Reply STOP. {other} stays.');
   });
 
-  it('THROWS when a token present in the template has no value (a defect, never blank)', () => {
-    expect(() =>
-      resolveMessage('welcome.sms', undefined, { 'welcome.sms': 'Hi {firstName}!' }),
-    ).toThrow(/missing interpolation var/);
+  it('an operator OVERRIDE degrades gracefully (no throw) when a declared token has no value', () => {
+    // Regression guard: a personalized welcomeText override can fire on a path
+    // with no name (the START/keyword reply passes no firstName). Operator data
+    // must NEVER crash a send — an unfilled declared token degrades to empty
+    // instead of throwing. (The strict throw is kept for catalog DEFAULTS below.)
+    expect(
+      resolveMessage('welcome.sms', undefined, { 'welcome.sms': 'Hi {firstName}, welcome!' }),
+    ).toBe('Hi , welcome!');
+    // ...and still substitutes when a value IS supplied.
+    expect(
+      resolveMessage('welcome.sms', { firstName: 'Keisha' }, {
+        'welcome.sms': 'Hi {firstName}, welcome!',
+      }),
+    ).toBe('Hi Keisha, welcome!');
+  });
+
+  it('THROWS when a catalog DEFAULT declares a token in its copy but no value is supplied (coding-defect guard)', () => {
+    // verify.cell_code's DEFAULT contains {code}; a call site that forgets it is
+    // a genuine bug — the strict throw stays for code-controlled defaults.
+    expect(() => resolveMessage('verify.cell_code', undefined)).toThrow(/missing interpolation var/);
   });
 
   it('does NOT require a declared var absent from the template (welcome.sms default has no {firstName})', () => {

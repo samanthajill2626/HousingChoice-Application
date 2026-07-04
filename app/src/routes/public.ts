@@ -28,6 +28,7 @@ import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
+import { resolveWithSettings } from '../messages/index.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -42,22 +43,15 @@ import {
 } from '../services/sendMessage.js';
 
 /**
- * The housing-fair "auto welcome text" DEFAULT copy — now the FILED A2P welcome
- * (spec §5): brand identity + opt-out language, verbatim from
- * lib/smsCompliance.ts (the single source of truth). The operator can still
- * override it via the settings `welcomeText` field (resolved per-request below),
- * but ANY settings-read failure falls back to THIS constant so intake never
- * breaks. `WELCOME_SMS` carries no `{firstName}` token, so renderWelcome is a
- * no-op interpolation — but an operator override MAY still use `{firstName}`.
- * Re-exported under the historical name so existing importers keep working.
+ * The housing-fair "auto welcome text" DEFAULT copy — the FILED A2P welcome
+ * (spec §5): brand identity + opt-out language, verbatim from lib/smsCompliance.ts
+ * (the single source of truth). The welcome is now resolved through the message
+ * catalog (`welcome.sms`): the operator can still override it via the settings
+ * `welcomeText` field, and ANY settings-read failure falls back to this default
+ * so intake never breaks. Re-exported under the historical name so existing
+ * importers (tests) keep working.
  */
 export const WELCOME_TEXT_TEMPLATE = WELCOME_SMS;
-
-/** Render a welcome body from a template (the constant or the operator's
- *  override), interpolating {firstName}. Pure. */
-function renderWelcome(template: string, firstName: string): string {
-  return template.replace('{firstName}', firstName);
-}
 
 /**
  * A non-reversible, non-PII marker for a phone — a short hash prefix used in
@@ -265,22 +259,14 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // A repeat signup never re-sends (no SMS spend, no spam).
     let welcomeSent = false;
     if (!alreadyWelcomed) {
-      // Resolve the welcome template defensively: the operator's settings
-      // welcomeText when set, else the constant. A settings-read failure must
-      // NOT break intake — the send is best-effort — so fall back to the
-      // constant on ANY error. NO PII logged (marker only).
-      let template = WELCOME_TEXT_TEMPLATE;
       try {
-        const s = await settings.getOrgSettings();
-        if (typeof s.welcomeText === 'string' && s.welcomeText.length > 0) template = s.welcomeText;
-      } catch {
-        // best-effort: a settings-read failure must NOT break intake — fall back to the constant.
-        log.warn({ marker }, 'welcomeText read failed; using default template');
-      }
-      try {
+        // Resolve the welcome through the catalog: the operator's settings
+        // `welcomeText` override when set (interpolating {firstName}), else the
+        // filed default. resolveWithSettings reads defensively — ANY settings-read
+        // failure falls back to the default so intake never breaks. NO PII logged.
         await sendMessage({
           conversationId: conversation.conversationId,
-          body: renderWelcome(template, firstName),
+          body: await resolveWithSettings('welcome.sms', { firstName }, { settingsRepo: settings }),
           automated: true,
         });
         welcomeSent = true;

@@ -45,6 +45,7 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { resolveWithSettings } from '../messages/index.js';
 import { defineJobHandler } from './jobs.js';
 
 export const MISSED_CALL_AUTOTEXT_JOB = 'call.missedAutoText';
@@ -125,7 +126,10 @@ export function registerMissedCallAutoTextJobHandler(deps: MissedCallAutoTextJob
     try {
       await sendMessage({
         conversationId: payload.conversationId,
-        body: orgSettings.missedCallAutoText,
+        // Resolve through the catalog: the operator's `missedCallAutoText`
+        // override when set, else the filed default. The enabled gate above
+        // still reads getOrgSettings() directly.
+        body: await resolveWithSettings('missed_call.autotext', undefined, { settingsRepo: settings }),
         author: 'teammate',
         automated: true,
       });

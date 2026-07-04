@@ -28,21 +28,14 @@
   gap: var(--sp-2);
 }
 
-/* A checkbox with a help line beneath it. The hint is a SIBLING of the <label>
- * (not inside it) + linked via aria-describedby, so it reads as a description and
- * doesn't pollute the checkbox's accessible name. Indented to sit under the label,
- * clear of the box. */
-.checkboxHinted {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.hint {
-  margin: 0 0 0 calc(1.1rem + var(--sp-2));
-  font-size: var(--fs-xs);
+/* A small ⓘ next to a checkbox label — reveals the field's help on mouseover
+ * (title tooltip) instead of an always-on line. aria-hidden keeps it out of the
+ * checkbox's accessible name; the real description rides an aria-describedby
+ * srLabel sibling. */
+.info {
   color: var(--c-text-subtle);
-  line-height: 1.4;
+  font-size: var(--fs-xs);
+  cursor: help;
 }
 
 .label {

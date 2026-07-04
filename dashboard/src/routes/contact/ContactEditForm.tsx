@@ -686,62 +686,82 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 placeholder="e.g. 1450"
               />
             </label>
-            <div className={styles.checkboxHinted}>
-              <label className={styles.checkboxField}>
-                <input
-                  type="checkbox"
-                  checked={registeredLandlord}
-                  onChange={(e) => setRegisteredLandlord(e.target.checked)}
-                  aria-describedby="obh-registered"
-                />
-                <span className={styles.label}>Registered landlord</span>
-              </label>
-              <p id="obh-registered" className={styles.hint}>
-                {LANDLORD_ONBOARDING_HINTS.registered_landlord}
-              </p>
-            </div>
-            <div className={styles.checkboxHinted}>
-              <label className={styles.checkboxField}>
-                <input
-                  type="checkbox"
-                  checked={rtaWithin48h}
-                  onChange={(e) => setRtaWithin48h(e.target.checked)}
-                  aria-describedby="obh-rta48"
-                />
-                <span className={styles.label}>Submits RTA within 48h</span>
-              </label>
-              <p id="obh-rta48" className={styles.hint}>
-                {LANDLORD_ONBOARDING_HINTS.rta_within_48h}
-              </p>
-            </div>
-            <div className={styles.checkboxHinted}>
-              <label className={styles.checkboxField}>
-                <input
-                  type="checkbox"
-                  checked={passInspection}
-                  onChange={(e) => setPassInspection(e.target.checked)}
-                  aria-describedby="obh-inspection"
-                />
-                <span className={styles.label}>Passes inspection first try</span>
-              </label>
-              <p id="obh-inspection" className={styles.hint}>
-                {LANDLORD_ONBOARDING_HINTS.pass_inspection_first_try}
-              </p>
-            </div>
-            <div className={styles.checkboxHinted}>
-              <label className={styles.checkboxField}>
-                <input
-                  type="checkbox"
-                  checked={incomeIncludesVoucher}
-                  onChange={(e) => setIncomeIncludesVoucher(e.target.checked)}
-                  aria-describedby="obh-voucher"
-                />
-                <span className={styles.label}>Voucher counts as income</span>
-              </label>
-              <p id="obh-voucher" className={styles.hint}>
-                {LANDLORD_ONBOARDING_HINTS.income_includes_voucher}
-              </p>
-            </div>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={registeredLandlord}
+                onChange={(e) => setRegisteredLandlord(e.target.checked)}
+                aria-describedby="obh-registered"
+              />
+              <span className={styles.label}>Registered landlord</span>
+              <span
+                className={styles.info}
+                title={LANDLORD_ONBOARDING_HINTS.registered_landlord}
+                aria-hidden="true"
+              >
+                ⓘ
+              </span>
+            </label>
+            <span id="obh-registered" className={styles.srLabel}>
+              {LANDLORD_ONBOARDING_HINTS.registered_landlord}
+            </span>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={rtaWithin48h}
+                onChange={(e) => setRtaWithin48h(e.target.checked)}
+                aria-describedby="obh-rta48"
+              />
+              <span className={styles.label}>Submits RTA within 48h</span>
+              <span
+                className={styles.info}
+                title={LANDLORD_ONBOARDING_HINTS.rta_within_48h}
+                aria-hidden="true"
+              >
+                ⓘ
+              </span>
+            </label>
+            <span id="obh-rta48" className={styles.srLabel}>
+              {LANDLORD_ONBOARDING_HINTS.rta_within_48h}
+            </span>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={passInspection}
+                onChange={(e) => setPassInspection(e.target.checked)}
+                aria-describedby="obh-inspection"
+              />
+              <span className={styles.label}>Passes inspection first try</span>
+              <span
+                className={styles.info}
+                title={LANDLORD_ONBOARDING_HINTS.pass_inspection_first_try}
+                aria-hidden="true"
+              >
+                ⓘ
+              </span>
+            </label>
+            <span id="obh-inspection" className={styles.srLabel}>
+              {LANDLORD_ONBOARDING_HINTS.pass_inspection_first_try}
+            </span>
+            <label className={styles.checkboxField}>
+              <input
+                type="checkbox"
+                checked={incomeIncludesVoucher}
+                onChange={(e) => setIncomeIncludesVoucher(e.target.checked)}
+                aria-describedby="obh-voucher"
+              />
+              <span className={styles.label}>Voucher counts as income</span>
+              <span
+                className={styles.info}
+                title={LANDLORD_ONBOARDING_HINTS.income_includes_voucher}
+                aria-hidden="true"
+              >
+                ⓘ
+              </span>
+            </label>
+            <span id="obh-voucher" className={styles.srLabel}>
+              {LANDLORD_ONBOARDING_HINTS.income_includes_voucher}
+            </span>
             <label className={styles.field}>
               <span className={styles.label}>Park reason</span>
               <textarea

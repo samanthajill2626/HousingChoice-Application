@@ -2,13 +2,11 @@
 // LandlordFile: the relay-group threads this contact is a member of
 // (GET /api/contacts/:id/relay-groups via the useContactFile slice).
 //
-// Each row links to the group's OWNER detail page (tour / placement) — that is
-// where the thread is operated (e.g. TourDetail's group-thread panel); the new
-// dashboard has no per-conversation inbox view, and a standalone group has no
-// sensible target, so it renders unlinked. Label preference: the other members'
-// names ("With Lars Landlord") > the operator tag > the (formatted) pool
-// number > a plain "Group text". A closed group shows "Closed" instead of the
-// member count.
+// Each row links to the group's own CONVERSATION view
+// (/conversations/:conversationId) — where the thread is read + operated. Label
+// preference: the other members' names ("With Lars Landlord") > the operator tag
+// > the (formatted) pool number > a plain "Group text". A closed group shows
+// "Closed" instead of the member count.
 import type { RelayGroupRow } from '../../api/index.js';
 import { Card, EmptyRow, PendingPanel, Row, responseClass } from './Card.js';
 import { formatPhone } from './format.js';
@@ -19,11 +17,11 @@ export interface GroupTextsCardProps {
   groups: RelayGroupRow[];
 }
 
-/** The owner detail route for a group, or undefined (standalone → no link). */
-export function groupLink(owner: RelayGroupRow['owner']): string | undefined {
-  if (owner.type === 'tour' && owner.id !== undefined) return `/tours/${owner.id}`;
-  if (owner.type === 'placement' && owner.id !== undefined) return `/placements/${owner.id}`;
-  return undefined;
+/** The conversation-view route for a group — its OWN conversationId (the relay
+ *  view dispatches on the conversation, not the owner). Always resolvable, so
+ *  every row links. */
+export function groupLink(g: RelayGroupRow): string {
+  return `/conversations/${g.conversationId}`;
 }
 
 /** A row's label: other members' names > tag > pool number > "Group text". */
@@ -43,11 +41,10 @@ export function GroupTextsCard({ pending, groups }: GroupTextsCardProps): React.
         <EmptyRow>No group texts yet.</EmptyRow>
       ) : (
         groups.map((g) => {
-          const to = groupLink(g.owner);
           return (
             <Row
               key={g.conversationId}
-              {...(to !== undefined && { to })}
+              to={groupLink(g)}
               label={groupLabel(g)}
               right={
                 <span className={responseClass.muted}>

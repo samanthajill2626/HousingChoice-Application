@@ -150,7 +150,7 @@ describe('TenantFile', () => {
     expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows (relay memberships) linking to the owner tour', () => {
+  it('renders Group-texts rows (relay memberships) linking to the conversation view', () => {
     renderIt({
       relayGroupsPending: false,
       relayGroups: [
@@ -167,7 +167,7 @@ describe('TenantFile', () => {
     });
     const link = screen
       .getAllByRole('link')
-      .find((a) => a.getAttribute('href') === '/tours/tour-9');
+      .find((a) => a.getAttribute('href') === '/conversations/conv-g1');
     expect(link).toBeDefined();
     expect(link).toHaveTextContent('With Lars Landlord');
     expect(link).toHaveTextContent('2 members');
@@ -307,7 +307,7 @@ describe('LandlordFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows — a closed placement-owned group links to the placement', () => {
+  it('renders Group-texts rows — a closed group links to its conversation view', () => {
     renderIt({
       relayGroups: [
         {
@@ -322,7 +322,7 @@ describe('LandlordFile', () => {
     });
     const link = screen
       .getAllByRole('link')
-      .find((a) => a.getAttribute('href') === '/placements/k1' && /With Tina Tenant/.test(a.textContent ?? ''));
+      .find((a) => a.getAttribute('href') === '/conversations/conv-g2' && /With Tina Tenant/.test(a.textContent ?? ''));
     expect(link).toBeDefined();
     expect(link).toHaveTextContent('Closed');
   });

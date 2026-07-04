@@ -254,7 +254,7 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'conv-123' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    const link = screen.getByRole('link', { name: /Open group thread in inbox/i });
+    const link = screen.getByRole('link', { name: /Open group thread/i });
     expect(link).toBeInTheDocument();
   });
 
@@ -262,7 +262,7 @@ describe('TourDetail', () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: undefined }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('link', { name: /Open group thread in inbox/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Open group thread/i })).not.toBeInTheDocument();
   });
 
   // ── The 'requested' (timeless) state — tours-sequence Task 4 ────────────────
@@ -467,7 +467,7 @@ describe('TourDetail', () => {
     expect(
       screen.queryByRole('button', { name: 'Open group thread' }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Open group thread/i })).toBeInTheDocument();
   });
 
   it("hides 'Open group thread' for canceled and closed tours", async () => {
@@ -508,7 +508,7 @@ describe('TourDetail', () => {
     // Exactly one argument — members omitted so the server auto-resolves them.
     expect(createTourRelay).toHaveBeenCalledWith('tour-abc');
     await waitFor(() =>
-      expect(screen.getByRole('link', { name: /Open group thread in inbox/i })).toBeInTheDocument(),
+      expect(screen.getByRole('link', { name: /Open group thread/i })).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole('button', { name: 'Open group thread' }),

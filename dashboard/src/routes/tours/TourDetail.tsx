@@ -299,7 +299,10 @@ export function TourDetail(): React.JSX.Element {
             <div>
               <dt>Group thread</dt>
               <dd>
-                <Link to={`/inbox`} aria-label="Open group thread in inbox">
+                <Link
+                  to={`/conversations/${tour.groupThreadId}`}
+                  aria-label="Open group thread"
+                >
                   View group thread
                 </Link>
               </dd>

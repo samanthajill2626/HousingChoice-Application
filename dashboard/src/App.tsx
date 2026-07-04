@@ -15,6 +15,7 @@ import { Today } from './routes/today/Today.js';
 import { ContactsList } from './routes/contacts/ContactsList.js';
 import { ListingsList } from './routes/listings/ListingsList.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
+import { ConversationDetail } from './routes/conversation/ConversationDetail.js';
 import { ListingDetail } from './routes/listing/ListingDetail.js';
 import { PlacementsBoard } from './routes/placements/PlacementsBoard.js';
 import { PlacementDetail } from './routes/placements/PlacementDetail.js';
@@ -198,6 +199,10 @@ function AuthedApp(): React.JSX.Element {
             {/* The tenant + landlord detail page (one shell). The static
                 /contacts/* list routes above rank above this dynamic segment. */}
             <Route path="contacts/:contactId" element={<ContactDetail />} />
+            {/* The relay-group conversation view — /conversations/:conversationId.
+                A relay_group renders the group view; a 1:1 redirects to its
+                contact page (resolves the milestone `conversation` deep-links). */}
+            <Route path="conversations/:conversationId" element={<ConversationDetail />} />
             {/* The property detail page. The static /listings list route above
                 ranks above this dynamic segment. */}
             <Route path="listings/:unitId" element={<ListingDetail />} />

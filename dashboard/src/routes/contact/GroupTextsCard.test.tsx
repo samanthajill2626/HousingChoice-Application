@@ -1,6 +1,6 @@
 // GroupTextsCard — pending / honest-empty / row rendering, label preference
-// (other members' names > tag > pool number > "Group text"), owner links
-// (tour / placement / standalone-unlinked), and the Closed right-hand label.
+// (other members' names > tag > pool number > "Group text"), conversation links
+// (every row → /conversations/:conversationId), and the Closed right-hand label.
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -55,7 +55,7 @@ describe('GroupTextsCard', () => {
     expect(screen.getByRole('heading', { name: /Group texts\s*2/ })).toBeInTheDocument();
   });
 
-  it('links a tour-owned group to the tour and a placement-owned group to the placement', () => {
+  it('links every row to its own conversation view, regardless of owner', () => {
     renderIt({
       pending: false,
       groups: [
@@ -68,14 +68,16 @@ describe('GroupTextsCard', () => {
       ],
     });
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href'));
-    expect(hrefs).toContain('/tours/tour-1');
-    expect(hrefs).toContain('/placements/k9');
+    expect(hrefs).toContain('/conversations/conv-g1');
+    expect(hrefs).toContain('/conversations/conv-g2');
   });
 
-  it('renders a standalone (unowned) group UNLINKED', () => {
+  it('links a standalone (unowned) group to its conversation too', () => {
     renderIt({ pending: false, groups: [makeGroup({ otherMemberNames: ['Lars Landlord'] })] });
-    expect(screen.getByText('With Lars Landlord')).toBeInTheDocument();
-    expect(screen.queryAllByRole('link')).toHaveLength(0);
+    expect(screen.getByRole('link', { name: /With Lars Landlord/ })).toHaveAttribute(
+      'href',
+      '/conversations/conv-g1',
+    );
   });
 
   it('shows "Closed" (not the member count) for a closed group', () => {
@@ -96,9 +98,10 @@ describe('GroupTextsCard', () => {
     expect(groupLabel(bare)).toBe('Group text');
   });
 
-  it('groupLink: owner → route; standalone → undefined', () => {
-    expect(groupLink({ type: 'tour', id: 't1' })).toBe('/tours/t1');
-    expect(groupLink({ type: 'placement', id: 'p1' })).toBe('/placements/p1');
-    expect(groupLink({ type: null })).toBeUndefined();
+  it('groupLink: always the row\'s own conversation view', () => {
+    expect(groupLink(makeGroup({ conversationId: 'conv-x' }))).toBe('/conversations/conv-x');
+    expect(groupLink(makeGroup({ conversationId: 'conv-y', owner: { type: 'tour', id: 't1' } }))).toBe(
+      '/conversations/conv-y',
+    );
   });
 });

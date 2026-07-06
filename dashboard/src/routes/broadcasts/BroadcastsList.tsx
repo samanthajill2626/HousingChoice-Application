@@ -93,10 +93,15 @@ export function BroadcastsList(): React.JSX.Element {
                 <Link to={rowHref(row)} className={styles.row}>
                   <BroadcastStatusPill status={row.status} />
                   <span className={styles.audience}>{audienceSummary(row.audience_filter)}</span>
-                  <span className={styles.delivered}>
-                    {row.stats.delivered}/{row.stats.audience} delivered
+                  {/* Meta (delivered + date) grouped so on a tight content pane it
+                   *  wraps to its own line below the audience instead of squeezing
+                   *  it into a narrow wrapped column (container query in CSS). */}
+                  <span className={styles.meta}>
+                    <span className={styles.delivered}>
+                      {row.stats.delivered}/{row.stats.audience} delivered
+                    </span>
+                    <span className={styles.date}>{formatBroadcastDate(row.created_at)}</span>
                   </span>
-                  <span className={styles.date}>{formatBroadcastDate(row.created_at)}</span>
                 </Link>
               </li>
             ))}

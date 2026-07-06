@@ -4,7 +4,12 @@
 
 .page {
   /* Full-width: the list fills the AppFrame content area (which already pads the
-   * gutters). No max-width cap — this nav page spans the whole window. */
+   * gutters). No max-width cap — this nav page spans the whole window.
+   *
+   * A query container so each row stacks on the CONTENT PANE's width, not the
+   * viewport's — the pane is narrow both on phones AND just above the nav
+   * breakpoint (where the expanded sidebar still eats ~240px), matching Today. */
+  container-type: inline-size;
 }
 
 .header {
@@ -153,6 +158,16 @@
   white-space: nowrap;
 }
 
+/* Meta chips (kind + phone + status), grouped so they move + wrap together. On a
+ * wide pane .name's flex:1 pushes this to the right edge; on a tight pane it wraps
+ * to its own line below the name. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
 .badge {
   flex: 0 0 auto;
   padding: 1px var(--sp-2);
@@ -177,6 +192,20 @@
   color: var(--c-text-subtle);
   font-size: var(--fs-xs);
   white-space: nowrap;
+}
+
+/* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
+ * stack the meta chips below the name so the name gets a full line instead of the
+ * unshrinkable kind/phone/status crushing it to a few characters. */
+@container (max-width: 560px) {
+  .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
 }
 
 /* --- States --------------------------------------------------------------- */

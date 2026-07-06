@@ -5,7 +5,12 @@
 
 .page {
   /* Full-width: the list fills the AppFrame content area (which already pads the
-   * gutters). No max-width cap — this nav page spans the whole window. */
+   * gutters). No max-width cap — this nav page spans the whole window.
+   *
+   * A query container so each row stacks on the CONTENT PANE's width, not the
+   * viewport's — the pane is narrow both on phones AND just above the nav
+   * breakpoint (where the expanded sidebar still eats ~240px), matching Today. */
+  container-type: inline-size;
 }
 
 /* Heading row: the title on the left, the "New property" action on the right. */
@@ -239,6 +244,16 @@
   white-space: nowrap;
 }
 
+/* Meta chips (status + beds + rent), grouped so they move + wrap together. On a
+ * wide pane .address's flex:1 pushes this to the right edge; on a tight pane it
+ * wraps to its own line below the address. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
 .badge {
   flex: 0 0 auto;
   padding: 1px var(--sp-2);
@@ -264,6 +279,28 @@
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   white-space: nowrap;
+}
+
+/* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
+ * stack the meta chips below the address so the address gets a full line instead
+ * of the unshrinkable status/beds/rent crushing it to a few characters. */
+@container (max-width: 560px) {
+  .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  /* The address is the item's identity — on its own line, let it wrap in full
+   * (city + zip) instead of truncating to "...Atl...". */
+  .address {
+    flex: 1 1 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
 }
 
 /* --- States --------------------------------------------------------------- */

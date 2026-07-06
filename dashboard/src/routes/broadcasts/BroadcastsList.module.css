@@ -1,5 +1,9 @@
 /* BroadcastsList — header + filter tabs + list rows + states. Tokens only. */
 .page {
+  /* A query container so each row stacks on the CONTENT PANE's width, not the
+   * viewport's — the pane is narrow both on phones AND just above the nav
+   * breakpoint (where the expanded sidebar still eats ~240px), matching Today. */
+  container-type: inline-size;
 }
 .header {
   display: flex;
@@ -96,6 +100,15 @@
   color: var(--c-text);
   min-width: 0;
 }
+/* Meta (delivered + date), grouped so they move + wrap together. On a wide pane
+ * .audience's flex:1 pushes this to the right edge; on a tight pane it wraps to
+ * its own line below the audience. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+}
 .delivered {
   flex: 0 0 auto;
   font-size: var(--fs-sm);
@@ -106,6 +119,20 @@
   font-size: var(--fs-sm);
   color: var(--c-text-subtle);
   white-space: nowrap;
+}
+
+/* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
+ * stack the meta below the audience so the audience label gets the full width
+ * instead of being squeezed into a narrow wrapped column beside delivered/date. */
+@container (max-width: 560px) {
+  .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
 }
 
 .loadMore {

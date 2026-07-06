@@ -49,9 +49,13 @@ function Row({ unit }: { unit: UnitItem }): React.JSX.Element {
     <li className={styles.rowItem}>
       <Link to={`/listings/${unit.unitId}`} className={styles.row}>
         <span className={styles.address}>{address}</span>
-        <span className={styles.badge}>{statusLabel(unit.status)}</span>
-        {beds ? <span className={styles.beds}>{beds} bd/ba</span> : null}
-        {rent ? <span className={styles.rent}>{rent}/mo</span> : null}
+        {/* Meta chips grouped so on a tight content pane they wrap to their own
+         *  line below the address instead of crushing it (container query in CSS). */}
+        <span className={styles.meta}>
+          <span className={styles.badge}>{statusLabel(unit.status)}</span>
+          {beds ? <span className={styles.beds}>{beds} bd/ba</span> : null}
+          {rent ? <span className={styles.rent}>{rent}/mo</span> : null}
+        </span>
       </Link>
     </li>
   );

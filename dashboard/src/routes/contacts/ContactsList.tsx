@@ -70,13 +70,17 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
     <li className={styles.rowItem}>
       <Link to={`/contacts/${contact.contactId}`} className={styles.row}>
         <span className={styles.name}>{name}</span>
-        <span className={styles.badge}>{displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])}</span>
-        <span className={styles.phone}>{phone}</span>
-        {contact.type === 'tenant' && contact.status ? (
-          <StatusBadge kind="tenant" status={contact.status} />
-        ) : statusLabel(contact.status) ? (
-          <span className={styles.status}>{statusLabel(contact.status)}</span>
-        ) : null}
+        {/* Meta chips grouped so on a tight content pane they wrap to their own
+         *  line below the name instead of crushing it (container query in CSS). */}
+        <span className={styles.meta}>
+          <span className={styles.badge}>{displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])}</span>
+          <span className={styles.phone}>{phone}</span>
+          {contact.type === 'tenant' && contact.status ? (
+            <StatusBadge kind="tenant" status={contact.status} />
+          ) : statusLabel(contact.status) ? (
+            <span className={styles.status}>{statusLabel(contact.status)}</span>
+          ) : null}
+        </span>
       </Link>
     </li>
   );

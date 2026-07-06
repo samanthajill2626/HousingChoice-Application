@@ -2,7 +2,12 @@
  * ContactsList / ListingsList module language (tokens.css, never hard-coded). */
 
 .page {
-  /* Full-width: fills the AppFrame content area. */
+  /* Full-width: fills the AppFrame content area.
+   *
+   * A query container so each row stacks on the CONTENT PANE's width, not the
+   * viewport's — the pane is narrow both on phones AND just above the nav
+   * breakpoint (where the expanded sidebar still eats ~240px), matching Today. */
+  container-type: inline-size;
 }
 
 .header {
@@ -94,6 +99,27 @@
   outline-offset: 2px;
 }
 
+/* Identity block (tenant + property). flex:1 + min-width:0 lets it take the room
+ * left of the meta chips; on a tight pane it stacks into a column (container
+ * query below) so the name + address each get a full line. */
+.main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Meta chips (time + status + type), grouped so they move + wrap together. On a
+ * wide pane .main's flex:1 pushes this to the right edge; on a tight pane it
+ * wraps to its own line below the identity block. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
 .tenant {
   flex: 1 1 auto;
   min-width: 0;
@@ -131,6 +157,32 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   white-space: nowrap;
+}
+
+/* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
+ * stack the identity block over the chips so the tenant name + property address
+ * each get a full line and the meta chips wrap onto their own line, instead of the
+ * unshrinkable time + badges crushing the name/address to a couple of characters. */
+@container (max-width: 560px) {
+  .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .main {
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* The address owns its own line now — let it wrap in full instead of truncating. */
+  .property {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .meta {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
 }
 
 /* --- States --------------------------------------------------------------- */

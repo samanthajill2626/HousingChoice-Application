@@ -109,11 +109,18 @@ function TourRow({ tour, contacts, units, showTime }: TourRowProps): React.JSX.E
         className={styles.row}
         aria-label={`Tour for ${tenant} at ${property}`}
       >
-        <span className={styles.tenant}>{tenant}</span>
-        <span className={styles.property}>{property}</span>
-        {timeLabel !== undefined ? <span className={styles.time}>{timeLabel}</span> : null}
-        <span className={styles.badge}>{statusLabel}</span>
-        <span className={styles.badge}>{typeLabel}</span>
+        {/* Identity (tenant + property). On a tight content pane .main stacks and
+         *  the meta chips wrap to their own line below (container query in the CSS),
+         *  so the name + address never get crushed to a couple of characters. */}
+        <span className={styles.main}>
+          <span className={styles.tenant}>{tenant}</span>
+          <span className={styles.property}>{property}</span>
+        </span>
+        <span className={styles.meta}>
+          {timeLabel !== undefined ? <span className={styles.time}>{timeLabel}</span> : null}
+          <span className={styles.badge}>{statusLabel}</span>
+          <span className={styles.badge}>{typeLabel}</span>
+        </span>
       </Link>
     </li>
   );

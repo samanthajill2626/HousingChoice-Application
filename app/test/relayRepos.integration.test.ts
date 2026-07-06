@@ -6,6 +6,7 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -160,6 +161,135 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     await expect(
       conversations.setRelayStatus(created.conversationId, 'closed', null, 'open'),
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+  });
+
+  // --- BUG 1: clearRelayMemberOptedOut is a safe no-op when the map is absent -
+  // The common member-remove path clears the removed member's opt-out annotation.
+  // When NO member ever opted out, `relay_opted_out_members` is ABSENT, and a
+  // `REMOVE relay_opted_out_members.#mk` on a missing parent map is rejected by
+  // DynamoDB (ValidationException — invalid document path). The fix guards the
+  // REMOVE on the map existing and swallows the ConditionalCheckFailedException.
+  it('BUG 1(a): clearRelayMemberOptedOut is a no-op when no opt-out map exists (no throw)', async () => {
+    const pool = `+1555050${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: '+15550100200' }],
+    });
+    // No one has opted out → relay_opted_out_members is absent. Pre-fix this
+    // threw "The document path provided in the update expression is invalid".
+    await expect(
+      conversations.clearRelayMemberOptedOut(created.conversationId, 'c1'),
+    ).resolves.toBeUndefined();
+    const after = await conversations.getById(created.conversationId);
+    expect(after?.relay_opted_out_members).toBeUndefined(); // map never created
+  });
+
+  it('BUG 1(b): clearRelayMemberOptedOut removes an existing member entry', async () => {
+    const pool = `+1555051${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: '+15550100201' }],
+    });
+    await conversations.setRelayMemberOptedOut(created.conversationId, 'c1', {
+      contactId: 'c1',
+      at: new Date().toISOString(),
+    });
+    await conversations.clearRelayMemberOptedOut(created.conversationId, 'c1');
+    const after = await conversations.getById(created.conversationId);
+    expect(after?.relay_opted_out_members?.['c1']).toBeUndefined(); // entry cleared
+  });
+
+  it('BUG 1(c): clearRelayMemberOptedOut is a no-op when the map exists but the key is absent', async () => {
+    const pool = `+1555052${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: '+15550100202' }],
+    });
+    await conversations.setRelayMemberOptedOut(created.conversationId, 'c1', {
+      contactId: 'c1',
+      at: new Date().toISOString(),
+    });
+    // Clearing a DIFFERENT (absent) key must not throw and must leave c1 intact.
+    await expect(
+      conversations.clearRelayMemberOptedOut(created.conversationId, 'c2'),
+    ).resolves.toBeUndefined();
+    const after = await conversations.getById(created.conversationId);
+    expect(after?.relay_opted_out_members?.['c1']).toBeDefined(); // c1 untouched
+  });
+
+  // --- BUG 2: open relay groups are NOT diluted out by open 1:1 volume --------
+  // The pre-fix listRelayGroups walked the byLastActivity 'open' partition (EVERY
+  // open conversation) with a `type = relay_group` FilterExpression. DynamoDB
+  // applies FilterExpression AFTER Limit, so a relay group ordered behind more
+  // open 1:1 threads than the page budget was never returned. The fix repoints
+  // listRelayGroups to the sparse byRelayStatus GSI (relay groups ONLY), so the
+  // 1:1 volume is irrelevant. This test reproduces the dilution at a SCALED
+  // budget (Limit = the seeded 1:1 count), comparing the two query STRATEGIES
+  // head-to-head against the same DynamoDB Local table.
+  it('BUG 2: an open relay group behind >budget open 1:1s survives (GSI vs diluted byLastActivity)', async () => {
+    // The relay group, timestamped OLDER than the 1:1 flood below.
+    const pool = `+1555053${Math.floor(Math.random() * 9000 + 1000)}`;
+    const relay = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'cRelay', phone: '+15550100300' }],
+    });
+    await conversations.touchLastActivity(relay.conversationId, undefined, '2030-01-01T00:00:00.000Z');
+
+    // Flood the 'open' partition with 1:1 conversations ALL more-recently-active
+    // than the relay group (year 2099), each with a distinct timestamp so the
+    // sort order is deterministic. This is the scaled stand-in for "more open
+    // conversations than the page budget".
+    const oneToOneCount = 30;
+    for (let i = 0; i < oneToOneCount; i++) {
+      const phone = `+1555806${String(1000 + i)}`;
+      const conv = await conversations.createOrGetByParticipantPhone(phone, 'unknown_1to1');
+      await conversations.touchLastActivity(
+        conv.conversationId,
+        undefined,
+        `2099-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+      );
+    }
+
+    const relayTable = tableName('conversations', testEnv);
+
+    // PRE-FIX STRATEGY: byLastActivity 'open' partition + post-Limit type filter,
+    // budget = oneToOneCount. The newest `oneToOneCount` open convs are all 1:1s,
+    // so the type filter (applied AFTER Limit) yields NOTHING — the relay group
+    // is diluted out. This is exactly the bug.
+    const diluted = await doc.send(
+      new QueryCommand({
+        TableName: relayTable,
+        IndexName: 'byLastActivity',
+        KeyConditionExpression: '#s = :status',
+        FilterExpression: '#t = :relay',
+        ExpressionAttributeNames: { '#s': 'status', '#t': 'type' },
+        ExpressionAttributeValues: { ':status': 'open', ':relay': 'relay_group' },
+        ScanIndexForward: false,
+        Limit: oneToOneCount,
+      }),
+    );
+    const dilutedIds = (diluted.Items ?? []).map((c) => c['conversationId']);
+    expect(dilutedIds).not.toContain(relay.conversationId); // dropped by the filter
+
+    // POST-FIX STRATEGY: the sparse byRelayStatus GSI holds relay groups ONLY, so
+    // the same budget surfaces the relay group directly — immune to 1:1 volume.
+    const viaGsi = await doc.send(
+      new QueryCommand({
+        TableName: relayTable,
+        IndexName: 'byRelayStatus',
+        KeyConditionExpression: '#rs = :rs',
+        ExpressionAttributeNames: { '#rs': 'relay_status' },
+        ExpressionAttributeValues: { ':rs': 'relay_group#open' },
+        ScanIndexForward: false,
+        Limit: oneToOneCount,
+      }),
+    );
+    const gsiIds = (viaGsi.Items ?? []).map((c) => c['conversationId']);
+    expect(gsiIds).toContain(relay.conversationId); // survives
+
+    // And the repo method (now GSI-backed) surfaces it too.
+    const { items } = await conversations.listRelayGroups('open');
+    expect(items.map((c) => c.conversationId)).toContain(relay.conversationId);
   });
 
   it('pool_numbers: provisioned_via source tag round-trips on the item', async () => {

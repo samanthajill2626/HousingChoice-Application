@@ -364,6 +364,7 @@ export function createFakeWorld(): FakeWorld {
         participant_phone: poolNumber,
         pool_number: poolNumber,
         status: 'open',
+        relay_status: 'relay_group#open', // byRelayStatus GSI HASH (fidelity)
         last_activity_at: now,
         type: 'relay_group',
         ai_mode: 'manual',
@@ -424,6 +425,7 @@ export function createFakeWorld(): FakeWorld {
         );
       }
       conv.status = status;
+      conv.relay_status = `relay_group#${status}`; // lockstep with status (fidelity)
       if (poolNumber === null) delete conv.pool_number;
       else conv.pool_number = poolNumber;
       return conv;

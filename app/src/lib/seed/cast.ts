@@ -452,6 +452,7 @@ const searchingTenant = {
     conversationId: CONV_SEARCHING_RELAY,
     participant_phone: RELAY_POOL_PHONE, // the pool number (synthetic)
     status: 'open',
+    relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
     last_activity_at: CQ,
     type: 'relay_group',
     participants: [C_SEARCHING, 'contact-landlord-0001'],
@@ -696,6 +697,7 @@ const touredYesTenant = {
     conversationId: CONV_TOURED_RELAY,
     participant_phone: RELAY_POOL_TOURED,
     status: 'open',
+    relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
     last_activity_at: CY,
     type: 'relay_group',
     participants: [C_TOURED_YES, 'contact-landlord-0001'],

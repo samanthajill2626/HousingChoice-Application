@@ -1074,6 +1074,7 @@ function buildRelayConversations(): Record<string, unknown>[] {
     participant_phone: num, // byParticipantPhone = pool number for relay groups
     pool_number: num, // byPoolNumber GSI
     status: 'open',
+    relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
     last_activity_at: D.T3,
     type: 'relay_group',
     ai_mode: 'manual',

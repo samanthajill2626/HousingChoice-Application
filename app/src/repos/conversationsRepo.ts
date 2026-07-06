@@ -158,7 +158,21 @@ export interface ConversationItem {
     string,
     { contactId?: string; phone?: string; name?: string; at: string }
   >;
+  /**
+   * byRelayStatus GSI HASH: `relay_group#<status>` (`relay_group#open` /
+   * `relay_group#closed`). Written ONLY on relay_group conversations — 1:1
+   * threads never carry it, keeping the GSI sparse (relay groups only). Kept in
+   * lockstep with `status` by every relay-group writer (create/close/reopen).
+   * listRelayGroups queries this partition directly, so a relay group can never
+   * be diluted out of the byLastActivity 'open' partition by open 1:1 volume.
+   */
+  relay_status?: string;
   [key: string]: unknown;
+}
+
+/** byRelayStatus GSI partition key for a relay group in the given status. */
+export function relayStatusKey(status: 'open' | 'closed'): string {
+  return `relay_group#${status}`;
 }
 
 /**
@@ -212,10 +226,11 @@ const PREVIEW_MAX_CHARS = 120;
 const DEFAULT_INBOX_PAGE_LIMIT = 50;
 
 /**
- * listRelayGroups walk bounds: items EVALUATED per page (DynamoDB `Limit`
- * counts pre-filter evaluations) × the page budget = the most conversations
- * one call will consider (2000). Past the budget the result is flagged
- * `truncated` — the caller warns, never silently drops.
+ * listRelayGroups walk bounds: relay groups returned per page × the page budget
+ * = the most relay groups one call will return (2000). Since the byRelayStatus
+ * GSI partition holds relay groups ONLY (no post-Limit type filter), every
+ * evaluated row is a relay group — no dilution by 1:1 volume. Past the budget
+ * the result is flagged `truncated` — the caller warns, never silently drops.
  */
 const RELAY_LIST_PAGE_LIMIT = 100;
 const RELAY_LIST_MAX_PAGES = 20;
@@ -396,15 +411,17 @@ export interface ConversationsRepo {
   getByPoolNumber(poolNumber: string): Promise<ConversationItem | undefined>;
   /**
    * List the relay_group conversations in ONE status partition ('open' |
-   * 'closed'), newest-activity-first — the contact "Group texts" read
-   * (GET /api/contacts/:id/relay-groups). There is NO member→conversation
-   * index (a relay's participant_phone is the POOL number; rosters live in the
-   * un-indexed participants list), so this walks the byLastActivity partition
-   * with a type = relay_group filter — a paged Query, never a Scan. 1:1
-   * threads only ever write 'open', so the 'closed' partition is relays-only.
-   * The walk is bounded by a fixed page budget: `truncated` is true when the
-   * budget stopped it early — the caller MUST surface that (no silent
-   * truncation).
+   * 'closed'), newest-activity-first — the inbox relay rows + the contact
+   * "Group texts" read (GET /api/contacts/:id/relay-groups). There is NO
+   * member→conversation index (a relay's participant_phone is the POOL number;
+   * rosters live in the un-indexed participants list), so this queries the
+   * SPARSE byRelayStatus GSI (relay_status = `relay_group#<status>`, written on
+   * relay groups ONLY) — a DIRECT Query on a relays-only partition, never a
+   * Scan and never diluted by open 1:1 volume (the old byLastActivity walk +
+   * post-Limit type filter dropped relay groups behind >budget open 1:1s —
+   * relay-inbox-open-groups-truncation). The walk is bounded by a fixed page
+   * budget: `truncated` is true when the budget stopped it early — the caller
+   * MUST surface that (no silent truncation).
    */
   listRelayGroups(
     status: 'open' | 'closed',
@@ -936,6 +953,9 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         participant_phone: poolNumber,
         pool_number: poolNumber,
         status: 'open',
+        // byRelayStatus GSI HASH (sparse; relay groups only) — kept in lockstep
+        // with `status` so listRelayGroups queries this partition directly.
+        relay_status: relayStatusKey('open'),
         last_activity_at: now,
         type: 'relay_group',
         // Relay threads are operator-run, never AI-driven; manual keeps the
@@ -981,22 +1001,26 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async listRelayGroups(status) {
-      // One relay status partition of byLastActivity, newest-activity-first,
-      // filtered to relay_group server-side (the filter trims the wire, the
-      // page budget bounds the walk). See the interface note: there is no
-      // member→conversation index, so this is the read path for "which relay
-      // groups is contact X in" (rosters are matched by the caller).
+      // Query the byRelayStatus SPARSE GSI directly — its partition holds relay
+      // groups ONLY (relay_status = `relay_group#<status>` is written on no other
+      // item type), so there is no post-Limit type filter to dilute the budget.
+      // This is immune to the TOTAL volume of open 1:1 threads: the old path
+      // walked the byLastActivity 'open' partition (EVERY open conversation) with
+      // a `type = relay_group` FilterExpression, which DynamoDB applies AFTER the
+      // Limit — a relay group ordered behind >budget more-recently-active open
+      // 1:1s was never returned (relay-inbox-open-groups-truncation). Results
+      // come back newest-activity-first (last_activity_at SORT, descending). The
+      // page budget still bounds the walk; `truncated` flags a budget stop.
       const items: ConversationItem[] = [];
       let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
       for (let page = 0; page < RELAY_LIST_MAX_PAGES; page++) {
         const { Items, LastEvaluatedKey } = await doc.send(
           new QueryCommand({
             TableName: table,
-            IndexName: 'byLastActivity',
-            KeyConditionExpression: '#s = :status',
-            FilterExpression: '#t = :relay',
-            ExpressionAttributeNames: { '#s': 'status', '#t': 'type' },
-            ExpressionAttributeValues: { ':status': status, ':relay': 'relay_group' },
+            IndexName: 'byRelayStatus',
+            KeyConditionExpression: '#rs = :rs',
+            ExpressionAttributeNames: { '#rs': 'relay_status' },
+            ExpressionAttributeValues: { ':rs': relayStatusKey(status) },
             ScanIndexForward: false, // newest activity first
             Limit: RELAY_LIST_PAGE_LIMIT,
             ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
@@ -1043,10 +1067,12 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
+          // relay_status rides the flip in lockstep with #s so the byRelayStatus
+          // GSI moves the item to the new status partition (open↔closed).
           UpdateExpression:
             poolNumber === null
-              ? 'SET #s = :status REMOVE pool_number'
-              : 'SET #s = :status, pool_number = :pn',
+              ? 'SET #s = :status, relay_status = :rs REMOVE pool_number'
+              : 'SET #s = :status, relay_status = :rs, pool_number = :pn',
           ConditionExpression:
             expectedStatus === undefined
               ? 'attribute_exists(conversationId)'
@@ -1054,6 +1080,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
           ExpressionAttributeNames: { '#s': 'status' },
           ExpressionAttributeValues: {
             ':status': status,
+            ':rs': relayStatusKey(status),
             ...(poolNumber !== null && { ':pn': poolNumber }),
             ...(expectedStatus !== undefined && { ':expected': expectedStatus }),
           },
@@ -1104,15 +1131,30 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async clearRelayMemberOptedOut(conversationId, memberKey) {
-      await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { conversationId },
-          UpdateExpression: 'REMOVE relay_opted_out_members.#mk',
-          ConditionExpression: 'attribute_exists(conversationId)',
-          ExpressionAttributeNames: { '#mk': memberKey },
-        }),
-      );
+      // Idempotent no-op when there is nothing to clear. DynamoDB rejects a
+      // `REMOVE relay_opted_out_members.#mk` whose parent map is ABSENT (the
+      // document path is invalid for update → ValidationException), which is the
+      // common member-remove case since the map only exists once someone has
+      // opted out. Guard the REMOVE on the map existing (mirrors how the sibling
+      // RECORD path tolerates the missing map), and swallow the resulting
+      // ConditionalCheckFailedException — the map (or the key) being absent means
+      // there is nothing to clear. We never create the map here. PII: log keys only.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'REMOVE relay_opted_out_members.#mk',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND attribute_exists(relay_opted_out_members)',
+            ExpressionAttributeNames: { '#mk': memberKey },
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // No opt-out map on this conversation → nothing to clear (no-op).
+        return;
+      }
       log.info({ conversationId, memberKey }, 'relay member opt-out cleared on conversation');
     },
 

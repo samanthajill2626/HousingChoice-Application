@@ -138,6 +138,22 @@ export const TABLES: readonly TableSpec[] = [
         hashKey: { name: 'pool_number', type: 'S' },
         sparse: true,
       },
+      // Relay-group inbox/roster read (relay-inbox-open-groups-truncation fix):
+      // relay groups in ONE status partition, newest-activity-first. HASH is
+      // `relay_status` = `relay_group#<status>` (`relay_group#open` /
+      // `relay_group#closed`), written ONLY on relay_group items — 1:1 threads
+      // never carry it, so this GSI is sparse and holds relay groups ONLY. This
+      // makes listRelayGroups(status) a DIRECT query (no post-Limit type filter),
+      // so a relay group can no longer be diluted out of the byLastActivity
+      // 'open' partition by the TOTAL volume of open 1:1 threads ordered ahead of
+      // it (DynamoDB applies FilterExpression AFTER Limit). SORT is
+      // last_activity_at (ISO 8601) so results come back newest-activity-first.
+      {
+        indexName: 'byRelayStatus',
+        hashKey: { name: 'relay_status', type: 'S' },
+        rangeKey: { name: 'last_activity_at', type: 'S' },
+        sparse: true,
+      },
     ],
   },
   {

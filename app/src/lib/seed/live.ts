@@ -276,6 +276,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         participant_phone: LIVE_IDS.poolNumber,
         pool_number: LIVE_IDS.poolNumber,
         status: 'open',
+        relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
         type: 'relay_group',
         ai_mode: 'manual',
         participants: [

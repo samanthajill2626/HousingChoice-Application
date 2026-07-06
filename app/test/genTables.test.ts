@@ -148,6 +148,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'byParticipantPhone',
       'byLastActivity',
       'byPoolNumber',
+      'byRelayStatus',
     ]);
     expect(gsiNames('messages')).toEqual([]);
     expect(gsiNames('matches')).toEqual(['byUnit']);

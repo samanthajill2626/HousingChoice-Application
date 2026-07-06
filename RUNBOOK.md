@@ -73,6 +73,14 @@ aggregations over existing tables.
 
 Both are in the regenerated `tables.auto.tfvars.json` files. **Online** operations — no recreate, **no data migration**: the new table starts empty, and any old `next_deadline_type`/`next_deadline_at` attributes left on existing placement rows simply go unread (flexible-doc). Post-merge on **dev**: `npm run plan -- dev` (review the `placementDeadlines` add + `byNextDeadline` drop) → `npm run apply -- dev`. **No reseed/backfill** — deployed envs hold no demo fixtures (`db:seed` targets DynamoDB Local only, never AWS), so the new table starts empty and dev placement deadlines simply **accrue naturally** as placements enter `awaiting_landlord_submission` (rta_window) and as tenant voucher dates are set. (To exercise the feature with seed data, reseed a **local** stack — `npm run dev -- --local --seeded`, or a running `e2e:session` + `npm run e2e:reseed` — both target DynamoDB Local.) **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
+**Relay-group inbox truncation fix schema — NOT YET APPLIED (as of 2026-07-06; feature branch `feat/relay-group-view` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| Relay-group status index | `conversations` (existing) | **GSI add** — `byRelayStatus` (sparse, hash `relay_status` = `relay_group#<status>`, range `last_activity_at`) | `listRelayGroups(status)` reads relay groups DIRECTLY — no longer diluted out of the `byLastActivity` `'open'` partition by open 1:1 volume (relay-inbox-open-groups-truncation) |
+
+In the regenerated `tables.auto.tfvars.json` files. **Online** operation — no recreate, **no data migration required**: the write path stamps `relay_status` on create/close/reopen, so new + touched relay groups populate the index automatically. Existing open relay groups predating the GSI lack `relay_status` until re-stamped, but **dev is reseeded** (`db:seed` stamps `relay_group#open` on the seeded open relays) and **prod relay-group volume is ~none**, so no backfill is needed. Post-merge on **dev**: `npm run plan -- dev` (review the `byRelayStatus` add) → `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

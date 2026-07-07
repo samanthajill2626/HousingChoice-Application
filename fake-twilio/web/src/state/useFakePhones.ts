@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   addAdHoc as apiAddAdHoc,
+  getGroups,
   getPersonas,
   getThreads,
   resetAll as apiResetAll,
@@ -17,6 +18,7 @@ import type {
   AddAdHocInput,
   DeliveryProfile,
   EngineEvent,
+  GroupSnapshot,
   Persona,
   SendAsPartyInput,
   Thread,
@@ -30,6 +32,16 @@ export interface FakeState {
   unreadByNumber: Record<string, number>;
   /** The currently-selected party number, or null for the empty state. */
   selected: string | null;
+  /** Traffic-inferred relay groups (additive slice; keyed by poolNumber). */
+  groups: GroupSnapshot[];
+  /** Per-pool unread TRANSCRIPT-activity count; cleared when that group is
+   *  selected. Mirrors `unreadByNumber` — bumped per group.updated whose
+   *  lastActivityAt advanced (delivery-slot status ticks don't count). */
+  groupUnreadByPool: Record<string, number>;
+  /** The currently-selected group's pool number, or null. Mutually exclusive
+   *  with `selected` — pool numbers and persona numbers are separate keyspaces,
+   *  so selecting one side always nulls the other. */
+  selectedGroup: string | null;
 }
 
 export const initialState: FakeState = {
@@ -37,6 +49,9 @@ export const initialState: FakeState = {
   threads: [],
   unreadByNumber: {},
   selected: null,
+  groups: [],
+  groupUnreadByPool: {},
+  selectedGroup: null,
 };
 
 /**
@@ -47,8 +62,12 @@ export const initialState: FakeState = {
  *   - message.updated: patch the matching message's fields (state, timestamps)
  *     by sid within its thread; no-op if the thread/message is unknown.
  *   - persona.added: append the persona.
- *   - reset: clear threads + unread (personas + selection are left as-is; the
- *     hook re-derives selection validity on its own).
+ *   - group.updated: the event carries the WHOLE recomputed GroupSnapshot —
+ *     replace-or-append by poolNumber. A snapshot whose lastActivityAt advanced
+ *     (new transcript entry/leg — NOT a delivery-slot tick) on a group that is
+ *     NOT currently selected bumps that group's unread.
+ *   - reset: clear threads + groups + both unread maps (personas + selection
+ *     are left as-is; the hook re-derives selection validity on its own).
  */
 export function mergeEvent(state: FakeState, event: EngineEvent): FakeState {
   switch (event.type) {
@@ -85,8 +104,26 @@ export function mergeEvent(state: FakeState, event: EngineEvent): FakeState {
       if (state.personas.some((p) => p.id === event.persona.id)) return state;
       return { ...state, personas: [...state.personas, event.persona] };
     }
+    case 'group.updated': {
+      const { group } = event;
+      const idx = state.groups.findIndex((g) => g.poolNumber === group.poolNumber);
+      const prev = idx === -1 ? undefined : state.groups[idx];
+      const groups =
+        idx === -1 ? [...state.groups, group] : state.groups.map((g, i) => (i === idx ? group : g));
+      // Same-format ISO strings compare correctly as strings. Equal timestamps
+      // mean a delivery-slot status tick (no new transcript activity) — no bump.
+      const activityAdvanced = prev === undefined || group.lastActivityAt > prev.lastActivityAt;
+      let groupUnreadByPool = state.groupUnreadByPool;
+      if (activityAdvanced && group.poolNumber !== state.selectedGroup) {
+        groupUnreadByPool = {
+          ...state.groupUnreadByPool,
+          [group.poolNumber]: (state.groupUnreadByPool[group.poolNumber] ?? 0) + 1,
+        };
+      }
+      return { ...state, groups, groupUnreadByPool };
+    }
     case 'reset': {
-      return { ...state, threads: [], unreadByNumber: {} };
+      return { ...state, threads: [], unreadByNumber: {}, groups: [], groupUnreadByPool: {} };
     }
     default:
       return state;
@@ -98,7 +135,11 @@ export interface UseFakePhones {
   threads: Thread[];
   unreadByNumber: Record<string, number>;
   selected: string | null;
+  groups: GroupSnapshot[];
+  groupUnreadByPool: Record<string, number>;
+  selectedGroup: string | null;
   select: (partyNumber: string) => void;
+  selectGroup: (poolNumber: string) => void;
   refresh: () => Promise<void>;
   // Action passthroughs (control client).
   sendAsParty: (input: SendAsPartyInput) => Promise<string>;
@@ -111,8 +152,8 @@ export function useFakePhones(): UseFakePhones {
   const [state, setState] = useState<FakeState>(initialState);
 
   const refresh = useCallback(async (): Promise<void> => {
-    const [personas, threads] = await Promise.all([getPersonas(), getThreads()]);
-    setState((prev) => ({ ...prev, personas, threads }));
+    const [personas, threads, groups] = await Promise.all([getPersonas(), getThreads(), getGroups()]);
+    setState((prev) => ({ ...prev, personas, threads, groups }));
   }, []);
 
   // Initial load on mount. Guard against setting state after unmount.
@@ -120,8 +161,8 @@ export function useFakePhones(): UseFakePhones {
   useEffect(() => {
     mountedRef.current = true;
     void (async () => {
-      const [personas, threads] = await Promise.all([getPersonas(), getThreads()]);
-      if (mountedRef.current) setState((prev) => ({ ...prev, personas, threads }));
+      const [personas, threads, groups] = await Promise.all([getPersonas(), getThreads(), getGroups()]);
+      if (mountedRef.current) setState((prev) => ({ ...prev, personas, threads, groups }));
     })();
     return () => {
       mountedRef.current = false;
@@ -144,10 +185,19 @@ export function useFakePhones(): UseFakePhones {
     },
   });
 
+  // Persona and group selection are mutually exclusive (one right-hand panel):
+  // selecting either side clears the other and marks its own row read.
   const select = useCallback((partyNumber: string): void => {
     setState((prev) => {
       const { [partyNumber]: _cleared, ...rest } = prev.unreadByNumber;
-      return { ...prev, selected: partyNumber, unreadByNumber: rest };
+      return { ...prev, selected: partyNumber, unreadByNumber: rest, selectedGroup: null };
+    });
+  }, []);
+
+  const selectGroup = useCallback((poolNumber: string): void => {
+    setState((prev) => {
+      const { [poolNumber]: _cleared, ...rest } = prev.groupUnreadByPool;
+      return { ...prev, selectedGroup: poolNumber, groupUnreadByPool: rest, selected: null };
     });
   }, []);
 
@@ -156,7 +206,11 @@ export function useFakePhones(): UseFakePhones {
     threads: state.threads,
     unreadByNumber: state.unreadByNumber,
     selected: state.selected,
+    groups: state.groups,
+    groupUnreadByPool: state.groupUnreadByPool,
+    selectedGroup: state.selectedGroup,
     select,
+    selectGroup,
     refresh,
     sendAsParty: apiSendAsParty,
     addAdHoc: apiAddAdHoc,

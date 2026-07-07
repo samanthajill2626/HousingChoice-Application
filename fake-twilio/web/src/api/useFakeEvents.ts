@@ -16,8 +16,16 @@ export interface FakeEventHandlers {
   enabled?: boolean;
 }
 
-/** The four engine event names emitted over SSE (see fake-twilio engine.ts). */
-const EVENT_TYPES = ['message.appended', 'message.updated', 'persona.added', 'reset'] as const;
+/** The engine event names emitted over SSE (see fake-twilio engineEvents.ts).
+ *  This is an explicit allowlist — an EngineEvent variant missing here is
+ *  silently dropped (EventSource only dispatches SUBSCRIBED named events). */
+const EVENT_TYPES = [
+  'message.appended',
+  'message.updated',
+  'persona.added',
+  'group.updated',
+  'reset',
+] as const;
 
 /** Reconnect backoff bounds (ms). EventSource retries on its own for clean
  *  drops; this covers the give-up cases and caps the retry storm. */

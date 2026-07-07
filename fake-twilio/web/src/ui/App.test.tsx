@@ -8,7 +8,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EngineEvent, Persona, Thread, ThreadMessage } from '../api/types.js';
+import type { EngineEvent, GroupSnapshot, Persona, Thread, ThreadMessage } from '../api/types.js';
 
 // ---- Boundary mocks ---------------------------------------------------------
 
@@ -36,6 +36,8 @@ const seededMsg: ThreadMessage = {
   updatedAt: '2026-06-15T00:00:00.000Z',
 };
 const threads: Thread[] = [{ partyNumber: '+15550100001', messages: [seededMsg] }];
+// Mutable so group-flow tests can seed a relay group; reset in beforeEach.
+let groups: GroupSnapshot[] = [];
 
 const sendAsParty = vi.fn(async () => 'SMx');
 const setDeliveryOutcome = vi.fn(async () => undefined);
@@ -44,6 +46,7 @@ const addAdHoc = vi.fn(async () => personas[0]!);
 vi.mock('../api/client.js', () => ({
   getPersonas: vi.fn(async () => personas),
   getThreads: vi.fn(async () => threads),
+  getGroups: vi.fn(async () => groups),
   sendAsParty: (...args: unknown[]) => sendAsParty(...(args as [])),
   addAdHoc: (...args: unknown[]) => addAdHoc(...(args as [])),
   setDeliveryOutcome: (...args: unknown[]) => setDeliveryOutcome(...(args as [])),
@@ -54,6 +57,7 @@ import { App } from './App.js';
 
 beforeEach(() => {
   capturedOnEvent = undefined;
+  groups = [];
 });
 afterEach(() => vi.clearAllMocks());
 

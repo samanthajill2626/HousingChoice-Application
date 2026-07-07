@@ -1,6 +1,13 @@
 // Control-API fetchers for the fake-phones UI. Same-origin calls to the
 // fake-twilio host's /control/* surface (see fake-twilio/src/routes/control.ts).
-import type { AddAdHocInput, DeliveryProfile, Persona, SendAsPartyInput, Thread } from './types.js';
+import type {
+  AddAdHocInput,
+  DeliveryProfile,
+  GroupSnapshot,
+  Persona,
+  SendAsPartyInput,
+  Thread,
+} from './types.js';
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -27,6 +34,10 @@ export async function getPersonas(): Promise<Persona[]> {
 
 export async function getThreads(): Promise<Thread[]> {
   return (await get<{ threads: Thread[] }>('/control/threads')).threads;
+}
+
+export async function getGroups(): Promise<GroupSnapshot[]> {
+  return (await get<{ groups: GroupSnapshot[] }>('/control/groups')).groups;
 }
 
 export async function sendAsParty(input: SendAsPartyInput): Promise<string> {

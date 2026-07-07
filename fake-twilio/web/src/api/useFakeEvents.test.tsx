@@ -78,6 +78,29 @@ describe('useFakeEvents', () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
+  // The listener list is an explicit allowlist — a named SSE frame that is not
+  // registered is silently dropped. 'group.updated' must be subscribed or the
+  // group view never updates live.
+  it('fires onEvent for a parsed group.updated event', () => {
+    const onEvent = vi.fn();
+    renderHook(() => useFakeEvents({ onEvent }));
+    act(() =>
+      instances()[0]!.emit(
+        'group.updated',
+        JSON.stringify({
+          type: 'group.updated',
+          group: { poolNumber: '+15550160001', members: [], entries: [], lastActivityAt: '2026-06-15T00:00:00.000Z' },
+        }),
+      ),
+    );
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'group.updated',
+        group: expect.objectContaining({ poolNumber: '+15550160001' }),
+      }),
+    );
+  });
+
   it('reconnects with capped exponential backoff on error (1s, then 2s)', () => {
     renderHook(() => useFakeEvents({ onEvent: vi.fn() }));
     const s0 = instances()[0]!;

@@ -57,6 +57,54 @@ export interface Thread {
   messages: ThreadMessage[];
 }
 
+/** The app's business number (mirrors `fake-twilio/src/engine/registry.ts`
+ *  APP_NUMBER). An outbound message whose `from` differs from this was sent
+ *  from a relay POOL number — the 1:1 view badges those legs "via ‹pool›". */
+export const APP_NUMBER = '+15550009999';
+
+// ---- Relay groups (traffic-derived; mirror engine/types.ts) ----
+// Groups are an ADDITIONAL view over the same traffic — pool legs still land in
+// the recipient persona's single 1:1 thread. Served by `GET /control/groups`
+// and pushed whole per mutation as the `group.updated` SSE event.
+
+export interface GroupMember {
+  /** Member E.164. */
+  number: string;
+  /** Persona label when known, else the bare number (auto-registered recipients). */
+  label: string;
+}
+
+/** One fan-out leg's delivery slot on a collapsed outbound entry. The leg keeps
+ *  its own SID so the existing status-callback flow advances per-recipient
+ *  state (rendered as one StatusChip per slot in the group view). */
+export interface GroupOutboundRecipient {
+  number: string;
+  sid: string;
+  state: DeliveryState;
+  /** Twilio ErrorCode, set only when the leg resolved to a failure state. */
+  errorCode?: string;
+}
+
+/** An ordered group-transcript entry: an inbound member→pool message, or an
+ *  outbound burst (same-(body,media) fan-out legs collapsed into one logical
+ *  message with per-recipient delivery slots). `id` is a stable render key.
+ *  Optional fields are ABSENT (never null) when unset. */
+export type GroupEntry =
+  | { kind: 'inbound'; id: string; from: string; fromLabel: string; body?: string; mediaUrls?: string[]; at: string }
+  | { kind: 'outbound'; id: string; body?: string; mediaUrls?: string[]; at: string; recipients: GroupOutboundRecipient[] };
+
+/** The whole-group DTO: `GET /control/groups` item + `group.updated` payload.
+ *  `lastActivityAt` tracks TRANSCRIPT activity (a new leg or inbound), not
+ *  delivery-slot status changes — unread/sorting should key off it. */
+export interface GroupSnapshot {
+  /** The pool E.164 the group is keyed by. */
+  poolNumber: string;
+  /** Current inferred roster (set semantics). */
+  members: GroupMember[];
+  entries: GroupEntry[];
+  lastActivityAt: string;
+}
+
 // ---- Control API DTOs ----
 export interface SendAsPartyInput {
   /** Party number (must be a known persona or ad-hoc). */
@@ -80,9 +128,12 @@ export interface AddAdHocInput {
   number?: string;
 }
 
-// ---- Live event union (mirrors `EngineEvent` in engine.ts) ----
+// ---- Live event union (mirrors `EngineEvent` in engineEvents.ts) ----
+// NB: every variant name here must ALSO be in `EVENT_TYPES` (useFakeEvents.ts) —
+// the SSE listener list is an explicit allowlist; unlisted frames are dropped.
 export type EngineEvent =
   | { type: 'message.appended'; partyNumber: string; message: ThreadMessage }
   | { type: 'message.updated'; partyNumber: string; message: ThreadMessage }
   | { type: 'persona.added'; persona: Persona }
+  | { type: 'group.updated'; group: GroupSnapshot }
   | { type: 'reset' };

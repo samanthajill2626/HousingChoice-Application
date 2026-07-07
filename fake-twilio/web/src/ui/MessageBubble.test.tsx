@@ -77,3 +77,29 @@ test('renders a timestamp', () => {
   render(<MessageBubble message={msg()} />);
   expect(screen.getByText(/\d{1,2}:\d{2}/)).toBeInTheDocument();
 });
+
+// Relay-pool origin: an app message sent FROM a pool number (a relay fan-out
+// leg scattered into this persona's 1:1 thread) gets a small "via ‹pool›"
+// badge linking it to the group. Ordinary business-number traffic must not.
+test('an app message from a relay pool shows a "via ‹formatted pool›" badge', () => {
+  render(
+    <MessageBubble
+      message={msg({ direction: 'outbound', from: '+15550160001', to: '+15550100001' })}
+    />,
+  );
+  expect(screen.getByText('via (555) 016-0001')).toBeInTheDocument();
+});
+
+test('no via badge on ordinary business-number traffic (from = APP_NUMBER)', () => {
+  render(
+    <MessageBubble
+      message={msg({ direction: 'outbound', from: '+15550009999', to: '+15550100001' })}
+    />,
+  );
+  expect(screen.queryByText(/^via /)).not.toBeInTheDocument();
+});
+
+test("no via badge on the party's own message (engine inbound)", () => {
+  render(<MessageBubble message={msg({ direction: 'inbound', from: '+15550100001' })} />);
+  expect(screen.queryByText(/^via /)).not.toBeInTheDocument();
+});

@@ -10,6 +10,8 @@
 // restricted to same-origin canned assets.
 import { StatusChip } from './StatusChip.js';
 import { cannedLabelFor, isImageAsset } from '../assets/canned/index.js';
+import { formatPhoneDisplay } from '../lib/phone.js';
+import { APP_NUMBER } from '../api/types.js';
 import styles from './MessageBubble.module.css';
 import type { ThreadMessage } from '../api/types.js';
 
@@ -30,6 +32,12 @@ export function MessageBubble({ message }: MessageBubbleProps): React.JSX.Elemen
   const isAppMessage = message.direction === 'outbound';
   const partySide = isAppMessage ? 'incoming' : 'outgoing';
   const time = formatTime(message.createdAt);
+  // A relay fan-out leg is an APP message sent from a POOL number, not the
+  // business number — badge it "via ‹pool›" so scattered legs in this party's
+  // 1:1 thread are identifiable (the group view shows the whole transcript).
+  // Ordinary business-number traffic (from = APP_NUMBER, either direction)
+  // never gets one; the party's OWN texts aren't app legs at all.
+  const viaPool = isAppMessage && message.from !== '' && message.from !== APP_NUMBER;
   return (
     <div
       className={`${styles.row} ${isAppMessage ? styles.incoming : styles.outgoing}`}
@@ -55,6 +63,7 @@ export function MessageBubble({ message }: MessageBubbleProps): React.JSX.Elemen
           <p className={styles.body}>{message.body}</p>
         )}
         <div className={styles.meta}>
+          {viaPool && <span className={styles.via}>via {formatPhoneDisplay(message.from)}</span>}
           <time className={styles.time} dateTime={message.createdAt}>
             {time}
           </time>

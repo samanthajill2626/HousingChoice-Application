@@ -33,6 +33,19 @@ export function createControlRouter(engine: FakeTwilioEngine): Router {
     res.status(200).json({ threads: engine.listThreads() });
   });
 
+  // Traffic-inferred relay groups (spec §5). Response shape (see GroupSnapshot
+  // in engine/types.ts):
+  //   { groups: [{ poolNumber, members: [{ number, label }],
+  //                entries: [ { kind:'inbound', id, from, fromLabel, body?, mediaUrls?, at }
+  //                         | { kind:'outbound', id, body?, mediaUrls?, at,
+  //                             recipients: [{ number, sid, state, errorCode? }] } ],
+  //                lastActivityAt }] }
+  // Live updates stream as 'group.updated' SSE frames on /control/events,
+  // each carrying the whole recomputed group ({ type, group }).
+  router.get('/control/groups', (_req, res) => {
+    res.status(200).json({ groups: engine.listGroups() });
+  });
+
   router.post('/control/delivery-outcome', (req, res) => {
     try {
       engine.setDeliveryOutcome(req.body as SetDeliveryOutcomeInput);

@@ -78,4 +78,29 @@ describe('control API', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.errors)).toBe(true);
   });
+
+  it('GET /control/groups returns traffic-inferred relay groups', async () => {
+    const { app } = makeApp();
+    await request(app)
+      .post('/control/send-as-party')
+      .send({ from: '+15550100001', to: '+15550160001', body: 'hi group' });
+    const res = await request(app).get('/control/groups');
+    expect(res.status).toBe(200);
+    expect(res.body.groups).toHaveLength(1);
+    expect(res.body.groups[0]).toMatchObject({ poolNumber: '+15550160001' });
+    expect(res.body.groups[0].members).toEqual([{ number: '+15550100001', label: 'Tasha Nguyen (tenant)' }]);
+    expect(res.body.groups[0].entries[0]).toMatchObject({ kind: 'inbound', from: '+15550100001', body: 'hi group' });
+    expect(typeof res.body.groups[0].lastActivityAt).toBe('string');
+  });
+
+  it('POST /control/reset clears groups too', async () => {
+    const { app } = makeApp();
+    await request(app)
+      .post('/control/send-as-party')
+      .send({ from: '+15550100001', to: '+15550160001', body: 'hi group' });
+    await request(app).post('/control/reset').send({});
+    const res = await request(app).get('/control/groups');
+    expect(res.status).toBe(200);
+    expect(res.body.groups).toHaveLength(0);
+  });
 });

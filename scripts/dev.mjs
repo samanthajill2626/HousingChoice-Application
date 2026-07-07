@@ -510,6 +510,67 @@ const { result } = concurrently(commands, {
   outputStream: new DevLogStream(),
 });
 
+// --- Seeded relay-group intro replay (fake phones) -------------------------
+// With `--mock --seeded`, the seeded OPEN relay groups (e.g. conv-live-relay-group)
+// live only in DynamoDB — no intro ever flowed through the fake, so the group is
+// INVISIBLE in the fake-phones UI until first live traffic. Once the app is
+// healthy, POST the dev seam ONCE to re-fire the real relay.intro job for every
+// well-formed seeded open group, so the fake infers the group at startup (same
+// path as a runtime-created group). The intro persists no message rows, so this
+// does not perturb the DB. In `--local` the app runs the intro job in-process, so
+// only the APP must be up — poll /__dev/ping, not the worker.
+//
+// Best-effort + fire-and-forget: a slow/failed app boot only logs a warning and
+// NEVER tears down the dev loop (this runs alongside `await result` below, not
+// before it). NOT wired into /__dev/reseed — that keeps the e2e outbox byte-stable
+// (after a manual reseed, re-POST the seam yourself; see fake-twilio/README.md).
+if (mockEnabled && seedEnabled && mode === 'local') {
+  void (async () => {
+    const appBase = 'http://localhost:8080';
+    const deadline = Date.now() + 60_000;
+    let healthy = false;
+    while (Date.now() < deadline) {
+      try {
+        const ping = await fetch(`${appBase}/__dev/ping`);
+        if (ping.ok) {
+          healthy = true;
+          break;
+        }
+      } catch {
+        // app not listening yet — keep polling
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!healthy) {
+      console.warn(
+        'dev — relay intro-replay skipped: the app never became healthy on :8080 within 60s\n' +
+          '       (fake-phones relay groups will appear on first live traffic instead).',
+      );
+      return;
+    }
+    try {
+      const res = await fetch(`${appBase}/__dev/relay/replay-intros`, { method: 'POST' });
+      if (!res.ok) {
+        console.warn(
+          `dev — relay intro-replay returned HTTP ${res.status}; fake-phones relay groups ` +
+            'will appear on first live traffic instead.',
+        );
+        return;
+      }
+      const body = await res.json();
+      console.log(
+        `dev — replayed seeded relay-group intros to the fake phones ` +
+          `(replayed=${body.replayed}, skipped=${body.skipped}).`,
+      );
+    } catch (err) {
+      console.warn(
+        `dev — relay intro-replay failed (${err.message}); fake-phones relay groups ` +
+          'will appear on first live traffic instead.',
+      );
+    }
+  })();
+}
+
 try {
   await result;
 } catch {

@@ -22,7 +22,11 @@ import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessa
 import { resetLocalData } from '../lib/devReset.js';
 import { createMessagingAdapter } from '../adapters/messaging.js';
 import { createContactsRepo } from '../repos/contactsRepo.js';
-import { createConversationsRepo } from '../repos/conversationsRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationItem,
+  type ConversationsRepo,
+} from '../repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
@@ -36,6 +40,19 @@ import {
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
 import { createUnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
+import { enqueueImmediate } from '../jobs/jobs.js';
+import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
+
+/** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
+ *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
+ *  a read repo + an enqueue seam (no send/persist path of its own). */
+export interface RelayReplayDeps {
+  conversationsRepo: ConversationsRepo;
+  /** Enqueue the REAL relay.intro job for one relay conversation. Defaults to
+   *  enqueueImmediate(RELAY_INTRO_JOB, …) (relayProvisioning.ts's enqueue);
+   *  injected in tests to spy or drive the job inline. */
+  enqueueIntro: (relayConversationId: string) => Promise<void>;
+}
 
 export interface DevRouterDeps {
   logger?: Logger;
@@ -52,6 +69,35 @@ export interface DevRouterDeps {
   /** Poll deps for POST /__dev/placement-nudges/tick — injected in tests (the
    *  world fakes); defaults to the worker's construction (worker.ts). */
   placementNudgeDeps?: RunDuePlacementNudgesDeps;
+  /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
+   *  the real conversations repo + relay.intro enqueue. */
+  relayReplayDeps?: RelayReplayDeps;
+}
+
+/**
+ * A relay group is REPLAYABLE iff it has a pool number AND a well-formed
+ * participants roster — member OBJECTS carrying non-empty phones. This screens
+ * out the cast seeds' bare-id rosters (arrays of contactId STRINGS,
+ * seed/cast.ts) and the matrix seeds' empty rosters (seed/matrix.ts), which
+ * carry no phone to intro. The declared `participants` type is
+ * ConversationParticipant[], but the real seed data violates it (bare strings),
+ * so this guards at runtime against `unknown` entries.
+ */
+function isReplayableRelayGroup(conv: ConversationItem): boolean {
+  const pool = conv.pool_number;
+  if (typeof pool !== 'string' || pool.length === 0) return false;
+  const roster: unknown = conv.participants;
+  return (
+    Array.isArray(roster) &&
+    roster.length > 0 &&
+    roster.every(
+      (p): boolean =>
+        typeof p === 'object' &&
+        p !== null &&
+        typeof (p as { phone?: unknown }).phone === 'string' &&
+        (p as { phone: string }).phone.length > 0,
+    )
+  );
 }
 
 // Role assigned when dev-login auto-provisions a missing user. The seed
@@ -316,6 +362,50 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       'dev deadline-fixture applied',
     );
     res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/relay/replay-intros — re-fire the REAL relay.intro job for every
+  // OPEN relay_group conversation that has a pool number AND a well-formed
+  // participants roster. This materializes the seeded live relay group
+  // (conv-live-relay-group) in the fake-phones UI at startup: the intro legs flow
+  // FROM the pool number through the real fan-out adapter, and the fake infers
+  // the group from that traffic (pure dynamic inference — no static mirror). The
+  // dev.mjs boot POSTs this once under `--mock --seeded` (NOT wired into
+  // /__dev/reseed — that keeps the e2e outbox byte-stable).
+  //
+  // The intro job is a SYSTEM ANNOUNCEMENT: it sends per-member legs but persists
+  // NO message rows (relayFanOut.ts — putJobExecutionMarker is the only write, an
+  // idempotency marker, not a message), so the seeded DB stays byte-stable. A
+  // repeat POST re-fires the intros (more fake legs) — acceptable for a dev tool,
+  // and it never duplicates anything in the DB. Cast/matrix seeds' bare-id or
+  // empty rosters, and (via the 'open' query) closed groups, are skipped
+  // gracefully and counted. Same triple-gate/hermetic-LOCAL-only construction as
+  // the tick seams above (the dev router only mounts behind lib/devRoutes.ts).
+  let replayDeps = deps.relayReplayDeps;
+  const relayReplayDeps = (): RelayReplayDeps => {
+    replayDeps ??= {
+      conversationsRepo: createConversationsRepo({ logger: log }),
+      enqueueIntro: async (relayConversationId) => {
+        await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId });
+      },
+    };
+    return replayDeps;
+  };
+  router.post('/__dev/relay/replay-intros', async (_req, res) => {
+    const { conversationsRepo, enqueueIntro } = relayReplayDeps();
+    const { items } = await conversationsRepo.listRelayGroups('open');
+    let replayed = 0;
+    let skipped = 0;
+    for (const conv of items) {
+      if (isReplayableRelayGroup(conv)) {
+        await enqueueIntro(conv.conversationId);
+        replayed += 1;
+      } else {
+        skipped += 1;
+      }
+    }
+    log.info({ replayed, skipped }, 'dev relay intro-replay ran');
+    res.status(200).json({ replayed, skipped });
   });
 
   return router;

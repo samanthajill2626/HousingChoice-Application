@@ -3,7 +3,7 @@
 // The EngineEvent union — a live engine state-change, streamed to the fake-phones
 // UI over SSE. Both engines (messaging + the Phase 5 CallEngine) emit through the
 // shared EventHub, so the union lives here, decoupled from any single engine.
-import type { Persona, ThreadMessage } from './types.js';
+import type { GroupSnapshot, Persona, ThreadMessage } from './types.js';
 import type { CallState } from './voiceTypes.js';
 
 export type EngineEvent =
@@ -11,6 +11,12 @@ export type EngineEvent =
   | { type: 'message.appended'; partyNumber: string; message: ThreadMessage }
   | { type: 'message.updated'; partyNumber: string; message: ThreadMessage }
   | { type: 'persona.added'; persona: Persona }
+  // Relay-group inference: emitted on EVERY group mutation (creation, burst
+  // append, inbound, roster change, delivery-slot advance), carrying the whole
+  // recomputed group — the web replaces-or-appends by poolNumber. The web
+  // package hand-mirrors this variant AND must list 'group.updated' in its SSE
+  // EVENT_TYPES allowlist, or the frame is silently dropped.
+  | { type: 'group.updated'; group: GroupSnapshot }
   | { type: 'reset' }
   // ---- voice (call) variants ----
   | { type: 'call.placed'; call: CallState }

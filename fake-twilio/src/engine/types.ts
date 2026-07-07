@@ -51,6 +51,50 @@ export interface Thread {
   messages: ThreadMessage[];
 }
 
+// ---- Relay-group inference (traffic-derived; spec §4) ----
+// Groups are an ADDITIONAL view over the same traffic — pool legs still land in
+// the recipient persona's single 1:1 thread exactly as before. These DTO shapes
+// are the `GET /control/groups` response items and the `group.updated` SSE
+// payload; the fake-phones web package hand-mirrors them (update BOTH places).
+
+export interface GroupMember {
+  /** Member E.164. */
+  number: string;
+  /** Persona label when known, else the bare number (auto-registered recipients). */
+  label: string;
+}
+
+/** One fan-out leg's delivery slot on a collapsed outbound entry. The leg keeps
+ *  its own SID so the existing status-callback flow advances per-recipient state
+ *  (rendered as delivery chips in the group view). */
+export interface GroupOutboundRecipient {
+  number: string;
+  sid: string;
+  state: DeliveryState;
+  /** Twilio ErrorCode, set only when the leg resolved to a failure state. */
+  errorCode?: string;
+}
+
+/** An ordered group-transcript entry: an inbound member→pool message, or an
+ *  outbound burst (same-(body,media) fan-out legs collapsed into one logical
+ *  message with per-recipient delivery slots). `id` is a stable render key:
+ *  the message SID (inbound) or the burst's first-leg SID (outbound). */
+export type GroupEntry =
+  | { kind: 'inbound'; id: string; from: string; fromLabel: string; body?: string; mediaUrls?: string[]; at: string }
+  | { kind: 'outbound'; id: string; body?: string; mediaUrls?: string[]; at: string; recipients: GroupOutboundRecipient[] };
+
+/** The whole-group DTO: `GET /control/groups` item + `group.updated` payload.
+ *  `lastActivityAt` tracks TRANSCRIPT activity (a new leg or inbound), not
+ *  delivery-slot status changes. */
+export interface GroupSnapshot {
+  /** The pool E.164 the group is keyed by. */
+  poolNumber: string;
+  /** Current inferred roster (set semantics, spec §4.3). */
+  members: GroupMember[];
+  entries: GroupEntry[];
+  lastActivityAt: string;
+}
+
 // ---- Control API DTOs ----
 export interface SendAsPartyInput {
   /** Party number (must be a known persona or ad-hoc). */

@@ -2,10 +2,12 @@
 import type { Clock } from './clock.js';
 import { PersonaRegistry, APP_NUMBER } from './registry.js';
 import { ConversationStore } from './store.js';
+import { GroupStore } from './groups.js';
 import { buildInboundSmsParams, buildStatusParams, type WebhookParams } from './signer.js';
 import { plannedTransitions, stepDelayMs } from './delivery.js';
 import type {
-  AddAdHocInput, DeliveryProfile, Persona, SendAsPartyInput, SetDeliveryOutcomeInput, Thread, ThreadMessage,
+  AddAdHocInput, DeliveryProfile, GroupSnapshot, Persona, SendAsPartyInput, SetDeliveryOutcomeInput, Thread,
+  ThreadMessage,
 } from './types.js';
 import type { EventHub } from './eventHub.js';
 import type { EngineEvent, EngineListener } from './engineEvents.js';
@@ -80,6 +82,9 @@ export class FakeTwilioEngine {
   private readonly appNumber: string;
   private readonly registry: PersonaRegistry;
   private readonly store: ConversationStore;
+  /** Traffic-derived relay-group state (spec §4) — an ADDITIONAL view; pool
+   *  legs still land in the recipient persona's 1:1 thread exactly as before. */
+  private readonly groups = new GroupStore();
   private readonly nextProfile = new Map<string, DeliveryProfile>();
   private sidSeq: number;
   /** Cancel fns for every still-pending scheduled status callback (FIX 1). */
@@ -124,6 +129,10 @@ export class FakeTwilioEngine {
   listThreads(): Thread[] {
     return this.store.listThreads();
   }
+  /** Traffic-inferred relay groups (spec §4) — the `GET /control/groups` payload. */
+  listGroups(): GroupSnapshot[] {
+    return this.groups.listGroups();
+  }
   addAdHoc(input: AddAdHocInput): Persona {
     if (input.number !== undefined) {
       const normalized = input.number.trim();
@@ -154,6 +163,9 @@ export class FakeTwilioEngine {
     for (const cancel of this.pendingCancels) cancel();
     this.pendingCancels.clear();
     this.store.reset();
+    // Groups are traffic-derived state, so they reset with traffic (§4.4).
+    // Personas persist, as before.
+    this.groups.reset();
     this.nextProfile.clear();
     this.emit({ type: 'reset' });
   }
@@ -202,6 +214,20 @@ export class FakeTwilioEngine {
     };
     this.store.append(input.from, message);
     this.emit({ type: 'message.appended', partyNumber: input.from, message });
+    // Relay-group inference (spec §4.1): an EXPLICIT non-app `to` is a pool
+    // number — this is a member→group message. Observed BEFORE the webhook
+    // dispatch so group state stays consistent with the thread append above
+    // even when the app rejects the webhook (both retain the message).
+    // APP_NUMBER traffic (the default `to`) never touches a group.
+    if (input.to !== undefined && to !== this.appNumber) {
+      const group = this.groups.observeInbound({
+        poolNumber: to, from: input.from, fromLabel: persona.label, sid,
+        ...(input.body !== undefined && { body: input.body }),
+        ...(input.mediaUrls !== undefined && { mediaUrls: input.mediaUrls }),
+        atIso: now,
+      });
+      this.emit({ type: 'group.updated', group });
+    }
     const params = buildInboundSmsParams({
       messageSid: sid, from: input.from, to,
       ...(input.body !== undefined && { body: input.body }),
@@ -257,6 +283,30 @@ export class FakeTwilioEngine {
     this.store.append(input.to, message);
     this.emit({ type: 'message.appended', partyNumber: input.to, message });
 
+    // Relay-group inference (spec §4.1): a `from` that isn't the app's business
+    // number is a pool number — this leg is part of a group fan-out. Nothing
+    // else in the app sends from a non-business number today; a future
+    // false-positive would just create a spurious group in this dev tool
+    // (accepted, spec §9 — tighten with NumberRegistry.isPool if it ever
+    // bites). APP_NUMBER traffic (including the default `from`) never creates
+    // or touches a group. The group transcript is an ADDITIONAL view — the
+    // thread append above is unchanged.
+    if (input.from !== undefined && input.from !== this.appNumber) {
+      const group = this.groups.observeOutboundLeg({
+        poolNumber: input.from,
+        to: input.to,
+        // Keep the bare-number label auto-registration produced (or the real
+        // persona label when the recipient is known).
+        toLabel: this.registry.byNumber(input.to)?.label ?? input.to,
+        sid,
+        state: message.state,
+        ...(input.body !== undefined && { body: input.body }),
+        ...(mediaUrls !== undefined && { mediaUrls }),
+        atIso: now,
+      });
+      this.emit({ type: 'group.updated', group });
+    }
+
     const profile = this.nextProfile.get(input.to) ?? { kind: 'normal' as const };
     this.nextProfile.delete(input.to);
     // The create-response carries 'queued' (set on the stored message above). Real
@@ -287,6 +337,12 @@ export class FakeTwilioEngine {
             updated.errorCode = profile.errorCode;
           }
           this.emit({ type: 'message.updated', partyNumber: input.to, message: updated });
+          // If this SID is a relay-group fan-out leg, advance its delivery slot
+          // too, so per-recipient chips track the same status-callback flow.
+          // (updated.errorCode is only ever set by the fail-state branch above,
+          // so passing it through mirrors the message's own error handling.)
+          const group = this.groups.updateSlotState(sid, state, updated.errorCode);
+          if (group) this.emit({ type: 'group.updated', group });
         }
         // FIX 4: skip the status callback for the initial 'queued' state (index 0).
         if (i === 0) return;

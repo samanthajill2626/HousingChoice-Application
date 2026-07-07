@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RosterRail } from './RosterRail.js';
-import type { Persona } from '../api/types.js';
+import type { GroupSnapshot, Persona } from '../api/types.js';
 
 function persona(over: Partial<Persona> = {}): Persona {
   return {
@@ -58,4 +58,119 @@ test('has an ad-hoc number button that calls onAddAdHoc', async () => {
   render(<RosterRail personas={personas} unreadByNumber={{}} selected={null} onSelect={() => {}} onAddAdHoc={onAddAdHoc} />);
   await userEvent.click(screen.getByRole('button', { name: /ad-hoc number/i }));
   expect(onAddAdHoc).toHaveBeenCalledTimes(1);
+});
+
+// ---- "Group texts" section (traffic-inferred relay groups) -------------------
+
+const groups: GroupSnapshot[] = [
+  {
+    poolNumber: '+15550160001',
+    members: [
+      { number: '+15550170001', label: 'Diana Osei' },
+      { number: '+15550170003', label: 'Gloria Mensah' },
+    ],
+    entries: [],
+    lastActivityAt: '2026-06-15T00:00:00.000Z',
+  },
+  {
+    poolNumber: '+15550160002',
+    members: [{ number: '+15550170002', label: 'Ben Tenant' }],
+    entries: [],
+    lastActivityAt: '2026-06-15T01:00:00.000Z',
+  },
+];
+
+test('renders a Group texts section: one row per group with formatted pool + member count', () => {
+  render(
+    <RosterRail
+      personas={personas}
+      unreadByNumber={{}}
+      selected={null}
+      onSelect={() => {}}
+      onAddAdHoc={() => {}}
+      groups={groups}
+      groupUnreadByPool={{}}
+      selectedGroup={null}
+      onSelectGroup={() => {}}
+    />,
+  );
+  expect(screen.getByRole('heading', { name: /group texts/i })).toBeInTheDocument();
+  const row = screen.getByRole('button', { name: /\(555\) 016-0001/ });
+  expect(row).toHaveTextContent('2 members');
+  expect(screen.getByRole('button', { name: /\(555\) 016-0002/ })).toHaveTextContent('1 member');
+});
+
+test('renders NO Group texts section when there are no groups', () => {
+  render(
+    <RosterRail
+      personas={personas}
+      unreadByNumber={{}}
+      selected={null}
+      onSelect={() => {}}
+      onAddAdHoc={() => {}}
+      groups={[]}
+      groupUnreadByPool={{}}
+      selectedGroup={null}
+      onSelectGroup={() => {}}
+    />,
+  );
+  expect(screen.queryByRole('heading', { name: /group texts/i })).not.toBeInTheDocument();
+});
+
+test('clicking a group row calls onSelectGroup with the pool number (not onSelect)', async () => {
+  const onSelect = vi.fn();
+  const onSelectGroup = vi.fn();
+  render(
+    <RosterRail
+      personas={personas}
+      unreadByNumber={{}}
+      selected={null}
+      onSelect={onSelect}
+      onAddAdHoc={() => {}}
+      groups={groups}
+      groupUnreadByPool={{}}
+      selectedGroup={null}
+      onSelectGroup={onSelectGroup}
+    />,
+  );
+  await userEvent.click(screen.getByRole('button', { name: /\(555\) 016-0001/ }));
+  expect(onSelectGroup).toHaveBeenCalledWith('+15550160001');
+  expect(onSelect).not.toHaveBeenCalled();
+});
+
+test('the selected group row is marked aria-current', () => {
+  render(
+    <RosterRail
+      personas={personas}
+      unreadByNumber={{}}
+      selected={null}
+      onSelect={() => {}}
+      onAddAdHoc={() => {}}
+      groups={groups}
+      groupUnreadByPool={{}}
+      selectedGroup="+15550160002"
+      onSelectGroup={() => {}}
+    />,
+  );
+  expect(screen.getByRole('button', { name: /\(555\) 016-0002/ })).toHaveAttribute('aria-current', 'true');
+  expect(screen.getByRole('button', { name: /\(555\) 016-0001/ })).not.toHaveAttribute('aria-current');
+});
+
+test('renders a group unread badge with the count (consistent with persona rows)', () => {
+  render(
+    <RosterRail
+      personas={personas}
+      unreadByNumber={{}}
+      selected={null}
+      onSelect={() => {}}
+      onAddAdHoc={() => {}}
+      groups={groups}
+      groupUnreadByPool={{ '+15550160001': 4 }}
+      selectedGroup={null}
+      onSelectGroup={() => {}}
+    />,
+  );
+  const row = screen.getByRole('button', { name: /\(555\) 016-0001/ });
+  expect(row).toHaveTextContent('4');
+  expect(row).toHaveAccessibleName(/4 unread/i);
 });

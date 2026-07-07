@@ -173,3 +173,52 @@ describe('App shell', () => {
     await waitFor(() => expect(screen.getByText('Delivered')).toBeVisible());
   });
 });
+
+// ---- Relay groups (Group texts) ----------------------------------------------
+
+const relayGroup: GroupSnapshot = {
+  poolNumber: '+15550160001',
+  members: [
+    { number: '+15550100001', label: 'Ana Tenant' },
+    { number: '+15550100002', label: 'Bob Landlord' },
+  ],
+  entries: [],
+  lastActivityAt: '2026-06-15T00:10:00.000Z',
+};
+
+describe('App shell — relay groups', () => {
+  it('selecting a group opens the GroupPanel; persona and group selection are mutually exclusive', async () => {
+    groups = [relayGroup];
+    const user = userEvent.setup();
+    render(<App />);
+    // A persona first.
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+    expect(screen.getByRole('log', { name: 'Conversation' })).toBeVisible();
+    // Selecting the group replaces the persona panel with the group panel.
+    await user.click(screen.getByRole('button', { name: /\(555\) 016-0001/ }));
+    expect(await screen.findByRole('log', { name: 'Group conversation' })).toBeVisible();
+    expect(screen.queryByRole('log', { name: 'Conversation' })).toBeNull();
+    // And selecting a persona again swaps back.
+    await user.click(screen.getByRole('button', { name: /Ana Tenant/ }));
+    expect(await screen.findByRole('log', { name: 'Conversation' })).toBeVisible();
+    expect(screen.queryByRole('log', { name: 'Group conversation' })).toBeNull();
+  });
+
+  it('a group reply calls sendAsParty with from=<picked member> and to=<pool> (the real fan-out trigger)', async () => {
+    groups = [relayGroup];
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /\(555\) 016-0001/ }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /reply as/i }),
+      '+15550100002',
+    );
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'hi from Bob');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sendAsParty).toHaveBeenCalledWith({
+      from: '+15550100002',
+      to: '+15550160001',
+      body: 'hi from Bob',
+    });
+  });
+});

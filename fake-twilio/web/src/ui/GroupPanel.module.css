@@ -1,0 +1,183 @@
+/* GroupPanel — group-specific styles. The panel SHELL (outer card, scrolling
+ * log, send error) comes from App.module.css; bubbles mirror MessageBubble's
+ * proportions with group extras (sender labels, per-recipient delivery rows,
+ * the roster strip, and the "Reply as" picker bar). */
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-3) var(--hc-space-4);
+  border-bottom: 1px solid var(--hc-color-border);
+}
+
+.identity {
+  display: flex;
+  align-items: baseline;
+  gap: var(--hc-space-3);
+}
+
+/* Roster strip: one small pill per current member. */
+.roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-2);
+}
+
+.memberChip {
+  padding: 0.1rem var(--hc-space-2);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-pill);
+  background-color: var(--hc-color-surface-alt);
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+  white-space: nowrap;
+}
+
+/* --- Transcript entries (mirror MessageBubble's sides) --- */
+/* `.app` = an app fan-out to the members (left, neutral, carries delivery
+ * slots); `.member` = a member's own text to the pool (right, brand). */
+.entry {
+  display: flex;
+  width: 100%;
+}
+.app {
+  justify-content: flex-start;
+}
+.member {
+  justify-content: flex-end;
+}
+
+.bubble {
+  max-width: min(78%, 32rem);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-2);
+  padding: var(--hc-space-3) var(--hc-space-3);
+  border-radius: var(--hc-radius-lg);
+  box-shadow: var(--hc-shadow-sm);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.app .bubble {
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+  color: var(--hc-color-text);
+  border-bottom-left-radius: var(--hc-radius-sm);
+}
+
+.member .bubble {
+  background-color: var(--hc-color-brand);
+  color: var(--hc-color-text-inverse);
+  border-bottom-right-radius: var(--hc-radius-sm);
+}
+
+/* Sender label on member entries. */
+.sender {
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-semibold);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.body {
+  margin: 0;
+  font-size: var(--hc-font-size-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-2);
+}
+
+.thumb {
+  display: block;
+  width: 9rem;
+  height: auto;
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  border: 1px solid var(--hc-color-border);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--hc-space-2);
+}
+
+.time {
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.member .time {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Per-recipient delivery slots on an app fan-out entry. */
+.recipients {
+  list-style: none;
+  margin: 0;
+  padding: var(--hc-space-2) 0 0;
+  border-top: 1px dashed var(--hc-color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hc-space-1);
+}
+
+.recipient {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hc-space-3);
+}
+
+.recipientLabel {
+  font-size: var(--hc-font-size-xs);
+  color: var(--hc-color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- "Reply as" member picker, above the shared Composer. --- */
+.replyBar {
+  flex: 0 0 auto;
+  padding: var(--hc-space-2) var(--hc-space-4);
+  border-top: 1px solid var(--hc-color-border);
+  background-color: var(--hc-color-surface-alt);
+}
+
+.replyAs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-2);
+}
+
+.replyAsLabel {
+  font-size: var(--hc-font-size-xs);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text-muted);
+}
+
+.replyAsSelect {
+  padding: var(--hc-space-1) var(--hc-space-2);
+  border: 1px solid var(--hc-color-border);
+  border-radius: var(--hc-radius-md);
+  background-color: var(--hc-color-surface);
+  font-size: var(--hc-font-size-sm);
+  color: var(--hc-color-text);
+}
+.replyAsSelect:focus-visible {
+  outline: none;
+  border-color: var(--hc-color-brand);
+  box-shadow: var(--hc-focus-ring);
+}

@@ -1,19 +1,22 @@
 // App — the fake-phones UI shell. A thin composition over the live data hook
 // (`useFakePhones`) and the presentational components: the persistent DevBanner
 // on top, then a two-pane body (RosterRail on the left at --hc-hub-list-width,
-// a PhonePanel on the right) that mirrors the dashboard hub layout. All state
-// lives in the hook (initial load + SSE merge) — the App holds NO duplicated
-// conversation state; the only local UI state is "is the ad-hoc dialog open?".
+// a PhonePanel OR GroupPanel on the right) that mirrors the dashboard hub
+// layout. All state lives in the hook (initial load + SSE merge) — the App
+// holds NO duplicated conversation state; the only local UI state is "is the
+// ad-hoc dialog open?".
 //
-// Wiring (always for the SELECTED party):
+// Wiring (always for the SELECTED party / group):
 //   - Composer.onSend            → sendAsParty({ from: selected.number, body, mediaUrls })
-//   - Composer.onSetDeliveryProfile → setDeliveryOutcome(selected.number, profile)
+//   - GroupPanel.onSend          → sendAsParty({ from: <picked member>, to: <pool>, … })
+//   - Composer.onSetDeliveryProfile → setDeliveryOutcome(<party or picked member>, profile)
 //   - RosterRail ＋ Ad-hoc        → AdHocDialog → addAdHoc(input)
 import { useEffect, useRef, useState } from 'react';
 import { useFakePhones } from '../state/useFakePhones.js';
 import { AdHocDialog } from './AdHocDialog.js';
 import { Composer, type ComposerSendInput } from './Composer.js';
 import { DevBanner } from './DevBanner.js';
+import { GroupPanel } from './GroupPanel.js';
 import { MessageBubble } from './MessageBubble.js';
 import { RosterRail } from './RosterRail.js';
 import type { AddAdHocInput, DeliveryProfile, Persona, Thread } from '../api/types.js';
@@ -87,6 +90,10 @@ export function App(): React.JSX.Element {
 
   const selectedPersona = phones.personas.find((p) => p.number === phones.selected);
   const selectedThread = phones.threads.find((t) => t.partyNumber === phones.selected);
+  // Group selection is mutually exclusive with persona selection (the hook
+  // nulls one when the other is set). A stale pool (e.g. after reset cleared
+  // the groups) simply finds nothing and the empty PhonePanel state shows.
+  const selectedGroup = phones.groups.find((g) => g.poolNumber === phones.selectedGroup);
 
   // The Composer's delivery-profile radio is one-shot in the engine: a non-normal
   // profile is consumed on the next app→party OUTBOUND, then the engine reverts to
@@ -124,6 +131,34 @@ export function App(): React.JSX.Element {
     void phones.setDeliveryOutcome(selectedPersona.number, profile);
   };
 
+  // Group reply-as-member: the GroupPanel picks the member; the pool is the
+  // selected group's. This is the interactive path that triggers the app's
+  // REAL relay fan-out (the app sees member→pool exactly as from a phone).
+  const handleGroupSend = async (input: {
+    from: string;
+    body: string;
+    mediaUrls: string[];
+  }): Promise<void> => {
+    if (!selectedGroup) return;
+    setSendError(undefined);
+    try {
+      await phones.sendAsParty({
+        from: input.from,
+        to: selectedGroup.poolNumber,
+        body: input.body,
+        ...(input.mediaUrls.length > 0 && { mediaUrls: input.mediaUrls }),
+      });
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Could not send the message.');
+      // Re-throw so the Composer keeps the composed message + picked images.
+      throw err;
+    }
+  };
+
+  const handleGroupSetDeliveryProfile = (memberNumber: string, profile: DeliveryProfile): void => {
+    void phones.setDeliveryOutcome(memberNumber, profile);
+  };
+
   const handleAddAdHoc = (input: AddAdHocInput): void => {
     setAdHocError(undefined);
     void (async () => {
@@ -157,15 +192,35 @@ export function App(): React.JSX.Element {
             setAdHocError(undefined);
             setAdHocOpen(true);
           }}
+          groups={phones.groups}
+          groupUnreadByPool={phones.groupUnreadByPool}
+          selectedGroup={phones.selectedGroup}
+          onSelectGroup={(poolNumber) => {
+            // Same hygiene as a persona switch: the error belonged elsewhere.
+            setSendError(undefined);
+            phones.selectGroup(poolNumber);
+          }}
         />
-        <PhonePanel
-          persona={selectedPersona}
-          thread={selectedThread}
-          onSend={handleSend}
-          onSetDeliveryProfile={handleSetDeliveryProfile}
-          deliveryResetSignal={deliveryResetSignal}
-          {...(sendError !== undefined && { sendError })}
-        />
+        {selectedGroup ? (
+          // Keyed by pool so switching groups remounts the panel (fresh picked
+          // member + composer state), exactly like switching phones feels.
+          <GroupPanel
+            key={selectedGroup.poolNumber}
+            group={selectedGroup}
+            onSend={handleGroupSend}
+            onSetDeliveryProfile={handleGroupSetDeliveryProfile}
+            {...(sendError !== undefined && { sendError })}
+          />
+        ) : (
+          <PhonePanel
+            persona={selectedPersona}
+            thread={selectedThread}
+            onSend={handleSend}
+            onSetDeliveryProfile={handleSetDeliveryProfile}
+            deliveryResetSignal={deliveryResetSignal}
+            {...(sendError !== undefined && { sendError })}
+          />
+        )}
       </main>
 
       {adHocOpen && (

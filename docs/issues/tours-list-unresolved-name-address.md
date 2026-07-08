@@ -3,7 +3,8 @@ id: tours-list-unresolved-name-address
 title: /tours list renders raw tenant/unit IDs instead of a name + address
 type: bug
 severity: low
-status: open
+status: resolved
+resolved: 2026-07-08
 area: dashboard
 created: 2026-07-03
 refs: dashboard/src/routes/tours/
@@ -44,3 +45,25 @@ with a name/address. If (a), give those seeded pool entities proper
 `tenantId`→contact name and `unitId`→unit address (with a graceful "Unknown
 tenant"/"(no address)" fallback rather than the raw id). Verify by booting the
 full `--seeded` profile and confirming every /tours row shows a name + address.
+
+**Resolution (2026-07-08).** Both suspected causes were REAL, and one was a live
+bug beyond the seed:
+
+- (b) DISPLAY/LIVE BUG: the /tours list resolves names via useContacts('all') +
+  useListings(), and both hooks loaded only the FIRST server page (50/type).
+  Any tour referencing an entity past page one rendered the raw id - this would
+  hit real production data at modest scale (verified: unit-mx-tourable-04
+  existed WITH an address but sat past page 1 of 59 units). Fixed: both hooks
+  now walk every page (bounded nextCursor loop, warn-on-cap, never silent).
+- (a) SEED GAP: the tours pool, broadcast recipients, and listing sends
+  hardcode tenant-mx-searching-standalone-01 / tenant-mx-placing-standalone-01,
+  but buildTenantsMatrix only created standalones when placements left the >=2
+  floor unmet - so those ids DANGLED (404). Fixed: those statuses now always
+  create standalone-01 (GUARANTEED_STANDALONE floor in matrix.ts), and
+  seedMatrix.test.ts gained cross-reference integrity tests (tours / listing
+  sends / broadcast recipients must reference seeded rows; verified they fail
+  without the fix).
+
+Verified on the full --seeded profile: every /tours row shows a real name +
+street address; zero raw ids.
+

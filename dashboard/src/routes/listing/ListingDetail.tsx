@@ -14,7 +14,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { deleteUnit, restoreUnit, type Contact } from '../../api/index.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { Button, Spinner, StatusBadge, StatusMenu, type StatusTone } from '../../ui/index.js';
 import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
@@ -22,7 +22,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, CardAction, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Card, CardAction, CollapsibleRows, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
@@ -44,17 +44,17 @@ import { formatDayDivider, formatTime } from '../contact/format.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
 import styles from './ListingDetail.module.css';
 
-// Property-status ? header badge class. `available` is the one publicly-shareable
-// status (green); occupied/off_market read as a settled/closed badge; the rest
-// fall back to the neutral badge.
-const STATUS_BADGE: Record<ListingStatus, string> = {
-  setup: styles.badgeInactive ?? '',
-  available: styles.badgeAvailable ?? '',
-  under_application: styles.badgePlaced ?? '',
-  finalizing: styles.badgePlaced ?? '',
-  occupied: styles.badgePlaced ?? '',
-  on_hold: styles.badgeInactive ?? '',
-  off_market: styles.badgeInactive ?? '',
+// Property-status -> the interactive status pill's tone. `available` is the one
+// publicly-shareable status (green); under_application/finalizing/occupied read as
+// a settled/in-progress (placed) tone; the rest fall back to the neutral tone.
+const STATUS_TONE: Record<ListingStatus, StatusTone> = {
+  setup: 'inactive',
+  available: 'available',
+  under_application: 'placed',
+  finalizing: 'placed',
+  occupied: 'placed',
+  on_hold: 'inactive',
+  off_market: 'inactive',
 };
 
 // Property-status ? status-dot colour for the related-properties rows.
@@ -76,38 +76,6 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
 
 /** How many rows the Related / Similar property lists show before collapsing. */
 const RELATED_LIMIT = 4;
-
-/**
- * Render a list of already-built <Row>s, capped at `limit` with a "Show N more" /
- * "Show less" toggle when there are more. Each rung must carry its own `key`.
- * Own state per instance, so Related and Similar expand independently.
- */
-function CollapsibleRows({
-  rows,
-  limit,
-}: {
-  rows: React.JSX.Element[];
-  limit: number;
-}): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false);
-  const shown = expanded ? rows : rows.slice(0, limit);
-  const hidden = rows.length - limit;
-  return (
-    <>
-      {shown}
-      {rows.length > limit ? (
-        <button
-          type="button"
-          className={styles.moreToggle}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? 'Show less' : `Show ${hidden} more`}
-        </button>
-      ) : null}
-    </>
-  );
-}
 
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
@@ -140,11 +108,11 @@ export function ListingDetail(): React.JSX.Element {
   function onChangeStatus(toStatus: ListingStatus): void {
     if (statusBusy || !state.unit || toStatus === state.unit.status) return;
     setStatusBusy(true);
+    // Clear any prior error at ATTEMPT start (matches PlacementDetail's
+    // runTransition) so a retry never renders a stale message.
+    setStatusError(null);
     void setListingStatus(state.unit.unitId, { toStatus, source: 'manual' })
-      .then((updated) => {
-        setUnit(updated);
-        setStatusError(null);
-      })
+      .then((updated) => setUnit(updated))
       .catch(() => {
         setStatusError("Couldn't update the property status - please try again.");
       })
@@ -226,57 +194,42 @@ export function ListingDetail(): React.JSX.Element {
     <div className={styles.page}>
       <header className={styles.header}>
         <div className={styles.identity}>
-          <h1 className={styles.name}>
-            {address}
-            <span className={`${styles.badge} ${STATUS_BADGE[unit.status] ?? ''}`}>
-              {statusLabel(unit.status)}
-            </span>
-            {deleted ? <span className={styles.deletedBadge}>?? Deleted</span> : null}
-          </h1>
+          <div className={styles.titleRow}>
+            <h1 className={styles.name}>{address}</h1>
+            {/* Interactive status pill: shows the current status AND changes it
+                (one control, so the header no longer duplicates a badge + a select).
+                A soft-DELETED property gets a display-only badge instead — no live
+                status control on a deleted record (matches the contact header). */}
+            {deleted ? (
+              <StatusBadge kind="listing" status={unit.status} />
+            ) : (
+              <StatusMenu
+                value={unit.status}
+                options={LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] }))}
+                onChange={(v) => onChangeStatus(v as ListingStatus)}
+                tone={STATUS_TONE[unit.status]}
+                disabled={statusBusy}
+                label="Property status"
+                error={statusError}
+              />
+            )}
+            {deleted ? <span className={styles.deletedBadge}>Deleted</span> : null}
+          </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
         </div>
         <div className={styles.actions}>
-          <label className={styles.statusSelect}>
-            <span className={styles.srLabel}>Property status</span>
-            <select
-              aria-label="Property status"
-              value={unit.status}
-              disabled={statusBusy}
-              onChange={(e) => onChangeStatus(e.target.value as ListingStatus)}
-            >
-              {LISTING_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {LISTING_STATUS_LABELS[s]}
-                </option>
-              ))}
-            </select>
-            {statusError !== null ? (
-              <span role="alert" className={styles.statusError}>
-                {statusError}
-              </span>
-            ) : null}
-          </label>
           {deleted ? (
             <button type="button" className={`${styles.btn} ${styles.btnAlt}`} disabled={deleteBusy} onClick={onRestore}>
               Restore
             </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`)}
-              >
-                📣 Broadcast to tenants
-              </button>
-              <button type="button" className={styles.btn} onClick={() => setStartingPlacement(true)}>
-                Start placement
-              </button>
-            </>
-          )}
+          ) : null}
           <ListingActionsMenu
             triggerClassName={styles.kebab ?? ''}
             {...(!deleted && { onEdit: () => setEditing(true) })}
+            {...(!deleted && {
+              onBroadcast: () => navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`),
+            })}
+            {...(!deleted && { onStartPlacement: () => setStartingPlacement(true) })}
             deleted={deleted}
             onDelete={() => setConfirmingDelete(true)}
             onRestore={onRestore}
@@ -451,7 +404,9 @@ export function ListingDetail(): React.JSX.Element {
                   to={`/contacts/${r.contactId}`}
                   label={
                     <span>
-                      {r.name ?? r.contactId}
+                      {/* The NAME is the visible link (brand-styled; the whole row
+                          stays the hit target) — no separate "Open" affordance. */}
+                      <span className={styles.contactName}>{r.name ?? r.contactId}</span>
                       {r.primaryVoice ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}
@@ -459,7 +414,6 @@ export function ListingDetail(): React.JSX.Element {
                       </span>
                     </span>
                   }
-                  right={<span className={styles.openLink}>Open</span>}
                 />
               ))
             )}

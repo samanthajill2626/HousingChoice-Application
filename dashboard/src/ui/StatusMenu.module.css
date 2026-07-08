@@ -1,0 +1,174 @@
+/* StatusMenu — an interactive status pill + its dropdown. The trigger mirrors the
+ * status-badge look (pill, white text) with a caret; tone classes set the colour.
+ * All values from ui/tokens.css. */
+
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* The pill trigger. Shape + text here; the tone class sets the background. */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px var(--sp-2);
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--c-text-inverse);
+  background: var(--c-status-inactive-bg); /* fallback; a tone class overrides */
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+
+.trigger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.trigger:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.caret {
+  font-size: 0.7em;
+  line-height: 1;
+}
+
+/* Tone = the current status colour (mirrors the badge tones). */
+.toneAvailable {
+  background: var(--c-status-available-bg);
+}
+.tonePlaced {
+  background: var(--c-status-placed-bg);
+}
+.toneInactive {
+  background: var(--c-status-inactive-bg);
+}
+
+/* An un-tinted, outlined pill (dark text) for statuses with no colour semantic —
+ * e.g. a placement's workflow stage. */
+.toneNeutral {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+}
+
+/* SOFT-tint tones (dark text) mirroring StatusBadge's BadgeTone families, so an
+ * interactive contact-status pill keeps the same at-a-glance colours as the
+ * display badge it replaces. */
+.tonePositive {
+  background: var(--c-match-bg);
+  border: 1px solid var(--c-match-border);
+  color: var(--c-match-text);
+}
+.toneProgress {
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+.toneWarn {
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+.toneMuted {
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-subtle);
+}
+
+/* Prominent header variant (e.g. the placement stage, which is the page's lead). */
+.sizeLg {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+}
+
+/* The dropdown, anchored under the trigger. */
+.menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 30;
+  min-width: 12rem;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+/* A labelled section within the menu (grouped options, e.g. placement phases). */
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.group + .group {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
+}
+
+.groupLabel {
+  padding: var(--sp-1) var(--sp-2) 2px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--c-surface-2);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.check {
+  width: 1em;
+  flex: 0 0 auto;
+  color: var(--c-brand);
+}
+
+/* Inline error below the pill (a rejected transition). Readable on any ground. */
+.error {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 30;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}

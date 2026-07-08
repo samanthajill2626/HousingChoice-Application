@@ -416,6 +416,27 @@ describe('statusTransition — park_reason on the move to parked', () => {
     expect(updated.status).toBe('on_hold');
     expect(updated).not.toHaveProperty('park_reason');
   });
+
+  it('a reason-less park CLEARS a stale park_reason instead of inheriting it', async () => {
+    // Park with a reason, un-park, then re-park WITHOUT a reason (the status
+    // pill's path — it never sends one). The old reason must not survive onto
+    // the new park, where it would read as this park's explanation.
+    await world.contactsRepo.create({ contactId: 'll-repark', type: 'landlord', status: 'interested' });
+    await svc.setTenantStatus('ll-repark', {
+      toStatus: 'parked',
+      source: 'manual',
+      reason: 'not a fit',
+    });
+    await svc.setTenantStatus('ll-repark', { toStatus: 'interested', source: 'manual' });
+    // Un-parking leaves the historical reason in place (documented behavior)...
+    expect((await world.contactsRepo.getById('ll-repark'))!.park_reason).toBe('not a fit');
+
+    const reparked = await svc.setTenantStatus('ll-repark', { toStatus: 'parked', source: 'manual' });
+    // ...but the reason-less RE-park clears it.
+    expect(reparked.status).toBe('parked');
+    expect(reparked).not.toHaveProperty('park_reason');
+    expect((await world.contactsRepo.getById('ll-repark'))!).not.toHaveProperty('park_reason');
+  });
 });
 
 describe('statusTransition — inspection_outcome on the inspection-complete move (§4)', () => {

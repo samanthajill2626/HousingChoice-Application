@@ -94,9 +94,7 @@
 .rowLabel {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
   cursor: pointer;
 }
 .checkbox {
@@ -104,13 +102,31 @@
   width: 16px;
   height: 16px;
 }
+/* Name + phone + tags — takes the flex slot the label used to hold (the name is
+ * now a profile LINK outside the checkbox label, so clicking it never toggles). */
+.rowBody {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .rowName {
   flex: 0 1 auto;
   font-size: var(--fs-md);
-  color: var(--c-text);
+  color: var(--c-brand);
+  text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.rowName:hover {
+  text-decoration: underline;
+}
+.rowName:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 .rowPhone {
   flex: 0 0 auto;

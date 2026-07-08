@@ -16,7 +16,7 @@
 // + a segmented Comms | Profile toggle. The page resolves the reply target
 // (primary / picker) and whether a conversation is sendable, else Send is disabled.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
@@ -28,12 +28,25 @@ import {
   sendMessage,
   setContactOptOut,
   setContactVoiceOptOut,
+  setTenantStatus,
   updateContact,
+  LANDLORD_STATUSES,
+  LANDLORD_STATUS_LABELS,
+  TENANT_STATUSES,
+  TENANT_STATUS_LABELS,
   type Contact,
   type ContactType,
+  type LandlordStatus,
+  type TenantStatus,
   type TimelineMessage,
 } from '../../api/index.js';
-import { Button, ContactStatusBadge, Spinner } from '../../ui/index.js';
+import {
+  Button,
+  ContactStatusBadge,
+  Spinner,
+  StatusMenu,
+  contactStatusTone,
+} from '../../ui/index.js';
 import { Modal } from './Modal.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
@@ -81,6 +94,9 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // The header's interactive status pill (tenant/landlord lifecycle change).
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -99,6 +115,16 @@ export function ContactDetail(): React.JSX.Element {
   const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
+
+  // The /contacts/:contactId route re-renders this SAME component instance on a
+  // param change (no remount — the same reason Timeline takes resetScrollKey), so
+  // per-contact transient state must be reset by hand or it leaks: fail a status
+  // change on contact A, navigate to B, and B would show A's error.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatusError(null);
+    setStatusBusy(false);
+  }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
   const { hasVerifiedCell } = useMe();
@@ -285,6 +311,29 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // Lifecycle-status change from the header's interactive pill. Goes through the
+  // transition service (setTenantStatus serves ALL contact types — the route
+  // validates against the stored contact's own type-scoped allowlist), NEVER a
+  // plain contact PATCH. Manual source; on success apply the returned contact in
+  // place; on failure surface an inline error (the pill keeps the stored status,
+  // so a silent failure would look like the change just vanished).
+  const onChangeStatus = (toStatus: string): void => {
+    if (statusBusy || toStatus === contact.status) return;
+    setStatusBusy(true);
+    // Clear any prior error at ATTEMPT start (matches PlacementDetail's
+    // runTransition) so a retry never renders a stale message.
+    setStatusError(null);
+    void setTenantStatus(contact.contactId, {
+      // StatusMenu is stringly-typed; the value came from the type-scoped option
+      // list (TENANT_STATUSES / LANDLORD_STATUSES), so the union cast is exact.
+      toStatus: toStatus as TenantStatus | LandlordStatus,
+      source: 'manual',
+    })
+      .then((updated) => setContact(updated))
+      .catch(() => setStatusError("Couldn't update the status - please try again."))
+      .finally(() => setStatusBusy(false));
+  };
+
   // Soft-delete (reversible). Deleting is confirmed first, then the contact drops
   // out of the normal views — so on success we navigate back to the Contacts list
   // (it can be restored from the Deleted tab). Restore stays on the page and
@@ -329,7 +378,30 @@ export function ContactDetail(): React.JSX.Element {
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
             <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
-            {contact.status ? (
+            {/* Tenant/landlord lifecycle status: an interactive pill that shows AND
+                changes it (same pattern as the property/placement headers). Other
+                types (and deleted contacts) keep the display-only badge. */}
+            {contact.status && !deleted && contact.type === 'tenant' ? (
+              <StatusMenu
+                value={contact.status}
+                options={TENANT_STATUSES.map((s) => ({ value: s, label: TENANT_STATUS_LABELS[s] }))}
+                onChange={onChangeStatus}
+                tone={contactStatusTone(contact.type, contact.status)}
+                disabled={statusBusy}
+                label="Contact status"
+                error={statusError}
+              />
+            ) : contact.status && !deleted && contact.type === 'landlord' ? (
+              <StatusMenu
+                value={contact.status}
+                options={LANDLORD_STATUSES.map((s) => ({ value: s, label: LANDLORD_STATUS_LABELS[s] }))}
+                onChange={onChangeStatus}
+                tone={contactStatusTone(contact.type, contact.status)}
+                disabled={statusBusy}
+                label="Contact status"
+                error={statusError}
+              />
+            ) : contact.status ? (
               <ContactStatusBadge type={contact.type} status={contact.status} />
             ) : null}
             {deleted ? <span className={styles.deletedBadge}>🗑 Deleted</span> : null}

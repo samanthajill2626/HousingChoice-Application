@@ -1,0 +1,142 @@
+/* PlacementRow - a ledger row. Stretched-link overlay + Today-style attention
+ * stripe. Tokens only. */
+
+.row {
+  position: relative; /* anchors the overlay link and the attention stripe */
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+  overflow: hidden; /* clips the stripe */
+}
+
+.row:hover {
+  background: var(--c-surface-2);
+}
+
+.pending {
+  opacity: 0.6;
+}
+
+/* Attention = the Today treatment: 4px amber stripe down the LEFT edge. */
+.flagged::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--c-warning);
+}
+
+/* The whole-row link: an absolutely positioned overlay UNDER the actions. */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.overlay:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tenant {
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+.porting {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-purple-bg);
+  border: 1px solid var(--c-evt-purple-border);
+  color: var(--c-evt-purple-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.listing {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+.stage {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.metaItem {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+/* Actions (the kebab) sit ABOVE the overlay so they are clickable. */
+.actions {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Mobile: stack the text block over the meta chips; hide the actions slot
+ * (stage moves happen on the detail page). */
+@media (max-width: 767.98px) {
+  .row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: var(--sp-1);
+  }
+
+  .main {
+    flex-wrap: wrap;
+  }
+
+  .listing {
+    flex-basis: 100%;
+  }
+
+  .meta {
+    flex-basis: 100%;
+  }
+
+  .actions {
+    display: none;
+  }
+}

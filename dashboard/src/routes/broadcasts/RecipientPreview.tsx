@@ -8,7 +8,7 @@
 // "Send to N tenants", which posts the EXACT checked contactIds. 400/409 are
 // surfaced inline. A "Delete draft" button removes the unsent draft.
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
   deleteBroadcast,
@@ -50,7 +50,8 @@ export interface RecipientPreviewProps {
 function initialRows(preview: PreviewResponse): Row[] {
   return preview.candidates.map((c) => ({
     contactId: c.contactId,
-    name: contactDisplayName(c.firstName, undefined, c.phone),
+    // FULL name — first name alone doesn't identify a person at roster scale.
+    name: contactDisplayName(c.firstName, c.lastName, c.phone),
     phone: c.phone,
     alreadySentThisProperty: c.alreadySentThisProperty,
     hasConsent: c.has_consent,
@@ -298,7 +299,21 @@ export function RecipientPreview({
                   disabled={!row.hasConsent}
                   onChange={() => toggle(row.contactId)}
                 />
-                <span className={styles.rowName}>{row.name}</span>
+              </label>
+              {/* The name links to the profile in a NEW TAB — the curated list
+                  (checkbox state, added rows) lives in this page's memory, so
+                  in-tab navigation would lose it. Outside the checkbox label so
+                  clicking the link never toggles the row. */}
+              <span className={styles.rowBody}>
+                <Link
+                  className={styles.rowName}
+                  to={`/contacts/${encodeURIComponent(row.contactId)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Open profile in a new tab — your recipient list stays put"
+                >
+                  {row.name}
+                </Link>
                 <span className={styles.rowPhone}>{formatPhone(row.phone)}</span>
                 {!row.hasConsent ? (
                   <span className={styles.noConsentTag}>consent not recorded — fix before sending</span>
@@ -306,7 +321,7 @@ export function RecipientPreview({
                   <span className={styles.alreadyTag}>Already sent</span>
                 ) : null}
                 {row.added ? <span className={styles.addedTag}>Added</span> : null}
-              </label>
+              </span>
               <button
                 type="button"
                 className={styles.removeBtn}

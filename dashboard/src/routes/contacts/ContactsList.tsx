@@ -119,7 +119,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         </Button>
       </div>
       <p className={styles.sub}>
-        Showing the first page of records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
+        All records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
       </p>
 
       <nav className={styles.filters} aria-label="Filter contacts">

@@ -4,10 +4,34 @@
 // lookup), so:
 //   - 'tenant' / 'landlord' / 'unknown' fetch that type directly;
 //   - 'all' fans out across every audience type and merges.
-// First page per type only (the server pages via nextCursor) — a transitional
-// limitation the list view notes; the type-specific slices supersede it later.
+// EVERY page per type is walked (the server pages via nextCursor): this hook
+// also feeds the id→contact lookup maps (Tours rows, the property page's
+// placements card, edit-form relationship candidates), where a first-page-only
+// load rendered raw contact IDs for anything past page one.
 import { useEffect, useState } from 'react';
 import { getContacts, type Contact, type ContactType } from '../../api/index.js';
+
+/** Page-walk bound: a hard stop so a pathological/looping cursor can never spin
+ *  forever (40 pages × the server's 50/page = 2000 records per type — far past
+ *  Phase-1 scale). Hitting it WARNS — never a silent truncation. */
+const MAX_PAGES = 40;
+
+/** Fetch every page of one contact type (nextCursor walk, bounded). */
+async function getAllContactPages(
+  params: { type: ContactType; deleted: boolean },
+  signal: AbortSignal,
+): Promise<Contact[]> {
+  const out: Contact[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await getContacts({ ...params, ...(cursor !== undefined && { cursor }) }, signal);
+    out.push(...res.contacts);
+    if (!res.nextCursor) return out;
+    cursor = res.nextCursor;
+  }
+  console.warn(`useContacts: page cap (${MAX_PAGES}) hit for type=${params.type} — list truncated`);
+  return out;
+}
 
 /** The route-driven filter. 'all' = the Contacts parent; tenant/landlord/unknown
  *  are the audience children; 'deleted' is the soft-deleted ("Deleted") view. */
@@ -52,15 +76,15 @@ export function useContacts(filter: ContactsFilter): ContactsState {
     (async () => {
       try {
         const deleted = filter === 'deleted';
-        const pages = await Promise.all(
-          TYPES_FOR[filter].map((type) => getContacts({ type, deleted }, signal)),
+        const perType = await Promise.all(
+          TYPES_FOR[filter].map((type) => getAllContactPages({ type, deleted }, signal)),
         );
         if (signal.aborted) return;
-        // Merge the per-type pages, de-duping on contactId (a contact only ever
+        // Merge the per-type lists, de-duping on contactId (a contact only ever
         // has one type, but a defensive de-dupe keeps the list keys unique).
         const byId = new Map<string, Contact>();
-        for (const page of pages) {
-          for (const contact of page.contacts) byId.set(contact.contactId, contact);
+        for (const list of perType) {
+          for (const contact of list) byId.set(contact.contactId, contact);
         }
         setState({ status: 'ready', contacts: [...byId.values()], forFilter: filter });
       } catch (err) {

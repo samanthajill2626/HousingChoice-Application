@@ -1550,6 +1550,8 @@ export interface BroadcastRecipientView {
 export interface PreviewCandidate {
   contactId: string;
   firstName?: string;
+  /** For the review rows' FULL display name. */
+  lastName?: string;
   phone: string;
   voucherSize?: number;
   housingAuthority?: string;

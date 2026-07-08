@@ -201,6 +201,42 @@ describe('seed matrix: §7 derivation consistency over ALL placements', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6b. Cross-reference integrity: tours / listing sends / broadcast recipients
+//     only reference contacts + units that are actually seeded. (Regression:
+//     the tours pool + listing sends hardcoded `-standalone-01` tenant ids that
+//     buildTenantsMatrix only created conditionally — when placements already
+//     covered the >=2 floor, the ids dangled and the /tours list rendered raw
+//     contactIds.)
+// ---------------------------------------------------------------------------
+describe('seed matrix: cross-reference integrity (tours, listing sends, broadcast recipients)', () => {
+  const contactIds = new Set(allContacts.map((c) => c['contactId'] as string));
+  const unitIds = new Set(allUnits.map((u) => u['unitId'] as string));
+
+  it('every tour references a seeded tenant contact AND a seeded unit', () => {
+    for (const t of allTours) {
+      expect(contactIds.has(t['tenantId'] as string), `tour ${t['tourId']}: tenant '${t['tenantId']}' must be seeded`).toBe(true);
+      expect(unitIds.has(t['unitId'] as string), `tour ${t['tourId']}: unit '${t['unitId']}' must be seeded`).toBe(true);
+    }
+  });
+
+  it('every listing send references a seeded contact AND a seeded unit', () => {
+    for (const s of PROFILE['listing_sends'] ?? []) {
+      expect(contactIds.has(s['contactId'] as string), `listing send: contact '${s['contactId']}' must be seeded`).toBe(true);
+      expect(unitIds.has(s['unitId'] as string), `listing send: unit '${s['unitId']}' must be seeded`).toBe(true);
+    }
+  });
+
+  it('every broadcast recipient references a seeded contact', () => {
+    for (const b of allBroadcasts) {
+      const recipients = (b['recipients'] ?? {}) as Record<string, unknown>;
+      for (const contactId of Object.keys(recipients)) {
+        expect(contactIds.has(contactId), `broadcast ${b['broadcastId']}: recipient '${contactId}' must be seeded`).toBe(true);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7. Every 'parked' landlord has park_reason
 // ---------------------------------------------------------------------------
 describe('seed matrix: parked landlords carry park_reason', () => {

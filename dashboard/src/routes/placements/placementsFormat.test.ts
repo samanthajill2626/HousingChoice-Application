@@ -16,6 +16,16 @@ describe('dateTime / shortDate normalise the audit sort-key suffix (never render
     expect(shortDate(SORTKEY)).toBe(shortDate(CLEAN));
     expect(shortDate(SORTKEY)).not.toContain('#');
   });
+
+  it('shortDate treats a date-only string (tour_date / inspection_date) as a LOCAL calendar date, not UTC midnight', () => {
+    // new Date('2026-07-16') parses as UTC midnight, which renders as "Jul 15" in
+    // negative-offset US timezones — a real off-by-one on every tour/inspection date.
+    expect(shortDate('2026-07-16')).toBe('Jul 16');
+  });
+
+  it('shortDate still formats a full ISO instant correctly (mid-day UTC, TZ-stable for US timezones)', () => {
+    expect(shortDate('2026-07-16T12:00:00.000Z')).toBe('Jul 16');
+  });
 });
 
 describe('summarizeHistory (M6 — human labels, never raw snake_case)', () => {

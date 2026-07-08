@@ -324,6 +324,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     const candidates = audience.contacts.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
       contactId: c.contactId,
       ...(c.firstName !== undefined && { firstName: c.firstName }),
+      // Full name for the review rows (same authed/internal PII class as
+      // firstName + phone above).
+      ...(c.lastName !== undefined && { lastName: c.lastName }),
       phone: c.phone,
       ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
       ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),

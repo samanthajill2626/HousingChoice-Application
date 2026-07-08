@@ -31,6 +31,7 @@ import type {
   InboxFilter,
   InboxPage,
   InspectionOutcome,
+  LandlordStatus,
   ListingSendRow,
   ListingStatus,
   LostReason,
@@ -281,13 +282,21 @@ export async function getPlacementHistory(
   return res.history;
 }
 
-/** PATCH /api/contacts/:contactId/tenant-status - set a tenant's lifecycle
+/** PATCH /api/contacts/:contactId/tenant-status - set a contact's lifecycle
  *  status through the transition service (applies provenance/derivation -
- *  NEVER use a plain contact PATCH for tenant lifecycle). Returns the updated
- *  contact (unwrapped from { contact }). */
+ *  NEVER use a plain contact PATCH for lifecycle status). Despite the historic
+ *  name, the route serves ALL contact types: it validates `toStatus` against
+ *  the STORED contact's own type-scoped allowlist (tenant lifecycle vs the
+ *  landlord lead lifecycle), so the input type is the union. Returns the
+ *  updated contact (unwrapped from { contact }). */
 export async function setTenantStatus(
   contactId: string,
-  input: { toStatus: TenantStatus; source: TransitionSource; reason?: string; porting?: boolean },
+  input: {
+    toStatus: TenantStatus | LandlordStatus;
+    source: TransitionSource;
+    reason?: string;
+    porting?: boolean;
+  },
 ): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}/tenant-status`,

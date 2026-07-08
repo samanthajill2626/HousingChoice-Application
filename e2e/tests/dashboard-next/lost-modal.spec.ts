@@ -22,17 +22,28 @@ async function devLoginAndReset(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+// This spec drives placement-0001 to the terminal `lost` stage; restore it to an
+// ACTIVE stage afterwards so downstream specs that assume the seeded tenant still
+// has an active placement (e.g. placement-create's overlap notice) are not
+// polluted. A manual transition out of a terminal stage is allowed.
+test.afterEach(async ({ page }) => {
+  await page.request.post(`${NEXT}/api/placements/placement-0001/transition`, {
+    data: { toStage: 'awaiting_inspection', source: 'manual' },
+  });
+});
+
 test('Lost modal: blocks until a reason is given, then closes the placement', async ({ page }) => {
   await devLoginAndReset(page);
   await page.goto(`${NEXT}/placements`);
 
-  await expect(page.getByRole('listitem', { name: 'Inspection' }).getByText('Tasha Nguyen', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Tasha Nguyen - Awaiting inspection' })).toBeVisible();
 
-  // Mark lost opens the modal — and does NOT transition yet.
-  await page.getByRole('button', { name: /Mark Tasha Nguyen's placement lost/i }).click();
+  // Mark lost now lives in the row's kebab menu - it opens the modal and does
+  // NOT transition yet.
+  await page.getByRole('button', { name: 'Actions for Tasha Nguyen' }).click();
+  await page.getByRole('menuitem', { name: 'Mark lost...' }).click();
   await expect(page.getByRole('heading', { name: 'Mark placement lost' })).toBeVisible();
 
-  // Confirm is disabled until a category OR free text is provided.
   const confirm = page.getByRole('button', { name: 'Mark lost' });
   await expect(confirm).toBeDisabled();
 
@@ -40,17 +51,13 @@ test('Lost modal: blocks until a reason is given, then closes the placement', as
   await expect(confirm).toBeEnabled();
   await confirm.click();
 
-  // The placement is now terminal → it appears in the collapsed Closed area.
-  // The card has left the Inspection column.
-  await expect(
-    page.getByRole('listitem', { name: 'Inspection' }).getByText('Tasha Nguyen', { exact: true }),
-  ).toHaveCount(0);
+  // Terminal -> the row leaves the active ledger...
+  await expect(page.getByRole('link', { name: 'Tasha Nguyen - Awaiting inspection' })).toHaveCount(0);
 
-  // Expand the Closed disclosure and assert the lost placement is listed.
-  const summary = page.getByText('Closed', { exact: false }).first();
-  await expect(summary).toBeVisible();
-  await summary.click();
-  const closedList = page.getByRole('list', { name: 'Closed placements' });
-  await expect(closedList.getByText('Tasha Nguyen', { exact: true })).toBeVisible();
-  await expect(closedList.getByText(/Lost/)).toBeVisible();
+  // ...and appears under the Closed filter with its stage label.
+  await page
+    .getByRole('navigation', { name: 'Placement phases' })
+    .getByRole('link', { name: /^Closed/ })
+    .click();
+  await expect(page.getByRole('link', { name: 'Tasha Nguyen - Lost' })).toBeVisible();
 });

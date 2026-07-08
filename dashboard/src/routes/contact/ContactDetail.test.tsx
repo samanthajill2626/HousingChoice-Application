@@ -13,6 +13,7 @@ const getUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactMedia = vi.fn();
 const updateContact = vi.fn();
+const setTenantStatus = vi.fn();
 const getContacts = vi.fn();
 const deleteContact = vi.fn();
 const restoreContact = vi.fn();
@@ -38,6 +39,7 @@ vi.mock('../../api/index.js', async () => {
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
+    setTenantStatus: (...a: unknown[]) => setTenantStatus(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
     deleteContact: (...a: unknown[]) => deleteContact(...a),
     restoreContact: (...a: unknown[]) => restoreContact(...a),
@@ -124,6 +126,7 @@ beforeEach(() => {
   sendMessage.mockReset();
   ensureContactConversation.mockReset();
   updateContact.mockReset();
+  setTenantStatus.mockReset();
   getPlacementsBy.mockReset();
   getPlacementsBy.mockResolvedValue([]);
   getTours.mockReset();
@@ -157,6 +160,102 @@ describe('ContactDetail', () => {
     renderAt('k1');
     await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
     expect(screen.getByText(/Do Not Contact/i)).toBeInTheDocument();
+  });
+
+  it('tenant status pill: lists the tenant lifecycle and changes it via the transition service', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, status: 'searching' });
+    setTenantStatus.mockResolvedValue({ ...TENANT, status: 'on_hold' });
+    renderAt('k1');
+
+    const pill = await screen.findByRole('button', { name: 'Contact status: Searching' });
+    await user.click(pill);
+    // The menu lists the TENANT lifecycle (7 values), current one checked.
+    for (const label of ['Needs review', 'Onboarding', 'Searching', 'Placing', 'Placed', 'On hold', 'Inactive']) {
+      expect(screen.getByRole('menuitemradio', { name: label })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('menuitemradio', { name: 'Searching' })).toHaveAttribute('aria-checked', 'true');
+
+    await user.click(screen.getByRole('menuitemradio', { name: 'On hold' }));
+    // The change goes through the transition service (NEVER a plain PATCH), and
+    // the returned contact is applied in place — the pill re-labels.
+    expect(setTenantStatus).toHaveBeenCalledWith('k1', { toStatus: 'on_hold', source: 'manual' });
+    await screen.findByRole('button', { name: 'Contact status: On hold' });
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it('landlord status pill: lists the landlord lead lifecycle (never tenant values)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...LANDLORD, status: 'active' });
+    renderAt('L1');
+
+    const pill = await screen.findByRole('button', { name: 'Contact status: Active' });
+    await user.click(pill);
+    for (const label of ['Needs review', 'Interested', 'Active', 'Parked']) {
+      expect(screen.getByRole('menuitemradio', { name: label })).toBeInTheDocument();
+    }
+    // Tenant-only values never leak into a landlord's menu.
+    expect(screen.queryByRole('menuitemradio', { name: 'Searching' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitemradio', { name: 'Placed' })).not.toBeInTheDocument();
+  });
+
+  it('landlord status pill: changing it PATCHes through the transition service and applies the result', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...LANDLORD, status: 'active' });
+    setTenantStatus.mockResolvedValue({ ...LANDLORD, status: 'parked' });
+    renderAt('L1');
+
+    await user.click(await screen.findByRole('button', { name: 'Contact status: Active' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Parked' }));
+
+    // The landlord value rides the SAME transition-service endpoint (it is
+    // type-scoped server-side), never a plain contact PATCH.
+    expect(setTenantStatus).toHaveBeenCalledWith('L1', { toStatus: 'parked', source: 'manual' });
+    await screen.findByRole('button', { name: 'Contact status: Parked' });
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it('a soft-DELETED contact keeps the display-only status badge — no pill', async () => {
+    getContact.mockResolvedValue({
+      ...TENANT,
+      status: 'placed',
+      deleted_at: '2026-06-19T00:00:00.000Z',
+    });
+    renderAt('k1');
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Contact status/i })).not.toBeInTheDocument();
+    // The status still reads as a plain badge (header; may also echo in the
+    // Details card, hence getAllByText).
+    expect(screen.getAllByText('Placed').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('surfaces an inline error when the status transition fails (pill keeps the stored status)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, status: 'searching' });
+    setTenantStatus.mockRejectedValue(new ApiError(400, 'bad_transition', 'nope'));
+    renderAt('k1');
+
+    await user.click(await screen.findByRole('button', { name: 'Contact status: Searching' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Inactive' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/Couldn't update the status/i),
+    );
+    // Unchanged — the pill still shows the stored status.
+    expect(screen.getByRole('button', { name: 'Contact status: Searching' })).toBeInTheDocument();
+  });
+
+  it('an untriaged (unknown) contact keeps the display-only status badge — no pill', async () => {
+    getContact.mockResolvedValue(UNKNOWN);
+    renderAt('u9');
+    await waitFor(() => expect(screen.getByText('Unknown')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Contact status/i })).not.toBeInTheDocument();
+    // The status still reads (display badge in the header + the Details row).
+    expect(screen.getAllByText('Needs review').length).toBeGreaterThanOrEqual(1);
   });
 
   it('renders the landlord file (Properties card) for a landlord', async () => {

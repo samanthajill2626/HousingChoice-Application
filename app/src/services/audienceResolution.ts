@@ -32,6 +32,9 @@ export interface ResolvedContact {
   contactId: string;
   phone: string;
   firstName?: string;
+  /** For the review-recipients rows, which show the FULL name (people are not
+   *  identifiable by first name alone at roster scale). */
+  lastName?: string;
   /** The tenant's approved bedroom (voucher) size — for the preview row display. */
   voucherSize?: number;
   /** The administering housing authority — for the preview row display. */
@@ -87,6 +90,12 @@ function firstNameOf(contact: ContactItem): string | undefined {
   return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 }
 
+/** Resolved last name (the preview rows show the FULL name), or undefined. */
+function lastNameOf(contact: ContactItem): string | undefined {
+  const v = contact['lastName'];
+  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+}
+
 /** The administering housing authority for the preview row, or undefined. */
 function housingAuthorityOf(contact: ContactItem): string | undefined {
   const v = contact['housingAuthority'];
@@ -136,12 +145,14 @@ export function createAudienceResolutionService(
           continue;
         }
         const firstName = firstNameOf(contact);
+        const lastName = lastNameOf(contact);
         const voucherSize = voucherSizeOf(contact);
         const housingAuthority = housingAuthorityOf(contact);
         resolved.push({
           contactId: contact.contactId,
           phone: contact.phone,
           ...(firstName !== undefined && { firstName }),
+          ...(lastName !== undefined && { lastName }),
           ...(voucherSize !== undefined && { voucherSize }),
           ...(housingAuthority !== undefined && { housingAuthority }),
           // A2P/CTIA: per-candidate consent flag (spec §4). NOT a pre-exclusion

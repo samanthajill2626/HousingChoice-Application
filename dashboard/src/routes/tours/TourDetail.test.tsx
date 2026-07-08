@@ -577,6 +577,31 @@ describe('TourDetail - three-channel switcher', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'hi landlord' });
   });
+
+  it('composer footer: 1:1 tabs show the reply number; the group tab keeps the shared relay copy', async () => {
+    getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('g1', 'tenant-1', 0, 'relay_group'),
+        conv('c-tenant', 'tenant-1', 0),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+    // Group tab (initial): the composer matches ConversationDetail's group view
+    // (no reply-target props -> the shared "this contact" fallback).
+    expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
+      'Reply sends to this contact',
+    );
+    // Tenant 1:1 tab: the footer names the tenant's number (the contact-page pattern).
+    await userEvent.click(screen.getByRole('tab', { name: /Tenant - Ann/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
+        'Reply sends to (404) 555-0111',
+      ),
+    );
+  });
 });
 
 describe('TourDetail - conversation empty states', () => {

@@ -105,6 +105,10 @@ export function TourConversation({
   const groupDead = tour.status === 'canceled' || tour.status === 'closed';
   const oneToOneContactId = activeKey === 'landlord' ? landlordId : tour.tenantId;
   const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
+  // The 1:1 composer footer shows WHO the reply sends to (the contact's number,
+  // same as the contact page's reply box); the group tab passes none - its
+  // composer matches ConversationDetail's group view.
+  const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
 
   return (
     <div className={styles.convo}>
@@ -161,11 +165,15 @@ export function TourConversation({
             </p>
           </div>
         ) : active.conversationId !== null ? (
-          <ContactThread conversationId={active.conversationId} />
+          <ContactThread
+            conversationId={active.conversationId}
+            {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+          />
         ) : (
           <NewContactThread
             contactId={oneToOneContactId}
             name={oneToOneName}
+            {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
           />
         )}
@@ -224,7 +232,14 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
 
 /** A 1:1 transcript for an EXISTING conversation. Optimistic send via the shared
  *  relay-thread trio. Mounts only while its tab is active (lazy fetch). */
-function ContactThread({ conversationId }: { conversationId: string }): React.JSX.Element {
+function ContactThread({
+  conversationId,
+  replyToPhone,
+}: {
+  conversationId: string;
+  /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
+  replyToPhone?: string;
+}): React.JSX.Element {
   const thread = useRelayThread(conversationId);
   const onSend = (body: string): Promise<void> => {
     const tempId = thread.addOptimistic(conversationId, body);
@@ -242,6 +257,7 @@ function ContactThread({ conversationId }: { conversationId: string }): React.JS
       source="server"
       canSend
       onSend={onSend}
+      {...(replyToPhone !== undefined && { replyToPhone })}
       resetScrollKey={conversationId}
     />
   );
@@ -253,10 +269,13 @@ function ContactThread({ conversationId }: { conversationId: string }): React.JS
 function NewContactThread({
   contactId,
   name,
+  replyToPhone,
   onCreated,
 }: {
   contactId: string;
   name: string;
+  /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
+  replyToPhone?: string;
   onCreated: (conversationId: string) => void;
 }): React.JSX.Element {
   const onSend = async (body: string): Promise<void> => {
@@ -271,6 +290,7 @@ function NewContactThread({
       source="server"
       canSend
       onSend={onSend}
+      {...(replyToPhone !== undefined && { replyToPhone })}
       emptyLabel={`No messages with ${name} yet`}
       resetScrollKey={`new:${contactId}`}
     />

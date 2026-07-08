@@ -39,13 +39,13 @@ beforeEach(() => {
 });
 
 describe('RemindersPanel', () => {
-  it('renders a region named "Reminders" with a heading', async () => {
+  it('renders a "Reminders" Card heading', async () => {
     getTourReminders.mockResolvedValue({ reminders: [] } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
+    // Restyled INTO a <Card title="Reminders"> (an h3), not a named region.
     await waitFor(() =>
-      expect(screen.getByRole('region', { name: /Reminders/i })).toBeInTheDocument(),
+      expect(screen.getByRole('heading', { name: /Reminders/i })).toBeInTheDocument(),
     );
-    expect(screen.getByRole('heading', { name: /Reminders/i })).toBeInTheDocument();
     expect(getTourReminders).toHaveBeenCalledWith('tour-1', expect.anything());
   });
 

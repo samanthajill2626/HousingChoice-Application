@@ -17,6 +17,7 @@ import {
   type TourReminderView,
 } from '../../api/index.js';
 import { sendRelative, dateTime } from '../placements/placementsFormat.js';
+import { Card } from '../contact/Card.js';
 import styles from './RemindersPanel.module.css';
 
 /** A compact state chip for a single rung, mirroring DeadlineChip's tone pattern. */
@@ -69,11 +70,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
   }, [tourId]);
 
   return (
-    <section className={styles.panel} aria-labelledby="reminders-heading">
-      <h2 id="reminders-heading" className={styles.title}>
-        Reminders
-      </h2>
-
+    <Card title="Reminders">
       {loading ? (
         <p className={styles.muted} aria-live="polite">
           Loading reminders…
@@ -118,6 +115,6 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           })}
         </ul>
       )}
-    </section>
+    </Card>
   );
 }

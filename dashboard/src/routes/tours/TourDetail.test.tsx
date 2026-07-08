@@ -1,40 +1,62 @@
-// TourDetail component tests — verify:
-//   - Tour details (status, scheduledAt) are rendered
-//   - Reschedule / cancel controls appear in the right states
-//   - The exit gate ("Moving forward? yes/no") is wired to PATCH { outcome, moveForward }
-//   - The group-thread link renders when groupThreadId is set
+// TourDetail component tests - the rebuilt two-pane tour page. Verifies:
+//   - the status-aware PRIMARY CTA ladder (Book / Mark toured / Record outcome /
+//     Start placement / View placement / none) + the kebab guards
+//   - the three-channel switcher: initial tab, never-auto-switch, unread dots,
+//     SINGLE-conversation mark-read (never the inbox fan-out), composer targeting,
+//     lazy-load, and the group + 1:1 empty states (open-group / create-on-demand)
+//   - the right-column cards (routing chip + fallback warning, People, Guidance,
+//     Outcome) + the mobile initial pane = Details
+//   - not-found
 //
-// Pattern mirrors PlacementDetail.test.tsx + files.test.tsx: mock the api barrel,
-// import the component after mocking, assert accessibility-first.
-import { render, screen, waitFor } from '@testing-library/react';
+// Pattern mirrors PlacementDetail.test / the old TourDetail.test: mock the api
+// barrel, import after mocking, assert accessibility-first.
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { Tour } from '../../api/index.js';
+import type { Contact, Tour, UnitItem } from '../../api/index.js';
 
 const getTour = vi.fn();
+const getUnit = vi.fn();
+const getContact = vi.fn();
+const getConversations = vi.fn();
+const getTourActivity = vi.fn();
+const getTourReminders = vi.fn();
+const getConversationMessages = vi.fn();
+const getConversation = vi.fn();
+const getConversationMembers = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
-// RemindersPanel (mounted by TourDetail) fetches its own ladder — stub it so the
-// detail tests don't hit the network (a real fetch would surface a second
-// role="alert" and collide with the action-error assertions).
-const getTourReminders = vi.fn();
+const ensureContactConversation = vi.fn();
+const sendMessage = vi.fn();
+const markConversationRead = vi.fn();
+const markInboxRead = vi.fn();
+
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getTour: (...a: unknown[]) => getTour(...a),
+    getUnit: (...a: unknown[]) => getUnit(...a),
+    getContact: (...a: unknown[]) => getContact(...a),
+    getConversations: (...a: unknown[]) => getConversations(...a),
+    getTourActivity: (...a: unknown[]) => getTourActivity(...a),
+    getTourReminders: (...a: unknown[]) => getTourReminders(...a),
+    getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
+    getConversation: (...a: unknown[]) => getConversation(...a),
+    getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
-    getTourReminders: (...a: unknown[]) => getTourReminders(...a),
+    ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
+    sendMessage: (...a: unknown[]) => sendMessage(...a),
+    markConversationRead: (...a: unknown[]) => markConversationRead(...a),
+    markInboxRead: (...a: unknown[]) => markInboxRead(...a),
   };
 });
 
-// Spy on useNavigate so the convert action's post-success navigation is assertable
-// while the rest of react-router-dom (MemoryRouter/Routes/Link) stays real.
 const navigateSpy = vi.fn();
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
@@ -51,7 +73,60 @@ function makeTour(over: Partial<Tour> = {}): Tour {
     scheduledAt: '2026-07-10T14:00:00Z',
     tourType: 'self_guided',
     status: 'scheduled',
+    createdAt: '2026-07-01T10:00:00Z',
     ...over,
+  };
+}
+
+function makeUnit(over: Partial<UnitItem> = {}): UnitItem {
+  return {
+    unitId: 'unit-1',
+    landlordId: 'landlord-1',
+    status: 'available',
+    address: { line1: '123 Main St', city: 'Atlanta', state: 'GA' },
+    beds: 2,
+    rent_min: 1400,
+    rent_max: 1600,
+    tour_process: 'Lockbox on the front door.',
+    application_process: 'Apply online after the visit.',
+    ...over,
+  } as UnitItem;
+}
+
+function tenantContact(): Contact {
+  return {
+    contactId: 'tenant-1',
+    type: 'tenant',
+    status: 'searching',
+    firstName: 'Ann',
+    lastName: 'Tenant',
+    voucherSize: 2,
+    phone: '+14045550111',
+  };
+}
+function landlordContact(): Contact {
+  return {
+    contactId: 'landlord-1',
+    type: 'landlord',
+    firstName: 'Lon',
+    lastName: 'Landlord',
+    phone: '+14045550222',
+  };
+}
+
+/** A 1:1 conversation summary for a contact. */
+function conv(conversationId: string, contactId: string, unread = 0, type = 'tenant_1to1') {
+  return {
+    conversationId,
+    type,
+    participant_phone: '+14045550111',
+    participants: [{ contactId, phone: '+14045550111' }],
+    preview: null,
+    last_activity_at: '2026-07-05T00:00:00Z',
+    unread_count: unread,
+    assignment: null,
+    sms_opt_out: false,
+    participant_display_name: null,
   };
 }
 
@@ -60,559 +135,495 @@ function renderDetail(tourId = 'tour-abc') {
     <MemoryRouter initialEntries={[`/tours/${tourId}`]}>
       <Routes>
         <Route path="/tours/:tourId" element={<TourDetail />} />
+        <Route path="/placements/:placementId" element={<div>Placement page</div>} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
+/** Wait for the loaded page (past the loading spinner). */
+async function waitLoaded() {
+  await screen.findByRole('link', { name: 'Back to tours' });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  // Default: an empty ladder (RemindersPanel renders "No reminders armed.").
+  getTour.mockResolvedValue(makeTour());
+  getUnit.mockResolvedValue(makeUnit());
+  getContact.mockImplementation((id: string) =>
+    Promise.resolve(id === 'landlord-1' ? landlordContact() : tenantContact()),
+  );
+  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getTourActivity.mockResolvedValue([]);
   getTourReminders.mockResolvedValue({ reminders: [] });
+  getConversationMessages.mockResolvedValue([]);
+  getConversation.mockResolvedValue({
+    conversationId: 'g1',
+    type: 'relay_group',
+    status: 'open',
+    participants: [],
+  });
+  getConversationMembers.mockResolvedValue([]);
+  markConversationRead.mockResolvedValue(undefined);
 });
 
-describe('TourDetail', () => {
-  it('shows a loading state while the tour is fetching', () => {
-    getTour.mockReturnValue(new Promise(() => {})); // never resolves
+describe('TourDetail - load + header', () => {
+  it('shows a loading spinner while the tour is fetching', () => {
+    getTour.mockReturnValue(new Promise(() => {}));
     renderDetail();
-    expect(screen.getByText(/Loading tour/i)).toBeInTheDocument();
+    // The back crumb only appears once loaded.
+    expect(screen.queryByRole('link', { name: 'Back to tours' })).not.toBeInTheDocument();
   });
 
-  it('renders the tour status and scheduled date', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+  it('renders the identity, status badge, and facts once loaded', async () => {
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    // Status label "Scheduled" appears in the Status row's <dd>
-    const statusDd = screen.getByLabelText(/Status: Scheduled/i);
-    expect(statusDd).toBeInTheDocument();
-    // The scheduledAt date is displayed (aria-label includes "Scheduled:")
-    expect(screen.getByLabelText(/Scheduled:/i)).toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByText('Tour - 123 Main St, Atlanta, GA')).toBeInTheDocument();
+    // The tour StatusBadge (kind=tour) shows the status label.
+    expect(screen.getByText('Scheduled')).toBeInTheDocument();
+    // Facts line: when - type - tenant -> address.
+    expect(screen.getByText(/Self-guided - Ann Tenant -> 123 Main St/)).toBeInTheDocument();
   });
 
-  it('shows an error message when the tour is not found', async () => {
+  it('shows a not-found panel on a 404', async () => {
     getTour.mockRejectedValue(new ApiError(404, 'tour_not_found', 'tour_not_found'));
     renderDetail();
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(screen.getByRole('alert')).toHaveTextContent(/tour_not_found/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/couldn't find this tour/i);
   });
+});
 
-  it('renders reschedule and cancel buttons for a scheduled tour', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /Reschedule this tour/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
-  });
-
-  it('does NOT show reschedule/cancel for a closed tour', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Book tour' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Cancel this tour/i })).not.toBeInTheDocument();
-  });
-
-  // Retargeted from ours' 'Book a time' overload onto main's dedicated 'Book tour'
-  // control — preserving ours' unique assertion that Cancel is visible on a
-  // requested tour (booking is a separate verb from Reschedule).
-  it('a requested tour renders the Book control and Cancel controls', async () => {
+describe('TourDetail - primary CTA ladder', () => {
+  it('requested -> Book tour', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    // 'Book tour' — not 'Reschedule' — for a tour never yet scheduled
+    await waitLoaded();
     expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
-    // Cancel must also be present
-    expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
+    // Not booked shows in the facts + Schedule card.
+    expect(screen.getByText(/Not booked - Self-guided/)).toBeInTheDocument();
   });
 
-  // Retargeted from ours' 'Book a time' overload onto main's 'Book tour' form —
-  // preserving ours' unique looser assertion: patchTour is called with an object
-  // CONTAINING scheduledAt (status may also be present).
-  it('booking a time on a requested tour PATCHes scheduledAt and the UI reflects scheduled', async () => {
-    const requestedTour = makeTour({ status: 'requested', scheduledAt: undefined });
-    const scheduledTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
-    getTour.mockResolvedValue(requestedTour);
-    patchTour.mockResolvedValue(scheduledTour);
-
+  it('scheduled -> Mark toured', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument());
+    await waitLoaded();
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
+  });
 
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Book tour' }));
+  it('toured without an outcome -> Record outcome', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByRole('button', { name: 'Record outcome' })).toBeInTheDocument();
+  });
 
-    // Booking form must appear
+  it('convertible + not converted -> Start placement', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    renderDetail();
+    await waitLoaded();
+    // Header CTA + Outcome-card button both say "Start placement".
+    expect(screen.getAllByRole('button', { name: 'Start placement' }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('converted -> View placement link (header) + Outcome-card placement row', async () => {
+    getTour.mockResolvedValue(
+      makeTour({
+        status: 'closed',
+        outcome: 'move_forward',
+        moveForward: true,
+        convertible: true,
+        convertedPlacementId: 'plc-77',
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    const link = screen.getByRole('link', { name: 'View placement' });
+    expect(link).toHaveAttribute('href', '/placements/plc-77');
+    expect(screen.getByRole('link', { name: 'View the placement' })).toHaveAttribute(
+      'href',
+      '/placements/plc-77',
+    );
+  });
+
+  it('a canceled tour has no primary CTA', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'canceled' }));
+    renderDetail();
+    await waitLoaded();
+    for (const name of ['Book tour', 'Mark toured', 'Record outcome', 'Start placement', 'View placement']) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+  });
+
+  it('Mark toured PATCHes { status: toured } and applies the returned tour', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Record outcome' })).toBeInTheDocument());
+  });
+
+  it('Start placement converts then navigates to the new placement', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockResolvedValue({
+      placement: { placementId: 'plc-abc' },
+      tour: makeTour({ status: 'closed', convertedPlacementId: 'plc-abc' }),
+    });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Start placement' })[0]!);
+    expect(createPlacementFromTour).toHaveBeenCalledWith('tour-abc');
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-abc'));
+  });
+
+  it('a convert failure surfaces role=alert and does NOT navigate', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockRejectedValue(new ApiError(409, 'tour_already_converted', 'tour_already_converted'));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Start placement' })[0]!);
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/tour_already_converted/i));
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('TourDetail - kebab guards', () => {
+  async function openKebab() {
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+  }
+
+  it('scheduled: Reschedule + Cancel + Mark no-show (no Open group when a group exists)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: 'g1' }));
+    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: 'Reschedule' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Cancel tour' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Mark no-show' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Open group text' })).not.toBeInTheDocument();
+  });
+
+  it('requested: Cancel + Open group text; NO Reschedule, NO Mark no-show', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: 'Cancel tour' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Open group text' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Reschedule' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Mark no-show' })).not.toBeInTheDocument();
+  });
+
+  it('a closed tour with a group has no kebab at all', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'closed', groupThreadId: 'g1', outcome: 'not_a_fit', moveForward: false }),
+    );
+    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    renderDetail();
+    await waitLoaded();
+    expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
+  });
+
+  it('Cancel (kebab) opens the confirm modal and PATCHes { status: canceled }', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'canceled' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Cancel tour' }));
+    // Confirm dialog.
+    const dialog = screen.getByRole('dialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel tour' }));
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'canceled' });
+  });
+
+  it('Mark no-show (kebab) PATCHes { status: no_show }', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'no_show' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Mark no-show' }));
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
+  });
+});
+
+describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
+  it('Book opens a modal and PATCHes { scheduledAt, status: scheduled }', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
+    patchTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Book tour' }));
     expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
-    const dateInput = screen.getByLabelText(/Date and time/i);
-    await user.type(dateInput, '2026-07-20T10:00');
-
-    await user.click(screen.getByRole('button', { name: /Confirm booking/i }));
-
-    // PATCH must include scheduledAt (status: 'scheduled' may also be included)
+    await userEvent.type(screen.getByLabelText('Date and time'), '2026-07-20T10:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
-      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20') }),
+      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20'), status: 'scheduled' }),
     );
-    // After PATCH the UI reflects the new status
-    await waitFor(() => expect(screen.getByLabelText(/Status: Scheduled/i)).toBeInTheDocument());
   });
 
-  it('canceling a tour calls PATCH with status=canceled', async () => {
-    const tour = makeTour({ status: 'scheduled' });
-    const canceledTour = makeTour({ status: 'canceled' });
-    getTour.mockResolvedValue(tour);
-    patchTour.mockResolvedValue(canceledTour);
-
+  it('Reschedule (Schedule-card action) PATCHes { scheduledAt, status: scheduled }', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' }));
     renderDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument());
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Cancel this tour/i }));
-
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'canceled' });
-    await waitFor(() => expect(screen.getByText('Canceled')).toBeInTheDocument());
+    await waitLoaded();
+    // The Schedule card exposes a Reschedule action (aria-label "Reschedule tour").
+    await userEvent.click(screen.getByRole('button', { name: 'Reschedule tour' }));
+    expect(screen.getByRole('form', { name: 'Reschedule tour form' })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('New date and time'), '2026-07-20T10:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm reschedule' }));
+    expect(patchTour).toHaveBeenCalledWith(
+      'tour-abc',
+      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20'), status: 'scheduled' }),
+    );
   });
 
-  it('the reschedule form calls PATCH with scheduledAt + status=scheduled', async () => {
-    const tour = makeTour({ status: 'scheduled' });
-    const rescheduledTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
-    getTour.mockResolvedValue(tour);
-    patchTour.mockResolvedValue(rescheduledTour);
-
+  it('Record outcome "Yes - move forward" PATCHes { outcome, moveForward }', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
     renderDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /Reschedule this tour/i })).toBeInTheDocument());
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Reschedule this tour/i }));
-
-    // Form appears
-    expect(screen.getByRole('form', { name: /Reschedule tour form/i })).toBeInTheDocument();
-    const dateInput = screen.getByLabelText(/New date and time/i);
-    await user.type(dateInput, '2026-07-20T10:00');
-
-    await user.click(screen.getByRole('button', { name: /Confirm reschedule/i }));
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', {
-      scheduledAt: expect.stringContaining('2026-07-20'),
-      status: 'scheduled',
-    });
-  });
-
-  it('the exit gate shows for a toured tour without an outcome and calls PATCH on submit', async () => {
-    const tour = makeTour({ status: 'toured' });
-    const closedTour = makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true });
-    getTour.mockResolvedValue(tour);
-    patchTour.mockResolvedValue(closedTour);
-
-    renderDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument());
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Record exit gate decision/i }));
-
-    // The exit gate form appears
-    expect(screen.getByRole('form', { name: /Exit gate form/i })).toBeInTheDocument();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
     expect(screen.getByRole('group', { name: /Moving forward with this property/i })).toBeInTheDocument();
-
-    // Pick "Yes — move forward"
-    await user.click(screen.getByRole('radio', { name: /Yes — move forward/i }));
-    await user.click(screen.getByRole('button', { name: /Save decision/i }));
-
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', {
-      outcome: 'move_forward',
-      moveForward: true,
-    });
-
-    // After saving, convertible shows
-    await waitFor(() => expect(screen.getByText(/ready for placement/i)).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    expect(patchTour).toHaveBeenCalledWith('tour-abc', { outcome: 'move_forward', moveForward: true });
   });
 
-  it('exit gate "No — not a fit" PATCHes outcome + moveForward AND closes the tour (diagram: not_a_fit closes)', async () => {
-    const tour = makeTour({ status: 'toured' });
-    const closedTour = makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false });
-    getTour.mockResolvedValue(tour);
-    patchTour.mockResolvedValue(closedTour);
-
+  it('Record outcome "No - not a fit" ALSO closes the tour', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
     renderDetail();
-    await waitFor(() => expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument());
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Record exit gate decision/i }));
-    await user.click(screen.getByRole('radio', { name: /No — not a fit/i }));
-    await user.click(screen.getByRole('button', { name: /Save decision/i }));
-
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'No - not a fit' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
     expect(patchTour).toHaveBeenCalledWith('tour-abc', {
       outcome: 'not_a_fit',
       moveForward: false,
       status: 'closed',
     });
-    // The page reflects the closed tour.
-    expect(screen.getByLabelText(/Status: Closed/i)).toBeInTheDocument();
   });
+});
 
-  it('shows a group thread link when groupThreadId is set', async () => {
-    getTour.mockResolvedValue(makeTour({ groupThreadId: 'conv-123' }));
+describe('TourDetail - right column cards', () => {
+  it('self-guided shows the Guidance card with the ID-gate lead + reminders route to the tenant 1:1', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided' }));
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    const link = screen.getByRole('link', { name: /Open group thread/i });
-    expect(link).toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByText('Self-guided tour')).toBeInTheDocument();
+    expect(screen.getByText('Photo ID before lockbox code - always.')).toBeInTheDocument();
+    expect(screen.getByText('reminders -> tenant 1:1')).toBeInTheDocument();
   });
 
-  it('does NOT show a group thread link when groupThreadId is absent', async () => {
-    getTour.mockResolvedValue(makeTour({ groupThreadId: undefined }));
+  it('landlord-led WITHOUT a group shows the fallback warning chip', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'landlord_led', groupThreadId: undefined }));
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('link', { name: /Open group thread/i })).not.toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByText('no group - reminders -> 1:1')).toBeInTheDocument();
+    expect(screen.getByText('Landlord-led tour')).toBeInTheDocument();
   });
 
-  // ── The 'requested' (timeless) state — tours-sequence Task 4 ────────────────
-  // A requested tour has NO scheduledAt: it renders 'Not yet booked', offers a
-  // 'Book tour' control (NOT Reschedule — booking is its own verb), and can be
-  // canceled.
-  /** A timeless 'requested' tour: makeTour minus its scheduledAt. */
-  function makeRequestedTour(over: Partial<Tour> = {}): Tour {
-    const base = makeTour();
-    delete base.scheduledAt; // timeless — the property is truly absent
-    return { ...base, status: 'requested', ...over };
-  }
-
-  it("renders 'Requested' status and 'Not yet booked' for a timeless requested tour", async () => {
-    getTour.mockResolvedValue(makeRequestedTour());
+  it('landlord-led WITH a group routes reminders to the group', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'landlord_led', groupThreadId: 'g1' }));
+    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.getByLabelText(/Status: Requested/i)).toBeInTheDocument();
-    const scheduledDd = screen.getByLabelText('Scheduled: Not yet booked');
-    expect(scheduledDd).toHaveTextContent('Not yet booked');
-    expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByText('reminders -> group')).toBeInTheDocument();
   });
 
-  it('shows the Book control (not Reschedule) plus Cancel tour for a requested tour', async () => {
-    getTour.mockResolvedValue(makeRequestedTour());
+  it('People card links the tenant, landlord, and property', async () => {
+    getTour.mockResolvedValue(makeTour());
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Book tour' })).toHaveTextContent('Book tour');
-    expect(screen.queryByRole('button', { name: /Reschedule this tour/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Cancel this tour/i })).toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Ann Tenant' })).toHaveAttribute('href', '/contacts/tenant-1');
+    expect(screen.getByRole('link', { name: 'Lon Landlord' })).toHaveAttribute('href', '/contacts/landlord-1');
+    expect(screen.getByRole('link', { name: '123 Main St, Atlanta, GA' })).toHaveAttribute(
+      'href',
+      '/listings/unit-1',
+    );
   });
 
-  it('does NOT show the Book control for a scheduled tour', async () => {
+  it('pm_team labels the landlord slot "Property manager"', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'pm_team' }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText('Property manager')).toBeInTheDocument();
+    expect(screen.getByText('PM-team tour')).toBeInTheDocument();
+  });
+
+  it('Outcome card shows the pending panel before the gate', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Book tour' })).not.toBeInTheDocument();
+    await waitLoaded();
+    expect(screen.getByText(/Records after the tour/i)).toBeInTheDocument();
   });
 
-  it('booking a requested tour PATCHes { scheduledAt, status: scheduled }', async () => {
-    const tour = makeRequestedTour();
-    const bookedTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
-    getTour.mockResolvedValue(tour);
-    patchTour.mockResolvedValue(bookedTour);
-
-    renderDetail();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Book tour' }));
-
-    // The booking form appears — mirrors the Reschedule form structure.
-    const form = screen.getByRole('form', { name: 'Book tour form' });
-    expect(form).toBeInTheDocument();
-    const dateInput = screen.getByLabelText('Date and time');
-    expect(dateInput).toBeRequired();
-    await user.type(dateInput, '2026-07-20T10:00');
-
-    await user.click(screen.getByRole('button', { name: /Confirm booking/i }));
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', {
-      scheduledAt: expect.stringContaining('2026-07-20'),
-      status: 'scheduled',
-    });
-    // The page applies the returned tour: status flips to Scheduled.
-    await waitFor(() => expect(screen.getByLabelText(/Status: Scheduled/i)).toBeInTheDocument());
-  });
-
-  it('the Book form Cancel dismisses without PATCHing', async () => {
-    getTour.mockResolvedValue(makeRequestedTour());
-    renderDetail();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Book tour' }));
-    expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /^Cancel$/ }));
-
-    expect(screen.queryByRole('form', { name: 'Book tour form' })).not.toBeInTheDocument();
-    expect(patchTour).not.toHaveBeenCalled();
-  });
-
-  // ── Status controls + open-group affordance — tours-sequence Task 5 ─────────
-  // Mark toured / Mark no-show (scheduled only - Mark toured is what makes the
-  // exit gate reachable; the 'confirmed' status + Confirm control were removed
-  // 2026-07-08), and the 'Open group thread' button (no groupThreadId yet,
-  // tour not canceled/closed).
-
-  it("a scheduled tour shows 'Mark toured' and 'Mark no-show' (no Confirm control - removed)", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark toured' })).toHaveTextContent('Mark toured');
-    expect(screen.getByRole('button', { name: 'Mark no-show' })).toHaveTextContent('Mark no-show');
-  });
-
-  it('a requested tour shows NONE of the attendance controls', async () => {
-    getTour.mockResolvedValue(makeRequestedTour());
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
-  });
-
-  it("a toured tour shows neither attendance control; 'Record outcome' is present", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
-  });
-
-  it("'Mark toured' PATCHes { status: toured }; controls swap to 'Record outcome'", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
-    patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
-    renderDetail();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Mark toured' }));
-
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
-    await waitFor(() => expect(screen.getByLabelText(/Status: Toured/i)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
-  });
-
-  it("'Mark no-show' PATCHes { status: no_show }", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
-    patchTour.mockResolvedValue(makeTour({ status: 'no_show' }));
-    renderDetail();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Mark no-show' })).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Mark no-show' }));
-
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
-    await waitFor(() => expect(screen.getByLabelText(/Status: No show/i)).toBeInTheDocument());
-  });
-
-  it("shows 'Open group thread' when the tour has no groupThreadId", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.getByRole('button', { name: 'Open group thread' }),
-    ).toHaveTextContent('Open group thread');
-  });
-
-  it("shows 'Open group thread' for a requested tour too (no group yet)", async () => {
-    getTour.mockResolvedValue(makeRequestedTour());
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.getByRole('button', { name: 'Open group thread' }),
-    ).toBeInTheDocument();
-  });
-
-  it("hides 'Open group thread' when groupThreadId is set; the view link shows instead", async () => {
-    getTour.mockResolvedValue(makeTour({ groupThreadId: 'conv-123' }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.queryByRole('button', { name: 'Open group thread' }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Open group thread/i })).toBeInTheDocument();
-  });
-
-  it("hides 'Open group thread' for canceled and closed tours", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: undefined }));
-    const first = renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.queryByRole('button', { name: 'Open group thread' }),
-    ).not.toBeInTheDocument();
-    first.unmount();
-
-    getTour.mockResolvedValue(
-      makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false, groupThreadId: undefined }),
+  it('Activity card renders the trail rows with a load-more when the page is full', async () => {
+    getTour.mockResolvedValue(makeTour());
+    getTourActivity.mockResolvedValue(
+      Array.from({ length: 20 }, (_v, i) => ({
+        id: `2026-07-0${(i % 9) + 1}T00:00:00Z#${i}`,
+        at: `2026-07-0${(i % 9) + 1}T00:00:00Z`,
+        type: 'tour_scheduled',
+      })),
     );
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.queryByRole('button', { name: 'Open group thread' }),
-    ).not.toBeInTheDocument();
+    await waitLoaded();
+    await waitFor(() => expect(screen.getByRole('list', { name: 'Tour activity' })).toBeInTheDocument());
+    expect(screen.getAllByText('Tour scheduled').length).toBe(20);
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
   });
+});
 
-  it("'Open group thread' calls createTourRelay with ONLY the tourId; on success the link appears", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
-    createTourRelay.mockResolvedValue({
-      tour: makeTour({ status: 'scheduled', groupThreadId: 'conv-999' }),
-      conversation: {},
+describe('TourDetail - three-channel switcher', () => {
+  it('a self-guided tour (no group) defaults to the Tenant tab and never auto-switches', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-tenant', 'tenant-1'), conv('c-landlord', 'landlord-1', 0, 'landlord_1to1')],
+      nextCursor: null,
     });
     renderDetail();
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Open group thread' }),
-      ).toBeInTheDocument(),
-    );
+    await waitLoaded();
+    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'false');
+    // Let all the channel fetches settle; the active tab must NOT have moved.
+    await waitFor(() => expect(getConversations).toHaveBeenCalled());
+    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).toHaveAttribute('aria-selected', 'true');
+  });
 
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
+  it('a tour WITH a group defaults to the Group tab', async () => {
+    getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
+    getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'true');
+  });
 
-    // Exactly one argument — members omitted so the server auto-resolves them.
+  it('shows an unread dot on a non-active channel and lazy-loads ONLY the active transcript', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 2, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+    // The Landlord tab (unread 2) exposes an accessible "unread" hint.
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument());
+    // Lazy-load: only the ACTIVE (tenant) conversation was fetched.
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    expect(getConversationMessages).not.toHaveBeenCalledWith('c-landlord', expect.anything());
+  });
+
+  it('viewing an unread tab marks the SINGLE conversation read - never the inbox fan-out', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 2, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+    await screen.findByRole('tab', { name: /Landlord - Lon.*unread/i });
+    // The tenant tab (active, unread 0) triggered no mark-read.
+    expect(markConversationRead).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('c-landlord'));
+    // The contact-wide fan-out read must NEVER be used (it would clear sibling tabs).
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
+  it('composer targets the ACTIVE tab, before and after switching', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
+    renderDetail();
+    await waitLoaded();
+    // Wait for the tenant channel to resolve + its real thread to mount (so the
+    // composer sends into the existing conversation, not create-on-demand).
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    // Tenant tab active: send targets the tenant conversation.
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sendMessage).toHaveBeenLastCalledWith('c-tenant', { body: 'hi tenant' });
+    // Switch to landlord: its thread mounts, then send targets the landlord conversation.
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-landlord', expect.anything()));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi landlord');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'hi landlord' });
+  });
+});
+
+describe('TourDetail - conversation empty states', () => {
+  it('group with no thread shows "No group text yet" + Open group text (createTourRelay)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    createTourRelay.mockResolvedValue({ tour: makeTour({ groupThreadId: 'g-new' }), conversation: {} });
+    renderDetail();
+    await waitLoaded();
+    // Switch to the Group tab (self-guided defaults to Tenant).
+    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
     expect(createTourRelay).toHaveBeenCalledWith('tour-abc');
-    await waitFor(() =>
-      expect(screen.getByRole('link', { name: /Open group thread/i })).toBeInTheDocument(),
-    );
-    expect(
-      screen.queryByRole('button', { name: 'Open group thread' }),
-    ).not.toBeInTheDocument();
   });
 
-  it('relay_member_unresolvable renders the detail text inline', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
-    createTourRelay.mockRejectedValue(
-      new ApiError(
-        400,
-        'relay_member_unresolvable',
-        'relay_member_unresolvable (Tenant has no phone number on file)',
-        { error: 'relay_member_unresolvable', detail: 'Tenant has no phone number on file' },
-      ),
-    );
+  it('a 1:1 with no thread shows the "with <name>" empty state + creates on first send', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+    ensureContactConversation.mockResolvedValue('c-new');
+    sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Open group thread' }),
-      ).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
-
-    // The detail text — and ONLY the detail text — is the inline error.
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(screen.getByRole('alert').textContent).toBe('Tenant has no phone number on file');
+    await waitLoaded();
+    // Tenant tab active, no conversation yet.
+    await waitFor(() => expect(screen.getByText('No messages with Ann Tenant yet')).toBeInTheDocument());
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'first message');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(ensureContactConversation).toHaveBeenCalledWith('tenant-1');
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('c-new', { body: 'first message' }));
   });
 
-  // ── Post-Tour & Application: Start placement from a convertible tour ────────
-  // A convertible, not-yet-converted tour offers "Start placement" (→ convert →
-  // navigate to the new placement). Once converted, the tour carries
-  // convertedPlacementId and shows a "View placement" link instead (no button).
-
-  it("shows 'Start placement' for a convertible, unconverted tour", async () => {
-    getTour.mockResolvedValue(
-      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
-    );
+  it('open-group is disabled on a canceled tour with a short note', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: undefined }));
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.getByRole('button', { name: 'Start placement from this tour' }),
-    ).toHaveTextContent('Start placement');
-    // Not yet converted → no "View placement" link.
-    expect(screen.queryByRole('link', { name: /View placement/i })).not.toBeInTheDocument();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled();
+    expect(screen.getByText(/a group text cannot be opened/i)).toBeInTheDocument();
   });
+});
 
-  it("does NOT show 'Start placement' for a non-convertible tour", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+describe('TourDetail - mobile', () => {
+  it('exposes a Details | Conversation toggle with Details pressed initially', async () => {
     renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(
-      screen.queryByRole('button', { name: 'Start placement from this tour' }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows a 'View placement' link (and NO Start button) once the tour is converted", async () => {
-    getTour.mockResolvedValue(
-      makeTour({ status: 'closed', convertible: true, convertedPlacementId: 'plc-77' }),
-    );
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    const link = screen.getByRole('link', { name: /View placement/i });
-    expect(link).toHaveAttribute('href', '/placements/plc-77');
-    expect(
-      screen.queryByRole('button', { name: 'Start placement from this tour' }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("'Start placement' converts the tour then navigates to the new placement", async () => {
-    getTour.mockResolvedValue(
-      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
-    );
-    createPlacementFromTour.mockResolvedValue({
-      placement: { placementId: 'plc-abc', tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' },
-      tour: makeTour({ status: 'closed', convertible: true, convertedPlacementId: 'plc-abc' }),
-    });
-    renderDetail();
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Start placement from this tour' }),
-      ).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Start placement from this tour' }));
-
-    expect(createPlacementFromTour).toHaveBeenCalledWith('tour-abc');
-    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-abc'));
-  });
-
-  it("a convert failure surfaces via role=alert and does NOT navigate", async () => {
-    getTour.mockResolvedValue(
-      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
-    );
-    createPlacementFromTour.mockRejectedValue(
-      new ApiError(409, 'tour_already_converted', 'tour_already_converted'),
-    );
-    renderDetail();
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Start placement from this tour' }),
-      ).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Start placement from this tour' }));
-
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(screen.getByRole('alert')).toHaveTextContent(/tour_already_converted/i);
-    expect(navigateSpy).not.toHaveBeenCalled();
-  });
-
-  it('a generic relay failure renders the error message inline', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
-    createTourRelay.mockRejectedValue(
-      new ApiError(409, 'relay_already_provisioned', 'relay_already_provisioned', {
-        error: 'relay_already_provisioned',
-      }),
-    );
-    renderDetail();
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Open group thread' }),
-      ).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open group thread' }));
-
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    expect(screen.getByRole('alert')).toHaveTextContent(/relay_already_provisioned/i);
+    await waitLoaded();
+    const details = screen.getByRole('button', { name: 'Details' });
+    const conversation = screen.getByRole('button', { name: 'Conversation' });
+    expect(details).toHaveAttribute('aria-pressed', 'true');
+    expect(conversation).toHaveAttribute('aria-pressed', 'false');
   });
 });

@@ -1,0 +1,294 @@
+/* TourDetail - page-specific decoration layered on the shared twoPaneShell
+ * (ui/twoPaneShell.module.css). Layout/breakpoint live in the shell; this file
+ * styles only the bits unique to the tour page: the header back crumb + facts,
+ * the left-pane channel tab rail + empty states, the right-column chips, the
+ * Activity list, and the modal form fields. All values from ui/tokens.css. */
+
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-7);
+}
+
+.error {
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+/* --- Header band decoration ----------------------------------------------- */
+
+.backBtn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--c-header-btn-bg);
+  color: var(--c-text-inverse);
+  text-decoration: none;
+  font-size: var(--fs-lg);
+}
+
+.backBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.facts {
+  margin-top: 2px;
+  color: var(--c-header-facts);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.created {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}
+
+/* A thin full-width error bar under the header (action failures). */
+.errorBar {
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+  border-bottom: 1px solid var(--c-evt-amber-border);
+  font-size: var(--fs-sm);
+}
+
+/* --- Left pane: channel switcher ------------------------------------------ */
+
+.convo {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tabRail {
+  display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.tab,
+.tabOn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  white-space: nowrap;
+}
+
+.tabOn {
+  background: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+  border-color: var(--c-nav-bg);
+}
+
+.tab:focus-visible,
+.tabOn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* The unread dot on a channel tab. */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-brand);
+  flex: 0 0 auto;
+}
+
+.tabOn .dot {
+  background: var(--c-text-inverse);
+}
+
+.channelPane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.channelEmpty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  color: var(--c-text-muted);
+}
+
+.emptyTitle {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.emptyNote {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- Right column: chips + rows ------------------------------------------- */
+
+.typeRow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.chip,
+.chipWarn {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.chipWarn {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+
+.person {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.subtle {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+.guidanceLead {
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  margin-bottom: var(--sp-2);
+}
+
+/* --- Activity list (mirrors PlacementDetail's history) -------------------- */
+
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.activityRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.activityTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.activityType {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.activityTs {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  white-space: nowrap;
+}
+
+.activityActor {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* --- Modal form fields (shared by TourModals) ----------------------------- */
+
+.modalForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.modalLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.modalInput {
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-md);
+}
+
+.modalHint {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.modalError {
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.radioGroup {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.radioRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+}
+
+/* Visually-hidden text (the tab "unread" hint for screen readers). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -113,6 +113,10 @@ export interface TimelineProps {
    *  jump to the newest item, no "new messages" pill — so switching conversations
    *  never yanks or spuriously flags. */
   resetScrollKey?: string;
+  /** Override the ready-but-empty stream copy (default "No messages yet."). Used
+   *  by the tour page's create-on-demand 1:1 tab ("No messages with <name> yet").
+   *  Optional + defaulted - contact/relay timelines are unchanged. */
+  emptyLabel?: string;
 }
 
 /** The relay member key convention (MIRRORS app relayMemberKey): the member's
@@ -441,6 +445,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     relayRoster,
     relayClosed,
     resetScrollKey,
+    emptyLabel,
   } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
@@ -657,7 +662,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         ) : null}
 
         {status === 'ready' && visible.length === 0 ? (
-          <p className={styles.empty}>No messages yet.</p>
+          <p className={styles.empty}>{emptyLabel ?? 'No messages yet.'}</p>
         ) : null}
 
         {status === 'ready' && source === 'fallback' && visible.length > 0 ? (

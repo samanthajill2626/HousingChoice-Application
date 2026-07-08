@@ -86,7 +86,14 @@ export function listingAddress(units: Map<string, UnitItem>, unitId: string): st
 export function shortDate(iso: string | undefined): string {
   if (!iso) return '';
   const norm = isoOf(iso);
-  const d = new Date(norm);
+  // Date-only strings (e.g. placement.tour_date / inspection_date, "2026-07-16")
+  // have no time component, so `new Date(norm)` parses them as UTC midnight —
+  // which renders as the PREVIOUS day in negative-offset US timezones. Build the
+  // date from its calendar parts in LOCAL time instead so it never shifts.
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(norm);
+  const d = dateOnlyMatch
+    ? new Date(Number(dateOnlyMatch[1]), Number(dateOnlyMatch[2]) - 1, Number(dateOnlyMatch[3]))
+    : new Date(norm);
   if (Number.isNaN(d.getTime())) return norm.slice(0, 10);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }

@@ -644,18 +644,19 @@ const TOUR_TOOK_PLACE: ReadonlySet<TourStatus> = new Set<TourStatus>(['toured', 
  * A tour-owning tenant's milestones: `tour_scheduled` once the tour has a
  * scheduled time (a timeless `requested` tour → none), and `tour_took_place` when
  * the tour actually happened (toured/closed). Keyed on the tour's `tenantId`.
- * refType `unit` (the property toured) — activity_events has no `tour` refType.
+ * refType `tour` (the tour itself) — mirrors the real writer recordTourEvent
+ * (routes/tours.ts), so the milestone deep-links to /tours/<id>, not the property.
  */
 export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
   const tenantId = String(tour['tenantId'] ?? '');
-  const unitId = String(tour['unitId'] ?? '');
+  const tourId = String(tour['tourId'] ?? '');
   const status = String(tour['status'] ?? '') as TourStatus;
   const scheduledAt = tour['scheduledAt'];
   const createdAt = String(tour['createdAt'] ?? tour['updatedAt'] ?? '');
   if (tenantId === '' || !(status in TOUR_STATUS_LABELS)) return [];
   const hasSchedule = typeof scheduledAt === 'string' && scheduledAt.length > 0;
   if (!hasSchedule) return []; // requested (timeless) → no scheduled/took-place milestones
-  const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;
+  const ref = tourId !== '' ? { refType: 'tour', refId: tourId } : undefined;
   const rows: ActivityRow[] = [];
   // The booking happened at tour creation (these seed tours are created already-
   // scheduled); label follows the legacy `Tour scheduled - <date>` shape.

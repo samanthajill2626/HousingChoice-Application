@@ -479,8 +479,10 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     const tookPlace = rows.find((r) => r.type === 'tour_took_place')!;
     // activityEventsRepo.ts:59 documents this exact label shape.
     expect(tookPlace.label).toBe(`Tour took place - ${TOUR_STATUS_LABELS['toured']}`);
-    expect(tookPlace.refType).toBe('unit');
-    expect(tookPlace.refId).toBe(toured!['unitId']);
+    // refType 'tour' → deep-links to the tour itself (mirrors recordTourEvent in
+    // routes/tours.ts), not the property.
+    expect(tookPlace.refType).toBe('tour');
+    expect(tookPlace.refId).toBe(toured!['tourId']);
     expect(iso(tookPlace.tsEventId)).toBe(iso(String(toured!['scheduledAt'])));
     // The merged orchestrator surfaces the tour milestones for the tenant.
     const merged = byContact.get(String(toured!['tenantId'])) ?? [];

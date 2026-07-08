@@ -53,27 +53,6 @@
   color: var(--c-header-text);
 }
 
-.badge {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-regular);
-  padding: 1px var(--sp-2);
-  border-radius: var(--radius-pill);
-  color: var(--c-text-inverse);
-  background: var(--c-status-placed-bg);
-}
-
-.badgeAvailable {
-  background: var(--c-status-available-bg);
-}
-
-.badgePlaced {
-  background: var(--c-status-placed-bg);
-}
-
-.badgeInactive {
-  background: var(--c-status-inactive-bg);
-}
-
 .facts {
   margin-top: 2px;
   color: var(--c-header-facts);
@@ -86,7 +65,6 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: var(--sp-2);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   padding: 1px var(--sp-2);
@@ -115,53 +93,6 @@
   gap: var(--sp-2);
   align-items: center;
   flex: 0 0 auto;
-}
-
-.statusSelect select {
-  background: var(--c-header-kebab-bg);
-  color: var(--c-text-inverse);
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: var(--sp-1) var(--sp-2);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  cursor: pointer;
-}
-
-.statusSelect select:focus-visible {
-  outline: 2px solid var(--c-focus-ring);
-  outline-offset: 2px;
-}
-
-/* Inline status-write error — sits below the select. The select label is a
- * column so the message stacks under the control without disturbing the row. */
-.statusSelect {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--sp-1);
-}
-
-.statusError {
-  color: var(--c-danger);
-  background: var(--c-surface);
-  border-radius: var(--radius-sm);
-  padding: 1px var(--sp-2);
-  font-size: var(--fs-xs);
-  max-width: 16rem;
-  text-align: right;
-}
-
-.srLabel {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 .btn {
@@ -416,11 +347,10 @@
 
 /* --- Mobile (≤768px) ------------------------------------------------------- */
 /* LAST in the file so these win over the base rules at equal specificity.
- * The header was one flex row — address (+ badge + facts) beside a fixed-width
- * 3-button cluster — which on a phone squeezed the title to ~one word per line
- * and overflowed the viewport. Stack it: identity on top, actions a wrapping row
- * below (Broadcast full-width, Edit + ⋯ on the next line). And collapse the
- * cramped 2-up detail grid to a single readable column. */
+ * The header is one flex row — the title row (address + status pill) beside the
+ * actions (Restore-when-deleted + the kebab) — which on a phone squeezes the
+ * title. Stack it: identity on top, actions a wrapping row below. And collapse
+ * the cramped 2-up detail grid to a single readable column. */
 @media (max-width: 768px) {
   .header {
     flex-direction: column;
@@ -433,10 +363,6 @@
   .actions {
     margin-left: 0;
     flex-wrap: wrap;
-  }
-  .actions .btn:first-child {
-    flex: 1 1 100%;
-    text-align: center;
   }
   .btnAlt {
     flex: 1 1 auto;

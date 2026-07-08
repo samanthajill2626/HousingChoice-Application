@@ -30,10 +30,15 @@
   outline-offset: 2px;
 }
 
+/* FIXED + PORTALED (see StageMenu.tsx header): the ledger's overflow:hidden
+ * ancestors clip an in-place popover, and .actions' z-index:2 stacking context
+ * traps it under sticky group headers / later rows' kebabs - so the menu is
+ * portaled to document.body and positioned fixed. top/right (and a
+ * viewport-clamped max-height) are set inline from the kebab's rect at open
+ * time; the menu closes on scroll/resize so the coordinates never go stale.
+ * The max-height here is the no-inline-style fallback (jsdom/tests). */
 .menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + var(--sp-1));
+  position: fixed;
   z-index: 20;
   min-width: 220px;
   max-height: min(60vh, 480px);

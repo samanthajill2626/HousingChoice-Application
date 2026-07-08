@@ -649,7 +649,10 @@ export class Scenario {
     const firstName = this.requireActiveFirstName();
     return step(`Team sends a listing (${unit.unitId}) to the tenant`, async () => {
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
-      await this.page.getByRole('button', { name: /Broadcast to tenants/i }).click();
+      // "Broadcast to tenants" lives in the header kebab (More actions) menu now,
+      // not as a standalone hero button.
+      await this.page.getByRole('button', { name: 'More actions' }).click();
+      await this.page.getByRole('menuitem', { name: 'Broadcast to tenants' }).click();
       await expect(this.page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unit.unitId}`));
       await expect(this.page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
       await this.page
@@ -1301,7 +1304,12 @@ export class Scenario {
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Property details' }) });
       await expect(details.getByText('Voucher size accepted')).toBeVisible();
-      await expect(this.page.getByText('Available', { exact: true }).first()).toBeVisible();
+      // The header status is the interactive pill (its visible text carries a
+      // trailing caret glyph, so exact-text matching can't work) — assert via its
+      // accessible name instead.
+      await expect(
+        this.page.getByRole('button', { name: 'Property status: Available' }),
+      ).toBeVisible();
     });
   }
 
@@ -1967,7 +1975,8 @@ export class Scenario {
 
   /**
    * [Team, MANUAL] Move the placement to `stageLabel` (the STAGE_LABELS display
-   * string) via the PlacementDetail "Move to…" picker — the SAME gated pipeline
+   * string) via the PlacementDetail stage pill (an interactive menu-button whose
+   * accessible name is "Placement stage: <current>") — the SAME gated pipeline
    * the board uses. When the target is 'Lost' the reason modal opens: pick the
    * `lostReason` category (its visible label) and confirm. Asserts the new stage
    * renders before returning.
@@ -1976,12 +1985,10 @@ export class Scenario {
     const id = this.requireActivePlacementId();
     return step(`Team moves the placement → ${stageLabel}`, async () => {
       await this.page.goto(`${NEXT}/placements/${id}`);
-      await expect(this.page.getByRole('combobox', { name: 'Move to stage' })).toBeVisible({
-        timeout: 10_000,
-      });
-      await this.page
-        .getByRole('combobox', { name: 'Move to stage' })
-        .selectOption({ label: stageLabel });
+      const stagePill = this.page.getByRole('button', { name: /^Placement stage:/ });
+      await expect(stagePill).toBeVisible({ timeout: 10_000 });
+      await stagePill.click();
+      await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();
 
       if (stageLabel === 'Lost') {
         const dialog = this.page.getByRole('dialog', { name: 'Mark placement lost' });
@@ -2294,9 +2301,9 @@ export class Scenario {
 
   /**
    * [App] Conversion moved the property to Under application (API status
-   * 'under_application') AND Team SEES the "Under application" badge in the
-   * property-detail header (scoped to the h1 so the status-select option copy
-   * can't double-match).
+   * 'under_application') AND Team SEES it in the property-detail header — the
+   * interactive status pill, asserted by its accessible name (the status left
+   * the h1 when the pill replaced the badge + select).
    */
   expectUnitUnderApplication(unit: Unit): Promise<void> {
     return step('App: property reads Under application', async () => {
@@ -2306,7 +2313,7 @@ export class Scenario {
       expect(u.status).toBe('under_application');
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
       await expect(
-        this.page.getByRole('heading', { level: 1 }).getByText('Under application', { exact: true }),
+        this.page.getByRole('button', { name: 'Property status: Under application' }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2639,8 +2646,8 @@ export class Scenario {
 
   /**
    * [App] The move into awaiting_move_in DERIVED the property to Finalizing:
-   * unit.status === 'finalizing' (API) AND Team SEES the "Finalizing" badge in the
-   * property-detail header (scoped to the h1, mirroring expectUnitUnderApplication).
+   * unit.status === 'finalizing' (API) AND Team SEES it in the header status
+   * pill (by accessible name, mirroring expectUnitUnderApplication).
    */
   expectPropertyFinalizing(unit: Unit): Promise<void> {
     return step('App: property reads Finalizing', async () => {
@@ -2650,14 +2657,14 @@ export class Scenario {
       expect(u.status).toBe('finalizing');
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
       await expect(
-        this.page.getByRole('heading', { level: 1 }).getByText('Finalizing', { exact: true }),
+        this.page.getByRole('button', { name: 'Property status: Finalizing' }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
 
   /**
    * [App] Move-in DERIVED the property to Occupied: unit.status === 'occupied'
-   * (API) AND Team SEES the "Occupied" badge in the property-detail header.
+   * (API) AND Team SEES it in the header status pill (by accessible name).
    */
   expectPropertyOccupied(unit: Unit): Promise<void> {
     return step('App: property reads Occupied', async () => {
@@ -2667,7 +2674,7 @@ export class Scenario {
       expect(u.status).toBe('occupied');
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
       await expect(
-        this.page.getByRole('heading', { level: 1 }).getByText('Occupied', { exact: true }),
+        this.page.getByRole('button', { name: 'Property status: Occupied' }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2878,7 +2885,7 @@ export class Scenario {
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
   }
 
-  /** Open the PlacementDetail "Move to…" picker on the active placement, select
+  /** Open the PlacementDetail stage pill on the active placement, pick
    *  `stageLabel` (a STAGE_LABELS display string) — which opens the gated
    *  MovePromptModal — and return the modal (a role="dialog" named `dialogName`,
    *  its title). Navigates to the placement first, mirroring teamMovesPlacementTo. */
@@ -2888,9 +2895,10 @@ export class Scenario {
   ): Promise<import('@playwright/test').Locator> {
     const id = this.requireActivePlacementId();
     await this.page.goto(`${NEXT}/placements/${id}`);
-    const picker = this.page.getByRole('combobox', { name: 'Move to stage' });
-    await expect(picker).toBeVisible({ timeout: 10_000 });
-    await picker.selectOption({ label: stageLabel });
+    const stagePill = this.page.getByRole('button', { name: /^Placement stage:/ });
+    await expect(stagePill).toBeVisible({ timeout: 10_000 });
+    await stagePill.click();
+    await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();
     const dialog = this.page.getByRole('dialog', { name: dialogName });
     await expect(dialog).toBeVisible();
     return dialog;

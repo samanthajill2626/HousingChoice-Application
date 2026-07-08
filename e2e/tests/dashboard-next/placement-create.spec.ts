@@ -79,8 +79,10 @@ test.describe('Manual placement creation', () => {
     // unit-0002 (occupied, no active placement → no UNIT-side overlap).
     await page.goto(`${NEXT}/listings/${SEEDED_UNIT_FREE}`);
 
-    // The property header "Start placement" opens the create dialog locked to this unit.
-    await page.getByRole('button', { name: 'Start placement' }).click();
+    // "Start placement" lives in the property header kebab (More actions) menu;
+    // it opens the create dialog locked to this unit.
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: 'Start placement' }).click();
     const dialog = page.getByRole('dialog', { name: /New placement/i });
     await expect(dialog).toBeVisible();
 

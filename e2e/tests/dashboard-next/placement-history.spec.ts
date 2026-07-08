@@ -37,9 +37,11 @@ test('Placement detail: shows placement facts + history, and a transition adds a
   await expect(page.getByRole('heading', { name: /Awaiting inspection/ })).toBeVisible();
   await expect(page.getByRole('heading', { name: /History/ })).toBeVisible();
 
-  // Move out of awaiting_inspection via the full stage picker → the outcome
-  // prompt → confirm. This records a transition the history then reflects.
-  await page.getByRole('combobox', { name: 'Move to stage' }).selectOption('determine_rent');
+  // Move out of awaiting_inspection via the stage pill (menu items carry the
+  // stage LABELS) → the outcome prompt → confirm. This records a transition the
+  // history then reflects.
+  await page.getByRole('button', { name: /^Placement stage:/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Determine rent', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Record inspection outcome' })).toBeVisible();
   // Scope to the move dialog — the in-place inspection recorder card (shown at
   // awaiting_inspection) also has a Pass/Fail radio.

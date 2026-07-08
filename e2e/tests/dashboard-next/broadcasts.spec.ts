@@ -100,9 +100,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     });
     expect(sentRes.ok()).toBeTruthy();
 
-    // --- Compose from the property: the "📣 Broadcast to tenants" button. ---
+    // --- Compose from the property: "Broadcast to tenants" in the kebab menu. ---
     await page.goto(`${NEXT}/listings/${SEEDED_UNIT}`);
-    await page.getByRole('button', { name: /Broadcast to tenants/i }).click();
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: 'Broadcast to tenants' }).click();
     await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${SEEDED_UNIT}`));
     await expect(page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
 

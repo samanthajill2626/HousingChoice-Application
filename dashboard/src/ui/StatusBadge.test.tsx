@@ -17,4 +17,29 @@ describe('StatusBadge', () => {
     render(<StatusBadge kind="tenant" status="some_legacy_value" />);
     expect(screen.getByText('Some legacy value')).toBeInTheDocument();
   });
+
+  // --- tour kind (tour-detail-page): the six-status tone map ------------------
+  it('renders the tour-status label from the tour map', () => {
+    render(<StatusBadge kind="tour" status="scheduled" />);
+    expect(screen.getByText('Scheduled')).toBeInTheDocument();
+  });
+
+  // Labels for every tour status (the tone map itself is tokens-only CSS, not
+  // observable in jsdom where CSS modules are stripped - vite.config css:false).
+  it.each([
+    ['requested', 'Requested'],
+    ['scheduled', 'Scheduled'],
+    ['toured', 'Toured'],
+    ['closed', 'Closed'],
+    ['canceled', 'Canceled'],
+    ['no_show', 'No show'],
+  ])('maps tour status %s -> label %s', (status, label) => {
+    render(<StatusBadge kind="tour" status={status} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
+  it('falls back to a humanized form for an off-list tour value', () => {
+    render(<StatusBadge kind="tour" status="some_future_status" />);
+    expect(screen.getByText('Some future status')).toBeInTheDocument();
+  });
 });

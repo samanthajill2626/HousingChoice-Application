@@ -26,6 +26,7 @@ import {
 import { createLogger } from '../src/lib/logger.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
+import type { BroadcastItem } from '../src/repos/broadcastsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { loadConfig } from '../src/lib/config.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -116,6 +117,57 @@ describe('POST /webhooks/twilio/status — transitions', () => {
 
     expect(res.status).toBe(200);
     expect((await world.messagesRepo.getByProviderSid('SMlate'))?.delivery_status).toBe('sent');
+  });
+
+  it('broadcast rollup: a delivery callback whose recipient slot is not yet written retries the load ONCE, then rolls up delivered (send/pacing race)', async () => {
+    // The fan-out records the recipient slot (conversationId+tsMsgId, status
+    // 'sent') a beat AFTER the provider send; a fast delivered callback can land
+    // in that gap. The rollup must re-load the broadcast once before giving up.
+    const { app, world } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 5 });
+    const seeded = await seedOutbound(world, 'SMbcastrace', { broadcast_id: 'bcast-race' });
+
+    const now = new Date().toISOString();
+    const base: BroadcastItem = {
+      broadcastId: 'bcast-race',
+      created_by: 'usr_test',
+      created_at: now,
+      status: 'sending',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 1, sent: 1, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: {
+        'c-1': { status: 'sent', conversationId: seeded.conversationId, tsMsgId: seeded.tsMsgId },
+      },
+      updated_at: now,
+    };
+    // The COMMITTED state: the map already carries the matching 'sent' slot (so
+    // the conditional setRecipient succeeds). The race is purely in the READ.
+    world.broadcasts.set('bcast-race', base);
+
+    // FIRST getById returns a STALE broadcast (slot still 'queued', no keys) —
+    // the pacing gap; every later read delegates to the real (committed) repo.
+    let reads = 0;
+    const realGetById = world.broadcastsRepo.getById.bind(world.broadcastsRepo);
+    world.broadcastsRepo.getById = async (id: string) => {
+      reads += 1;
+      if (id === 'bcast-race' && reads === 1) {
+        return { ...base, recipients: { 'c-1': { status: 'queued' } } } satisfies BroadcastItem;
+      }
+      return realGetById(id);
+    };
+
+    const res = await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: 'SMbcastrace', MessageStatus: 'delivered' }),
+    );
+    expect(res.status).toBe(200);
+
+    // The rollup retried the load, found the slot, and rolled up delivered.
+    const bcast = world.broadcasts.get('bcast-race')!;
+    expect(bcast.recipients['c-1']?.status).toBe('delivered');
+    expect(bcast.stats.delivered).toBe(1);
+    expect(reads).toBeGreaterThanOrEqual(2); // the retry actually happened
   });
 
   it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {

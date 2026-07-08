@@ -920,6 +920,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             message.tsMsgId,
             mappedStatus,
             ErrorCode,
+            statusRetryDelayMs,
           );
         } catch (err) {
           log.error({ err, providerSid: MessageSid, broadcastId: message.broadcast_id }, 'broadcast delivery rollup failed — message status recorded, broadcast stats stale');
@@ -1069,6 +1070,7 @@ async function rollIntoBroadcast(
   tsMsgId: string,
   deliveryStatus: DeliveryStatus,
   errorCode: string | undefined,
+  statusRetryDelayMs: number,
 ): Promise<void> {
   // Only terminal delivery outcomes roll up; intermediate (sent/queued)
   // callbacks for a broadcast message are already reflected by the send job.
@@ -1087,12 +1089,23 @@ async function rollIntoBroadcast(
   }
   // Find the recipient slot for THIS message (matched by the persisted
   // conversationId + tsMsgId stamped at send time).
-  const entry = Object.entries(broadcast.recipients ?? {}).find(
-    ([, r]) => r.conversationId === conversationId && r.tsMsgId === tsMsgId,
-  );
+  const matchesSlot = (r: BroadcastRecipient): boolean =>
+    r.conversationId === conversationId && r.tsMsgId === tsMsgId;
+  let entry = Object.entries(broadcast.recipients ?? {}).find(([, r]) => matchesSlot(r));
   if (!entry) {
-    log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot — ignored');
-    return;
+    // The fan-out persists the recipient slot a beat AFTER the provider send
+    // (post-send A2P pacing), so a fast delivery callback can arrive before the
+    // slot lands. Re-load the broadcast ONCE after a short wait before declaring
+    // the outcome lost — same delay seam as the /status unknown-SID retry.
+    await delay(statusRetryDelayMs);
+    const reloaded = await broadcasts.getById(broadcastId);
+    entry = reloaded
+      ? Object.entries(reloaded.recipients ?? {}).find(([, r]) => matchesSlot(r))
+      : undefined;
+    if (!entry) {
+      log.warn({ broadcastId, conversationId }, 'broadcast delivery rollup: no matching recipient slot — ignored');
+      return;
+    }
   }
   const [contactKey, slot] = entry;
   if (!broadcastSlotMayTransition(slot.status)) {

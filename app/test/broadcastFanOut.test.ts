@@ -589,4 +589,40 @@ describe('broadcast.send (M1.8a)', () => {
       .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('listing-send row failed'));
     expect(errs.length).toBeGreaterThanOrEqual(1);
   });
+
+  // --- DLR-rollup race: persist the recipient slot BEFORE the pacing token ---
+  it('records the sent recipient slot BEFORE acquiring the A2P pacing token (race fix)', async () => {
+    // The delivery callback matches a recipient by its persisted slot
+    // (conversationId+tsMsgId). If the ~1s A2P token acquire runs BEFORE the
+    // slot write, a fast callback lands in the gap and its outcome is lost. So
+    // the success-path recordRecipient(+bumpStats) MUST precede acquire.
+    const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
+    seedUnit(world);
+    seedBroadcast(world, [alice]);
+
+    // A shared call-order log: both acquire() and the 'sent' slot write append.
+    const order: string[] = [];
+    const acquire = vi.fn(async () => {
+      order.push('acquire');
+    });
+    const bucket = { acquire } as unknown as TokenBucket;
+
+    // Wrap setRecipient so the 'sent' write records its position relative to
+    // acquire (the fake still applies the write for real).
+    const realSetRecipient = world.broadcastsRepo.setRecipient.bind(world.broadcastsRepo);
+    world.broadcastsRepo.setRecipient = async (broadcastId, contactKey, recipient, allowedPriorStatuses) => {
+      if (recipient.status === 'sent') order.push('setRecipient:sent');
+      return realSetRecipient(broadcastId, contactKey, recipient, allowedPriorStatuses);
+    };
+
+    wireHandler(world, logger, bucket);
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+
+    const sentIdx = order.indexOf('setRecipient:sent');
+    const acquireIdx = order.indexOf('acquire');
+    expect(sentIdx).toBeGreaterThanOrEqual(0);
+    expect(acquireIdx).toBeGreaterThanOrEqual(0);
+    // The recipient slot is persisted BEFORE the pacing token is acquired.
+    expect(sentIdx).toBeLessThan(acquireIdx);
+  });
 });

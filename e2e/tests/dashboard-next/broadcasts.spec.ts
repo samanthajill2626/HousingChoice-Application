@@ -165,6 +165,13 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // At least one recipient row is a contact link → /contacts/<id>.
     await expect(recipients.getByRole('link').first()).toHaveAttribute('href', /\/contacts\//);
 
+    // Regression net (the DLR-rollup race that let recipients stick at "Sent"):
+    // a recipient advances to Delivered. The fake fires delivery callbacks a
+    // beat after the send; the results view live-updates via the broadcast.updated
+    // SSE (debounced refetch), so a recipient row's badge reaches "Delivered"
+    // with no manual reload. This is the assertion that was missing before.
+    await expect(recipients.getByText('Delivered').first()).toBeVisible({ timeout: 15_000 });
+
     // --- PROOF OF SEND via the fake-twilio thread store (not real SMS): the
     // "keep" tenant got the outbound broadcast body; the "drop" tenant did NOT. ---
     await expect

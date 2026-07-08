@@ -278,13 +278,9 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       const body = renderBody(broadcast.body_template, unitContext, firstNameOf(contact));
 
       try {
-        // A2P meter: ONE token per REAL outbound SMS. sendMessage runs FIRST —
-        // it may throw SendRefusedError (conversation-level opt-out / breaker /
-        // manual) BEFORE any adapter send, and a refusal must spend NO token.
-        // A resolved sendMessage means the message reached the adapter, so we
-        // acquire the token in the SUCCESS path. Pacing is preserved: one token
-        // per actual send still rate-limits against the shared ~1/s bucket
-        // (post-send pacing — the next recipient waits behind this token).
+        // sendMessage runs FIRST — it may throw SendRefusedError (conversation-
+        // level opt-out / breaker / manual) BEFORE any adapter send, and a
+        // refusal must spend NO token (the throw skips everything below).
         const outcome = await sendMessage({
           conversationId: conversation.conversationId,
           body,
@@ -292,13 +288,22 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           automated: true,
           broadcastId: payload.broadcastId,
         });
-        await deps.tokenBucket?.acquire(1);
+        // Persist the recipient slot (conversationId+tsMsgId, status 'sent') +
+        // bump stats BEFORE the A2P pacing acquire. ORDER MATTERS: the provider's
+        // delivery status callback can fire within the ~1s token gap, and the
+        // /status rollup (rollIntoBroadcast) matches THIS message to its slot by
+        // conversationId+tsMsgId — so the slot MUST exist before the token is
+        // acquired, or a fast delivered/failed outcome finds no slot and is lost.
         await recordRecipient(broadcasts, payload.broadcastId, contactKey, {
           conversationId: outcome.conversationId,
           tsMsgId: outcome.tsMsgId,
           status: 'sent',
         });
         await broadcasts.bumpStats(payload.broadcastId, { sent: 1, queued: -1 });
+        // A2P meter: ONE token per REAL outbound SMS. Acquiring AFTER the slot
+        // write preserves pacing — the token still gates the NEXT send (post-send
+        // pacing), so the shared ~1/s bucket still rate-limits the fan-out.
+        await deps.tokenBucket?.acquire(1);
         sentCount += 1;
         // BE2/C2: a delivered property is a `listing_sent` milestone on the
         // tenant's timeline. Prefer the unit (the thing sent) as the deep-link

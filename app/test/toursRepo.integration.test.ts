@@ -356,9 +356,9 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
   });
 
   it('listByStatus returns empty array for a status with no matching tours', async () => {
-    const result = await tours.listByStatus('confirmed');
-    // confirmed tours may or may not exist from other tests, but this call
-    // should not throw — it may return any non-error result
+    const result = await tours.listByStatus('no_show');
+    // no_show tours may or may not exist from other tests, but this call
+    // should not throw - it may return any non-error result
     expect(Array.isArray(result)).toBe(true);
   });
 

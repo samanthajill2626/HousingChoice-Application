@@ -366,10 +366,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Rules:
     //   - 'closed' is terminal: no status change is allowed from 'closed'.
     //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
-    //     it, and the only ways out are booking (→ scheduled, which requires a
-    //     time) or canceling — confirmed/toured/no_show all presuppose a time.
+    //     it, and the only ways out are booking (-> scheduled, which requires a
+    //     time) or canceling - toured/no_show presuppose a time.
     //   - The only path back to 'scheduled' is via canReschedule() (i.e. from
-    //     requested/scheduled/confirmed/canceled/no_show — NOT toured/closed).
+    //     requested/scheduled/canceled/no_show - NOT toured/closed).
     if (newStatus !== undefined) {
       const targetStatus = newStatus as TourStatus;
 
@@ -388,9 +388,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
       if (currentStatus === 'requested' && targetStatus !== 'scheduled' && targetStatus !== 'canceled') {
         // Booking is the only forward path out of requested (the diagram's
-        // booking step is what advances the tour); confirmed/toured/no_show on
-        // a tour that never had a time would break booking semantics — e.g.
-        // an unreschedulable 'toured' dead end with no ladder ever armed.
+        // booking step is what advances the tour); toured/no_show on a tour
+        // that never had a time would break booking semantics - e.g. an
+        // unreschedulable 'toured' dead end with no ladder ever armed.
         res.status(409).json({ error: 'illegal_status_transition', detail: `a requested tour can only be booked (scheduled) or canceled (requested: ${targetStatus})` });
         return;
       }
@@ -446,10 +446,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (newStatus !== undefined) patch['status'] = newStatus;
     // Booking / revival: a scheduledAt patch with no explicit status on a
     // requested (booking), canceled, or no_show (revival) tour auto-advances to
-    // 'scheduled' in the same update — a fresh time on a dead-but-reschedulable
+    // 'scheduled' in the same update - a fresh time on a dead-but-reschedulable
     // tour must never leave it reading Canceled/No show with a live ladder.
-    // (confirmed keeps its status on a bare time change — a reschedule should
-    // not demote a confirmed tour.)
     if (
       scheduledAtIso !== undefined &&
       newStatus === undefined &&
@@ -482,11 +480,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // still-pending rungs (a tenant who showed up must never get the
     // no_show_checkin "you may have missed your tour" text).
     const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
-    const armable = effectiveStatus === 'scheduled' || effectiveStatus === 'confirmed';
+    const armable = effectiveStatus === 'scheduled';
     // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
-    // status-only revival from canceled/no_show uses the stored time — its
-    // rungs were canceled and must come back). A status-only 'confirmed' patch
-    // does NOT re-arm (it would re-fire the confirmation rung).
+    // status-only revival from canceled/no_show uses the stored time - its
+    // rungs were canceled and must come back).
     const rearmTrigger = scheduledAtIso !== undefined || patch['status'] === 'scheduled';
     // Whether the reminder ladder changed on this patch — drives the ONE
     // scheduled.updated emit below (arm/reschedule OR cancel, never both).

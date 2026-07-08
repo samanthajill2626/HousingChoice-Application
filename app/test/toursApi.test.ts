@@ -302,7 +302,7 @@ describe('PATCH /api/tours/:tourId', () => {
     const { app } = makeWebhookHarness();
     const res = await authed(app)
       .patch('/api/tours/no-such-tour')
-      .send({ status: 'confirmed' });
+      .send({ status: 'canceled' });
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'tour_not_found' });
   });
@@ -335,6 +335,24 @@ describe('PATCH /api/tours/:tourId', () => {
       .patch(`/api/tours/${tourId}`)
       .send({ outcome: 'dunno' });
     expect(badOutcome.status).toBe(400);
+  });
+
+  it("PATCH { status: 'confirmed' } is a plain 400 invalid-status error (the status was removed 2026-07-08)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // The removed value fails the isTourStatus field validation FIRST - the
+    // natural 400 with the existing invalid-field error shape, NOT a special
+    // 409 (orchestrator decision E-B2). The enum listing must not offer it.
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'status must be one of: requested, scheduled, toured, no_show, canceled, closed',
+    });
+
+    // The tour is untouched (still scheduled).
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
   });
 });
 
@@ -387,7 +405,7 @@ describe('PATCH → toured records the tour_took_place activity milestone', () =
     const tourId = created.body.tour.tourId as string;
     const tenantId = BASE_CREATE_BODY.tenantId;
 
-    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
     expect(res.status).toBe(200);
 
     const { items } = await world.activityEventsRepo.listByContact(tenantId);
@@ -555,13 +573,13 @@ describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
     expect(res.body.error).toBe('illegal_status_transition');
   });
 
-  it("a requested tour can only be booked or canceled — confirmed/toured/no_show are 409", async () => {
+  it("a requested tour can only be booked or canceled - toured/no_show/closed are 409", async () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    for (const target of ['confirmed', 'toured', 'no_show', 'closed']) {
+    for (const target of ['toured', 'no_show', 'closed']) {
       const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: target });
       expect(res.status, `requested → ${target}`).toBe(409);
       expect(res.body.error).toBe('illegal_status_transition');
@@ -655,16 +673,17 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
   });
 
-  it("status-only {status:'confirmed'} does NOT re-arm (no duplicate confirmation text)", async () => {
+  it("status-only {status:'no_show'} keeps the pending rows (the reschedule nudge is for exactly this)", async () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     const before = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+    expect(before.length).toBeGreaterThan(0);
 
-    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
     expect(res.status).toBe(200);
     const after = pendingRows(world, tourId).map((r) => r.reminderId).sort();
-    expect(after).toEqual(before); // same rows — nothing canceled, nothing re-armed
+    expect(after).toEqual(before); // same rows - nothing canceled, nothing re-armed
   });
 });
 

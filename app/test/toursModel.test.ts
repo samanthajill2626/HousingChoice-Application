@@ -15,16 +15,20 @@ import {
 } from '../src/lib/toursModel.js';
 
 describe('toursModel — TOUR_STATUSES', () => {
-  it('contains exactly the seven expected statuses in order (requested first)', () => {
+  it('contains exactly the six expected statuses in order (requested first)', () => {
     expect([...TOUR_STATUSES]).toEqual([
       'requested',
       'scheduled',
-      'confirmed',
       'toured',
       'no_show',
       'canceled',
       'closed',
     ]);
+  });
+
+  it("does NOT contain 'confirmed' (removed 2026-07-08 - scheduled covers it)", () => {
+    expect([...TOUR_STATUSES]).not.toContain('confirmed');
+    expect(isTourStatus('confirmed')).toBe(false);
   });
 
   it('status keys are snake_case (no spaces/uppercase)', () => {
@@ -35,7 +39,7 @@ describe('toursModel — TOUR_STATUSES', () => {
 });
 
 describe('toursModel — isTourStatus guard', () => {
-  it('accepts all seven valid statuses', () => {
+  it('accepts all six valid statuses', () => {
     for (const s of TOUR_STATUSES) {
       expect(isTourStatus(s)).toBe(true);
     }
@@ -88,7 +92,7 @@ describe('toursModel — TOUR_STATUS_LABELS', () => {
 
 describe('toursModel — canReschedule', () => {
   it('returns true for reschedulable statuses (requested = booking rides the same guard)', () => {
-    const reschedulable: TourStatus[] = ['requested', 'scheduled', 'confirmed', 'canceled', 'no_show'];
+    const reschedulable: TourStatus[] = ['requested', 'scheduled', 'canceled', 'no_show'];
     for (const s of reschedulable) {
       expect(canReschedule(s)).toBe(true);
     }
@@ -108,7 +112,7 @@ describe('toursModel — canReschedule', () => {
   it('covers the exact reschedule set — no extra trues', () => {
     const trueSet = TOUR_STATUSES.filter((s) => canReschedule(s));
     expect(trueSet.sort()).toEqual(
-      ['canceled', 'confirmed', 'no_show', 'requested', 'scheduled'].sort(),
+      ['canceled', 'no_show', 'requested', 'scheduled'].sort(),
     );
   });
 });

@@ -455,18 +455,19 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).not.toContain('placement-lost-deadline');
   });
 
-  it('a canceled tour today does NOT appear in tours_today (scheduled + confirmed do)', async () => {
+  it('tours_today is scheduled-ONLY: canceled and toured tours today do not appear', async () => {
     seedTenant('t-canceled', 'Cancel', 'Ed');
     seedTenant('t-touring', 'Still', 'Touring');
-    seedTenant('t-confirmed', 'Con', 'Firmed');
+    seedTenant('t-toured', 'Al', 'Ready');
     await seedTour({ tourId: 'tour-canceled', tenantId: 't-canceled', scheduledAt: todayNoonIso(), status: 'canceled' });
     await seedTour({ tourId: 'tour-live', tenantId: 't-touring', scheduledAt: todayNoonIso() });
-    await seedTour({ tourId: 'tour-confirmed', tenantId: 't-confirmed', scheduledAt: todayNoonIso(), status: 'confirmed' });
+    // A tour that already happened today must not read as "Tour today" work.
+    await seedTour({ tourId: 'tour-done', tenantId: 't-toured', scheduledAt: todayNoonIso(), status: 'toured' });
 
     const tours = (await getItems()).filter((i) => i.group === 'tours_today');
     const ids = tours.map((i) => i.refId);
     expect(ids).toContain('tour-live');
-    expect(ids).toContain('tour-confirmed');
+    expect(ids).not.toContain('tour-done');
     expect(ids).not.toContain('tour-canceled');
   });
 

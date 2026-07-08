@@ -81,6 +81,26 @@ describe('RemindersPanel', () => {
     expect(screen.getByText(/Sent -/i)).toBeInTheDocument();
   });
 
+  it('an upcoming rung reads "sends in" (a reminder is sent, not "due")', async () => {
+    getTourReminders.mockResolvedValue({
+      // Far-future dueAt → sendRelative yields "sends in Nd".
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(/sends in/i)).toBeInTheDocument());
+    // Reminders never use the deadline wording.
+    expect(screen.queryByText(/due in/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/overdue/i)).not.toBeInTheDocument();
+  });
+
+  it('an upcoming rung whose fire time has passed reads "sending shortly"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-1', kind: 'morning_of', state: 'upcoming', dueAt: '2000-01-01T00:00:00Z' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(/sending shortly/i)).toBeInTheDocument());
+  });
+
   it('highlights the NEXT rung with aria-current and a "Next" tag', async () => {
     const next = rung({ reminderId: 'r-2', kind: 'morning_of' });
     getTourReminders.mockResolvedValue({

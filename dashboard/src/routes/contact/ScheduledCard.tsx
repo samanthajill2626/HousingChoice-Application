@@ -6,7 +6,7 @@
 // "Will be skipped — <reason>" line. Purely presentational; the server owns the
 // `upcoming` bucket and its suppression.
 import type { TimelineScheduled } from '../../api/index.js';
-import { dateTime, deadlineRelative } from '../placements/placementsFormat.js';
+import { dateTime, sendRelative } from '../placements/placementsFormat.js';
 import styles from './Timeline.module.css';
 
 /** Source → the short staff-facing tag shown on the card. */
@@ -29,12 +29,10 @@ const SUPPRESSION_COPY: Readonly<
  *  <absolute>"; once it's at/past due (the worker just hasn't run yet), the
  *  honest "sending shortly". */
 function fireTimeLabel(at: string, now: number): string {
-  const future = new Date(at).getTime() > now;
-  if (!future) return 'sending shortly';
-  // deadlineRelative yields "due in Nh" — drop the "due " so it reads "sends in Nh".
-  const rel = deadlineRelative(at, now).text.replace(/^due /, '');
-  const abs = dateTime(at);
-  return [`sends ${rel}`, abs].filter(Boolean).join(' - ');
+  // Imminent (at/past fire time) → the honest "sending shortly", no absolute.
+  if (new Date(at).getTime() <= now) return 'sending shortly';
+  // Future → "sends in Nh - <absolute>" (sendRelative is the shared wording).
+  return [sendRelative(at, now), dateTime(at)].filter(Boolean).join(' - ');
 }
 
 export function ScheduledCard({

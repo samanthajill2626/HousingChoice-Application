@@ -16,7 +16,7 @@ import {
   REMINDER_SUPPRESSION_LABELS,
   type TourReminderView,
 } from '../../api/index.js';
-import { deadlineRelative, dateTime } from '../placements/placementsFormat.js';
+import { sendRelative, dateTime } from '../placements/placementsFormat.js';
 import styles from './RemindersPanel.module.css';
 
 /** A compact state chip for a single rung, mirroring DeadlineChip's tone pattern. */
@@ -32,11 +32,13 @@ function StateChip({ rung }: { rung: TourReminderView }): React.JSX.Element {
   if (rung.state === 'canceled') {
     return <span className={`${styles.chip} ${styles.canceled}`}>Canceled</span>;
   }
-  // upcoming — amber, with the relative fire time ("due in Nh" / "overdue").
-  const rel = deadlineRelative(rung.dueAt);
+  // upcoming — amber, with the relative FIRE time. These are reminders that WILL
+  // be sent, so the wording is "sends in Nh" / "sending shortly" (mirrors the
+  // contact-timeline ScheduledCard), NOT the "due in"/"overdue" used for deadlines.
+  const text = sendRelative(rung.dueAt);
   return (
     <span className={`${styles.chip} ${styles.upcoming}`}>
-      {rel.text || 'Upcoming'}
+      {text || 'Upcoming'}
     </span>
   );
 }

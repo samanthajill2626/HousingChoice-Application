@@ -44,6 +44,22 @@ export function deadlineRelative(
   return { text: `due in ${days}d`, overdue: false };
 }
 
+/**
+ * Relative fire-time phrasing for a SCHEDULED SEND (a reminder / nudge that WILL
+ * be sent) vs now: "sends in Nm/Nh/Nd" while its fire time is in the future, else
+ * "sending shortly" (at/past its fire time but the worker just hasn't run yet).
+ * Distinct from deadlineRelative's "due in"/"overdue": a scheduled message isn't
+ * "due", it sends. Single source of truth for the scheduled-send wording shared
+ * by the Tour RemindersPanel chip and the contact-timeline ScheduledCard.
+ */
+export function sendRelative(iso: string, now: number = Date.now()): string {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return '';
+  if (at - now <= 0) return 'sending shortly';
+  // Reuse deadlineRelative's bucket math; swap the "due " lead for "sends ".
+  return `sends ${deadlineRelative(iso, now).text.replace(/^due /, '')}`;
+}
+
 /** The tenant's display name for a placement, or the tenant id when the contact
  *  isn't loaded. */
 export function tenantName(contacts: Map<string, Contact>, tenantId: string): string {

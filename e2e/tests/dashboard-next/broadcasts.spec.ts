@@ -209,25 +209,20 @@ test.describe('Broadcasts — delete an unsent draft', () => {
     // It shows in the Drafts list (resume link carries ?draftId=).
     await page.goto(`${NEXT}/broadcasts`);
     await page.getByRole('tab', { name: 'Drafts' }).click();
-    await expect(page.locator(`a[href="/broadcasts/new?draftId=${draftId}"]`)).toBeVisible({
-      timeout: 10_000,
-    });
+    const draftRow = page
+      .getByRole('listitem')
+      .filter({ has: page.locator(`a[href="/broadcasts/new?draftId=${draftId}"]`) });
+    await expect(draftRow).toBeVisible({ timeout: 10_000 });
 
-    // Reach the Delete affordance: open the composer for this draft, write a
-    // message + Preview (resume does not repopulate the template — by design;
-    // editing a draft = recreate, §10), then Delete the draft.
-    await page.goto(`${NEXT}/broadcasts/new?draftId=${draftId}`);
-    await page.getByLabel('Message').fill(`Draft to delete ${stamp}`);
-    const previewBtn = page.getByRole('button', { name: 'Preview recipients' });
-    await expect(previewBtn).toBeEnabled({ timeout: 15_000 });
-    await previewBtn.click();
-    await expect(page.getByRole('heading', { name: 'Review recipients' })).toBeVisible();
-    await page.getByRole('button', { name: 'Delete draft' }).click();
+    // Delete straight from the list row (the direct affordance — the composer
+    // can't rehydrate a draft, so the list is where a draft gets killed) →
+    // confirm in the modal.
+    await draftRow.getByRole('button', { name: /^Delete draft:/ }).click();
+    const dialog = page.getByRole('dialog', { name: 'Delete draft?' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Delete draft' }).click();
 
-    // Back on the list; the original draft is gone (it was deleted by the recreate
-    // when we re-typed the body, and the new throwaway by the Delete button).
-    await expect(page).toHaveURL(/\/broadcasts$/);
-    await page.getByRole('tab', { name: 'Drafts' }).click();
+    // The row drops from the Drafts list without a reload.
     await expect(page.locator(`a[href="/broadcasts/new?draftId=${draftId}"]`)).toHaveCount(0, {
       timeout: 10_000,
     });

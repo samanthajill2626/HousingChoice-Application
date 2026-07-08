@@ -22,6 +22,8 @@ export interface BroadcastsListState {
   loadingMore: boolean;
   loadMore: () => void;
   retry: () => void;
+  /** Drop a row locally (after a successful delete) — no refetch, cursor kept. */
+  removeRow: (broadcastId: string) => void;
 }
 
 const PAGE_LIMIT = 50;
@@ -76,6 +78,10 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
     void fetchFirstPage();
   }, [fetchFirstPage]);
 
+  const removeRow = useCallback((broadcastId: string) => {
+    setRows((prev) => prev.filter((r) => r.broadcastId !== broadcastId));
+  }, []);
+
   const loadMore = useCallback(() => {
     if (cursor === null || loadingMore) return;
     // Capture the generation at start — a ?status= filter change mid-flight bumps
@@ -117,5 +123,5 @@ export function useBroadcastsList(filter: BroadcastsFilter): BroadcastsListState
   );
   useEventStream({ onBroadcastUpdated });
 
-  return { status, rows, hasMore: cursor !== null, loadingMore, loadMore, retry };
+  return { status, rows, hasMore: cursor !== null, loadingMore, loadMore, retry, removeRow };
 }

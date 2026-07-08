@@ -1,20 +1,24 @@
 // BroadcastsList tests (§8) — the /broadcasts nav surface. Covers: rows render
 // (status pill - audience - delivered/total - date); the ?status= filter tabs
 // re-query; "New broadcast" → composer; a row → Results; a draft row → composer
-// resume (?draftId=); cursor "Load more".
+// resume (?draftId=); cursor "Load more"; draft delete (confirm modal → row
+// removed; Cancel keeps it; a raced 409 explains + refetches).
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { ApiError } from '../../api/index.js';
 import type { BroadcastStatus, BroadcastSummary, BroadcastsPage, EventStreamHandlers } from '../../api/index.js';
 
 const listBroadcasts = vi.fn();
+const deleteBroadcast = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     listBroadcasts: (...a: unknown[]) => listBroadcasts(...a),
+    deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
     useEventStream: (_h: EventStreamHandlers) => {},
   };
 });
@@ -57,6 +61,7 @@ function renderList(): void {
 
 beforeEach(() => {
   listBroadcasts.mockReset();
+  deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -116,6 +121,65 @@ describe('BroadcastsList — navigation', () => {
     renderList();
     const list = await screen.findByRole('list', { name: 'Broadcasts' });
     expect(within(list).getByRole('link')).toHaveAttribute('href', '/broadcasts/new?draftId=bcast_D');
+  });
+});
+
+describe('BroadcastsList — delete draft', () => {
+  it('shows a Delete action on draft rows only', async () => {
+    listBroadcasts.mockResolvedValue(
+      pageOf([
+        summary({ broadcastId: 'bcast_D', status: 'draft' }),
+        summary({ broadcastId: 'bcast_S', status: 'sent' }),
+      ]),
+    );
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Broadcasts' });
+    // One draft row → exactly one Delete button.
+    expect(within(list).getAllByRole('button', { name: /^Delete draft:/ })).toHaveLength(1);
+  });
+
+  it('confirming the modal deletes the draft and removes its row', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
+    renderList();
+    await screen.findByRole('list', { name: 'Broadcasts' });
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
+    await u.click(within(dialog).getByRole('button', { name: 'Delete draft' }));
+    await waitFor(() => expect(deleteBroadcast).toHaveBeenCalledWith('bcast_D'));
+    // Row dropped locally (no refetch) → the only row is gone → empty state.
+    expect(await screen.findByText('No broadcasts yet')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(listBroadcasts).toHaveBeenCalledTimes(1);
+  });
+
+  it('Cancel closes the modal without deleting', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
+    renderList();
+    await screen.findByRole('list', { name: 'Broadcasts' });
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
+    await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleteBroadcast).not.toHaveBeenCalled();
+    expect(screen.getByRole('list', { name: 'Broadcasts' })).toBeInTheDocument();
+  });
+
+  it('explains a 409 (raced to sending) and refetches the list', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
+    deleteBroadcast.mockRejectedValue(new ApiError(409, 'broadcast_not_draft', 'not a draft'));
+    renderList();
+    await screen.findByRole('list', { name: 'Broadcasts' });
+    const u = userEvent.setup();
+    await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
+    await u.click(within(dialog).getByRole('button', { name: 'Delete draft' }));
+    expect(
+      await within(dialog).findByText(/already started sending, so it can no longer be deleted/),
+    ).toBeInTheDocument();
+    // The list refetched behind the modal so the row shows its real status.
+    await waitFor(() => expect(listBroadcasts).toHaveBeenCalledTimes(2));
   });
 });
 

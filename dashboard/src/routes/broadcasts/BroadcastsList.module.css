@@ -77,8 +77,15 @@
 }
 .rowItem {
   border-bottom: 1px solid var(--c-border);
+  /* The row link + (on drafts) the Delete button side by side; the button lives
+   * OUTSIDE the link so a delete click never navigates. */
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
 }
 .row {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -119,6 +126,27 @@
   font-size: var(--fs-sm);
   color: var(--c-text-subtle);
   white-space: nowrap;
+}
+/* Draft rows only: quiet until intent (muted → danger on hover), mirroring the
+ * review step's delete treatment. */
+.deleteBtn {
+  flex: 0 0 auto;
+  margin-right: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.deleteBtn:hover {
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+}
+.deleteBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
 }
 
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
@@ -195,4 +223,16 @@
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* Delete-draft confirm modal body. */
+.confirmBody {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--c-text);
+}
+.confirmError {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
 }

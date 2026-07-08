@@ -532,7 +532,6 @@ export const TOUR_TYPE_LABELS: Readonly<Record<TourType, string>> = {
 export type TourStatus =
   | 'requested'
   | 'scheduled'
-  | 'confirmed'
   | 'toured'
   | 'no_show'
   | 'canceled'
@@ -542,7 +541,6 @@ export type TourStatus =
 export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
   requested: 'Requested',
   scheduled: 'Scheduled',
-  confirmed: 'Confirmed',
   toured: 'Toured',
   no_show: 'No show',
   canceled: 'Canceled',
@@ -595,6 +593,28 @@ export interface Tour {
 /** GET /api/tours response. */
 export interface ToursPage {
   tours: Tour[];
+}
+
+/**
+ * One row of a tour's OWN lifecycle history (GET /api/tours/:tourId/activity ->
+ * { events }). Mirrors the app-side TourActivityEvent projection verbatim: a
+ * FIXED-KEY whitelist lifted from the audit payload (never the raw document).
+ * `id` is the audit ts sort key (`<ISO>#<suffix>`) and doubles as the `before`
+ * paging cursor; `at` is its ISO prefix.
+ */
+export interface TourActivityEvent {
+  /** The audit ts SK - unique within the tour; the `before` cursor + a stable React key. */
+  id: string;
+  /** ISO 8601 - when the event happened (the ts prefix). */
+  at: string;
+  type: string;
+  /** The acting user, when the event was not a system action. */
+  actorId?: string;
+  tourId?: string;
+  /** The created placement (tour_converted rows). */
+  placementId?: string;
+  /** The opened group thread (tour_group_opened rows). */
+  conversationId?: string;
 }
 
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
@@ -861,6 +881,16 @@ export interface MessagePersistedEvent {
  *  the timeline refetches unconditionally. NO PII. */
 export interface ScheduledUpdatedEvent {
   contactId?: string;
+}
+
+/** GET /api/events 'tour.updated' payload (tour-detail-page 1a). A tour was
+ *  mutated (PATCH status/scheduledAt/exit-gate, group opened, or converted) - the
+ *  tour page refetches its header + Activity card. ID + status only: the page
+ *  re-reads the tour itself, so the event carries no names/phones/labels. Mirrors
+ *  app/src/lib/events.ts TourUpdatedEvent. NO PII. */
+export interface TourUpdatedEvent {
+  tourId: string;
+  status: string;
 }
 
 // --- Contact creation / vocabulary (extensible create flow) ------------------

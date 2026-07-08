@@ -26,6 +26,7 @@ import {
   type EventBus,
   type MessagePersistedEvent,
   type ScheduledUpdatedEvent,
+  type TourUpdatedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -1191,11 +1192,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onScheduledUpdated = (payload: ScheduledUpdatedEvent): void => {
       writeEvent('scheduled.updated', payload);
     };
+    const onTourUpdated = (payload: TourUpdatedEvent): void => {
+      writeEvent('tour.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
     events.on('placement.updated', onPlacementUpdated);
     events.on('scheduled.updated', onScheduledUpdated);
+    events.on('tour.updated', onTourUpdated);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -1218,6 +1223,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('broadcast.updated', onBroadcastUpdated);
       events.off('placement.updated', onPlacementUpdated);
       events.off('scheduled.updated', onScheduledUpdated);
+      events.off('tour.updated', onTourUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

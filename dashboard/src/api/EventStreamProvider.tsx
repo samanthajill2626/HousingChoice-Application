@@ -28,12 +28,15 @@ import type {
   MessagePersistedEvent,
   BroadcastUpdatedEvent,
   ScheduledUpdatedEvent,
+  TourUpdatedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
   onConversationUpdated?: (event: ConversationUpdatedEvent) => void;
   /** A placement (M1.10) changed — live board move / attention / tour / deadline. */
   onPlacementUpdated?: (event: PlacementUpdatedEvent) => void;
+  /** A tour (tour-detail-page) changed - the tour page refetches header + Activity. */
+  onTourUpdated?: (event: TourUpdatedEvent) => void;
   /** A message was persisted — the contact timeline refetches to show it live. */
   onMessagePersisted?: (event: MessagePersistedEvent) => void;
   /** A scheduled ladder (tour reminder / placement nudge) was armed/rescheduled/
@@ -148,6 +151,11 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
       source.addEventListener('scheduled.updated', (ev) => {
         const data = parse<ScheduledUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onScheduledUpdated, data);
+      });
+
+      source.addEventListener('tour.updated', (ev) => {
+        const data = parse<TourUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onTourUpdated, data);
       });
 
       source.addEventListener('error', () => {

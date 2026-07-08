@@ -8,14 +8,16 @@
 import {
   LISTING_STATUS_LABELS,
   TENANT_STATUS_LABELS,
+  TOUR_STATUS_LABELS,
   type LandlordStatus,
   type ListingStatus,
   type TenantStatus,
+  type TourStatus,
 } from '../api/index.js';
 import { contactStatusLabel, humanize } from '../routes/contact/format.js';
 import styles from './StatusBadge.module.css';
 
-export type BadgeTone = 'neutral' | 'positive' | 'progress' | 'muted' | 'warn';
+export type BadgeTone = 'neutral' | 'positive' | 'progress' | 'muted' | 'warn' | 'info' | 'danger';
 
 /** tenant status → tone (colour family). */
 const TENANT_TONE: Record<TenantStatus, BadgeTone> = {
@@ -51,31 +53,47 @@ const LISTING_TONE: Record<ListingStatus, BadgeTone> = {
   off_market: 'muted',
 };
 
+/** tour status -> tone. requested = attention (warn/amber); scheduled = active
+ *  (info/blue); toured = progress; closed = neutral; canceled = danger (red);
+ *  no_show = muted. Mirrors the 2026-07-08 tour-detail-page decision. */
+const TOUR_TONE: Record<TourStatus, BadgeTone> = {
+  requested: 'warn',
+  scheduled: 'info',
+  toured: 'progress',
+  closed: 'neutral',
+  canceled: 'danger',
+  no_show: 'muted',
+};
+
 const TONE_CLASS: Record<BadgeTone, string> = {
   neutral: styles.neutral ?? '',
   positive: styles.positive ?? '',
   progress: styles.progress ?? '',
   muted: styles.muted ?? '',
   warn: styles.warn ?? '',
+  info: styles.info ?? '',
+  danger: styles.danger ?? '',
 };
 
 export interface StatusBadgeProps {
   /** Which lifecycle the status belongs to (drives the label + tone maps). */
-  kind: 'tenant' | 'listing';
+  kind: 'tenant' | 'listing' | 'tour';
   /** The stored status value (snake_case wire string). */
   status: string;
 }
 
 /** Resolve the display label for a status (kind-aware), falling back to a
  *  humanized form for an off-list value. */
-function labelFor(kind: 'tenant' | 'listing', status: string): string {
+function labelFor(kind: 'tenant' | 'listing' | 'tour', status: string): string {
   if (kind === 'tenant') return TENANT_STATUS_LABELS[status as TenantStatus] ?? humanize(status);
+  if (kind === 'tour') return TOUR_STATUS_LABELS[status as TourStatus] ?? humanize(status);
   return LISTING_STATUS_LABELS[status as ListingStatus] ?? humanize(status);
 }
 
 /** Resolve the tone for a status (kind-aware), defaulting to neutral. */
-function toneFor(kind: 'tenant' | 'listing', status: string): BadgeTone {
+function toneFor(kind: 'tenant' | 'listing' | 'tour', status: string): BadgeTone {
   if (kind === 'tenant') return TENANT_TONE[status as TenantStatus] ?? 'neutral';
+  if (kind === 'tour') return TOUR_TONE[status as TourStatus] ?? 'neutral';
   return LISTING_TONE[status as ListingStatus] ?? 'neutral';
 }
 

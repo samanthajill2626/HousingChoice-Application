@@ -152,8 +152,10 @@ interface NeedsRow {
   sortAt: number | null;
 }
 
-/** Tour statuses that appear in tours_today (time-scheduled, active tours). */
-const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled', 'confirmed']);
+/** Tour statuses that appear in tours_today (time-scheduled, active tours).
+ *  scheduled ONLY - the 'confirmed' status was removed 2026-07-08 (mirrors
+ *  app/src/routes/today.ts TOURS_TODAY_STATUSES). */
+const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled']);
 
 export function buildTodayFromSources(
   placements: PlacementItem[],

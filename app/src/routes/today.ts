@@ -18,7 +18,7 @@
 // field + its tour_scheduled milestone live on; only this derivation moved).
 // Because scheduledAt is an instant, the caller also owns the day's BOUNDARIES:
 // pass ?toursFrom=&toursTo= (ISO instants for the browser's local day window) and
-// the tours group folds in scheduled/confirmed tours inside that window. When the
+// the tours group folds in scheduled tours inside that window. When the
 // window is absent we fall back to the UTC window of ?day=YYYY-MM-DD (or of the
 // UTC date when ?day= is also absent) — evening tours near the UTC boundary may
 // bucket a day off under the fallback; the dashboard always sends the window.
@@ -440,14 +440,15 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     }
 
     // --- tours_today: Tour entities whose scheduledAt falls in the caller's day window ---
-    // status ∈ {scheduled, confirmed}; 'requested' tours have no scheduledAt and
-    // are naturally excluded by the sparse byScheduledAt GSI. The window comes
+    // status = scheduled ONLY (the 'confirmed' status was removed 2026-07-08 -
+    // scheduled covers it); 'requested' tours have no scheduledAt and are
+    // naturally excluded by the sparse byScheduledAt GSI. The window comes
     // from ?toursFrom/?toursTo (the browser's local-day boundaries) with a UTC-day
     // fallback (see toursWindow above). Deleted-tenant check is best-effort (same
     // as other groups). The placement.tour_date branch is RETIRED: only Tour
     // entities appear here.
     {
-      const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled', 'confirmed']);
+      const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled']);
       const todayTours = await tours.listByScheduledRange(toursWindow.from, toursWindow.to);
       warnIfCapped('tours_today', todayTours.length);
       for (const t of todayTours) {

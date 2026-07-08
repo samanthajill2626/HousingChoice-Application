@@ -1,33 +1,57 @@
-// TourDetail — the detail page for a single tour (GET /api/tours/:tourId).
-// Shows: status, scheduled date/time ('Not yet booked' for a timeless
-// 'requested' tour), tour type, exit-gate feedback (the "Moving forward?"
-// question → PATCH { outcome, moveForward }), book / reschedule / cancel /
-// confirm / mark-toured / mark-no-show controls, an 'Open group thread'
-// affordance (provisions the masked relay group; members auto-resolved
-// server-side), and a link to the tour's relay group thread once it exists.
+// TourDetail - the /tours/:tourId detail page, rebuilt on the shared two-pane
+// shell (ui/twoPaneShell): a dark header band (back crumb, "Tour - <address>",
+// tour StatusBadge, facts line, ONE status-aware primary CTA + a "..." kebab for
+// branch actions) over a body with the three-channel conversation switcher LEFT
+// and the tour file RIGHT (Schedule / People / Reminders / Guidance / Outcome /
+// Activity). A segmented "Details | Conversation" toggle appears at <=860px,
+// leading with DETAILS (per the 2026-07-08 decision; the contact page leads with
+// comms). Everything the page needs comes from useTour + useTourChannels +
+// useTourActivity; mutations go through PATCH /api/tours/:id, POST /:id/relay, and
+// POST /api/placements/from-tour, applying the returned tour in place.
 //
-// Tours are SEPARATE from placements. This page records the navigator decision
-// (exit gate) but does NOT create a placement or change tenant status. The exit
-// gate sets `convertible`; actual conversion is a downstream step.
-//
-// Audience vocabulary: navigator/staff see "property"; tenant sees "home".
-// This is a staff-only dashboard page, so we use "property" for the unit.
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+// Tours are SEPARATE from placements: the exit gate records the navigator's
+// decision; conversion (Start placement) is a downstream step. Audience: staff
+// see "property" for the unit (GLOSSARY).
+import { useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  getTour,
-  patchTour,
-  createTourRelay,
-  createPlacementFromTour,
   ApiError,
-  TOUR_STATUS_LABELS,
+  createPlacementFromTour,
+  createTourRelay,
+  patchTour,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
+  type Contact,
   type Tour,
   type TourOutcome,
   type TourStatus,
+  type UnitItem,
 } from '../../api/index.js';
+import { Button, Spinner, StatusBadge } from '../../ui/index.js';
+import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
+import {
+  contactDisplayName,
+  contactStatusLabel,
+  formatAddress,
+  formatPhone,
+} from '../contact/format.js';
+import { formatRent } from '../listing/listingFormat.js';
+import { dateTime, shortDate } from '../placements/placementsFormat.js';
+import { useTour } from './useTour.js';
+import { useTourChannels } from './useTourChannels.js';
+import { useTourActivity } from './useTourActivity.js';
 import { RemindersPanel } from './RemindersPanel.js';
+import { TourActionsMenu } from './TourActionsMenu.js';
+import { TourConversation } from './TourConversation.js';
+import {
+  BookTourModal,
+  CancelTourModal,
+  RecordOutcomeModal,
+  RescheduleTourModal,
+} from './TourModals.js';
+import { describeTourActivity } from './tourActivityFormat.js';
+import shell from '../../ui/twoPaneShell.module.css';
+import styles from './TourDetail.module.css';
 
 /** Format a scheduledAt ISO datetime for human-readable display. */
 function formatScheduledAt(iso: string): string {
@@ -43,90 +67,142 @@ function formatScheduledAt(iso: string): string {
   });
 }
 
-/** The statuses from which a navigator can cancel (anything not already terminal). */
-const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
-  'requested',
+/** Reschedule shows for these statuses (canReschedule minus 'requested', which
+ *  uses the dedicated Book control). */
+const RESCHEDULABLE_UI: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'scheduled',
-  'confirmed',
-]);
-
-/** The statuses from which a navigator can RESCHEDULE. The backend's
- *  canReschedule also allows 'requested' (booking rides the same guard), but in
- *  the UI a requested tour uses the dedicated Book control, not Reschedule. */
-const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
-  'scheduled',
-  'confirmed',
   'canceled',
   'no_show',
 ]);
 
+/** Cancel shows for the pre-tour (non-dead) statuses. */
+const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>(['requested', 'scheduled']);
+
 export function TourDetail(): React.JSX.Element {
-  const { tourId } = useParams<{ tourId: string }>();
-  const navigate = useNavigate();
-  const [tour, setTour] = useState<Tour | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const { tourId = '' } = useParams<{ tourId: string }>();
+  const { status, tour, setTour, unit, tenant, landlord } = useTour(tourId);
 
-  // Reschedule form state
-  const [showReschedule, setShowReschedule] = useState(false);
-  const [newScheduledAt, setNewScheduledAt] = useState('');
-
-  // Book form state (a 'requested' tour has no time yet — booking sets one)
-  const [showBook, setShowBook] = useState(false);
-  const [bookScheduledAt, setBookScheduledAt] = useState('');
-
-  // Exit gate form state
-  const [showExitGate, setShowExitGate] = useState(false);
-  const [exitOutcome, setExitOutcome] = useState<TourOutcome | ''>('');
-  const [exitMoveForward, setExitMoveForward] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (!tourId) return;
-    setLoading(true);
-    setError(null);
-    const controller = new AbortController();
-    getTour(tourId, controller.signal)
-      .then((t) => { setTour(t); setLoading(false); })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setError(err instanceof ApiError ? err.message : 'Failed to load tour');
-        setLoading(false);
-      });
-    return () => controller.abort();
-  }, [tourId]);
-
-  // A bare status transition (confirm / toured / no-show / cancel): PATCH the
-  // new status and apply the returned tour — inapplicable controls disappear.
-  async function handleStatus(status: TourStatus, failMessage: string) {
-    if (!tour || submitting) return;
-    setSubmitting(true);
-    setActionError(null);
-    try {
-      const updated = await patchTour(tour.tourId, { status });
-      setTour(updated);
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : failMessage);
-    } finally {
-      setSubmitting(false);
-    }
+  if (status === 'loading') {
+    return (
+      <div className={styles.center}>
+        <Spinner center />
+      </div>
+    );
+  }
+  if (status === 'notfound') {
+    return (
+      <div className={styles.center}>
+        <p role="alert" className={styles.error}>
+          We couldn&apos;t find this tour.
+        </p>
+      </div>
+    );
+  }
+  if (status === 'error' || tour === null) {
+    return (
+      <div className={styles.center}>
+        <p role="alert" className={styles.error}>
+          We couldn&apos;t load this tour.
+        </p>
+      </div>
+    );
   }
 
-  // Open a masked group thread for the tour. Members are omitted so the server
-  // auto-resolves [tenant, unit's landlord]. On success the returned tour
-  // carries the new groupThreadId, so the 'Group thread' row + link appear.
-  async function handleOpenGroup() {
-    if (!tour || submitting) return;
-    setSubmitting(true);
+  return (
+    <TourDetailLoaded
+      key={tour.tourId}
+      tourId={tour.tourId}
+      tour={tour}
+      setTour={setTour}
+      unit={unit}
+      tenant={tenant}
+      landlord={landlord}
+    />
+  );
+}
+
+interface LoadedProps {
+  tourId: string;
+  tour: Tour;
+  setTour: (tour: Tour) => void;
+  unit: UnitItem | null;
+  tenant: Contact | null;
+  landlord: Contact | null;
+}
+
+function TourDetailLoaded({
+  tourId,
+  tour,
+  setTour,
+  unit,
+  tenant,
+  landlord,
+}: LoadedProps): React.JSX.Element {
+  const navigate = useNavigate();
+  const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
+  const channels = useTourChannels(tour, landlordId);
+
+  // Mobile pane: DETAILS first on narrow widths (per the 2026-07-08 decision).
+  const [pane, setPane] = useState<'details' | 'conversation'>('details');
+  const [modal, setModal] = useState<'book' | 'reschedule' | 'outcome' | 'cancel' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const isPm = tour.tourType === 'pm_team';
+  const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
+  const tenantName = tenant
+    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
+    : tour.tenantId;
+  const landlordName = landlord
+    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
+    : landlordId ?? null;
+  const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
+  const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not booked';
+  const factsLine = `${whenText} - ${typeLabel} - ${tenantName} -> ${address}`;
+  const createdText = typeof tour.createdAt === 'string' ? shortDate(tour.createdAt) : null;
+
+  // --- Guards ---------------------------------------------------------------
+  const canReschedule = RESCHEDULABLE_UI.has(tour.status);
+  const canCancel = CANCELABLE.has(tour.status);
+  const canMarkNoShow = tour.status === 'scheduled';
+  const canOpenGroup =
+    tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
+  const isConverted = typeof tour.convertedPlacementId === 'string';
+
+  // --- Mutations ------------------------------------------------------------
+  // A direct (no-input) status PATCH: apply the returned tour; errors surface in
+  // the header alert bar.
+  const runDirect = async (fn: () => Promise<Tour>, failMsg: string): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
     setActionError(null);
     try {
-      const { tour: updated } = await createTourRelay(tour.tourId);
+      setTour(await fn());
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : failMsg);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const markToured = (): void => void runDirect(() => patchTour(tourId, { status: 'toured' }), 'Status update failed');
+  const markNoShow = (): void => void runDirect(() => patchTour(tourId, { status: 'no_show' }), 'Status update failed');
+
+  // Provision the masked group thread (members auto-resolved server-side); shared
+  // by the header kebab AND the left-pane empty state.
+  const handleOpenGroup = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const { tour: updated } = await createTourRelay(tourId);
       setTour(updated);
+      if (typeof updated.groupThreadId === 'string') {
+        channels.setConversationId('group', updated.groupThreadId);
+      }
     } catch (err) {
       if (err instanceof ApiError) {
-        // relay_member_unresolvable carries a human-readable `detail`
-        // (e.g. which member has no phone) — show that, not the raw code.
+        // relay_member_unresolvable carries a human `detail` (which member has no
+        // phone) - show that, not the raw code.
         const detail =
           err.body !== null && typeof err.body === 'object'
             ? (err.body as { detail?: unknown }).detail
@@ -137,366 +213,349 @@ export function TourDetail(): React.JSX.Element {
             : err.message,
         );
       } else {
-        setActionError('Failed to open group thread');
+        setActionError('Failed to open group text');
       }
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
-  }
+  };
 
-  // Book a 'requested' (timeless) tour: setting scheduledAt + status 'scheduled'
-  // arms the reminder ladder server-side.
-  async function handleBook(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tour || submitting || !bookScheduledAt) return;
-    setSubmitting(true);
+  // Convert a convertible, not-yet-converted tour into a placement, then jump to
+  // it. QUIET - no announcement at convert time (founder 2026-07-02).
+  const handleConvert = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
     setActionError(null);
     try {
-      // Normalize the zoneless datetime-local value to a full ISO instant (the
-      // navigator's timezone, not the server's) — same rule as ScheduleTourForm.
-      const updated = await patchTour(tour.tourId, {
-        scheduledAt: new Date(bookScheduledAt).toISOString(),
-        status: 'scheduled',
-      });
-      setTour(updated);
-      setShowBook(false);
-      setBookScheduledAt('');
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Booking failed');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleReschedule(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tour || submitting || !newScheduledAt) return;
-    setSubmitting(true);
-    setActionError(null);
-    try {
-      // Normalize like handleBook — never send the raw zoneless string.
-      const updated = await patchTour(tour.tourId, {
-        scheduledAt: new Date(newScheduledAt).toISOString(),
-        status: 'scheduled',
-      });
-      setTour(updated);
-      setShowReschedule(false);
-      setNewScheduledAt('');
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Reschedule failed');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleExitGate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tour || submitting || exitOutcome === '' || exitMoveForward === null) return;
-    setSubmitting(true);
-    setActionError(null);
-    try {
-      // The NO path CLOSES the tour in the same patch (diagram: "outcome
-      // not_a_fit. Close the tour") — the server's terminal branch also cancels
-      // any lingering reminder rungs. The YES path leaves it 'toured'
-      // (convertible; Post-Tour & Application closes it at conversion).
-      const updated = await patchTour(tour.tourId, {
-        outcome: exitOutcome,
-        moveForward: exitMoveForward,
-        ...(exitMoveForward === false && { status: 'closed' as const }),
-      });
-      setTour(updated);
-      setShowExitGate(false);
-      setExitOutcome('');
-      setExitMoveForward(null);
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Exit gate update failed');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  // Post-Tour & Application conversion: turn a CONVERTIBLE, not-yet-converted
-  // tour into a placement, then jump to the new placement. QUIET — the server
-  // sends no announcement at convert time (founder 2026-07-02).
-  async function handleConvert() {
-    if (!tour || submitting) return;
-    setSubmitting(true);
-    setActionError(null);
-    try {
-      const { placement } = await createPlacementFromTour(tour.tourId);
+      const { placement } = await createPlacementFromTour(tourId);
       navigate(`/placements/${placement.placementId}`);
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Failed to start placement');
-    } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
+  };
+
+  // Modal confirm handlers: apply the returned tour; THROW on failure so the modal
+  // surfaces its own inline error and stays open.
+  const confirmBook = async (isoScheduledAt: string): Promise<void> => {
+    setTour(await patchTour(tourId, { scheduledAt: isoScheduledAt, status: 'scheduled' }));
+  };
+  const confirmReschedule = async (isoScheduledAt: string): Promise<void> => {
+    setTour(await patchTour(tourId, { scheduledAt: isoScheduledAt, status: 'scheduled' }));
+  };
+  const confirmOutcome = async (decision: {
+    outcome: TourOutcome;
+    moveForward: boolean;
+  }): Promise<void> => {
+    // not-a-fit ALSO closes the tour (diagram) in the same PATCH; move-forward
+    // leaves it 'toured' (convertible).
+    setTour(
+      await patchTour(tourId, {
+        outcome: decision.outcome,
+        moveForward: decision.moveForward,
+        ...(decision.moveForward === false && { status: 'closed' as const }),
+      }),
+    );
+  };
+  const confirmCancel = async (): Promise<void> => {
+    setTour(await patchTour(tourId, { status: 'canceled' }));
+  };
+
+  // --- Primary CTA (one status-aware happy-path button) ---------------------
+  let primaryCta: React.JSX.Element | null = null;
+  if (isConverted) {
+    primaryCta = (
+      <Button as="a" href={`/placements/${tour.convertedPlacementId}`} size="sm">
+        View placement
+      </Button>
+    );
+  } else if (tour.convertible === true) {
+    primaryCta = (
+      <Button size="sm" onClick={() => void handleConvert()} disabled={busy}>
+        Start placement
+      </Button>
+    );
+  } else if (tour.status === 'requested') {
+    primaryCta = (
+      <Button size="sm" onClick={() => setModal('book')}>
+        Book tour
+      </Button>
+    );
+  } else if (tour.status === 'scheduled') {
+    primaryCta = (
+      <Button size="sm" onClick={markToured} disabled={busy}>
+        Mark toured
+      </Button>
+    );
+  } else if (tour.status === 'toured' && tour.outcome === undefined) {
+    primaryCta = (
+      <Button size="sm" onClick={() => setModal('outcome')}>
+        Record outcome
+      </Button>
+    );
   }
 
-  if (loading) {
-    return <p aria-live="polite">Loading tour…</p>;
-  }
-  if (error !== null || !tour) {
-    return <p role="alert">{error ?? 'Tour not found'}</p>;
+  // --- People card data -----------------------------------------------------
+  const tenantChips: string[] = [];
+  if (tenant?.status) tenantChips.push(contactStatusLabel(tenant.type, tenant.status));
+  if (typeof tenant?.voucherSize === 'number') tenantChips.push(`Voucher ${tenant.voucherSize}BR`);
+  const propertyChips: string[] = [];
+  if (unit) {
+    if (typeof unit.beds === 'number') propertyChips.push(`${unit.beds} BR`);
+    const rent = formatRent(unit.rent_min, unit.rent_max);
+    if (rent) propertyChips.push(`${rent}/mo`);
   }
 
-  const statusLabel = TOUR_STATUS_LABELS[tour.status] ?? tour.status;
-  const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
-  // A timeless 'requested' tour has no scheduledAt yet — never "Invalid Date".
-  const scheduledDisplay =
-    tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not yet booked';
-  const canCancel = CANCELABLE.has(tour.status as TourStatus);
-  const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
-  // Book: only a 'requested' (timeless) tour is booked; afterwards Reschedule takes over.
-  const canBook = tour.status === 'requested';
-  // Status controls: Confirm only from 'scheduled'; attendance (toured /
-  // no-show) from 'scheduled' or 'confirmed'. Marking toured is what makes the
-  // exit gate reachable.
-  const canConfirm = tour.status === 'scheduled';
-  const canMarkAttendance = tour.status === 'scheduled' || tour.status === 'confirmed';
-  // Open group: only before a group exists, and never on a dead tour.
-  const canOpenGroup =
-    tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
-  // Exit gate: show when the tour has been toured but not yet decided
-  const canRecord = tour.status === 'toured' && tour.outcome === undefined;
+  // Reminder-routing chip, mirroring app tourReminders resolveUsableGroup: a
+  // self-guided tour routes to the tenant 1:1; a landlord-led/pm tour routes to a
+  // usable group, else warns that it falls back to the 1:1 (a coordination smell).
+  const routing =
+    tour.tourType === 'self_guided'
+      ? { text: 'reminders -> tenant 1:1', warn: false }
+      : tour.groupThreadId !== undefined
+        ? { text: 'reminders -> group', warn: false }
+        : { text: 'no group - reminders -> 1:1', warn: true };
+
+  const guidanceTitle =
+    tour.tourType === 'self_guided'
+      ? 'Self-guided tour'
+      : tour.tourType === 'landlord_led'
+        ? 'Landlord-led tour'
+        : 'PM-team tour';
+  const tourProcess = typeof unit?.tour_process === 'string' ? unit.tour_process : undefined;
+  const applicationProcess =
+    typeof unit?.application_process === 'string' ? unit.application_process : undefined;
 
   return (
-    <article aria-label="Tour details">
-      <h1>Tour</h1>
-
-      <section aria-label="Tour information">
-        <dl>
-          <div>
-            <dt>Status</dt>
-            <dd aria-label={`Status: ${statusLabel}`}>{statusLabel}</dd>
+    <div className={shell.page}>
+      <header className={shell.header}>
+        <Link to="/tours" className={styles.backBtn} aria-label="Back to tours">
+          {'\u2190'}
+        </Link>
+        <div className={shell.identity}>
+          <div className={shell.nameRow}>
+            <span className={shell.name}>Tour - {address}</span>
+            <StatusBadge kind="tour" status={tour.status} />
           </div>
-          <div>
-            <dt>Scheduled</dt>
-            <dd aria-label={`Scheduled: ${scheduledDisplay}`}>{scheduledDisplay}</dd>
-          </div>
-          <div>
-            <dt>Type</dt>
-            <dd>{typeLabel}</dd>
-          </div>
-          {tour.outcome !== undefined ? (
-            <div>
-              <dt>Outcome</dt>
-              <dd>{TOUR_OUTCOME_LABELS[tour.outcome] ?? tour.outcome}</dd>
-            </div>
-          ) : null}
-          {tour.moveForward !== undefined ? (
-            <div>
-              <dt>Moving forward</dt>
-              <dd>{tour.moveForward ? 'Yes' : 'No'}</dd>
-            </div>
-          ) : null}
-          {tour.convertible === true ? (
-            <div>
-              <dt>Convertible</dt>
-              <dd>Yes — ready for placement (not yet converted)</dd>
-            </div>
-          ) : null}
-          {tour.groupThreadId !== undefined ? (
-            <div>
-              <dt>Group thread</dt>
-              <dd>
-                <Link
-                  to={`/conversations/${tour.groupThreadId}`}
-                  aria-label="Open group thread"
-                >
-                  View group thread
-                </Link>
-              </dd>
-            </div>
-          ) : null}
-        </dl>
-      </section>
-
-      {/* The armed reminder ladder (confirmation/day_before/morning_of/en_route/
-          no_show_checkin) — each rung's state (upcoming w/ fire time - sent-at -
-          canceled), the NEXT reminder highlighted, and any will-be-skipped note. */}
-      <RemindersPanel tourId={tour.tourId} />
-
-      {actionError !== null ? <p role="alert">{actionError}</p> : null}
-
-      {/* Book — a 'requested' tour has no time yet; booking sets one and arms reminders. */}
-      {canBook && !showBook ? (
-        <button
-          type="button"
-          onClick={() => setShowBook(true)}
-          disabled={submitting}
-        >
-          Book tour
-        </button>
-      ) : null}
-      {showBook ? (
-        <form onSubmit={handleBook} aria-label="Book tour form">
-          <label htmlFor="tour-book-at">Date and time</label>
-          <input
-            id="tour-book-at"
-            type="datetime-local"
-            value={bookScheduledAt}
-            onChange={(e) => setBookScheduledAt(e.target.value)}
-            required
+          <div className={styles.facts}>{factsLine}</div>
+          {createdText !== null ? <div className={styles.created}>created {createdText}</div> : null}
+        </div>
+        <div className={shell.actions}>
+          {primaryCta}
+          <TourActionsMenu
+            canReschedule={canReschedule}
+            onReschedule={() => setModal('reschedule')}
+            canCancel={canCancel}
+            onCancel={() => setModal('cancel')}
+            canMarkNoShow={canMarkNoShow}
+            onMarkNoShow={markNoShow}
+            canOpenGroup={canOpenGroup}
+            onOpenGroup={() => void handleOpenGroup()}
+            busy={busy}
           />
-          <button type="submit" disabled={submitting || !bookScheduledAt}>
-            Confirm booking
-          </button>
-          <button type="button" onClick={() => { setShowBook(false); setBookScheduledAt(''); }}>
-            Cancel
-          </button>
-        </form>
+        </div>
+      </header>
+
+      {actionError !== null ? (
+        <div className={styles.errorBar} role="alert">
+          {actionError}
+        </div>
       ) : null}
 
-      {/* Reschedule */}
-      {canReschedule && !showReschedule ? (
+      {/* Narrow-width segmented toggle (hidden on wide via the shell CSS). Details
+          leads on mobile (unlike the contact page). */}
+      <div className={shell.segMobile} role="group" aria-label="View">
         <button
           type="button"
-          onClick={() => setShowReschedule(true)}
-          disabled={submitting}
-          aria-label="Reschedule this tour"
+          className={pane === 'details' ? shell.segOn : shell.segBtn}
+          aria-pressed={pane === 'details'}
+          onClick={() => setPane('details')}
         >
-          Reschedule
+          Details
         </button>
-      ) : null}
-      {showReschedule ? (
-        <form onSubmit={handleReschedule} aria-label="Reschedule tour form">
-          <label htmlFor="tour-reschedule-at">New date and time</label>
-          <input
-            id="tour-reschedule-at"
-            type="datetime-local"
-            value={newScheduledAt}
-            onChange={(e) => setNewScheduledAt(e.target.value)}
-            required
+        <button
+          type="button"
+          className={pane === 'conversation' ? shell.segOn : shell.segBtn}
+          aria-pressed={pane === 'conversation'}
+          onClick={() => setPane('conversation')}
+        >
+          Conversation
+        </button>
+      </div>
+
+      <div className={shell.body}>
+        <div
+          className={`${shell.left} ${pane === 'conversation' ? shell.paneActive : shell.paneHidden}`}
+        >
+          <TourConversation
+            tour={tour}
+            tenant={tenant}
+            landlord={landlord}
+            landlordId={landlordId}
+            channels={channels}
+            onOpenGroup={() => void handleOpenGroup()}
+            openGroupBusy={busy}
           />
-          <button type="submit" disabled={submitting || !newScheduledAt}>
-            Confirm reschedule
-          </button>
-          <button type="button" onClick={() => { setShowReschedule(false); setNewScheduledAt(''); }}>
-            Cancel
-          </button>
-        </form>
-      ) : null}
+        </div>
+        <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
+          <div className={shell.rightInner}>
+            {/* --- Schedule --- */}
+            <Card
+              title="Schedule"
+              aside={
+                canReschedule ? (
+                  <CardAction onClick={() => setModal('reschedule')} label="Reschedule tour">
+                    Reschedule
+                  </CardAction>
+                ) : undefined
+              }
+            >
+              <KV k="When" v={whenText} />
+              <KV
+                k="Type"
+                v={
+                  <span className={styles.typeRow}>
+                    {typeLabel}
+                    <span className={routing.warn ? styles.chipWarn : styles.chip}>{routing.text}</span>
+                  </span>
+                }
+              />
+            </Card>
 
-      {/* Status controls: confirm, then mark attendance (toured / no-show). */}
-      {canConfirm ? (
-        <button
-          type="button"
-          onClick={() => void handleStatus('confirmed', 'Confirm failed')}
-          disabled={submitting}
-        >
-          Confirm tour
-        </button>
+            {/* --- People --- */}
+            <Card title="People">
+              <KV
+                k="Tenant"
+                v={
+                  <span className={styles.person}>
+                    <Link to={`/contacts/${tour.tenantId}`}>{tenantName}</Link>
+                    {tenantChips.length > 0 ? <Chips items={tenantChips} /> : null}
+                  </span>
+                }
+              />
+              <KV
+                k={isPm ? 'Property manager' : 'Landlord'}
+                v={
+                  landlordId !== undefined ? (
+                    <span className={styles.person}>
+                      <Link to={`/contacts/${landlordId}`}>{landlordName ?? landlordId}</Link>
+                      {landlord?.phone ? (
+                        <span className={styles.subtle}>{formatPhone(landlord.phone)}</span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <EmptyRow>No landlord on file.</EmptyRow>
+                  )
+                }
+              />
+              <KV
+                k="Property"
+                v={
+                  <span className={styles.person}>
+                    <Link to={`/listings/${tour.unitId}`}>{address}</Link>
+                    {propertyChips.length > 0 ? <Chips items={propertyChips} /> : null}
+                  </span>
+                }
+              />
+            </Card>
+
+            {/* --- Reminders (RemindersPanel renders its own Card) --- */}
+            <RemindersPanel tourId={tour.tourId} />
+
+            {/* --- Guidance (type-aware) --- */}
+            <Card title={guidanceTitle}>
+              {tour.tourType === 'self_guided' ? (
+                <p className={styles.guidanceLead}>Photo ID before lockbox code - always.</p>
+              ) : null}
+              {tourProcess !== undefined ? (
+                <KV k="Tour process" v={<NotesText text={tourProcess} />} />
+              ) : null}
+              {applicationProcess !== undefined ? (
+                <KV k="Application process" v={<NotesText text={applicationProcess} />} />
+              ) : null}
+              {tourProcess === undefined && applicationProcess === undefined ? (
+                <EmptyRow>No tour or application notes on file.</EmptyRow>
+              ) : null}
+            </Card>
+
+            {/* --- Outcome --- */}
+            <Card title="Outcome">
+              {tour.outcome === undefined ? (
+                <PendingPanel note="Records after the tour: moving forward starts a placement; not a fit closes the tour." />
+              ) : (
+                <>
+                  <KV k="Outcome" v={TOUR_OUTCOME_LABELS[tour.outcome] ?? tour.outcome} />
+                  <KV k="Moving forward" v={tour.moveForward ? 'Yes' : 'No'} />
+                  {isConverted ? (
+                    <Row to={`/placements/${tour.convertedPlacementId}`} label="View the placement" />
+                  ) : tour.convertible === true ? (
+                    <Button size="sm" onClick={() => void handleConvert()} disabled={busy}>
+                      Start placement
+                    </Button>
+                  ) : null}
+                </>
+              )}
+            </Card>
+
+            {/* --- Activity --- */}
+            <TourActivityCard tourId={tour.tourId} />
+          </div>
+        </div>
+      </div>
+
+      {modal === 'book' ? (
+        <BookTourModal onClose={() => setModal(null)} onConfirm={confirmBook} />
       ) : null}
-      {canMarkAttendance ? (
+      {modal === 'reschedule' ? (
+        <RescheduleTourModal onClose={() => setModal(null)} onConfirm={confirmReschedule} />
+      ) : null}
+      {modal === 'outcome' ? (
+        <RecordOutcomeModal onClose={() => setModal(null)} onConfirm={confirmOutcome} />
+      ) : null}
+      {modal === 'cancel' ? (
+        <CancelTourModal onClose={() => setModal(null)} onConfirm={confirmCancel} />
+      ) : null}
+    </div>
+  );
+}
+
+/** The tour's OWN lifecycle history, newest-first with "load more" - mirrors
+ *  PlacementDetail's HistoryPanel, reading useTourActivity. */
+function TourActivityCard({ tourId }: { tourId: string }): React.JSX.Element {
+  const { status, rows, hasMore, loadingMore, loadMore } = useTourActivity(tourId);
+  return (
+    <Card title="Activity" aside={rows.length > 0 ? String(rows.length) : undefined}>
+      {status === 'loading' ? (
+        <Spinner center />
+      ) : status === 'error' ? (
+        <EmptyRow>We couldn&apos;t load the activity.</EmptyRow>
+      ) : rows.length === 0 ? (
+        <EmptyRow>No activity yet.</EmptyRow>
+      ) : (
         <>
-          <button
-            type="button"
-            onClick={() => void handleStatus('toured', 'Status update failed')}
-            disabled={submitting}
-          >
-            Mark toured
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleStatus('no_show', 'Status update failed')}
-            disabled={submitting}
-          >
-            Mark no-show
-          </button>
+          <ul className={styles.activity} aria-label="Tour activity">
+            {rows.map((row, i) => {
+              const d = describeTourActivity(row);
+              return (
+                <li key={`${row.id}:${i}`} className={styles.activityRow}>
+                  <div className={styles.activityTop}>
+                    <span className={styles.activityType}>
+                      {d.to !== undefined ? <Link to={d.to}>{d.label}</Link> : d.label}
+                    </span>
+                    <span className={styles.activityTs}>{dateTime(row.at)}</span>
+                  </div>
+                  {row.actorId ? <div className={styles.activityActor}>by {row.actorId}</div> : null}
+                </li>
+              );
+            })}
+          </ul>
+          {hasMore ? (
+            <Button variant="secondary" size="sm" loading={loadingMore} onClick={loadMore}>
+              Load more
+            </Button>
+          ) : null}
         </>
-      ) : null}
-
-      {/* Cancel */}
-      {canCancel ? (
-        <button
-          type="button"
-          onClick={() => void handleStatus('canceled', 'Cancel failed')}
-          disabled={submitting}
-          aria-label="Cancel this tour"
-        >
-          Cancel tour
-        </button>
-      ) : null}
-
-      {/* Open group thread — Team-created by hand (never auto-created). Members
-          are omitted so the server auto-resolves [tenant, unit's landlord]. */}
-      {canOpenGroup ? (
-        <button
-          type="button"
-          onClick={() => void handleOpenGroup()}
-          disabled={submitting}
-        >
-          Open group thread
-        </button>
-      ) : null}
-
-      {/* Exit gate: "Moving forward?" — records the navigator decision. Does NOT create a placement. */}
-      {canRecord && !showExitGate ? (
-        <button
-          type="button"
-          onClick={() => setShowExitGate(true)}
-          disabled={submitting}
-          aria-label="Record exit gate decision"
-        >
-          Record outcome
-        </button>
-      ) : null}
-      {showExitGate ? (
-        <form onSubmit={handleExitGate} aria-label="Exit gate form">
-          <fieldset>
-            <legend>Moving forward with this property?</legend>
-            <label>
-              <input
-                type="radio"
-                name="move-forward"
-                value="yes"
-                checked={exitMoveForward === true}
-                onChange={() => { setExitMoveForward(true); setExitOutcome('move_forward'); }}
-              />
-              Yes — move forward
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="move-forward"
-                value="no"
-                checked={exitMoveForward === false}
-                onChange={() => { setExitMoveForward(false); setExitOutcome('not_a_fit'); }}
-              />
-              No — not a fit
-            </label>
-          </fieldset>
-          <button
-            type="submit"
-            disabled={submitting || exitMoveForward === null}
-          >
-            Save decision
-          </button>
-          <button
-            type="button"
-            onClick={() => { setShowExitGate(false); setExitOutcome(''); setExitMoveForward(null); }}
-          >
-            Cancel
-          </button>
-        </form>
-      ) : null}
-
-      {/* Post-Tour & Application: a convertible, not-yet-converted tour offers
-          'Start placement' (converts + jumps to the new placement). Once converted
-          the tour carries convertedPlacementId → link to the placement instead. */}
-      {tour.convertible === true && tour.convertedPlacementId === undefined ? (
-        <button
-          type="button"
-          onClick={() => void handleConvert()}
-          disabled={submitting}
-          aria-label="Start placement from this tour"
-        >
-          Start placement
-        </button>
-      ) : null}
-      {typeof tour.convertedPlacementId === 'string' ? (
-        <Link to={`/placements/${tour.convertedPlacementId}`}>View placement</Link>
-      ) : null}
-    </article>
+      )}
+    </Card>
   );
 }

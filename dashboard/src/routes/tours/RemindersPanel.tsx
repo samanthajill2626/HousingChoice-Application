@@ -8,15 +8,24 @@
 // The NEXT rung to fire is highlighted.
 //
 // Staff-facing panel on a staff-only page, so "reminders"/"tour" wording is fine.
-import { useEffect, useState } from 'react';
+//
+// LIVE: arming/rescheduling/canceling a reminder ladder emits a
+// `scheduled.updated` SSE event (advisory payload - it carries no tourId, so we
+// refetch on any), and every mutation on this tour emits `tour.updated` - we
+// subscribe to both (the useTourActivity pattern) so an on-page Book/Reschedule/
+// Mark-toured refreshes the ladder without a reload.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTourReminders,
+  useEventStream,
   ApiError,
   REMINDER_KIND_LABELS,
   REMINDER_SUPPRESSION_LABELS,
   type TourReminderView,
+  type TourUpdatedEvent,
 } from '../../api/index.js';
 import { sendRelative, dateTime } from '../placements/placementsFormat.js';
+import { Card } from '../contact/Card.js';
 import styles from './RemindersPanel.module.css';
 
 /** A compact state chip for a single rung, mirroring DeadlineChip's tone pattern. */
@@ -43,37 +52,86 @@ function StateChip({ rung }: { rung: TourReminderView }): React.JSX.Element {
   );
 }
 
-export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Element {
-  const [reminders, setReminders] = useState<TourReminderView[]>([]);
-  const [nextId, setNextId] = useState<string | undefined>(undefined);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+/** The last LANDED fetch: the ladder + which tourId it describes (loading is
+ *  derived when it doesn't match - the useTourActivity pattern, no setState in
+ *  the effect body). */
+interface Committed {
+  reminders: TourReminderView[];
+  nextId: string | undefined;
+  error: string | null;
+  /** Which tourId this state describes. */
+  forId: string;
+  /** False until the first fetch for forId lands. */
+  loaded: boolean;
+}
 
-  useEffect(() => {
+export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Element {
+  const [state, setState] = useState<Committed>({
+    reminders: [],
+    nextId: undefined,
+    error: null,
+    forId: tourId,
+    loaded: false,
+  });
+
+  // Track the in-flight request so a refetch (SSE-driven or tourId change)
+  // supersedes the previous one and a late response can't clobber fresher data.
+  const abortRef = useRef<AbortController | null>(null);
+
+  const fetchNow = useCallback(() => {
     if (!tourId) return;
-    setLoading(true);
-    setError(null);
+    abortRef.current?.abort();
     const controller = new AbortController();
+    abortRef.current = controller;
     getTourReminders(tourId, controller.signal)
       .then((page) => {
-        setReminders(page.reminders);
-        setNextId(page.next?.reminderId);
-        setLoading(false);
+        if (controller.signal.aborted) return;
+        setState({
+          reminders: page.reminders,
+          nextId: page.next?.reminderId,
+          error: null,
+          forId: tourId,
+          loaded: true,
+        });
       })
       .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setError(err instanceof ApiError ? err.message : 'Failed to load reminders');
-        setLoading(false);
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+          return;
+        }
+        setState({
+          reminders: [],
+          nextId: undefined,
+          error: err instanceof ApiError ? err.message : 'Failed to load reminders',
+          forId: tourId,
+          loaded: true,
+        });
       });
-    return () => controller.abort();
   }, [tourId]);
 
-  return (
-    <section className={styles.panel} aria-labelledby="reminders-heading">
-      <h2 id="reminders-heading" className={styles.title}>
-        Reminders
-      </h2>
+  useEffect(() => {
+    fetchNow();
+    return () => abortRef.current?.abort();
+  }, [fetchNow]);
 
+  // Live: refetch when a reminder ladder changes anywhere (scheduled.updated has
+  // no tourId to filter on) or when THIS tour mutates (belt-and-suspenders - the
+  // arm/cancel rides the same PATCH that emits it). Refetches are QUIET: the
+  // prior ladder stays up until the fresh one lands - no loading flash.
+  const onScheduledUpdated = useCallback(() => fetchNow(), [fetchNow]);
+  const onTourUpdated = useCallback(
+    (ev: TourUpdatedEvent) => {
+      if (ev.tourId === tourId) fetchNow();
+    },
+    [tourId, fetchNow],
+  );
+  useEventStream({ onScheduledUpdated, onTourUpdated });
+
+  // Committed state is for a previous tourId (or nothing landed yet) -> loading.
+  const loading = state.forId !== tourId || !state.loaded;
+  const { reminders, nextId, error } = state;
+
+  return (
+    <Card title="Reminders">
       {loading ? (
         <p className={styles.muted} aria-live="polite">
           Loading reminders…
@@ -118,6 +176,6 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           })}
         </ul>
       )}
-    </section>
+    </Card>
   );
 }

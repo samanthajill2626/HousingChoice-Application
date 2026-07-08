@@ -59,7 +59,7 @@ describe('useTours', () => {
 
   const UPCOMING = [
     { tourId: 't2', tenantId: 'c2', unitId: 'u2', scheduledAt: '2026-07-10T14:00:00Z', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-02T00:00:00Z' },
-    { tourId: 't1', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-07-05T10:00:00Z', tourType: 'landlord_led', status: 'confirmed', createdAt: '2026-06-01T00:00:00Z' },
+    { tourId: 't1', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-07-05T10:00:00Z', tourType: 'landlord_led', status: 'scheduled', createdAt: '2026-06-01T00:00:00Z' },
   ];
 
   // Fixtures use camelCase createdAt — the REAL wire field (toursRepo.ts stores createdAt;

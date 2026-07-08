@@ -44,3 +44,19 @@
   border-color: var(--c-evt-amber-border);
   color: var(--c-evt-amber-text);
 }
+
+/* info (blue) - the "active/booked" state (tour: scheduled). A solid brand-blue
+ * pill so it reads distinct from the soft-blue `.progress`. Tokens only. */
+.info {
+  background: var(--c-brand);
+  border-color: var(--c-brand);
+  color: var(--c-text-inverse);
+}
+
+/* danger (red) - an ended/negative state (tour: canceled). Reuses the same
+ * --c-danger the delivery-failed status + danger Button use. Tokens only. */
+.danger {
+  background: var(--c-danger);
+  border-color: var(--c-danger);
+  color: var(--c-text-inverse);
+}

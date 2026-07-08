@@ -177,8 +177,8 @@ test('PM-team: same shape with the PM in the landlord slot → exit NO (not a fi
   await flow.tickTourReminders();
   await flow.expectReminderInGroup('confirmation', [tenant, pm]);
 
-  // Confirm → toured → exit gate NO → [MANUAL] close the tour.
-  await flow.teamConfirmsTour();
+  // Toured -> exit gate NO -> the same PATCH closes the tour (not a fit). The
+  // 'confirmed' status was removed 2026-07-08: scheduled -> toured directly.
   await flow.teamMarksToured();
   await flow.teamRecordsExitGate('no');
   await flow.expectTourClosedNotAFit();
@@ -201,7 +201,11 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
 
-  // No mutual meeting time → usually NO group thread. The 'Open group thread'
+  // The rebuilt page: a self-guided tour opens on the Tenant channel (no group)
+  // and the Guidance card leads with the bolded ID-gate rule.
+  await flow.expectSelfGuidedTourPage();
+
+  // No mutual meeting time means usually NO group thread. The 'Open group text'
   // button still shows (an admin MAY hand-create one), so assert NON-EXISTENCE:
   // no groupThreadId on the tour + no pool-number traffic to the tenant.
   await flow.expectNoTourGroup();
@@ -301,4 +305,69 @@ test('activity coverage: a canceled tour pins on the tenant timeline', async ({ 
   // Cancel → a `tour_canceled` pin.
   await flow.teamCancelsTour();
   await flow.expectTourMilestoneOnTenantTimeline('Tour canceled');
+});
+
+// The page-driven arc: walk the WHOLE sequence THROUGH the rebuilt TourDetail
+// page (not just the API) - the two-pane conversation switcher (group send +
+// relay fan-out, tenant 1:1), the header CTA ladder (Book -> Mark toured ->
+// Record outcome -> Start placement), and the Outcome + Activity cards.
+test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -> toured -> outcome YES -> start placement -> Activity + placement link', async ({
+  page,
+  request,
+}) => {
+  test.slow(); // a full page-driven walk with a relay fan-out + a conversion.
+  const flow = new Scenario(page, request);
+  const { tenant, owner, unit } = await searchingTenantOwnerUnit(flow, {
+    tenant: 'Arc',
+    owner: 'Host',
+  });
+
+  // Interest -> a timeless 'requested' tour; the page shows Requested + Not booked.
+  await flow.tenantAsksToTour(unit);
+  await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
+
+  // Open the masked group ON the page (the Group tab empty state), then send from
+  // the Group tab -> the relay fans the message out to BOTH members.
+  await flow.teamOpensTourGroup();
+  await flow.expectGroupIntros([tenant, owner]);
+  await flow.teamSendsInGroupTab('Are you both set for the visit?', [tenant, owner]);
+
+  // The Tenant channel tab shows the tenant 1:1 (their tour-interest inbound).
+  await flow.expectTenantTabShows1to1(/would like to tour/i);
+
+  // Book via the header CTA modal -> Scheduled -> Mark toured (CTA) -> Record
+  // outcome YES (CTA modal) -> convertible.
+  await flow.teamBooksTour(tourSchedule());
+  await flow.teamMarksToured();
+  await flow.teamRecordsExitGate('yes');
+  await flow.expectTourConvertible();
+
+  // Start placement (CTA) navigates to the new placement; the tour then links back.
+  await flow.teamConvertsTourToPlacement();
+  await flow.expectTourShowsPlacementLink();
+
+  // The Activity card tells the whole story (group opened, booked, toured,
+  // outcome, converted). Order-independent presence check.
+  await flow.expectTourActivityRows([
+    'Group text opened',
+    'Tour scheduled',
+    'Tour took place',
+    'Outcome recorded',
+    'Converted to placement',
+  ]);
+});
+
+// Mobile (M1): the rebuilt page leads with DETAILS on a 360px viewport (unlike the
+// contact page, which leads with comms), and the primary CTA stays reachable
+// without horizontal scroll.
+test('mobile: the tour page opens on Details with the primary CTA in-viewport (360px)', async ({
+  page,
+  request,
+}) => {
+  const flow = new Scenario(page, request);
+  const { unit } = await searchingTenantOwnerUnit(flow, { tenant: 'Mobi', owner: 'Narrow' });
+  await flow.tenantAsksToTour(unit);
+  await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
+
+  await flow.expectMobileDetailsFirst();
 });

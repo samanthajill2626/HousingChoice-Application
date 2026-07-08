@@ -868,9 +868,9 @@ function buildLandlordsMatrix(): LandlordGroup[] {
 //
 // Per status:
 //   - requested  — TIMELESS: no scheduledAt, ZERO reminder rows (invariant).
-//   - scheduled/confirmed — UPCOMING (scheduledAt = now + Ndays): a SENT
+//   - scheduled  - UPCOMING (scheduledAt = now + Ndays): a SENT
 //     confirmation (armed at creation) + a PENDING day_before whose dueAt =
-//     scheduledAt − 24h ≥ now, so listDue(now) never returns it (no live-fire).
+//     scheduledAt - 24h >= now, so listDue(now) never returns it (no live-fire).
 //   - toured/no_show/canceled/closed — recent PAST (scheduledAt = now − Ndays):
 //     ALL reminders terminal. day_before sent at its dueAt (= scheduledAt − 24h);
 //     no_show adds a sent no_show_checkin at scheduledAt + 30m; canceled's
@@ -892,11 +892,10 @@ interface TourGroup {
 }
 
 // Upcoming statuses are future-dated; the rest of the non-requested statuses are
-// recent-past. Day offsets are indexed by (rep − 1) for per-rep variety.
-const UPCOMING_TOUR_STATUSES: ReadonlySet<TourStatus> = new Set<TourStatus>(['scheduled', 'confirmed']);
+// recent-past. Day offsets are indexed by (rep - 1) for per-rep variety.
+const UPCOMING_TOUR_STATUSES: ReadonlySet<TourStatus> = new Set<TourStatus>(['scheduled']);
 const UPCOMING_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
   scheduled: [3, 5],
-  confirmed: [2, 4],
 };
 const PAST_TOUR_DAYS: Partial<Record<TourStatus, readonly [number, number]>> = {
   toured: [4, 6],

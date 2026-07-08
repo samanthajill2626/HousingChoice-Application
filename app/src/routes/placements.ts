@@ -725,6 +725,25 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       stage: created.stage,
       fromTourId: tour.tourId,
     });
+    // Tour-history milestone (tour-detail-page 1a): the conversion is the final
+    // chapter of the tour's OWN story - a tours#<tourId> audit row carrying the
+    // created placementId (the Activity card links it). Best-effort: a failed
+    // write must never fail the 201 (the placement + finalize are persisted).
+    try {
+      await audit.append(`tours#${tour.tourId}`, 'tour_converted', {
+        tourId: tour.tourId,
+        placementId: created.placementId,
+        ...(req.user?.userId !== undefined && { actor: req.user.userId }),
+      });
+    } catch (err) {
+      log.error(
+        { err, tourId: tour.tourId, placementId: created.placementId },
+        'tour_converted tour audit failed (best-effort)',
+      );
+    }
+    // Live tour-page refresh (tour-detail-page 1a): the finalize patch above
+    // just closed the tour. ID + status only (no PII).
+    events.emit('tour.updated', { tourId: tour.tourId, status: 'closed' });
     await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
     // Arm the tenant's voucher_expiration deadline from the contact date (best-effort).
     await armVoucherFromTenant(created.placementId, created.tenantId);

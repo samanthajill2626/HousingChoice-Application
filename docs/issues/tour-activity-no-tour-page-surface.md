@@ -3,11 +3,21 @@ id: tour-activity-no-tour-page-surface
 title: Tour detail page shows none of its own lifecycle history
 type: improvement
 severity: low
-status: open
+status: resolved
+resolved: 2026-07-08
 area: dashboard/tours
 created: 2026-07-03
-refs: app/src/routes/tours.ts, dashboard/src/routes/tour/
+refs: app/src/routes/tours.ts, dashboard/src/routes/tours/
 ---
+
+**Resolution (2026-07-08, tour-detail-page feature).** Fixed via suggested option
+(a). Phase 1a added a third best-effort `audit.append(`tours#<tourId>`, ...)` write
+in `recordTourEvent` (plus `tour_group_opened` / `tour_converted` milestones) and a
+`GET /api/tours/:tourId/activity` endpoint (limit + `before` cursor). Phase 1b's
+rebuilt tour page now has its OWN **Activity card** (right column) reading
+`tours#<id>` via that endpoint through `useTourActivity` + `getTourActivity`,
+mirroring the placement History panel (newest-first, load-more). The navigator no
+longer has to leave for the tenant or property surface to see the tour's history.
 
 **Problem.** The activity-coverage feature (2026-07-03) propagates the tour
 lifecycle to two surfaces — the tenant's contact timeline (activity milestones:

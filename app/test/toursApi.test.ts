@@ -302,7 +302,7 @@ describe('PATCH /api/tours/:tourId', () => {
     const { app } = makeWebhookHarness();
     const res = await authed(app)
       .patch('/api/tours/no-such-tour')
-      .send({ status: 'confirmed' });
+      .send({ status: 'canceled' });
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'tour_not_found' });
   });
@@ -335,6 +335,24 @@ describe('PATCH /api/tours/:tourId', () => {
       .patch(`/api/tours/${tourId}`)
       .send({ outcome: 'dunno' });
     expect(badOutcome.status).toBe(400);
+  });
+
+  it("PATCH { status: 'confirmed' } is a plain 400 invalid-status error (the status was removed 2026-07-08)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // The removed value fails the isTourStatus field validation FIRST - the
+    // natural 400 with the existing invalid-field error shape, NOT a special
+    // 409 (orchestrator decision E-B2). The enum listing must not offer it.
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'status must be one of: requested, scheduled, toured, no_show, canceled, closed',
+    });
+
+    // The tour is untouched (still scheduled).
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
   });
 });
 
@@ -387,7 +405,7 @@ describe('PATCH → toured records the tour_took_place activity milestone', () =
     const tourId = created.body.tour.tourId as string;
     const tenantId = BASE_CREATE_BODY.tenantId;
 
-    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
     expect(res.status).toBe(200);
 
     const { items } = await world.activityEventsRepo.listByContact(tenantId);
@@ -491,6 +509,21 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
     expect(
       world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
     ).toHaveLength(2); // one on create + one on reschedule
+
+    // No-op reschedule (MINOR 5): re-PATCH the IDENTICAL time -> nothing new on
+    // any surface (the units# audit and the tenant activity both stay put).
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_rescheduled',
+      ),
+    ).toHaveLength(1);
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+    ).toHaveLength(2);
   });
 
   it('emits tour_took_place and tour_outcome on the toured→outcome path', async () => {
@@ -538,6 +571,300 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
 });
 
 // ============================================================================
+// tours#<tourId> audit trail - the THIRD recordTourEvent write
+// (tour-detail-page 1a; feeds GET /api/tours/:tourId/activity)
+// ============================================================================
+
+describe('tours#<tourId> audit trail (third best-effort write)', () => {
+  const toursAudit = (world: FakeWorld, tourId: string) =>
+    world.auditEvents.filter((e) => e.entityKey === `tours#${tourId}`);
+
+  async function createScheduled(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const res = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(res.status).toBe(201);
+    return res.body.tour.tourId as string;
+  }
+
+  it('create-scheduled writes tours# tour_scheduled (alongside tenant + units# writes)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    const rows = toursAudit(world, tourId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      entityKey: `tours#${tourId}`,
+      event_type: 'tour_scheduled',
+      payload: { tourId },
+    });
+    // The existing two surfaces are UNCHANGED by the third write.
+    expect(world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId)).toHaveLength(1);
+    expect(
+      world.auditEvents.filter((e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_scheduled'),
+    ).toHaveLength(1);
+  });
+
+  it('a timeless (requested) create writes NO tours# row', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    expect(res.status).toBe(201);
+    expect(toursAudit(world, res.body.tour.tourId as string)).toHaveLength(0);
+  });
+
+  it('booking a requested tour (into-scheduled) writes tours# tour_scheduled', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'landlord_led' });
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-20T10:00:00.000Z' }).expect(200);
+    const rows = toursAudit(world, tourId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.event_type).toBe('tour_scheduled');
+  });
+
+  it('a reschedule (bare time change while scheduled) writes tours# tour_rescheduled', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
+    expect(toursAudit(world, tourId).map((e) => e.event_type)).toEqual([
+      'tour_scheduled',
+      'tour_rescheduled',
+    ]);
+  });
+
+  it('a no-op reschedule to the SAME time writes NO extra tours# row (MINOR 5)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
+    // Re-PATCH the identical time: idempotent, like the INTO-status milestones.
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
+    expect(toursAudit(world, tourId).map((e) => e.event_type)).toEqual([
+      'tour_scheduled',
+      'tour_rescheduled',
+    ]);
+  });
+
+  it('toured writes tours# tour_took_place (idempotent - a re-PATCH does not re-write)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(
+      toursAudit(world, tourId).filter((e) => e.event_type === 'tour_took_place'),
+    ).toHaveLength(1);
+  });
+
+  it('no_show writes tours# tour_no_show', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
+    expect(toursAudit(world, tourId).filter((e) => e.event_type === 'tour_no_show')).toHaveLength(1);
+  });
+
+  it('canceled writes tours# tour_canceled', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' }).expect(200);
+    expect(toursAudit(world, tourId).filter((e) => e.event_type === 'tour_canceled')).toHaveLength(1);
+  });
+
+  it('the exit gate writes tours# tour_outcome', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true })
+      .expect(200);
+    expect(toursAudit(world, tourId).filter((e) => e.event_type === 'tour_outcome')).toHaveLength(1);
+  });
+
+  it('a failing tours# write must NOT fail the mutation nor the other two surfaces (best-effort)', async () => {
+    const world = createFakeWorld();
+    const realAppend = world.auditRepo.append.bind(world.auditRepo);
+    world.auditRepo.append = async (entityKey, eventType, payload) => {
+      if (entityKey.startsWith('tours#')) throw new Error('injected tours# audit failure');
+      return realAppend(entityKey, eventType, payload);
+    };
+    const { app } = makeWebhookHarness({ world });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201); // create survived the failing third write
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    expect(res.status).toBe(200); // the operator mutation never fails
+
+    // The tenant-timeline + units# writes still landed; tours# has nothing.
+    expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(1);
+    expect(
+      world.auditEvents.filter((e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_took_place'),
+    ).toHaveLength(1);
+    expect(world.auditEvents.filter((e) => e.entityKey.startsWith('tours#'))).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// GET /api/tours/:tourId/activity - the tour page's Activity read
+// (placement-history paging pattern: limit + before; E-D1)
+// ============================================================================
+
+describe('GET /api/tours/:tourId/activity', () => {
+  async function walkLifecycle(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+  ): Promise<string> {
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY); // tour_scheduled
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200); // tour_took_place
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true })
+      .expect(200); // tour_outcome
+    return tourId;
+  }
+
+  it('returns { events } newest-first with the fixed-key projection (id/at/type + payload whitelist)', async () => {
+    const { app } = makeWebhookHarness();
+    const tourId = await walkLifecycle(app);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/activity`);
+    expect(res.status).toBe(200);
+    const events = res.body.events as Record<string, unknown>[];
+    expect(events.map((e) => e['type'])).toEqual([
+      'tour_outcome',
+      'tour_took_place',
+      'tour_scheduled',
+    ]);
+    for (const e of events) {
+      expect(typeof e['id']).toBe('string');
+      expect(typeof e['at']).toBe('string');
+      // at is the ISO prefix of the id SK.
+      expect((e['id'] as string).startsWith(e['at'] as string)).toBe(true);
+      expect(e['tourId']).toBe(tourId);
+      // Fixed-key whitelist: the raw payload document never leaks through.
+      expect(e['payload']).toBeUndefined();
+    }
+  });
+
+  it('never leaks unknown payload keys (fixed-key whitelist)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    // A poison row written straight to the trail: only whitelisted keys survive.
+    await world.auditRepo.append(`tours#${tourId}`, 'tour_scheduled', {
+      tourId,
+      phone: '+15555550000',
+      body: 'secret message text',
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/activity`);
+    expect(res.status).toBe(200);
+    for (const e of res.body.events as Record<string, unknown>[]) {
+      expect(e['phone']).toBeUndefined();
+      expect(e['body']).toBeUndefined();
+    }
+  });
+
+  it('honors ?limit= and pages backward with ?before= (no overlap, no gap)', async () => {
+    const { app } = makeWebhookHarness();
+    const tourId = await walkLifecycle(app); // 3 rows
+
+    const page1 = await authed(app).get(`/api/tours/${tourId}/activity?limit=2`);
+    expect(page1.status).toBe(200);
+    const rows1 = page1.body.events as { id: string; type: string }[];
+    expect(rows1).toHaveLength(2);
+    expect(rows1.map((e) => e.type)).toEqual(['tour_outcome', 'tour_took_place']);
+
+    const cursor = rows1[rows1.length - 1]!.id;
+    const page2 = await authed(app).get(
+      `/api/tours/${tourId}/activity?limit=2&before=${encodeURIComponent(cursor)}`,
+    );
+    expect(page2.status).toBe(200);
+    const rows2 = page2.body.events as { id: string; type: string }[];
+    expect(rows2).toHaveLength(1);
+    expect(rows2[0]!.type).toBe('tour_scheduled');
+    // No overlap between pages.
+    const ids1 = new Set(rows1.map((e) => e.id));
+    expect(rows2.some((e) => ids1.has(e.id))).toBe(false);
+  });
+
+  it('returns an empty trail for a tour with no history (timeless create)', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).get(`/api/tours/${tourId}/activity`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ events: [] });
+  });
+
+  it('404 tour_not_found for an unknown tour', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app).get('/api/tours/no-such-tour/activity');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'tour_not_found' });
+  });
+
+  it('400 for an invalid ?limit=', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    for (const bad of ['0', '-1', 'abc', '101', '1.5']) {
+      const res = await authed(app).get(`/api/tours/${tourId}/activity?limit=${bad}`);
+      expect(res.status, `limit=${bad}`).toBe(400);
+    }
+  });
+});
+
+// ============================================================================
+// tour.updated bus event (tour-detail-page 1a) - emitted after successful
+// PATCH mutations and relay provisioning; mirrors placement.updated plumbing.
+// ============================================================================
+
+describe('tour.updated bus emissions', () => {
+  const tourUpdates = (world: FakeWorld) => world.emitted.filter((e) => e.event === 'tour.updated');
+
+  it('a successful status PATCH emits tour.updated { tourId, status }', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(tourUpdates(world)).toHaveLength(0); // create does not emit (1a scope)
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(tourUpdates(world)).toHaveLength(1);
+    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'toured' });
+  });
+
+  it('a reschedule PATCH emits tour.updated with the post-patch status', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-22T10:00:00.000Z' })
+      .expect(200);
+    expect(tourUpdates(world)).toHaveLength(1);
+    expect(tourUpdates(world)[0]!.payload).toEqual({ tourId, status: 'scheduled' });
+  });
+
+  it('a REJECTED patch (409 illegal transition / 400 invalid field) emits nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' }).expect(200);
+    const afterClose = tourUpdates(world).length;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'scheduled' }).expect(409);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'bogus' }).expect(400);
+    expect(tourUpdates(world)).toHaveLength(afterClose);
+  });
+});
+
+// ============================================================================
 // Whole-branch-review hardening — transition guards, effective-status reminder
 // side effects, scheduledAt canonicalization, exit-gate status coupling
 // ============================================================================
@@ -555,13 +882,13 @@ describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
     expect(res.body.error).toBe('illegal_status_transition');
   });
 
-  it("a requested tour can only be booked or canceled — confirmed/toured/no_show are 409", async () => {
+  it("a requested tour can only be booked or canceled - toured/no_show/closed are 409", async () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(TIMELESS_BODY);
     expect(created.status).toBe(201);
     const tourId = created.body.tour.tourId as string;
 
-    for (const target of ['confirmed', 'toured', 'no_show', 'closed']) {
+    for (const target of ['toured', 'no_show', 'closed']) {
       const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: target });
       expect(res.status, `requested → ${target}`).toBe(409);
       expect(res.body.error).toBe('illegal_status_transition');
@@ -655,16 +982,17 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
   });
 
-  it("status-only {status:'confirmed'} does NOT re-arm (no duplicate confirmation text)", async () => {
+  it("status-only {status:'no_show'} keeps the pending rows (the reschedule nudge is for exactly this)", async () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     const before = pendingRows(world, tourId).map((r) => r.reminderId).sort();
+    expect(before.length).toBeGreaterThan(0);
 
-    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'confirmed' });
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
     expect(res.status).toBe(200);
     const after = pendingRows(world, tourId).map((r) => r.reminderId).sort();
-    expect(after).toEqual(before); // same rows — nothing canceled, nothing re-armed
+    expect(after).toEqual(before); // same rows - nothing canceled, nothing re-armed
   });
 });
 
@@ -1144,6 +1472,53 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     // The intro fanned out to both members FROM the pool number (proves relay sends).
     expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550200001', '+15550200002'].sort());
     expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
+  });
+
+  it('relay success records a tours#-ONLY tour_group_opened milestone + emits tour.updated (1a)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const activityCountBefore = world.activityEvents.length;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(201);
+    const conversationId = (res.body.conversation as Record<string, unknown>)['conversationId'];
+
+    // tours#<tourId> carries the milestone with the opened thread id + actor.
+    const opened = world.auditEvents.filter(
+      (e) => e.entityKey === `tours#${tourId}` && e.event_type === 'tour_group_opened',
+    );
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.payload).toMatchObject({ tourId, conversationId });
+    expect(opened[0]!.actorId).toBe('usr_testva00000000000000000');
+
+    // tours#-ONLY: no units# row and no tenant activity event for group-opened.
+    expect(world.auditEvents.some((e) => e.entityKey.startsWith('units#') && e.event_type === 'tour_group_opened')).toBe(false);
+    expect(world.activityEvents.length).toBe(activityCountBefore);
+
+    // tour.updated advised dashboards (ID + status only).
+    const updates = world.emitted.filter((e) => e.event === 'tour.updated');
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect(updates[updates.length - 1]!.payload).toEqual({ tourId, status: 'scheduled' });
+  });
+
+  it('a REFUSED relay provision (409 tour_not_active) records NO tour_group_opened milestone', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(409); // tour_not_active
+    expect(
+      world.auditEvents.some((e) => e.event_type === 'tour_group_opened'),
+    ).toBe(false);
   });
 
   it('404 for a missing tour', async () => {

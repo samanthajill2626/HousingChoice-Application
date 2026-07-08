@@ -146,10 +146,11 @@ test.describe('Tours page', () => {
     const tourId = tourIdMatch![1]!;
 
     // ── Tour detail sanity ──
-    // The detail page renders inside an article — status is "Scheduled".
-    const detail = page.getByRole('article', { name: 'Tour details' });
-    await expect(detail).toBeVisible();
-    await expect(detail.getByText(/Scheduled/i).first()).toBeVisible();
+    // The rebuilt detail page shows the tour StatusBadge in the header band (no
+    // more <article>/<dd> aria-labels). Scope to the page header via the
+    // "Tour - <address>" identity so the status word can't collide with a card.
+    const detailHeader = page.locator('header').filter({ hasText: 'Tour -' });
+    await expect(detailHeader.getByText('Scheduled', { exact: true })).toBeVisible();
 
     // ── /tours page — Upcoming section lists the tour ──
     await page.goto(`${NEXT}/tours`);
@@ -221,14 +222,11 @@ test.describe('Tours page', () => {
     const tourId = tourIdMatch![1]!;
 
     // ── Tour detail: status is "Requested" (the 'requested' label) ──
-    const detail = page.getByRole('article', { name: 'Tour details' });
-    await expect(detail).toBeVisible();
-    // The status <dd> renders the TOUR_STATUS_LABELS text ("Requested") and has
-    // aria-label="Status: Requested". Use getByLabel (aria-label match) since
-    // Playwright doesn't expose bare <dd> with aria-label via getByRole('definition').
-    await expect(detail.getByLabel('Status: Requested')).toBeVisible();
-    // Scheduled row shows the timeless rendering (no time set).
-    await expect(detail.getByLabel('Scheduled: Not yet booked')).toBeVisible();
+    // The rebuilt page shows the status as a header StatusBadge pill plus a "Not
+    // booked" facts line (no more <dd> aria-labels). Scope to the page header.
+    const detailHeader = page.locator('header').filter({ hasText: 'Tour -' });
+    await expect(detailHeader.getByText('Requested', { exact: true })).toBeVisible();
+    await expect(detailHeader.getByText('Not booked')).toBeVisible();
 
     // ── /tours page — "Needs booking" section lists the tour ──
     await page.goto(`${NEXT}/tours`);

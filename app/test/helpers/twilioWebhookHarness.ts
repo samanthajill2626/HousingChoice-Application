@@ -246,6 +246,7 @@ export function createFakeWorld(): FakeWorld {
   events.on('broadcast.updated', (payload) => emitted.push({ event: 'broadcast.updated', payload }));
   events.on('placement.updated', (payload) => emitted.push({ event: 'placement.updated', payload }));
   events.on('scheduled.updated', (payload) => emitted.push({ event: 'scheduled.updated', payload }));
+  events.on('tour.updated', (payload) => emitted.push({ event: 'tour.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
@@ -857,16 +858,23 @@ export function createFakeWorld(): FakeWorld {
       // `ts` SK (copied from the hidden __ts — the spread drops non-enumerable
       // keys, so it is re-attached enumerably on the COPY; world.auditEvents
       // assertions never see it). The fake uses insertion order (the hidden
-      // __seq) as the clock; `before` is an exclusive __seq bound when a test
-      // pages (none currently do). limit defaults to 50.
+      // __seq) as the clock; `before` matches the REAL repo contract - an
+      // exclusive upper bound on the `ts` SK, compared as a string (the fake
+      // __ts is `<ISO>#<zero-padded seq>`, so string order IS insertion order).
+      // limit defaults to 50.
       const seqOf = (e: object): number =>
         typeof (e as { __seq?: number }).__seq === 'number' ? (e as { __seq: number }).__seq : 0;
       const tsOf = (e: object): string | undefined =>
         typeof (e as { __ts?: string }).__ts === 'string' ? (e as { __ts: string }).__ts : undefined;
-      const beforeSeq = typeof opts.before === 'string' ? Number(opts.before) : undefined;
+      const before =
+        typeof opts.before === 'string' && opts.before.length > 0 ? opts.before : undefined;
       const items = auditEvents
         .filter((e) => e.entityKey === entityKey)
-        .filter((e) => (beforeSeq === undefined || Number.isNaN(beforeSeq) ? true : seqOf(e) < beforeSeq))
+        .filter((e) => {
+          if (before === undefined) return true;
+          const ts = tsOf(e);
+          return ts !== undefined && ts < before;
+        })
         .slice()
         .sort((a, b) => seqOf(b) - seqOf(a)) // newest-first
         .slice(0, opts.limit ?? 50)

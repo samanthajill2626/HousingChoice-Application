@@ -10,7 +10,7 @@
 //  6. Every TOUR_STATUS ×2
 //  7. §7 derivation holds for ALL placements (tenant+unit status == deriveStatuses(stage))
 //  8. Every 'parked' landlord carries park_reason
-//  9. Every reminder row belongs to a scheduled/confirmed/no_show/toured/closed/canceled
+//  9. Every reminder row belongs to a scheduled/no_show/toured/closed/canceled
 //     tour (never a 'requested' one)
 // 10. All 8 consent methods appear ≥1 across the full contacts set
 // 11. All IDs are unique across the full seed (no duplicate PKs)

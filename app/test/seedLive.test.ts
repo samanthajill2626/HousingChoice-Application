@@ -10,7 +10,7 @@
 //   5. Live tenant/unit statuses equal deriveStatuses(stage).
 //   6. Live IDs don't collide with lean/matrix/cast IDs.
 //   7. Reminder invariant: requested tours have no rows (live has none); live
-//      scheduled/confirmed tours legitimately have rows.
+//      scheduled tours legitimately have rows.
 //
 // Uses the real armTourReminders computation (same import as live.ts) to
 // compute expected dueAts — ensuring the seed and worker always agree.

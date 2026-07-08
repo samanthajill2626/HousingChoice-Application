@@ -635,8 +635,8 @@ export function placementMilestones(placement: Record<string, unknown>): Activit
 
 /**
  * Tour statuses in which the tenant PHYSICALLY toured (a `tour_took_place`
- * milestone is warranted). `no_show`/`canceled` did NOT take place; `scheduled`/
- * `confirmed` have not yet. `closed` follows a real tour, so it counts.
+ * milestone is warranted). `no_show`/`canceled` did NOT take place;
+ * `scheduled` has not yet. `closed` follows a real tour, so it counts.
  */
 const TOUR_TOOK_PLACE: ReadonlySet<TourStatus> = new Set<TourStatus>(['toured', 'closed']);
 

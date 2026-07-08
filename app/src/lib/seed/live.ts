@@ -7,7 +7,7 @@
 //           tours_today group. Its reminders are armed via the real armTourReminders.
 //   TOUR-B  landlord-led tour TOMORROW at 14:00 UTC + a relay group conv + pool
 //           number. Full 5-rung reminder ladder armed via armTourReminders.
-//   TOUR-C  confirmed tour +2 days (no new contacts — reuses live tenant/unit).
+//   TOUR-C  scheduled tour +2 days (no new contacts - reuses live tenant/unit).
 //
 //   PLACEMENT-A  overdue RTA deadline (rta_window placementDeadlines item in the
 //                PAST) → surfaces in Today's needs_you_now. Its stage_entered_at
@@ -53,7 +53,9 @@ export const LIVE_IDS = {
   // Tours
   tourToday: 'tour-live-today',
   tourTomorrow: 'tour-live-tomorrow',
-  tourConfirmed: 'tour-live-confirmed',
+  // Renamed from tour-live-confirmed (2026-07-08): the confirmed status was
+  // removed - this is the second UPCOMING (scheduled) tour, +2 days out.
+  tourUpcoming: 'tour-live-upcoming',
   // Conversations
   tenantAConv: 'conv-live-tenant-a',
   tenantBConv: 'conv-live-tenant-b',
@@ -96,7 +98,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
   const dayAfter = new Date(now);
   dayAfter.setUTCDate(dayAfter.getUTCDate() + 2);
   const dayAfterYmd = dayAfter.toISOString().slice(0, 10);
-  const scheduledAtConfirmed = `${dayAfterYmd}T14:00:00.000Z`;
+  const scheduledAtUpcoming = `${dayAfterYmd}T14:00:00.000Z`;
 
   // --- Derived statuses for live placements ---------------------------------
   // Both live placements are in 'awaiting_landlord_submission' (RTA phase →
@@ -187,7 +189,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         tour_process: 'Self-guided with lockbox. Text landlord for code.',
         created_at: iso,
       },
-      // Unit B — landlord-led tour tomorrow + confirmed tour +2d
+      // Unit B - landlord-led tour tomorrow + scheduled tour +2d
       {
         unitId: LIVE_IDS.unitB,
         landlordId: LIVE_IDS.landlordA,
@@ -332,14 +334,14 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         createdAt: iso,
         updatedAt: iso,
       },
-      // TOUR-C: confirmed +2 days
+      // TOUR-C: scheduled +2 days (second upcoming tour)
       {
-        tourId: LIVE_IDS.tourConfirmed,
+        tourId: LIVE_IDS.tourUpcoming,
         tenantId: LIVE_IDS.tenantA,
         unitId: LIVE_IDS.unitB,
         tourType: 'landlord_led',
-        status: 'confirmed',
-        scheduledAt: scheduledAtConfirmed,
+        status: 'scheduled',
+        scheduledAt: scheduledAtUpcoming,
         _schedPartition: 'tours',
         groupThreadId: LIVE_IDS.relayGroup,
         createdAt: iso,
@@ -438,7 +440,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     const toursArr = staticItems['tours'] ?? [];
     const tourToday = toursArr[0] as TourItem;
     const tourTomorrow = toursArr[1] as TourItem;
-    const tourConfirmed = toursArr[2] as TourItem;
+    const tourUpcoming = toursArr[2] as TourItem;
 
     // Arm TOUR-A (today, self-guided): confirmation always fires; day_before/
     // morning_of/en_route/no_show_checkin are skipped if their dueAt < now
@@ -457,11 +459,11 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
       `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.length} reminder${armedTomorrow.length === 1 ? '' : 's'}`,
     );
 
-    // Arm TOUR-C (+2 days, confirmed): similar to tomorrow — all 5 rungs should
+    // Arm TOUR-C (+2 days, scheduled): similar to tomorrow - all 5 rungs should
     // arm since scheduledAt is 2 days in the future.
-    const armedConfirmed = await armTourReminders(tourConfirmed, nowIso, { tourRemindersRepo: remindersRepo });
+    const armedUpcoming = await armTourReminders(tourUpcoming, nowIso, { tourRemindersRepo: remindersRepo });
     console.log(
-      `  seeded   tourReminders (live tour-confirmed): ${armedConfirmed.length} reminder${armedConfirmed.length === 1 ? '' : 's'}`,
+      `  seeded   tourReminders (live tour-upcoming): ${armedUpcoming.length} reminder${armedUpcoming.length === 1 ? '' : 's'}`,
     );
 
     // Now-relative lifecycle history: reuse the SAME deterministic generator the

@@ -53,7 +53,7 @@ const isPending = (r: Record<string, unknown>) => r['sentAt'] === undefined && r
 /** The terminal instant of a reminder (sentAt ?? canceledAt), or +∞ when pending. */
 const terminalMs = (r: Record<string, unknown>): number =>
   r['sentAt'] !== undefined ? ms(r['sentAt']) : r['canceledAt'] !== undefined ? ms(r['canceledAt']) : Infinity;
-const UPCOMING_TOUR = new Set<TourStatus>(['scheduled', 'confirmed']);
+const UPCOMING_TOUR = new Set<TourStatus>(['scheduled']);
 const PAST_TOUR = new Set<TourStatus>(['toured', 'no_show', 'canceled', 'closed']);
 
 // ---------------------------------------------------------------------------

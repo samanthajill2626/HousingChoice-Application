@@ -4,20 +4,25 @@
 //   - the NEXT rung is highlighted (aria-current + "Next" tag)
 //   - a suppression renders the "Will be skipped — <reason>" note
 //   - an empty ladder → "No reminders armed."
+//   - a scheduled.updated / same-tour tour.updated SSE event refetches the ladder
 //
 // Pattern mirrors TourDetail.test.tsx: mock the api barrel, import after mocking,
-// assert accessibility-first.
-import { render, screen, waitFor, within } from '@testing-library/react';
+// assert accessibility-first. The SSE capture mirrors useTourActivity.test.tsx.
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { TourReminderView, TourRemindersPage } from '../../api/index.js';
+import type { EventStreamHandlers, TourReminderView, TourRemindersPage } from '../../api/index.js';
 
 const getTourReminders = vi.fn();
+let streamHandlers: EventStreamHandlers | null = null;
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getTourReminders: (...a: unknown[]) => getTourReminders(...a),
+    useEventStream: (h: EventStreamHandlers) => {
+      streamHandlers = h;
+    },
   };
 });
 
@@ -36,6 +41,7 @@ function rung(over: Partial<TourReminderView> = {}): TourReminderView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  streamHandlers = null;
 });
 
 describe('RemindersPanel', () => {
@@ -129,5 +135,42 @@ describe('RemindersPanel', () => {
     getTourReminders.mockRejectedValue(new ApiError(500, 'boom', 'boom'));
     render(<RemindersPanel tourId="tour-1" />);
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+  });
+
+  it('refetches on a scheduled.updated event (arm/reschedule/cancel goes live)', async () => {
+    // Book-a-tour repro: mounts with no reminders, the ladder arms server-side,
+    // scheduled.updated fires -> the panel refetches and shows the fresh rung.
+    getTourReminders.mockResolvedValueOnce({ reminders: [] } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(/No reminders armed/i)).toBeInTheDocument());
+    expect(getTourReminders).toHaveBeenCalledTimes(1);
+
+    getTourReminders.mockResolvedValueOnce({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before' })],
+    } satisfies TourRemindersPage);
+    // The payload carries no tourId (advisory contactId only) -> refetch on any.
+    act(() => streamHandlers?.onScheduledUpdated?.({}));
+    await waitFor(() => expect(getTourReminders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
+  });
+
+  it('refetches on a tour.updated for THIS tour, ignores other tours', async () => {
+    // Mark-toured repro: the pending rung must flip to Canceled without a reload.
+    getTourReminders.mockResolvedValueOnce({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Day before')).toBeInTheDocument());
+    expect(getTourReminders).toHaveBeenCalledTimes(1);
+
+    act(() => streamHandlers?.onTourUpdated?.({ tourId: 'other-tour', status: 'toured' }));
+    expect(getTourReminders).toHaveBeenCalledTimes(1);
+
+    getTourReminders.mockResolvedValueOnce({
+      reminders: [rung({ reminderId: 'r-1', kind: 'day_before', state: 'canceled' })],
+    } satisfies TourRemindersPage);
+    act(() => streamHandlers?.onTourUpdated?.({ tourId: 'tour-1', status: 'toured' }));
+    await waitFor(() => expect(getTourReminders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText('Canceled')).toBeInTheDocument());
   });
 });

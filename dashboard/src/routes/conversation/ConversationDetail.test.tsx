@@ -111,10 +111,17 @@ describe('ConversationDetail dispatch', () => {
     // The segmented toggle leads with Conversation (aria-pressed).
     expect(screen.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Details' })).toHaveAttribute('aria-pressed', 'false');
-    // The roster list is labelled + carries the members.
+    // The roster list is labelled + carries the members, each name linking to its
+    // contact page.
     const roster = screen.getByRole('list', { name: 'Group members' });
-    expect(within(roster).getByText('Keisha Kane')).toBeInTheDocument();
-    expect(within(roster).getByText('Lars Landlord')).toBeInTheDocument();
+    expect(within(roster).getByRole('link', { name: 'Keisha Kane' })).toHaveAttribute(
+      'href',
+      '/contacts/c1',
+    );
+    expect(within(roster).getByRole('link', { name: 'Lars Landlord' })).toHaveAttribute(
+      'href',
+      '/contacts/c2',
+    );
     // Marked read on view.
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
   });

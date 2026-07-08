@@ -449,7 +449,15 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
                 <ul className={styles.memberList} aria-label="Group members">
                   {members.map((m) => (
                     <li key={m.phone} className={styles.memberRow}>
-                      <span className={styles.memberName}>{memberDisplayName(m)}</span>
+                      {/* Link to the member's contact page when known; an
+                       *  unknown-number member (no contactId) stays plain text. */}
+                      {m.contactId ? (
+                        <Link to={`/contacts/${m.contactId}`} className={styles.memberLink}>
+                          {memberDisplayName(m)}
+                        </Link>
+                      ) : (
+                        <span className={styles.memberName}>{memberDisplayName(m)}</span>
+                      )}
                       <span className={styles.memberMeta}>{formatPhoneDisplay(m.phone) || m.phone}</span>
                       <button
                         type="button"

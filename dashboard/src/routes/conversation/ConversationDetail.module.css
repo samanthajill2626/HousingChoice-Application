@@ -108,6 +108,25 @@
   color: var(--c-text);
 }
 
+/* A member whose contact is known links to its contact page — styled as a link
+ * (brand color, underline on hover) per the "anything clickable looks clickable"
+ * rule. */
+.memberLink {
+  font-size: var(--fs-sm);
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+.memberLink:hover {
+  text-decoration: underline;
+}
+
+.memberLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
 .memberMeta {
   font-size: var(--fs-xs);
   color: var(--c-text-muted);

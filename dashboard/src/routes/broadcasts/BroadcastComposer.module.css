@@ -30,6 +30,11 @@
   gap: var(--sp-3);
   margin-top: var(--sp-5);
 }
+/* Why-is-this-disabled hint beside the Preview button (quiet, muted). */
+.previewHint {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
 .previewBtn {
   padding: var(--sp-2) var(--sp-5);
   border: 1px solid transparent;

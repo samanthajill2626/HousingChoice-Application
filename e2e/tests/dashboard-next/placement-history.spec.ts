@@ -26,12 +26,9 @@ async function devLoginAndReset(page: Page): Promise<void> {
 test('Placement detail: shows placement facts + history, and a transition adds a row', async ({ page }) => {
   await devLoginAndReset(page);
 
-  // Open the seeded placement from its board card.
+  // Open the seeded placement from its ledger row.
   await page.goto(`${NEXT}/placements`);
-  await page
-    .getByRole('listitem', { name: 'Inspection' })
-    .getByRole('link', { name: 'Open' })
-    .click();
+  await page.getByRole('link', { name: 'Tasha Nguyen - Awaiting inspection' }).click();
 
   // Detail header: the stage label + the History panel.
   await expect(page.getByRole('heading', { name: /Awaiting inspection/ })).toBeVisible();

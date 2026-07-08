@@ -14,7 +14,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { deleteUnit, restoreUnit, type Contact } from '../../api/index.js';
-import { Button, Spinner, StatusMenu, type StatusTone } from '../../ui/index.js';
+import { Button, Spinner, StatusBadge, StatusMenu, type StatusTone } from '../../ui/index.js';
 import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
@@ -197,16 +197,22 @@ export function ListingDetail(): React.JSX.Element {
           <div className={styles.titleRow}>
             <h1 className={styles.name}>{address}</h1>
             {/* Interactive status pill: shows the current status AND changes it
-                (one control, so the header no longer duplicates a badge + a select). */}
-            <StatusMenu
-              value={unit.status}
-              options={LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] }))}
-              onChange={(v) => onChangeStatus(v as ListingStatus)}
-              tone={STATUS_TONE[unit.status]}
-              disabled={statusBusy}
-              label="Property status"
-              error={statusError}
-            />
+                (one control, so the header no longer duplicates a badge + a select).
+                A soft-DELETED property gets a display-only badge instead — no live
+                status control on a deleted record (matches the contact header). */}
+            {deleted ? (
+              <StatusBadge kind="listing" status={unit.status} />
+            ) : (
+              <StatusMenu
+                value={unit.status}
+                options={LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] }))}
+                onChange={(v) => onChangeStatus(v as ListingStatus)}
+                tone={STATUS_TONE[unit.status]}
+                disabled={statusBusy}
+                label="Property status"
+                error={statusError}
+              />
+            )}
             {deleted ? <span className={styles.deletedBadge}>Deleted</span> : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}

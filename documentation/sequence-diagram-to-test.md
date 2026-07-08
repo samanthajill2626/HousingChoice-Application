@@ -130,7 +130,8 @@ a different name, not a gap to build** — the audit's job is to find the mappin
 
 - **"Send a listing" IS the broadcast-to-tenants flow.** There is no individual
   send-listing-to-one-tenant route; the Phase-1 mechanism is the broadcast composer
-  (`/listings/:unitId` → "📣 Broadcast to tenants" → fill `Message` → "Preview recipients"
+  (`/listings/:unitId` → kebab "More actions" → menuitem "Broadcast to tenants" → fill
+  `Message` → "Preview recipients"
   → curate → "Send to N tenant(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,
   `[FlyerLink]`) and records a `listing_send` row. **Curate to ONE tenant** with
   "Deselect all" → check the tenant's row by their **first name** (preview rows show the

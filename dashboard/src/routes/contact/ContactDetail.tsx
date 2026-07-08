@@ -36,6 +36,7 @@ import {
   TENANT_STATUS_LABELS,
   type Contact,
   type ContactType,
+  type LandlordStatus,
   type TenantStatus,
   type TimelineMessage,
 } from '../../api/index.js';
@@ -323,7 +324,9 @@ export function ContactDetail(): React.JSX.Element {
     // runTransition) so a retry never renders a stale message.
     setStatusError(null);
     void setTenantStatus(contact.contactId, {
-      toStatus: toStatus as TenantStatus,
+      // StatusMenu is stringly-typed; the value came from the type-scoped option
+      // list (TENANT_STATUSES / LANDLORD_STATUSES), so the union cast is exact.
+      toStatus: toStatus as TenantStatus | LandlordStatus,
       source: 'manual',
     })
       .then((updated) => setContact(updated))

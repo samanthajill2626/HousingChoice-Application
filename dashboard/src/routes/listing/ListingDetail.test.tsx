@@ -446,6 +446,19 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
   });
 
+  it('a deleted property shows a display-only status badge — no live status pill', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+    });
+    renderAt();
+    // No interactive control on a deleted record (matches the contact header)...
+    expect(screen.queryByRole('button', { name: /Property status/i })).not.toBeInTheDocument();
+    // ...but the status still reads, as a plain badge next to the Deleted tag.
+    expect(screen.getByText('Available')).toBeInTheDocument();
+    expect(screen.getByText('Deleted')).toBeInTheDocument();
+  });
+
   it('falls back gracefully when optional fields are missing', () => {
     useListing.mockReturnValue({
       ...READY,

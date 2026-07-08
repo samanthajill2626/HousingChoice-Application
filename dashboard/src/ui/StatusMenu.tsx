@@ -7,6 +7,7 @@
 // owns any gating — onChange may kick off a confirm/reason modal instead of an
 // immediate write; the menu just reports the chosen value.
 import { useEffect, useRef, useState } from 'react';
+import { humanize } from '../routes/contact/format.js';
 import styles from './StatusMenu.module.css';
 
 /** The pill colour. Two families:
@@ -138,6 +139,9 @@ export function StatusMenu({
 
   const allOptions = groups ? groups.flatMap((g) => g.options) : (options ?? []);
   const current = allOptions.find((o) => o.value === value);
+  // An off-list/legacy stored value has no option to label it — humanize the raw
+  // string (same fallback StatusBadge uses) instead of showing snake_case.
+  const currentLabel = current?.label ?? humanize(value);
 
   const choose = (v: string): void => {
     closeAndRefocus();
@@ -205,12 +209,12 @@ export function StatusMenu({
         className={`${styles.trigger} ${TONE_CLASS[tone]} ${size === 'lg' ? styles.sizeLg : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`${label}: ${current?.label ?? value}`}
+        aria-label={`${label}: ${currentLabel}`}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={onTriggerKeyDown}
       >
-        {current?.label ?? value}
+        {currentLabel}
         <span className={styles.caret} aria-hidden="true">▾</span>
       </button>
       {open ? (

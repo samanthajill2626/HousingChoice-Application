@@ -404,7 +404,9 @@ export function ListingDetail(): React.JSX.Element {
                   to={`/contacts/${r.contactId}`}
                   label={
                     <span>
-                      {r.name ?? r.contactId}
+                      {/* The NAME is the visible link (brand-styled; the whole row
+                          stays the hit target) — no separate "Open" affordance. */}
+                      <span className={styles.contactName}>{r.name ?? r.contactId}</span>
                       {r.primaryVoice ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}
@@ -412,7 +414,6 @@ export function ListingDetail(): React.JSX.Element {
                       </span>
                     </span>
                   }
-                  right={<span className={styles.openLink}>Open</span>}
                 />
               ))
             )}

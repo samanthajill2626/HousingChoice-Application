@@ -498,9 +498,11 @@ export function createStatusTransitionService(
       if (porting !== undefined) patch.porting = porting === true;
       // park_reason (docs/issues/landlord-lead-status-and-park.md): the move to
       // the terminal `parked` (a landlord decline/not-a-fit/never-signed) captures
-      // the supplied reason as a first-class field on the contact. Only written on
-      // the `parked` move — other statuses leave any existing park_reason untouched.
-      if (toStatus === 'parked' && reason !== undefined) patch.park_reason = reason;
+      // the supplied reason as a first-class field on the contact. The park move
+      // OWNS the field: no reason supplied → CLEAR any stale park_reason from a
+      // prior park (null = REMOVE) so a re-park never silently inherits an old,
+      // possibly wrong, explanation. Other statuses leave it untouched.
+      if (toStatus === 'parked') patch.park_reason = reason !== undefined ? reason : null;
       const updated = await contactsRepo.update(contactId, patch);
 
       await auditRepo.append(`contacts#${contactId}`, 'tenant_status_changed', {

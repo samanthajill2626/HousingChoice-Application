@@ -116,7 +116,7 @@ const TOUR_NEXT_WEEK: Tour = {
   unitId: 'u2',
   scheduledAt: sevenDaysFrom(10),
   tourType: 'landlord_led',
-  status: 'confirmed',
+  status: 'scheduled',
   createdAt: '2026-06-02T10:00:00Z',
 };
 

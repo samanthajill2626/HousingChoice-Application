@@ -175,7 +175,7 @@ describe('TourDetail', () => {
   });
 
   it('the reschedule form calls PATCH with scheduledAt + status=scheduled', async () => {
-    const tour = makeTour({ status: 'confirmed' });
+    const tour = makeTour({ status: 'scheduled' });
     const rescheduledTour = makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' });
     getTour.mockResolvedValue(tour);
     patchTour.mockResolvedValue(rescheduledTour);
@@ -349,67 +349,39 @@ describe('TourDetail', () => {
   });
 
   // ── Status controls + open-group affordance — tours-sequence Task 5 ─────────
-  // Confirm tour (scheduled only), Mark toured / Mark no-show (scheduled or
-  // confirmed — Mark toured is what makes the exit gate reachable), and the
-  // 'Open group thread' button (no groupThreadId yet, tour not canceled/closed).
+  // Mark toured / Mark no-show (scheduled only - Mark toured is what makes the
+  // exit gate reachable; the 'confirmed' status + Confirm control were removed
+  // 2026-07-08), and the 'Open group thread' button (no groupThreadId yet,
+  // tour not canceled/closed).
 
-  it("a scheduled tour shows 'Confirm tour', 'Mark toured', and 'Mark no-show'", async () => {
+  it("a scheduled tour shows 'Mark toured' and 'Mark no-show' (no Confirm control - removed)", async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Confirm tour' })).toHaveTextContent('Confirm tour');
+    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Mark toured' })).toHaveTextContent('Mark toured');
     expect(screen.getByRole('button', { name: 'Mark no-show' })).toHaveTextContent('Mark no-show');
   });
 
-  it("a confirmed tour shows 'Mark toured' + 'Mark no-show' but NOT 'Confirm tour'", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
-    renderDetail();
-    await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark no-show' })).toBeInTheDocument();
-  });
-
-  it('a requested tour shows NONE of the three status controls', async () => {
+  it('a requested tour shows NONE of the attendance controls', async () => {
     getTour.mockResolvedValue(makeRequestedTour());
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
   });
 
-  it("a toured tour shows none of the three; 'Record outcome' is present", async () => {
+  it("a toured tour shows neither attendance control; 'Record outcome' is present", async () => {
     getTour.mockResolvedValue(makeTour({ status: 'toured' }));
     renderDetail();
     await waitFor(() => expect(screen.queryByText(/Loading tour/i)).not.toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();
   });
 
-  it("'Confirm tour' PATCHes { status: confirmed } and disappears after success", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
-    patchTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
-    renderDetail();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Confirm tour' })).toBeInTheDocument(),
-    );
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Confirm tour' }));
-
-    expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'confirmed' });
-    await waitFor(() => expect(screen.getByLabelText(/Status: Confirmed/i)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
-    // Attendance controls remain available on a confirmed tour.
-    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
-  });
-
   it("'Mark toured' PATCHes { status: toured }; controls swap to 'Record outcome'", async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'confirmed' }));
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
     renderDetail();
     await waitFor(() =>
@@ -421,7 +393,6 @@ describe('TourDetail', () => {
 
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
     await waitFor(() => expect(screen.getByLabelText(/Status: Toured/i)).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: 'Confirm tour' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark no-show' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Record exit gate decision/i })).toBeInTheDocument();

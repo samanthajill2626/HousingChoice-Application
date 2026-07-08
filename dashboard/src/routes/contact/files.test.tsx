@@ -279,7 +279,7 @@ describe('LandlordFile', () => {
       unitId: 'u1',
       scheduledAt: '2026-07-01T10:00:00Z',
       tourType: 'landlord_led',
-      status: 'confirmed',
+      status: 'scheduled',
     };
     renderIt({ tours: [landlordTour] });
     expect(screen.queryByText('No tours on these properties yet.')).not.toBeInTheDocument();
@@ -287,7 +287,7 @@ describe('LandlordFile', () => {
     const allLinks = screen.getAllByRole('link');
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L1');
     expect(tourDetailLink).toBeDefined();
-    expect(screen.getByText('Confirmed')).toBeInTheDocument();
+    expect(screen.getByText('Scheduled')).toBeInTheDocument();
   });
 
   it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {

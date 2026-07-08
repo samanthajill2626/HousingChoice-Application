@@ -2,9 +2,11 @@
 // Shows: status, scheduled date/time ('Not yet booked' for a timeless
 // 'requested' tour), tour type, exit-gate feedback (the "Moving forward?"
 // question → PATCH { outcome, moveForward }), book / reschedule / cancel /
-// confirm / mark-toured / mark-no-show controls, an 'Open group thread'
+// mark-toured / mark-no-show controls, an 'Open group thread'
 // affordance (provisions the masked relay group; members auto-resolved
 // server-side), and a link to the tour's relay group thread once it exists.
+// (2026-07-08: the 'confirmed' status + Confirm control were removed -
+// scheduled covers it. This page is rebuilt wholesale in slice 1b.)
 //
 // Tours are SEPARATE from placements. This page records the navigator decision
 // (exit gate) but does NOT create a placement or change tenant status. The exit
@@ -47,7 +49,6 @@ function formatScheduledAt(iso: string): string {
 const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'requested',
   'scheduled',
-  'confirmed',
 ]);
 
 /** The statuses from which a navigator can RESCHEDULE. The backend's
@@ -55,7 +56,6 @@ const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
  *  the UI a requested tour uses the dedicated Book control, not Reschedule. */
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'scheduled',
-  'confirmed',
   'canceled',
   'no_show',
 ]);
@@ -97,7 +97,7 @@ export function TourDetail(): React.JSX.Element {
     return () => controller.abort();
   }, [tourId]);
 
-  // A bare status transition (confirm / toured / no-show / cancel): PATCH the
+  // A bare status transition (toured / no-show / cancel): PATCH the
   // new status and apply the returned tour — inapplicable controls disappear.
   async function handleStatus(status: TourStatus, failMessage: string) {
     if (!tour || submitting) return;
@@ -248,11 +248,9 @@ export function TourDetail(): React.JSX.Element {
   const canReschedule = RESCHEDULABLE.has(tour.status as TourStatus);
   // Book: only a 'requested' (timeless) tour is booked; afterwards Reschedule takes over.
   const canBook = tour.status === 'requested';
-  // Status controls: Confirm only from 'scheduled'; attendance (toured /
-  // no-show) from 'scheduled' or 'confirmed'. Marking toured is what makes the
-  // exit gate reachable.
-  const canConfirm = tour.status === 'scheduled';
-  const canMarkAttendance = tour.status === 'scheduled' || tour.status === 'confirmed';
+  // Status controls: attendance (toured / no-show) from 'scheduled'. Marking
+  // toured is what makes the exit gate reachable.
+  const canMarkAttendance = tour.status === 'scheduled';
   // Open group: only before a group exists, and never on a dead tour.
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
@@ -377,16 +375,7 @@ export function TourDetail(): React.JSX.Element {
         </form>
       ) : null}
 
-      {/* Status controls: confirm, then mark attendance (toured / no-show). */}
-      {canConfirm ? (
-        <button
-          type="button"
-          onClick={() => void handleStatus('confirmed', 'Confirm failed')}
-          disabled={submitting}
-        >
-          Confirm tour
-        </button>
-      ) : null}
+      {/* Status controls: mark attendance (toured / no-show). */}
       {canMarkAttendance ? (
         <>
           <button

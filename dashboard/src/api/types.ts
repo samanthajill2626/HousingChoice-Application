@@ -532,7 +532,6 @@ export const TOUR_TYPE_LABELS: Readonly<Record<TourType, string>> = {
 export type TourStatus =
   | 'requested'
   | 'scheduled'
-  | 'confirmed'
   | 'toured'
   | 'no_show'
   | 'canceled'
@@ -542,7 +541,6 @@ export type TourStatus =
 export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
   requested: 'Requested',
   scheduled: 'Scheduled',
-  confirmed: 'Confirmed',
   toured: 'Toured',
   no_show: 'No show',
   canceled: 'Canceled',

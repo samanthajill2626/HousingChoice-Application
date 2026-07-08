@@ -179,14 +179,15 @@ describe('buildTodayFromSources', () => {
     expect(items.filter((i) => i.group === 'tours_today')).toEqual([]);
   });
 
-  it('excludes a requested (time-less) tour and a canceled tour from tours_today', () => {
+  it('excludes requested (time-less), canceled, and toured tours from tours_today (scheduled only)', () => {
     const items = buildTodayFromSources([], [], NOW, [
       tourOf({ tourId: 'tour-requested', status: 'requested' }), // no scheduledAt
       tourOf({ tourId: 'tour-canceled', status: 'canceled', scheduledAt: at(2 * HOUR) }),
-      tourOf({ tourId: 'tour-confirmed', status: 'confirmed', scheduledAt: at(3 * HOUR) }),
+      tourOf({ tourId: 'tour-done', status: 'toured', scheduledAt: at(1 * HOUR) }),
+      tourOf({ tourId: 'tour-live', status: 'scheduled', scheduledAt: at(3 * HOUR) }),
     ]);
     expect(items.filter((i) => i.group === 'tours_today').map((i) => i.refId)).toEqual([
-      'tour-confirmed',
+      'tour-live',
     ]);
   });
 

@@ -9,9 +9,22 @@
 import { useEffect, useRef, useState } from 'react';
 import styles from './StatusMenu.module.css';
 
-/** The pill colour. `neutral` is an un-tinted outlined pill (e.g. a workflow stage
- *  that has no green/blue/grey semantic). */
-export type StatusTone = 'available' | 'placed' | 'inactive' | 'neutral';
+/** The pill colour. Two families:
+ *  - SOLID fills (white text) for the property header's dark band:
+ *    `available` | `placed` | `inactive`.
+ *  - SOFT tints (dark text) mirroring StatusBadge's BadgeTone, for contact
+ *    statuses: `positive` | `progress` | `warn` | `muted`.
+ *  - `neutral` is an un-tinted outlined pill (e.g. a workflow stage that has no
+ *    colour semantic; also the badge-neutral look). */
+export type StatusTone =
+  | 'available'
+  | 'placed'
+  | 'inactive'
+  | 'neutral'
+  | 'positive'
+  | 'progress'
+  | 'warn'
+  | 'muted';
 
 /** The pill size: `sm` (a compact badge, the default) or `lg` (a prominent header
  *  control, e.g. the placement stage). */
@@ -55,6 +68,10 @@ const TONE_CLASS: Record<StatusTone, string> = {
   placed: styles.tonePlaced ?? '',
   inactive: styles.toneInactive ?? '',
   neutral: styles.toneNeutral ?? '',
+  positive: styles.tonePositive ?? '',
+  progress: styles.toneProgress ?? '',
+  warn: styles.toneWarn ?? '',
+  muted: styles.toneMuted ?? '',
 };
 
 export function StatusMenu({

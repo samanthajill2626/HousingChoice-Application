@@ -28,12 +28,24 @@ import {
   sendMessage,
   setContactOptOut,
   setContactVoiceOptOut,
+  setTenantStatus,
   updateContact,
+  LANDLORD_STATUSES,
+  LANDLORD_STATUS_LABELS,
+  TENANT_STATUSES,
+  TENANT_STATUS_LABELS,
   type Contact,
   type ContactType,
+  type TenantStatus,
   type TimelineMessage,
 } from '../../api/index.js';
-import { Button, ContactStatusBadge, Spinner } from '../../ui/index.js';
+import {
+  Button,
+  ContactStatusBadge,
+  Spinner,
+  StatusMenu,
+  contactStatusTone,
+} from '../../ui/index.js';
 import { Modal } from './Modal.js';
 import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
@@ -81,6 +93,9 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // The header's interactive status pill (tenant/landlord lifecycle change).
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -285,6 +300,27 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // Lifecycle-status change from the header's interactive pill. Goes through the
+  // transition service (setTenantStatus serves ALL contact types — the route
+  // validates against the stored contact's own type-scoped allowlist), NEVER a
+  // plain contact PATCH. Manual source; on success apply the returned contact in
+  // place; on failure surface an inline error (the pill keeps the stored status,
+  // so a silent failure would look like the change just vanished).
+  const onChangeStatus = (toStatus: string): void => {
+    if (statusBusy || toStatus === contact.status) return;
+    setStatusBusy(true);
+    void setTenantStatus(contact.contactId, {
+      toStatus: toStatus as TenantStatus,
+      source: 'manual',
+    })
+      .then((updated) => {
+        setContact(updated);
+        setStatusError(null);
+      })
+      .catch(() => setStatusError("Couldn't update the status - please try again."))
+      .finally(() => setStatusBusy(false));
+  };
+
   // Soft-delete (reversible). Deleting is confirmed first, then the contact drops
   // out of the normal views — so on success we navigate back to the Contacts list
   // (it can be restored from the Deleted tab). Restore stays on the page and
@@ -329,7 +365,30 @@ export function ContactDetail(): React.JSX.Element {
           <div className={styles.nameRow}>
             <span className={styles.name}>{name}</span>
             <span className={`${styles.pill} ${pill.cls}`}>{pill.label}</span>
-            {contact.status ? (
+            {/* Tenant/landlord lifecycle status: an interactive pill that shows AND
+                changes it (same pattern as the property/placement headers). Other
+                types (and deleted contacts) keep the display-only badge. */}
+            {contact.status && !deleted && contact.type === 'tenant' ? (
+              <StatusMenu
+                value={contact.status}
+                options={TENANT_STATUSES.map((s) => ({ value: s, label: TENANT_STATUS_LABELS[s] }))}
+                onChange={onChangeStatus}
+                tone={contactStatusTone(contact.type, contact.status)}
+                disabled={statusBusy}
+                label="Contact status"
+                error={statusError}
+              />
+            ) : contact.status && !deleted && contact.type === 'landlord' ? (
+              <StatusMenu
+                value={contact.status}
+                options={LANDLORD_STATUSES.map((s) => ({ value: s, label: LANDLORD_STATUS_LABELS[s] }))}
+                onChange={onChangeStatus}
+                tone={contactStatusTone(contact.type, contact.status)}
+                disabled={statusBusy}
+                label="Contact status"
+                error={statusError}
+              />
+            ) : contact.status ? (
               <ContactStatusBadge type={contact.type} status={contact.status} />
             ) : null}
             {deleted ? <span className={styles.deletedBadge}>🗑 Deleted</span> : null}

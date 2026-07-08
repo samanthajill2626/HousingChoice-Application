@@ -61,6 +61,30 @@
   border: 1px solid var(--c-border);
 }
 
+/* SOFT-tint tones (dark text) mirroring StatusBadge's BadgeTone families, so an
+ * interactive contact-status pill keeps the same at-a-glance colours as the
+ * display badge it replaces. */
+.tonePositive {
+  background: var(--c-match-bg);
+  border: 1px solid var(--c-match-border);
+  color: var(--c-match-text);
+}
+.toneProgress {
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+.toneWarn {
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+.toneMuted {
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-subtle);
+}
+
 /* Prominent header variant (e.g. the placement stage, which is the page's lead). */
 .sizeLg {
   padding: var(--sp-1) var(--sp-3);

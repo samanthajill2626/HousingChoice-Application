@@ -1,6 +1,6 @@
-// placementsFormat — small pure presentation helpers for the placement board +
+// placementsFormat -- small pure presentation helpers for the placements page +
 // placement detail. Resolve a placement's tenant NAME (home) and property ADDRESS
-// from the lookup maps usePlacements builds, falling back to the id (honest —
+// from the lookup maps usePlacements builds, falling back to the id (honest --
 // never fabricated). Tested in isolation.
 import {
   LISTING_STATUS_LABELS,

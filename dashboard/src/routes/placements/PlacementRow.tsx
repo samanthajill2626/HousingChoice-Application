@@ -37,7 +37,7 @@ export function PlacementRow({ row, pending = false, menu }: PlacementRowProps):
         to={`/placements/${placement.placementId}`}
         aria-label={`${row.tenant} - ${stageLabel}`}
       />
-      <span className={styles.main}>
+      <div className={styles.main}>
         <span className={styles.tenant}>{row.tenant}</span>
         {row.porting ? (
           <span className={styles.porting} title="Tenant is porting">
@@ -47,14 +47,14 @@ export function PlacementRow({ row, pending = false, menu }: PlacementRowProps):
         <span className={styles.listing} title={row.listing}>
           {row.listing}
         </span>
-      </span>
-      <span className={styles.meta}>
+      </div>
+      <div className={styles.meta}>
         <span className={styles.stage}>{stageLabel}</span>
         {tourDate ? <span className={styles.metaItem}>Tour {tourDate}</span> : null}
         <DeadlineChip placement={placement} />
         {row.tenantStatus ? <StatusBadge kind="tenant" status={row.tenantStatus} /> : null}
-      </span>
-      {menu !== undefined && menu !== null ? <span className={styles.actions}>{menu}</span> : null}
+      </div>
+      {menu !== undefined && menu !== null ? <div className={styles.actions}>{menu}</div> : null}
     </li>
   );
 }

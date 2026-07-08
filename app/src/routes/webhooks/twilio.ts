@@ -1097,6 +1097,9 @@ async function rollIntoBroadcast(
     // (post-send A2P pacing), so a fast delivery callback can arrive before the
     // slot lands. Re-load the broadcast ONCE after a short wait before declaring
     // the outcome lost — same delay seam as the /status unknown-SID retry.
+    // Worst case a callback that misses BOTH lookups (message, then slot) acks
+    // after ~2x statusRetryDelayMs (~5s default) — bounded, well under Twilio's
+    // webhook timeout, and only on the genuine-miss path.
     await delay(statusRetryDelayMs);
     const reloaded = await broadcasts.getById(broadcastId);
     entry = reloaded

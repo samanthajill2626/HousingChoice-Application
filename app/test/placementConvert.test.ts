@@ -138,6 +138,78 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect((res.body.tour as Record<string, unknown>)['status']).toBe('closed');
   });
 
+  it('records the tours# tour_converted milestone + emits tour.updated (tour-detail-page 1a)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const tourId = 'tour-convert-audit';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+    const placementId = (res.body.placement as Record<string, unknown>)['placementId'] as string;
+
+    // Exactly one tours#<tourId> tour_converted audit row, carrying the created
+    // placementId (the tour Activity card links it) + the acting user.
+    const converted = world.auditEvents.filter(
+      (e) => e.entityKey === `tours#${tourId}` && e.event_type === 'tour_converted',
+    );
+    expect(converted).toHaveLength(1);
+    expect(converted[0]!.payload).toMatchObject({ tourId, placementId });
+    expect(converted[0]!.actorId).toBe('usr_testva00000000000000000');
+
+    // tour.updated advised the dashboards the tour closed (ID + status only).
+    const tourUpdates = world.emitted.filter((e) => e.event === 'tour.updated');
+    expect(tourUpdates).toHaveLength(1);
+    expect(tourUpdates[0]!.payload).toEqual({ tourId, status: 'closed' });
+  });
+
+  it('a failing tours# tour_converted audit write does NOT fail the conversion (best-effort)', async () => {
+    const world = createFakeWorld();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    const tourId = 'tour-convert-audit-fail';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    // Fail ONLY the tours#-keyed appends; placements# and the rest still write.
+    const realAppend = world.auditRepo.append.bind(world.auditRepo);
+    world.auditRepo.append = async (entityKey, eventType, payload) => {
+      if (entityKey.startsWith('tours#')) throw new Error('injected tours# audit failure');
+      return realAppend(entityKey, eventType, payload);
+    };
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+    expect(world.placements.size).toBe(1);
+    expect(world.toursMap.get(tourId)!.status).toBe('closed');
+    // The placements# provenance row still landed.
+    expect(
+      world.auditEvents.some(
+        (e) => e.entityKey.startsWith('placements#') && e.event_type === 'placement_created',
+      ),
+    ).toBe(true);
+  });
+
   it('tour not convertible (convertible absent) → 409 tour_not_convertible, no placement created', async () => {
     const { app, world } = makeWebhookHarness();
     const { tenantId, unitId } = seedTenantAndUnit(world);

@@ -4,6 +4,7 @@
 //
 //   POST  /api/tours  { tenantId, unitId, scheduledAt?, tourType } → 201 { tour }
 //   GET   /api/tours/:tourId                                         → { tour } | 404
+//   GET   /api/tours/:tourId/activity?limit=&before=       -> { events } | 404
 //   GET   /api/tours?tenantId=&unitId=&from=&to=&status=             → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
@@ -66,7 +67,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
-import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
@@ -107,6 +108,62 @@ const POST_ALLOWED = new Set(['tenantId', 'unitId', 'scheduledAt', 'tourType']);
 
 // Allowed PATCH body fields (strict allowlist).
 const PATCH_ALLOWED = new Set(['scheduledAt', 'status', 'outcome', 'moveForward']);
+
+// --- Tour activity projection (GET /:tourId/activity, tour-detail-page 1a) ---
+
+/**
+ * One tour Activity row on the wire. Details are a FIXED-KEY whitelist lifted
+ * from the audit payload - NEVER the raw payload document (a future payload
+ * field cannot leak through here). Mirrors the units#/activity projection
+ * STYLE; paging (limit + before cursor) follows the placement-history pattern
+ * (orchestrator decision E-D1).
+ */
+interface TourActivityEvent {
+  /** The audit `ts` SK (`<ISO>#<suffix>`) - unique within the tour; doubles as the `before` cursor. */
+  id: string;
+  /** ISO 8601 - the ts prefix (when the event happened). */
+  at: string;
+  type: string;
+  /** The acting user, when the event was not a system action. */
+  actorId?: string;
+  tourId?: string;
+  /** The created placement (tour_converted rows). */
+  placementId?: string;
+  /** The opened group thread (tour_group_opened rows). */
+  conversationId?: string;
+}
+
+/** Project one audit row -> the Activity wire shape (fixed-key whitelist). */
+function toTourActivityEvent(e: AuditEvent): TourActivityEvent {
+  const p = e.payload ?? {};
+  const str = (key: string): string | undefined =>
+    typeof p[key] === 'string' ? (p[key] as string) : undefined;
+  // `at` is the ISO prefix of the `<ISO>#<suffix>` SK (same derivation as the
+  // unit activity read) - the SK IS the timestamp the trail sorts by.
+  const hash = e.ts.indexOf('#');
+  const at = hash > 0 ? e.ts.slice(0, hash) : e.ts;
+  return {
+    id: e.ts,
+    at,
+    type: e.event_type,
+    ...(typeof e.actorId === 'string' && { actorId: e.actorId }),
+    ...(str('tourId') !== undefined && { tourId: str('tourId') }),
+    ...(str('placementId') !== undefined && { placementId: str('placementId') }),
+    ...(str('conversationId') !== undefined && { conversationId: str('conversationId') }),
+  };
+}
+
+const DEFAULT_ACTIVITY_LIMIT = 50;
+const MAX_ACTIVITY_LIMIT = 100;
+
+/** Parse ?limit= into 1..MAX (default DEFAULT). undefined = invalid -> 400. */
+function parseActivityLimit(raw: unknown): number | undefined {
+  if (raw === undefined) return DEFAULT_ACTIVITY_LIMIT;
+  if (typeof raw !== 'string') return undefined;
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ACTIVITY_LIMIT) return undefined;
+  return limit;
+}
 
 export interface ToursRouterDeps {
   config?: AppConfig;
@@ -150,10 +207,13 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Best-effort dual-write of a tour lifecycle event to BOTH surfaces: the
-  // tenant's contact timeline (activity event) and the property's Activity card
-  // (a `units#<unitId>` audit row). Each write is independently guarded — NEITHER
-  // may fail the route (state is already persisted). PII-safe log: ids/type only.
+  // Best-effort triple-write of a tour lifecycle event to THREE surfaces: the
+  // tenant's contact timeline (activity event), the property's Activity card
+  // (a `units#<unitId>` audit row), and the tour's OWN history (a
+  // `tours#<tourId>` audit row - tour-detail-page 1a, feeds
+  // GET /api/tours/:tourId/activity). Each write is independently guarded -
+  // NONE may fail the route (state is already persisted). PII-safe log:
+  // ids/type only.
   async function recordTourEvent(
     tour: { tenantId: string; unitId: string; tourId: string },
     activityType: ActivityEventType,
@@ -175,6 +235,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
     } catch (err) {
       log.error({ err, tourId: tour.tourId }, `${auditType} unit audit failed (best-effort)`);
+    }
+    try {
+      await audit.append(`tours#${tour.tourId}`, auditType, { tourId: tour.tourId });
+    } catch (err) {
+      log.error({ err, tourId: tour.tourId }, `${auditType} tour audit failed (best-effort)`);
     }
   }
 
@@ -305,6 +370,42 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
     res.json({ tour });
+  });
+
+  // GET /api/tours/:tourId/activity?limit=&before= - the tour page's Activity
+  // card read (tour-detail-page 1a; resolves tour-activity-no-tour-page-surface
+  // once the card lands in 1b). Serves the tour's OWN audit trail (entityKey
+  // `tours#<tourId>`: tour_scheduled / tour_rescheduled / tour_took_place /
+  // tour_no_show / tour_canceled / tour_outcome / tour_group_opened /
+  // tour_converted) NEWEST-FIRST via auditRepo.listByEntity, projected onto
+  // TourActivityEvent (fixed-key whitelist, never the raw payload). Paging is
+  // the PLACEMENT-HISTORY pattern (E-D1): bounded ?limit= (1..MAX, default
+  // DEFAULT) + optional ?before= exclusive `ts` upper bound (a row's `id`) for
+  // load-more. 404 unknown tour. Forward-only - no backfill, same policy as
+  // the unit Activity card. PII (doc section 9): ids/counts only in logs.
+  router.get('/:tourId/activity', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const limit = parseActivityLimit(req.query['limit']);
+    if (limit === undefined) {
+      res.status(400).json({ error: `limit must be an integer 1..${MAX_ACTIVITY_LIMIT}` });
+      return;
+    }
+    const before =
+      typeof req.query['before'] === 'string' && req.query['before'].length > 0
+        ? req.query['before']
+        : undefined;
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const rows = await audit.listByEntity(`tours#${tourId}`, {
+      limit,
+      ...(before !== undefined && { before }),
+    });
+    const projected = rows.map(toTourActivityEvent);
+    log.info({ tourId, returned: projected.length }, 'tour activity served');
+    res.json({ events: projected });
   });
 
   // PATCH /api/tours/:tourId — partial update with transition guards.
@@ -548,6 +649,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       );
     }
 
+    // Live tour-page refresh (tour-detail-page 1a): advise dashboards this tour
+    // changed, mirroring placement.updated. Best-effort fire-and-forget (the bus
+    // isolates listeners); ID + status only - never names/phones/labels (PII).
+    events.emit('tour.updated', { tourId, status: tour.status });
+
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');
     res.json({ tour });
   });
@@ -746,6 +852,23 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     // Stamp the real groupThreadId over the claim sentinel.
     const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
+
+    // Tour-history milestone (tour-detail-page 1a): group-opened is a
+    // tours#-ONLY audit row (the tenant timeline + property card deliberately
+    // do NOT carry it - recordTourEvent is not used here). Best-effort: a
+    // failed write must never fail the provisioned 201. IDs only.
+    try {
+      await audit.append(`tours#${tourId}`, 'tour_group_opened', {
+        tourId,
+        conversationId: conversation.conversationId,
+        ...(actor !== undefined && { actor }),
+      });
+    } catch (err) {
+      log.error({ err, tourId }, 'tour_group_opened tour audit failed (best-effort)');
+    }
+
+    // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
+    events.emit('tour.updated', { tourId, status: updatedTour.status });
 
     log.info(
       { tourId, conversationId: conversation.conversationId, memberCount: members.length },

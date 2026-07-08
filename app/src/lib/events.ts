@@ -213,12 +213,25 @@ export interface ScheduledUpdatedEvent {
   contactId?: string;
 }
 
+/**
+ * A tour was mutated (tour-detail-page 1a) - the tour page refetches the
+ * header + Activity card live. Emitted best-effort after a successful
+ * PATCH /api/tours/:tourId, POST /api/tours/:tourId/relay, and the from-tour
+ * conversion (placements.ts). ID + status only: the page re-reads the tour
+ * itself, so the event never carries names/phones/labels (PII, doc section 9).
+ */
+export interface TourUpdatedEvent {
+  tourId: string;
+  status: string;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
   'broadcast.updated': BroadcastUpdatedEvent;
   'placement.updated': PlacementUpdatedEvent;
   'scheduled.updated': ScheduledUpdatedEvent;
+  'tour.updated': TourUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

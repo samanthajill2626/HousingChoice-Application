@@ -48,6 +48,7 @@ import type {
   TodayResponse,
   TransitionSource,
   Tour,
+  TourActivityEvent,
   TourOutcome,
   TourStatus,
   TourType,
@@ -1220,6 +1221,26 @@ export async function getTourReminders(
     `/api/tours/${encodeURIComponent(tourId)}/reminders`,
     { ...(signal !== undefined && { signal }) },
   );
+}
+
+/** GET /api/tours/:tourId/activity?limit=&before= - the tour's OWN lifecycle
+ *  history (newest-first), for the Activity card. Mirrors getPlacementHistory:
+ *  `limit` bounds the page, `before` (a prior row's `id`) pages older. The server
+ *  wraps the page under { events }; we unwrap it so callers get a plain
+ *  TourActivityEvent[]. */
+export async function getTourActivity(
+  tourId: string,
+  opts: { limit?: number; before?: string } = {},
+  signal?: AbortSignal,
+): Promise<TourActivityEvent[]> {
+  const res = await request<{ events: TourActivityEvent[] }>(
+    `/api/tours/${encodeURIComponent(tourId)}/activity`,
+    {
+      query: { limit: opts.limit, before: opts.before },
+      ...(signal !== undefined && { signal }),
+    },
+  );
+  return res.events;
 }
 
 /** GET /api/tours?tenantId=&unitId=&from=&to=&status= — list tours by filter.

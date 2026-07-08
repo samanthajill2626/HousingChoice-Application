@@ -1,0 +1,114 @@
+/* PlacementsPage - header + search + (rail | chips) + ledger. Tokens only. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+
+.error {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+
+.search {
+  margin-bottom: var(--sp-3);
+}
+
+.searchInput {
+  width: 100%;
+  max-width: 420px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+.searchInput:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-5);
+}
+
+.listArea {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.group {
+  margin-bottom: var(--sp-4);
+}
+
+.groupHead {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--c-bg);
+  border-bottom: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+}
+
+.groupCount {
+  color: var(--c-text-subtle);
+  font-weight: var(--fw-semibold);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--c-surface);
+}
+
+.empty {
+  padding: var(--sp-5) var(--sp-3);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* Mobile: the filter chips stack ABOVE the list (nav is first in the DOM). */
+@media (max-width: 767.98px) {
+  .layout {
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+}

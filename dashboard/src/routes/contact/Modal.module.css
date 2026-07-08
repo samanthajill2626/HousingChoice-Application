@@ -62,8 +62,17 @@
 }
 
 .body {
-  padding: var(--sp-4);
+  /* Scroll container. Padding lives on .bodyInner (not here) so it's part of the
+   * scrolled content: this keeps the body's own content box flush with the
+   * scrollbar, leaving .bodyInner's padding as clearance so a focusable control at
+   * the content's right edge (full-width input, right-aligned button) doesn't get
+   * its focus ring clipped by the scroll edge. It also makes the bottom padding
+   * scroll-respected (a scroll container's own bottom padding is often dropped). */
   overflow: auto;
+}
+
+.bodyInner {
+  padding: var(--sp-4);
 }
 
 .footer {

@@ -108,11 +108,6 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  /* Keep the right-aligned "Change type" button off the modal's scroll edge: the
-   * dialog body is an overflow:auto scroll container whose scrollbar sits flush
-   * against the content, clipping the button's focus ring (offset outline) on its
-   * right. This inset gives the ring room to render fully. */
-  padding-right: var(--sp-2);
 }
 
 .kindInfo {

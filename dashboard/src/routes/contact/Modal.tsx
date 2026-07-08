@@ -59,7 +59,9 @@ export function Modal({ title, onClose, children, footer }: ModalProps): React.J
             ✕
           </button>
         </div>
-        <div className={styles.body}>{children}</div>
+        <div className={styles.body}>
+          <div className={styles.bodyInner}>{children}</div>
+        </div>
         {footer !== undefined ? <div className={styles.footer}>{footer}</div> : null}
       </div>
     </div>

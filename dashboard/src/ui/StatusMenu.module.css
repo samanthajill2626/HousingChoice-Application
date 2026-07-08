@@ -53,6 +53,21 @@
   background: var(--c-status-inactive-bg);
 }
 
+/* An un-tinted, outlined pill (dark text) for statuses with no colour semantic —
+ * e.g. a placement's workflow stage. */
+.toneNeutral {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border: 1px solid var(--c-border);
+}
+
+/* Prominent header variant (e.g. the placement stage, which is the page's lead). */
+.sizeLg {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+}
+
 /* The dropdown, anchored under the trigger. */
 .menu {
   position: absolute;
@@ -67,6 +82,27 @@
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
+}
+
+/* A labelled section within the menu (grouped options, e.g. placement phases). */
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.group + .group {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--c-border);
+}
+
+.groupLabel {
+  padding: var(--sp-1) var(--sp-2) 2px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
 }
 
 .item {

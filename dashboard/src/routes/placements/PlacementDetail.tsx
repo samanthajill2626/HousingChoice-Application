@@ -29,7 +29,7 @@ import {
   type PlacementStage,
   type UnitItem,
 } from '../../api/index.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { Button, Spinner, StatusMenu, type StatusMenuGroup } from '../../ui/index.js';
 import { Card, EmptyRow, KV } from '../contact/Card.js';
 import { formatMoney } from '../listing/listingFormat.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
@@ -52,10 +52,21 @@ interface PendingMove {
   gate: TransitionGate;
 }
 
-// The distinct phases in ladder order - the "Move to" picker groups its stages
-// under these as <optgroup> headings, so the sub-stages read within their phase
+// The distinct phases in ladder order - the stage pill's menu groups its stages
+// under these as section headings, so the sub-stages read within their phase
 // (Application / RTA / Inspection / ...) instead of one flat list.
 const PLACEMENT_PHASES_ORDERED = [...new Set(PLACEMENT_STAGES.map((s) => STAGE_PHASE[s]))];
+
+// Every stage, grouped by phase — the interactive stage pill's menu. The current
+// stage is shown (checked) rather than hidden; picking a different one drives the
+// SAME gated transition as the board (requestMove → gate → confirm/reason modal).
+const STAGE_GROUPS: StatusMenuGroup[] = PLACEMENT_PHASES_ORDERED.map((ph) => ({
+  label: ph,
+  options: PLACEMENT_STAGES.filter((s) => STAGE_PHASE[s] === ph).map((s) => ({
+    value: s,
+    label: STAGE_LABELS[s],
+  })),
+})).filter((g) => g.options.length > 0);
 
 export function PlacementDetail(): React.JSX.Element {
   const { placementId = '' } = useParams<{ placementId: string }>();
@@ -239,41 +250,19 @@ export function PlacementDetail(): React.JSX.Element {
     <div className={styles.page}>
       <header className={styles.header}>
         <h1 className={styles.title}>
-          {stageLabel}
+          {/* Interactive stage pill: shows the current stage AND moves it (the menu
+              groups stages by phase; a move runs the SAME gated pipeline as before). */}
+          <StatusMenu
+            value={placement.stage}
+            groups={STAGE_GROUPS}
+            onChange={(v) => requestMove(v as PlacementStage)}
+            tone="neutral"
+            size="lg"
+            disabled={busy}
+            label="Placement stage"
+          />
           <span className={styles.phase}>{phase}</span>
         </h1>
-        <div className={styles.actions}>
-          <label className={styles.moveLabel}>
-            <span className={styles.srOnly}>Move to stage</span>
-            <select
-              className={styles.moveSelect}
-              aria-label="Move to stage"
-              value=""
-              disabled={busy}
-              onChange={(e) => {
-                const v = e.target.value as PlacementStage;
-                if (v) requestMove(v);
-              }}
-            >
-              <option value="">Move to…</option>
-              {PLACEMENT_PHASES_ORDERED.map((ph) => {
-                const stages = PLACEMENT_STAGES.filter(
-                  (s) => STAGE_PHASE[s] === ph && s !== placement.stage,
-                );
-                if (stages.length === 0) return null;
-                return (
-                  <optgroup key={ph} label={ph}>
-                    {stages.map((s) => (
-                      <option key={s} value={s}>
-                        {STAGE_LABELS[s]}
-                      </option>
-                    ))}
-                  </optgroup>
-                );
-              })}
-            </select>
-          </label>
-        </div>
       </header>
 
       {error !== null ? (

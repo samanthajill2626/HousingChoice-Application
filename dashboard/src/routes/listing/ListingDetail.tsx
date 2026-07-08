@@ -22,7 +22,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, CardAction, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Card, CardAction, CollapsibleRows, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
@@ -76,38 +76,6 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
 
 /** How many rows the Related / Similar property lists show before collapsing. */
 const RELATED_LIMIT = 4;
-
-/**
- * Render a list of already-built <Row>s, capped at `limit` with a "Show N more" /
- * "Show less" toggle when there are more. Each rung must carry its own `key`.
- * Own state per instance, so Related and Similar expand independently.
- */
-function CollapsibleRows({
-  rows,
-  limit,
-}: {
-  rows: React.JSX.Element[];
-  limit: number;
-}): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false);
-  const shown = expanded ? rows : rows.slice(0, limit);
-  const hidden = rows.length - limit;
-  return (
-    <>
-      {shown}
-      {rows.length > limit ? (
-        <button
-          type="button"
-          className={styles.moreToggle}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? 'Show less' : `Show ${hidden} more`}
-        </button>
-      ) : null}
-    </>
-  );
-}
 
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();

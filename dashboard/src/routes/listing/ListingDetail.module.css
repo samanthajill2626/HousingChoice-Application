@@ -357,29 +357,6 @@
   padding: 0 var(--sp-2);
 }
 
-/* "Show N more" / "Show less" toggle under a capped row list (Related / Similar
- * properties). A subtle brand text-button — mirrors Card's .notesToggle. */
-.moreToggle {
-  margin-top: var(--sp-2);
-  background: transparent;
-  border: none;
-  padding: var(--sp-1) 0;
-  color: var(--c-brand);
-  font: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-
-.moreToggle:hover {
-  text-decoration: underline;
-}
-
-.moreToggle:focus-visible {
-  outline: 2px solid var(--c-focus-ring);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
-}
-
 /* --- Photos (full width) -------------------------------------------------- */
 
 .photos {

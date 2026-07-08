@@ -21,6 +21,7 @@ import {
   CardAction,
   CardInlineAction,
   Chips,
+  CollapsibleRows,
   EmptyRow,
   KV,
   NotesText,
@@ -179,14 +180,16 @@ export function LandlordFile({
         {myUnits.length === 0 ? (
           <EmptyRow>No properties yet.</EmptyRow>
         ) : (
-          myUnits.map((u) => (
-            <Row
-              key={u.unitId}
-              to={`/listings/${u.unitId}`}
-              label={unitRowLabel(u)}
-              right={<StatusBadge kind="listing" status={u.status} />}
-            />
-          ))
+          <CollapsibleRows
+            rows={myUnits.map((u) => (
+              <Row
+                key={u.unitId}
+                to={`/listings/${u.unitId}`}
+                label={unitRowLabel(u)}
+                right={<StatusBadge kind="listing" status={u.status} />}
+              />
+            ))}
+          />
         )}
       </Card>
 
@@ -194,22 +197,24 @@ export function LandlordFile({
         {tours.length === 0 ? (
           <EmptyRow>No tours on these properties yet.</EmptyRow>
         ) : (
-          tours.map((t) => {
-            const unit = unitMap.get(t.unitId);
-            const addr = unit ? formatAddress(unit.address) || t.unitId : t.unitId;
-            return (
-              <Row
-                key={t.tourId}
-                to={`/tours/${t.tourId}`}
-                label={`${addr} - ${
-                  t.scheduledAt !== undefined
-                    ? new Date(t.scheduledAt).toLocaleDateString()
-                    : 'Not booked'
-                }`}
-                right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
-              />
-            );
-          })
+          <CollapsibleRows
+            rows={tours.map((t) => {
+              const unit = unitMap.get(t.unitId);
+              const addr = unit ? formatAddress(unit.address) || t.unitId : t.unitId;
+              return (
+                <Row
+                  key={t.tourId}
+                  to={`/tours/${t.tourId}`}
+                  label={`${addr} - ${
+                    t.scheduledAt !== undefined
+                      ? new Date(t.scheduledAt).toLocaleDateString()
+                      : 'Not booked'
+                  }`}
+                  right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
+                />
+              );
+            })}
+          />
         )}
       </Card>
 
@@ -217,23 +222,25 @@ export function LandlordFile({
         {myPlacements.length === 0 ? (
           <EmptyRow>No placements on these units yet.</EmptyRow>
         ) : (
-          myPlacements.map((c) => {
-            const unit = unitMap.get(c.unitId);
-            const addr = unit ? formatAddress(unit.address) || c.unitId : c.unitId;
-            return (
-              <Row
-                key={c.placementId}
-                to={`/placements/${c.placementId}`}
-                label={addr}
-                right={
-                  <>
-                    <DeadlineChip placement={c} />
-                    {STAGE_LABELS[c.stage] ?? c.stage}
-                  </>
-                }
-              />
-            );
-          })
+          <CollapsibleRows
+            rows={myPlacements.map((c) => {
+              const unit = unitMap.get(c.unitId);
+              const addr = unit ? formatAddress(unit.address) || c.unitId : c.unitId;
+              return (
+                <Row
+                  key={c.placementId}
+                  to={`/placements/${c.placementId}`}
+                  label={addr}
+                  right={
+                    <>
+                      <DeadlineChip placement={c} />
+                      {STAGE_LABELS[c.stage] ?? c.stage}
+                    </>
+                  }
+                />
+              );
+            })}
+          />
         )}
       </Card>
 

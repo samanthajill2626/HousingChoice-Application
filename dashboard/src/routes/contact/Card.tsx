@@ -86,6 +86,40 @@ export function EmptyRow({ children }: { children: React.ReactNode }): React.JSX
   return <p className={styles.empty}>{children}</p>;
 }
 
+/**
+ * Render a list of already-built rows, capped at `limit` (default 4) with a
+ * "Show N more" / "Show less" toggle when there are more. Each row must carry its
+ * own `key`. Owns its expanded state per instance, so several lists on a page
+ * expand independently. Keeps long card lists (a landlord's properties/tours/
+ * placements, a unit's related/similar) from running unbounded.
+ */
+export function CollapsibleRows({
+  rows,
+  limit = 4,
+}: {
+  rows: React.JSX.Element[];
+  limit?: number;
+}): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? rows : rows.slice(0, limit);
+  const hidden = rows.length - limit;
+  return (
+    <>
+      {shown}
+      {rows.length > limit ? (
+        <button
+          type="button"
+          className={styles.moreToggle}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Show less' : `Show ${hidden} more`}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 /** A key/value detail row (the Details card). An optional `hint` adds a small ⓘ
  *  next to the key that reveals the explanation on hover (title tooltip) — for
  *  fields whose meaning isn't obvious from the label alone (e.g. the

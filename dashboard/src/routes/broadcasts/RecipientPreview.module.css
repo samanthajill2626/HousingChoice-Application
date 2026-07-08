@@ -160,20 +160,6 @@
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
 }
-.removeBtn {
-  flex: 0 0 auto;
-  padding: var(--sp-1) var(--sp-2);
-  border: none;
-  background: none;
-  color: var(--c-text-muted);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.removeBtn:hover {
-  color: var(--c-danger);
-  text-decoration: underline;
-}
-
 .addRow {
   display: flex;
   flex-direction: column;

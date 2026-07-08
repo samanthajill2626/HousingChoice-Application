@@ -1,12 +1,15 @@
 // RecipientPreview — the editable curated recipient list (the step between
 // Preview and Send). Every preview candidate is listed individually with a
-// checkbox; the operator can uncheck/remove anyone, add tenants the filter
+// checkbox; the operator can uncheck anyone (the ONLY exclusion mechanism —
+// the old per-row Remove duplicated it and could dismiss a fenced no-consent
+// row from view, hiding the record-consent reminder), add tenants the filter
 // didn't catch (tenant search → append), search-within-recipients (filter by
-// name/phone), and bulk Select all / Deselect all. Already-sent-this-property
-// rows render amber + UNCHECKED (a SOFT opt-in-to-resend flag, never a hard
-// gate); "Select all" SKIPS already-sent rows. A live selected count drives
-// "Send to N tenants", which posts the EXACT checked contactIds. 400/409 are
-// surfaced inline. A "Delete draft" button removes the unsent draft.
+// name/phone), and bulk Select all / Deselect all. Excluded rows stay VISIBLE
+// (auditable: staff can see who's left out and re-check them). Already-sent-
+// this-property rows render amber + UNCHECKED (a SOFT opt-in-to-resend flag,
+// never a hard gate); "Select all" SKIPS already-sent rows. A live selected
+// count drives "Send to N tenants", which posts the EXACT checked contactIds.
+// 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -107,10 +110,6 @@ export function RecipientPreview({
         r.contactId === contactId && r.hasConsent ? { ...r, checked: !r.checked } : r,
       ),
     );
-  }
-
-  function remove(contactId: string): void {
-    setRows((prev) => prev.filter((r) => r.contactId !== contactId));
   }
 
   /** Select all — but SKIP already-sent rows (opt-in only) AND no-consent rows
@@ -322,14 +321,6 @@ export function RecipientPreview({
                 ) : null}
                 {row.added ? <span className={styles.addedTag}>Added</span> : null}
               </span>
-              <button
-                type="button"
-                className={styles.removeBtn}
-                aria-label={`Remove ${row.name}`}
-                onClick={() => remove(row.contactId)}
-              >
-                Remove
-              </button>
             </li>
           ))}
         </ul>

@@ -102,6 +102,28 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('RecipientPreview — list rendering', () => {
+  it('shows the FULL name, linking to the profile in a new tab (list state preserved)', async () => {
+    const user = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', firstName: 'Tasha', lastName: 'Nguyen' })],
+      }),
+    });
+    // Full name — not the bare first name.
+    const link = screen.getByRole('link', { name: 'Tasha Nguyen' });
+    expect(link).toHaveAttribute('href', '/contacts/c1');
+    // New tab, so the in-memory curated list (checkboxes, added rows) is never lost.
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link.getAttribute('rel')).toContain('noopener');
+    // The checkbox's accessible name carries the full name too.
+    const box = screen.getByRole('checkbox', { name: 'Tasha Nguyen' });
+    expect(box).toBeChecked();
+    // Clicking the name (the link) must NOT toggle the checkbox — it sits outside
+    // the checkbox label.
+    await user.click(link);
+    expect(box).toBeChecked();
+  });
+
   it('lists EVERY candidate individually with a checkbox', () => {
     renderPreview({
       preview: previewOf({

@@ -70,8 +70,8 @@ export function freshContact(label: string): Contact {
   const stamp = `${Date.now()}`.slice(-5);
   seq += 1;
   const phone = `+1555${stamp}${String(seq).padStart(2, '0')}`;
-  // firstName is unique + space-free (so a broadcast preview row — which shows the
-  // FIRST name only — is locatable by an exact accessible-name match).
+  // firstName is unique + space-free (a broadcast review row shows the FULL name,
+  // so verbs anchor on this run-unique first name + a word boundary).
   const firstName = `${label}${stamp}${seq}`;
   return { phone, firstName, lastName: 'Tester', name: `${label} ${stamp}-${seq}` };
 }
@@ -665,10 +665,13 @@ export class Scenario {
       // Curate to exactly the active tenant: clear the audience, then check only them.
       await this.page.getByRole('button', { name: 'Deselect all' }).click();
       const list = this.page.getByRole('list', { name: 'Candidate recipients' });
-      // exact: the row's accessible name is the FIRST name only; without exact a
-      // prior-run tenant whose firstName is a prefix (e.g. "Searcher123451" inside
-      // "Searcher1234512") would also match this substring.
-      await list.getByRole('checkbox', { name: firstName, exact: true }).check();
+      // The row's accessible name is the FULL name ("<firstName> <lastName>").
+      // Anchor on the run-unique firstName followed by a word boundary so a
+      // prior-run tenant whose firstName is a prefix (e.g. "Searcher123451"
+      // inside "Searcher1234512") can never also match.
+      await list
+        .getByRole('checkbox', { name: new RegExp(`^${escapeRegExp(firstName)}( |$)`) })
+        .check();
       await this.page.getByRole('button', { name: /^Send to/ }).click();
       await expect(this.page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/, { timeout: 15_000 });
     });

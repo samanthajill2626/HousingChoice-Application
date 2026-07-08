@@ -150,13 +150,15 @@ describe('audience resolution (M1.8a)', () => {
     expect(out.contactIds.sort()).toEqual(['two', 'twoB']);
   });
 
-  it('carries firstName + phone through for the per-recipient merge field / send', async () => {
-    const items = [tenant({ contactId: 'c-1', firstName: 'Ann', phone: '+15551230001' })];
+  it('carries firstName + lastName + phone through (merge field / the review rows FULL name)', async () => {
+    const items = [
+      tenant({ contactId: 'c-1', firstName: 'Ann', lastName: 'Osei', phone: '+15551230001' }),
+    ];
     const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
     const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
     // has_consent:false here — this tenant has no recorded consent (A2P §4).
     expect(out.contacts).toEqual([
-      { contactId: 'c-1', phone: '+15551230001', firstName: 'Ann', has_consent: false },
+      { contactId: 'c-1', phone: '+15551230001', firstName: 'Ann', lastName: 'Osei', has_consent: false },
     ]);
   });
 

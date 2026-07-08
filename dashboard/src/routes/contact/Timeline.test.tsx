@@ -610,7 +610,7 @@ describe('Timeline stick-to-bottom', () => {
       },
     });
   }
-  const wrap = (items: TimelineItem[]): React.JSX.Element => (
+  const wrap = (items: TimelineItem[], key = 'c1'): React.JSX.Element => (
     <MemoryRouter>
       <Timeline
         status="ready"
@@ -619,10 +619,13 @@ describe('Timeline stick-to-bottom', () => {
         replyToPhone="+14040100007"
         canSend={false}
         onSend={vi.fn()}
+        resetScrollKey={key}
       />
     </MemoryRouter>
   );
-  const stream = (): HTMLElement => document.querySelector('[class*="stream"]') as HTMLElement;
+  // The scroll container is `.stream`; exclude the `.streamWrap` positioning parent.
+  const stream = (): HTMLElement =>
+    document.querySelector('[class*="stream"]:not([class*="Wrap"])') as HTMLElement;
 
   it('pins to the bottom when a new item arrives while the operator is at the bottom', () => {
     const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
@@ -648,5 +651,51 @@ describe('Timeline stick-to-bottom', () => {
     rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
 
     expect(el.scrollTop).toBe(40); // left exactly where they were reading
+  });
+
+  it('shows a "New messages" pill when an item arrives while scrolled up; clicking it jumps down', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
+    const el = stream();
+    makeScrollable(el, 500);
+    el.scrollTop = 40; // scrolled up reading history
+    fireEvent.scroll(el);
+    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+
+    setProp(el, 'scrollHeight', 700); // a new item lands below
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
+
+    const pill = screen.getByRole('button', { name: /jump to the newest/i });
+    expect(pill).toBeInTheDocument();
+
+    fireEvent.click(pill);
+    expect(el.scrollTop).toBe(700); // jumped to the newest
+    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+  });
+
+  it('does NOT show the pill when the new item arrives while already at the bottom', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
+    const el = stream();
+    makeScrollable(el, 500);
+    el.scrollTop = 400; // at bottom
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 700);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
+
+    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
+  });
+
+  it('switching conversations jumps to the bottom with no carried-over pill', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT], 'c1'));
+    const el = stream();
+    makeScrollable(el, 500);
+    el.scrollTop = 40; // scrolled up in conversation c1
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 900);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL], 'c2')); // a DIFFERENT conversation
+
+    expect(el.scrollTop).toBe(900); // opened on the newest item
+    expect(screen.queryByRole('button', { name: /jump to the newest/i })).not.toBeInTheDocument();
   });
 });

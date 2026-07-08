@@ -65,6 +65,48 @@
 
 /* --- Stream --------------------------------------------------------------- */
 
+/* Positioned wrapper so the "↓ New messages" pill floats over the stream's
+ * bottom edge without scrolling with the content. Takes the flex:1 slot .stream
+ * used to hold; .stream fills it. */
+.streamWrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* "↓ New messages" pill — shown only when a new item lands while the operator is
+ * scrolled up. Floats centered near the bottom of the stream; click jumps down. */
+.newPill {
+  position: absolute;
+  bottom: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--c-brand);
+  color: var(--c-text-inverse);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.newPill:hover {
+  background: var(--c-brand-hover);
+}
+
+.newPill:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
 .stream {
   flex: 1;
   /* A floor — NOT a fixed height — on the message list itself (not the panel) so

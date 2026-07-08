@@ -108,6 +108,11 @@ export interface TimelineProps {
   /** Relay group is closed — show a standing note at the composer (sending is
    *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
   relayClosed?: boolean;
+  /** A stable id for the conversation/contact this timeline shows (contactId or
+   *  conversationId). When it changes the stream is treated as a FRESH timeline —
+   *  jump to the newest item, no "new messages" pill — so switching conversations
+   *  never yanks or spuriously flags. */
+  resetScrollKey?: string;
 }
 
 /** The relay member key convention (MIRRORS app relayMemberKey): the member's
@@ -435,6 +440,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     clearDraftSignal,
     relayRoster,
     relayClosed,
+    resetScrollKey,
   } = props;
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
@@ -502,29 +508,66 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return out;
   }, [visible]);
 
-  // --- Stick-to-bottom -----------------------------------------------------
+  // --- Stick-to-bottom + "new messages" pill -------------------------------
   // The stream scrolls with the NEWEST item at the bottom. Keep the operator
-  // pinned there so incoming messages/activity stay visible — but only while
-  // they're already at (or near) the bottom; if they've scrolled UP to read
-  // history, a new item must NOT yank them back down.
+  // pinned there so incoming messages/activity stay visible while they're at (or
+  // near) the bottom; if they've scrolled UP to read history, a new item must NOT
+  // yank them — instead a "↓ New messages" pill appears so they know something
+  // landed and can jump down on demand (the cell-phone convention).
   const streamRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true); // default true → open on the newest item
+  const prevCountRef = useRef(0); // item count at the last layout pass
+  const prevKeyRef = useRef(resetScrollKey); // conversation identity last seen
+  const [hasNewBelow, setHasNewBelow] = useState(false);
+
+  const isAtBottom = (el: HTMLElement): boolean =>
+    // Within ~48px of the bottom counts as "at bottom" (slack for sub-pixel
+    // rounding and a partially-visible last row).
+    el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+
+  const scrollToBottom = (): void => {
+    const el = streamRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setHasNewBelow(false);
+  };
 
   const handleStreamScroll = (): void => {
     const el = streamRef.current;
     if (!el) return;
-    // Within ~48px of the bottom counts as "at bottom" (slack for sub-pixel
-    // rounding and a partially-visible last row).
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+    atBottomRef.current = isAtBottom(el);
+    // Reaching the bottom clears the pill (the operator has caught up).
+    if (atBottomRef.current && hasNewBelow) setHasNewBelow(false);
   };
 
-  // After the rendered stream changes (new item arrived, or first load), re-pin
-  // to the bottom when the operator was there. useLayoutEffect runs before paint,
-  // so the jump is invisible (no flash of the pre-scroll position).
+  // After the rendered stream changes, decide what to do with the scroll: pin to
+  // the bottom if the operator was there, flag "new below" if a new item landed
+  // while they were scrolled up, or — when the conversation itself changed — treat
+  // it as a fresh timeline and jump to the newest. useLayoutEffect runs before
+  // paint, so any jump is invisible (no flash of the pre-scroll position).
   useLayoutEffect(() => {
     const el = streamRef.current;
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [clusters]);
+    if (!el) return;
+    const count = clusters.reduce((n, c) => n + c.items.length, 0);
+    if (prevKeyRef.current !== resetScrollKey) {
+      // Switched conversations → open on the newest item, no carried-over pill.
+      prevKeyRef.current = resetScrollKey;
+      prevCountRef.current = count;
+      atBottomRef.current = true;
+      el.scrollTop = el.scrollHeight;
+      setHasNewBelow(false);
+      return;
+    }
+    const grew = count > prevCountRef.current;
+    prevCountRef.current = count;
+    if (atBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setHasNewBelow(false);
+    } else if (grew) {
+      setHasNewBelow(true);
+    }
+  }, [clusters, resetScrollKey]);
 
   // A retry IS a send — surface its failure (429 rate_limited, opt-out, …) in
   // the SAME composer error slot handleSend uses, instead of swallowing the
@@ -603,6 +646,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         </div>
       </header>
 
+      <div className={styles.streamWrap}>
       <div className={styles.stream} ref={streamRef} onScroll={handleStreamScroll}>
         {status === 'loading' ? <Spinner center /> : null}
 
@@ -637,6 +681,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </div>
             ))
           : null}
+      </div>
+        {hasNewBelow ? (
+          <button
+            type="button"
+            className={styles.newPill}
+            onClick={scrollToBottom}
+            aria-label="Jump to the newest messages"
+          >
+            <span aria-hidden="true">↓</span> New messages
+          </button>
+        ) : null}
       </div>
 
       {upcoming && upcoming.length > 0 ? (

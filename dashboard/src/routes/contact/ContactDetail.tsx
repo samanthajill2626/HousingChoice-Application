@@ -427,6 +427,7 @@ export function ContactDetail(): React.JSX.Element {
             onRetry={onRetry}
             optedOut={optedOut}
             clearDraftSignal={clearDraftSignal}
+            resetScrollKey={contactId}
           />
         </div>
         <div

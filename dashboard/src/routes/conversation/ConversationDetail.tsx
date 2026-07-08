@@ -409,6 +409,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             {...(canSend && { onSend })}
             relayRoster={members}
             relayClosed={closed}
+            resetScrollKey={conversationId}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>

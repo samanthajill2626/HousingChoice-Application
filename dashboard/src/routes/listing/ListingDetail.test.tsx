@@ -1,11 +1,15 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
 vi.mock('./useListing.js', () => ({ useListing: (id: string) => useListing(id) }));
+
+// The "Placements on this property" card resolves tenant names from useContacts.
+const useContacts = vi.fn();
+vi.mock('../contacts/useContacts.js', () => ({ useContacts: (filter: string) => useContacts(filter) }));
 
 const deleteUnit = vi.fn();
 const restoreUnit = vi.fn();
@@ -92,6 +96,17 @@ const READY: ListingState = {
   similar: { status: 'pending' },
   activity: { status: 'pending' },
 };
+
+// Default contacts so the placement card can resolve tenantId 't1' → "Fixture Tenant"
+// (a name unique to this file, so it can't collide with other rows' contact names).
+beforeEach(() => {
+  useContacts.mockReturnValue({
+    status: 'ready',
+    contacts: [
+      { contactId: 't1', type: 'tenant', status: 'active', firstName: 'Fixture', lastName: 'Tenant', phone: '+14045550111' },
+    ],
+  });
+});
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -215,6 +230,15 @@ describe('ListingDetail', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByRole('link', { name: /u2/ })).toHaveAttribute('href', '/listings/u2');
+  });
+
+  it('shows the tenant NAME (not the raw id) for a placement on this property', () => {
+    useListing.mockReturnValue(READY); // placementsOnUnit tenantId 't1'
+    renderAt();
+    const row = screen.getByRole('link', { name: /Fixture Tenant/ });
+    expect(row).toHaveAttribute('href', '/placements/c1');
+    // The raw tenantId must never be surfaced.
+    expect(screen.queryByText('t1')).not.toBeInTheDocument();
   });
 
   it('caps related properties at 4 with a "Show more" toggle that expands + collapses', async () => {

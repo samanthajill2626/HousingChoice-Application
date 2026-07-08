@@ -11,9 +11,9 @@
 // contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" serves the unit
 // audit trail (pending only on an older backend). Nothing is fabricated.
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { deleteUnit, restoreUnit } from '../../api/index.js';
+import { deleteUnit, restoreUnit, type Contact } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
 import {
   LISTING_STATUSES,
@@ -26,6 +26,8 @@ import { Card, CardAction, EmptyRow, KV, PendingPanel, Row, responseClass } from
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
+import { useContacts } from '../contacts/useContacts.js';
+import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
 import {
@@ -111,6 +113,14 @@ export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
   const state = useListing(unitId);
+  // Contacts back the "Placements on this property" rows: resolve each placement's
+  // tenantId to a display name (falls back to the id when a contact hasn't loaded).
+  const { contacts: contactsList } = useContacts('all');
+  const contactsMap = useMemo(() => {
+    const m = new Map<string, Contact>();
+    for (const c of contactsList) m.set(c.contactId, c);
+    return m;
+  }, [contactsList]);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -493,7 +503,7 @@ export function ListingDetail(): React.JSX.Element {
                 <Row
                   key={c.placementId}
                   to={`/placements/${c.placementId}`}
-                  label={c.tenantId}
+                  label={tenantName(contactsMap, c.tenantId)}
                   right={STAGE_LABELS[c.stage] ?? c.stage}
                 />
               ))

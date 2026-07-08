@@ -578,6 +578,64 @@ describe('TourDetail - three-channel switcher', () => {
     expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'hi landlord' });
   });
 
+  it('a draft typed on Tenant does NOT carry to Landlord on a tab switch (no wrong-party send) (MAJOR 1)', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
+    renderDetail();
+    await waitLoaded();
+    // Tenant tab active + its real thread mounted.
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    // Type a tenant-intended draft but DO NOT send.
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Reply message' }),
+      'PRIVATE note for the tenant',
+    );
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('PRIVATE note for the tenant');
+    // Switch to the Landlord tab WITHOUT sending.
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-landlord', expect.anything()));
+    // The remount gives a FRESH composer: the tenant draft is gone (not carried over).
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+    // Compose + send on the Landlord tab.
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'note for the landlord');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    // The send targets the LANDLORD conversation with the AFTER-switch body...
+    expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'note for the landlord' });
+    // ...and the tenant-intended draft NEVER went anywhere (no wrong-party leak).
+    expect(
+      sendMessage.mock.calls.some(
+        (c) => (c[1] as { body?: string } | undefined)?.body === 'PRIVATE note for the tenant',
+      ),
+    ).toBe(false);
+  });
+
+  it('the INITIAL active tab auto-marks-read when it loads with unread, no click (MAJOR 2)', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 3),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+    // The reviewer's exact repro: initial Tenant tab, tenant 1:1 unread 3, NO
+    // interaction. The ref-based markRead no-op'd on the loading->ready commit.
+    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('c-tenant'));
+    expect(markConversationRead.mock.calls.filter((c) => c[0] === 'c-tenant')).toHaveLength(1);
+    // The inactive landlord tab (unread 0) is never marked; never the inbox fan-out.
+    expect(markConversationRead).not.toHaveBeenCalledWith('c-landlord');
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
   it('composer footer: 1:1 tabs show the reply number; the group tab keeps the shared relay copy', async () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
     getConversations.mockResolvedValue({

@@ -65,9 +65,13 @@ export function TourConversation({
 
   // Viewing a tab marks its SINGLE conversation read + clears the tab dot. Runs on
   // the initial tab and every switch; re-runs when the active channel resolves an
-  // id or gains unread. markRead no-ops at unread 0, so this never loops.
+  // id or gains unread. We pass the active channel's CURRENT conversationId +
+  // unread as ARGUMENTS (rather than have markRead read a ref) so the INITIAL
+  // active tab marks read on the loading->ready commit: a ref would be written by
+  // a parent effect that runs AFTER this child effect, so it would still be stale
+  // here. markRead no-ops at unread 0, so this never loops.
   useEffect(() => {
-    channels.markRead(activeKey);
+    channels.markRead(activeKey, active.conversationId, active.unread);
   }, [activeKey, active.conversationId, active.unread, channels]);
 
   const isPm = tour.tourType === 'pm_team';
@@ -165,12 +169,21 @@ export function TourConversation({
             </p>
           </div>
         ) : active.conversationId !== null ? (
+          // key by conversation identity so switching the Tenant<->Landlord 1:1
+          // REMOUNTS a fresh Timeline. Both tabs render <ContactThread> at the same
+          // JSX position; without a key React reuses the fiber and Timeline's
+          // in-progress draft survives the switch, so a Send would post it to the
+          // newly-selected party. Also clears the stale-transcript flash (MINOR 3).
           <ContactThread
+            key={active.conversationId}
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
           />
         ) : (
+          // key by channel so a create-on-demand Tenant/Landlord tab also remounts
+          // on switch (conversationId is null here, so it cannot key the pane).
           <NewContactThread
+            key={activeKey}
             contactId={oneToOneContactId}
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}

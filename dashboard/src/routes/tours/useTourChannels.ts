@@ -43,8 +43,12 @@ export interface TourChannelsState {
   landlord: TourChannelInfo;
   /** Inject a just-resolved conversationId (open-group / create-on-first-send). */
   setConversationId: (key: TourChannelKey, conversationId: string) => void;
-  /** Mark a channel's single conversation read + zero its unread locally. */
-  markRead: (key: TourChannelKey) => void;
+  /** Mark a channel's single conversation read + zero its unread locally. The
+   *  caller passes the channel's CURRENT conversationId + unread (the values from
+   *  the render it fires in) so mark-read never depends on a ref a PARENT effect
+   *  writes only AFTER this consumer's child effect runs. No-ops unless a resolved
+   *  conversation has unread > 0. */
+  markRead: (key: TourChannelKey, conversationId: string | null, unread: number) => void;
 }
 
 interface Committed {
@@ -112,14 +116,6 @@ export function useTourChannels(tour: Tour, landlordId: string | undefined): Tou
     ...initialChannels(groupThreadId),
     forId: tourId,
   }));
-
-  // A ref mirror of the committed channels so markRead reads the CURRENT
-  // conversationId without a stale closure. Written in a passive effect (never
-  // during render).
-  const chRef = useRef(state);
-  useEffect(() => {
-    chRef.current = state;
-  });
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -189,12 +185,18 @@ export function useTourChannels(tour: Tour, landlordId: string | undefined): Tou
     [tourId],
   );
 
-  const markRead = useCallback((key: TourChannelKey) => {
-    const ch = chRef.current[key];
-    if (!ch.conversationId || ch.unread === 0) return;
-    const id = ch.conversationId;
+  // markRead takes the channel's CURRENT conversationId + unread as ARGUMENTS
+  // (from the consumer that has them at effect time) instead of reading a ref: the
+  // ref mirror was written in a PARENT passive effect that runs AFTER the child
+  // mark-read effect, so on the loading->ready commit the ref was stale (null id /
+  // unread 0) and the INITIAL active tab never auto-marked-read. Zeroing unread
+  // locally makes the immediate re-render a no-op (no fire loop); it fires again
+  // only when a real event raises unread. Single conversation only - NEVER the
+  // contact-wide inbox fan-out (that would clear sibling channel tabs).
+  const markRead = useCallback((key: TourChannelKey, conversationId: string | null, unread: number) => {
+    if (conversationId === null || unread <= 0) return;
     setState((prev) => (prev[key].unread === 0 ? prev : { ...prev, [key]: { ...prev[key], unread: 0 } }));
-    void markConversationRead(id).catch(() => {
+    void markConversationRead(conversationId).catch(() => {
       /* best-effort - a failed mark-read must not break the view */
     });
   }, []);

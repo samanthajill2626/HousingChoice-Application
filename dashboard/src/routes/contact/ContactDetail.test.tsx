@@ -201,6 +201,37 @@ describe('ContactDetail', () => {
     expect(screen.queryByRole('menuitemradio', { name: 'Placed' })).not.toBeInTheDocument();
   });
 
+  it('landlord status pill: changing it PATCHes through the transition service and applies the result', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...LANDLORD, status: 'active' });
+    setTenantStatus.mockResolvedValue({ ...LANDLORD, status: 'parked' });
+    renderAt('L1');
+
+    await user.click(await screen.findByRole('button', { name: 'Contact status: Active' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Parked' }));
+
+    // The landlord value rides the SAME transition-service endpoint (it is
+    // type-scoped server-side), never a plain contact PATCH.
+    expect(setTenantStatus).toHaveBeenCalledWith('L1', { toStatus: 'parked', source: 'manual' });
+    await screen.findByRole('button', { name: 'Contact status: Parked' });
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it('a soft-DELETED contact keeps the display-only status badge — no pill', async () => {
+    getContact.mockResolvedValue({
+      ...TENANT,
+      status: 'placed',
+      deleted_at: '2026-06-19T00:00:00.000Z',
+    });
+    renderAt('k1');
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Contact status/i })).not.toBeInTheDocument();
+    // The status still reads as a plain badge (header; may also echo in the
+    // Details card, hence getAllByText).
+    expect(screen.getAllByText('Placed').length).toBeGreaterThanOrEqual(1);
+  });
+
   it('surfaces an inline error when the status transition fails (pill keeps the stored status)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

@@ -309,7 +309,8 @@ UI-only / read-endpoint specs:
   14:00 UTC, + a relay group conversation (`conv-live-relay-group`) + pool number
   (`+15550160001`). **Full 5-rung ladder armed** via `armTourReminders` — the richest
   target for a Part A reminders-panel / Part B timeline read (has PENDING future rows).
-- **TOUR-C** `tour-live-confirmed` — confirmed tour +2 days.
+- **TOUR-C** `tour-live-upcoming` (was `tour-live-confirmed`; the confirmed
+  status was removed 2026-07-08) — scheduled tour +2 days.
 - **PLACEMENT-A** `placement-live-overdue-rta` — overdue `rta_window` deadline (past
   `next_deadline_at`) → Today `needs_you_now`.
 - **PLACEMENT-B** `placement-live-follow-up` — due `follow_up` deadline.

@@ -18,7 +18,8 @@ refs: dashboard/src/routes/tours/
 **Problem.** On the **/tours** page, some tour rows show the raw entity ID instead
 of a human-readable label:
 
-- `tour-mx-scheduled-01` and `tour-mx-confirmed-02` render the tenant as
+- `tour-mx-scheduled-01` (and, before the confirmed status was removed
+  2026-07-08, `tour-mx-confirmed-02`) render the tenant as
   **`tenant-mx-searching-standalone-01`** (raw contactId) instead of a name.
 - `tour-mx-scheduled-02` renders the property as **`unit-mx-tourable-04`** (raw
   unitId) instead of a street address.

@@ -87,29 +87,96 @@ export function StatusMenu({
 }: StatusMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  /** The rendered menu items, in DOM (= display) order. */
+  const menuItems = (): HTMLButtonElement[] =>
+    Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? []);
+
+  /** Close and put focus back on the trigger (APG menu-button: Escape/selection
+   *  return focus; without this, closing unmounts the focused item and focus
+   *  silently drops to <body>). */
+  const closeAndRefocus = (): void => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
 
   useEffect(() => {
     if (!open) return;
-    const onClick = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    const onMouseDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        // Only reclaim focus when it currently lives inside this control (a
+        // keyboard user dismissing by clicking empty space) — never steal it
+        // from another control the user just clicked.
+        if (ref.current.contains(document.activeElement)) triggerRef.current?.focus();
+        setOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
     };
-    document.addEventListener('mousedown', onClick);
+    document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKey);
     };
+  }, [open]);
+
+  // On open, move focus INTO the menu — the checked item (radio-menu
+  // convention), else the first (APG menu-button pattern).
+  useEffect(() => {
+    if (!open) return;
+    const items = menuItems();
+    const checked = items.find((el) => el.getAttribute('aria-checked') === 'true');
+    (checked ?? items[0])?.focus();
   }, [open]);
 
   const allOptions = groups ? groups.flatMap((g) => g.options) : (options ?? []);
   const current = allOptions.find((o) => o.value === value);
 
   const choose = (v: string): void => {
-    setOpen(false);
+    closeAndRefocus();
     if (v !== value) onChange(v);
+  };
+
+  /** Arrow/Home/End roving focus inside the menu; Tab closes and resumes the
+   *  page tab sequence from the trigger. Enter/Space activate natively (items
+   *  are buttons). */
+  const onMenuKeyDown = (e: React.KeyboardEvent): void => {
+    const items = menuItems();
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(at + 1) % items.length]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(at - 1 + items.length) % items.length]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1]?.focus();
+    } else if (e.key === 'Tab') {
+      // Close and refocus the trigger WITHOUT preventing default, so the tab
+      // continues from the trigger to its natural neighbor.
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+  };
+
+  /** ArrowDown/ArrowUp on the (closed) trigger open the menu, per APG. */
+  const onTriggerKeyDown = (e: React.KeyboardEvent): void => {
+    if (!open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      setOpen(true);
+    }
   };
 
   const renderItem = (o: StatusMenuOption): React.JSX.Element => (
@@ -119,6 +186,8 @@ export function StatusMenu({
       role="menuitemradio"
       aria-checked={o.value === value}
       className={styles.item}
+      // Roving focus via arrows only — keep items out of the page tab order.
+      tabIndex={-1}
       onClick={() => choose(o.value)}
     >
       <span className={styles.check} aria-hidden="true">
@@ -131,6 +200,7 @@ export function StatusMenu({
   return (
     <span className={styles.wrap} ref={ref}>
       <button
+        ref={triggerRef}
         type="button"
         className={`${styles.trigger} ${TONE_CLASS[tone]} ${size === 'lg' ? styles.sizeLg : ''}`}
         aria-haspopup="menu"
@@ -138,12 +208,13 @@ export function StatusMenu({
         aria-label={`${label}: ${current?.label ?? value}`}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={onTriggerKeyDown}
       >
         {current?.label ?? value}
         <span className={styles.caret} aria-hidden="true">▾</span>
       </button>
       {open ? (
-        <div className={styles.menu} role="menu" aria-label={label}>
+        <div className={styles.menu} role="menu" aria-label={label} ref={menuRef} onKeyDown={onMenuKeyDown}>
           {groups
             ? groups.map((g) => (
                 <div key={g.label} role="group" aria-label={g.label} className={styles.group}>

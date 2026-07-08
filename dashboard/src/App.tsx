@@ -17,7 +17,7 @@ import { ListingsList } from './routes/listings/ListingsList.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
 import { ConversationDetail } from './routes/conversation/ConversationDetail.js';
 import { ListingDetail } from './routes/listing/ListingDetail.js';
-import { PlacementsBoard } from './routes/placements/PlacementsBoard.js';
+import { PlacementsPage } from './routes/placements/PlacementsPage.js';
 import { PlacementDetail } from './routes/placements/PlacementDetail.js';
 import { Inbox } from './routes/inbox/Inbox.js';
 import { BroadcastsList } from './routes/broadcasts/BroadcastsList.js';
@@ -134,8 +134,8 @@ function AuthedApp(): React.JSX.Element {
             <Route path="contacts/unknown" element={<ContactsList filter="unknown" />} />
             <Route path="contacts/deleted" element={<ContactsList filter="deleted" />} />
 
-            {/* Placement board (§F2). Static — ranks above placements/:placementId. */}
-            <Route path="placements" element={<PlacementsBoard />} />
+            {/* Placements page (§F2). Static — ranks above placements/:placementId. */}
+            <Route path="placements" element={<PlacementsPage />} />
             <Route path="placements/:placementId" element={<PlacementDetail />} />
 
             {/* Properties list view. Static — ranks above listings/:unitId. */}

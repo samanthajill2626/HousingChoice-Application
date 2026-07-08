@@ -1,0 +1,96 @@
+/* StageMenu - kebab + grouped stage-ladder popover. Mirrors
+ * ContactActionsMenu.module.css idioms. Tokens only. */
+
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.kebab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kebab:hover {
+  color: var(--c-text);
+}
+
+.kebab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+/* FIXED + PORTALED (see StageMenu.tsx header): the ledger's overflow:hidden
+ * ancestors clip an in-place popover, and .actions' z-index:2 stacking context
+ * traps it under sticky group headers / later rows' kebabs - so the menu is
+ * portaled to document.body and positioned fixed. top/right (and a
+ * viewport-clamped max-height) are set inline from the kebab's rect at open
+ * time; the menu closes on scroll/resize so the coordinates never go stale.
+ * The max-height here is the no-inline-style fallback (jsdom/tests). */
+.menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 220px;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  padding: var(--sp-1);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.groupHead {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-subtle);
+}
+
+.item {
+  display: block;
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.item:disabled {
+  color: var(--c-text-subtle);
+  cursor: default;
+}
+
+.danger {
+  color: var(--c-danger);
+}
+
+.divider {
+  margin: var(--sp-1) 0;
+  border-top: 1px solid var(--c-border);
+}

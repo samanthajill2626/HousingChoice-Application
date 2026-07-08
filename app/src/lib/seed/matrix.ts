@@ -777,9 +777,18 @@ function buildTenantsMatrix(placementGroups: PlacementGroup[]): TenantGroup[] {
   const groups: TenantGroup[] = [];
   let counter = 0;
 
+  // Statuses whose `-standalone-01` contactId is HARDCODED by other builders
+  // (the tours pool, broadcast recipients, listing sends, activity events).
+  // Those cross-references must ALWAYS resolve, so these statuses create at
+  // least one standalone row even when placements already satisfy the >=2
+  // floor - otherwise the referenced contact simply does not exist and every
+  // surface that joins it (the /tours list, broadcast results, timelines)
+  // renders a dangling raw id / 404s on click-through.
+  const GUARANTEED_STANDALONE: ReadonlySet<string> = new Set(['searching', 'placing']);
+
   for (const status of TENANT_STATUSES) {
     const existing = statusCounts[status] ?? 0;
-    const needed = Math.max(0, 2 - existing);
+    const needed = Math.max(GUARANTEED_STANDALONE.has(status) ? 1 : 0, 2 - existing);
     for (let rep = 1; rep <= needed; rep++) {
       counter++;
       const tenantId = `tenant-mx-${status.replace(/_/g, '-')}-standalone-${String(rep).padStart(2, '0')}`;

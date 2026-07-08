@@ -68,7 +68,13 @@ export function StageMenu({ tenant, currentStage, busy = false, onSelect }: Stag
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        setOpen(false);
+        // Escape is a keyboard dismissal - return focus to the kebab so the tab
+        // sequence resumes where it left off (the portal took the menu out of
+        // natural order, so without this focus lands at the end of <body>).
+        btnRef.current?.focus();
+      }
     };
     // Fixed coordinates go stale the moment anything scrolls or resizes -
     // close instead of chasing. Capture phase so the ledger's own scroll
@@ -90,6 +96,17 @@ export function StageMenu({ tenant, currentStage, busy = false, onSelect }: Stag
     };
   }, [open]);
 
+  // The portal renders the menu at the END of <body>, outside the kebab's tab
+  // order, so opening with the keyboard would strand focus. Move focus to the
+  // first enabled menuitem once the portal has committed; Tab/Shift+Tab then
+  // walk the menu's buttons naturally (no roving arrow-key handling - matches
+  // ContactActionsMenu's depth). Escape/selection restore focus to the kebab.
+  useEffect(() => {
+    if (!open) return;
+    const first = menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)');
+    first?.focus();
+  }, [open]);
+
   function toggle(): void {
     if (!open && btnRef.current) {
       const rect = btnRef.current.getBoundingClientRect();
@@ -105,6 +122,10 @@ export function StageMenu({ tenant, currentStage, busy = false, onSelect }: Stag
 
   function pick(stage: PlacementStage): void {
     setOpen(false);
+    // Selection is a keyboard-reachable dismissal - restore focus to the kebab
+    // (same rationale as Escape). Outside-click/scroll/resize intentionally do
+    // NOT restore, so a mousedown elsewhere keeps its own focus target.
+    btnRef.current?.focus();
     onSelect(stage);
   }
 

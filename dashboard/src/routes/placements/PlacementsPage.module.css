@@ -107,7 +107,7 @@
 
 /* Mobile: the filter chips stack ABOVE the list (nav is first in the DOM).
  * align-items: stretch (overriding the desktop flex-start) makes the chip nav
- * and list fill the column width instead of shrink-wrapping to content — without
+ * and list fill the column width instead of shrink-wrapping to content - without
  * it the chip strip grows to its full content width and drags the whole content
  * area into a horizontal scroll, defeating the strip's own overflow-x: auto. */
 @media (max-width: 767.98px) {

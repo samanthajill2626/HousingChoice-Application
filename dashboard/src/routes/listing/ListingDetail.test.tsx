@@ -217,6 +217,33 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('link', { name: /u2/ })).toHaveAttribute('href', '/listings/u2');
   });
 
+  it('caps related properties at 6 with a "Show more" toggle that expands + collapses', async () => {
+    const rows = Array.from({ length: 8 }, (_, i) => ({
+      unitId: `rel-${i + 1}`,
+      status: 'available' as const,
+      relation: 'same_landlord' as const,
+      label: 'Same landlord',
+    }));
+    useListing.mockReturnValue({ ...READY, related: { status: 'ready', rows } });
+    const user = userEvent.setup();
+    renderAt();
+
+    // Only the first 6 render; #7 and #8 are hidden behind the toggle.
+    expect(screen.getByRole('link', { name: /rel-6/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /rel-7/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Show 2 more' }));
+
+    // Expanded: all 8 render and the toggle flips to "Show less".
+    expect(screen.getByRole('link', { name: /rel-7/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /rel-8/ })).toBeInTheDocument();
+    const collapse = screen.getByRole('button', { name: 'Show less' });
+
+    await user.click(collapse);
+    expect(screen.queryByRole('link', { name: /rel-7/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Show 2 more' })).toBeInTheDocument();
+  });
+
   it('renders pending panels for Sent-to-tenants (C4) and Similar (C6)', () => {
     useListing.mockReturnValue(READY);
     renderAt();

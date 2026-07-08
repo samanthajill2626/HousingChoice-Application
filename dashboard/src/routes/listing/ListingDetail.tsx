@@ -72,6 +72,41 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
   no_reply: { label: '? No reply', cls: responseClass.wait },
 };
 
+/** How many rows the Related / Similar property lists show before collapsing. */
+const RELATED_LIMIT = 6;
+
+/**
+ * Render a list of already-built <Row>s, capped at `limit` with a "Show N more" /
+ * "Show less" toggle when there are more. Each rung must carry its own `key`.
+ * Own state per instance, so Related and Similar expand independently.
+ */
+function CollapsibleRows({
+  rows,
+  limit,
+}: {
+  rows: React.JSX.Element[];
+  limit: number;
+}): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? rows : rows.slice(0, limit);
+  const hidden = rows.length - limit;
+  return (
+    <>
+      {shown}
+      {rows.length > limit ? (
+        <button
+          type="button"
+          className={styles.moreToggle}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? 'Show less' : `Show ${hidden} more`}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
@@ -470,23 +505,26 @@ export function ListingDetail(): React.JSX.Element {
               related.rows.length === 0 ? (
                 <EmptyRow>No related properties.</EmptyRow>
               ) : (
-                related.rows.map((r) => (
-                  <Row
-                    key={r.unitId}
-                    to={`/listings/${r.unitId}`}
-                    label={
-                      <span>
-                        {shortAddress(r.address, r.unitId)}
-                        {r.label ? <span className={styles.subLabel}>{r.label}</span> : null}
-                      </span>
-                    }
-                    right={
-                      <span className={STATUS_DOT[r.status] ?? responseClass.muted}>
-                        {statusLabel(r.status)}
-                      </span>
-                    }
-                  />
-                ))
+                <CollapsibleRows
+                  limit={RELATED_LIMIT}
+                  rows={related.rows.map((r) => (
+                    <Row
+                      key={r.unitId}
+                      to={`/listings/${r.unitId}`}
+                      label={
+                        <span>
+                          {shortAddress(r.address, r.unitId)}
+                          {r.label ? <span className={styles.subLabel}>{r.label}</span> : null}
+                        </span>
+                      }
+                      right={
+                        <span className={STATUS_DOT[r.status] ?? responseClass.muted}>
+                          {statusLabel(r.status)}
+                        </span>
+                      }
+                    />
+                  ))}
+                />
               )
             ) : related.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load related properties.</EmptyRow>
@@ -500,19 +538,22 @@ export function ListingDetail(): React.JSX.Element {
               similar.rows.length === 0 ? (
                 <EmptyRow>No similar properties.</EmptyRow>
               ) : (
-                similar.rows.map((s) => (
-                  <Row
-                    key={s.unitId}
-                    to={`/listings/${s.unitId}`}
-                    label={
-                      <span>
-                        {shortAddress(s.address, s.unitId)}
-                        <span className={styles.subLabel}>{s.summary}</span>
-                      </span>
-                    }
-                    right={<span className={styles.match}>{s.matchPct}%</span>}
-                  />
-                ))
+                <CollapsibleRows
+                  limit={RELATED_LIMIT}
+                  rows={similar.rows.map((s) => (
+                    <Row
+                      key={s.unitId}
+                      to={`/listings/${s.unitId}`}
+                      label={
+                        <span>
+                          {shortAddress(s.address, s.unitId)}
+                          <span className={styles.subLabel}>{s.summary}</span>
+                        </span>
+                      }
+                      right={<span className={styles.match}>{s.matchPct}%</span>}
+                    />
+                  ))}
+                />
               )
             ) : similar.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load similar properties.</EmptyRow>

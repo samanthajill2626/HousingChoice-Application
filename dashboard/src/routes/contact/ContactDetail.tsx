@@ -16,7 +16,7 @@
 // + a segmented Comms | Profile toggle. The page resolves the reply target
 // (primary / picker) and whether a conversation is sendable, else Send is disabled.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
@@ -114,6 +114,16 @@ export function ContactDetail(): React.JSX.Element {
   const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
+
+  // The /contacts/:contactId route re-renders this SAME component instance on a
+  // param change (no remount — the same reason Timeline takes resetScrollKey), so
+  // per-contact transient state must be reset by hand or it leaks: fail a status
+  // change on contact A, navigate to B, and B would show A's error.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatusError(null);
+    setStatusBusy(false);
+  }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
   const { hasVerifiedCell } = useMe();
@@ -309,14 +319,14 @@ export function ContactDetail(): React.JSX.Element {
   const onChangeStatus = (toStatus: string): void => {
     if (statusBusy || toStatus === contact.status) return;
     setStatusBusy(true);
+    // Clear any prior error at ATTEMPT start (matches PlacementDetail's
+    // runTransition) so a retry never renders a stale message.
+    setStatusError(null);
     void setTenantStatus(contact.contactId, {
       toStatus: toStatus as TenantStatus,
       source: 'manual',
     })
-      .then((updated) => {
-        setContact(updated);
-        setStatusError(null);
-      })
+      .then((updated) => setContact(updated))
       .catch(() => setStatusError("Couldn't update the status - please try again."))
       .finally(() => setStatusBusy(false));
   };

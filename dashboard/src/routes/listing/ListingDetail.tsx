@@ -108,11 +108,11 @@ export function ListingDetail(): React.JSX.Element {
   function onChangeStatus(toStatus: ListingStatus): void {
     if (statusBusy || !state.unit || toStatus === state.unit.status) return;
     setStatusBusy(true);
+    // Clear any prior error at ATTEMPT start (matches PlacementDetail's
+    // runTransition) so a retry never renders a stale message.
+    setStatusError(null);
     void setListingStatus(state.unit.unitId, { toStatus, source: 'manual' })
-      .then((updated) => {
-        setUnit(updated);
-        setStatusError(null);
-      })
+      .then((updated) => setUnit(updated))
       .catch(() => {
         setStatusError("Couldn't update the property status - please try again.");
       })

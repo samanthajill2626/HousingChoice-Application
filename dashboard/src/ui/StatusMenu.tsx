@@ -156,7 +156,12 @@ export function StatusMenu({
             : (options ?? []).map(renderItem)}
         </div>
       ) : null}
-      {error !== null ? (
+      {/* The error and the menu share the same anchor slot below the pill, so the
+          error is SUPPRESSED while the menu is open — otherwise it overlaps the
+          first menu row and steals its pointer events. Parents also clear the
+          error when a new attempt starts, so a retry never re-opens onto a stale
+          message. */}
+      {error !== null && !open ? (
         <span role="alert" className={styles.error}>
           {error}
         </span>

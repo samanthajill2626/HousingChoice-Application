@@ -188,6 +188,16 @@ export function BroadcastComposer(): React.JSX.Element {
           {previewBusy ? 'Loading…' : 'Preview recipients'}
         </button>
         {draft.reachPending ? <Spinner /> : null}
+        {/* A disabled button must say WHY: the one operator-actionable gate is
+            the empty message; the settling draft/reach is transient (spinner).
+            A stale draft's failure already renders in the error alert above. */}
+        {!previewBusy && !canPreview ? (
+          bodyTemplate.trim().length === 0 ? (
+            <span className={styles.previewHint}>Write a message to enable the preview.</span>
+          ) : draft.reachPending || draft.draftId === null ? (
+            <span className={styles.previewHint}>Sizing the audience…</span>
+          ) : null
+        ) : null}
       </div>
     </div>
   );

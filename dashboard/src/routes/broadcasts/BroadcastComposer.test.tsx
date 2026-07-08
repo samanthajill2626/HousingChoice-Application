@@ -132,11 +132,16 @@ describe('BroadcastComposer — preview gate', () => {
     const u = userEvent.setup();
     renderComposer();
     const previewBtn = screen.getByRole('button', { name: 'Preview recipients' });
-    // No message yet → disabled.
+    // No message yet → disabled, WITH the why-hint (an unexplained disabled
+    // button is a dead end for a first-time operator).
     expect(previewBtn).toBeDisabled();
+    expect(screen.getByText('Write a message to enable the preview.')).toBeInTheDocument();
     await u.type(screen.getByLabelText('Message'), 'Hello tenants');
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    // Enabled → the hint is gone.
+    expect(screen.queryByText('Write a message to enable the preview.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sizing the audience…')).not.toBeInTheDocument();
 
     await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
     // Advances to the curated list step.

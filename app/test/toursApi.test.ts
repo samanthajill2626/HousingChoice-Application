@@ -509,6 +509,21 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
     expect(
       world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
     ).toHaveLength(2); // one on create + one on reschedule
+
+    // No-op reschedule (MINOR 5): re-PATCH the IDENTICAL time -> nothing new on
+    // any surface (the units# audit and the tenant activity both stay put).
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+    expect(
+      world.auditEvents.filter(
+        (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_rescheduled',
+      ),
+    ).toHaveLength(1);
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+    ).toHaveLength(2);
   });
 
   it('emits tour_took_place and tour_outcome on the toured→outcome path', async () => {
@@ -611,6 +626,18 @@ describe('tours#<tourId> audit trail (third best-effort write)', () => {
   it('a reschedule (bare time change while scheduled) writes tours# tour_rescheduled', async () => {
     const { app, world } = makeWebhookHarness();
     const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
+    expect(toursAudit(world, tourId).map((e) => e.event_type)).toEqual([
+      'tour_scheduled',
+      'tour_rescheduled',
+    ]);
+  });
+
+  it('a no-op reschedule to the SAME time writes NO extra tours# row (MINOR 5)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createScheduled(app);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
+    // Re-PATCH the identical time: idempotent, like the INTO-status milestones.
     await authed(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-07-21T10:00:00.000Z' }).expect(200);
     expect(toursAudit(world, tourId).map((e) => e.event_type)).toEqual([
       'tour_scheduled',

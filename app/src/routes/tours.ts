@@ -618,9 +618,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Each INTO-status guard is against `currentStatus` (a no-op re-PATCH to the
     // same status never re-emits). PII: ids/type only (never the label) in logs.
     const t = { tenantId: current.tenantId, unitId: current.unitId, tourId };
-    // A bare time change on a tour that stays 'scheduled' is a reschedule.
+    // A bare time change on a tour that stays 'scheduled' is a reschedule - but
+    // ONLY when the time actually changed. A no-op re-PATCH to the identical
+    // scheduledAt must emit nothing (mirroring the INTO-status milestones'
+    // `currentStatus !== X` idempotency). scheduledAtIso is canonicalized
+    // (toISOString) exactly as the stored current.scheduledAt is, so a string
+    // compare cleanly detects a genuine change.
     const wasReschedule =
-      scheduledAtIso !== undefined && currentStatus === 'scheduled' && effectiveStatus === 'scheduled';
+      scheduledAtIso !== undefined &&
+      currentStatus === 'scheduled' &&
+      effectiveStatus === 'scheduled' &&
+      scheduledAtIso !== current.scheduledAt;
     if (effectiveStatus === 'scheduled' && currentStatus !== 'scheduled') {
       await recordTourEvent(t, 'tour_scheduled', 'tour_scheduled', 'Tour scheduled');
     } else if (wasReschedule) {

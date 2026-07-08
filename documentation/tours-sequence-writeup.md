@@ -91,8 +91,14 @@ The landlord provides the lockbox code to the team ahead of time.
 Once a time is agreed, the team **sets the date/time on the tour record**. That is
 the booking (same-day is fine), and it is the moment automation kicks in: the
 booking-confirmation text goes out and the reminder ladder arms off the booked
-time — matching the architecture doc's Figure 3, where the tour is stamped
-`confirmed` only after the slot is coordinated.
+time. Booking stamps the tour `scheduled` - that IS the confirmed state.
+
+> 2026-07-08: the `confirmed` tour status was removed - `scheduled` covers it
+> (scheduled and confirmed were the same step; the booking-time [AUTO] text
+> already says "confirmed"). The `confirmation` reminder RUNG below is a
+> message, not a status, and stays. Where the architecture doc's Figure 3 says
+> the tour is stamped "confirmed" once the slot is coordinated, the built
+> status for that moment is `scheduled`.
 
 **Reminder routing (founder decision, 2026-07-02):** reminders go to the **group
 thread** for landlord-led and PM tours — the landlord/PM should see them too — and
@@ -178,10 +184,11 @@ formalizes the gap and the build closes it:
 2. **Reminder routing to the group thread.** The built ladder always texts the
    tenant's 1:1 thread. Per the founder decision above, tours with a group thread
    (landlord-led / PM) should get their reminders in the group instead.
-3. **Confirm / mark-toured / mark-no-show controls.** The transitions into
-   `confirmed` / `toured` / `no_show` are API-supported (`PATCH { status }`) but
-   do not yet all have dedicated dashboard controls (TourDetail has reschedule,
-   cancel, and the exit gate).
+3. **Mark-toured / mark-no-show controls.** The transitions into `toured` /
+   `no_show` are API-supported (`PATCH { status }`) but do not yet all have
+   dedicated dashboard controls (TourDetail has reschedule, cancel, and the
+   exit gate). (2026-07-08: the `confirmed` status - and with it any Confirm
+   control - was removed; `scheduled` covers it.)
 
 ## Out of scope, but documented
 

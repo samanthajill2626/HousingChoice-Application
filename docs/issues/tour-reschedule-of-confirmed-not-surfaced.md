@@ -3,9 +3,10 @@ id: tour-reschedule-of-confirmed-not-surfaced
 title: Rescheduling a CONFIRMED tour emits no activity/audit milestone
 type: bug
 severity: low
-status: open
+status: resolved
 area: app/tours
 created: 2026-07-03
+resolved: 2026-07-08
 refs: app/src/routes/tours.ts
 ---
 
@@ -45,3 +46,12 @@ wasReschedule = scheduledAtIso !== undefined
 emitting `tour_scheduled` (activity) / `tour_rescheduled` (audit) with a "Tour
 rescheduled" label. Decide deliberately (product) whether a confirmed-tour reschedule
 should read as "rescheduled" on the timelines.
+
+**Resolution (2026-07-08).** Obsolete - the `confirmed` tour status was REMOVED
+by the tour-detail-page redesign (spec
+docs/superpowers/specs/2026-07-08-tour-detail-page-design.md, section 6:
+scheduled and confirmed were the same step). A tour that would previously sit
+at `confirmed` is now simply `scheduled`, where the existing reschedule guard
+(`wasReschedule`: scheduled -> scheduled with a time change) already emits the
+`tour_rescheduled` milestone on both surfaces (plus the new tours#<tourId>
+trail). The uncovered state no longer exists.

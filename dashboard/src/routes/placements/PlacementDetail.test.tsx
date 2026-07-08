@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem } from '../../api/index.js';
+import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem, PlacementStage } from '../../api/index.js';
+import { STAGE_LABELS } from '../../api/index.js';
 
 const getPlacement = vi.fn();
 const getUnit = vi.fn();
@@ -105,6 +106,15 @@ function emitCaseUpdated(over: Partial<PlacementUpdatedEvent> & { placementId: s
   }
 }
 
+/** Move the placement via the interactive stage pill: open it, then pick a stage. */
+async function chooseStage(
+  user: ReturnType<typeof userEvent.setup>,
+  stage: PlacementStage,
+): Promise<void> {
+  await user.click(screen.getByRole('button', { name: /Placement stage/i }));
+  await user.click(screen.getByRole('menuitemradio', { name: STAGE_LABELS[stage] }));
+}
+
 describe('PlacementDetail', () => {
   it('renders the stage, phase, links, time-in-stage, inspection + final rent', async () => {
     getPlacement.mockResolvedValue({ ...CASE, inspection_outcome: 'pass' });
@@ -168,7 +178,7 @@ describe('PlacementDetail', () => {
     renderAt();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Awaiting inspection/ })).toBeInTheDocument());
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'determine_rent');
+    await chooseStage(user, 'determine_rent');
     expect(screen.getByRole('heading', { name: 'Record inspection outcome' })).toBeInTheDocument();
     expect(transitionPlacement).not.toHaveBeenCalled();
 
@@ -191,7 +201,7 @@ describe('PlacementDetail', () => {
     renderAt();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Awaiting rent acceptance/ })).toBeInTheDocument());
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_hap_contract');
+    await chooseStage(user, 'awaiting_hap_contract');
     const dialog = screen.getByRole('dialog');
     const input = within(dialog).getByLabelText(/Final contract rent/i);
     // The modal prefills the recorded final_rent (in-place stage-data); clear it
@@ -209,7 +219,7 @@ describe('PlacementDetail', () => {
     renderAt();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Schedule inspection/ })).toBeInTheDocument());
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_inspection');
+    await chooseStage(user, 'awaiting_inspection');
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByRole('heading', { name: 'Schedule inspection' })).toBeInTheDocument();
     expect(transitionPlacement).not.toHaveBeenCalled();
@@ -233,7 +243,7 @@ describe('PlacementDetail', () => {
     renderAt();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Determine rent/ })).toBeInTheDocument());
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_rent_acceptance');
+    await chooseStage(user, 'awaiting_rent_acceptance');
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByRole('heading', { name: 'Confirm determined rent' })).toBeInTheDocument();
     expect(transitionPlacement).not.toHaveBeenCalled();
@@ -407,7 +417,7 @@ describe('PlacementDetail', () => {
     renderAt();
     await screen.findByRole('heading', { name: /Complete paperwork/ });
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Move to stage' }), 'awaiting_move_in');
+    await chooseStage(user, 'awaiting_move_in');
     expect(screen.getByRole('heading', { name: 'Confirm move-in ready' })).toBeInTheDocument();
     // LIF-eligible tenant with lif unset → the pending note shows.
     expect(screen.getByText(/LIF is not marked/i)).toBeInTheDocument();

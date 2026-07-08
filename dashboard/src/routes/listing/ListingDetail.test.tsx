@@ -110,6 +110,15 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
+/** Change the property status via the interactive pill: open it, then pick an option. */
+async function chooseStatus(
+  user: ReturnType<typeof userEvent.setup>,
+  optionLabel: string,
+): Promise<void> {
+  await user.click(screen.getByRole('button', { name: /Property status/i }));
+  await user.click(screen.getByRole('menuitemradio', { name: optionLabel }));
+}
+
 describe('ListingDetail', () => {
   it('shows a spinner while loading', () => {
     useListing.mockReturnValue({ ...READY, status: 'loading', unit: null });
@@ -131,14 +140,14 @@ describe('ListingDetail', () => {
     renderAt();
     const heading = screen.getByRole('heading', { name: /1450 Joseph Blvd NW/ });
     expect(heading).toBeInTheDocument();
-    // The status badge lives inside the heading (the select option also reads
-    // "Available", so scope to the heading to disambiguate).
-    expect(within(heading).getByText('Available')).toBeInTheDocument();
+    // Status now lives in the interactive pill (a menu-button labelled "Property
+    // status"), not a badge in the heading.
+    expect(screen.getByRole('button', { name: /Property status/i })).toHaveTextContent('Available');
     expect(screen.getByText((t) => t.includes('2 BR') && t.includes('1 BA') && t.includes('$1,400') && t.includes('1,600/mo'))).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Broadcast to tenants/ })).toBeInTheDocument();
-    // Edit is not a standalone HEADER button — it's under the ? menu — but it IS
-    // available inline on the Property details + Tour & application cards (two
-    // real, clickable CardAction buttons; the ? menu's Edit is hidden until open).
+    // Broadcast + Start placement moved into the ⋯ menu (asserted in its own test).
+    // Edit is not a standalone HEADER button either — it's under the ⋯ menu — but it
+    // IS available inline on the Property details + Tour & application cards (two
+    // real, clickable CardAction buttons; the ⋯ menu's Edit is hidden until open).
     expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(2);
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
@@ -341,7 +350,7 @@ describe('ListingDetail', () => {
     expect(screen.getByText(/Add/)).toBeInTheDocument();
   });
 
-  it('the status select calls setListingStatus and applies the returned unit (badge updates)', async () => {
+  it('the status pill calls setListingStatus and applies the returned unit (pill updates)', async () => {
     const user = userEvent.setup();
     // Drive useListing from a mutable state so setUnit (called by the component on
     // a successful write) re-renders with the new status, like the real hook.
@@ -353,7 +362,7 @@ describe('ListingDetail', () => {
     setListingStatus.mockResolvedValue({ ...READY.unit!, status: 'off_market' });
 
     renderAt();
-    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'off_market');
+    await chooseStatus(user, 'Off market');
 
     await waitFor(() =>
       expect(setListingStatus).toHaveBeenCalledWith('u1', {
@@ -377,20 +386,33 @@ describe('ListingDetail', () => {
     // First change FAILS ? an inline error appears (no silent swallow).
     setListingStatus.mockRejectedValueOnce(new Error('boom'));
     renderAt();
-    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'off_market');
+    await chooseStatus(user, 'Off market');
     await waitFor(() =>
       expect(screen.getByText(/Couldn.t update the property status/i)).toBeInTheDocument(),
     );
 
     // A subsequent SUCCESSFUL change clears the error.
     setListingStatus.mockResolvedValueOnce({ ...READY.unit!, status: 'on_hold' });
-    await user.selectOptions(screen.getByRole('combobox', { name: /Property status/i }), 'on_hold');
+    await chooseStatus(user, 'On hold');
     await waitFor(() =>
       expect(screen.queryByText(/Couldn.t update the property status/i)).not.toBeInTheDocument(),
     );
   });
 
-  it('the header "Start placement" button opens the create dialog pre-filled+locked to this unit', async () => {
+  it('the ⋯ menu holds Start placement + Broadcast to tenants (moved off the hero)', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(READY);
+    renderAt();
+    // Neither is a standalone hero button anymore.
+    expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Broadcast to tenants/ })).not.toBeInTheDocument();
+    // Both live in the ⋯ menu.
+    await user.click(screen.getByRole('button', { name: /More actions/ }));
+    expect(screen.getByRole('menuitem', { name: 'Start placement' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Broadcast to tenants' })).toBeInTheDocument();
+  });
+
+  it('the ⋯ menu "Start placement" opens the create dialog pre-filled+locked to this unit', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue({
       ...READY,
@@ -402,7 +424,8 @@ describe('ListingDetail', () => {
     getPlacementsBy.mockResolvedValue([]);
     renderAt();
 
-    await user.click(screen.getByRole('button', { name: 'Start placement' }));
+    await user.click(screen.getByRole('button', { name: /More actions/ }));
+    await user.click(screen.getByRole('menuitem', { name: 'Start placement' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'New placement' });
     // Unit side is LOCKED (read-only label, NOT a combobox); the label resolves to

@@ -54,7 +54,14 @@ harness before claiming the work is done** — and add/extend a spec for new beh
 - Write specs with accessibility-first selectors (`getByRole`/`getByLabel`) — see
   [e2e/support/selectors.md](../e2e/support/selectors.md). Requires Docker (DynamoDB Local).
 - Interactive MCP browser: this repo's [.mcp.json](../.mcp.json) uses bundled
-  chromium (no admin). If your client's *plugin* Playwright MCP errors with
+  chromium (no admin) with **`--isolated`** — each session gets its own ephemeral
+  browser profile, so CONCURRENT agent sessions can drive browsers side-by-side
+  (without it, all sessions share ONE locked profile dir and fight: "Browser is
+  already in use" + browsers dying mid-call as sessions clobber each other; never
+  "fix" that by killing mcp-chrome processes — that kills the OTHER agent's
+  browser). Trade-off: an isolated profile starts logged OUT on every browser
+  launch — just `POST /auth/dev-login` (or click the dev-login button) again.
+  If your client's *plugin* Playwright MCP errors with
   `Chromium distribution 'chrome' is not found`, a one-time **Administrator**
   `npx playwright install chrome` fixes it (see [e2e/README.md](../e2e/README.md)
   → Setup). The suite and `--headed`/`--ui` runs need no admin.

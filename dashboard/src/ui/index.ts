@@ -9,3 +9,9 @@ export {
   type StatusBadgeProps,
   type BadgeTone,
 } from './StatusBadge.js';
+export {
+  StatusMenu,
+  type StatusMenuProps,
+  type StatusMenuOption,
+  type StatusTone,
+} from './StatusMenu.js';

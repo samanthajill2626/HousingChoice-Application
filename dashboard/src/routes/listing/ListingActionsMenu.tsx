@@ -10,6 +10,11 @@ export interface ListingActionsMenuProps {
   triggerClassName: string;
   /** Open the edit dialog. Omitted (e.g. on a deleted property) → no Edit item. */
   onEdit?: () => void;
+  /** Start a placement on this property (opens the create dialog). Omitted on a
+   *  deleted property → no item. */
+  onStartPlacement?: () => void;
+  /** Broadcast this property to tenants. Omitted on a deleted property → no item. */
+  onBroadcast?: () => void;
   /** Current soft-delete state (drives Delete vs Restore). */
   deleted: boolean;
   /** Begin deleting — the parent opens a confirm dialog (then DELETEs). */
@@ -23,6 +28,8 @@ export interface ListingActionsMenuProps {
 export function ListingActionsMenu({
   triggerClassName,
   onEdit,
+  onStartPlacement,
+  onBroadcast,
   deleted,
   onDelete,
   onRestore,
@@ -74,6 +81,32 @@ export function ListingActionsMenu({
       </button>
       {open ? (
         <div className={styles.menu} role="menu">
+          {onStartPlacement ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              onClick={() => {
+                setOpen(false);
+                onStartPlacement();
+              }}
+            >
+              Start placement
+            </button>
+          ) : null}
+          {onBroadcast ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              onClick={() => {
+                setOpen(false);
+                onBroadcast();
+              }}
+            >
+              Broadcast to tenants
+            </button>
+          ) : null}
           {onEdit ? (
             <button
               type="button"

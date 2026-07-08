@@ -1,0 +1,114 @@
+/* StatusMenu — an interactive status pill + its dropdown. The trigger mirrors the
+ * status-badge look (pill, white text) with a caret; tone classes set the colour.
+ * All values from ui/tokens.css. */
+
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* The pill trigger. Shape + text here; the tone class sets the background. */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px var(--sp-2);
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--c-text-inverse);
+  background: var(--c-status-inactive-bg); /* fallback; a tone class overrides */
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+
+.trigger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.trigger:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.caret {
+  font-size: 0.7em;
+  line-height: 1;
+}
+
+/* Tone = the current status colour (mirrors the badge tones). */
+.toneAvailable {
+  background: var(--c-status-available-bg);
+}
+.tonePlaced {
+  background: var(--c-status-placed-bg);
+}
+.toneInactive {
+  background: var(--c-status-inactive-bg);
+}
+
+/* The dropdown, anchored under the trigger. */
+.menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 30;
+  min-width: 12rem;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover {
+  background: var(--c-surface-2);
+}
+
+.item:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.check {
+  width: 1em;
+  flex: 0 0 auto;
+  color: var(--c-brand);
+}
+
+/* Inline error below the pill (a rejected transition). Readable on any ground. */
+.error {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 30;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}

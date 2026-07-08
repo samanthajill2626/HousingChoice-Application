@@ -35,6 +35,14 @@
   min-width: 0;
 }
 
+/* Title line: the address + the interactive status pill + any "Deleted" tag. */
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
 .name {
   display: flex;
   align-items: center;

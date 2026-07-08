@@ -591,3 +591,62 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.queryByText(/^delivered \d+\/\d+$/)).not.toBeInTheDocument();
   });
 });
+
+describe('Timeline stick-to-bottom', () => {
+  // jsdom does no layout, so drive the scroll geometry ourselves: mock
+  // scrollHeight/clientHeight and back scrollTop with a real read/write value.
+  function setProp(el: HTMLElement, name: string, value: number): void {
+    Object.defineProperty(el, name, { configurable: true, value });
+  }
+  function makeScrollable(el: HTMLElement, scrollHeight: number, clientHeight = 100): void {
+    setProp(el, 'clientHeight', clientHeight);
+    setProp(el, 'scrollHeight', scrollHeight);
+    let top = 0;
+    Object.defineProperty(el, 'scrollTop', {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+    });
+  }
+  const wrap = (items: TimelineItem[]): React.JSX.Element => (
+    <MemoryRouter>
+      <Timeline
+        status="ready"
+        items={items}
+        source="server"
+        replyToPhone="+14040100007"
+        canSend={false}
+        onSend={vi.fn()}
+      />
+    </MemoryRouter>
+  );
+  const stream = (): HTMLElement => document.querySelector('[class*="stream"]') as HTMLElement;
+
+  it('pins to the bottom when a new item arrives while the operator is at the bottom', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
+    const el = stream();
+    makeScrollable(el, 500);
+    el.scrollTop = 400; // 500 - 400 - 100 = 0 → at bottom
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 700); // a new item grew the content
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
+
+    expect(el.scrollTop).toBe(700); // re-pinned to the new bottom
+  });
+
+  it('does NOT yank to the bottom when the operator has scrolled up to read history', () => {
+    const { rerender } = render(wrap([MESSAGE_IN, MESSAGE_OUT]));
+    const el = stream();
+    makeScrollable(el, 500);
+    el.scrollTop = 40; // 500 - 40 - 100 = 360 → NOT at bottom
+    fireEvent.scroll(el);
+
+    setProp(el, 'scrollHeight', 700);
+    rerender(wrap([MESSAGE_IN, MESSAGE_OUT, CALL]));
+
+    expect(el.scrollTop).toBe(40); // left exactly where they were reading
+  });
+});

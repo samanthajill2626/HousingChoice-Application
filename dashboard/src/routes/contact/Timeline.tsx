@@ -8,7 +8,7 @@
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
 // first (roles/labels) so it's testable.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
   ConversationParticipant,
@@ -502,6 +502,30 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     return out;
   }, [visible]);
 
+  // --- Stick-to-bottom -----------------------------------------------------
+  // The stream scrolls with the NEWEST item at the bottom. Keep the operator
+  // pinned there so incoming messages/activity stay visible — but only while
+  // they're already at (or near) the bottom; if they've scrolled UP to read
+  // history, a new item must NOT yank them back down.
+  const streamRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true); // default true → open on the newest item
+
+  const handleStreamScroll = (): void => {
+    const el = streamRef.current;
+    if (!el) return;
+    // Within ~48px of the bottom counts as "at bottom" (slack for sub-pixel
+    // rounding and a partially-visible last row).
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+  };
+
+  // After the rendered stream changes (new item arrived, or first load), re-pin
+  // to the bottom when the operator was there. useLayoutEffect runs before paint,
+  // so the jump is invisible (no flash of the pre-scroll position).
+  useLayoutEffect(() => {
+    const el = streamRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [clusters]);
+
   // A retry IS a send — surface its failure (429 rate_limited, opt-out, …) in
   // the SAME composer error slot handleSend uses, instead of swallowing the
   // rejection (the bug: retry shares the manual-send budget, so hammering Retry
@@ -526,6 +550,9 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     // draft NOW rather than waiting on the POST — the operator sees their message
     // land instantly instead of an ambiguous "did it go?" gap.
     setDraft('');
+    // The operator just sent — pin to the bottom so their own message is in view
+    // even if they'd scrolled up while composing.
+    atBottomRef.current = true;
     try {
       await onSend?.(text);
     } catch (err) {
@@ -576,7 +603,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         </div>
       </header>
 
-      <div className={styles.stream}>
+      <div className={styles.stream} ref={streamRef} onScroll={handleStreamScroll}>
         {status === 'loading' ? <Spinner center /> : null}
 
         {status === 'error' ? (

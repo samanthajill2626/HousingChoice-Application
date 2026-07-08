@@ -103,6 +103,34 @@ describe('DELETE /api/contacts/:id (soft delete) + restore', () => {
     expect(ids).not.toContain('c-del');
   });
 
+  it('re-emits conversation.updated for the contact threads on delete AND restore (live views refetch)', async () => {
+    // The delete/restore doesn't touch the conversation row, so without this
+    // fan-out nothing would signal live views (Today/inbox) to drop/return the
+    // contact's card until a manual reload (the reported bug).
+    const { app, world } = makeWebhookHarness();
+    const emitted = world.emitted;
+    seedContact(world, { contactId: 'c-fan', type: 'tenant', phone: '+15550000040' });
+    seedConversation(world, 'conv-fan', {
+      participant_phone: '+15550000040',
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 1,
+    });
+    const conversationUpdatedFor = (id: string): number =>
+      emitted.filter(
+        (e) =>
+          e.event === 'conversation.updated' &&
+          (e.payload as { conversationId?: string }).conversationId === id,
+      ).length;
+
+    emitted.length = 0;
+    await auth(request(app).delete('/api/contacts/c-fan'));
+    expect(conversationUpdatedFor('conv-fan')).toBeGreaterThan(0);
+
+    emitted.length = 0;
+    await auth(request(app).post('/api/contacts/c-fan/restore'));
+    expect(conversationUpdatedFor('conv-fan')).toBeGreaterThan(0);
+  });
+
   it('hides a deleted unknown contact from the today queue', async () => {
     const { app, world } = makeWebhookHarness();
     // An untriaged unknown contact in the triage partition — normally a

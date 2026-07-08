@@ -1491,6 +1491,48 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ contact: withPhones({ ...existing, voice_opt_out: optOut }) });
   });
 
+  // Soft-delete/restore changes a contact's PRESENCE on the live views (Today
+  // queue, inbox, placements board) without touching the conversation/placement
+  // rows themselves — so nothing would emit an SSE and those views would keep a
+  // stale card until a manual reload. Re-emit the existing conversation.updated +
+  // placement.updated signals for the contact's threads + tenant placements: any
+  // one triggers useToday's full refetch (which then filters the deleted contact),
+  // and the inbox/board pick up their own rows too. BEST-EFFORT — the delete/restore
+  // has already persisted; a fan-out hiccup must NEVER fail the request.
+  const propagateContactPresenceChange = async (
+    contactId: string,
+    contact: ContactItem,
+  ): Promise<void> => {
+    try {
+      const seen = new Set<string>();
+      for (const p of contactPhones(contact)) {
+        for (const conv of await conversations.findByParticipantPhone(p.phone)) {
+          if (seen.has(conv.conversationId)) continue;
+          seen.add(conv.conversationId);
+          events.emit('conversation.updated', toConversationUpdatedEvent(conv));
+        }
+      }
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact presence change: conversation fan-out failed (best-effort)');
+    }
+    // Cover a follow-up/deadline card whose contact has no 1:1 thread.
+    try {
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      do {
+        const page = await placements.listByTenant(contactId, {
+          ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+        });
+        for (const p of page.items) {
+          const ds = await placementDeadlines.listByPlacement(p.placementId);
+          events.emit('placement.updated', toPlacementUpdatedEvent(p, soonestDeadline(ds)));
+        }
+        exclusiveStartKey = page.lastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact presence change: placement fan-out failed (best-effort)');
+    }
+  };
+
   // DELETE /api/contacts/:contactId → 200 { contact }. SOFT delete: stamps
   // deleted_at so the record + ALL its data are retained (POST .../restore brings
   // it back), but it's hidden from the contact lists, inbox, today, and broadcast
@@ -1516,6 +1558,8 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       deletedAt,
     });
+    // Refresh the live views so this contact's Today/inbox cards drop without a reload.
+    await propagateContactPresenceChange(contactId, updated);
     log.info({ contactId, actor: req.user?.userId }, 'contact soft-deleted');
     res.json({ contact: withPhones(updated) });
   });
@@ -1541,6 +1585,8 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     await audit.append(`contacts#${contactId}`, 'contact_restored', {
       actor: req.user?.userId,
     });
+    // Refresh the live views so this contact's Today/inbox cards return without a reload.
+    await propagateContactPresenceChange(contactId, updated);
     log.info({ contactId, actor: req.user?.userId }, 'contact restored');
     res.json({ contact: withPhones(updated) });
   });

@@ -11,7 +11,7 @@
 //
 // Selectors + contracts here were verified against the live --mock --local stack in
 // the Task 4 conformance audit (.superpowers/sdd/task-4-audit.md).
-import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
 import { fakeUrl } from '../support/urls.js';
 import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
@@ -1410,9 +1410,10 @@ export class Scenario {
       if (!m) throw new Error('teamCreatesTourFromInterest: expected a /tours/:tourId URL after create');
       const tourId = decodeURIComponent(m[1]!);
       this.activeTour = { tourId };
-      // Requested + not booked — the rendered LABELS, never raw enums.
-      await expect(this.page.getByLabel('Status: Requested')).toBeVisible();
-      await expect(this.page.getByLabel('Scheduled: Not yet booked')).toBeVisible();
+      // Requested + not booked - the rebuilt page shows the tour StatusBadge in
+      // the header band (no more <dd> aria-labels) plus a "Not booked" facts line.
+      await expect(this.tourStatusBadge('Requested')).toBeVisible();
+      await expect(this.tourHeader().getByText('Not booked')).toBeVisible();
       return tourId;
     });
   }
@@ -1427,13 +1428,15 @@ export class Scenario {
     const tour = this.requireActiveTour();
     return step('Team opens the masked relay group on the tour', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      // With no group yet the initial channel tab is Tenant; switch to the Group
+      // tab to reach its in-place empty state with the [Open group text] button
+      // (the same action the header kebab offers).
+      await this.page.getByRole('tab', { name: 'Group text' }).click();
       const [res] = await Promise.all([
         this.page.waitForResponse(
           (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
         ),
-        this.page
-          .getByRole('button', { name: 'Open group thread' })
-          .click(),
+        this.page.getByRole('button', { name: 'Open group text' }).click(),
       ]);
       expect(res.status(), await res.text()).toBe(201);
       const { tour: updated, conversation } = (await res.json()) as {
@@ -1444,16 +1447,12 @@ export class Scenario {
       expect(updated.groupThreadId).toBe(conversation.conversationId);
       tour.poolNumber = conversation.pool_number as string;
       tour.groupThreadId = conversation.conversationId;
-      // The 'Group thread' row + link appear once the tour carries the thread
-      // id. exact:true — a loose 'Group thread' also matches the link text
-      // 'View group thread' (strict-mode violation, seen live).
-      await expect(this.page.getByText('Group thread', { exact: true })).toBeVisible();
-      // The link now targets the relay-group CONVERSATION view (/conversations/:id)
-      // — the dead /inbox link was repointed (relay-group-view §8); its aria-label
-      // dropped "in inbox" to match.
+      // The empty state is replaced by the live group transcript (the composer),
+      // so the [Open group text] button is gone. The intro fan-out to each member
+      // is asserted separately (expectGroupIntros).
       await expect(
-        this.page.getByRole('link', { name: 'Open group thread' }),
-      ).toBeVisible();
+        this.page.getByRole('button', { name: 'Open group text' }),
+      ).toHaveCount(0, { timeout: 10_000 });
     });
   }
 
@@ -1564,8 +1563,10 @@ export class Scenario {
       // datetime-local input — fill takes the raw 'YYYY-MM-DDTHH:mm' value; the
       // form sends it as-is (valid ISO for the backend's Date.parse).
       await form.getByLabel('Date and time').fill(times.scheduledAtLocal);
-      await form.getByRole('button', { name: 'Confirm booking' }).click();
-      await expect(this.page.getByLabel('Status: Scheduled')).toBeVisible({ timeout: 10_000 });
+      // The Confirm button sits in the modal FOOTER (outside the <form>, wired via
+      // form=), so it's scoped to the page, not the form.
+      await this.page.getByRole('button', { name: 'Confirm booking' }).click();
+      await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
     });
   }
 
@@ -1649,26 +1650,41 @@ export class Scenario {
     return this.expectRelayedInGroup(landlord, t, 'On my way!');
   }
 
-  /** [Team, MANUAL] Confirm the scheduled tour (TourDetail control). */
-  teamConfirmsTour(): Promise<void> {
-    return this.tourStatusAction('Confirm tour', 'Confirmed', 'Team confirms the tour');
-  }
-
-  /** [Team, MANUAL] Log the tour outcome: toured (TourDetail control) — this is
+  /** [Team, MANUAL] Log the tour outcome: toured (header primary CTA) - this is
    *  what makes the exit gate reachable. */
   teamMarksToured(): Promise<void> {
-    return this.tourStatusAction('Mark toured', 'Toured', 'Team logs the tour outcome (toured)');
+    const tour = this.requireActiveTour();
+    return step('Team logs the tour outcome (toured)', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('button', { name: 'Mark toured' }).click();
+      await expect(this.tourStatusBadge('Toured')).toBeVisible({ timeout: 10_000 });
+    });
   }
 
-  /** [Team, MANUAL] Log a no-show (TourDetail control). No-show tours stay
-   *  reschedulable. */
+  /** [Team, MANUAL] Log a no-show (header kebab item; scheduled-only). No-show
+   *  tours stay reschedulable. */
   teamMarksNoShow(): Promise<void> {
-    return this.tourStatusAction('Mark no-show', 'No show', 'Team logs a no-show');
+    const tour = this.requireActiveTour();
+    return step('Team logs a no-show', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const menu = await this.openTourKebab();
+      await menu.getByRole('menuitem', { name: 'Mark no-show' }).click();
+      await expect(this.tourStatusBadge('No show')).toBeVisible({ timeout: 10_000 });
+    });
   }
 
-  /** [Team, MANUAL] Cancel the tour (TourDetail 'Cancel tour' control). */
+  /** [Team, MANUAL] Cancel the tour (header kebab 'Cancel tour' -> confirm modal). */
   teamCancelsTour(): Promise<void> {
-    return this.tourStatusAction('Cancel this tour', 'Canceled', 'Team cancels the tour');
+    const tour = this.requireActiveTour();
+    return step('Team cancels the tour', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const menu = await this.openTourKebab();
+      await menu.getByRole('menuitem', { name: 'Cancel tour' }).click();
+      const dialog = this.page.getByRole('dialog', { name: 'Cancel tour?' });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('button', { name: 'Cancel tour' }).click();
+      await expect(this.tourStatusBadge('Canceled')).toBeVisible({ timeout: 10_000 });
+    });
   }
 
   /** [App] A tour-lifecycle milestone pin shows on the ACTIVE tenant's timeline,
@@ -1694,12 +1710,14 @@ export class Scenario {
     const tour = this.requireActiveTour();
     return step(`Team reschedules the tour (${times.scheduledAtLocal})`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('button', { name: 'Reschedule this tour' }).click();
+      const menu = await this.openTourKebab();
+      await menu.getByRole('menuitem', { name: 'Reschedule' }).click();
       const form = this.page.getByRole('form', { name: 'Reschedule tour form' });
       await expect(form).toBeVisible();
       await form.getByLabel('New date and time').fill(times.scheduledAtLocal);
-      await form.getByRole('button', { name: 'Confirm reschedule' }).click();
-      await expect(this.page.getByLabel('Status: Scheduled')).toBeVisible({ timeout: 10_000 });
+      // Confirm sits in the modal FOOTER (outside the <form>), so scope to the page.
+      await this.page.getByRole('button', { name: 'Confirm reschedule' }).click();
+      await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
     });
   }
 
@@ -1811,29 +1829,33 @@ export class Scenario {
     });
   }
 
-  /** [Team, MANUAL] Record the exit-gate decision on the toured tour (the
-   *  em-dash radio labels are part of the pinned contract). */
+  /** [Team, MANUAL] Record the exit-gate decision on the toured tour via the
+   *  header 'Record outcome' primary CTA -> the Record-outcome modal. The radio
+   *  labels are ASCII hyphen ('Yes - move forward' / 'No - not a fit'). */
   teamRecordsExitGate(decision: 'yes' | 'no'): Promise<void> {
     const tour = this.requireActiveTour();
-    const radio = decision === 'yes' ? 'Yes — move forward' : 'No — not a fit';
+    const radio = decision === 'yes' ? 'Yes - move forward' : 'No - not a fit';
     const outcomeLabel = decision === 'yes' ? 'Move forward' : 'Not a fit';
-    return step(`Team records the exit gate → ${radio}`, async () => {
+    return step(`Team records the exit gate -> ${radio}`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('button', { name: 'Record exit gate decision' }).click();
-      const form = this.page.getByRole('form', { name: 'Exit gate form' });
+      await this.page.getByRole('button', { name: 'Record outcome' }).click();
+      const form = this.page.getByRole('form', { name: 'Record outcome form' });
       await expect(form).toBeVisible();
       await form.getByRole('radio', { name: radio }).check();
-      await form.getByRole('button', { name: 'Save decision' }).click();
-      // Wait for the form to CLOSE first (it closes only on a successful PATCH)
-      // — getByText substring-matches, so asserting the outcome label while the
-      // form is still open would match the radio's own text ('Yes — move
-      // forward') and pass BEFORE the save landed (a race seen live).
-      await expect(this.page.getByRole('form', { name: 'Exit gate form' })).toHaveCount(0, {
+      // Save sits in the modal FOOTER (outside the <form>), so scope to the page.
+      await this.page.getByRole('button', { name: 'Save decision' }).click();
+      // Wait for the modal to CLOSE first (it closes only on a successful PATCH);
+      // getByText substring-matches, so reading the outcome label while the modal
+      // is still open would match the radio's own text and pass BEFORE the save
+      // landed (a race seen live on the old page).
+      await expect(this.page.getByRole('form', { name: 'Record outcome form' })).toHaveCount(0, {
         timeout: 10_000,
       });
-      // The Outcome row renders the decision LABEL once saved.
-      const article = this.page.getByRole('article', { name: 'Tour details' });
-      await expect(article.getByText(outcomeLabel)).toBeVisible();
+      // The Outcome card renders the decision LABEL once saved.
+      const outcomeCard = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Outcome' }) });
+      await expect(outcomeCard.getByText(outcomeLabel)).toBeVisible();
     });
   }
 
@@ -1851,10 +1873,14 @@ export class Scenario {
       expect(t.outcome).toBe('move_forward');
       expect(t.moveForward).toBe(true);
       expect(t.convertible).toBe(true);
+      // Team SEES the convertible state on the page: the Outcome card shows the
+      // move-forward outcome + a [Start placement] action (not yet converted).
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await expect(
-        this.page.getByText('Yes — ready for placement (not yet converted)'),
-      ).toBeVisible();
+      const outcomeCard = this.page
+        .locator('section')
+        .filter({ has: this.page.getByRole('heading', { name: 'Outcome' }) });
+      await expect(outcomeCard.getByText('Move forward')).toBeVisible();
+      await expect(outcomeCard.getByRole('button', { name: 'Start placement' })).toBeVisible();
     });
   }
 
@@ -1873,9 +1899,9 @@ export class Scenario {
       expect(t.status).toBe('closed');
       expect(t.outcome).toBe('not_a_fit');
       expect(t.convertible).not.toBe(true);
-      // Team SEES it closed.
+      // Team SEES it closed (the header StatusBadge reads 'Closed').
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await expect(this.page.getByLabel('Status: Closed')).toBeVisible();
+      await expect(this.tourStatusBadge('Closed')).toBeVisible();
     });
   }
 
@@ -1907,8 +1933,8 @@ export class Scenario {
     });
   }
 
-  /** [App] NO group thread EXISTS for this tour (self-guided default — the
-   *  'Open group thread' button still shows because an admin MAY hand-create
+  /** [App] NO group thread EXISTS for this tour (self-guided default; the
+   *  'Open group text' button still shows because an admin MAY hand-create
    *  one, so the assert is on existence: no groupThreadId + no intro reached
    *  the tenant from any pool number). */
   expectNoTourGroup(): Promise<void> {
@@ -1926,6 +1952,127 @@ export class Scenario {
           (m) => m.direction === 'outbound' && POOL_NUMBER_RE.test(m.from),
         ) ?? false;
       expect(introFromPool).toBe(false);
+    });
+  }
+
+  // ==== Tour page-driven walk verbs (the rebuilt TourDetail two-pane page) =====
+  // These drive the NEW page surfaces directly: the three-channel conversation
+  // switcher (Group / Tenant / Landlord tabs), the type-aware Guidance card, the
+  // Outcome + Activity cards, and the mobile Details-first pane.
+
+  /** [Team, page] Send a message from the tour page's GROUP channel tab; the relay
+   *  fans it out to every group member (proof-of-send via the fake threads, from
+   *  the pool number). Exercises the left-pane channel composer + relay fan-out. */
+  teamSendsInGroupTab(body: string, members: Contact[]): Promise<void> {
+    const tour = this.requireActiveTour();
+    const pool = this.requireActiveTourGroup().poolNumber;
+    return step(`Team sends in the group tab: "${body}"`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('tab', { name: 'Group text' }).click();
+      await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
+      await this.page.getByRole('button', { name: 'Send' }).click();
+      // Optimistic echo in the transcript (the sent bubble).
+      const comms = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(comms.getByText(body).first()).toBeVisible({ timeout: 10_000 });
+      // Relay fan-out: every member receives it from the pool number.
+      for (const member of members) {
+        await expect
+          .poll(
+            async () => {
+              const threads = await listThreads(this.request);
+              const thread = threads.find((x) => x.partyNumber === member.phone);
+              return (
+                thread?.messages.some(
+                  (m) => m.direction === 'outbound' && m.from === pool && (m.body ?? '').includes(body),
+                ) ?? false
+              );
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      }
+    });
+  }
+
+  /** [Team, page] The tour page's TENANT channel tab shows the tenant 1:1 thread
+   *  (a known prior inbound renders in that transcript). */
+  expectTenantTabShows1to1(bodyRe: RegExp): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('Team opens the Tenant channel tab (1:1 transcript)', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      await this.page.getByRole('tab', { name: /^Tenant/ }).click();
+      const comms = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(comms.getByText(bodyRe).first()).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [App, page] The tour's Activity card lists the walked lifecycle rows, each a
+   *  tourActivityFormat label (order-independent presence check). */
+  expectTourActivityRows(labels: string[]): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step(`App: the tour Activity card lists ${labels.join(', ')}`, async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const list = this.page.getByRole('list', { name: 'Tour activity' });
+      await expect(list).toBeVisible({ timeout: 10_000 });
+      for (const label of labels) {
+        await expect(list.getByText(label, { exact: true }).first()).toBeVisible({
+          timeout: 10_000,
+        });
+      }
+    });
+  }
+
+  /** [App, page] After conversion the tour page links back to the created placement
+   *  via the header [View placement] CTA. */
+  expectTourShowsPlacementLink(): Promise<void> {
+    const tour = this.requireActiveTour();
+    const placementId = this.requireActivePlacementId();
+    return step('App: the tour page links to the converted placement', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      const link = this.page.getByRole('link', { name: 'View placement' });
+      await expect(link).toBeVisible({ timeout: 10_000 });
+      await expect(link).toHaveAttribute('href', `/placements/${placementId}`);
+    });
+  }
+
+  /** [App, page] A self-guided tour opens on the TENANT channel (no group) and the
+   *  Guidance card leads with the bolded ID-gate rule. */
+  expectSelfGuidedTourPage(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('App: self-guided tour defaults to the Tenant tab + shows the ID-gate guidance', async () => {
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      // No group thread -> the initial channel tab is Tenant (selected).
+      await expect(this.page.getByRole('tab', { name: /^Tenant/ })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      // The self-guided Guidance card leads with the ID-gate rule (ASCII hyphen).
+      await expect(this.page.getByText('Photo ID before lockbox code - always.')).toBeVisible();
+    });
+  }
+
+  /** [App, page] MOBILE (360px): the tour page opens on the DETAILS pane (the
+   *  right-column cards visible, the conversation channel tabs hidden) and the
+   *  primary CTA fits the viewport width (no horizontal overflow). */
+  expectMobileDetailsFirst(): Promise<void> {
+    const tour = this.requireActiveTour();
+    return step('App (mobile 360px): tour opens on Details, CTA visible in-viewport', async () => {
+      await this.page.setViewportSize({ width: 360, height: 740 });
+      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      // Details leads: a right-column card heading is visible...
+      await expect(this.page.getByRole('heading', { name: 'Schedule' })).toBeVisible();
+      // ...and the conversation channel tabs are in the hidden pane (display:none).
+      await expect(
+        this.page.getByRole('tablist', { name: 'Conversation channel' }),
+      ).toBeHidden();
+      // The primary CTA (a requested tour -> "Book tour") is visible and its right
+      // edge fits within the 360px viewport (no horizontal scroll).
+      const cta = this.page.getByRole('button', { name: 'Book tour' });
+      await expect(cta).toBeVisible();
+      const box = await cta.boundingBox();
+      expect(box, 'the CTA has a bounding box').not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(360);
     });
   }
 
@@ -1953,8 +2100,12 @@ export class Scenario {
     const tour = this.requireActiveTour();
     return step('Team converts the tour into a placement (Start placement)', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
+      // A convertible tour shows TWO "Start placement" buttons (header CTA + the
+      // Outcome-card action); both call the same convert handler. .first() = the
+      // header CTA.
       await this.page
-        .getByRole('button', { name: 'Start placement from this tour' })
+        .getByRole('button', { name: 'Start placement' })
+        .first()
         .click();
       await this.page.waitForURL(/\/placements\/[^/?#]+$/, { timeout: 10_000 });
       const m = /\/placements\/([^/?#]+)/.exec(this.page.url());
@@ -2771,9 +2922,7 @@ export class Scenario {
     const id = tourId ?? this.requireActiveTour().tourId;
     return step('Team opens the tour Reminders panel', async () => {
       await this.page.goto(`${NEXT}/tours/${id}`);
-      await expect(this.page.getByRole('region', { name: 'Reminders' })).toBeVisible({
-        timeout: 10_000,
-      });
+      await expect(this.remindersCard()).toBeVisible({ timeout: 10_000 });
     });
   }
 
@@ -2793,7 +2942,7 @@ export class Scenario {
   ): Promise<void> {
     const label = REMINDER_KIND_LABELS[kind];
     return step(`App: Reminders panel shows '${label}' as ${state}`, async () => {
-      const region = this.page.getByRole('region', { name: 'Reminders' });
+      const region = this.remindersCard();
       const rows = region.getByRole('listitem').filter({ hasText: label });
       let row;
       if (state === 'sent') row = rows.filter({ hasText: /Sent/ });
@@ -2824,14 +2973,34 @@ export class Scenario {
 
   // ---- internal helpers ---------------------------------------------------
 
-  /** Click a TourDetail status control and assert the new status LABEL renders. */
-  private tourStatusAction(buttonAria: string, newLabel: string, stepName: string): Promise<void> {
-    const tour = this.requireActiveTour();
-    return step(stepName, async () => {
-      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('button', { name: buttonAria }).click();
-      await expect(this.page.getByLabel(`Status: ${newLabel}`)).toBeVisible({ timeout: 10_000 });
-    });
+  /** The rebuilt TourDetail header band, scoped by the "Tour - <address>" identity
+   *  so it never collides with the AppFrame topbar <header> or the conversation
+   *  chrome. The tour StatusBadge + facts line live here. */
+  private tourHeader(): Locator {
+    return this.page.locator('header').filter({ hasText: 'Tour -' });
+  }
+
+  /** The tour StatusBadge for `label` (exact). The rebuilt page renders the status
+   *  as a StatusBadge pill in the header band (no more <dd> aria-labels). */
+  private tourStatusBadge(label: string): Locator {
+    return this.tourHeader().getByText(label, { exact: true });
+  }
+
+  /** The tour Reminders card (restyled from a titled region INTO a Card in the
+   *  2026-07-08 rebuild: an unnamed <section> with a "Reminders" <h3>). Scope by
+   *  the heading so the rung listitems resolve inside it. */
+  private remindersCard(): Locator {
+    return this.page
+      .locator('section')
+      .filter({ has: this.page.getByRole('heading', { name: 'Reminders' }) });
+  }
+
+  /** Open the TourDetail header kebab ('More actions') and return the open menu. */
+  private async openTourKebab(): Promise<Locator> {
+    await this.page.getByRole('button', { name: 'More actions' }).click();
+    const menu = this.page.getByRole('menu');
+    await expect(menu).toBeVisible();
+    return menu;
   }
 
   /** Team texts the ACTIVE tenant 1:1 from their contact page (the real reply box). */

@@ -16,7 +16,10 @@ import styles from './StatusMenu.module.css';
  *  - SOFT tints (dark text) mirroring StatusBadge's BadgeTone, for contact
  *    statuses: `positive` | `progress` | `warn` | `muted`.
  *  - `neutral` is an un-tinted outlined pill (e.g. a workflow stage that has no
- *    colour semantic; also the badge-neutral look). */
+ *    colour semantic; also the badge-neutral look).
+ *  - `info` | `danger` joined BadgeTone with the tour StatusBadge work
+ *    (2026-07-08); solid brand/danger fills matching the badge look, so the
+ *    mirror stays total when a pill fronts one of those statuses. */
 export type StatusTone =
   | 'available'
   | 'placed'
@@ -25,7 +28,9 @@ export type StatusTone =
   | 'positive'
   | 'progress'
   | 'warn'
-  | 'muted';
+  | 'muted'
+  | 'info'
+  | 'danger';
 
 /** The pill size: `sm` (a compact badge, the default) or `lg` (a prominent header
  *  control, e.g. the placement stage). */
@@ -73,6 +78,8 @@ const TONE_CLASS: Record<StatusTone, string> = {
   progress: styles.toneProgress ?? '',
   warn: styles.toneWarn ?? '',
   muted: styles.toneMuted ?? '',
+  info: styles.toneInfo ?? '',
+  danger: styles.toneDanger ?? '',
 };
 
 export function StatusMenu({

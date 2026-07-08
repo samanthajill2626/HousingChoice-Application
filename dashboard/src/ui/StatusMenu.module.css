@@ -84,6 +84,18 @@
   border: 1px solid var(--c-border);
   color: var(--c-text-subtle);
 }
+/* info + danger joined BadgeTone with the tour StatusBadge work (2026-07-08);
+ * mirror StatusBadge's solid fills so a pill matches the badge it replaces. */
+.toneInfo {
+  background: var(--c-brand);
+  border: 1px solid var(--c-brand);
+  color: var(--c-text-inverse);
+}
+.toneDanger {
+  background: var(--c-danger);
+  border: 1px solid var(--c-danger);
+  color: var(--c-text-inverse);
+}
 
 /* Prominent header variant (e.g. the placement stage, which is the page's lead). */
 .sizeLg {

@@ -1,13 +1,16 @@
 // BroadcastsList — the /broadcasts nav surface. A status-filtered, paginated
 // list of broadcasts: each row shows the status pill, the audience summary, the
 // delivered/total rollup, and the created date. A draft row opens the composer's
-// review/send step (the draft already has an id → preview it); a sending/sent/
+// review/send step (the draft already has an id → preview it) and carries a
+// Delete action (confirm modal → DELETE — the list is the only reliable place to
+// kill a draft, since the composer can't rehydrate one yet); a sending/sent/
 // failed row opens its live Results view. A "New broadcast" button starts a fresh
 // composer. Accessibility-first (real headings, a labeled filter, link rows).
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Spinner } from '../../ui/index.js';
-import type { BroadcastSummary } from '../../api/index.js';
+import { Button, Spinner } from '../../ui/index.js';
+import { ApiError, deleteBroadcast, type BroadcastSummary } from '../../api/index.js';
+import { Modal } from '../contact/Modal.js';
 import { BroadcastStatusPill } from './BroadcastStatusPill.js';
 import { audienceSummary, formatBroadcastDate } from './broadcastFormat.js';
 import { useBroadcastsList, type BroadcastsFilter } from './useBroadcastsList.js';
@@ -33,6 +36,44 @@ export function BroadcastsList(): React.JSX.Element {
   const [filter, setFilter] = useState<BroadcastsFilter>('all');
   const navigate = useNavigate();
   const list = useBroadcastsList(filter);
+
+  // Draft delete — the row being confirmed (modal open while non-null).
+  const [confirmDelete, setConfirmDelete] = useState<BroadcastSummary | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  function closeConfirm(): void {
+    if (deleteBusy) return;
+    setConfirmDelete(null);
+    setDeleteError(null);
+  }
+
+  async function onConfirmDelete(): Promise<void> {
+    if (confirmDelete === null || deleteBusy) return;
+    const id = confirmDelete.broadcastId;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteBroadcast(id);
+      list.removeRow(id);
+      setConfirmDelete(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Raced a send — it's no longer a draft. Say so, and refresh the list
+        // behind the modal so the row shows its real status.
+        setDeleteError('This broadcast already started sending, so it can no longer be deleted.');
+        list.retry();
+      } else if (err instanceof ApiError && err.status === 404) {
+        // Already gone (deleted elsewhere) — dropping the row IS the outcome.
+        list.removeRow(id);
+        setConfirmDelete(null);
+      } else {
+        setDeleteError("Couldn't delete the draft — please try again.");
+      }
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
 
   return (
     <div className={styles.page}>
@@ -103,6 +144,19 @@ export function BroadcastsList(): React.JSX.Element {
                     <span className={styles.date}>{formatBroadcastDate(row.created_at)}</span>
                   </span>
                 </Link>
+                {row.status === 'draft' ? (
+                  <button
+                    type="button"
+                    className={styles.deleteBtn}
+                    aria-label={`Delete draft: ${audienceSummary(row.audience_filter)}`}
+                    onClick={() => {
+                      setDeleteError(null);
+                      setConfirmDelete(row);
+                    }}
+                  >
+                    Delete
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -117,6 +171,46 @@ export function BroadcastsList(): React.JSX.Element {
             </button>
           ) : null}
         </>
+      ) : null}
+
+      {confirmDelete !== null ? (
+        <Modal
+          title="Delete draft?"
+          onClose={closeConfirm}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={closeConfirm}
+                disabled={deleteBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                type="button"
+                onClick={() => void onConfirmDelete()}
+                disabled={deleteBusy}
+              >
+                {deleteBusy ? 'Deleting…' : 'Delete draft'}
+              </Button>
+            </>
+          }
+        >
+          <p className={styles.confirmBody}>
+            This deletes the unsent draft ({audienceSummary(confirmDelete.audience_filter)},{' '}
+            {formatBroadcastDate(confirmDelete.created_at)}). Nothing has been sent, and the
+            draft&apos;s message can&apos;t be recovered.
+          </p>
+          {deleteError !== null ? (
+            <p className={styles.confirmError} role="alert">
+              {deleteError}
+            </p>
+          ) : null}
+        </Modal>
       ) : null}
     </div>
   );

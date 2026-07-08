@@ -130,9 +130,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
         ) : null}
       </div>
       <p className={styles.sub}>
-        {deleted
-          ? 'Soft-deleted properties. Open one to restore it.'
-          : 'Showing the first page of unit records.'}
+        {deleted ? 'Soft-deleted properties. Open one to restore it.' : 'All property records.'}
       </p>
 
       <nav className={styles.tabs} aria-label="Properties view">

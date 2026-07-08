@@ -73,7 +73,7 @@ const RESPONSE_META: Record<string, { label: string; cls: string }> = {
 };
 
 /** How many rows the Related / Similar property lists show before collapsing. */
-const RELATED_LIMIT = 6;
+const RELATED_LIMIT = 4;
 
 /**
  * Render a list of already-built <Row>s, capped at `limit` with a "Show N more" /

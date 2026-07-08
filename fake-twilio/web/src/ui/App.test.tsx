@@ -221,4 +221,68 @@ describe('App shell — relay groups', () => {
       body: 'hi from Bob',
     });
   });
+
+  it('relay-group traffic is HIDDEN from the 1:1 pane (renders only in the GroupPanel)', async () => {
+    // 2026-07-07 UX fix: pool legs used to double-show (group transcript + a
+    // badged copy in the member's 1:1 thread). The 1:1 pane now filters to
+    // DIRECT business traffic (isDirectMessage); the raw thread state still
+    // carries the legs (mirrors /control/threads).
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+    // The seeded business message renders.
+    expect(await screen.findByText('Welcome to your new home')).toBeVisible();
+    // A relay fan-out leg (from = pool) and Ana's own group send (to = pool)
+    // arrive live — neither may render in the 1:1 pane.
+    act(() => {
+      capturedOnEvent?.({
+        type: 'message.appended',
+        partyNumber: '+15550100001',
+        message: {
+          sid: 'SMpoolleg',
+          direction: 'outbound',
+          from: '+15550160001',
+          to: '+15550100001',
+          body: 'Diana Osei: see you at the tour',
+          state: 'queued',
+          createdAt: '2026-06-15T00:01:00.000Z',
+          updatedAt: '2026-06-15T00:01:00.000Z',
+        },
+      });
+      capturedOnEvent?.({
+        type: 'message.appended',
+        partyNumber: '+15550100001',
+        message: {
+          sid: 'SMgroupsend',
+          direction: 'inbound',
+          from: '+15550100001',
+          to: '+15550160001',
+          body: 'my own group reply',
+          state: 'delivered',
+          createdAt: '2026-06-15T00:02:00.000Z',
+          updatedAt: '2026-06-15T00:02:00.000Z',
+        },
+      });
+    });
+    expect(screen.queryByText('Diana Osei: see you at the tour')).toBeNull();
+    expect(screen.queryByText('my own group reply')).toBeNull();
+    // A DIRECT business message still lands live in the pane.
+    act(() => {
+      capturedOnEvent?.({
+        type: 'message.appended',
+        partyNumber: '+15550100001',
+        message: {
+          sid: 'SMdirect',
+          direction: 'outbound',
+          from: '+15550009999',
+          to: '+15550100001',
+          body: 'a normal business text',
+          state: 'queued',
+          createdAt: '2026-06-15T00:03:00.000Z',
+          updatedAt: '2026-06-15T00:03:00.000Z',
+        },
+      });
+    });
+    expect(await screen.findByText('a normal business text')).toBeVisible();
+  });
 });

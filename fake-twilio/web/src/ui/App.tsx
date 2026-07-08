@@ -19,6 +19,7 @@ import { DevBanner } from './DevBanner.js';
 import { GroupPanel } from './GroupPanel.js';
 import { MessageBubble } from './MessageBubble.js';
 import { RosterRail } from './RosterRail.js';
+import { isDirectMessage } from '../api/types.js';
 import type { AddAdHocInput, DeliveryProfile, Persona, Thread } from '../api/types.js';
 import styles from './App.module.css';
 
@@ -89,7 +90,14 @@ export function App(): React.JSX.Element {
   const [sendError, setSendError] = useState<string | undefined>(undefined);
 
   const selectedPersona = phones.personas.find((p) => p.number === phones.selected);
-  const selectedThread = phones.threads.find((t) => t.partyNumber === phones.selected);
+  const rawSelectedThread = phones.threads.find((t) => t.partyNumber === phones.selected);
+  // The 1:1 pane shows BUSINESS traffic only (one side = the app number) —
+  // relay-group traffic renders exclusively in the GroupPanel. Filtering at
+  // DISPLAY time keeps the hook's raw threads faithful to /control/threads
+  // (which the e2e scenario steps assert pool legs into).
+  const selectedThread: Thread | undefined = rawSelectedThread
+    ? { ...rawSelectedThread, messages: rawSelectedThread.messages.filter(isDirectMessage) }
+    : undefined;
   // Group selection is mutually exclusive with persona selection (the hook
   // nulls one when the other is set). A stale pool (e.g. after reset cleared
   // the groups) simply finds nothing and the empty PhonePanel state shows.
@@ -99,6 +107,8 @@ export function App(): React.JSX.Element {
   // profile is consumed on the next app→party OUTBOUND, then the engine reverts to
   // normal. Bump this signal so the radio follows suit — when that outbound lands
   // (the selected thread gains an outbound), and when the selected party changes.
+  // Counted on the FILTERED thread: profiles arm app→party 1:1 sends; group
+  // fan-out legs consuming a profile isn't a flow the fake models.
   const [deliveryResetSignal, setDeliveryResetSignal] = useState(0);
   const selectedOutboundCount =
     selectedThread?.messages.filter((m) => m.direction === 'outbound').length ?? 0;

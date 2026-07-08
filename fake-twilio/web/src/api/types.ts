@@ -59,13 +59,29 @@ export interface Thread {
 
 /** The app's business number (mirrors `fake-twilio/src/engine/registry.ts`
  *  APP_NUMBER). An outbound message whose `from` differs from this was sent
- *  from a relay POOL number — the 1:1 view badges those legs "via ‹pool›". */
+ *  from a relay POOL number — group traffic, which renders ONLY in the
+ *  GroupPanel (see isDirectMessage). */
 export const APP_NUMBER = '+15550009999';
+
+/**
+ * True iff a message is ordinary app↔party BUSINESS traffic — one side is the
+ * app's business number. Relay-group traffic fails this in both directions (a
+ * fan-out leg's `from` is the pool; a member's group send's `to` is the pool)
+ * and belongs ONLY in the GroupPanel transcript: the 1:1 pane and its unread
+ * rule filter on this predicate so group texts don't show up twice (2026-07-07
+ * UX decision, revising spec §3's "badged in the 1:1 too" simplification). The
+ * raw `threads` state stays UNFILTERED — it mirrors `GET /control/threads`,
+ * which the e2e scenario steps assert pool legs INTO.
+ */
+export function isDirectMessage(message: ThreadMessage): boolean {
+  return message.from === APP_NUMBER || message.to === APP_NUMBER;
+}
 
 // ---- Relay groups (traffic-derived; mirror engine/types.ts) ----
 // Groups are an ADDITIONAL view over the same traffic — pool legs still land in
-// the recipient persona's single 1:1 thread. Served by `GET /control/groups`
-// and pushed whole per mutation as the `group.updated` SSE event.
+// the recipient persona's raw thread (mirroring /control/threads), but the 1:1
+// PANE hides them (isDirectMessage): they render only here. Served by
+// `GET /control/groups` and pushed whole per mutation as `group.updated` SSE.
 
 export interface GroupMember {
   /** Member E.164. */

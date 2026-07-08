@@ -14,6 +14,7 @@ import {
   setDeliveryOutcome as apiSetDeliveryOutcome,
 } from '../api/client.js';
 import { useFakeEvents } from '../api/useFakeEvents.js';
+import { isDirectMessage } from '../api/types.js';
 import type {
   AddAdHocInput,
   DeliveryProfile,
@@ -83,7 +84,16 @@ export function mergeEvent(state: FakeState, event: EngineEvent): FakeState {
         threads = state.threads.map((t, i) => (i === idx ? replaced : t));
       }
       let unreadByNumber = state.unreadByNumber;
-      if (message.direction === 'inbound' && partyNumber !== state.selected) {
+      // Only DIRECT (business app↔party) inbounds count toward the 1:1 badge —
+      // group traffic is hidden from the 1:1 pane (App filters on the same
+      // predicate) and counts via groupUnreadByPool instead. Without this, a
+      // member's own group send (direction inbound, to=pool) would show a
+      // phantom unread on a pane it doesn't even render in.
+      if (
+        message.direction === 'inbound' &&
+        isDirectMessage(message) &&
+        partyNumber !== state.selected
+      ) {
         unreadByNumber = {
           ...state.unreadByNumber,
           [partyNumber]: (state.unreadByNumber[partyNumber] ?? 0) + 1,

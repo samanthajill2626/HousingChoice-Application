@@ -71,18 +71,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Relay-pool origin badge ("via ‹pool›") on app fan-out legs. */
-.via {
-  padding: 0 var(--hc-space-2);
-  border: 1px solid var(--hc-color-border);
-  border-radius: var(--hc-radius-pill);
-  background-color: var(--hc-color-surface-alt);
-  font-size: var(--hc-font-size-xs);
-  color: var(--hc-color-text-muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .outgoing .time {
   color: rgba(255, 255, 255, 0.85);
 }

@@ -88,6 +88,20 @@ describe('mergeEvent (pure)', () => {
     expect(next.unreadByNumber['+15550100001'] ?? 0).toBe(0);
   });
 
+  it("a member's GROUP send (inbound, to = pool) does NOT increment the 1:1 unread", () => {
+    // Group traffic is hidden from the 1:1 pane (isDirectMessage filter), so it
+    // must not produce a phantom 1:1 badge — group activity counts via
+    // groupUnreadByPool instead (driven by the separate group.updated event).
+    const next = mergeEvent(baseState({ selected: '+15550100002' }), {
+      type: 'message.appended',
+      partyNumber: '+15550100001',
+      message: msg({ direction: 'inbound', to: '+15550160001' }),
+    });
+    expect(next.unreadByNumber['+15550100001'] ?? 0).toBe(0);
+    // ...but the message still lands in the raw thread (mirrors /control/threads).
+    expect(next.threads[0]!.messages).toHaveLength(1);
+  });
+
   it('message.updated patches the message state by sid', () => {
     const existing: Thread = { partyNumber: '+15550100001', messages: [msg({ sid: 'SMa', state: 'queued' })] };
     const next = mergeEvent(baseState({ threads: [existing] }), {

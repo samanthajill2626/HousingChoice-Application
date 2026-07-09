@@ -206,6 +206,17 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     return Number(text.trim());
   }
 
+  // The lifecycle pill, scoped to the results <header> (the one holding the
+  // page h1). Scoping matters: the StatChips row ALWAYS renders a "Sent" <dt>,
+  // so a bare page-level getByText('Sent') can match the chip label and pass
+  // VACUOUSLY even if the pill never flipped.
+  function statusPill(page: Page, label: string) {
+    return page
+      .locator('header')
+      .filter({ has: page.getByRole('heading', { level: 1 }) })
+      .getByText(label, { exact: true });
+  }
+
   test('curated send: land while Sending, chips tick, terminal Delivered=N/Sent=0/Queued=0, rows show names + formatted phones + contact links', async ({
     page,
     request,
@@ -213,13 +224,14 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
 
-    // Three fresh, consented 2-BR tenants we fully control. Three recipients gives
+    // Five fresh, consented 2-BR tenants we fully control. Five recipients gives
     // a clean all-delivered set AND a wall-clock sending window: the shared A2P
     // token bucket admits ~1 send/sec (capacity 1, refill 1/s), so the paced
-    // fan-out cannot finish in under ~2s regardless of CPU. That guaranteed window
-    // is what lets us land on the detail page WHILE the broadcast is still Sending.
+    // fan-out cannot finish in under ~4s regardless of CPU. That guaranteed window
+    // is what lets us land on the detail page WHILE the broadcast is still Sending
+    // even when page mount + first paint are slow on a loaded box.
     const tenants: Array<{ contactId: string; firstName: string; name: string; phone: string }> = [];
-    for (const label of ['Alpha', 'Bravo', 'Charlie']) {
+    for (const label of ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo']) {
       tenants.push(await createTenant(page.request, `${label}${stamp}`));
     }
     const N = tenants.length;
@@ -248,10 +260,11 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     await page.goto(`${NEXT}/broadcasts/${broadcastId}`);
     await expect(page.getByLabel('Delivery stats')).toBeVisible({ timeout: 10_000 });
 
-    // (1) We ARE mid-send: the lifecycle pill reads "Sending" (exact, so the
-    // per-recipient "Sending..." delivery badge cannot match). Proves G1 - the
-    // deferred adapter returns fast enough that the operator lands during the run.
-    await expect(page.getByText('Sending', { exact: true })).toBeVisible({ timeout: 10_000 });
+    // (1) We ARE mid-send: the header pill reads "Sending" (scoped + exact, so
+    // neither a per-recipient "Sending..." badge nor any chip label can match).
+    // Proves G1 - the deferred adapter returns fast enough that the operator
+    // lands during the run.
+    await expect(statusPill(page, 'Sending')).toBeVisible({ timeout: 10_000 });
 
     // (2) The chips TICK during the run, observed live on a page we never reload:
     //   - Queued falls below the full audience as the paced fan-out drains it;
@@ -285,7 +298,9 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
       .toEqual({ delivered: N, sent: 0, queued: 0 });
 
     // The lifecycle pill live-updated to the terminal "Sent" (no manual reload).
-    await expect(page.getByText('Sent', { exact: true })).toBeVisible({ timeout: 10_000 });
+    // MUST be the scoped pill: the "Sent" chip <dt> always exists, so an unscoped
+    // getByText would pass without the pill ever flipping.
+    await expect(statusPill(page, 'Sent')).toBeVisible({ timeout: 10_000 });
 
     // (4) Recipient identity: each row shows the tenant's NAME (primary) + FORMATTED
     // phone (secondary, "(555) XXX-XXXX" - never the raw E.164) and links to

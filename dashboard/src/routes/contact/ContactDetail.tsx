@@ -498,7 +498,15 @@ export function ContactDetail(): React.JSX.Element {
 
       <div className={styles.body}>
         <div className={`${styles.left} ${pane === 'comms' ? styles.paneActive : styles.paneHidden}`}>
+          {/* key= REMOUNTS the Timeline when the route param changes: this page
+              re-renders the SAME component instance on contact-to-contact
+              navigation (no remount), so the composer's LOCAL state - the text
+              draft and, since outbound MMS, the uploaded attachment chips -
+              would otherwise survive into the NEXT contact's composer and a
+              Send would deliver contact A's media to contact B. Same keyed
+              isolation the tour channel switcher uses (TourConversation). */}
           <Timeline
+            key={contactId}
             status={timeline.status}
             items={timeline.items}
             upcoming={timeline.upcoming}

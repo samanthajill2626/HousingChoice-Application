@@ -187,6 +187,41 @@ describe('Timeline outbound MMS composer', () => {
     expect(screen.getByRole('button', { name: 'Remove keep.png' })).toBeInTheDocument();
   });
 
+  it('BLOCKS Send while any chip is errored, so an errored attachment is never silently dropped', async () => {
+    // First upload succeeds (a good chip), the second fails (an errored chip).
+    // A send with text + the good chip + the errored chip must NOT go out
+    // silently omitting the failed file: Send is blocked with an inline warning.
+    mockedUpload
+      .mockResolvedValueOnce({ key: 'uploads/good', contentType: 'image/png', size: 2048 })
+      .mockRejectedValueOnce(new ApiError(413, 'file_too_large', 'file_too_large'));
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderComposer({ onSend });
+
+    fireEvent.change(fileInput(), { target: { files: [imageFile('good.png')] } });
+    await screen.findByRole('button', { name: 'Remove good.png' });
+    fireEvent.change(fileInput(), { target: { files: [imageFile('bad.png')] } });
+    // The errored chip surfaces its failure (wait for the rejection to settle).
+    await screen.findByText(/attachment failed to upload/i);
+
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'see attached' } });
+
+    // Send is disabled even with a good chip + text: the errored chip blocks it.
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onSend).not.toHaveBeenCalled();
+
+    // Removing the errored chip unblocks Send (the good chip + text remain).
+    fireEvent.click(screen.getByRole('button', { name: 'Remove bad.png' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onSend).toHaveBeenCalledWith('see attached', ['uploads/good']);
+    // Let the send resolve (chips clear) so no state update escapes act().
+    await waitFor(() =>
+      expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument(),
+    );
+  });
+
   it('shows an attachment count on an optimistic (queued, no-sid) bubble', () => {
     // The optimistic row the consumers add carries placeholder media_attachments
     // and a temp tsMsgId with no provider sid -> the bubble renders a count chip.

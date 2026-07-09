@@ -640,6 +640,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     .filter((a) => a.status === 'done' && a.key !== undefined)
     .map((a) => a.key as string);
   const hasUploading = attachments.some((a) => a.status === 'uploading');
+  // An errored chip is neither 'done' (so it's excluded from uploadedKeys) nor
+  // 'uploading' (so hasUploading doesn't block) - without this guard a send with
+  // a good chip + a failed chip would go out SILENTLY dropping the failed file.
+  // Block Send while any chip is errored and prompt the operator to remove it.
+  const hasErrored = attachments.some((a) => a.status === 'error');
   // The reply box starts one line and grows to fit the draft (up to its CSS
   // max-height); a manual drag-resize overrides that until the draft clears.
   const replyRef = useAutoGrowTextarea(draft);
@@ -774,7 +779,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     const keys = uploadedKeys;
     // A send needs body OR at least one uploaded attachment; block while an upload
     // is still in flight (so its key isn't lost).
-    if ((!text && keys.length === 0) || !canSend || sending || hasUploading) return;
+    if ((!text && keys.length === 0) || !canSend || sending || hasUploading || hasErrored) return;
     setSending(true);
     setSendError(null);
     // Optimistic: onSend shows the bubble ("Sending…") immediately, so clear the
@@ -964,6 +969,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             ))}
           </ul>
         ) : null}
+        {hasErrored ? (
+          <p className={styles.error} role="alert">
+            An attachment failed to upload. Remove it to send.
+          </p>
+        ) : null}
         {attachError ? (
           <p className={styles.error} role="alert">
             {attachError}
@@ -1013,9 +1023,16 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               !canSend ||
               sending ||
               hasUploading ||
+              hasErrored ||
               (draft.trim().length === 0 && uploadedKeys.length === 0)
             }
-            title={canSend ? undefined : 'No single conversation to send into yet'}
+            title={
+              canSend
+                ? hasErrored
+                  ? 'Remove the failed attachment to send'
+                  : undefined
+                : 'No single conversation to send into yet'
+            }
           >
             {sending ? 'Sending…' : 'Send'}
           </button>

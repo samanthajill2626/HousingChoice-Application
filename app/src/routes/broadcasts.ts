@@ -548,9 +548,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     res.json(toBroadcastResults(broadcast));
   });
 
-  // GET /api/broadcasts?status=&limit= — list (by status, else this user's).
+  // GET /api/broadcasts?status=&limit= — the TEAM-WIDE list (optionally status-
+  // filtered), newest-first. Both branches read the same byCreated GSI, so the
+  // dashboard's All tab and its status tabs see the SAME population (they used
+  // to diverge: no-filter was scoped to the acting user, 2026-07-08 bug).
   router.get('/broadcasts', async (req, res) => {
-    const actor = (req as AuthedRequest).user?.userId ?? 'unknown';
     const limit = parseLimit(req.query['limit']);
     if (limit === undefined) {
       res.status(400).json({ error: `limit must be an integer 1..${MAX_PAGE_LIMIT}` });
@@ -576,10 +578,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         res.status(400).json({ error: `status must be one of: ${[...BROADCAST_STATUSES].join(', ')}` });
         return;
       }
+      // Filtered pages can come back SHORT (Limit precedes the filter) while
+      // still carrying a cursor — the client pages until nextCursor is null.
       page = await broadcasts.listByStatus(rawStatus as BroadcastStatus, opts);
     } else {
-      // No status filter → the acting user's broadcasts, newest-first.
-      page = await broadcasts.listByCreatedBy(actor, opts);
+      page = await broadcasts.list(opts);
     }
     res.json({
       broadcasts: page.items.map(toBroadcastSummary),

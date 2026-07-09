@@ -512,6 +512,51 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.body.error).toBe('invalid cursor');
   });
 
+  // --- Team-wide list (byCreated GSI, 2026-07-08) ---------------------------
+  // Regression: the no-filter list used to be scoped to the ACTING user
+  // (listByCreatedBy), so the dashboard's All tab showed a subset of what its
+  // own status tabs (listByStatus, global) showed. Both views are team-wide now.
+  it('lists ALL creators (not just the acting user) newest-first, in both the All view and the status view', async () => {
+    const { app } = makeWebhookHarness({ world });
+    // Three broadcasts by three DIFFERENT users, seeded at the repo (the session
+    // user below is user-0002 — the old code would have shown only theirs).
+    const filter = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+    const mine = await world.broadcastsRepo.create({ created_by: 'user-0002', body_template: 'a', audience_filter: filter });
+    const theirs = await world.broadcastsRepo.create({ created_by: 'user-0001', body_template: 'b', audience_filter: filter });
+    const third = await world.broadcastsRepo.create({ created_by: 'user-0003', body_template: 'c', audience_filter: filter });
+    // Distinct created_at (newest-first is assertable) + one non-draft.
+    const patchRow = (id: string, patch: { created_at: string; status?: 'sent' }): void => {
+      const row = world.broadcasts.get(id);
+      if (row === undefined) throw new Error(`missing broadcast ${id}`);
+      Object.assign(row, patch);
+    };
+    patchRow(mine.broadcastId, { created_at: '2026-07-01T10:00:00.000Z' });
+    patchRow(theirs.broadcastId, { created_at: '2026-07-03T10:00:00.000Z', status: 'sent' });
+    patchRow(third.broadcastId, { created_at: '2026-07-02T10:00:00.000Z' });
+
+    const all = await request(app)
+      .get('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(all.status).toBe(200);
+    expect(all.body.broadcasts.map((b: { broadcastId: string }) => b.broadcastId)).toEqual([
+      theirs.broadcastId, // 07-03 — another user's, and it leads (newest)
+      third.broadcastId, // 07-02
+      mine.broadcastId, // 07-01
+    ]);
+
+    // The status view filters the SAME team-wide population, same order.
+    const drafts = await request(app)
+      .get('/api/broadcasts?status=draft')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(drafts.status).toBe(200);
+    expect(drafts.body.broadcasts.map((b: { broadcastId: string }) => b.broadcastId)).toEqual([
+      third.broadcastId,
+      mine.broadcastId,
+    ]);
+  });
+
   // --- FIX 7: a concurrent send → 409, not 500, and does not double-enqueue -
   it('a send racing markSending returns 409 (not 500) and does not double-enqueue (FIX 7)', async () => {
     seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });

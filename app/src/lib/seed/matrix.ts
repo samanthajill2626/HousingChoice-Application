@@ -1102,6 +1102,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
       status: 'sent',
       created_by: 'user-0001',
       created_at: D.T4,
+      _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-01',
       audience_filter: {
         contact_type: 'tenant',
@@ -1129,6 +1130,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
       status: 'draft',
       created_by: 'user-0002',
       created_at: D.T5,
+      _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-02',
       audience_filter: {
         contact_type: 'tenant',

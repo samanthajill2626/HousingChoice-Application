@@ -110,7 +110,7 @@ export function BroadcastsList(): React.JSX.Element {
 
       {list.status === 'error' ? (
         <div className={styles.error} role="alert">
-          <p>We couldn&apos;t load your broadcasts.</p>
+          <p>We couldn&apos;t load the broadcasts.</p>
           <button type="button" className={styles.retry} onClick={() => list.retry()}>
             Retry
           </button>

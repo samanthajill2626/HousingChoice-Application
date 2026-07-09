@@ -378,8 +378,7 @@ describe('RecipientPreview — send posts the exact checked selection', () => {
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/bcast_1'));
   });
 
-  it('removing a row drops it from the send selection', async () => {
-    const u = userEvent.setup();
+  it('renders no per-row Remove button — unchecking is the only exclusion mechanism', () => {
     renderPreview({
       preview: previewOf({
         candidates: [
@@ -388,11 +387,10 @@ describe('RecipientPreview — send posts the exact checked selection', () => {
         ],
       }),
     });
-    await u.click(screen.getByRole('button', { name: 'Remove Bo' }));
-    await u.click(screen.getByRole('button', { name: /^Send to/ }));
-    await waitFor(() => expect(sendBroadcast).toHaveBeenCalled());
-    const ids = (sendBroadcast.mock.calls[0] as [string, string[]])[1];
-    expect(ids).toEqual(['c1']);
+    // The old per-row Remove duplicated "uncheck" (both just exclude the contact
+    // from the posted ids) and let a fenced no-consent row be dismissed from view,
+    // hiding the record-consent reminder. Removed by design (Cameron, 2026-07-08).
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
   });
 });
 

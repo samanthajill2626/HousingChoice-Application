@@ -507,6 +507,93 @@ describe('messaging.retrySend job (worker side)', () => {
     expect(retried.direction).toBe('outbound');
   });
 
+  it('AUTOMATED RETRY re-presigns media_attachments FRESH (never replays the stored stale URLs)', async () => {
+    // The automated 30003 twin of the manual Retry route: presign PER ATTEMPT.
+    // A message's stored mediaUrls are short-lived bearer tokens - replaying them
+    // on a retry 24h later would hand Twilio an EXPIRED token. The durable truth
+    // is media_attachments (s3Keys); each is re-presigned fresh at retry time.
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    const STALE_URL =
+      'https://s3.local/uploads/aaaa?X-Amz-Signature=STALEEXPIRED&X-Amz-Expires=3600';
+    await seedOutbound(world, 'SMout0001', {
+      media_attachments: [{ s3Key: 'uploads/aaaa', contentType: 'image/png' }],
+      // The stale presigned URL from the FIRST send - must NOT be replayed.
+      mediaUrls: [STALE_URL],
+    });
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
+
+    // A fake store whose presign is unique per call AND derived from the key:
+    // proves the retry re-presigns (never replaying the stored URL).
+    let presignCount = 0;
+    const mediaStore = {
+      async presign(key: string, ttl: number) {
+        presignCount += 1;
+        return `https://s3.local/${key}?X-Amz-Signature=fresh${presignCount}&X-Amz-Expires=${ttl}`;
+      },
+    } as unknown as import('../src/adapters/mediaStore.js').MediaStore;
+
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, mediaStore, logger });
+    await outbound.deliverDelayed(dispatchJob);
+
+    // Exactly one fresh presign happened for the one attachment.
+    expect(presignCount).toBe(1);
+    const sentUrls = world.sent[0]?.mediaUrls;
+    expect(sentUrls).toBeDefined();
+    // Freshly presigned (bearer-token query present) AND derived from the s3Key,
+    // and NOT the stored stale URL.
+    expect(sentUrls?.[0]).not.toBe(STALE_URL);
+    expect(sentUrls?.[0]).toContain('X-Amz-Signature=fresh');
+    expect(sentUrls?.[0]).toContain('uploads/aaaa');
+    // The durable attachments ride along so the retried message PERSISTS them.
+    const retried = world.messages.find((m) => m.retry_of !== undefined)!;
+    expect(retried.media_attachments).toEqual([{ s3Key: 'uploads/aaaa', contentType: 'image/png' }]);
+  });
+
+  it('AUTOMATED RETRY with NO media_attachments replays raw mediaUrls (e2e/raw seam fallback)', async () => {
+    const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    const RAW_URL = 'https://provider.example/raw-media-fixture';
+    // No media_attachments (the raw internal/e2e seam): the raw mediaUrls ARE the
+    // durable truth here, so replaying them verbatim is correct.
+    await seedOutbound(world, 'SMout0001', { mediaUrls: [RAW_URL] });
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30003' }));
+
+    const send = createSendMessageService({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: ORIGIN_SECRET, MESSAGING_DRIVER: 'console' }),
+      logger,
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      auditRepo: world.auditRepo,
+    });
+    // No mediaStore dep at all - proves the fallback path needs none.
+    registerRetrySendJobHandler({ sendMessage: send, messagesRepo: world.messagesRepo, logger });
+    await outbound.deliverDelayed(dispatchJob);
+
+    expect(world.sent[0]?.mediaUrls).toEqual([RAW_URL]);
+  });
+
   it('a retry carries the ORIGINAL message author through (ai stays ai)', async () => {
     const outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(outbound);

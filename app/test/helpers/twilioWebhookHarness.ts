@@ -483,6 +483,10 @@ export function createFakeWorld(): FakeWorld {
         author: message.author,
         ...(message.body !== undefined && { body: message.body }),
         ...(message.mediaUrls !== undefined && { mediaUrls: message.mediaUrls }),
+        // Mirror the real repo: durable attachment keys persist as
+        // media_attachments (len>0), so a retried outbound MMS keeps its keys.
+        ...(message.mediaAttachments !== undefined &&
+          message.mediaAttachments.length > 0 && { media_attachments: message.mediaAttachments }),
         provider_sid: message.providerSid,
         provider_ts: message.providerTs,
         delivery_status: message.deliveryStatus,

@@ -121,6 +121,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     // Stored ONCE — no extra outbound message copies were appended.
     expect(world.messages.filter((m) => m.conversationId === 'conv-relay-1')).toHaveLength(1);
@@ -153,6 +154,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     // Carol receives; Bob (opted out) NEVER does.
     const recipients = world.sent.map((s: SendMessageParams) => s.to);
@@ -179,6 +181,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     // The conversation now carries Bob's opt-out (keyed by his relayMemberKey =
     // contactId), with his display data for the Today item + the observed instant.
@@ -198,6 +201,7 @@ describe('relay.fanOut (M1.7)', () => {
     world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
 
     await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
 
     const recipients = world.sent.map((s: SendMessageParams) => s.to).sort();
     expect(recipients).toEqual([ALICE, CAROL].sort()); // Bob skipped
@@ -217,6 +221,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     expect(world.sent).toHaveLength(1);
     expect(world.sent[0]!.to).toBe(BOB);
     expect(world.sent[0]!.body).not.toContain(ALICE); // never leak the phone
@@ -234,6 +239,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     expect(world.sent.map((s) => s.to)).toEqual([BOB]); // Carol gone, only Bob
   });
@@ -263,6 +269,7 @@ describe('relay.fanOut (M1.7)', () => {
       senderKey: TEAM_SENDER_KEY,
       senderNameOverride: TEAM_SENDER_LABEL,
     });
+    await outbound.settle();
 
     // The sentinel matches no member → NOBODY is excluded (all three receive it).
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
@@ -280,6 +287,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     expect(world.sent).toHaveLength(2);
 
     // Re-dispatch the SAME envelope (SQS at-least-once redelivery): the jobId
@@ -301,6 +309,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     // Only Carol is sent — Bob was already terminal.
     expect(world.sent.map((s) => s.to)).toEqual([CAROL]);
   });
@@ -318,6 +327,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
     expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
     expect(stored.delivery_recipients?.['c-bob']?.errorCode).toBe('30007');
@@ -335,6 +345,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     // A continuation relay.fanOut was enqueued for the remaining recipient via
     // the SQS path with an EXACT DelaySeconds backoff (5s for attempt 1, NOT
     // clamped to 60s) — recorded as a delayed outbound job, not an EventBridge
@@ -362,6 +373,7 @@ describe('relay.fanOut (M1.7)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
     const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
     expect(stored.delivery_recipients?.['c-bob']?.status).toBe('failed');
     expect(stored.delivery_recipients?.['c-carol']?.status).toBe('sent');
@@ -370,6 +382,7 @@ describe('relay.fanOut (M1.7)', () => {
   it('relay.intro names every member and sends to each', async () => {
     seedRelay(world);
     await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
     expect(world.sent.every((s) => s.from === POOL)).toBe(true);
     // Each intro body names all three.
@@ -475,6 +488,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       senderKey: TEAM_SENDER_KEY,
       senderNameOverride: TEAM_SENDER_LABEL,
     });
+    await outbound.settle();
 
     // A TEAM message has no member sender, so ALL 3 members get the media + body.
     expect(world.sent).toHaveLength(3);
@@ -497,6 +511,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     // Body comes from the catalog entry with {name} = the sender's name.
     const expectedBody = resolveMessage('relay.media_only', { name: 'Alice' });
@@ -520,6 +535,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     // Bob + Carol (never Alice) receive the forwarded media.
     const recipients = world.sent.map((s) => s.to).sort();
@@ -542,6 +558,7 @@ describe('relay.fanOut media (outbound MMS)', () => {
       sourceTsMsgId: source.tsMsgId,
       senderKey: 'c-alice',
     });
+    await outbound.settle();
 
     expect(world.sent).toHaveLength(2);
     const url0 = world.sent[0]?.mediaUrls?.[0];

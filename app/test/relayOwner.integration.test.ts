@@ -342,6 +342,8 @@ describe('getOwner() — unit (no DynamoDB)', () => {
 // ---------------------------------------------------------------------------
 describe('M2 (Task 5 fix wave): tour-owned relay thread — masked send uses the pool number', () => {
   let world: FakeWorld;
+  // Immediate dispatch now DEFERS (SQS semantics) - settle() drains the run.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -356,10 +358,12 @@ describe('M2 (Task 5 fix wave): tour-owned relay thread — masked send uses the
       contactsRepo: world.contactsRepo,
       logger,
     });
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await queueAdapter.settle();
     _resetForTests();
   });
 
@@ -415,6 +419,7 @@ describe('M2 (Task 5 fix wave): tour-owned relay thread — masked send uses the
       sourceTsMsgId: tsMsgId,
       senderKey: 'c-alice',
     });
+    await queueAdapter.settle(); // immediate dispatch is deferred - drain it
 
     // The fan-out ran in-process. Assert masked relay sends FROM the pool number.
     // ALICE is the sender → fan-out sends only to BOB (not back to the sender).

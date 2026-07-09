@@ -222,25 +222,85 @@ describe('SqsOutboundQueueAdapter (delay refactor)', () => {
   });
 });
 
-describe('InProcessOutboundQueueAdapter (delay refactor)', () => {
-  it('IMMEDIATE (delay 0): dispatches in-process now, through the token bucket', async () => {
+describe('InProcessOutboundQueueAdapter (deferred dispatch)', () => {
+  it('IMMEDIATE (delay 0): enqueue RESOLVES BEFORE dispatch runs; the deferred run dispatches on settle()', async () => {
     const dispatched: unknown[] = [];
-    const acquired: number[] = [];
     const adapter = new InProcessOutboundQueueAdapter({
       dispatch: async (e) => {
         dispatched.push(e);
       },
-      tokenBucket: { acquire: async (n: number) => acquired.push(n) } as never,
     });
 
     const envelope = makeEnvelope();
-    await adapter.enqueue(envelope); // delay 0
+    await adapter.enqueue(envelope); // delay 0 - resolves immediately
 
+    // Deferred: dispatch has NOT run yet when enqueue resolves (SQS semantics -
+    // the producer never observes the consumer).
+    expect(dispatched).toHaveLength(0);
+
+    // settle() drains the in-flight deferred dispatch.
+    await adapter.settle();
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]).toEqual(envelope); // structurally equal (wire copy)
     expect(dispatched[0]).not.toBe(envelope);
-    expect(acquired).toEqual([1]); // one token acquired before dispatch
     expect(adapter.delayed).toHaveLength(0);
+  });
+
+  it('IMMEDIATE (delay 0): the admission token is acquired INSIDE the deferred run (not paid by the enqueue caller)', async () => {
+    const order: string[] = [];
+    const adapter = new InProcessOutboundQueueAdapter({
+      dispatch: async () => {
+        order.push('dispatch');
+      },
+      tokenBucket: { acquire: async () => void order.push('acquire') } as never,
+    });
+
+    await adapter.enqueue(makeEnvelope());
+    // Neither the token nor the dispatch has been touched at enqueue resolution.
+    expect(order).toEqual([]);
+
+    await adapter.settle();
+    // The token is acquired first, THEN the dispatch runs - both in the deferred run.
+    expect(order).toEqual(['acquire', 'dispatch']);
+  });
+
+  it('IMMEDIATE (delay 0): a dispatch failure is LOGGED, not thrown to the enqueue caller', async () => {
+    const capture = createLogCapture();
+    const adapter = new InProcessOutboundQueueAdapter({
+      dispatch: async () => {
+        throw new Error('handler blew up');
+      },
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+
+    // enqueue must NOT reject even though the deferred dispatch will throw.
+    await expect(adapter.enqueue(makeEnvelope())).resolves.toBeUndefined();
+    // settle() must NOT reject either - the failure is swallowed inside the run.
+    await expect(adapter.settle()).resolves.toBeUndefined();
+
+    const errs = capture
+      .atLevel(50)
+      .filter((l) => typeof l['msg'] === 'string' && (l['msg'] as string).includes('deferred dispatch failed'));
+    expect(errs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('settle() also drains a dispatch enqueued DURING settling (a job that enqueues another immediate job)', async () => {
+    const dispatched: string[] = [];
+    let adapter!: InProcessOutboundQueueAdapter;
+    adapter = new InProcessOutboundQueueAdapter({
+      dispatch: async (e) => {
+        const env = e as JobEnvelope;
+        dispatched.push(env.jobName);
+        // The first job enqueues a SECOND immediate job mid-dispatch.
+        if (env.jobName === 'first') {
+          await adapter.enqueue({ ...makeEnvelope(), jobName: 'second' });
+        }
+      },
+    });
+
+    await adapter.enqueue({ ...makeEnvelope(), jobName: 'first' });
+    await adapter.settle();
+    expect(dispatched).toEqual(['first', 'second']);
   });
 
   it('DELAYED (delay > 0): records for deterministic draining, does NOT dispatch or sleep, no token spent', async () => {

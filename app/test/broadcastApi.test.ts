@@ -105,17 +105,24 @@ function wireBroadcastHandler(world: FakeWorld) {
 
 describe('share-broadcast API (M1.8a)', () => {
   let world: FakeWorld;
+  // The in-process queue now DEFERS immediate dispatch (SQS semantics) - POST
+  // /send returns before the fan-out runs. Tests that assert on fan-out results
+  // await queueAdapter.settle(); afterEach settle() is a leak-guard so a
+  // deferred dispatch never bleeds into the next test.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
     configureJobsLogger(createLogger({ destination: createLogCapture().stream }));
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
     wireBroadcastHandler(world);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await queueAdapter.settle();
     _resetForTests();
   });
 
@@ -213,6 +220,9 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(send.body.status).toBe('sending');
     expect(send.body.count).toBe(2);
 
+    // POST /send returns before the deferred fan-out runs (SQS semantics) - wait
+    // for the in-process dispatch to drain, then assert on its results.
+    await queueAdapter.settle();
     // The in-process fan-out ran → both tenants texted, broadcast finalized 'sent'.
     expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550100001', '+15550100002'].sort());
     expect(world.broadcasts.get(id)!.status).toBe('sent');
@@ -652,6 +662,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({});
+    await queueAdapter.settle(); // drain the deferred fan-out so it finalizes 'sent'
     expect(world.broadcasts.get(id)!.status).toBe('sent');
 
     const del = await request(app)
@@ -734,6 +745,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({ recipientContactIds: ['c-1', 'c-3'] });
     expect(send.status).toBe(200);
     expect(send.body.count).toBe(2);
+    await queueAdapter.settle(); // drain the deferred fan-out before asserting sends
     // The recipients map keys are EXACTLY the surviving checked ids (c-2 excluded).
     expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-1', 'c-3']);
     // Only those two were texted.
@@ -958,6 +970,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle(); // drain the prior broadcast's deferred fan-out
     expect(world.broadcasts.get(prior)!.status).toBe('sent');
 
     // A NEW draft for the same unit previews both — c-1 flagged, c-2 not.

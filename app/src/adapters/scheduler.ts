@@ -105,26 +105,41 @@ export interface DelayedItem {
 }
 
 /**
- * In-process outbound adapter — local dev + tests (M1.7 + delay refactor).
+ * In-process outbound adapter - local dev + tests (M1.7 + delay refactor;
+ * deferred-dispatch update for broadcast live progress).
  *
- * IMMEDIATE (delaySeconds 0): dispatches the envelope through `dispatch`
- * (dispatchJob) RIGHT NOW, after the shared token bucket admits it, so relay
- * fan-out actually runs without SQS/EventBridge.
+ * IMMEDIATE (delaySeconds 0): enqueue() no longer AWAITS the dispatch inline.
+ * It schedules the run on a macrotask (setImmediate) and RESOLVES IMMEDIATELY -
+ * matching SQS semantics, where the producer never observes the consumer's
+ * execution or failure. This is what lets POST /send (and relay fan-out / intro)
+ * return in milliseconds locally instead of blocking on the whole A2P-paced
+ * fan-out. The deferred run does, in order: tokenBucket.acquire(1) (the coarse
+ * local admission gate - the enqueue caller must NOT pay it) THEN dispatch(wire).
+ * A dispatch failure is CAUGHT and LOGGED (via the injected `logger`), never
+ * propagated to the enqueue caller - it cannot propagate on the SQS path either.
  *
- * DELAYED (delaySeconds > 0): RECORDED in `delayed[]` so tests stay
+ * DELAYED (delaySeconds > 0): unchanged - RECORDED in `delayed[]` so tests stay
  * deterministic (drain synchronously via deliverDelayed — never a real sleep,
  * matching InMemorySchedulerAdapter.deliverAll). In LOCAL DEV an injected
  * `scheduleTimer` (real setTimeout, wired in index.ts) ALSO fires the dispatch
  * after the delay so backoff continuations run on a laptop; tests omit it, so
  * delayed jobs only accumulate in `delayed[]`.
  *
+ * TEST SEAM - settle(): the adapter tracks its in-flight deferred dispatches (a
+ * Set of promises) and exposes `async settle()` that resolves when the set is
+ * empty, INCLUDING any dispatches enqueued DURING settling (a job that enqueues
+ * another immediate job). Unit tests and integration tests that need "the job
+ * finished" await settle() instead of relying on inline execution.
+ *
  * The envelope is JSON round-tripped to match the wire format the SQS path
- * delivers. A dispatch failure propagates to the caller (the webhook logs it
- * but still acks Twilio).
+ * delivers.
  */
 export class InProcessOutboundQueueAdapter implements OutboundQueueAdapter {
   /** Delayed jobs recorded for deterministic test draining (deliverDelayed). */
   readonly delayed: DelayedItem[] = [];
+  /** In-flight deferred immediate dispatches - drained by settle(). */
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly log: Logger;
 
   constructor(
     private readonly deps: {
@@ -136,15 +151,27 @@ export class InProcessOutboundQueueAdapter implements OutboundQueueAdapter {
        * just accumulate in `delayed[]` for deliverDelayed to drain.
        */
       scheduleTimer?: (run: () => void, delaySeconds: number) => void;
+      /**
+       * Logger for a swallowed deferred-dispatch failure (defaults to the module
+       * logger). A failure here can no longer reach the enqueue caller, so it
+       * MUST be logged or it would vanish.
+       */
+      logger?: Logger;
     },
-  ) {}
+  ) {
+    this.log = deps.logger ?? defaultLogger;
+  }
 
   async enqueue(envelope: JobEnvelope, opts?: EnqueueQueueOptions): Promise<void> {
     const delaySeconds = opts?.delaySeconds ?? 0;
     const wire = JSON.parse(JSON.stringify(envelope)) as unknown;
     if (delaySeconds <= 0) {
-      await this.deps.tokenBucket?.acquire(1);
-      await this.deps.dispatch(wire);
+      // Defer: schedule the run on a macrotask and resolve immediately (SQS
+      // semantics). Track the run promise so settle() can drain it; the run
+      // never rejects (errors are caught + logged inside).
+      const run = this.runDeferred(wire, envelope);
+      this.inFlight.add(run);
+      void run.finally(() => this.inFlight.delete(run));
       return;
     }
     // Delayed: record for deterministic test draining; optionally fire later
@@ -154,6 +181,37 @@ export class InProcessOutboundQueueAdapter implements OutboundQueueAdapter {
       this.deps.scheduleTimer(() => {
         void this.deps.dispatch(wire);
       }, delaySeconds);
+    }
+  }
+
+  /**
+   * The deferred immediate run: yield to a macrotask (so enqueue has already
+   * resolved), acquire ONE admission token, then dispatch. Any error is caught
+   * and logged - it can never propagate to the enqueue caller (nor could it on
+   * the SQS path).
+   */
+  private async runDeferred(wire: unknown, envelope: JobEnvelope): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      await this.deps.tokenBucket?.acquire(1);
+      await this.deps.dispatch(wire);
+    } catch (err) {
+      this.log.error(
+        { err, jobName: envelope.jobName, jobId: envelope.jobId },
+        'in-process deferred dispatch failed (swallowed - SQS producer cannot observe consumer failure)',
+      );
+    }
+  }
+
+  /**
+   * Test/dev helper: resolve once every in-flight deferred immediate dispatch
+   * has settled, INCLUDING dispatches enqueued during draining (a job that
+   * enqueues another immediate job). Delayed jobs are NOT drained here (use
+   * deliverDelayed for those).
+   */
+  async settle(): Promise<void> {
+    while (this.inFlight.size > 0) {
+      await Promise.all([...this.inFlight]);
     }
   }
 

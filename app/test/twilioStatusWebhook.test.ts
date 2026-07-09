@@ -743,6 +743,7 @@ describe('messaging.retrySend job (worker side)', () => {
     });
 
     await enqueue(RETRY_SEND_JOB, { providerSid: 'SMnope', conversationId: 'conv-x', attempt: 1 });
+    await outbound.settle(); // immediate dispatch is deferred - drain it
 
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('original message not found'));
     expect(warn).toBeDefined();

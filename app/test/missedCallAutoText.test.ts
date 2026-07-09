@@ -52,6 +52,8 @@ function seedCallerConversation(world: FakeWorld, overrides: Partial<Conversatio
 describe('call.missedAutoText (M1.9b)', () => {
   let world: FakeWorld;
   let capture: LogCapture;
+  // Immediate dispatch now DEFERS (SQS semantics) - settle() drains the run.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -77,15 +79,18 @@ describe('call.missedAutoText (M1.9b)', () => {
       tokenBucket: new TokenBucket({ capacity: 5, refillPerSec: 5 }),
       logger,
     });
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await queueAdapter.settle();
     _resetForTests();
   });
 
   it('enabled → sends the auto-text into the caller conversation (automated)', async () => {
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
 
     expect(world.sent).toHaveLength(1);
     expect(world.sent[0]!.to).toBe(CALLER);
@@ -98,21 +103,26 @@ describe('call.missedAutoText (M1.9b)', () => {
   it('disabled in settings → marks done + skips (no send)', async () => {
     world.settings.missedCallAutoTextEnabled = false;
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     expect(world.sent).toHaveLength(0);
   });
 
   it('caller opted out → SendRefusedError → skipped, NOT retried', async () => {
     seedCallerConversation(world, { sms_opt_out: true });
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     expect(world.sent).toHaveLength(0);
   });
 
   it('GUARDRAIL: idempotent per CallSid — re-enqueue (fresh jobId) never double-sends', async () => {
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     // A redelivered status callback enqueues a SECOND job with a different
     // jobId; the CallSid marker (not the jobId) is the dedupe key.
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     expect(world.sent).toHaveLength(1);
     // The CallSid marker was claimed exactly once.
     expect(world.jobExecutionMarkers.has(CALL_SID)).toBe(true);
@@ -120,6 +130,7 @@ describe('call.missedAutoText (M1.9b)', () => {
 
   it('never logs the caller phone (PII, doc §9)', async () => {
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
     expect(JSON.stringify(capture.lines)).not.toContain(CALLER);
   });
 

@@ -169,14 +169,15 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Two sends, one per tenant, to their own phones.
     expect(world.sent.map((s) => s.to).sort()).toEqual([alice.phone, bob.phone].sort());
 
     // Each persisted outbound message carries broadcast_id.
-    const outbound = world.messages.filter((m) => m.direction === 'outbound');
-    expect(outbound).toHaveLength(2);
-    expect(outbound.every((m) => m.broadcast_id === 'bcast-1')).toBe(true);
+    const outboundMsgs = world.messages.filter((m) => m.direction === 'outbound');
+    expect(outboundMsgs).toHaveLength(2);
+    expect(outboundMsgs.every((m) => m.broadcast_id === 'bcast-1')).toBe(true);
 
     // Merge fields rendered: Alice by name, Bob falls back to the neutral label.
     const aliceMsg = world.messages.find((m) => m.body?.startsWith('Hi Alice'));
@@ -210,6 +211,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const rows = world.auditEvents.filter(
       (e) => e.entityKey === 'units#unit-1' && e.event_type === 'broadcast_sent',
@@ -224,6 +226,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(0);
   });
@@ -240,6 +243,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the reachable tenant was texted; the opted-out one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -268,6 +272,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the consented tenant was texted; the no-consent one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -306,6 +311,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.sent).toHaveLength(100);
     const bcast = world.broadcasts.get('bcast-1')!;
@@ -331,6 +337,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // A continuation broadcast.send was enqueued (SQS path) for ONLY the
     // deferred key, with an exact DelaySeconds backoff — not an EventBridge
@@ -356,6 +363,7 @@ describe('broadcast.send (M1.8a)', () => {
 
     // attempt=3 is the last allowed; the next would be 4 > MAX(3) → cap reached.
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 3 });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -374,6 +382,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -393,6 +402,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -406,6 +416,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     const envelope = await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
     expect(world.sent).toHaveLength(1);
 
     // Re-dispatch the SAME envelope (SQS at-least-once): the jobId marker
@@ -424,6 +435,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only Bob is sent — Alice was already terminal.
     expect(world.sent.map((s) => s.to)).toEqual([b.phone]);
@@ -452,6 +464,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the reachable tenant was texted; the conversation-opted-out one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -479,6 +492,7 @@ describe('broadcast.send (M1.8a)', () => {
     // wait broadcastBackoffMs(2) = 10s (NOT broadcastBackoffMs(1) = 5s). Via
     // the SQS path this is an EXACT DelaySeconds of 10 (no EventBridge floor).
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 1 });
+    await outbound.settle();
 
     expect(outbound.delayed).toHaveLength(1);
     const item = outbound.delayed[0]!;
@@ -498,6 +512,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const sent = world.activityEvents.filter((e) => e.type === 'listing_sent');
     expect(sent).toHaveLength(2);
@@ -513,6 +528,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(0);
   });
@@ -526,6 +542,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.listingSends).toHaveLength(2);
     expect(world.listingSends.map((r) => r.contactId).sort()).toEqual(['c-alice', 'c-bob']);
@@ -542,6 +559,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // The SMS still goes out (sanity) but no listing-send row is recorded.
     expect(world.sent).toHaveLength(1);
@@ -555,6 +573,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.listingSends).toHaveLength(0);
   });
@@ -575,6 +594,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, capturingLogger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // (a) The SMS still went out to the recipient.
     expect(world.sent.map((s) => s.to)).toEqual([alice.phone]);
@@ -617,6 +637,7 @@ describe('broadcast.send (M1.8a)', () => {
 
     wireHandler(world, logger, bucket);
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const sentIdx = order.indexOf('setRecipient:sent');
     const acquireIdx = order.indexOf('acquire');

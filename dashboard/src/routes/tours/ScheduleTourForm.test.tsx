@@ -96,6 +96,18 @@ async function pickUnit(user: ReturnType<typeof userEvent.setup>, query: string,
   await user.click(await screen.findByRole('option', { name }));
 }
 
+/** A datetime-local value `msFromNow` from the real clock — the date tests use
+ *  RELATIVE times so they never rot into the past (or past the 14-day warning
+ *  window) as the calendar advances. */
+function localDatetime(msFromNow: number): string {
+  const d = new Date(Date.now() + msFromNow);
+  d.setSeconds(0, 0);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+const DAY = 24 * 3_600_000;
+
 describe('ScheduleTourForm', () => {
   // ── 1: renders the dialog + fields ──
   it('renders the dialog with Unit typeahead, Tour type select, and an optional Date and time', async () => {
@@ -168,8 +180,11 @@ describe('ScheduleTourForm', () => {
     createTour.mockResolvedValue(newTour({ status: 'scheduled', scheduledAt: '2026-07-15T14:00:00.000Z' }));
     setup({ tenantId: 'contact-tenant-0001' });
 
+    // 3 days out — inside the ordinary window (future, under 14 days), so no
+    // odd-time warning interferes with the plain submit path.
+    const at = localDatetime(3 * DAY);
     await pickUnit(user, 'Sycamore', /88 Sycamore St/);
-    await user.type(screen.getByLabelText('Date and time'), '2026-07-15T14:00');
+    await user.type(screen.getByLabelText('Date and time'), at);
     await user.click(screen.getByRole('button', { name: /^Schedule$/ }));
 
     await waitFor(() =>
@@ -179,7 +194,7 @@ describe('ScheduleTourForm', () => {
         tourType: 'self_guided',
         // The datetime-local value is normalized to a full ISO instant in the
         // user's timezone (the test computes the same conversion).
-        scheduledAt: new Date('2026-07-15T14:00').toISOString(),
+        scheduledAt: new Date(at).toISOString(),
       }),
     );
   });
@@ -246,19 +261,59 @@ describe('ScheduleTourForm', () => {
     expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led');
   });
 
-  // ── 7d: a non-empty PAST datetime shows an inline error and blocks submit ──
-  it('rejects a past datetime with an inline error and does not call createTour', async () => {
+  // ── 7d: a PAST datetime warns on the first submit; a second submit confirms ──
+  it('a past datetime warns and blocks the first submit; "Schedule anyway" confirms', async () => {
     const user = userEvent.setup();
+    createTour.mockResolvedValue(newTour({ status: 'scheduled' }));
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    const at = localDatetime(-2 * DAY);
+    await pickUnit(user, 'Sycamore', /88 Sycamore St/);
+    await user.type(screen.getByLabelText('Date and time'), at);
+    await user.click(screen.getByRole('button', { name: /^Schedule$/ }));
+
+    // First submit: an inline warning, NO create, and the button re-labels.
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/in the past/i));
+    expect(createTour).not.toHaveBeenCalled();
+
+    // Second submit ("Schedule anyway") is the confirmation — the tour is
+    // created with the past instant (back-dating is legitimate).
+    await user.click(screen.getByRole('button', { name: 'Schedule anyway' }));
+    await waitFor(() =>
+      expect(createTour).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduledAt: new Date(at).toISOString() }),
+      ),
+    );
+  });
+
+  // ── 7e: a FAR-FUTURE datetime (>14 days) warns; editing the date clears it ──
+  it('a >14-days-out datetime warns; editing to a near date clears the warning and submits clean', async () => {
+    const user = userEvent.setup();
+    createTour.mockResolvedValue(newTour({ status: 'scheduled' }));
     setup({ tenantId: 'contact-tenant-0001' });
     await screen.findByRole('dialog', { name: 'Schedule a tour' });
 
     await pickUnit(user, 'Sycamore', /88 Sycamore St/);
-    await user.type(screen.getByLabelText('Date and time'), '2020-01-01T10:00');
+    const dateField = screen.getByLabelText('Date and time');
+    await user.type(dateField, localDatetime(30 * DAY));
     await user.click(screen.getByRole('button', { name: /^Schedule$/ }));
 
-    // An inline alert (the past-date error) appears; createTour is never called.
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/past/i));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/more than 14 days/i));
     expect(createTour).not.toHaveBeenCalled();
+
+    // Fixing the date withdraws the warning (button back to plain "Schedule")
+    // and the next submit goes straight through.
+    const near = localDatetime(2 * DAY);
+    await user.clear(dateField);
+    await user.type(dateField, near);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Schedule$/ }));
+    await waitFor(() =>
+      expect(createTour).toHaveBeenCalledWith(
+        expect.objectContaining({ scheduledAt: new Date(near).toISOString() }),
+      ),
+    );
   });
 
   // ── 8: editable tenant typeahead when no tenantId prop ──

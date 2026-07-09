@@ -357,19 +357,51 @@ describe('TourDetail - kebab guards', () => {
   });
 });
 
+/** A datetime-local value `msFromNow` from the real clock — RELATIVE times so
+ *  the Book/Reschedule tests stay inside the ordinary window (future, under the
+ *  14-day odd-time warning) as the calendar advances. */
+function localDatetime(msFromNow: number): string {
+  const d = new Date(Date.now() + msFromNow);
+  d.setSeconds(0, 0);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const DAY = 24 * 3_600_000;
+
 describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
   it('Book opens a modal and PATCHes { scheduledAt, status: scheduled }', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     patchTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
     await waitLoaded();
+    const at = localDatetime(2 * DAY);
     await userEvent.click(screen.getByRole('button', { name: 'Book tour' }));
     expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('Date and time'), '2026-07-20T10:00');
+    await userEvent.type(screen.getByLabelText('Date and time'), at);
     await userEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
-      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20'), status: 'scheduled' }),
+      expect.objectContaining({ scheduledAt: new Date(at).toISOString(), status: 'scheduled' }),
+    );
+  });
+
+  it('Book with a PAST time warns first; "Book anyway" confirms the PATCH', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
+    patchTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitLoaded();
+    const past = localDatetime(-1 * DAY);
+    await userEvent.click(screen.getByRole('button', { name: 'Book tour' }));
+    await userEvent.type(screen.getByLabelText('Date and time'), past);
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+    // First submit: the odd-time warning, NO patch, button re-labeled.
+    expect(screen.getByRole('alert')).toHaveTextContent(/in the past/i);
+    expect(patchTour).not.toHaveBeenCalled();
+    // Second submit is the confirmation.
+    await userEvent.click(screen.getByRole('button', { name: 'Book anyway' }));
+    expect(patchTour).toHaveBeenCalledWith(
+      'tour-abc',
+      expect.objectContaining({ scheduledAt: new Date(past).toISOString(), status: 'scheduled' }),
     );
   });
 
@@ -378,14 +410,15 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     patchTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: '2026-07-20T10:00:00Z' }));
     renderDetail();
     await waitLoaded();
+    const at = localDatetime(2 * DAY);
     // The Schedule card exposes a Reschedule action (aria-label "Reschedule tour").
     await userEvent.click(screen.getByRole('button', { name: 'Reschedule tour' }));
     expect(screen.getByRole('form', { name: 'Reschedule tour form' })).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('New date and time'), '2026-07-20T10:00');
+    await userEvent.type(screen.getByLabelText('New date and time'), at);
     await userEvent.click(screen.getByRole('button', { name: 'Confirm reschedule' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
-      expect.objectContaining({ scheduledAt: expect.stringContaining('2026-07-20'), status: 'scheduled' }),
+      expect.objectContaining({ scheduledAt: new Date(at).toISOString(), status: 'scheduled' }),
     );
   });
 

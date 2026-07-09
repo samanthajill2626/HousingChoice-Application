@@ -69,7 +69,16 @@ export class S3MediaStore implements MediaStore {
         ...(contentType !== undefined && { ContentType: contentType }),
       },
     });
-    await upload.done();
+    try {
+      await upload.done();
+    } catch (err) {
+      // Belt-and-suspenders: a destroyed/errored body stream (e.g. the upload
+      // route aborting an over-size file) rejects done(); explicitly abort the
+      // multipart upload too so no orphan partial object is ever committed.
+      // Best-effort - swallow abort failures and rethrow the ORIGINAL error.
+      await upload.abort().catch(() => {});
+      throw err;
+    }
   }
 
   async getStream(key: string): Promise<MediaObject | undefined> {

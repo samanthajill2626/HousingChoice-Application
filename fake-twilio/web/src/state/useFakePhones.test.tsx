@@ -61,7 +61,19 @@ describe('mergeEvent (pure)', () => {
     expect(next.threads[0]?.messages.map((m) => m.sid)).toEqual(['SMa', 'SMb']);
   });
 
-  it('inbound message.appended to a NON-selected party increments unread', () => {
+  it('an ARRIVING app message (outbound, business→party) on a NON-selected party increments unread', () => {
+    // The headline notification case: the app texted this phone while the
+    // operator was looking elsewhere. (Before 2026-07-09 outbound never
+    // counted, so 1:1 rows never badged at all — only groups did.)
+    const next = mergeEvent(baseState({ selected: '+15550100002' }), {
+      type: 'message.appended',
+      partyNumber: '+15550100001',
+      message: msg({ direction: 'outbound', from: '+15550009999', to: '+15550100001' }),
+    });
+    expect(next.unreadByNumber['+15550100001']).toBe(1);
+  });
+
+  it('inbound message.appended to a NON-selected party increments unread (mock auto-replies)', () => {
     const next = mergeEvent(baseState({ selected: '+15550100002' }), {
       type: 'message.appended',
       partyNumber: '+15550100001',
@@ -70,22 +82,19 @@ describe('mergeEvent (pure)', () => {
     expect(next.unreadByNumber['+15550100001']).toBe(1);
   });
 
-  it('inbound message.appended to the SELECTED party does not increment unread', () => {
-    const next = mergeEvent(baseState({ selected: '+15550100001' }), {
+  it('message.appended to the SELECTED party does not increment unread (either direction)', () => {
+    const afterInbound = mergeEvent(baseState({ selected: '+15550100001' }), {
       type: 'message.appended',
       partyNumber: '+15550100001',
       message: msg({ direction: 'inbound' }),
     });
-    expect(next.unreadByNumber['+15550100001'] ?? 0).toBe(0);
-  });
-
-  it('outbound message.appended never increments unread', () => {
-    const next = mergeEvent(baseState({ selected: '+15550100002' }), {
+    expect(afterInbound.unreadByNumber['+15550100001'] ?? 0).toBe(0);
+    const afterOutbound = mergeEvent(baseState({ selected: '+15550100001' }), {
       type: 'message.appended',
       partyNumber: '+15550100001',
-      message: msg({ direction: 'outbound' }),
+      message: msg({ direction: 'outbound', from: '+15550009999', to: '+15550100001' }),
     });
-    expect(next.unreadByNumber['+15550100001'] ?? 0).toBe(0);
+    expect(afterOutbound.unreadByNumber['+15550100001'] ?? 0).toBe(0);
   });
 
   it("a member's GROUP send (inbound, to = pool) does NOT increment the 1:1 unread", () => {

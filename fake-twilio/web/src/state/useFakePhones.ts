@@ -58,8 +58,15 @@ export const initialState: FakeState = {
 /**
  * Apply a single live EngineEvent to the state, immutably. Pure — no I/O, no
  * `selected` mutation beyond reading it for the unread rule:
- *   - message.appended: append to the matching thread (create it if absent); an
- *     INBOUND message to a party that is NOT currently selected bumps its unread.
+ *   - message.appended: append to the matching thread (create it if absent); any
+ *     DIRECT message on a party that is NOT currently selected bumps its unread
+ *     — in BOTH directions, mirroring the group rule ("new transcript activity
+ *     you're not looking at"). Outbound (business→party) is the headline case:
+ *     the app texted this phone. Inbound on a non-selected thread only happens
+ *     when the mock inference engine authored the party's reply — still new
+ *     activity the operator hasn't seen. (Before 2026-07-09 only inbound
+ *     counted, which never fires for a human operator — their own sends are
+ *     always on the selected thread — so 1:1 rows never badged at all.)
  *   - message.updated: patch the matching message's fields (state, timestamps)
  *     by sid within its thread; no-op if the thread/message is unknown.
  *   - persona.added: append the persona.
@@ -84,16 +91,12 @@ export function mergeEvent(state: FakeState, event: EngineEvent): FakeState {
         threads = state.threads.map((t, i) => (i === idx ? replaced : t));
       }
       let unreadByNumber = state.unreadByNumber;
-      // Only DIRECT (business app↔party) inbounds count toward the 1:1 badge —
+      // Only DIRECT (business app↔party) messages count toward the 1:1 badge —
       // group traffic is hidden from the 1:1 pane (App filters on the same
       // predicate) and counts via groupUnreadByPool instead. Without this, a
       // member's own group send (direction inbound, to=pool) would show a
       // phantom unread on a pane it doesn't even render in.
-      if (
-        message.direction === 'inbound' &&
-        isDirectMessage(message) &&
-        partyNumber !== state.selected
-      ) {
+      if (isDirectMessage(message) && partyNumber !== state.selected) {
         unreadByNumber = {
           ...state.unreadByNumber,
           [partyNumber]: (state.unreadByNumber[partyNumber] ?? 0) + 1,

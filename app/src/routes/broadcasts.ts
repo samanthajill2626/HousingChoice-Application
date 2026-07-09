@@ -31,6 +31,7 @@ import { BROADCAST_SEND_JOB } from '../jobs/broadcastFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createBroadcastsRepo,
+  deriveBroadcastStats,
   MAX_BROADCAST_RECIPIENTS,
   type AudienceFilter,
   type BroadcastItem,
@@ -39,7 +40,7 @@ import {
   type BroadcastStatus,
 } from '../repos/broadcastsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
@@ -180,15 +181,92 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
   }
 }
 
+/**
+ * A recipient slot as returned to the dashboard: the persisted delivery slot
+ * PLUS optional raw identity (S5). Raw fields only - the dashboard composes the
+ * display name (contactDisplayName), so no name is composed server-side.
+ */
+interface EnrichedRecipient extends BroadcastRecipient {
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+}
+
+/** Bounded-concurrency getById fan-out (mirrors the send route's selection fetch). */
+const RESULTS_FETCH_CONCURRENCY = 50;
+
+/** Optional-string reader off a flexible ContactItem attribute (trimmed). */
+function trimmedField(contact: ContactItem, field: string): string | undefined {
+  const v = contact[field];
+  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+/**
+ * S5: enrich each recipients-map entry with OPTIONAL raw firstName/lastName/
+ * phone so the results view can show the tenant's name + number (and keep
+ * linking to /contacts/:id).
+ * - contactId keys: contacts.getById, chunked at RESULTS_FETCH_CONCURRENCY
+ *   (same pattern as the send route's explicit-selection fetch).
+ * - phone#<E164> keys: phone comes from the key (no lookup).
+ * - deleted/unresolvable contacts: omit the fields (never leak the raw key);
+ *   the dashboard falls back to today's "Tenant" label.
+ * Cost is bounded by MAX_BROADCAST_RECIPIENTS, only on this endpoint (no cache).
+ */
+async function enrichRecipients(
+  contacts: ContactsRepo,
+  recipients: Record<string, BroadcastRecipient>,
+): Promise<Record<string, EnrichedRecipient>> {
+  const keys = Object.keys(recipients);
+  const contactIdKeys = keys.filter((k) => !k.startsWith('phone#'));
+  const resolvedById = new Map<string, ContactItem>();
+  for (let i = 0; i < contactIdKeys.length; i += RESULTS_FETCH_CONCURRENCY) {
+    const chunk = contactIdKeys.slice(i, i + RESULTS_FETCH_CONCURRENCY);
+    const fetched = await Promise.all(chunk.map((id) => contacts.getById(id)));
+    for (let j = 0; j < chunk.length; j += 1) {
+      const contact = fetched[j];
+      if (contact) resolvedById.set(chunk[j]!, contact);
+    }
+  }
+  const out: Record<string, EnrichedRecipient> = {};
+  for (const key of keys) {
+    const slot = recipients[key]!;
+    if (key.startsWith('phone#')) {
+      // The phone is the key itself - no lookup, no identity leak beyond it.
+      out[key] = { ...slot, phone: key.slice('phone#'.length) };
+      continue;
+    }
+    const contact = resolvedById.get(key);
+    if (!contact) {
+      // Deleted / unresolvable - omit identity; never echo the raw contactKey.
+      out[key] = { ...slot };
+      continue;
+    }
+    const firstName = trimmedField(contact, 'firstName');
+    const lastName = trimmedField(contact, 'lastName');
+    const phone = typeof contact.phone === 'string' && contact.phone.length > 0 ? contact.phone : undefined;
+    out[key] = {
+      ...slot,
+      ...(firstName !== undefined && { firstName }),
+      ...(lastName !== undefined && { lastName }),
+      ...(phone !== undefined && { phone }),
+    };
+  }
+  return out;
+}
+
 /** The results-view projection of a broadcast (stats + recipients + lifecycle). */
-function toBroadcastResults(b: BroadcastItem): Record<string, unknown> {
+function toBroadcastResults(
+  b: BroadcastItem,
+  recipients: Record<string, EnrichedRecipient>,
+): Record<string, unknown> {
   return {
     broadcastId: b.broadcastId,
     status: b.status,
     unitId: b.unitId ?? null,
     audience_filter: b.audience_filter,
-    stats: b.stats,
-    recipients: b.recipients ?? {},
+    // S4: disjoint buckets derived from the recipients map (historical rows too).
+    stats: deriveBroadcastStats(b),
+    recipients,
     ...(b.last_error !== undefined && { last_error: b.last_error }),
     created_at: b.created_at,
   };
@@ -201,7 +279,8 @@ function toBroadcastSummary(b: BroadcastItem): Record<string, unknown> {
     status: b.status,
     unitId: b.unitId ?? null,
     audience_filter: b.audience_filter,
-    stats: b.stats,
+    // S4: derived disjoint stats (the byCreated GSI projects the map).
+    stats: deriveBroadcastStats(b),
     created_at: b.created_at,
     created_by: b.created_by,
   };
@@ -545,7 +624,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       res.status(404).json({ error: 'broadcast_not_found' });
       return;
     }
-    res.json(toBroadcastResults(broadcast));
+    // S5: resolve raw identity (firstName/lastName/phone) for each recipient so
+    // the results rows are human-readable. IDs/counts only in logs (never here).
+    const recipients = await enrichRecipients(contacts, broadcast.recipients ?? {});
+    res.json(toBroadcastResults(broadcast, recipients));
   });
 
   // GET /api/broadcasts?status=&limit= — the TEAM-WIDE list (optionally status-

@@ -1113,4 +1113,134 @@ describe('share-broadcast API (M1.8a)', () => {
     const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
     expect(c1.alreadySentThisProperty).toBe(false);
   });
+
+  // --- S4: GET results/list return DERIVED disjoint stats -------------------
+  const FILTER = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+
+  it('S4: GET results returns DERIVED disjoint stats (ignores stale persisted counters)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    const row = world.broadcasts.get(created.broadcastId)!;
+    row.status = 'sent';
+    row.recipients = {
+      'c-1': { status: 'delivered' },
+      'c-2': { status: 'sent' },
+      'c-3': { status: 'skipped', errorCode: 'no_consent' },
+      'c-4': { status: 'skipped' },
+    };
+    // Deliberately stale / double-counted persisted counters.
+    row.stats = { audience: 4, sent: 4, delivered: 4, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 };
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.stats).toEqual({
+      audience: 4,
+      delivered: 1,
+      sent: 1,
+      failed: 0,
+      skipped_no_consent: 1,
+      skipped_opted_out: 1,
+      queued: 0,
+    });
+  });
+
+  it('S4: GET list summaries return DERIVED disjoint stats', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    const row = world.broadcasts.get(created.broadcastId)!;
+    row.status = 'sent';
+    row.recipients = { 'c-1': { status: 'delivered' }, 'c-2': { status: 'failed' } };
+    row.stats = { audience: 2, sent: 2, delivered: 2, failed: 2, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 };
+
+    const res = await request(app)
+      .get('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const summary = res.body.broadcasts.find((b: { broadcastId: string }) => b.broadcastId === created.broadcastId);
+    expect(summary.stats).toMatchObject({ audience: 2, delivered: 1, failed: 1, sent: 0 });
+  });
+
+  // --- S5: results endpoint enriches recipients with raw identity ----------
+  it('S5: enriches contactId recipients with raw firstName/lastName/phone (no server-composed name)', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', lastName: 'Lee' } as Partial<ContactItem>);
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle();
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${id}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['c-1'];
+    expect(entry).toMatchObject({ firstName: 'Ann', lastName: 'Lee', phone: '+15550100001', status: 'sent' });
+    // The server ships RAW fields only; name composition stays in the dashboard.
+    expect(entry).not.toHaveProperty('name');
+  });
+
+  it('S5: a phone#<E164> recipient key takes phone from the key (no lookup)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    await world.broadcastsRepo.markSending(created.broadcastId, { 'phone#+15550100077': { status: 'sent' } });
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['phone#+15550100077'];
+    expect(entry).toMatchObject({ phone: '+15550100077', status: 'sent' });
+    expect(entry).not.toHaveProperty('firstName');
+  });
+
+  it('S5: a deleted/unresolvable contactId recipient omits the identity fields (never leaks the raw key)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    // 'c-ghost' has no contact in the world.
+    await world.broadcastsRepo.markSending(created.broadcastId, { 'c-ghost': { status: 'sent' } });
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['c-ghost'];
+    expect(entry.status).toBe('sent');
+    expect(entry).not.toHaveProperty('firstName');
+    expect(entry).not.toHaveProperty('lastName');
+    expect(entry).not.toHaveProperty('phone');
+  });
+
+  it('S5: the results route never logs recipient names or phones (PII, doc section 9)', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', lastName: 'Lee' } as Partial<ContactItem>);
+    seedUnit(world);
+    const { app, capture } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle();
+    capture.lines.length = 0; // focus on the results request's log lines
+
+    await request(app)
+      .get(`/api/broadcasts/${id}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const dump = JSON.stringify(capture.lines);
+    expect(dump).not.toContain('+15550100001');
+    expect(dump).not.toContain('Ann');
+    expect(dump).not.toContain('Lee');
+  });
 });

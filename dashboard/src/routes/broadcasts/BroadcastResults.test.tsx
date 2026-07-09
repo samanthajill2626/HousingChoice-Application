@@ -85,6 +85,46 @@ describe('BroadcastResults — render', () => {
     expect(link).toHaveAttribute('href', '/contacts/c1');
   });
 
+  it('shows the tenant name (primary) + formatted phone (secondary), link preserved', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({
+        recipients: {
+          c1: { status: 'delivered', firstName: 'Jane', lastName: 'Doe', phone: '+14040000007' },
+        },
+      }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    expect(within(list).getByText('Jane Doe')).toBeInTheDocument();
+    expect(within(list).getByText('(404) 000-0007')).toBeInTheDocument();
+    // The row still links to the contact's comms.
+    expect(within(list).getByRole('link', { name: /Jane Doe/ })).toHaveAttribute(
+      'href',
+      '/contacts/c1',
+    );
+  });
+
+  it('falls back to the phone as the label when no name resolves', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({ recipients: { c1: { status: 'sent', phone: '+14040000007' } } }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    // Phone is the primary label (no duplicate secondary line).
+    expect(within(list).getAllByText('(404) 000-0007')).toHaveLength(1);
+  });
+
+  it('falls back to "Tenant" when neither name nor phone resolves (deleted contact)', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({ recipients: { c1: { status: 'queued' } } }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    expect(within(list).getByText('Tenant')).toBeInTheDocument();
+    // Still a link to the contact page (contactId key).
+    expect(within(list).getByRole('link')).toHaveAttribute('href', '/contacts/c1');
+  });
+
   it('a phone-only recipient row renders WITHOUT a link', async () => {
     getBroadcastResults.mockResolvedValue(
       results({ recipients: { 'phone#+14040000007': { status: 'delivered' } } }),

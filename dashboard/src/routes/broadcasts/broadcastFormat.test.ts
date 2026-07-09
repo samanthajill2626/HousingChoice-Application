@@ -51,6 +51,39 @@ describe('toRecipientViews', () => {
     expect(views.map((v) => v.contactKey)).toContain('c1');
     expect(views.map((v) => v.contactKey)).toContain('c3');
   });
+
+  it('composes the row name from the server firstName/lastName', () => {
+    const views = toRecipientViews({
+      c1: { status: 'delivered', firstName: 'Jane', lastName: 'Doe', phone: '+14040000007' },
+    });
+    expect(views[0]?.name).toBe('Jane Doe');
+    // The server-provided phone rides along for the secondary line.
+    expect(views[0]?.phone).toBe('+14040000007');
+    expect(views[0]?.contactId).toBe('c1');
+  });
+
+  it('prefers the server-provided phone over the phone# key', () => {
+    const views = toRecipientViews({
+      'phone#+14040000001': { status: 'sent', phone: '+14040000007' },
+    });
+    expect(views[0]?.phone).toBe('+14040000007');
+  });
+
+  it('falls back to the phone# key when the server omits a phone', () => {
+    const views = toRecipientViews({
+      'phone#+14040000007': { status: 'sent' },
+    });
+    expect(views[0]?.phone).toBe('+14040000007');
+    // No name resolvable -> the view carries no composed name (row shows phone).
+    expect(views[0]?.name).toBeUndefined();
+  });
+
+  it('leaves name undefined for a deleted contact (no name, no phone)', () => {
+    const views = toRecipientViews({ c9: { status: 'queued' } });
+    expect(views[0]?.name).toBeUndefined();
+    expect(views[0]?.phone).toBeUndefined();
+    expect(views[0]?.contactId).toBe('c9');
+  });
 });
 
 describe('presentRecipientStatus', () => {

@@ -1523,13 +1523,24 @@ export interface BroadcastsPage {
 }
 
 /** The per-recipient delivery slot in the results map (keyed by contactKey —
- *  the contactId, else `phone#<E164>` for a phone-only recipient). */
+ *  the contactId, else `phone#<E164>` for a phone-only recipient). The identity
+ *  fields (firstName/lastName/phone) are the RAW projection the results endpoint
+ *  resolves per recipient, SAME shape as the preview endpoint's candidates -
+ *  name composition stays in the dashboard (contactDisplayName). Omitted when the
+ *  contact is deleted/unresolvable (the row falls back to "Tenant"). MIRRORS the
+ *  app results-route projection (app/src/routes/broadcasts.ts enrichRecipients). */
 export interface BroadcastRecipient {
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
   conversationId?: string;
   tsMsgId?: string;
   /** Twilio error class on a failure (mapped to a reason for display). */
   errorCode?: string;
+  /** Resolved contact first name (absent for phone-only / deleted contacts). */
+  firstName?: string;
+  /** Resolved contact last name (absent for phone-only / deleted contacts). */
+  lastName?: string;
+  /** E.164 phone: from the resolved contact, else the `phone#<E164>` key. */
+  phone?: string;
 }
 
 /** GET /api/broadcasts/:id/results — stats + the per-recipient delivery map. */
@@ -1553,7 +1564,11 @@ export interface BroadcastRecipientView {
   contactKey: string;
   /** Present when the key is a real contactId (links to the contact's comms). */
   contactId?: string;
-  /** Present when the key is `phone#<E164>` (a contact-less recipient). */
+  /** The composed display name (contactDisplayName over the server firstName/
+   *  lastName), when a name resolved. Absent -> the row shows the phone, else
+   *  the neutral "Tenant" fallback. */
+  name?: string;
+  /** Preferred E.164 phone (server-provided, else the `phone#<E164>` key). */
   phone?: string;
   status: BroadcastRecipient['status'];
   errorCode?: string;

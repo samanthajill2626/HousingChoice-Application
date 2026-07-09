@@ -24,15 +24,20 @@ import {
 import { useBroadcastResults } from './useBroadcastResults.js';
 import styles from './BroadcastResults.module.css';
 
-/** A recipient's display name: the formatted phone for a phone-only row, else a
- *  neutral "Tenant" (names aren't on the results map — never leak a raw id /
- *  `phone#…` key into the UI). */
-function recipientLabel(row: BroadcastRecipientView): string {
-  if (row.phone !== undefined) {
-    const formatted = formatPhone(row.phone);
-    return formatted.length > 0 ? formatted : 'Tenant';
+/** A recipient row's identity block: the tenant NAME (primary) + formatted phone
+ *  (secondary), mirroring the composer's review rows. When no name resolved the
+ *  formatted phone is the primary label (no duplicate secondary line); with
+ *  neither a name nor a phone (a deleted contact) the neutral "Tenant" fallback
+ *  stands in - never leak a raw id / `phone#...` key into the UI. */
+function recipientIdentity(row: BroadcastRecipientView): { primary: string; secondary?: string } {
+  const formattedPhone = row.phone !== undefined ? formatPhone(row.phone) : '';
+  if (row.name !== undefined && row.name.length > 0) {
+    return formattedPhone.length > 0
+      ? { primary: row.name, secondary: formattedPhone }
+      : { primary: row.name };
   }
-  return 'Tenant';
+  if (formattedPhone.length > 0) return { primary: formattedPhone };
+  return { primary: 'Tenant' };
 }
 
 /** One recipient row. A contactId row is a link to the tenant's comms; a failed
@@ -40,9 +45,15 @@ function recipientLabel(row: BroadcastRecipientView): string {
  *  the contact page hosts the in-thread Retry). A phone-only row renders link-less. */
 function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Element {
   const failed = row.status === 'failed';
+  const { primary, secondary } = recipientIdentity(row);
   const inner = (
     <>
-      <span className={styles.recipientName}>{recipientLabel(row)}</span>
+      <span className={styles.recipientIdentity}>
+        <span className={styles.recipientName}>{primary}</span>
+        {secondary !== undefined ? (
+          <span className={styles.recipientPhone}>{secondary}</span>
+        ) : null}
+      </span>
       <DeliveryBadge status={row.status} {...(row.errorCode !== undefined && { errorCode: row.errorCode })} />
       {failed && row.contactId !== undefined ? (
         // NOT aria-hidden: the hint contributes to the link's accessible name so

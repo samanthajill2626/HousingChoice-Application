@@ -11,6 +11,7 @@
 // enforces the alignment.
 
 import { CAST_RECORDING_KEY, CAST_PHOTO_KEY } from './media.js';
+import type { SeedConversationRow } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Fixed past timestamps (byte-stable across reseeds)
@@ -125,7 +126,7 @@ const unknownTexter = {
     status: 'open',
     last_activity_at: C0,
     type: 'unknown_1to1',
-    participants: [C_UNKNOWN],
+    participants: [{ contactId: C_UNKNOWN, phone: PHONES.unknownTexter }],
     participant_display_name: 'Alexis Monroe',
     last_message_preview: 'Is this property still available?',
     created_at: C0,
@@ -183,7 +184,7 @@ const midIntakeTenant = {
     status: 'open',
     last_activity_at: CB,
     type: 'tenant_1to1',
-    participants: [C_INTAKE],
+    participants: [{ contactId: C_INTAKE, phone: PHONES.midIntakeTenant }],
     participant_display_name: 'Destiny Holloway',
     last_message_preview: 'No, I do not have pets.',
     created_at: C8,
@@ -293,7 +294,7 @@ const parkedNoRtaTenant = {
     status: 'open',
     last_activity_at: CJ,
     type: 'tenant_1to1',
-    participants: [C_PARKED_NORTA],
+    participants: [{ contactId: C_PARKED_NORTA, phone: PHONES.parkedNoRta }],
     participant_display_name: 'Jamal Okonkwo',
     last_message_preview: 'OK, we will reach out as soon as your RTA comes in.',
     created_at: CE,
@@ -438,7 +439,7 @@ const searchingTenant = {
     status: 'open',
     last_activity_at: CO,
     type: 'tenant_1to1',
-    participants: [C_SEARCHING],
+    participants: [{ contactId: C_SEARCHING, phone: PHONES.searchingTenant }],
     participant_display_name: 'Monique Everett',
     last_message_preview: 'Too many stairs for me, but thank you for sending!',
     created_at: CK,
@@ -455,7 +456,16 @@ const searchingTenant = {
     relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
     last_activity_at: CQ,
     type: 'relay_group',
-    participants: [C_SEARCHING, 'contact-landlord-0001'],
+    // Full ConversationParticipant objects (the app-wide roster contract):
+    // the inbox group label reads member NAMES, the Members panel reads
+    // name+phone, and relay fan-out sends to member phones. Marcus Bell is
+    // the lean anchor landlord (lean.ts) — cross-profile references are legal
+    // (full profile composes lean+cast+matrix); seedRosterShape.test.ts pins
+    // these against the seeded contact rows.
+    participants: [
+      { contactId: C_SEARCHING, phone: PHONES.searchingTenant, name: 'Monique Everett' },
+      { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
+    ],
     participant_display_name: 'Tour Group - Monique Everett',
     last_message_preview: "Hello! I'm Monique Everett. Looking forward to seeing the place.",
     pool_number: RELAY_POOL_PHONE,
@@ -684,7 +694,7 @@ const touredYesTenant = {
     status: 'open',
     last_activity_at: CZ,
     type: 'tenant_1to1',
-    participants: [C_TOURED_YES],
+    participants: [{ contactId: C_TOURED_YES, phone: PHONES.touredYes }],
     participant_display_name: 'Brianna Whitfield',
     last_message_preview: "I really liked it! Let's move forward.",
     created_at: CV,
@@ -700,7 +710,11 @@ const touredYesTenant = {
     relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
     last_activity_at: CY,
     type: 'relay_group',
-    participants: [C_TOURED_YES, 'contact-landlord-0001'],
+    // Named roster objects — see the searching-tenant relay above for why.
+    participants: [
+      { contactId: C_TOURED_YES, phone: PHONES.touredYes, name: 'Brianna Whitfield' },
+      { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
+    ],
     participant_display_name: 'Tour Group - Brianna Whitfield',
     last_message_preview: 'See you at 2pm Saturday!',
     pool_number: RELAY_POOL_TOURED,
@@ -894,7 +908,7 @@ const neverSignedLandlord = {
     status: 'open',
     last_activity_at: C6,
     type: 'landlord_1to1',
-    participants: [C_NEVER_SIGNED],
+    participants: [{ contactId: C_NEVER_SIGNED, phone: PHONES.neverSigned }],
     participant_display_name: 'Patricia Shelton',
     last_message_preview: "I'll review the contract this week, I promise.",
     created_at: C1,
@@ -1002,7 +1016,7 @@ const parkedLandlord = {
     status: 'open',
     last_activity_at: CB,
     type: 'landlord_1to1',
-    participants: [C_PARKED_LL],
+    participants: [{ contactId: C_PARKED_LL, phone: PHONES.parkedLandlord }],
     participant_display_name: 'Raymond Cordova',
     last_message_preview: 'Thanks for the call.',
     created_at: C7,
@@ -1112,7 +1126,7 @@ const midIntakeUnitLandlord = {
     status: 'open',
     last_activity_at: CG,
     type: 'landlord_1to1',
-    participants: [C_MID_INTAKE_LL],
+    participants: [{ contactId: C_MID_INTAKE_LL, phone: PHONES.midIntakeLandlord }],
     participant_display_name: 'Constance Merritt',
     last_message_preview: 'What voucher size does the property accept?',
     created_at: CC,
@@ -1205,7 +1219,9 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     midIntakeUnitLandlord.unit,
   ];
 
-  const conversations: Record<string, unknown>[] = [
+  // SeedConversationRow (not Record<string, unknown>) so a roster written as
+  // bare contactId strings fails tsc instead of seeding broken groups.
+  const conversations: SeedConversationRow[] = [
     unknownTexter.conversation,
     unknownTexter.phoneClaimRow,
     midIntakeTenant.conversation,

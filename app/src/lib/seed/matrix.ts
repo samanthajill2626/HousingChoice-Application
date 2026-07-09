@@ -24,6 +24,9 @@
 import { PLACEMENT_STAGES, LISTING_STATUSES, TENANT_STATUSES, LANDLORD_STATUSES, STAGE_PHASE, STAGE_STUCK_THRESHOLDS, deriveStatuses, type PlacementStage, type PlacementPhase } from '../statusModel.js';
 import { TOUR_STATUSES, type TourStatus } from '../toursModel.js';
 import { deadlineIdFor } from '../../repos/placementDeadlinesRepo.js';
+import type { ConversationParticipant } from '../../repos/conversationsRepo.js';
+import { SEED } from './lean.js';
+import type { SeedConversationRow } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Fixed past dates (byte-stable)
@@ -1076,20 +1079,60 @@ function buildPoolNumbers(): Record<string, unknown>[] {
 // ---------------------------------------------------------------------------
 // Relay group conversations backed by pool numbers
 // ---------------------------------------------------------------------------
-function buildRelayConversations(): Record<string, unknown>[] {
-  return POOL_NUMBERS.map((num, i) => ({
-    conversationId: `conv-mx-relay-${String(i + 1).padStart(2, '0')}`,
-    participant_phone: num, // byParticipantPhone = pool number for relay groups
-    pool_number: num, // byPoolNumber GSI
-    status: 'open',
-    relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
-    last_activity_at: D.T3,
-    type: 'relay_group',
-    ai_mode: 'manual',
-    participants: [],
-    owner: { type: 'tour', id: `tour-mx-scheduled-${String(i + 1).padStart(2, '0')}` },
-    created_at: D.T2,
-  }));
+
+/** A seeded contact row → roster entry ({contactId, phone, name} — the
+ *  app-wide participants contract; the inbox group label reads the name). */
+function participantOf(contact: Record<string, unknown>): ConversationParticipant {
+  const name = [contact['firstName'], contact['lastName']]
+    .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    .join(' ');
+  return {
+    contactId: contact['contactId'] as string,
+    phone: contact['phone'] as string,
+    ...(name.length > 0 && { name }),
+  };
+}
+
+/**
+ * Each relay group is owned by a scheduled tour, so its roster is DERIVED from
+ * that tour's actual rows — the tour's tenant + the toured unit's landlord —
+ * keeping the matrix coherent-by-construction (an empty roster seeded a group
+ * text with no members: number-only inbox label, empty Members panel, and a
+ * fan-out with nobody to send to). The landlord may be the lean anchor
+ * (contact-landlord-0001 on tourable units) — profiles compose additively, so
+ * the lookup map must include lean's contacts.
+ */
+function buildRelayConversations(
+  tourGroups: TourGroup[],
+  contactsById: Map<string, Record<string, unknown>>,
+  unitsById: Map<string, Record<string, unknown>>,
+): SeedConversationRow[] {
+  return POOL_NUMBERS.map((num, i) => {
+    const tourId = `tour-mx-scheduled-${String(i + 1).padStart(2, '0')}`;
+    const tour = tourGroups.find((g) => g.tour['tourId'] === tourId)?.tour;
+    const participants: ConversationParticipant[] = [];
+    if (tour !== undefined) {
+      const tenant = contactsById.get(tour['tenantId'] as string);
+      if (tenant !== undefined) participants.push(participantOf(tenant));
+      const unit = unitsById.get(tour['unitId'] as string);
+      const landlord =
+        unit !== undefined ? contactsById.get(unit['landlordId'] as string) : undefined;
+      if (landlord !== undefined) participants.push(participantOf(landlord));
+    }
+    return {
+      conversationId: `conv-mx-relay-${String(i + 1).padStart(2, '0')}`,
+      participant_phone: num, // byParticipantPhone = pool number for relay groups
+      pool_number: num, // byPoolNumber GSI
+      status: 'open',
+      relay_status: 'relay_group#open', // byRelayStatus GSI HASH (sparse; relay only)
+      last_activity_at: D.T3,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants,
+      owner: { type: 'tour', id: tourId },
+      created_at: D.T2,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1368,20 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
   const tours: Record<string, unknown>[] = tourGroups.map((g) => g.tour);
   const tourReminders: Record<string, unknown>[] = tourGroups.flatMap((g) => g.reminders);
 
+  // Lookup maps for the relay rosters: matrix contacts/units PLUS lean's
+  // (tourable units belong to the lean anchor landlord; profiles compose
+  // additively, so the reference is legal — see buildRelayConversations).
+  const contactsById = new Map<string, Record<string, unknown>>();
+  for (const c of [...(SEED['contacts'] ?? []), ...contacts]) {
+    const id = c['contactId'];
+    if (typeof id === 'string') contactsById.set(id, c);
+  }
+  const unitsById = new Map<string, Record<string, unknown>>();
+  for (const u of [...(SEED['units'] ?? []), ...units]) {
+    const id = u['unitId'];
+    if (typeof id === 'string') unitsById.set(id, u);
+  }
+
   return {
     contacts,
     units,
@@ -1333,7 +1390,7 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
     tours,
     tourReminders,
     pool_numbers: buildPoolNumbers(),
-    conversations: buildRelayConversations(),
+    conversations: buildRelayConversations(tourGroups, contactsById, unitsById),
     broadcasts: buildBroadcasts(),
     listing_sends: buildListingSends(),
     invoices: buildInvoices(),

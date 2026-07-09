@@ -36,6 +36,7 @@ import { createPlacementDeadlinesRepo } from '../../repos/placementDeadlinesRepo
 import { deriveStatuses } from '../statusModel.js';
 import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
+import type { SeedConversationRow } from './types.js';
 
 // ---------------------------------------------------------------------------
 // ID constants — live namespace
@@ -292,7 +293,9 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         unread_count: 0,
         created_at: iso,
       },
-    ],
+      // satisfies: rosters MUST be ConversationParticipant objects (types.ts) —
+      // bare contactId strings fail tsc here instead of seeding broken groups.
+    ] satisfies SeedConversationRow[],
 
     pool_numbers: [
       {

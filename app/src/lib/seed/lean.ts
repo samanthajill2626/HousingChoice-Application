@@ -10,6 +10,8 @@
 //   - Unit canonical names: beds/rent_min/rent_max/pets
 //   - Status field: single `status` on contacts; single `stage` on placements
 
+import type { SeedConversationRow } from './types.js';
+
 // Stable timestamps so re-runs write byte-identical items.
 const T0 = '2026-06-01T14:00:00.000Z';
 const T1 = '2026-06-01T14:02:10.000Z';
@@ -33,8 +35,12 @@ const IDS = {
 
 /** table base name -> items. Document-style: only keys/GSI attrs contractual.
  *  Exported so a unit test can guard the field CASING (the flexible-doc repos
- *  store any key, so a snake_case typo is silently persisted then never read). */
-export const SEED: Record<string, Record<string, unknown>[]> = {
+ *  store any key, so a snake_case typo is silently persisted then never read).
+ *  `conversations` is narrowed to SeedConversationRow so a roster written as
+ *  bare contactId strings fails tsc (types.ts). */
+export const SEED: Record<string, Record<string, unknown>[]> & {
+  conversations: SeedConversationRow[];
+} = {
   contacts: [
     {
       contactId: IDS.tenant,
@@ -168,7 +174,9 @@ export const SEED: Record<string, Record<string, unknown>[]> = {
       status: 'open', // byLastActivity HASH
       last_activity_at: T2, // byLastActivity RANGE
       type: 'tenant_1to1',
-      participants: [IDS.tenant],
+      // ConversationParticipant object (the app-wide roster contract) — a bare
+      // contactId string has no phone for consumers to read.
+      participants: [{ contactId: IDS.tenant, phone: '+15550100001' }],
       last_message_preview: 'Saturday morning works great, thank you!',
       created_at: T0,
     },

@@ -5,6 +5,15 @@
 // debounced refetch of getBroadcastResults — because the SSE payload carries the
 // rollup but NOT the per-recipient detail, which only the GET returns. Abort- +
 // generation-guarded so a stale fetch never clobbers a newer one / a live overlay.
+//
+// Polling fallback (S3): while the loaded results are still 'sending', the hook
+// also polls getBroadcastResults on a ~2s interval. This is what keeps the detail
+// page ticking in DEPLOYED envs, where the fan-out runs in the worker process and
+// its per-recipient SSE emits never reach this app instance (only the DLR-rollup
+// emits do). The interval starts on the transition INTO 'sending', stops the
+// moment status goes terminal (sent/failed) or draft, and clears on unmount.
+// Poll + SSE both funnel through the same abort-/generation-guarded fetchResults,
+// so concurrent triggers stay safe.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -30,6 +39,11 @@ export interface BroadcastResultsState {
 /** Debounce for SSE-triggered refetches — coalesces a burst of broadcast.updated
  *  events (each delivery callback emits one) into a single GET. */
 const REFETCH_DEBOUNCE_MS = 400;
+
+/** Poll cadence while a broadcast is still sending (the deployed-worker liveness
+ *  fallback). Roughly a second locally / a couple of seconds deployed is the
+ *  spec target; 2s balances liveness against results-endpoint cost. */
+const POLL_INTERVAL_MS = 2000;
 
 export function useBroadcastResults(broadcastId: string): BroadcastResultsState {
   const [status, setStatus] = useState<BroadcastResultsStatus>('loading');
@@ -115,6 +129,18 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     },
     [],
   );
+
+  // --- S3: poll while sending. Keyed on the broadcast STATUS only (not the whole
+  // results object), so the interval runs at a steady cadence while status stays
+  // 'sending' and is torn down the instant it goes terminal / draft or on unmount.
+  // fetchResults is stable per broadcastId, so the interval is not re-armed by the
+  // background refetches it triggers.
+  const liveStatus = results?.status;
+  useEffect(() => {
+    if (liveStatus !== 'sending') return;
+    const id = setInterval(() => void fetchResults(true), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [liveStatus, fetchResults]);
 
   return { status, results, notFound, refresh, retry, refreshing };
 }

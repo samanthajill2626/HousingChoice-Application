@@ -225,6 +225,94 @@ describe('EventStreamProvider + useEventStream', () => {
     expect(b).not.toHaveBeenCalled();
   });
 
+  // --- Liveness watchdog (dead-but-open stream recovery) --------------------
+  // A half-open connection (sleep/wake, network switch, proxy drop with no RST)
+  // leaves EventSource readyState OPEN with no events and no 'error'. The
+  // watchdog detects the resulting silence and forces a reconnect.
+
+  it('watchdog reconnects when the stream goes stale (no events past STALE_MS)', () => {
+    vi.useFakeTimers();
+    render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
+    expect(FakeEventSource.instances).toHaveLength(1);
+    act(() => {
+      FakeEventSource.instances[0]?.emit('open', {});
+    });
+    // Silence well past STALE_MS (65s): the watchdog must close + reconnect.
+    act(() => {
+      vi.advanceTimersByTime(70_000);
+    });
+    expect(FakeEventSource.instances.length).toBeGreaterThan(1);
+    expect(FakeEventSource.instances[0]?.closed).toBe(true); // old one torn down
+  });
+
+  it('a heartbeat event keeps the stream alive past STALE_MS (no reconnect)', () => {
+    vi.useFakeTimers();
+    render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
+    act(() => {
+      FakeEventSource.instances[0]?.emit('open', {});
+    });
+    // A server heartbeat every 25s keeps refreshing liveness — total 100s of
+    // wall time, but never 65s of silence, so the watchdog never fires.
+    for (let i = 0; i < 4; i += 1) {
+      act(() => {
+        vi.advanceTimersByTime(25_000);
+        FakeEventSource.instances[0]?.emit('heartbeat', { at: '2026-07-08T00:00:00.000Z' });
+      });
+    }
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('fast-paths a reconnect on window "online" after prolonged silence', () => {
+    vi.useFakeTimers();
+    render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
+    act(() => {
+      FakeEventSource.instances[0]?.emit('open', {});
+    });
+    // >30s of silence but still under STALE_MS: the watchdog has NOT fired yet.
+    act(() => {
+      vi.advanceTimersByTime(31_000);
+    });
+    expect(FakeEventSource.instances).toHaveLength(1);
+    // Coming back online should reconnect immediately, not wait for the tick.
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it('fast-paths a reconnect on visibilitychange to visible after prolonged silence', () => {
+    vi.useFakeTimers();
+    render(
+      <EventStreamProvider>
+        <Sub />
+      </EventStreamProvider>,
+    );
+    act(() => {
+      FakeEventSource.instances[0]?.emit('open', {});
+    });
+    act(() => {
+      vi.advanceTimersByTime(31_000);
+    });
+    expect(FakeEventSource.instances).toHaveLength(1);
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
   it('degrades to a no-op (no connection) when no provider is mounted', () => {
     // A consumer outside the provider must not crash and must open no connection —
     // it simply receives no live updates (matches the old EventSource-absent path).

@@ -11,8 +11,17 @@
 // the shared <Timeline> + useRelayThread + sendMessage machinery. Empty states
 // render in place: the group offers [Open group text]; a 1:1 with no thread yet
 // offers a live composer that creates the conversation on the first send.
+//
+// A2P/CTIA just-in-time consent gate (§3.4, ContactDetail parity): a proactive
+// 1:1 send to a no-consent contact is refused server-side with a 409
+// `contact_no_consent`. The 1:1 threads report that refusal UP (onConsentRefused)
+// so this component holds the pending send + opens the SAME hard-block
+// ConsentCaptureModal the contact page uses; recording consent retries the exact
+// send and clears the composer's restored draft. Without this the refusal was
+// SILENT here — the optimistic bubble vanished, the draft came back, no error.
 import { useEffect, useState } from 'react';
 import {
+  ApiError,
   ensureContactConversation,
   getConversation,
   getConversationMembers,
@@ -23,10 +32,22 @@ import {
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Timeline } from '../contact/Timeline.js';
+import { ConsentCaptureModal } from '../contact/ConsentCaptureModal.js';
 import { contactDisplayName } from '../contact/format.js';
 import { useRelayThread } from '../conversation/useRelayThread.js';
 import { type TourChannelKey, type TourChannelsState } from './useTourChannels.js';
 import styles from './TourDetail.module.css';
+
+/** A 1:1 send refused by the consent gate, held while the modal is open. */
+interface PendingConsentSend {
+  key: 'tenant' | 'landlord';
+  contactId: string;
+  name: string;
+  /** Null when the thread didn't exist yet — the retry ensures it first. */
+  conversationId: string | null;
+  body: string;
+  attachmentKeys?: string[];
+}
 
 export interface TourConversationProps {
   tour: Tour;
@@ -107,12 +128,47 @@ export function TourConversation({
       : 'the landlord';
 
   const groupDead = tour.status === 'canceled' || tour.status === 'closed';
+  const oneToOneKey: 'tenant' | 'landlord' = activeKey === 'landlord' ? 'landlord' : 'tenant';
   const oneToOneContactId = activeKey === 'landlord' ? landlordId : tour.tenantId;
   const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
   // The 1:1 composer footer shows WHO the reply sends to (the contact's number,
   // same as the contact page's reply box); the group tab passes none - its
   // composer matches ConversationDetail's group view.
   const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
+
+  // Just-in-time consent gate (ContactDetail parity): the refused send held while
+  // the ConsentCaptureModal is open, and a per-channel clear-draft signal for the
+  // post-consent retry (per-channel so the OTHER tab's in-progress draft is never
+  // wiped by this one's retry landing).
+  const [pendingConsent, setPendingConsent] = useState<PendingConsentSend | null>(null);
+  const [clearSignals, setClearSignals] = useState<{ tenant: number; landlord: number }>({
+    tenant: 0,
+    landlord: 0,
+  });
+
+  // Consent recorded → retry the EXACT refused send out-of-band of the composer
+  // (the composer restored its draft on the 409; the clear signal removes it once
+  // the retry lands — a fresh failure leaves the draft, nothing is lost). The
+  // sent message itself arrives via the thread's SSE-driven refetch. The modal's
+  // updated Contact is ignored here: tenant/landlord are parent-owned props and
+  // the tour page displays no consent state.
+  function onConsentRecorded(): void {
+    const retry = pendingConsent;
+    setPendingConsent(null);
+    if (retry === null) return;
+    void (async () => {
+      const convId = retry.conversationId ?? (await ensureContactConversation(retry.contactId));
+      await sendMessage(convId, {
+        body: retry.body,
+        ...(retry.attachmentKeys !== undefined &&
+          retry.attachmentKeys.length > 0 && { attachmentKeys: retry.attachmentKeys }),
+      });
+      if (retry.conversationId === null) channels.setConversationId(retry.key, convId);
+      setClearSignals((s) => ({ ...s, [retry.key]: s[retry.key] + 1 }));
+    })().catch(() => {
+      /* the draft is still in the box for another try */
+    });
+  }
 
   return (
     <div className={styles.convo}>
@@ -178,6 +234,18 @@ export function TourConversation({
             key={active.conversationId}
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+            clearDraftSignal={clearSignals[oneToOneKey]}
+            onConsentRefused={(body, attachmentKeys) =>
+              setPendingConsent({
+                key: oneToOneKey,
+                contactId: oneToOneContactId,
+                name: oneToOneName,
+                conversationId: active.conversationId,
+                body,
+                ...(attachmentKeys !== undefined &&
+                  attachmentKeys.length > 0 && { attachmentKeys }),
+              })
+            }
           />
         ) : (
           // key by channel so a create-on-demand Tenant/Landlord tab also remounts
@@ -188,9 +256,30 @@ export function TourConversation({
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
+            clearDraftSignal={clearSignals[oneToOneKey]}
+            onConsentRefused={(body, attachmentKeys) =>
+              setPendingConsent({
+                key: oneToOneKey,
+                contactId: oneToOneContactId,
+                name: oneToOneName,
+                conversationId: null,
+                body,
+                ...(attachmentKeys !== undefined &&
+                  attachmentKeys.length > 0 && { attachmentKeys }),
+              })
+            }
           />
         )}
       </div>
+
+      {pendingConsent !== null ? (
+        <ConsentCaptureModal
+          contactId={pendingConsent.contactId}
+          contactName={pendingConsent.name}
+          onCancel={() => setPendingConsent(null)}
+          onRecorded={onConsentRecorded}
+        />
+      ) : null}
     </div>
   );
 }
@@ -246,15 +335,28 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
   );
 }
 
+/** True when a send was refused by the A2P/CTIA just-in-time consent gate. */
+function isConsentRefusal(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 409 && err.code === 'contact_no_consent';
+}
+
 /** A 1:1 transcript for an EXISTING conversation. Optimistic send via the shared
  *  relay-thread trio. Mounts only while its tab is active (lazy fetch). */
 function ContactThread({
   conversationId,
   replyToPhone,
+  clearDraftSignal,
+  onConsentRefused,
 }: {
   conversationId: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
+  /** Post-consent retry landed → clear the draft the 409 refusal restored. */
+  clearDraftSignal?: number;
+  /** The consent gate refused this send (409 contact_no_consent) — the parent
+   *  opens the capture modal holding it. Still rethrown so the composer restores
+   *  the draft (the modal shows WHY; no inline error — ContactDetail parity). */
+  onConsentRefused?: (body: string, attachmentKeys?: string[]) => void;
 }): React.JSX.Element {
   const thread = useRelayThread(conversationId);
   const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
@@ -266,6 +368,7 @@ function ContactThread({
       .then((result) => thread.resolveOptimistic(tempId, result))
       .catch((err: unknown) => {
         thread.failOptimistic(tempId);
+        if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys);
         throw err;
       });
   };
@@ -277,6 +380,7 @@ function ContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       resetScrollKey={conversationId}
     />
   );
@@ -290,19 +394,30 @@ function NewContactThread({
   name,
   replyToPhone,
   onCreated,
+  clearDraftSignal,
+  onConsentRefused,
 }: {
   contactId: string;
   name: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
   onCreated: (conversationId: string) => void;
+  /** Post-consent retry landed → clear the draft the 409 refusal restored. */
+  clearDraftSignal?: number;
+  /** The consent gate refused this send — see ContactThread. */
+  onConsentRefused?: (body: string, attachmentKeys?: string[]) => void;
 }): React.JSX.Element {
   const onSend = async (body: string, attachmentKeys?: string[]): Promise<void> => {
     const conversationId = await ensureContactConversation(contactId);
-    await sendMessage(conversationId, {
-      body,
-      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
-    });
+    try {
+      await sendMessage(conversationId, {
+        body,
+        ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+      });
+    } catch (err) {
+      if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys);
+      throw err;
+    }
     onCreated(conversationId);
   };
   return (
@@ -313,6 +428,7 @@ function NewContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       emptyLabel={`No messages with ${name} yet`}
       resetScrollKey={`new:${contactId}`}
     />

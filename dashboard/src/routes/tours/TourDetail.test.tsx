@@ -31,6 +31,7 @@ const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
 const ensureContactConversation = vi.fn();
 const sendMessage = vi.fn();
+const updateContact = vi.fn();
 const markConversationRead = vi.fn();
 const markInboxRead = vi.fn();
 
@@ -52,6 +53,7 @@ vi.mock('../../api/index.js', async () => {
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
     ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
+    updateContact: (...a: unknown[]) => updateContact(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
   };
@@ -696,6 +698,81 @@ describe('TourDetail - three-channel switcher', () => {
         'Reply sends to (404) 555-0111',
       ),
     );
+  });
+});
+
+describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
+  // A proactive 1:1 send to a no-consent contact is refused server-side (409
+  // contact_no_consent). Before 2026-07-09 the tour page swallowed it SILENTLY:
+  // optimistic bubble gone, draft restored, no error, no modal. It now opens the
+  // same hard-block ConsentCaptureModal as the contact page and retries.
+  it('a refused 1:1 send opens the consent modal; recording consent retries and clears the draft', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    sendMessage
+      .mockRejectedValueOnce(new ApiError(409, 'contact_no_consent', 'contact_no_consent'))
+      .mockResolvedValueOnce({ tsMsgId: 'm1', status: 'queued' });
+    updateContact.mockResolvedValue({ ...tenantContact(), consent_method: 'verbal_phone' });
+    renderDetail();
+    await waitLoaded();
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The hard-block modal appears — and the draft was restored (nothing lost).
+    const dialog = await screen.findByRole('dialog', { name: /Record consent before texting/i });
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('hi tenant');
+
+    await userEvent.selectOptions(within(dialog).getByLabelText(/How did they consent/i), 'verbal_phone');
+    await userEvent.click(within(dialog).getByRole('button', { name: /Record consent & send/i }));
+
+    // Consent PATCHed for the TENANT (the active 1:1), then the exact send retried.
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'tenant-1',
+        expect.objectContaining({ consent_method: 'verbal_phone' }),
+      ),
+    );
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
+    expect(sendMessage.mock.calls[1]).toEqual(['c-tenant', { body: 'hi tenant' }]);
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /Record consent/i })).not.toBeInTheDocument(),
+    );
+    // The restored draft clears once the retry lands (ContactDetail parity).
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(''));
+  });
+
+  it('Cancel aborts: no consent PATCH, no retry, the draft stays in the box', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 0),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    sendMessage.mockRejectedValue(new ApiError(409, 'contact_no_consent', 'contact_no_consent'));
+    renderDetail();
+    await waitLoaded();
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    const dialog = await screen.findByRole('dialog', { name: /Record consent before texting/i });
+    await userEvent.click(within(dialog).getByRole('button', { name: /Cancel/i }));
+
+    expect(screen.queryByRole('dialog', { name: /Record consent/i })).not.toBeInTheDocument();
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('hi tenant');
   });
 });
 

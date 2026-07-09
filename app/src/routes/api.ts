@@ -81,6 +81,7 @@ import { createPlacementsRouter } from './placements.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
+import { createMediaUploadsRouter } from './mediaUploads.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -328,6 +329,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
       ...(deps.pushService !== undefined && { pushService: deps.pushService }),
+    }),
+  );
+  // Outbound MMS uploads (POST /api/media/uploads) - streams one file into the
+  // private media bucket at uploads/<uuid>; the send route later presigns it.
+  router.use(
+    '/media',
+    createMediaUploadsRouter({
+      config,
+      logger: deps.logger,
+      ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
   // Founder settings (GET requireAuth, PUT requireRole admin).

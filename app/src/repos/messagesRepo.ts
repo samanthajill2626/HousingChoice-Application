@@ -144,6 +144,15 @@ export interface NewMessage {
   body?: string;
   /** Provider media URLs (MMS); S3 mirroring is Builder B's webhook path. */
   mediaUrls?: string[];
+  /**
+   * Outbound MMS attachments (design gap #3): the durable {s3Key, contentType}
+   * pairs behind an outbound send, persisted so sent media renders through the
+   * existing authed serve endpoint + timeline. Distinct from mediaUrls (which
+   * for an outbound send are the presigned, EXPIRING provider-fetch URLs). The
+   * inbound mirror sets media_attachments from its mirrored keys; this lets the
+   * SEND path close the same asymmetry. Absent on text-only sends.
+   */
+  mediaAttachments?: MediaAttachment[];
   deliveryStatus: DeliveryStatus;
   errorCode?: string;
   /** Relay group (M1.7): sender member key on an inbound relay message. */
@@ -539,6 +548,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         delivery_status: message.deliveryStatus,
         error_code: message.errorCode,
         created_at: now,
+        // Outbound MMS: persist the durable attachment keys so sent media
+        // renders through the authed serve endpoint (gap #3). Only when present.
+        ...(message.mediaAttachments !== undefined &&
+          message.mediaAttachments.length > 0 && { media_attachments: message.mediaAttachments }),
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         // Seed the per-recipient delivery map (possibly empty) so the fan-out's

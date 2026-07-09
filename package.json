@@ -67,5 +67,10 @@
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.33.0",
     "vitest": "^3.2.0"
+  },
+  "dependencies": {
+    "@aws-sdk/s3-request-presigner": "^3.1083.0",
+    "@types/busboy": "^1.5.4",
+    "busboy": "^1.6.0"
   }
 }

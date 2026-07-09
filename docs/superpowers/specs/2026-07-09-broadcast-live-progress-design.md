@@ -167,11 +167,13 @@ File: app/src/routes/broadcasts.ts (GET /broadcasts/:id/results).
     (same pattern as the send route's explicit-selection fetch).
   - phone#<E164> keys: phone comes from the key (no lookup).
 - Each entry in the response's recipients map gains OPTIONAL fields:
-    name?: string   (the contact's display name - use the existing shared
-                     display-name convention: the same helper the contacts
-                     API/preview responses use; do not invent a new format)
+    firstName?: string
+    lastName?: string
     phone?: string  (E.164)
-- Unresolvable contact (deleted): omit name/phone - the dashboard falls back
+  Raw fields, SAME shape as the preview endpoint's candidates - display-name
+  composition stays in the dashboard (contactDisplayName), which is how the
+  composer's review rows already do it. Do not compose a name server-side.
+- Unresolvable contact (deleted): omit the fields - the dashboard falls back
   to today's "Tenant" label. Never leak the raw contactKey.
 - PII posture: names/phones in an AUTHED response body - same class as the
   existing preview endpoint. Log lines remain IDs/counts only (never names,
@@ -182,9 +184,11 @@ File: app/src/routes/broadcasts.ts (GET /broadcasts/:id/results).
 ### S6. Dashboard changes
 
 - dashboard/src/api types: the results recipient entry type gains
-  name?/phone? (mirror the server projection - keep the sync comment
-  convention used elsewhere in api/types).
-- broadcastFormat.ts toRecipientViews(): prefer server-provided name/phone;
+  firstName?/lastName?/phone? (mirror the server projection - keep the sync
+  comment convention used elsewhere in api/types).
+- broadcastFormat.ts toRecipientViews(): compose the row name with the
+  existing contactDisplayName(firstName, lastName, phone) helper (the
+  composer's review rows already use it); prefer the server-provided phone;
   keep splitContactKey as the fallback for phone# keys; keep failed-first sort.
 - BroadcastResults.tsx RecipientRow: name primary + formatted phone secondary
   (formatPhone), visually consistent with the composer's review rows. Keep the

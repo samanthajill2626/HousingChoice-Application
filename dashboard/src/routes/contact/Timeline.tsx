@@ -145,6 +145,24 @@ function relaySenderLabel(
   return undefined;
 }
 
+/** The GROUP composer footer: a reply relays to EVERY member, so the line names
+ *  the whole roster ("everyone in this group text (Ann, Marcus)") instead of a
+ *  single number. A member with no resolved name falls back to their formatted
+ *  phone; an empty/unloaded roster (best-effort fetch) keeps the honest
+ *  "everyone" line with no list. */
+function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): React.JSX.Element {
+  const names = roster.map((m) => {
+    const n = m.name?.trim();
+    return n && n.length > 0 ? n : formatPhone(m.phone) || m.phone;
+  });
+  return (
+    <>
+      Reply sends to <strong>everyone in this group text</strong>
+      {names.length > 0 ? <> ({names.join(', ')})</> : null}
+    </>
+  );
+}
+
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
  *  green markers). number_added = amber; group-text add/remove = purple;
  *  the positive outcome-ish ones = green; everything else neutral. */
@@ -742,13 +760,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         ) : null}
         <div className={styles.replyFoot}>
           <span className={styles.replyTarget}>
-            <ReplyTargetPicker
-              {...(replyToPhone !== undefined && { replyToPhone })}
-              {...(replyToLabel !== undefined && { replyToLabel })}
-              targets={replyTargets ?? []}
-              {...(selectedConversationId !== undefined && { selectedConversationId })}
-              {...(onSelectTarget !== undefined && { onSelectTarget })}
-            />
+            {relayRoster !== undefined ? (
+              // A relay GROUP: a reply fans out to every member, so naming a
+              // single contact/number here would be wrong (and was: the shared
+              // "this contact" fallback). Say who it actually reaches.
+              <GroupReplyNote roster={relayRoster} />
+            ) : (
+              <ReplyTargetPicker
+                {...(replyToPhone !== undefined && { replyToPhone })}
+                {...(replyToLabel !== undefined && { replyToLabel })}
+                targets={replyTargets ?? []}
+                {...(selectedConversationId !== undefined && { selectedConversationId })}
+                {...(onSelectTarget !== undefined && { onSelectTarget })}
+              />
+            )}
           </span>
           <button
             type="button"

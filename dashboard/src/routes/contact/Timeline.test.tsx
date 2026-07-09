@@ -258,6 +258,33 @@ describe('Timeline', () => {
     expect(screen.getByText(/most recent/)).toBeInTheDocument();
   });
 
+  it('a relay GROUP names the whole roster in the composer footer (never a single target)', () => {
+    // A reply relays to EVERY member — the footer must say who it reaches. A
+    // member without a resolved name falls back to their formatted number.
+    renderTimeline({
+      items: [],
+      relayRoster: [
+        { contactId: 't1', phone: '+14045550111', name: 'Ann' },
+        { contactId: 'l1', phone: '+14045550122' },
+      ],
+    });
+    const foot = screen.getByText(/Reply sends to/);
+    expect(foot).toHaveTextContent(
+      'Reply sends to everyone in this group text (Ann, (404) 555-0122)',
+    );
+    // The single-target copy (incl. the replyToPhone prop the helper passes) is gone.
+    expect(foot).not.toHaveTextContent(/\(470\) 555-0148/);
+    expect(foot).not.toHaveTextContent('this contact');
+  });
+
+  it('a relay GROUP with an unloaded roster keeps the honest "everyone" line, no list', () => {
+    renderTimeline({ items: [], relayRoster: [] });
+    expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
+      'Reply sends to everyone in this group text',
+    );
+    expect(screen.getByText(/Reply sends to/)).not.toHaveTextContent('(');
+  });
+
   it('shows a loading state and an empty state', () => {
     const { rerender } = renderTimeline({ status: 'loading' });
     expect(screen.getByRole('status')).toBeInTheDocument();

@@ -78,8 +78,8 @@ const RECONNECT_MAX_MS = 30_000;
 // readyState OPEN with NO events and NO 'error' — the browser never notices,
 // so every live surface silently freezes until a manual reload. We treat the
 // stream as dead once we have seen no event (heartbeat or real) for STALE_MS.
-// STALE_MS = 65s = 2.5x the 25s server heartbeat + margin (tolerates one
-// dropped heartbeat before declaring the stream dead).
+// STALE_MS = 65s = ~2.5x the 25s server heartbeat (tolerates one dropped
+// heartbeat + margin before declaring the stream dead).
 const STALE_MS = 65_000;
 // How often the watchdog checks for staleness.
 const WATCHDOG_INTERVAL_MS = 10_000;
@@ -222,7 +222,9 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
     // the error path this does NOT inherit the backoff: a staleness or wake
     // signal means the network is likely fine again, so retry at once. Respects
     // the single-reconnect coalescing — a pending error-path timer is canceled
-    // so we never end up with two live sources.
+    // so we never end up with two live sources. Deliberately NO give-up cap
+    // (unlike the error path's backoff): a persistently half-open origin just
+    // re-proves itself every ~STALE_MS, which is the eager retry we want.
     const reconnectNow = (): void => {
       if (closed) return;
       if (reconnectTimer !== undefined) {

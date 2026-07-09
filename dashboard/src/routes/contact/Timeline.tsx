@@ -424,7 +424,10 @@ function MessageBubble({
       ) : null}
       <div className={styles.meta}>
         <span className={styles.metaText}>{meta}</span>
-        {delivery ? (
+        {delivery && deliveredSummary === null ? (
+          // Suppressed on a relay SOURCE bubble: its own delivery_status stays
+          // 'queued' forever (DLRs land in delivery_recipients slots, never on
+          // the parent), so "delivered N/M" below is the truthful state.
           <span
             className={`${styles.status} ${toneClass}`}
             {...(reason !== undefined && { title: reason })}

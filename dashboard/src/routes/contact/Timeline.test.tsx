@@ -595,6 +595,24 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.getByText('Team')).toBeInTheDocument();
   });
 
+  it('suppresses the per-message status chip on a relay source bubble (delivered N/M is the truth)', () => {
+    // A relay SOURCE message's own delivery_status stays at its initial
+    // 'queued' forever — DLRs land in delivery_recipients slots, never on the
+    // parent (relay-source-message-sending-chip). Rendering it would show a
+    // permanent "Sending…" contradicting a fully delivered "delivered 2/2".
+    const fullyDelivered: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_status: 'queued',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [fullyDelivered], relayRoster: ROSTER });
+    expect(screen.getByText('delivered 2/2')).toBeInTheDocument();
+    expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+  });
+
   it('attributes an inbound relay bubble to the sending member', () => {
     const inbound: TimelineItem = {
       kind: 'message',

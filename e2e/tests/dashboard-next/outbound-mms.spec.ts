@@ -135,11 +135,12 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
     await page.setViewportSize({ width: 360, height: 780 });
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${TASHA_ID}`);
-    await expect(page.getByRole('heading', { name: 'Details' })).toBeVisible();
 
-    // The attach affordance is visible and reachable at mobile width.
+    // Mobile lands on the Comms pane (a Comms/Profile toggle; "Details" lives under
+    // Profile), so gate readiness on the composer's attach affordance itself - the
+    // thing under test - which the mobile composer renders inline.
     const attach = page.getByRole('button', { name: 'Attach a file' });
-    await expect(attach).toBeVisible();
+    await expect(attach).toBeVisible({ timeout: 15_000 });
     const box = await attach.boundingBox();
     expect(box, 'attach button has no layout box').not.toBeNull();
     // Its right edge sits within the viewport (not clipped off-screen).

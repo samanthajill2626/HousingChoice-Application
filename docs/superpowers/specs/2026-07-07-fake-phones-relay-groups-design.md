@@ -1,3 +1,12 @@
+<!-- HISTORICAL-RECORD -->
+> ⚠️ **HISTORICAL RECORD — completed, merged, and frozen (2026-07-08).** This document
+> describes how this work was *designed/planned at the time of writing*. The work shipped to
+> `main` and its feature branch + worktree were deleted during worktree cleanup. **This file
+> is NOT current documentation, and the live code may have drifted from it. Do not treat it as
+> authoritative guidance on how the system should be built or how it behaves today.** For
+> current truth read the code and the living docs (e.g. `RUNBOOK.md`, `e2e/README.md`,
+> `documentation/GLOSSARY.md`). Kept only as a point-in-time record of intent.
+
 # Fake-phones relay groups — test group relay conversations in `--local --mock`
 
 **Date:** 2026-07-07

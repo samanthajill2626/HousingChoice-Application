@@ -43,7 +43,9 @@ const FLYER: PublicFlyer = {
 const DETAILS: PublicFlyerDetails = {
   ...FLYER,
   address: { line1: '88 Sycamore St', city: 'Decatur', state: 'GA', zip: '30030' },
-  utilities: 'Tenant-paid',
+  // The stored `utilities` value LISTS what the tenant pays (the reveal row's
+  // label is "Tenant pays").
+  utilities: 'Electric and gas',
   video_url: 'https://video.example/tour',
   application_fee: 40,
   same_day_rta: true,
@@ -98,7 +100,9 @@ describe('FlyerFunnel', () => {
 
     // → reveal (full details).
     expect(await screen.findByText(/88 Sycamore St/i)).toBeInTheDocument();
-    expect(screen.getByText(/Tenant-paid/i)).toBeInTheDocument();
+    // Tenant-paid utilities under the tenant-facing "Tenant pays" label.
+    expect(screen.getByText('Tenant pays')).toBeInTheDocument();
+    expect(screen.getByText('Electric and gas')).toBeInTheDocument();
     expect(screen.getByText(/\$40/)).toBeInTheDocument();
     expect(screen.getByText(/Same-day RTA/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /watch the tour/i })).toHaveAttribute(

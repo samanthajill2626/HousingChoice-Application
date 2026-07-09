@@ -157,6 +157,32 @@ test.describe('Property detail — broadcast + tour Activity rows (activity cove
   });
 });
 
+test.describe('Property detail — Notes card (internal staff notes)', () => {
+  test('+ Add opens the edit dialog; saved notes render on the card', async ({ page }) => {
+    await devLogin(page);
+    const stamp = `${Date.now()}`.slice(-6);
+    // Own infra (a run-unique property) so no seeded unit is mutated.
+    const landlordId = await createLandlord(page.request, `Noteowner${stamp}`);
+    const unitId = await createAvailableUnit(page.request, landlordId);
+
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const notesCard = page.locator('section', { has: page.getByRole('heading', { name: 'Notes' }) });
+    await expect(notesCard).toBeVisible();
+    await expect(notesCard.getByText('No notes yet.')).toBeVisible();
+
+    // "+ Add" (accessible name "Edit property notes") opens the SAME edit dialog.
+    await notesCard.getByRole('button', { name: 'Edit property notes' }).click();
+    const dialog = page.getByRole('dialog', { name: /Edit property/i });
+    await dialog.getByLabel('Notes').fill(`In-unit washer/dryer; no dishwasher (${stamp})`);
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // The card now shows the note (and the empty state is gone).
+    await expect(notesCard.getByText(`In-unit washer/dryer; no dishwasher (${stamp})`)).toBeVisible();
+    await expect(notesCard.getByText('No notes yet.')).toHaveCount(0);
+  });
+});
+
 test.describe('Property detail — Activity card (unit audit trail)', () => {
   test('a real edit surfaces as a "Property updated" Activity row after reload', async ({ page }) => {
     await devLogin(page);

@@ -89,6 +89,25 @@ describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () 
   });
 });
 
+describe('validateUnitBody — property notes (internal)', () => {
+  // Free-form staff notes ("In-unit washer/dryer", "No dishwasher") — writable
+  // like contact notes, but INTERNAL: the flyer projections never carry it
+  // (asserted in the allowlist-wall test below).
+  it('accepts notes (a string)', () => {
+    expect(validateUnitBody({ notes: 'In-unit washer/dryer' }, 'update')).toEqual({
+      ok: true,
+      fields: { notes: 'In-unit washer/dryer' },
+    });
+  });
+
+  it('rejects a non-string notes', () => {
+    expect(validateUnitBody({ notes: 42 }, 'update')).toEqual({
+      ok: false,
+      error: 'notes must be a string',
+    });
+  });
+});
+
 describe('toUnitFlyerDetails — the reveal allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
@@ -116,6 +135,7 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       application_fee: 50,
       same_day_rta: true,
       accessibility: 'SECRET ground floor',
+      notes: 'SECRET in-unit washer note',
       pets: 'SECRET cats only',
       priority: 'SECRET high',
       tour_process: 'SECRET lockbox 9999',

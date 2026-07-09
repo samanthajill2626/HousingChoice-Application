@@ -140,12 +140,17 @@ describe('GET /api/events — stream mechanics', () => {
     );
   });
 
-  it('sends heartbeat comments on the configured interval', async () => {
+  it('sends heartbeat as an observable named event (not a comment) on the configured interval', async () => {
     const { app } = makeWebhookHarness({ sseHeartbeatMs: 20 });
     const port = await startServer(app);
     const client = await connectSse(port);
 
-    await client.waitFor(': heartbeat');
+    // The heartbeat must be a REAL named event: EventSource cannot observe SSE
+    // comment frames (per spec), so a comment heartbeat leaves a half-open
+    // stream silently dead. A named 'heartbeat' event with a JSON timestamp is
+    // what the client watchdog listens for to prove liveness.
+    await client.waitFor('event: heartbeat');
+    await client.waitFor('data: {"at":"');
   });
 
   it('cleans up bus listeners on client disconnect (no leak across connects)', async () => {

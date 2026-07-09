@@ -19,7 +19,7 @@ const UNIT: UnitItem = {
   beds: 3,
   baths: 1,
   rent_min: 1975,
-  utilities: 'Tenant-paid',
+  utilities: 'Electric and gas',
   pets: 'Cats only',
   accepted_programs: ['HCV', 'VASH'],
   address: { line1: '88 Sycamore St', city: 'Decatur', state: 'GA', zip: '30030' },
@@ -30,7 +30,8 @@ beforeEach(() => vi.clearAllMocks());
 describe('ListingEditForm', () => {
   it('prefills current values', () => {
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    expect(screen.getByLabelText(/Utilities/i)).toHaveValue('Tenant-paid');
+    // The utilities label carries the tenant-paid semantics.
+    expect(screen.getByLabelText('Tenant-paid utilities')).toHaveValue('Electric and gas');
     expect(screen.getByLabelText(/Housing authority/i)).toHaveValue('ga_dca');
     expect(screen.getByLabelText(/Accepted vouchers/i)).toHaveValue('HCV, VASH');
     expect(screen.getByLabelText(/Street address/i)).toHaveValue('88 Sycamore St');
@@ -39,15 +40,31 @@ describe('ListingEditForm', () => {
   it('PATCHes only the changed fields and applies the returned unit', async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn();
-    updateUnit.mockResolvedValue({ ...UNIT, utilities: 'Owner-paid' });
+    updateUnit.mockResolvedValue({ ...UNIT, utilities: 'Gas only' });
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={onSaved} />);
 
-    await user.clear(screen.getByLabelText(/Utilities/i));
-    await user.type(screen.getByLabelText(/Utilities/i), 'Owner-paid');
+    await user.clear(screen.getByLabelText(/Tenant-paid utilities/i));
+    await user.type(screen.getByLabelText(/Tenant-paid utilities/i), 'Gas only');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
 
-    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Owner-paid' });
+    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' });
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it('prefills property notes and PATCHes them when changed', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withNotes: UnitItem = { ...UNIT, notes: 'In-unit washer/dryer' };
+    render(<ListingEditForm unit={withNotes} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    const notes = screen.getByLabelText('Notes');
+    expect(notes).toHaveValue('In-unit washer/dryer');
+    await user.type(notes, '; no dishwasher');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', {
+      notes: 'In-unit washer/dryer; no dishwasher',
+    });
   });
 
   it('sends a changed number as a number, and the programs array', async () => {
@@ -131,8 +148,8 @@ describe('ListingEditForm', () => {
     const user = userEvent.setup();
     updateUnit.mockRejectedValue(new Error('boom'));
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.clear(screen.getByLabelText(/Utilities/i));
-    await user.type(screen.getByLabelText(/Utilities/i), 'X');
+    await user.clear(screen.getByLabelText(/Tenant-paid utilities/i));
+    await user.type(screen.getByLabelText(/Tenant-paid utilities/i), 'X');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t save/i));
   });

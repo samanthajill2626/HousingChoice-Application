@@ -1127,10 +1127,12 @@ export interface UnitItem {
   rent_max?: number;
   payment_standard?: number;
   deposit?: number;
-  /** Utilities arrangement, e.g. "Tenant-paid". */
+  /** TENANT-PAID utilities (which utilities the tenant must pay), e.g. "Electric and gas". */
   utilities?: string;
   /** Accessibility note, e.g. "Ground floor". */
   accessibility?: string;
+  /** Internal staff notes, e.g. "In-unit washer/dryer". Never public. */
+  notes?: string;
   /** Pet policy, e.g. "Cats only". */
   pets?: string;
   /** S3 keys / URLs of property media (the Photos gallery + hero). */

@@ -636,7 +636,7 @@ describe('TourDetail - three-channel switcher', () => {
     expect(markInboxRead).not.toHaveBeenCalled();
   });
 
-  it('composer footer: 1:1 tabs show the reply number; the group tab keeps the shared relay copy', async () => {
+  it('composer footer: the group tab names the WHOLE roster; 1:1 tabs show the reply number', async () => {
     getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
     getConversations.mockResolvedValue({
       conversations: [
@@ -645,12 +645,16 @@ describe('TourDetail - three-channel switcher', () => {
       ],
       nextCursor: null,
     });
+    getConversationMembers.mockResolvedValue([
+      { contactId: 'tenant-1', phone: '+14045550111', name: 'Ann' },
+      { contactId: 'landlord-1', phone: '+14045550122', name: 'Marcus' },
+    ]);
     renderDetail();
     await waitLoaded();
-    // Group tab (initial): the composer matches ConversationDetail's group view
-    // (no reply-target props -> the shared "this contact" fallback).
+    // Group tab (initial): a reply relays to EVERY member — the footer says so
+    // and lists the roster (never the old "this contact" single-target copy).
     expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
-      'Reply sends to this contact',
+      'Reply sends to everyone in this group text (Ann, Marcus)',
     );
     // Tenant 1:1 tab: the footer names the tenant's number (the contact-page pattern).
     await userEvent.click(screen.getByRole('tab', { name: /Tenant - Ann/ }));

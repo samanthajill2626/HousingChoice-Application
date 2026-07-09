@@ -1307,7 +1307,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // logger → origin secret → body parsers all pass the response through
   // untouched, so res.write() flushes straight to the socket. The headers
   // below keep CloudFront (and any future proxy) from buffering or
-  // transforming the stream; heartbeat comments keep it from idling out.
+  // transforming the stream; a periodic 'heartbeat' event keeps it from
+  // idling out AND lets the client observe liveness (see the heartbeat
+  // interval below for why it is a named event, not an SSE comment).
   //
   // Connection cap (SSE_MAX_CONNECTIONS, default 50): each stream holds a
   // socket + heartbeat timer + bus listener pair forever — unbounded
@@ -1362,8 +1364,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     events.on('scheduled.updated', onScheduledUpdated);
     events.on('tour.updated', onTourUpdated);
 
+    // Heartbeat as a REAL named event, not an SSE comment: the browser
+    // EventSource API cannot observe comment frames (': ...') by spec, so a
+    // comment heartbeat cannot prove liveness to the client. A half-open
+    // connection (laptop sleep/wake, network switch, proxy drop without RST)
+    // would then sit readyState=OPEN with no events and no error, silently
+    // dead. Emitting 'heartbeat' with a timestamp lets the client watchdog
+    // detect staleness and reconnect. Interval/cleanup are unchanged.
     const heartbeat = setInterval(() => {
-      res.write(': heartbeat\n\n');
+      writeEvent('heartbeat', { at: new Date().toISOString() });
     }, sseHeartbeatMs);
     // Never keep the process alive for an idle stream.
     heartbeat.unref();

@@ -72,6 +72,23 @@ const EventStreamContext = createContext<EventStreamContextValue | null>(null);
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+// Liveness watchdog bounds. The server (app/src/routes/api.ts SSE_HEARTBEAT_MS)
+// emits a 'heartbeat' event every 25s. A half-open connection (laptop
+// sleep/wake, network switch, proxy drop without RST) leaves EventSource
+// readyState OPEN with NO events and NO 'error' — the browser never notices,
+// so every live surface silently freezes until a manual reload. We treat the
+// stream as dead once we have seen no event (heartbeat or real) for STALE_MS.
+// STALE_MS = 65s = ~2.5x the 25s server heartbeat (tolerates one dropped
+// heartbeat + margin before declaring the stream dead).
+const STALE_MS = 65_000;
+// How often the watchdog checks for staleness.
+const WATCHDOG_INTERVAL_MS = 10_000;
+// On an 'online' / tab-visible signal we know the environment just changed, so
+// we reconnect eagerly rather than waiting up to STALE_MS — but only if the
+// stream has actually been quiet (> one heartbeat interval + margin), to avoid
+// churning a healthy connection on a spurious visibility flip.
+const FASTPATH_GRACE_MS = 30_000;
+
 export function EventStreamProvider({ children }: { children: ReactNode }): React.JSX.Element {
   // The live subscriber set. Mutated only from subscribe()/unsubscribe() (effect
   // time, never render) and read only from the EventSource callbacks (post-commit).
@@ -93,6 +110,13 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
     let reconnectDelay = RECONNECT_MIN_MS;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
+    // Wall-clock of the last observed sign of life on the stream (open, or any
+    // event including the server 'heartbeat'). The watchdog compares against
+    // this to detect a half-open, silently-dead connection.
+    let lastActivityAt = Date.now();
+    const markActivity = (): void => {
+      lastActivityAt = Date.now();
+    };
 
     const parse = <T,>(raw: string): T | undefined => {
       try {
@@ -122,38 +146,53 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
     const connect = (): void => {
       if (closed) return;
       source = new EventSource('/api/events', { withCredentials: true });
+      markActivity(); // give the fresh connection a full grace window to open
 
       source.addEventListener('open', () => {
         reconnectDelay = RECONNECT_MIN_MS; // healthy connection — reset backoff
+        markActivity();
         fire((h) => h.onOpen);
       });
 
+      // Heartbeat: an observable named event (see server) whose ONLY job is to
+      // refresh liveness so the watchdog knows the stream is still alive. It
+      // carries no payload the app cares about — it is not dispatched.
+      source.addEventListener('heartbeat', () => {
+        markActivity();
+      });
+
       source.addEventListener('conversation.updated', (ev) => {
+        markActivity();
         const data = parse<ConversationUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onConversationUpdated, data);
       });
 
       source.addEventListener('placement.updated', (ev) => {
+        markActivity();
         const data = parse<PlacementUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onPlacementUpdated, data);
       });
 
       source.addEventListener('message.persisted', (ev) => {
+        markActivity();
         const data = parse<MessagePersistedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onMessagePersisted, data);
       });
 
       source.addEventListener('broadcast.updated', (ev) => {
+        markActivity();
         const data = parse<BroadcastUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onBroadcastUpdated, data);
       });
 
       source.addEventListener('scheduled.updated', (ev) => {
+        markActivity();
         const data = parse<ScheduledUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onScheduledUpdated, data);
       });
 
       source.addEventListener('tour.updated', (ev) => {
+        markActivity();
         const data = parse<TourUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onTourUpdated, data);
       });
@@ -179,11 +218,54 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
       });
     };
 
+    // Force an immediate reconnect (watchdog / online / visible paths). Unlike
+    // the error path this does NOT inherit the backoff: a staleness or wake
+    // signal means the network is likely fine again, so retry at once. Respects
+    // the single-reconnect coalescing — a pending error-path timer is canceled
+    // so we never end up with two live sources. Deliberately NO give-up cap
+    // (unlike the error path's backoff): a persistently half-open origin just
+    // re-proves itself every ~STALE_MS, which is the eager retry we want.
+    const reconnectNow = (): void => {
+      if (closed) return;
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      source?.close();
+      source = null;
+      reconnectDelay = RECONNECT_MIN_MS;
+      connect();
+    };
+
+    // The liveness watchdog: if the stream has gone silent past STALE_MS while
+    // it is supposedly OPEN (source non-null, no error-path reconnect pending),
+    // treat it as dead and reconnect. The healthy path never trips this — a
+    // heartbeat every 25s keeps lastActivityAt fresh.
+    const watchdog = setInterval(() => {
+      if (closed || source === null) return;
+      if (Date.now() - lastActivityAt > STALE_MS) reconnectNow();
+    }, WATCHDOG_INTERVAL_MS);
+
+    // Fast-path recovery: on an environment-change signal, skip the up-to-
+    // STALE_MS wait and reconnect immediately IF the stream has been quiet.
+    const onWake = (): void => {
+      if (closed) return;
+      if (Date.now() - lastActivityAt > FASTPATH_GRACE_MS) reconnectNow();
+    };
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === 'visible') onWake();
+    };
+    window.addEventListener('online', onWake);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     connect();
 
     return () => {
       closed = true;
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
+      clearInterval(watchdog);
+      window.removeEventListener('online', onWake);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       source?.close();
     };
   }, []);

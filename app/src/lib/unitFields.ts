@@ -50,8 +50,12 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   payment_standard: 'number',
   deposit: 'number',
   lif: 'number',
+  // TENANT-PAID utilities (which utilities the tenant must pay) — free-form.
   utilities: 'string',
   accessibility: 'string',
+  // Internal staff notes ("In-unit washer/dryer", "No dishwasher"). NEVER on
+  // the flyer projections below — internal only.
+  notes: 'string',
   pets: 'pets',
   priority: 'string',
   media: 'string[]',
@@ -188,7 +192,7 @@ export interface UnitFlyer {
 export interface UnitFlyerDetails extends UnitFlyer {
   /** The structured postal address (allowlisted sub-fields only). */
   address: Address;
-  /** Utilities arrangement (e.g. "Tenant-paid"). */
+  /** Tenant-paid utilities (which utilities the tenant pays, e.g. "Electric and gas"). */
   utilities: string | null;
   /** Tour video link. */
   video_url: string | null;

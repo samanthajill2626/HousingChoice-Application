@@ -38,6 +38,7 @@ import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import {
   createBroadcastsRepo,
+  deriveBroadcastStats,
   type BroadcastRecipient,
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
@@ -1152,20 +1153,25 @@ async function rollIntoBroadcast(
     // Another callback already transitioned this slot — do NOT bump stats.
     return;
   }
-  // Stats: a sent→delivered move bumps `delivered` (the recipient was counted
-  // in `sent` at send time — delivered is a refinement, not a re-count). A
-  // *→failed move bumps `failed`; if the slot was 'sent', decrement `sent` so
-  // the totals reconcile (a sent that ultimately failed is a failure).
+  // Stats (S4 disjoint model, persisted-counter hygiene): a sent->delivered move
+  // bumps `delivered` AND decrements `sent` (the recipient moves buckets, it is
+  // not double-counted) - mirroring the *->failed case. A *->failed move bumps
+  // `failed`; if the slot was 'sent', decrement `sent` too. This keeps the
+  // persisted counters consistent with the disjoint model on new broadcasts;
+  // historical rows keep their old cumulative counters but STILL display
+  // correctly because every read path derives from the recipients map.
   const fromSent = slot.status === 'sent';
   const delta =
     next === 'delivered'
-      ? { delivered: 1 }
+      ? { delivered: 1, ...(fromSent && { sent: -1 }) }
       : { failed: 1, ...(fromSent && { sent: -1 }) };
   const updated = await broadcasts.bumpStats(broadcastId, delta);
+  // The emit carries DERIVED disjoint stats from the ALL_NEW item (zero extra
+  // reads), so the dashboard chips reconcile to the recipients map.
   events.emit('broadcast.updated', {
     broadcastId,
     status: updated.status,
-    stats: updated.stats,
+    stats: deriveBroadcastStats(updated),
   });
   log.info({ broadcastId, deliveryStatus: next }, 'broadcast delivery rolled into stats');
 }

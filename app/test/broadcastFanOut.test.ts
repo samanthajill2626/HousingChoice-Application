@@ -27,7 +27,11 @@ import {
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
-import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
+import type {
+  BroadcastItem,
+  BroadcastRecipient,
+  BroadcastStats,
+} from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -169,14 +173,15 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Two sends, one per tenant, to their own phones.
     expect(world.sent.map((s) => s.to).sort()).toEqual([alice.phone, bob.phone].sort());
 
     // Each persisted outbound message carries broadcast_id.
-    const outbound = world.messages.filter((m) => m.direction === 'outbound');
-    expect(outbound).toHaveLength(2);
-    expect(outbound.every((m) => m.broadcast_id === 'bcast-1')).toBe(true);
+    const outboundMsgs = world.messages.filter((m) => m.direction === 'outbound');
+    expect(outboundMsgs).toHaveLength(2);
+    expect(outboundMsgs.every((m) => m.broadcast_id === 'bcast-1')).toBe(true);
 
     // Merge fields rendered: Alice by name, Bob falls back to the neutral label.
     const aliceMsg = world.messages.find((m) => m.body?.startsWith('Hi Alice'));
@@ -196,10 +201,11 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.recipients['c-alice']?.tsMsgId).toBeDefined();
     expect(bcast.recipients['c-alice']?.conversationId).toBeDefined();
 
-    // A broadcast.updated SSE event fired on completion.
-    const evt = world.emitted.find((e) => e.event === 'broadcast.updated');
-    expect(evt).toBeDefined();
-    expect((evt!.payload as { status: string }).status).toBe('sent');
+    // broadcast.updated SSE events fired: a live tick per recipient PLUS the
+    // terminal 'sent' on finalize (S2). The LAST one is the terminal emit.
+    const updates = world.emitted.filter((e) => e.event === 'broadcast.updated');
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect((updates.at(-1)!.payload as { status: string }).status).toBe('sent');
   });
 
   it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
@@ -210,6 +216,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const rows = world.auditEvents.filter(
       (e) => e.entityKey === 'units#unit-1' && e.event_type === 'broadcast_sent',
@@ -224,6 +231,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(0);
   });
@@ -240,6 +248,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the reachable tenant was texted; the opted-out one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -268,6 +277,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the consented tenant was texted; the no-consent one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -306,6 +316,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.sent).toHaveLength(100);
     const bcast = world.broadcasts.get('bcast-1')!;
@@ -331,6 +342,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // A continuation broadcast.send was enqueued (SQS path) for ONLY the
     // deferred key, with an exact DelaySeconds backoff — not an EventBridge
@@ -356,6 +368,7 @@ describe('broadcast.send (M1.8a)', () => {
 
     // attempt=3 is the last allowed; the next would be 4 > MAX(3) → cap reached.
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 3 });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -374,6 +387,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -393,6 +407,7 @@ describe('broadcast.send (M1.8a)', () => {
     };
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const bcast = world.broadcasts.get('bcast-1')!;
     expect(bcast.recipients['c-b']?.status).toBe('failed');
@@ -406,6 +421,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     const envelope = await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
     expect(world.sent).toHaveLength(1);
 
     // Re-dispatch the SAME envelope (SQS at-least-once): the jobId marker
@@ -424,6 +440,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only Bob is sent — Alice was already terminal.
     expect(world.sent.map((s) => s.to)).toEqual([b.phone]);
@@ -452,6 +469,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger, bucket);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // Only the reachable tenant was texted; the conversation-opted-out one never.
     expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
@@ -479,6 +497,7 @@ describe('broadcast.send (M1.8a)', () => {
     // wait broadcastBackoffMs(2) = 10s (NOT broadcastBackoffMs(1) = 5s). Via
     // the SQS path this is an EXACT DelaySeconds of 10 (no EventBridge floor).
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1', attempt: 1 });
+    await outbound.settle();
 
     expect(outbound.delayed).toHaveLength(1);
     const item = outbound.delayed[0]!;
@@ -498,6 +517,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const sent = world.activityEvents.filter((e) => e.type === 'listing_sent');
     expect(sent).toHaveLength(2);
@@ -513,6 +533,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(0);
   });
@@ -526,6 +547,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.listingSends).toHaveLength(2);
     expect(world.listingSends.map((r) => r.contactId).sort()).toEqual(['c-alice', 'c-bob']);
@@ -542,6 +564,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // The SMS still goes out (sanity) but no listing-send row is recorded.
     expect(world.sent).toHaveLength(1);
@@ -555,6 +578,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, logger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     expect(world.listingSends).toHaveLength(0);
   });
@@ -575,6 +599,7 @@ describe('broadcast.send (M1.8a)', () => {
     wireHandler(world, capturingLogger);
 
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     // (a) The SMS still went out to the recipient.
     expect(world.sent.map((s) => s.to)).toEqual([alice.phone]);
@@ -617,6 +642,7 @@ describe('broadcast.send (M1.8a)', () => {
 
     wireHandler(world, logger, bucket);
     await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
 
     const sentIdx = order.indexOf('setRecipient:sent');
     const acquireIdx = order.indexOf('acquire');
@@ -624,5 +650,87 @@ describe('broadcast.send (M1.8a)', () => {
     expect(acquireIdx).toBeGreaterThanOrEqual(0);
     // The recipient slot is persisted BEFORE the pacing token is acquired.
     expect(sentIdx).toBeLessThan(acquireIdx);
+  });
+
+  // --- S2: per-recipient live SSE ticks from the fan-out loop ---------------
+  function broadcastUpdates(): Array<{ status: string; stats: BroadcastStats }> {
+    return world.emitted
+      .filter((e) => e.event === 'broadcast.updated')
+      .map((e) => e.payload as { status: string; stats: BroadcastStats });
+  }
+  function bucketsSumToAudience(s: BroadcastStats): boolean {
+    return (
+      s.queued + s.sent + s.delivered + s.failed + s.skipped_opted_out + s.skipped_no_consent ===
+      s.audience
+    );
+  }
+
+  it('S2: emits broadcast.updated with DERIVED disjoint stats after each recipient transition (live ticks)', async () => {
+    const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [a, b]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // One tick per sent recipient (2) + the terminal finalize emit = 3.
+    expect(updates).toHaveLength(3);
+    // Every emit carries derived, disjoint stats that sum to the audience (2).
+    for (const u of updates) {
+      expect(u.stats.audience).toBe(2);
+      expect(bucketsSumToAudience(u.stats)).toBe(true);
+    }
+    // The first tick is the live mid-send state: one sent, one still queued.
+    expect(updates[0]!.status).toBe('sending');
+    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
+    // The terminal emit: both sent, none queued.
+    expect(updates.at(-1)!.status).toBe('sent');
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 2, queued: 0 });
+  });
+
+  it('S2: the transient-defer path (slot stays queued, no bumpStats) emits NOTHING for that recipient', async () => {
+    const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [a, b]);
+    wireHandler(world, logger);
+    // Bob rate-limits (429 transient) -> deferred to a continuation, slot stays
+    // queued, NO bumpStats. Alice succeeds.
+    world.adapter.sendMessage = async (params: SendMessageParams) => {
+      if (params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
+      return { providerSid: `SMok-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+    };
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // ONLY Alice's send emitted. Bob's transient defer emits nothing, and a
+    // continuation is pending so finalize (its terminal emit) does NOT run.
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.status).toBe('sending');
+    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
+    expect(bucketsSumToAudience(updates[0]!.stats)).toBe(true);
+  });
+
+  it('S2: a skip transition emits a derived tick (skipped bucket, disjoint)', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', phone: '+15550100001' });
+    const stopped = seedTenant(world, { contactId: 'c-stop', sms_opt_out: true, phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [ok, stopped]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // A tick for the skip + a tick for the send + the finalize emit.
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    for (const u of updates) expect(bucketsSumToAudience(u.stats)).toBe(true);
+    // Terminal: one sent, one skipped (opted-out), disjoint.
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 1, skipped_opted_out: 1, queued: 0 });
   });
 });

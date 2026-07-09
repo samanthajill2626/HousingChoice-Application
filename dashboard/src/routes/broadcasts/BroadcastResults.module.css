@@ -91,11 +91,26 @@
 .recipientFailed {
   background: var(--c-evt-amber-bg);
 }
-.recipientName {
+.recipientIdentity {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
   flex: 1 1 auto;
+  min-width: 0;
+}
+.recipientName {
+  flex: 0 1 auto;
   font-size: var(--fs-md);
   color: var(--c-text);
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recipientPhone {
+  flex: 0 0 auto;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
 }
 .retryHint {
   flex: 0 0 auto;

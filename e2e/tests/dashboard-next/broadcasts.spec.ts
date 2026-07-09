@@ -192,6 +192,132 @@ test.describe('Broadcasts — compose from a property → curate → send → re
   });
 });
 
+test.describe('Broadcasts - live send progress + disjoint buckets + recipient identity', () => {
+  // Read one StatChips value by its label. The chips render as a
+  // <dl aria-label="Delivery stats"> of <div><dt>{label}</dt><dd>{value}</dd></div>;
+  // scope to that dl (so a recipient DeliveryBadge like "Sent"/"Delivered" can't
+  // collide) and match the label's <dt> EXACTLY, then read its sibling <dd>.
+  async function statValue(page: Page, label: string): Promise<number> {
+    const chip = page
+      .getByLabel('Delivery stats')
+      .locator('div')
+      .filter({ has: page.getByText(label, { exact: true }) });
+    const text = (await chip.locator('dd').textContent()) ?? '';
+    return Number(text.trim());
+  }
+
+  // The lifecycle pill, scoped to the results <header> (the one holding the
+  // page h1). Scoping matters: the StatChips row ALWAYS renders a "Sent" <dt>,
+  // so a bare page-level getByText('Sent') can match the chip label and pass
+  // VACUOUSLY even if the pill never flipped.
+  function statusPill(page: Page, label: string) {
+    return page
+      .locator('header')
+      .filter({ has: page.getByRole('heading', { level: 1 }) })
+      .getByText(label, { exact: true });
+  }
+
+  test('curated send: land while Sending, chips tick, terminal Delivered=N/Sent=0/Queued=0, rows show names + formatted phones + contact links', async ({
+    page,
+    request,
+  }) => {
+    await devLogin(page);
+    const stamp = `${Date.now()}`.slice(-6);
+
+    // Five fresh, consented 2-BR tenants we fully control. Five recipients gives
+    // a clean all-delivered set AND a wall-clock sending window: the shared A2P
+    // token bucket admits ~1 send/sec (capacity 1, refill 1/s), so the paced
+    // fan-out cannot finish in under ~4s regardless of CPU. That guaranteed window
+    // is what lets us land on the detail page WHILE the broadcast is still Sending
+    // even when page mount + first paint are slow on a loaded box.
+    const tenants: Array<{ contactId: string; firstName: string; name: string; phone: string }> = [];
+    for (const label of ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo']) {
+      tenants.push(await createTenant(page.request, `${label}${stamp}`));
+    }
+    const N = tenants.length;
+    const body = `Live progress ${stamp} - a 2BR home is available.`;
+
+    // A curated send (explicit recipientContactIds = the curation) driven straight
+    // through the API - the SAME send mechanism the composer posts. The send POST
+    // now returns in milliseconds (the in-process queue adapter defers dispatch to
+    // a macrotask instead of awaiting the whole fan-out), so navigating immediately
+    // after it resolves lands us mid-send.
+    const draftRes = await page.request.post(`${NEXT}/api/broadcasts`, {
+      data: {
+        unitId: SEEDED_UNIT,
+        body_template: `${body} [TenantName]`,
+        audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
+      },
+    });
+    expect(draftRes.ok()).toBeTruthy();
+    const broadcastId = (await draftRes.json()).broadcastId as string;
+    const sendRes = await page.request.post(`${NEXT}/api/broadcasts/${broadcastId}/send`, {
+      data: { recipientContactIds: tenants.map((t) => t.contactId) },
+    });
+    expect(sendRes.ok(), await sendRes.text()).toBeTruthy();
+
+    // Land on the detail page while the send is running.
+    await page.goto(`${NEXT}/broadcasts/${broadcastId}`);
+    await expect(page.getByLabel('Delivery stats')).toBeVisible({ timeout: 10_000 });
+
+    // (1) We ARE mid-send: the header pill reads "Sending" (scoped + exact, so
+    // neither a per-recipient "Sending..." badge nor any chip label can match).
+    // Proves G1 - the deferred adapter returns fast enough that the operator
+    // lands during the run.
+    await expect(statusPill(page, 'Sending')).toBeVisible({ timeout: 10_000 });
+
+    // (2) The chips TICK during the run, observed live on a page we never reload:
+    //   - Queued falls below the full audience as the paced fan-out drains it;
+    //   - Sent + Delivered rises above zero.
+    // Both are monotonic, so polling is race-free (they become true and stay true).
+    await expect
+      .poll(async () => statValue(page, 'Queued'), {
+        timeout: 15_000,
+        message: 'Queued should tick down below the audience during the send',
+      })
+      .toBeLessThan(N);
+    await expect
+      .poll(async () => (await statValue(page, 'Sent')) + (await statValue(page, 'Delivered')), {
+        timeout: 15_000,
+        message: 'Sent+Delivered should rise above zero during the send',
+      })
+      .toBeGreaterThan(0);
+
+    // (3) Terminal state - the fake's DLRs drive every slot to delivered. Disjoint
+    // buckets: Delivered = N, Sent = 0, Queued = 0 (no double-counting). Read the
+    // three chips together so the assertion reflects one consistent snapshot.
+    await expect
+      .poll(
+        async () => ({
+          delivered: await statValue(page, 'Delivered'),
+          sent: await statValue(page, 'Sent'),
+          queued: await statValue(page, 'Queued'),
+        }),
+        { timeout: 20_000, message: 'buckets should finalize to Delivered=N, Sent=0, Queued=0' },
+      )
+      .toEqual({ delivered: N, sent: 0, queued: 0 });
+
+    // The lifecycle pill live-updated to the terminal "Sent" (no manual reload).
+    // MUST be the scoped pill: the "Sent" chip <dt> always exists, so an unscoped
+    // getByText would pass without the pill ever flipping.
+    await expect(statusPill(page, 'Sent')).toBeVisible({ timeout: 10_000 });
+
+    // (4) Recipient identity: each row shows the tenant's NAME (primary) + FORMATTED
+    // phone (secondary, "(555) XXX-XXXX" - never the raw E.164) and links to
+    // /contacts/:id. No "Tenant" fallback - the results endpoint enriched every row.
+    const recipients = page.getByRole('list', { name: 'Recipients' });
+    await expect(recipients).toBeVisible({ timeout: 10_000 });
+    for (const t of tenants) {
+      const row = recipients.getByRole('link').filter({ hasText: t.name });
+      await expect(row).toBeVisible();
+      await expect(row).toHaveAttribute('href', `/contacts/${t.contactId}`);
+      // Formatted (not raw): area-code grouping + this tenant's unique last 4 digits.
+      await expect(row).toContainText('(555) ');
+      await expect(row).toContainText(t.phone.slice(-4));
+    }
+  });
+});
+
 test.describe('Broadcasts — delete an unsent draft', () => {
   test('compose a draft, see it in the Drafts list, delete it → gone afterwards', async ({
     page,

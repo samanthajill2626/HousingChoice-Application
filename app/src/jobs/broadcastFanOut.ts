@@ -40,6 +40,7 @@ import type { TokenBucket } from '../lib/tokenBucket.js';
 import { buildUnitMergeContext, renderBody } from '../lib/mergeFields.js';
 import {
   createBroadcastsRepo,
+  deriveBroadcastStats,
   type BroadcastItem,
   type BroadcastRecipient,
   type BroadcastsRepo,
@@ -123,6 +124,28 @@ function isTerminal(status: BroadcastRecipient['status'] | undefined): boolean {
   return (
     status === 'sent' || status === 'delivered' || status === 'failed' || status === 'skipped'
   );
+}
+
+/**
+ * S2: emit a live-progress SSE tick from the fan-out loop. Called after EVERY
+ * bumpStats so the detail page's chips and recipient rows update roughly once a
+ * second (bounded by A2P pacing; no server debounce needed). The stats are
+ * DERIVED (S4) from the ALL_NEW item bumpStats returns (zero extra reads), and
+ * the status is that item's status ('sending' mid-run). R2: only ever called
+ * AFTER the slot write + bumpStats have persisted, so the emitted stats reflect
+ * the committed state.
+ *
+ * NOTE (accepted, documented seam): in DEPLOYED envs the fan-out runs in the
+ * worker process, so these emits do NOT reach the app's SSE clients (see
+ * lib/events.ts single-instance seam). Liveness there comes from S3 polling +
+ * the DLR-rollup emits (which originate in webhooks = the app process).
+ */
+function emitBroadcastProgress(events: EventBus, broadcastId: string, item: BroadcastItem): void {
+  events.emit('broadcast.updated', {
+    broadcastId,
+    status: item.status,
+    stats: deriveBroadcastStats(item),
+  });
 }
 
 /** Best-effort provider error-code extraction (Twilio attaches `code`). */
@@ -245,7 +268,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       const contact = await resolveContact(contacts, contactKey);
       if (!contact || typeof contact.phone !== 'string' || contact.phone.length === 0) {
         await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'failed', errorCode: 'no_contact' });
-        await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
+        );
         failedCount += 1;
         log.warn({ broadcastId: payload.broadcastId, contactKey }, 'broadcastFanOut: recipient has no resolvable contact/phone — marked failed');
         continue;
@@ -255,7 +282,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       // send). sendMessage's opt-out gate is the second fence.
       if (contact.sms_opt_out === true || contact.sms_unreachable === true) {
         await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped' });
-        await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 }),
+        );
         skippedCount += 1;
         continue;
       }
@@ -267,7 +298,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       // composer preview already annotated + excluded these; this is the fence.
       if (!hasSmsConsent(contact)) {
         await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: 'no_consent' });
-        await broadcasts.bumpStats(payload.broadcastId, { skipped_no_consent: 1, queued: -1 });
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { skipped_no_consent: 1, queued: -1 }),
+        );
         skippedCount += 1;
         log.info({ broadcastId: payload.broadcastId, contactKey }, 'broadcastFanOut: recipient has no recorded consent — skipped');
         continue;
@@ -299,7 +334,14 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           tsMsgId: outcome.tsMsgId,
           status: 'sent',
         });
-        await broadcasts.bumpStats(payload.broadcastId, { sent: 1, queued: -1 });
+        // S2: emit the live 'sent' tick from the DERIVED item BEFORE the ~1s
+        // pacing acquire - the detail page ticks as each send lands, not a
+        // second later. R2: the slot write + bumpStats have already persisted.
+        emitBroadcastProgress(
+          events,
+          payload.broadcastId,
+          await broadcasts.bumpStats(payload.broadcastId, { sent: 1, queued: -1 }),
+        );
         // A2P meter: ONE token per REAL outbound SMS. Acquiring AFTER the slot
         // write preserves pacing — the token still gates the NEXT send (post-send
         // pacing), so the shared ~1/s bucket still rate-limits the fan-out.
@@ -353,7 +395,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           // Treat as a skip (no token "wasted" on a real send; the recipient is
           // simply not reachable for this automated broadcast).
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'skipped', errorCode: err.code });
-          await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 });
+          emitBroadcastProgress(
+            events,
+            payload.broadcastId,
+            await broadcasts.bumpStats(payload.broadcastId, { skipped_opted_out: 1, queued: -1 }),
+          );
           skippedCount += 1;
           log.warn({ broadcastId: payload.broadcastId, contactKey, refusal: err.code }, 'broadcastFanOut: send refused — recipient skipped, continuing');
           continue;
@@ -361,14 +407,22 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
         const code = errorCodeOf(err);
         if (code === CARRIER_FILTERED_CODE) {
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'failed', errorCode: code });
-          await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 });
+          emitBroadcastProgress(
+            events,
+            payload.broadcastId,
+            await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
+          );
           failedCount += 1;
           log.error({ broadcastId: payload.broadcastId, contactKey, errorCode: code }, 'broadcastFanOut: carrier filtering (30007) — recipient failed, NOT retried');
           continue;
         }
         if (code !== undefined && UNREACHABLE_CODES.has(code)) {
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'failed', errorCode: code });
-          await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 });
+          emitBroadcastProgress(
+            events,
+            payload.broadcastId,
+            await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
+          );
           failedCount += 1;
           // Flag the contact unreachable (prompt voice; never retry SMS).
           try {
@@ -413,7 +467,11 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
       if (nextAttempt > MAX_BROADCAST_ATTEMPTS) {
         for (const contactKey of transientRemaining) {
           await recordRecipient(broadcasts, payload.broadcastId, contactKey, { status: 'failed', errorCode: 'transient_cap' });
-          await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 });
+          emitBroadcastProgress(
+            events,
+            payload.broadcastId,
+            await broadcasts.bumpStats(payload.broadcastId, { failed: 1, queued: -1 }),
+          );
         }
         log.error(
           { broadcastId: payload.broadcastId, deferred: transientRemaining.length, attempt: payload.attempt },
@@ -502,11 +560,9 @@ async function finalize(
   const finalItem: BroadcastItem = allFailed
     ? await broadcasts.markFailed(broadcastId, 'all recipients failed')
     : await broadcasts.markSent(broadcastId);
-  events.emit('broadcast.updated', {
-    broadcastId,
-    status: finalItem.status,
-    stats: finalItem.stats,
-  });
+  // S2/S4: the terminal emit carries DERIVED disjoint stats (not the persisted
+  // cumulative counters), so the final chips reconcile to the recipients map.
+  emitBroadcastProgress(events, broadcastId, finalItem);
   log.info(
     { broadcastId, status: finalItem.status, sent: finalItem.stats.sent, failed: finalItem.stats.failed, skipped: finalItem.stats.skipped_opted_out },
     'broadcast send finalized',

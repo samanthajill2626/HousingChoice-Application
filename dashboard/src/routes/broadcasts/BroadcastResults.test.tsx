@@ -36,7 +36,7 @@ function results(over: Partial<BroadcastResultsType> = {}): BroadcastResultsType
     status: 'sending',
     unitId: 'unit-0001',
     audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
-    stats: { audience: 3, sent: 1, delivered: 1, failed: 0, skipped_opted_out: 0, queued: 1 },
+    stats: { audience: 3, sent: 1, delivered: 1, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 1 },
     recipients: {
       c1: { status: 'delivered' },
       c2: { status: 'queued' },
@@ -83,6 +83,46 @@ describe('BroadcastResults — render', () => {
     const list = await screen.findByRole('list', { name: 'Recipients' });
     const link = within(list).getByRole('link');
     expect(link).toHaveAttribute('href', '/contacts/c1');
+  });
+
+  it('shows the tenant name (primary) + formatted phone (secondary), link preserved', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({
+        recipients: {
+          c1: { status: 'delivered', firstName: 'Jane', lastName: 'Doe', phone: '+14040000007' },
+        },
+      }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    expect(within(list).getByText('Jane Doe')).toBeInTheDocument();
+    expect(within(list).getByText('(404) 000-0007')).toBeInTheDocument();
+    // The row still links to the contact's comms.
+    expect(within(list).getByRole('link', { name: /Jane Doe/ })).toHaveAttribute(
+      'href',
+      '/contacts/c1',
+    );
+  });
+
+  it('falls back to the phone as the label when no name resolves', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({ recipients: { c1: { status: 'sent', phone: '+14040000007' } } }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    // Phone is the primary label (no duplicate secondary line).
+    expect(within(list).getAllByText('(404) 000-0007')).toHaveLength(1);
+  });
+
+  it('falls back to "Tenant" when neither name nor phone resolves (deleted contact)', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({ recipients: { c1: { status: 'queued' } } }),
+    );
+    renderResults();
+    const list = await screen.findByRole('list', { name: 'Recipients' });
+    expect(within(list).getByText('Tenant')).toBeInTheDocument();
+    // Still a link to the contact page (contactId key).
+    expect(within(list).getByRole('link')).toHaveAttribute('href', '/contacts/c1');
   });
 
   it('a phone-only recipient row renders WITHOUT a link', async () => {
@@ -148,7 +188,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
     getBroadcastResults.mockResolvedValueOnce(
       results({
         status: 'sent',
-        stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, queued: 0 },
+        stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
         recipients: { c1: { status: 'delivered' }, c2: { status: 'delivered' } },
       }),
     );
@@ -156,7 +196,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
     const event: BroadcastUpdatedEvent = {
       broadcastId: 'bcast_1',
       status: 'sent',
-      stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, queued: 0 },
+      stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
     };
     act(() => sse.onBroadcastUpdated?.(event));
 
@@ -186,7 +226,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
       sse.onBroadcastUpdated?.({
         broadcastId: 'someone_else',
         status: 'sent',
-        stats: { audience: 1, sent: 0, delivered: 1, failed: 0, skipped_opted_out: 0, queued: 0 },
+        stats: { audience: 1, sent: 0, delivered: 1, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
       }),
     );
     // No overlay, no refetch.

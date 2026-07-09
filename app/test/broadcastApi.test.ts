@@ -22,7 +22,7 @@ import { registerBroadcastSendJobHandler } from '../src/jobs/broadcastFanOut.js'
 import { loadConfig, DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import { MAX_BROADCAST_RECIPIENTS } from '../src/repos/broadcastsRepo.js';
+import { MAX_BROADCAST_RECIPIENTS, type BroadcastStats } from '../src/repos/broadcastsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -105,17 +105,24 @@ function wireBroadcastHandler(world: FakeWorld) {
 
 describe('share-broadcast API (M1.8a)', () => {
   let world: FakeWorld;
+  // The in-process queue now DEFERS immediate dispatch (SQS semantics) - POST
+  // /send returns before the fan-out runs. Tests that assert on fan-out results
+  // await queueAdapter.settle(); afterEach settle() is a leak-guard so a
+  // deferred dispatch never bleeds into the next test.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
     configureJobsLogger(createLogger({ destination: createLogCapture().stream }));
     configureScheduler(new InMemorySchedulerAdapter());
     world = createFakeWorld();
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
     wireBroadcastHandler(world);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await queueAdapter.settle();
     _resetForTests();
   });
 
@@ -213,6 +220,9 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(send.body.status).toBe('sending');
     expect(send.body.count).toBe(2);
 
+    // POST /send returns before the deferred fan-out runs (SQS semantics) - wait
+    // for the in-process dispatch to drain, then assert on its results.
+    await queueAdapter.settle();
     // The in-process fan-out ran → both tenants texted, broadcast finalized 'sent'.
     expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550100001', '+15550100002'].sort());
     expect(world.broadcasts.get(id)!.status).toBe('sent');
@@ -316,6 +326,43 @@ describe('share-broadcast API (M1.8a)', () => {
     const evt = world.emitted.find((e) => e.event === 'broadcast.updated');
     expect(evt).toBeDefined();
     expect((evt!.payload as { stats: { delivered: number } }).stats.delivered).toBe(1);
+  });
+
+  it('S4: a delivered callback decrements persisted sent and emits DERIVED disjoint stats', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'Hi [TenantName]', audience_filter: { contact_type: 'tenant' } });
+    const id = create.body.broadcastId;
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    await queueAdapter.settle();
+    // After the send, the recipient is 'sent' (persisted sent=1).
+    expect(world.broadcasts.get(id)!.stats.sent).toBe(1);
+
+    const sid = world.messages.find((m) => m.broadcast_id === id)!.provider_sid;
+    world.emitted.length = 0;
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageSid: sid, MessageStatus: 'delivered' }));
+
+    const bcast = world.broadcasts.get(id)!;
+    // Persisted-counter hygiene: delivered decrements sent (mirrors the failed
+    // case), so the persisted counters match the disjoint model on new rows.
+    expect(bcast.stats.sent).toBe(0);
+    expect(bcast.stats.delivered).toBe(1);
+    // The emit carries DERIVED disjoint stats (sum to the audience of 1).
+    const evt = world.emitted.find((e) => e.event === 'broadcast.updated')!;
+    const stats = (evt.payload as { stats: BroadcastStats }).stats;
+    expect(stats).toMatchObject({ audience: 1, delivered: 1, sent: 0, queued: 0 });
+    expect(
+      stats.queued + stats.sent + stats.delivered + stats.failed + stats.skipped_opted_out + stats.skipped_no_consent,
+    ).toBe(stats.audience);
   });
 
   it('failed callback for a broadcast message rolls failed++ (forward-only)', async () => {
@@ -652,6 +699,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({});
+    await queueAdapter.settle(); // drain the deferred fan-out so it finalizes 'sent'
     expect(world.broadcasts.get(id)!.status).toBe('sent');
 
     const del = await request(app)
@@ -734,6 +782,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({ recipientContactIds: ['c-1', 'c-3'] });
     expect(send.status).toBe(200);
     expect(send.body.count).toBe(2);
+    await queueAdapter.settle(); // drain the deferred fan-out before asserting sends
     // The recipients map keys are EXACTLY the surviving checked ids (c-2 excluded).
     expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-1', 'c-3']);
     // Only those two were texted.
@@ -958,6 +1007,7 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle(); // drain the prior broadcast's deferred fan-out
     expect(world.broadcasts.get(prior)!.status).toBe('sent');
 
     // A NEW draft for the same unit previews both — c-1 flagged, c-2 not.
@@ -1062,5 +1112,135 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.body.priorRecipientContactIds).toEqual([]);
     const c1 = res.body.candidates.find((c: { contactId: string }) => c.contactId === 'c-1');
     expect(c1.alreadySentThisProperty).toBe(false);
+  });
+
+  // --- S4: GET results/list return DERIVED disjoint stats -------------------
+  const FILTER = { contact_type: 'tenant' as const, excludeOptedOut: true, excludeUnreachable: true };
+
+  it('S4: GET results returns DERIVED disjoint stats (ignores stale persisted counters)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    const row = world.broadcasts.get(created.broadcastId)!;
+    row.status = 'sent';
+    row.recipients = {
+      'c-1': { status: 'delivered' },
+      'c-2': { status: 'sent' },
+      'c-3': { status: 'skipped', errorCode: 'no_consent' },
+      'c-4': { status: 'skipped' },
+    };
+    // Deliberately stale / double-counted persisted counters.
+    row.stats = { audience: 4, sent: 4, delivered: 4, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 };
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.stats).toEqual({
+      audience: 4,
+      delivered: 1,
+      sent: 1,
+      failed: 0,
+      skipped_no_consent: 1,
+      skipped_opted_out: 1,
+      queued: 0,
+    });
+  });
+
+  it('S4: GET list summaries return DERIVED disjoint stats', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    const row = world.broadcasts.get(created.broadcastId)!;
+    row.status = 'sent';
+    row.recipients = { 'c-1': { status: 'delivered' }, 'c-2': { status: 'failed' } };
+    row.stats = { audience: 2, sent: 2, delivered: 2, failed: 2, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 };
+
+    const res = await request(app)
+      .get('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const summary = res.body.broadcasts.find((b: { broadcastId: string }) => b.broadcastId === created.broadcastId);
+    expect(summary.stats).toMatchObject({ audience: 2, delivered: 1, failed: 1, sent: 0 });
+  });
+
+  // --- S5: results endpoint enriches recipients with raw identity ----------
+  it('S5: enriches contactId recipients with raw firstName/lastName/phone (no server-composed name)', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', lastName: 'Lee' } as Partial<ContactItem>);
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle();
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${id}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['c-1'];
+    expect(entry).toMatchObject({ firstName: 'Ann', lastName: 'Lee', phone: '+15550100001', status: 'sent' });
+    // The server ships RAW fields only; name composition stays in the dashboard.
+    expect(entry).not.toHaveProperty('name');
+  });
+
+  it('S5: a phone#<E164> recipient key takes phone from the key (no lookup)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    await world.broadcastsRepo.markSending(created.broadcastId, { 'phone#+15550100077': { status: 'sent' } });
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['phone#+15550100077'];
+    expect(entry).toMatchObject({ phone: '+15550100077', status: 'sent' });
+    expect(entry).not.toHaveProperty('firstName');
+  });
+
+  it('S5: a deleted/unresolvable contactId recipient omits the identity fields (never leaks the raw key)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
+    // 'c-ghost' has no contact in the world.
+    await world.broadcastsRepo.markSending(created.broadcastId, { 'c-ghost': { status: 'sent' } });
+
+    const res = await request(app)
+      .get(`/api/broadcasts/${created.broadcastId}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const entry = res.body.recipients['c-ghost'];
+    expect(entry.status).toBe('sent');
+    expect(entry).not.toHaveProperty('firstName');
+    expect(entry).not.toHaveProperty('lastName');
+    expect(entry).not.toHaveProperty('phone');
+  });
+
+  it('S5: the results route never logs recipient names or phones (PII, doc section 9)', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001', lastName: 'Lee' } as Partial<ContactItem>);
+    seedUnit(world);
+    const { app, capture } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle();
+    capture.lines.length = 0; // focus on the results request's log lines
+
+    await request(app)
+      .get(`/api/broadcasts/${id}/results`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const dump = JSON.stringify(capture.lines);
+    expect(dump).not.toContain('+15550100001');
+    expect(dump).not.toContain('Ann');
+    expect(dump).not.toContain('Lee');
   });
 });

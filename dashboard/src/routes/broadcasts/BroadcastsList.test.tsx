@@ -31,7 +31,7 @@ function summary(over: Partial<BroadcastSummary> = {}): BroadcastSummary {
     status: 'sent',
     unitId: 'unit-0001',
     audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
-    stats: { audience: 4, sent: 0, delivered: 3, failed: 1, skipped_opted_out: 0, queued: 0 },
+    stats: { audience: 4, sent: 0, delivered: 3, failed: 1, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
     created_at: '2026-06-30T14:00:00.000Z',
     created_by: 'user-0002',
     ...over,

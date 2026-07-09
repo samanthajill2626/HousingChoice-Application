@@ -1,7 +1,10 @@
 // StatChips — the broadcast delivery rollup as a row of labeled count chips
-// (Recipients / Delivered / Sent / Queued / Failed). One job: present
+// (Recipients / Delivered / Sent / Queued / Failed / Skipped). One job: present
 // BroadcastStats as accessible text (label + count), colour as reinforcement
-// only. "Recipients" is the resolved audience (stats.audience).
+// only. "Recipients" is the resolved audience (stats.audience); the remaining
+// buckets are disjoint and sum to it (Queued + Sent + Delivered + Failed +
+// Skipped == Recipients), so the row visibly balances. "Skipped" folds both
+// skip reasons (opted out + no consent) into one neutral count.
 import type { BroadcastStats } from '../../api/index.js';
 import styles from './StatChips.module.css';
 
@@ -18,6 +21,7 @@ export function StatChips({ stats }: { stats: BroadcastStats }): React.JSX.Eleme
     { label: 'Sent', value: stats.sent },
     { label: 'Queued', value: stats.queued },
     { label: 'Failed', value: stats.failed, tone: 'danger' },
+    { label: 'Skipped', value: stats.skipped_opted_out + stats.skipped_no_consent },
   ];
   return (
     <dl className={styles.chips} aria-label="Delivery stats">

@@ -5,6 +5,15 @@
 // debounced refetch of getBroadcastResults — because the SSE payload carries the
 // rollup but NOT the per-recipient detail, which only the GET returns. Abort- +
 // generation-guarded so a stale fetch never clobbers a newer one / a live overlay.
+//
+// Polling fallback (S3): while the loaded results are still 'sending', the hook
+// also polls getBroadcastResults on a ~2s interval. This is what keeps the detail
+// page ticking in DEPLOYED envs, where the fan-out runs in the worker process and
+// its per-recipient SSE emits never reach this app instance (only the DLR-rollup
+// emits do). The interval starts on the transition INTO 'sending', stops the
+// moment status goes terminal (sent/failed) or draft, and clears on unmount.
+// Poll + SSE both funnel through the same abort-/generation-guarded fetchResults,
+// so concurrent triggers stay safe.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -31,6 +40,11 @@ export interface BroadcastResultsState {
  *  events (each delivery callback emits one) into a single GET. */
 const REFETCH_DEBOUNCE_MS = 400;
 
+/** Poll cadence while a broadcast is still sending (the deployed-worker liveness
+ *  fallback). Roughly a second locally / a couple of seconds deployed is the
+ *  spec target; 2s balances liveness against results-endpoint cost. */
+const POLL_INTERVAL_MS = 2000;
+
 export function useBroadcastResults(broadcastId: string): BroadcastResultsState {
   const [status, setStatus] = useState<BroadcastResultsStatus>('loading');
   const [results, setResults] = useState<BroadcastResults | null>(null);
@@ -39,6 +53,15 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
 
   const abortRef = useRef<AbortController | null>(null);
   const genRef = useRef(0);
+  /** True once a TERMINAL status (sent/failed) was observed via the SSE overlay.
+   *  The gen/abort guard protects fetches against EACH OTHER, but the overlay
+   *  owns no generation - so a poll that was already in flight when finalize's
+   *  event landed can resolve LATER with a stale pre-finalize 'sending' snapshot
+   *  and briefly regress the pill (sending -> sent -> sending -> sent). The
+   *  lifecycle is forward-only (a sent/failed broadcast can never resume
+   *  sending), so such a snapshot is stale BY DEFINITION and is discarded; the
+   *  debounced refetch delivers the terminal rows. Reset per broadcastId. */
+  const terminalSeenRef = useRef(false);
 
   const fetchResults = useCallback(
     async (background: boolean) => {
@@ -51,6 +74,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
       try {
         const data = await getBroadcastResults(broadcastId, controller.signal);
         if (controller.signal.aborted || gen !== genRef.current) return;
+        if (terminalSeenRef.current && data.status === 'sending') return;
         setResults(data);
         setStatus('ready');
         setNotFound(false);
@@ -80,6 +104,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     setStatus('loading');
     setResults(null);
     setNotFound(false);
+    terminalSeenRef.current = false;
     void fetchResults(false);
     return () => abortRef.current?.abort();
   }, [fetchResults]);
@@ -96,6 +121,9 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
   const onBroadcastUpdated = useCallback(
     (e: BroadcastUpdatedEvent) => {
       if (e.broadcastId !== broadcastId) return;
+      // Latch a terminal status BEFORE overlaying: any in-flight fetch that
+      // still says 'sending' is now stale and must not regress the pill.
+      if (e.status === 'sent' || e.status === 'failed') terminalSeenRef.current = true;
       // (1) Instant overlay of the live rollup onto whatever we have.
       setResults((prev) => (prev === null ? prev : { ...prev, status: e.status, stats: e.stats }));
       // (2) Debounced refetch to pick up the per-recipient changes.
@@ -115,6 +143,18 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     },
     [],
   );
+
+  // --- S3: poll while sending. Keyed on the broadcast STATUS only (not the whole
+  // results object), so the interval runs at a steady cadence while status stays
+  // 'sending' and is torn down the instant it goes terminal / draft or on unmount.
+  // fetchResults is stable per broadcastId, so the interval is not re-armed by the
+  // background refetches it triggers.
+  const liveStatus = results?.status;
+  useEffect(() => {
+    if (liveStatus !== 'sending') return;
+    const id = setInterval(() => void fetchResults(true), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [liveStatus, fetchResults]);
 
   return { status, results, notFound, refresh, retry, refreshing };
 }

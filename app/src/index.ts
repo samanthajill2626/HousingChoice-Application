@@ -93,6 +93,8 @@ if (config.jobsQueueUrl) {
     new InProcessOutboundQueueAdapter({
       dispatch: dispatchJob,
       tokenBucket: a2pBucket,
+      // A swallowed deferred-dispatch failure logs through the app logger.
+      logger,
       // LOCAL DEV: fire delayed jobs (backoff continuations) after a real
       // timeout so they actually run on a laptop. unref() so a pending backoff
       // never blocks process exit. Tests omit this seam (deterministic drain).

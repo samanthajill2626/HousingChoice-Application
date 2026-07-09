@@ -64,6 +64,7 @@ describe('jobs: context survives a job round-trip', () => {
     await runWithContext({ requestId, conversationId: 'c1', tenantId: 't1' }, () =>
       enqueue('demo.echo', { hello: 'world' }),
     );
+    await outbound.settle(); // immediate dispatch is deferred - drain it
 
     expect(observedPayload).toEqual({ hello: 'world' });
     expect(observed).toBeDefined();
@@ -91,6 +92,9 @@ describe('jobs: context survives a job round-trip', () => {
     await runWithContext({ requestId: newRequestId(), conversationId: 'c1' }, () =>
       enqueue('demo.chain', {}),
     );
+    // Both dispatches are deferred; settle() also drains the nested demo.echo
+    // enqueued from inside the demo.chain handler.
+    await outbound.settle();
 
     expect(hops).toEqual([2]);
   });
@@ -112,6 +116,7 @@ describe('jobs: context survives a job round-trip', () => {
     await runWithContext({ requestId: newRequestId(), traceparent }, () =>
       enqueue('demo.echo', {}),
     );
+    await outbound.settle(); // immediate dispatch is deferred - drain it
 
     expect(observed).toBe(traceparent);
   });
@@ -129,6 +134,7 @@ describe('jobs: context survives a job round-trip', () => {
       captured = { jobName: 'demo.capture', payload, ...(getContext() ?? {}) };
     });
     await runWithContext({ requestId: newRequestId() }, () => enqueue('demo.capture', { a: 1 }));
+    await outbound.settle(); // immediate dispatch is deferred - drain it
     expect(captured).toBeDefined();
     const tampered = { jobName: 'demo.unknown', payload: { a: 1 } };
     await expect(dispatchJob(JSON.parse(JSON.stringify(tampered)))).rejects.toThrow(
@@ -218,7 +224,8 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     let dispatched = false;
     _resetForTests();
     configureJobsClock(() => NOW);
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    const adapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(adapter);
     configureScheduler(scheduler);
     configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
     defineJobHandler('demo.job', () => {
@@ -226,8 +233,9 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     });
 
     await enqueue('demo.job', { x: 1 });
+    await adapter.settle(); // delay 0 defers the dispatch - drain it
 
-    // delay 0 dispatches in-process immediately; nothing recorded as delayed,
+    // delay 0 takes the immediate in-process path; nothing recorded as delayed,
     // nothing handed to EventBridge.
     expect(dispatched).toBe(true);
     expect(scheduler.scheduled).toHaveLength(0);
@@ -271,7 +279,8 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     let dispatched = false;
     _resetForTests();
     configureJobsClock(() => NOW);
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    const adapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(adapter);
     configureScheduler(scheduler);
     configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
     defineJobHandler('demo.job', () => {
@@ -279,6 +288,7 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     });
 
     await enqueue('demo.job', { x: 1 }, { runAt: new Date(NOW - 5_000) });
+    await adapter.settle(); // floored-to-0 delay defers the dispatch - drain it
 
     expect(dispatched).toBe(true);
     expect(scheduler.scheduled).toHaveLength(0);
@@ -287,7 +297,8 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
   it('enqueueImmediate is enqueue with no runAt → immediate SQS path (delay 0)', async () => {
     let dispatched = false;
     _resetForTests();
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    const adapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(adapter);
     configureScheduler(scheduler);
     configureJobsLogger(createLogger({ level: 'info', destination: createLogCapture().stream }));
     defineJobHandler('demo.job', () => {
@@ -295,6 +306,7 @@ describe('jobs.enqueue: delay routing (SQS DelaySeconds vs EventBridge)', () => 
     });
 
     await enqueueImmediate('demo.job', { x: 1 });
+    await adapter.settle(); // enqueueImmediate defers the dispatch - drain it
 
     expect(dispatched).toBe(true);
     expect(scheduler.scheduled).toHaveLength(0);

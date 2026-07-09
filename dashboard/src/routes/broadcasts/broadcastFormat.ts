@@ -11,6 +11,7 @@ import type {
   BroadcastStatus,
 } from '../../api/index.js';
 import { presentDeliveryStatus, type DeliveryPresentation } from '../contact/deliveryStatus.js';
+import { contactDisplayName } from '../contact/format.js';
 
 /** The voucher-size chip choices (bedroomSize 0..4; "4+" means 4-or-more). */
 export interface VoucherSizeChoice {
@@ -103,15 +104,28 @@ export function splitContactKey(key: string): { contactId?: string; phone?: stri
 
 /** Flatten the results recipients map into renderable rows (stable order: the
  *  map's insertion order, which the backend builds from the resolved audience).
- *  Failed rows sort FIRST so the operator's disposition work is up top. */
+ *  Failed rows sort FIRST so the operator's disposition work is up top. The row
+ *  name is composed with contactDisplayName over the server-projected first/last
+ *  name (the SAME helper the composer's review rows use); the phone prefers the
+ *  server projection and falls back to the `phone#<E164>` key. A row with neither
+ *  a name nor a phone carries neither field (the view renders the "Tenant"
+ *  fallback). */
 export function toRecipientViews(
   recipients: Record<string, BroadcastRecipient>,
 ): BroadcastRecipientView[] {
   const rows: BroadcastRecipientView[] = Object.entries(recipients).map(([key, slot]) => {
-    const { contactId, phone } = splitContactKey(key);
+    const split = splitContactKey(key);
+    // Prefer the server-provided phone; fall back to the phone# key's number.
+    const phone = slot.phone ?? split.phone;
+    // Compose the name only when the server actually resolved one - an empty
+    // first+last must NOT collapse to contactDisplayName's phone/"Unknown"
+    // fallbacks (the row handles those itself, incl. the "Tenant" label).
+    const hasName = Boolean((slot.firstName ?? '').trim() || (slot.lastName ?? '').trim());
+    const name = hasName ? contactDisplayName(slot.firstName, slot.lastName, phone) : undefined;
     return {
       contactKey: key,
-      ...(contactId !== undefined && { contactId }),
+      ...(split.contactId !== undefined && { contactId: split.contactId }),
+      ...(name !== undefined && { name }),
       ...(phone !== undefined && { phone }),
       status: slot.status,
       ...(slot.errorCode !== undefined && { errorCode: slot.errorCode }),

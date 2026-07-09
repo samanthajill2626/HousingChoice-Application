@@ -384,6 +384,34 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     expect(calls[0]?.attachments).toEqual([{ s3Key: 'uploads/aaaa', contentType: 'image/png' }]);
   });
 
+  // F2: attachments exist but no MediaStore is available (degenerate no-
+  // MEDIA_BUCKET config). We must NEVER replay the stored (expired) presigned
+  // URLs - retry the body only rather than ship an expired token.
+  it('with media_attachments but NO mediaStore, drops media (never replays the stale presigned URLs)', async () => {
+    const STALE_URL = 'https://s3.local/uploads/bbbb?X-Amz-Signature=STALEEXPIRED&X-Amz-Expires=3600';
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      media_attachments: [{ s3Key: 'uploads/bbbb', contentType: 'image/png' }],
+      mediaUrls: [STALE_URL],
+    };
+    // No mediaStore passed - route's mediaStore is undefined (no MEDIA_BUCKET).
+    const { app, calls } = makeRetryApp(original);
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(calls).toHaveLength(1);
+    // The stale token is NOT shipped, and no media rides along.
+    expect(calls[0]?.mediaUrls).toBeUndefined();
+    expect(calls[0]?.attachments).toBeUndefined();
+    // The body still retries.
+    expect(calls[0]?.body).toBe('this failed');
+  });
+
   it('falls back to replaying raw mediaUrls when the original has NO media_attachments (e2e seam)', async () => {
     const original = {
       ...FAILED_ORIGINAL,

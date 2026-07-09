@@ -844,20 +844,35 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const originalAttachments = mediaAttachmentsOf(original);
     let retryMediaUrls: string[] | undefined;
     let retryAttachments: MediaAttachment[] | undefined;
-    if (originalAttachments.length > 0 && mediaStore) {
-      retryMediaUrls = await Promise.all(
-        originalAttachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
-      );
-      retryAttachments = originalAttachments;
-      log.info(
-        {
-          conversationId,
-          providerSid,
-          attachmentCount: originalAttachments.length,
-          s3Keys: originalAttachments.map((a) => a.s3Key),
-        },
-        'retry: re-presigned attachments fresh (never replaying stored URLs)',
-      );
+    if (originalAttachments.length > 0) {
+      if (mediaStore) {
+        retryMediaUrls = await Promise.all(
+          originalAttachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
+        );
+        retryAttachments = originalAttachments;
+        log.info(
+          {
+            conversationId,
+            providerSid,
+            attachmentCount: originalAttachments.length,
+            s3Keys: originalAttachments.map((a) => a.s3Key),
+          },
+          'retry: re-presigned attachments fresh (never replaying stored URLs)',
+        );
+      } else {
+        // Degenerate no-MEDIA_BUCKET config: NEVER replay the stored presigned
+        // URLs (an expired bearer token). Retry the text only rather than ship an
+        // expired token. Log IDs/keys/count, never a URL.
+        log.warn(
+          {
+            conversationId,
+            providerSid,
+            attachmentCount: originalAttachments.length,
+            s3Keys: originalAttachments.map((a) => a.s3Key),
+          },
+          'retry: attachments present but no MediaStore - retrying body only, media dropped (never replay stale URLs)',
+        );
+      }
     } else if (original.mediaUrls !== undefined) {
       retryMediaUrls = original.mediaUrls;
     }

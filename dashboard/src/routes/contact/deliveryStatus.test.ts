@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { presentDeliveryStatus, deliveryReason } from './deliveryStatus.js';
+import { presentDeliveryStatus, presentRelayDelivery, deliveryReason } from './deliveryStatus.js';
 
 describe('presentDeliveryStatus', () => {
   it('maps each delivery status to label / tone / isFailure', () => {
@@ -17,6 +17,50 @@ describe('presentDeliveryStatus', () => {
   it('treats "sent" as a non-failure waypoint (sent ≠ delivered)', () => {
     expect(presentDeliveryStatus('sent')?.isFailure).toBe(false);
     expect(presentDeliveryStatus('delivered')?.isFailure).toBe(false);
+  });
+});
+
+describe('presentRelayDelivery', () => {
+  it('counts up in neutral while legs are still in flight', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'sent' }]),
+    ).toEqual({ label: 'delivered 1/2', tone: 'neutral', isFailure: false });
+    expect(
+      presentRelayDelivery([{ status: 'queued' }, { status: 'queued' }]),
+    ).toEqual({ label: 'delivered 0/2', tone: 'neutral', isFailure: false });
+  });
+
+  it('finalizes GREEN — same "Delivered" cue as a 1:1 bubble — when every leg delivered', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'delivered' }]),
+    ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
+  });
+
+  it('turns danger and counts the failures when a leg hard-fails', () => {
+    expect(
+      presentRelayDelivery([{ status: 'delivered' }, { status: 'failed', errorCode: '30005' }]),
+    ).toEqual({ label: 'delivered 1/2 - 1 failed', tone: 'danger', isFailure: true });
+    // undelivered is a hard failure too; the still-in-flight leg keeps counting.
+    expect(
+      presentRelayDelivery([{ status: 'undelivered' }, { status: 'queued' }]),
+    ).toEqual({ label: 'delivered 0/2 - 1 failed', tone: 'danger', isFailure: true });
+  });
+
+  it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        { status: 'delivered' },
+        { status: 'failed', errorCode: 'contact_opted_out' },
+      ]),
+    ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
+  });
+
+  it('returns null when there is nothing to summarize (no legs, or everyone opted out)', () => {
+    expect(presentRelayDelivery([])).toBeNull();
+    expect(
+      presentRelayDelivery([{ status: 'failed', errorCode: 'contact_opted_out' }]),
+    ).toBeNull();
   });
 });
 

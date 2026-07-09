@@ -42,6 +42,46 @@ export function presentDeliveryStatus(
   return STATUS_PRESENTATION[status] ?? null;
 }
 
+/** The slice of a relay `delivery_recipients` slot the rollup presenter reads. */
+export interface RelayDeliverySlot {
+  status: DeliveryStatus;
+  errorCode?: string;
+}
+
+/**
+ * Present a relay SOURCE message's per-recipient rollup as one chip. The rules:
+ *   - in flight → neutral "delivered N/M" that counts up as DLRs land;
+ *   - every leg delivered → the SAME green "Delivered" cue as a 1:1 bubble
+ *     ("Delivered N/N") so a finalized group send is legible at a glance;
+ *   - any hard-failed leg (failed/undelivered) → danger, with the failure count.
+ * Opted-out members are EXCLUDED from the count: they were never sent to (the
+ * bubble's opt-out note explains them), and counting them would make N/M
+ * unreachable — the chip could never finalize. All-opted-out (or no slots) ⇒
+ * null: nothing was fanned out, so there is nothing to summarize.
+ */
+export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresentation | null {
+  const fanned = slots.filter(
+    (s) => !(s.status === 'failed' && s.errorCode === 'contact_opted_out'),
+  );
+  if (fanned.length === 0) return null;
+  const delivered = fanned.filter((s) => s.status === 'delivered').length;
+  const failed = fanned.filter(
+    (s) => s.status === 'failed' || s.status === 'undelivered',
+  ).length;
+  const total = fanned.length;
+  if (failed > 0) {
+    return {
+      label: `delivered ${delivered}/${total} - ${failed} failed`,
+      tone: 'danger',
+      isFailure: true,
+    };
+  }
+  if (delivered === total) {
+    return { label: `Delivered ${total}/${total}`, tone: 'success', isFailure: false };
+  }
+  return { label: `delivered ${delivered}/${total}`, tone: 'neutral', isFailure: false };
+}
+
 /**
  * Twilio error code → human-readable reason (the §7.1 classes the legacy covered).
  * Used when the timeline carries `error_code` on a failure; absent code ⇒ undefined

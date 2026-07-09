@@ -23,7 +23,8 @@ import { ApiError, uploadMedia } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
-import { deliveryReason, presentDeliveryStatus } from './deliveryStatus.js';
+import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
+import type { DeliveryTone } from './deliveryStatus.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
@@ -296,6 +297,15 @@ function MilestonePin({ ms }: { ms: TimelineMilestone }): React.JSX.Element {
   );
 }
 
+/** Delivery tone → chip color class — shared by the 1:1 status chip and the
+ *  relay rollup chip so "Delivered" is the same green everywhere. */
+const TONE_CLASS: Record<DeliveryTone, string | undefined> = {
+  neutral: styles.toneNeutral,
+  info: styles.toneInfo,
+  success: styles.toneSuccess,
+  danger: styles.toneDanger,
+};
+
 function MessageBubble({
   msg,
   onRetry,
@@ -336,29 +346,19 @@ function MessageBubble({
     (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
   ).length;
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
-  // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery as
-  // "delivered N/M" (N terminal-delivered of M fanned-out) from the SAME map the
+  // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery
+  // as ONE rollup chip (counting up while in flight, green "Delivered N/N" once
+  // every leg delivered, danger when a leg hard-fails) from the SAME map the
   // opted-out note reads. GUARDED to relay + outbound so a 1:1 bubble (no
   // delivery_recipients) is visually unchanged.
-  const relaySlots = msg.delivery_recipients ? Object.values(msg.delivery_recipients) : null;
   const deliveredSummary =
-    outbound && relaySlots !== null && relaySlots.length > 0
-      ? {
-          delivered: relaySlots.filter((r) => r.status === 'delivered').length,
-          total: relaySlots.length,
-        }
+    outbound && msg.delivery_recipients
+      ? presentRelayDelivery(Object.values(msg.delivery_recipients))
       : null;
   // Relay attribution: who authored this relayed message ("Team" or a member's
   // name). Undefined on a 1:1 bubble (no relay_sender_key) → no attribution line.
   const senderLabel = relaySenderLabel(msg.relay_sender_key, relayRoster);
-  const toneClass = delivery
-    ? ({
-        neutral: styles.toneNeutral,
-        info: styles.toneInfo,
-        success: styles.toneSuccess,
-        danger: styles.toneDanger,
-      }[delivery.tone] ?? '')
-    : '';
+  const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
 
   // The transport - number - time line is hidden by default; a click/tap on the
   // bubble reveals it (the grouped time labels give the at-a-glance time). Don't
@@ -437,8 +437,8 @@ function MessageBubble({
           </span>
         ) : null}
         {deliveredSummary !== null ? (
-          <span className={`${styles.status} ${styles.toneNeutral ?? ''}`}>
-            delivered {deliveredSummary.delivered}/{deliveredSummary.total}
+          <span className={`${styles.status} ${TONE_CLASS[deliveredSummary.tone] ?? ''}`}>
+            {deliveredSummary.label}
           </span>
         ) : null}
       </div>

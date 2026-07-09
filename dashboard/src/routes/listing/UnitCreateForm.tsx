@@ -58,6 +58,7 @@ export function UnitCreateForm({
   const [deposit, setDeposit] = useState('');
   const [utilities, setUtilities] = useState('');
   const [accessibility, setAccessibility] = useState('');
+  const [notes, setNotes] = useState('');
   const [pets, setPets] = useState('');
   const [programs, setPrograms] = useState('');
   const [listingLink, setListingLink] = useState('');
@@ -144,6 +145,7 @@ export function UnitCreateForm({
     addStr('jurisdiction', jurisdiction);
     addStr('utilities', utilities);
     addStr('accessibility', accessibility);
+    addStr('notes', notes);
     addStr('pets', pets);
     addStr('listing_link', listingLink);
     addStr('video_url', videoUrl);
@@ -371,12 +373,12 @@ export function UnitCreateForm({
         </div>
 
         <label className={styles.field}>
-          <span className={styles.label}>Utilities</span>
+          <span className={styles.label}>Tenant-paid utilities</span>
           <input
             className={styles.input}
             value={utilities}
             onChange={(e) => setUtilities(e.target.value)}
-            placeholder="e.g. Tenant-paid"
+            placeholder="e.g. Electric and gas"
             autoComplete="off"
           />
         </label>
@@ -389,6 +391,17 @@ export function UnitCreateForm({
             onChange={(e) => setAccessibility(e.target.value)}
             placeholder="e.g. Ground floor"
             autoComplete="off"
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Notes</span>
+          <textarea
+            className={styles.textarea}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. In-unit washer/dryer; no dishwasher"
+            rows={3}
           />
         </label>
 

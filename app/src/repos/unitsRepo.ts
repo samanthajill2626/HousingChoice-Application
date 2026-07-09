@@ -146,10 +146,20 @@ export interface UnitItem {
   final_rent?: number;
   /** Status-model (§8): the source of the current `status` write (provenance/precedence). */
   status_source?: TransitionSource;
-  /** Utilities arrangement — free-form (string). */
+  /**
+   * TENANT-PAID utilities — free-form (string), e.g. "Electric and gas". The
+   * semantics are "which utilities the tenant must pay" (human label
+   * "Tenant-paid utilities"); the storage key stays `utilities`.
+   */
   utilities?: string;
   /** Accessibility notes — free-form. */
   accessibility?: string;
+  /**
+   * Internal staff notes — free-form, the contact-`notes` counterpart (e.g.
+   * "In-unit washer/dryer", "No dishwasher"). NEVER on the flyer projections
+   * (unitFields.ts allowlists exclude it by construction).
+   */
+  notes?: string;
   /** Pets policy — free-form (string or boolean). */
   pets?: string | boolean;
   /** Property priority — free-form. */

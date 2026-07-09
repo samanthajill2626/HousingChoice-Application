@@ -120,6 +120,20 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   Properties"). Internal identifiers (the `broadcast` entity, routes, jobs) are
   unchanged — only the displayed name follows the audience rule.
 
+- **`utilities` = TENANT-PAID utilities** (2026-07-08). The unit's `utilities`
+  field records **which utilities the tenant must pay** (free-form, e.g.
+  "Electric and gas") — that is the fact the program cares about. Human labels:
+  staff/landlord surfaces say **"Tenant-paid utilities"**; the tenant-facing
+  flyer reveal row says **"Tenant pays"**. The storage key stays `utilities`
+  (no data migration; values written before the relabel may still read like an
+  arrangement, e.g. "Tenant-paid").
+
+- **Unit `notes`** — free-form INTERNAL staff notes on a property (the contact
+  `notes` counterpart): amenity/quirk facts that are neither utilities nor
+  accessibility, e.g. "In-unit washer/dryer", "No dishwasher". Never on the
+  public flyer projections (`unitFields.ts` allowlists exclude it by
+  construction).
+
 ---
 
 ## For the future AI layer

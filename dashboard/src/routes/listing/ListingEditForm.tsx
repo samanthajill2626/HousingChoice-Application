@@ -34,6 +34,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [deposit, setDeposit] = useState(numStr(unit.deposit));
   const [utilities, setUtilities] = useState(str(unit.utilities));
   const [accessibility, setAccessibility] = useState(str(unit.accessibility));
+  const [notes, setNotes] = useState(str(unit.notes));
   const [pets, setPets] = useState(
     typeof unit.pets === 'string'
       ? unit.pets
@@ -104,6 +105,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     // same_day_rta — a boolean toggle; send when it differs from the stored value.
     if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
     if (accessibility !== str(unit.accessibility)) patch['accessibility'] = accessibility;
+    if (notes !== str(unit.notes)) patch['notes'] = notes;
     if (listingLink !== str(unit.listing_link)) patch['listing_link'] = listingLink;
     if (tourProcess !== str(unit.tour_process)) patch['tour_process'] = tourProcess;
     if (applicationProcess !== str(unit.application_process)) {
@@ -343,12 +345,12 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
         </div>
 
         <label className={styles.field}>
-          <span className={styles.label}>Utilities</span>
+          <span className={styles.label}>Tenant-paid utilities</span>
           <input
             className={styles.input}
             value={utilities}
             onChange={(e) => setUtilities(e.target.value)}
-            placeholder="e.g. Tenant-paid"
+            placeholder="e.g. Electric and gas"
             autoComplete="off"
           />
         </label>
@@ -361,6 +363,17 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             onChange={(e) => setAccessibility(e.target.value)}
             placeholder="e.g. Ground floor"
             autoComplete="off"
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Notes</span>
+          <textarea
+            className={styles.textarea}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. In-unit washer/dryer; no dishwasher"
+            rows={3}
           />
         </label>
 

@@ -64,7 +64,7 @@ const READY: ListingState = {
     deposit: 1400,
     jurisdiction: 'Atlanta',
     area: 'West End',
-    utilities: 'Tenant-paid',
+    utilities: 'Electric and gas',
     accessibility: 'Ground floor',
     pets: 'Cats only',
     application_fee: 25,
@@ -146,9 +146,9 @@ describe('ListingDetail', () => {
     expect(screen.getByText((t) => t.includes('2 BR') && t.includes('1 BA') && t.includes('$1,400') && t.includes('1,600/mo'))).toBeInTheDocument();
     // Broadcast + Start placement moved into the ⋯ menu (asserted in its own test).
     // Edit is not a standalone HEADER button either — it's under the ⋯ menu — but it
-    // IS available inline on the Property details + Tour & application cards (two
-    // real, clickable CardAction buttons; the ⋯ menu's Edit is hidden until open).
-    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(2);
+    // IS available inline on the Property details + Notes + Tour & application cards
+    // (three real, clickable CardAction buttons; the ⋯ menu's Edit is hidden until open).
+    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(3);
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
 
@@ -163,14 +163,14 @@ describe('ListingDetail', () => {
 
     // The edit dialog is open with the current values prefilled.
     const dialog = screen.getByRole('dialog', { name: /Edit property/i });
-    const utilities = within(dialog).getByLabelText(/Utilities/i);
-    expect(utilities).toHaveValue('Tenant-paid');
+    const utilities = within(dialog).getByLabelText(/Tenant-paid utilities/i);
+    expect(utilities).toHaveValue('Electric and gas');
 
     await user.clear(utilities);
-    await user.type(utilities, 'Owner-paid');
+    await user.type(utilities, 'Gas only');
     await user.click(within(dialog).getByRole('button', { name: /^Save$/i }));
 
-    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Owner-paid' });
+    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' });
   });
 
   it('shows the public flyer link + copy for an available property', () => {
@@ -194,7 +194,10 @@ describe('ListingDetail', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByText('$1,550')).toBeInTheDocument(); // payment standard
-    expect(screen.getByText('Tenant-paid')).toBeInTheDocument();
+    // Utilities carry tenant-paid semantics: the label says WHO pays, the value
+    // lists WHICH utilities.
+    expect(screen.getByText('Tenant-paid utilities')).toBeInTheDocument();
+    expect(screen.getByText('Electric and gas')).toBeInTheDocument();
     expect(screen.getByText('Cats only')).toBeInTheDocument();
     // Flyer-detail fields now surface on the read view (staff see what's on the flyer).
     expect(screen.getByText('Application fee')).toBeInTheDocument();
@@ -210,6 +213,32 @@ describe('ListingDetail', () => {
     const list = screen.getByRole('list', { name: /Accepted vouchers/i });
     const items = within(list).getAllByRole('listitem').map((li) => li.textContent);
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
+  });
+
+  it('renders the Notes card: property notes when present, an empty state with "+ Add" otherwise', () => {
+    // No notes (the READY fixture) → empty state, and the action reads "+ Add".
+    useListing.mockReturnValue(READY);
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/listings/u1']}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('No notes yet.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit property notes' })).toHaveTextContent('+ Add');
+    unmount();
+
+    // With notes → the full text renders (author's line breaks preserved by
+    // NotesText) and the action reads "Edit".
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, notes: 'In-unit washer/dryer.\nNo dishwasher.' },
+    });
+    renderAt();
+    expect(screen.getByText(/In-unit washer\/dryer\./)).toBeInTheDocument();
+    expect(screen.queryByText('No notes yet.')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit property notes' })).toHaveTextContent('Edit');
   });
 
   it('omits the "Voucher size accepted" detail row when it is unset', () => {
@@ -347,7 +376,10 @@ describe('ListingDetail', () => {
     // The URL media renders an <img>; the bare S3 key renders a placeholder (no img src).
     const imgs = screen.getAllByRole('img');
     expect(imgs.some((i) => i.getAttribute('src') === 'https://example.com/photo-1.jpg')).toBe(true);
-    expect(screen.getByText(/Add/)).toBeInTheDocument();
+    // Two "+ Add" affordances exist now (Photos + the empty Notes card) — assert
+    // the photos one specifically.
+    const photos = screen.getByRole('heading', { name: 'Photos' }).closest('section');
+    expect(within(photos as HTMLElement).getByText(/Add/)).toBeInTheDocument();
   });
 
   it('the status pill calls setListingStatus and applies the returned unit (pill updates)', async () => {

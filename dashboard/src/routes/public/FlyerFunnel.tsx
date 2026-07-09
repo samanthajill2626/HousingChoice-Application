@@ -173,7 +173,8 @@ export function FlyerFunnel(): React.JSX.Element {
             )}
             {details.utilities !== null && (
               <div className={styles.detailRow}>
-                <dt className={styles.dt}>Utilities</dt>
+                {/* Standard listing phrasing: which utilities the TENANT pays. */}
+                <dt className={styles.dt}>Tenant pays</dt>
                 <dd className={styles.dd}>{details.utilities}</dd>
               </div>
             )}

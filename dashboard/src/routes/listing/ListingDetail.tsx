@@ -22,7 +22,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, CardAction, CollapsibleRows, EmptyRow, KV, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
@@ -299,7 +299,7 @@ export function ListingDetail(): React.JSX.Element {
               <KV k="Payment standard" v={formatMoney(unit.payment_standard) || '—'} />
               <KV k="Deposit" v={formatMoney(unit.deposit) || '—'} />
               <KV k="Jurisdiction" v={unit.jurisdiction ?? '—'} />
-              <KV k="Utilities" v={unit.utilities ?? '—'} />
+              <KV k="Tenant-paid utilities" v={unit.utilities ?? '—'} />
               <KV k="Accessibility" v={unit.accessibility ?? '—'} />
               <KV k="Pets" v={unit.pets ?? '—'} />
               <KV k="Application fee" v={formatMoney(unit.application_fee) || '—'} />
@@ -337,6 +337,27 @@ export function ListingDetail(): React.JSX.Element {
                 <EmptyRow>None recorded yet.</EmptyRow>
               )}
             </div>
+          </Card>
+
+          {/* Free-form property notes (the tenant "Preferences & notes" counterpart):
+              amenity/quirk facts that are neither utilities nor accessibility —
+              "in-unit washer/dryer", "no dishwasher". Internal only (never on the
+              public flyer). */}
+          <Card
+            title="Notes"
+            aside={
+              deleted ? undefined : (
+                <CardAction onClick={() => setEditing(true)} label="Edit property notes">
+                  {unit.notes ? 'Edit' : '+ Add'}
+                </CardAction>
+              )
+            }
+          >
+            {unit.notes ? (
+              <NotesText text={unit.notes} />
+            ) : (
+              <EmptyRow>No notes yet.</EmptyRow>
+            )}
           </Card>
 
           <Card

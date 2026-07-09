@@ -2,7 +2,11 @@
 //   - BookTourModal / RescheduleTourModal: a datetime-local, normalized to a full
 //     ISO instant (the navigator's timezone) before the parent PATCHes it. Book
 //     runs on a timeless 'requested' tour (sets scheduledAt + status scheduled);
-//     Reschedule runs on an already-timed tour (same PATCH shape).
+//     Reschedule runs on an already-timed tour (same PATCH shape). An odd time
+//     (past / >14 days out) stops the first submit with a confirmable warning
+//     and the button becomes "Book anyway"/"Reschedule anyway" — submitting
+//     again confirms; editing the time clears it (tourTime.ts, shared with
+//     ScheduleTourForm).
 //   - RecordOutcomeModal: the exit gate - a move-forward / not-a-fit radio choice.
 //     The parent PATCHes { outcome, moveForward } (and closes the tour on not-a-fit).
 //   - CancelTourModal: a confirm dialog - the parent PATCHes { status: canceled }.
@@ -15,6 +19,7 @@ import { useState } from 'react';
 import { type TourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
+import { tourTimeWarning } from './tourTime.js';
 import styles from './TourDetail.module.css';
 
 /** Normalize a zoneless datetime-local value to a full ISO instant. */
@@ -34,6 +39,7 @@ function DateTimeModal({
   formLabel,
   fieldLabel,
   confirmLabel,
+  anywayLabel,
   busyLabel,
   errorText,
   inputId,
@@ -44,6 +50,8 @@ function DateTimeModal({
   formLabel: string;
   fieldLabel: string;
   confirmLabel: string;
+  /** The confirm button's label while an odd-time warning is pending. */
+  anywayLabel: string;
   busyLabel: string;
   errorText: string;
   inputId: string;
@@ -51,11 +59,19 @@ function DateTimeModal({
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The pending confirmable time warning (past / >14 days out) — the first
+  // submit stops on it; submitting the same odd time again is the confirmation.
+  const [warning, setWarning] = useState<string | null>(null);
   const formId = `${inputId}-form`;
 
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (value === '' || busy) return;
+    const oddTime = tourTimeWarning(value);
+    if (oddTime !== null && oddTime !== warning) {
+      setWarning(oddTime);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -77,7 +93,7 @@ function DateTimeModal({
             Cancel
           </Button>
           <Button size="sm" type="submit" form={formId} disabled={value === '' || busy}>
-            {busy ? busyLabel : confirmLabel}
+            {busy ? busyLabel : warning !== null ? anywayLabel : confirmLabel}
           </Button>
         </>
       }
@@ -91,9 +107,18 @@ function DateTimeModal({
           className={styles.modalInput}
           type="datetime-local"
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            // Editing withdraws a pending warning — the next submit re-checks.
+            if (warning !== null) setWarning(null);
+          }}
           required
         />
+        {warning !== null ? (
+          <p role="alert" className={styles.modalWarn}>
+            {warning} Press “{anywayLabel}” to confirm, or pick a different time.
+          </p>
+        ) : null}
         {error !== null ? (
           <p role="alert" className={styles.modalError}>
             {error}
@@ -111,6 +136,7 @@ export function BookTourModal({ onClose, onConfirm }: DateModalProps): React.JSX
       formLabel="Book tour form"
       fieldLabel="Date and time"
       confirmLabel="Confirm booking"
+      anywayLabel="Book anyway"
       busyLabel="Booking..."
       errorText="Couldn't book the tour - please try again."
       inputId="tour-book-at"
@@ -127,6 +153,7 @@ export function RescheduleTourModal({ onClose, onConfirm }: DateModalProps): Rea
       formLabel="Reschedule tour form"
       fieldLabel="New date and time"
       confirmLabel="Confirm reschedule"
+      anywayLabel="Reschedule anyway"
       busyLabel="Rescheduling..."
       errorText="Couldn't reschedule the tour - please try again."
       inputId="tour-reschedule-at"

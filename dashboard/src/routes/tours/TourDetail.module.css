@@ -264,6 +264,13 @@
   font-size: var(--fs-sm);
 }
 
+/* A confirmable warning (odd tour time) — amber, not danger: the operator may
+ * legitimately proceed. */
+.modalWarn {
+  color: var(--c-warning);
+  font-size: var(--fs-sm);
+}
+
 .radioGroup {
   border: none;
   margin: 0;

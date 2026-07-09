@@ -17,8 +17,10 @@
 //
 // Tour-type is PREFILLED from the picked unit's `tour_process` free-text field
 // (best-effort keyword match; staff can override — a manual pick sticks until a
-// NEW unit is picked). The optional date, when non-empty, must be in the future:
-// a past instant shows an inline error and blocks submit.
+// NEW unit is picked). An odd-looking date (in the past, or more than 14 days
+// out — usually a typo, occasionally intended) shows a confirmable warning:
+// the first submit stops with the warning and the button becomes "Schedule
+// anyway"; submitting again confirms. Editing the date clears the warning.
 import { useEffect, useState } from 'react';
 import {
   createTour,
@@ -39,6 +41,7 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { tourTimeWarning } from './tourTime.js';
 import styles from './ScheduleTourForm.module.css';
 
 export interface ScheduleTourFormProps {
@@ -122,8 +125,10 @@ export function ScheduleTourForm({
   // re-derives; while set, a unit re-pick must NOT clobber the staff choice.
   const [tourTypeOverridden, setTourTypeOverridden] = useState(false);
 
-  // Inline validation error for a past datetime (empty stays valid).
-  const [dateError, setDateError] = useState<string | null>(null);
+  // The pending confirmable date warning (past / >14 days out). Non-null means
+  // the LAST submit stopped on it — the next submit with the same odd time is
+  // the confirmation and proceeds. Editing the date clears it.
+  const [dateWarning, setDateWarning] = useState<string | null>(null);
 
   // Submission state.
   const [busy, setBusy] = useState(false);
@@ -202,10 +207,10 @@ export function ScheduleTourForm({
     setTourTypeOverridden(true);
   }
 
-  // Clear any prior past-datetime error as the user edits; re-validate on submit.
+  // Editing the date withdraws a pending warning — the next submit re-checks.
   function handleScheduledAtChange(e: React.ChangeEvent<HTMLInputElement>): void {
     setScheduledAtLocal(e.target.value);
-    if (dateError !== null) setDateError(null);
+    if (dateWarning !== null) setDateWarning(null);
   }
 
   const canCreate = resolvedTenantId !== undefined && resolvedUnitId !== undefined && !busy;
@@ -214,14 +219,13 @@ export function ScheduleTourForm({
     e.preventDefault();
     if (resolvedTenantId === undefined || resolvedUnitId === undefined || busy) return;
 
-    // A non-empty date must be in the future — a past (or unparseable) instant
-    // shows an inline error and blocks submit. Empty stays valid (timeless).
-    if (scheduledAtLocal !== '') {
-      const ts = new Date(scheduledAtLocal).getTime();
-      if (Number.isNaN(ts) || ts <= Date.now()) {
-        setDateError("The date and time can't be in the past.");
-        return;
-      }
+    // An odd-looking time (past / >14 days out) stops the FIRST submit with a
+    // confirmable warning; the same submit repeated is the confirmation. Empty
+    // stays valid (timeless).
+    const warning = tourTimeWarning(scheduledAtLocal);
+    if (warning !== null && warning !== dateWarning) {
+      setDateWarning(warning);
+      return;
     }
 
     setBusy(true);
@@ -259,7 +263,7 @@ export function ScheduleTourForm({
             Cancel
           </Button>
           <Button variant="primary" size="sm" type="submit" form={FORM_ID} disabled={!canCreate}>
-            {busy ? 'Scheduling…' : 'Schedule'}
+            {busy ? 'Scheduling…' : dateWarning !== null ? 'Schedule anyway' : 'Schedule'}
           </Button>
         </>
       }
@@ -322,14 +326,14 @@ export function ScheduleTourForm({
             value={scheduledAtLocal}
             onChange={handleScheduledAtChange}
             aria-describedby="schedule-tour-at-hint"
-            aria-invalid={dateError !== null}
+            aria-invalid={dateWarning !== null}
           />
           <p id="schedule-tour-at-hint" className={styles.hint}>
             Leave empty to create the tour without a time — book it later.
           </p>
-          {dateError !== null ? (
-            <p role="alert" className={styles.error}>
-              {dateError}
+          {dateWarning !== null ? (
+            <p role="alert" className={styles.warn}>
+              {dateWarning} Press “Schedule anyway” to confirm, or pick a different time.
             </p>
           ) : null}
         </div>

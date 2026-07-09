@@ -219,9 +219,12 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
   }, [conversationId]);
 
   const canSend = !closed;
-  const onSend = (body: string): Promise<void> => {
-    const tempId = thread.addOptimistic(conversationId, body);
-    return sendMessage(conversationId, { body })
+  const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
+    const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
+    return sendMessage(conversationId, {
+      body,
+      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+    })
       .then((result) => thread.resolveOptimistic(tempId, result))
       .catch((err: unknown) => {
         thread.failOptimistic(tempId);
@@ -254,9 +257,12 @@ function ContactThread({
   replyToPhone?: string;
 }): React.JSX.Element {
   const thread = useRelayThread(conversationId);
-  const onSend = (body: string): Promise<void> => {
-    const tempId = thread.addOptimistic(conversationId, body);
-    return sendMessage(conversationId, { body })
+  const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
+    const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
+    return sendMessage(conversationId, {
+      body,
+      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+    })
       .then((result) => thread.resolveOptimistic(tempId, result))
       .catch((err: unknown) => {
         thread.failOptimistic(tempId);
@@ -291,9 +297,12 @@ function NewContactThread({
   replyToPhone?: string;
   onCreated: (conversationId: string) => void;
 }): React.JSX.Element {
-  const onSend = async (body: string): Promise<void> => {
+  const onSend = async (body: string, attachmentKeys?: string[]): Promise<void> => {
     const conversationId = await ensureContactConversation(contactId);
-    await sendMessage(conversationId, { body });
+    await sendMessage(conversationId, {
+      body,
+      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+    });
     onCreated(conversationId);
   };
   return (

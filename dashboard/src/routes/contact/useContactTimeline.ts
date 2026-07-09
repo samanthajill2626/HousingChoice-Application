@@ -41,7 +41,12 @@ interface TimelineData {
 export interface ContactTimelineState extends TimelineData {
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
-  addOptimistic: (conversationId: string, body: string, toPhone?: string) => string;
+  addOptimistic: (
+    conversationId: string,
+    body: string,
+    toPhone?: string,
+    attachmentKeys?: string[],
+  ) => string;
   /** POST succeeded: stamp the real tsMsgId + status so the SSE refetch reconciles
    *  the bubble by id (then it advances Sending… → Sent → Delivered on its own). */
   resolveOptimistic: (tempId: string, result: SendMessageResult) => void;
@@ -163,9 +168,20 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   const abortRef = useRef<AbortController | null>(null);
 
   const addOptimistic = useCallback(
-    (conversationId: string, body: string, toPhone?: string): string => {
+    (
+      conversationId: string,
+      body: string,
+      toPhone?: string,
+      attachmentKeys?: string[],
+    ): string => {
       tempIdRef.current += 1;
       const tempId = `optimistic:${tempIdRef.current}`;
+      // Optimistic MMS: carry placeholder media_attachments so the bubble shows
+      // an attachment count immediately. The temp tsMsgId has no provider sid, so
+      // MessageBubble renders the count chip (real thumbnails land on refetch).
+      // The stored contentType is a placeholder - it is not rendered while there
+      // is no servable sid.
+      const hasMedia = attachmentKeys !== undefined && attachmentKeys.length > 0;
       const item: TimelineMessage = {
         kind: 'message',
         id: tempId,
@@ -174,11 +190,17 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
         tsMsgId: tempId,
         direction: 'outbound',
         author: 'teammate',
-        type: 'sms',
+        type: hasMedia ? 'mms' : 'sms',
         body,
         // 'queued' renders as "Sending…" (deliveryStatus) — the in-progress state.
         delivery_status: 'queued',
         ...(toPhone !== undefined && { toPhone }),
+        ...(hasMedia && {
+          media_attachments: attachmentKeys.map((k) => ({
+            s3Key: k,
+            contentType: 'application/octet-stream',
+          })),
+        }),
       };
       setPending((p) => [...p, { tempId, item }]);
       return tempId;

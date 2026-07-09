@@ -22,7 +22,7 @@ import { registerBroadcastSendJobHandler } from '../src/jobs/broadcastFanOut.js'
 import { loadConfig, DEV_SESSION_SECRET_DEFAULT } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import { MAX_BROADCAST_RECIPIENTS } from '../src/repos/broadcastsRepo.js';
+import { MAX_BROADCAST_RECIPIENTS, type BroadcastStats } from '../src/repos/broadcastsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -326,6 +326,43 @@ describe('share-broadcast API (M1.8a)', () => {
     const evt = world.emitted.find((e) => e.event === 'broadcast.updated');
     expect(evt).toBeDefined();
     expect((evt!.payload as { stats: { delivered: number } }).stats.delivered).toBe(1);
+  });
+
+  it('S4: a delivered callback decrements persisted sent and emits DERIVED disjoint stats', async () => {
+    seedTenant(world, { contactId: 'c-1', firstName: 'Ann', phone: '+15550100001' });
+    seedUnit(world);
+    const { app } = makeWebhookHarness({ world });
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'Hi [TenantName]', audience_filter: { contact_type: 'tenant' } });
+    const id = create.body.broadcastId;
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    await queueAdapter.settle();
+    // After the send, the recipient is 'sent' (persisted sent=1).
+    expect(world.broadcasts.get(id)!.stats.sent).toBe(1);
+
+    const sid = world.messages.find((m) => m.broadcast_id === id)!.provider_sid;
+    world.emitted.length = 0;
+    await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageSid: sid, MessageStatus: 'delivered' }));
+
+    const bcast = world.broadcasts.get(id)!;
+    // Persisted-counter hygiene: delivered decrements sent (mirrors the failed
+    // case), so the persisted counters match the disjoint model on new rows.
+    expect(bcast.stats.sent).toBe(0);
+    expect(bcast.stats.delivered).toBe(1);
+    // The emit carries DERIVED disjoint stats (sum to the audience of 1).
+    const evt = world.emitted.find((e) => e.event === 'broadcast.updated')!;
+    const stats = (evt.payload as { stats: BroadcastStats }).stats;
+    expect(stats).toMatchObject({ audience: 1, delivered: 1, sent: 0, queued: 0 });
+    expect(
+      stats.queued + stats.sent + stats.delivered + stats.failed + stats.skipped_opted_out + stats.skipped_no_consent,
+    ).toBe(stats.audience);
   });
 
   it('failed callback for a broadcast message rolls failed++ (forward-only)', async () => {

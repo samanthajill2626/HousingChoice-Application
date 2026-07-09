@@ -363,6 +363,12 @@ describe('seed matrix: broadcasts', () => {
     const draftBroadcasts = allBroadcasts.filter((b) => b['status'] === 'draft');
     expect(draftBroadcasts.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('every broadcast stamps _listPartition (byCreated GSI membership — un-stamped rows vanish from the dashboard list)', () => {
+    for (const b of allBroadcasts) {
+      expect(b['_listPartition'], `broadcast ${String(b['broadcastId'])}`).toBe('broadcasts');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,12 @@
 // filter snapshot, the per-recipient delivery map, and rolled-up stats the
 // results view reads.
 //
-// Items stay FLEXIBLE documents — only the key (broadcastId) and the two GSI
-// key attributes (status, created_by + created_at) are contractual
-// (lib/tables.ts). Everything else (body_template, audience_filter snapshot,
-// recipients map, stats) is a free-form attribute, so schema churn needs no
-// migration — exactly the §5 posture.
+// Items stay FLEXIBLE documents — only the key (broadcastId) and the GSI key
+// attributes (_listPartition + created_at for the team-wide byCreated list;
+// unitId for the sparse byUnit lookup) are contractual (lib/tables.ts).
+// Everything else (body_template, audience_filter snapshot, recipients map,
+// stats) is a free-form attribute, so schema churn needs no migration —
+// exactly the §5 posture.
 //
 // ITEM SIZE: the `recipients` map lives ON the item. A DynamoDB item is capped
 // at 400KB, so this only holds a BOUNDED audience — the Phase-1 filtered tenant
@@ -33,8 +34,16 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-/** Broadcast lifecycle status (byStatus GSI hash). */
+/** Broadcast lifecycle status (the byCreated GSI's FilterExpression key). */
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
+
+/**
+ * The byCreated GSI's constant partition value (the tours `_schedPartition`
+ * convention): every broadcast stamps `_listPartition = LIST_PARTITION` so the
+ * team-wide list is ONE newest-first query. Rows created before this attribute
+ * existed need the backfill script or they drop out of the list views.
+ */
+export const LIST_PARTITION = 'broadcasts';
 
 /**
  * Hard cap on a broadcast's recipient count.
@@ -100,11 +109,16 @@ export interface BroadcastRecipient {
 
 export interface BroadcastItem {
   broadcastId: string;
-  /** byCreatedAt GSI hash: the acting user's userId. */
+  /** The acting user's userId (audit/attribution; no longer an index key). */
   created_by: string;
-  /** byCreatedAt GSI range (ISO 8601). */
+  /** byCreated GSI range (ISO 8601). */
   created_at: string;
-  /** byStatus GSI hash. */
+  /**
+   * byCreated GSI hash — the constant LIST_PARTITION, stamped by create().
+   * Optional in the type because rows written before the byCreated migration
+   * lack it until backfilled.
+   */
+  _listPartition?: typeof LIST_PARTITION;
   status: BroadcastStatus;
   /** The unit whose flyer + merge fields this broadcast shares (optional draft). */
   unitId?: string;
@@ -165,10 +179,16 @@ export interface BroadcastsRepo {
   /** Create a DRAFT broadcast (generates broadcastId); returns the stored item. */
   create(input: CreateBroadcastInput): Promise<BroadcastItem>;
   getById(broadcastId: string): Promise<BroadcastItem | undefined>;
-  /** List by lifecycle status via the byStatus GSI. */
+  /** ALL broadcasts (team-wide), newest-first, via the byCreated GSI. */
+  list(opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
+  /**
+   * Team-wide broadcasts in one lifecycle status, newest-first: the byCreated
+   * GSI + a FilterExpression on status. DynamoDB applies Limit BEFORE the
+   * filter, so a page can return fewer than `limit` items (even zero) while
+   * still carrying a lastEvaluatedKey — callers page until the cursor is gone,
+   * never until a short page.
+   */
   listByStatus(status: BroadcastStatus, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
-  /** List a creator's broadcasts newest-first via the byCreatedAt GSI. */
-  listByCreatedBy(createdBy: string, opts?: ListBroadcastsOpts): Promise<BroadcastsPage>;
   /**
    * List the broadcasts targeting a unit via the sparse byUnit GSI (only
    * broadcasts WITH a unitId index here). One page per call; the route's
@@ -246,21 +266,30 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
     return Item as BroadcastItem | undefined;
   }
 
-  /** Shared GSI query (one partition, optional pagination). */
+  /** Shared GSI query (one partition, optional status filter + pagination). */
   async function queryIndex(
     indexName: string,
     keyName: string,
     keyValue: string,
     opts: ListBroadcastsOpts,
     scanIndexForward = true,
+    statusFilter?: BroadcastStatus,
   ): Promise<BroadcastsPage> {
     // `status` is a DynamoDB reserved word → expression-aliased.
     const input: QueryCommandInput = {
       TableName: table,
       IndexName: indexName,
       KeyConditionExpression: '#k = :v',
-      ExpressionAttributeNames: { '#k': keyName },
-      ExpressionAttributeValues: { ':v': keyValue },
+      ExpressionAttributeNames: {
+        '#k': keyName,
+        ...(statusFilter !== undefined && { '#s': 'status' }),
+      },
+      ExpressionAttributeValues: {
+        ':v': keyValue,
+        ...(statusFilter !== undefined && { ':s': statusFilter }),
+      },
+      // Limit applies BEFORE the filter (see listByStatus's contract note).
+      ...(statusFilter !== undefined && { FilterExpression: '#s = :s' }),
       ScanIndexForward: scanIndexForward,
       ...(opts.limit !== undefined && { Limit: opts.limit }),
       ...(opts.exclusiveStartKey !== undefined && {
@@ -314,6 +343,7 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         broadcastId: input.broadcastId ?? `bcast-${randomUUID()}`,
         created_by: input.created_by,
         created_at: now,
+        _listPartition: LIST_PARTITION, // byCreated GSI membership
         status: 'draft',
         audience_filter: input.audience_filter,
         body_template: input.body_template,
@@ -334,13 +364,14 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
       return item;
     },
 
-    async listByStatus(status, opts = {}) {
-      return queryIndex('byStatus', 'status', status, opts);
+    async list(opts = {}) {
+      // Newest-first: byCreated sorts on created_at; descending.
+      return queryIndex('byCreated', '_listPartition', LIST_PARTITION, opts, false);
     },
 
-    async listByCreatedBy(createdBy, opts = {}) {
-      // Newest-first: byCreatedAt sorts on created_at; descending.
-      return queryIndex('byCreatedAt', 'created_by', createdBy, opts, false);
+    async listByStatus(status, opts = {}) {
+      // Same partition, post-Query status filter (see the interface's paging note).
+      return queryIndex('byCreated', '_listPartition', LIST_PARTITION, opts, false, status);
     },
 
     async listByUnit(unitId, opts = {}) {

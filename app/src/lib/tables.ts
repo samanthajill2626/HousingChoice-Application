@@ -286,14 +286,21 @@ export const TABLES: readonly TableSpec[] = [
     baseName: 'broadcasts',
     hashKey: { name: 'broadcastId', type: 'S' },
     gsis: [
-      // List by lifecycle state (draft/sending/sent/failed) — the results
-      // dashboard's "in-flight / recent broadcasts" view.
-      { indexName: 'byStatus', hashKey: { name: 'status', type: 'S' } },
-      // List a creator's broadcasts newest-first: partition by created_by,
-      // sort on created_at (ISO 8601).
+      // The TEAM-WIDE broadcasts list, newest-first: constant partition (every
+      // item stamps `_listPartition = 'broadcasts'`, the tours `_schedPartition`
+      // convention) + created_at range. ONE query serves the dashboard's All tab
+      // (no filter) AND the four status tabs (FilterExpression on status) — a
+      // per-status hash could never produce the All tab without a 4-way merge.
+      // Replaced byStatus (hash status, unsorted) + byCreatedAt (hash created_by
+      // — it silently scoped the All tab to the acting user, 2026-07-08 bug).
+      // Single-partition is a non-issue at broadcast volume (a few/day, small
+      // items); the upgrade path if that ever changes is date-bucketed hashes.
+      // MIGRATION: pre-existing rows need `_listPartition` backfilled
+      // (scripts/backfill-broadcast-list-partition.ts) or they drop out of the
+      // list views (they stay readable by id / byUnit).
       {
-        indexName: 'byCreatedAt',
-        hashKey: { name: 'created_by', type: 'S' },
+        indexName: 'byCreated',
+        hashKey: { name: '_listPartition', type: 'S' },
         rangeKey: { name: 'created_at', type: 'S' },
       },
       // Prior-recipients lookup (Broadcasts dashboard): partition by unitId so a

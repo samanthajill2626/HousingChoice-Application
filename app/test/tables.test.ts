@@ -61,17 +61,19 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus (status), byCreatedAt (created_by + created_at), byUnit (unitId, sparse); no stream/TTL', () => {
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byCreated (_listPartition + created_at, the team-wide list), byUnit (unitId, sparse); no stream/TTL', () => {
     const t = spec('broadcasts');
     expect(t.hashKey.name).toBe('broadcastId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byStatus', 'byCreatedAt', 'byUnit']);
-    const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
-    expect(byStatus?.hashKey.name).toBe('status');
-    expect(byStatus?.rangeKey).toBeUndefined();
-    const byCreatedAt = t.gsis.find((g) => g.indexName === 'byCreatedAt');
-    expect(byCreatedAt?.hashKey.name).toBe('created_by');
-    expect(byCreatedAt?.rangeKey?.name).toBe('created_at');
+    expect(gsiNames(t)).toEqual(['byCreated', 'byUnit']);
+    // byCreated: constant partition (every item stamps _listPartition =
+    // 'broadcasts') + created_at sort — ONE query serves the All tab and the
+    // status tabs (FilterExpression). Replaced byStatus (unsorted) + byCreatedAt
+    // (per-creator — it scoped the All tab to the acting user, 2026-07-08 bug).
+    const byCreated = t.gsis.find((g) => g.indexName === 'byCreated');
+    expect(byCreated?.hashKey.name).toBe('_listPartition');
+    expect(byCreated?.rangeKey?.name).toBe('created_at');
+    expect(byCreated?.sparse).toBeUndefined(); // NOT sparse — every item stamps it
     // Broadcasts dashboard: the prior-recipients lookup — partition by unitId,
     // sparse (only broadcasts WITH a unitId index here).
     const byUnit = t.gsis.find((g) => g.indexName === 'byUnit');

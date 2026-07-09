@@ -81,6 +81,21 @@ Both are in the regenerated `tables.auto.tfvars.json` files. **Online** operatio
 
 In the regenerated `tables.auto.tfvars.json` files. **Online** operation — no recreate, **no data migration required**: the write path stamps `relay_status` on create/close/reopen, so new + touched relay groups populate the index automatically. Existing open relay groups predating the GSI lack `relay_status` until re-stamped, but **dev is reseeded** (`db:seed` stamps `relay_group#open` on the seeded open relays) and **prod relay-group volume is ~none**, so no backfill is needed. Post-merge on **dev**: `npm run plan -- dev` (review the `byRelayStatus` add) → `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover).
 
+**Broadcasts team-wide list schema — NOT YET APPLIED to dev (as of 2026-07-08, on `main`). Apply to DEV with the next dev deploy; PROD rides the M1.11 cutover.**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| Team-wide list index | `broadcasts` (existing) | **GSI add** — `byCreated` (fixed hash `_listPartition` = `'broadcasts'` + range `created_at`) | ONE newest-first query serves the dashboard's All tab AND its status tabs (FilterExpression) |
+| Old list indexes retired | `broadcasts` (existing) | **GSI drop ×2** — `byStatus` (unsorted) + `byCreatedAt` (per-creator) | `byCreatedAt` silently scoped the All tab to the acting user, so All showed a SUBSET of its own status tabs (2026-07-08 bug); `byStatus` returned arbitrary order |
+
+In the regenerated `tables.auto.tfvars.json` files. **Online** operations, but this one HAS a small **backfill**: rows created before the migration lack `_listPartition`, and un-stamped rows are invisible to the dashboard's Broadcasts list (all tabs) — they stay readable by id and via `byUnit`. On **dev**, in order:
+
+1. `npm run plan -- dev` (review: `byCreated` add + `byStatus`/`byCreatedAt` drops — DynamoDB takes one GSI change per UpdateTable, so the provider applies them sequentially; if the apply errors mid-sequence, re-run plan+apply to converge) → `npm run apply -- dev`.
+2. Backfill (idempotent; `--dry-run` first to see counts): `npx tsx app/scripts/backfill-broadcast-list-partition.ts --dry-run` then without the flag, with the dev env/profile active (it resolves the table via `TABLE_PREFIX`).
+3. Deploy the app image built from this `main`. NOTE: between the apply (drops the old GSIs) and the deploy, the currently-running dev app's `GET /api/broadcasts` errors — do the two together. Prod has no such window (empty table, apply+deploy both ride M1.11; the backfill is then a no-op but harmless to run).
+
+Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add → backfill 4 rows → re-run skipped 4 → GSI drops → dashboard verified team-wide). **Local stacks:** a persisted DynamoDB Local table predating this change lacks `byCreated` (`db:create` never retrofits GSIs — docs/issues/e2e-lane-tables-stale-schema.md) and the Broadcasts list 500s; either redo the dev-stack sequence above by hand (as rehearsed) or just delete the stale `hc-local-…-broadcasts` table and reboot the stack (recreate + reseed). Mind the lane-key trap: e2e lane tables are namespaced by ACCESS KEY (no `-sharedDb`), so aws-cli must use the lane's `accessKeyId=hclane<L>` (printed at boot) or the table is invisible — this cost two red e2e runs on 2026-07-08.
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

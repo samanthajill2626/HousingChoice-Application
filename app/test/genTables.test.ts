@@ -58,17 +58,15 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     });
   });
 
-  it('broadcasts (M1.8a): PK broadcastId; GSIs byStatus + byCreatedAt + byUnit; no stream/TTL', () => {
+  it('broadcasts (M1.8a): PK broadcastId; GSIs byCreated (team-wide list) + byUnit; no stream/TTL', () => {
     expect(tables['broadcasts']).toEqual({
       hash_key: { name: 'broadcastId', type: 'S' },
       gsis: [
         {
-          index_name: 'byStatus',
-          hash_key: { name: 'status', type: 'S' },
-        },
-        {
-          index_name: 'byCreatedAt',
-          hash_key: { name: 'created_by', type: 'S' },
+          // The team-wide list feed: constant partition + created_at sort.
+          // Replaced byStatus + byCreatedAt (2026-07-08) — see tables.ts.
+          index_name: 'byCreated',
+          hash_key: { name: '_listPartition', type: 'S' },
           range_key: { name: 'created_at', type: 'S' },
         },
         {

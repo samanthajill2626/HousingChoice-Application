@@ -79,6 +79,7 @@ import {
   type BroadcastItem,
   type BroadcastsRepo,
   type BroadcastStats,
+  LIST_PARTITION,
   zeroStats,
 } from '../../src/repos/broadcastsRepo.js';
 import {
@@ -1387,17 +1388,22 @@ export function createFakeWorld(): FakeWorld {
     const last = window[window.length - 1];
     return {
       items,
-      // The GSI ExclusiveStartKey (byCreatedAt): base key + GSI keys — a small
+      // The GSI ExclusiveStartKey (byCreated): base key + GSI keys — a small
       // flat scalar object the route's decodeCursor accepts (1..3 string attrs).
       ...(hasMore && last !== undefined && {
         lastEvaluatedKey: {
           broadcastId: last.broadcastId,
-          created_by: last.created_by,
+          _listPartition: LIST_PARTITION,
           created_at: last.created_at,
         } as Record<string, unknown>,
       }),
     };
   };
+  /** byCreated GSI order: every stamped item, newest-first. */
+  const broadcastsNewestFirst = (): BroadcastItem[] =>
+    [...broadcasts.values()]
+      .filter((b) => b._listPartition === LIST_PARTITION) // index membership
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   const broadcastsRepo: BroadcastsRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -1407,6 +1413,7 @@ export function createFakeWorld(): FakeWorld {
         broadcastId: input.broadcastId ?? `bcast-${++broadcastCounter}`,
         created_by: input.created_by,
         created_at: now,
+        _listPartition: LIST_PARTITION,
         status: 'draft',
         audience_filter: input.audience_filter,
         body_template: input.body_template,
@@ -1423,15 +1430,14 @@ export function createFakeWorld(): FakeWorld {
       const b = broadcasts.get(broadcastId);
       return b ? { ...b } : undefined;
     },
-    async listByStatus(status, opts = {}) {
-      const all = [...broadcasts.values()].filter((b) => b.status === status);
-      return pageBroadcasts(all, opts);
+    async list(opts = {}) {
+      return pageBroadcasts(broadcastsNewestFirst(), opts);
     },
-    async listByCreatedBy(createdBy, opts = {}) {
-      const all = [...broadcasts.values()]
-        .filter((b) => b.created_by === createdBy)
-        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-      return pageBroadcasts(all, opts);
+    async listByStatus(status, opts = {}) {
+      // Approximation: the real repo filters WITHIN each Limit-ed page (short
+      // pages possible); the fake filters first, then pages. Same item set and
+      // order — only the page boundaries differ, which no test depends on.
+      return pageBroadcasts(broadcastsNewestFirst().filter((b) => b.status === status), opts);
     },
     async markSending(broadcastId, recipients) {
       const b = broadcasts.get(broadcastId);

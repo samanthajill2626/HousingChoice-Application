@@ -404,3 +404,152 @@ describe('relay body/intro composition (M1.7)', () => {
     }
   });
 });
+
+// Outbound MMS: relay media BOTH directions (design Sec 7). The fan-out reads
+// the source message's media_attachments, presigns each s3Key PER LEG at
+// leg-send time, and forwards the media to the other members. A media-only
+// source uses the relay.media_only catalog body.
+describe('relay.fanOut media (outbound MMS)', () => {
+  let world: FakeWorld;
+  let outbound: InProcessOutboundQueueAdapter;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ level: 'info', destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      // The real MediaStore fake: presign returns a UNIQUE URL per call deriving
+      // from the s3Key, so per-leg freshness is assertable.
+      mediaStore: world.mediaStore,
+      logger,
+    });
+    outbound = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(outbound);
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  /** Seed a source message carrying media_attachments (as the mirror/hub would). */
+  function seedMediaSource(
+    body: string,
+    senderKey: string,
+    media: { s3Key: string; contentType: string }[],
+  ): MessageItem {
+    const providerTs = new Date().toISOString();
+    const tsMsgId = buildTsMsgId(providerTs, 'SMrelay-mms-1');
+    const item: MessageItem = {
+      conversationId: 'conv-relay-1',
+      tsMsgId,
+      type: 'mms',
+      direction: 'inbound',
+      author: 'unknown',
+      ...(body.length > 0 && { body }),
+      provider_sid: 'SMrelay-mms-1',
+      provider_ts: providerTs,
+      delivery_status: 'delivered',
+      created_at: providerTs,
+      relay_sender_key: senderKey,
+      media_attachments: media,
+    };
+    world.messages.push(item);
+    return item;
+  }
+
+  it('team MMS-with-text: every leg carries presigned media + the "Name: body" prefix', async () => {
+    seedRelay(world);
+    const source = seedMediaSource('here is the flyer', TEAM_SENDER_KEY, [
+      { s3Key: 'uploads/flyer-key', contentType: 'application/pdf' },
+    ]);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: TEAM_SENDER_KEY,
+      senderNameOverride: TEAM_SENDER_LABEL,
+    });
+
+    // A TEAM message has no member sender, so ALL 3 members get the media + body.
+    expect(world.sent).toHaveLength(3);
+    for (const s of world.sent) {
+      expect(s.body).toBe(`${TEAM_SENDER_LABEL}: here is the flyer`);
+      expect(s.mediaUrls).toHaveLength(1);
+      expect(s.mediaUrls?.[0]).toContain('uploads/flyer-key'); // derived from the s3Key
+      expect(s.mediaUrls?.[0]).toContain('X-Amz-Signature'); // presigned bearer URL
+    }
+  });
+
+  it('media-only source: legs use the relay.media_only catalog body and carry the media', async () => {
+    seedRelay(world);
+    const source = seedMediaSource('', 'c-alice', [
+      { s3Key: 'media/conv-relay-1/SMrelay-mms-1/0', contentType: 'image/png' },
+    ]);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    // Body comes from the catalog entry with {name} = the sender's name.
+    const expectedBody = resolveMessage('relay.media_only', { name: 'Alice' });
+    expect(world.sent).toHaveLength(2);
+    for (const s of world.sent) {
+      expect(s.body).toBe(expectedBody);
+      expect(s.mediaUrls?.[0]).toContain('media/conv-relay-1/SMrelay-mms-1/0');
+      expect(s.mediaUrls?.[0]).toContain('X-Amz-Signature');
+    }
+  });
+
+  it('member inbound MMS: presigns the mirrored keys and forwards them to the OTHER members', async () => {
+    seedRelay(world);
+    // Alice (a member) sent a photo; the webhook mirrored it to a media/ key.
+    const source = seedMediaSource('look at this', 'c-alice', [
+      { s3Key: 'media/conv-relay-1/SMrelay-mms-1/0', contentType: 'image/jpeg' },
+    ]);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    // Bob + Carol (never Alice) receive the forwarded media.
+    const recipients = world.sent.map((s) => s.to).sort();
+    expect(recipients).toEqual([BOB, CAROL].sort());
+    expect(world.sent.some((s) => s.to === ALICE)).toBe(false);
+    for (const s of world.sent) {
+      expect(s.body).toBe('Alice: look at this');
+      expect(s.mediaUrls?.[0]).toContain('media/conv-relay-1/SMrelay-mms-1/0');
+    }
+  });
+
+  it('presigns PER LEG: each recipient gets a FRESH URL (never a single batched presign)', async () => {
+    seedRelay(world);
+    const source = seedMediaSource('', 'c-alice', [
+      { s3Key: 'uploads/shared-key', contentType: 'image/png' },
+    ]);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+
+    expect(world.sent).toHaveLength(2);
+    const url0 = world.sent[0]?.mediaUrls?.[0];
+    const url1 = world.sent[1]?.mediaUrls?.[0];
+    // Both derive from the same durable key...
+    expect(url0).toContain('uploads/shared-key');
+    expect(url1).toContain('uploads/shared-key');
+    // ...but are DISTINCT presigns (per-leg, not one batched URL reused).
+    expect(url0).not.toBe(url1);
+  });
+});

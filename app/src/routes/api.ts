@@ -14,7 +14,12 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
-import { isInlineMediaType } from '../lib/mediaTypes.js';
+import { isInlineMediaType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
+import {
+  OUTBOUND_MMS_MAX_MEDIA,
+  OUTBOUND_MMS_MAX_TOTAL_BYTES,
+  UPLOAD_KEY_PATTERN,
+} from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
@@ -41,6 +46,7 @@ import {
   createMessagesRepo,
   mediaAttachmentsOf,
   relayMemberKey,
+  type MediaAttachment,
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
@@ -81,6 +87,7 @@ import { createPlacementsRouter } from './placements.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
+import { createMediaUploadsRouter } from './mediaUploads.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -328,6 +335,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
       ...(deps.pushService !== undefined && { pushService: deps.pushService }),
+    }),
+  );
+  // Outbound MMS uploads (POST /api/media/uploads) - streams one file into the
+  // private media bucket at uploads/<uuid>; the send route later presigns it.
+  router.use(
+    '/media',
+    createMediaUploadsRouter({
+      config,
+      logger: deps.logger,
+      ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
   // Founder settings (GET requireAuth, PUT requireRole admin).
@@ -628,7 +645,55 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }),
   );
 
-  // POST /api/conversations/:conversationId/messages  { body?, mediaUrls? }
+  // Outbound MMS presign TTL (design Sec 4): 1 hour. A generous margin over
+  // Twilio's fetch-at-processing window, still short-lived exposure. Presigned
+  // per attempt (send / each relay leg / retry) and NEVER persisted as truth.
+  const PRESIGN_TTL_SECONDS = 3600;
+
+  /**
+   * Validate client-supplied `attachmentKeys` (outbound MMS, design Sec 4) and
+   * resolve them to durable {s3Key, contentType} attachments. Each key must be
+   * one our OWN upload endpoint minted (UPLOAD_KEY_PATTERN - the client can
+   * never point us at an arbitrary bucket key); at most OUTBOUND_MMS_MAX_MEDIA;
+   * each HeadObject'd (missing -> unknown_attachment) with its stored type
+   * re-checked against the inline allowlist and sizes summed under the carrier
+   * total cap. Returns the attachments on success, or a {status, error} the
+   * caller maps straight to the HTTP response. Presigning is the caller's job
+   * (per-attempt): 1:1 presigns now; relay presigns per leg in the fan-out.
+   */
+  async function resolveAttachmentKeys(
+    keys: string[],
+  ): Promise<{ ok: true; attachments: MediaAttachment[] } | { ok: false; status: number; error: string }> {
+    if (keys.length > OUTBOUND_MMS_MAX_MEDIA) {
+      return { ok: false, status: 400, error: 'too_many_attachments' };
+    }
+    if (!keys.every((k) => UPLOAD_KEY_PATTERN.test(k))) {
+      return { ok: false, status: 400, error: 'invalid_attachment_key' };
+    }
+    if (!mediaStore) {
+      return { ok: false, status: 503, error: 'media_storage_unavailable' };
+    }
+    const attachments: MediaAttachment[] = [];
+    let totalBytes = 0;
+    for (const s3Key of keys) {
+      const meta = await mediaStore.head(s3Key);
+      if (!meta) {
+        return { ok: false, status: 400, error: 'unknown_attachment' };
+      }
+      const contentType = normalizeStoredMediaType(meta.contentType);
+      if (!isInlineMediaType(contentType)) {
+        return { ok: false, status: 400, error: 'unsupported_attachment_type' };
+      }
+      totalBytes += meta.size ?? 0;
+      attachments.push({ s3Key, contentType });
+    }
+    if (totalBytes > OUTBOUND_MMS_MAX_TOTAL_BYTES) {
+      return { ok: false, status: 400, error: 'attachments_too_large' };
+    }
+    return { ok: true, attachments };
+  }
+
+  // POST /api/conversations/:conversationId/messages  { body?, mediaUrls?, attachmentKeys? }
   // A manual human send (automated sends come from jobs, not this route).
   //
   // FIX 2: a relay_group thread is NOT a 1:1 send — the 1:1 wrapper would text
@@ -651,34 +716,75 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // narrow req.params from the path literal — coerce like voiceApi.ts does.
     const conversationId = String(req.params['conversationId'] ?? '');
     mergeContext({ conversationId });
-    const payload = (req.body ?? {}) as { body?: unknown; mediaUrls?: unknown };
+    const payload = (req.body ?? {}) as { body?: unknown; mediaUrls?: unknown; attachmentKeys?: unknown };
 
     const body = typeof payload.body === 'string' && payload.body.length > 0 ? payload.body : undefined;
+    // Legacy raw mediaUrls: the INTERNAL/e2e seam (the dashboard never uses it).
+    // Kept so raw provider-URL sends and the retry-raw fallback still work.
     const mediaUrls =
       Array.isArray(payload.mediaUrls) &&
       payload.mediaUrls.length > 0 &&
       payload.mediaUrls.every((u): u is string => typeof u === 'string')
         ? payload.mediaUrls
         : undefined;
-    if (body === undefined && mediaUrls === undefined) {
-      res.status(400).json({ error: 'body (non-empty string) or mediaUrls (string[]) is required' });
+    // Outbound MMS (design Sec 4): the dashboard uploads via /api/media/uploads
+    // then sends the returned keys here. Reject a non-string-array outright.
+    const attachmentKeys =
+      Array.isArray(payload.attachmentKeys) &&
+      payload.attachmentKeys.length > 0 &&
+      payload.attachmentKeys.every((k): k is string => typeof k === 'string')
+        ? payload.attachmentKeys
+        : undefined;
+    if (body === undefined && mediaUrls === undefined && attachmentKeys === undefined) {
+      res.status(400).json({ error: 'body, attachmentKeys, or mediaUrls is required' });
       return;
+    }
+
+    // Validate + resolve uploaded attachments to durable {s3Key, contentType}
+    // (HeadObject each, type re-check, total-size cap). Presign happens per
+    // attempt below (1:1 now; relay per leg in the fan-out).
+    let attachments: MediaAttachment[] | undefined;
+    if (attachmentKeys !== undefined) {
+      const resolved = await resolveAttachmentKeys(attachmentKeys);
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ error: resolved.error });
+        return;
+      }
+      attachments = resolved.attachments;
     }
 
     // Relay branch: fetch the conversation to decide. A miss falls through to
     // the 1:1 path (sendMessage throws ConversationNotFoundError → 404), so the
-    // existing behavior for unknown ids is unchanged.
+    // existing behavior for unknown ids is unchanged. Relay carries the DURABLE
+    // attachments onto the hub message; the fan-out re-presigns per leg (never
+    // the presigned URLs here - they would expire before a long roster/retry).
     const conversation = await conversations.getById(conversationId);
     if (conversation?.type === 'relay_group') {
-      await sendRelayTeamMessage(req, res, conversation, body, mediaUrls);
+      await sendRelayTeamMessage(req, res, conversation, body, mediaUrls, attachments);
       return;
+    }
+
+    // 1:1: presign each durable key FRESH (per-attempt rule) into the adapter
+    // mediaUrls; merge any legacy raw mediaUrls behind them. Presigned URLs are
+    // bearer tokens - never logged here (s3Key/count only).
+    let outboundMediaUrls = mediaUrls;
+    if (attachments !== undefined && mediaStore) {
+      const presigned = await Promise.all(
+        attachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
+      );
+      outboundMediaUrls = [...presigned, ...(mediaUrls ?? [])];
+      log.info(
+        { conversationId, attachmentCount: attachments.length, s3Keys: attachments.map((a) => a.s3Key) },
+        'outbound send: presigned attachments',
+      );
     }
 
     try {
       const outcome = await sendMessage({
         conversationId,
         ...(body !== undefined && { body }),
-        ...(mediaUrls !== undefined && { mediaUrls }),
+        ...(outboundMediaUrls !== undefined && { mediaUrls: outboundMediaUrls }),
+        ...(attachments !== undefined && { attachments }),
         automated: false,
       });
       res.status(201).json(outcome);
@@ -727,11 +833,56 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
 
+    // PRESIGN PER ATTEMPT (design Sec 5 - the Cameron rule): a retry is a NEW
+    // provider create + fetch. Presigned URLs are short-lived bearer tokens, so
+    // replaying the original's stored mediaUrls verbatim would hand Twilio an
+    // EXPIRED token 24h later. When the original carries media_attachments (the
+    // durable s3Keys), re-presign each FRESH and send those (the new message
+    // persists these fresh URLs + media_attachments via sendMessage). Only a
+    // message with NO media_attachments (the raw e2e/internal seam) falls back
+    // to replaying its raw mediaUrls.
+    const originalAttachments = mediaAttachmentsOf(original);
+    let retryMediaUrls: string[] | undefined;
+    let retryAttachments: MediaAttachment[] | undefined;
+    if (originalAttachments.length > 0) {
+      if (mediaStore) {
+        retryMediaUrls = await Promise.all(
+          originalAttachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
+        );
+        retryAttachments = originalAttachments;
+        log.info(
+          {
+            conversationId,
+            providerSid,
+            attachmentCount: originalAttachments.length,
+            s3Keys: originalAttachments.map((a) => a.s3Key),
+          },
+          'retry: re-presigned attachments fresh (never replaying stored URLs)',
+        );
+      } else {
+        // Degenerate no-MEDIA_BUCKET config: NEVER replay the stored presigned
+        // URLs (an expired bearer token). Retry the text only rather than ship an
+        // expired token. Log IDs/keys/count, never a URL.
+        log.warn(
+          {
+            conversationId,
+            providerSid,
+            attachmentCount: originalAttachments.length,
+            s3Keys: originalAttachments.map((a) => a.s3Key),
+          },
+          'retry: attachments present but no MediaStore - retrying body only, media dropped (never replay stale URLs)',
+        );
+      }
+    } else if (original.mediaUrls !== undefined) {
+      retryMediaUrls = original.mediaUrls;
+    }
+
     try {
       const outcome = await sendMessage({
         conversationId,
         ...(original.body !== undefined && { body: original.body }),
-        ...(original.mediaUrls !== undefined && { mediaUrls: original.mediaUrls }),
+        ...(retryMediaUrls !== undefined && { mediaUrls: retryMediaUrls }),
+        ...(retryAttachments !== undefined && { attachments: retryAttachments }),
         automated: false,
         // Carry the original author through (a retried AI message stays 'ai').
         author: original.author === 'ai' ? 'ai' : 'teammate',
@@ -762,6 +913,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     conversation: ConversationItem,
     bodyText: string | undefined,
     mediaUrlList: string[] | undefined,
+    attachments: MediaAttachment[] | undefined,
   ): Promise<void> {
     const conversationId = conversation.conversationId;
     if (conversation.status !== 'open') {
@@ -799,7 +951,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationId,
       providerSid,
       providerTs,
-      type: mediaUrlList !== undefined && mediaUrlList.length > 0 ? 'mms' : 'sms',
+      type:
+        (mediaUrlList !== undefined && mediaUrlList.length > 0) ||
+        (attachments !== undefined && attachments.length > 0)
+          ? 'mms'
+          : 'sms',
       direction: 'outbound',
       author: 'teammate',
       deliveryStatus: 'queued',
@@ -807,6 +963,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       deliveryRecipients,
       ...(bodyText !== undefined && { body: bodyText }),
       ...(mediaUrlList !== undefined && { mediaUrls: mediaUrlList }),
+      // Persist the DURABLE attachment keys on the hub message so relay.fanOut
+      // can re-presign PER LEG (design Sec 7) - the presigned URLs are never
+      // stored here (they would expire before a paced fan-out / retry).
+      ...(attachments !== undefined && attachments.length > 0 && { mediaAttachments: attachments }),
     });
 
     // Fan out to ALL members FROM the pool number. TEAM_SENDER_KEY matches no

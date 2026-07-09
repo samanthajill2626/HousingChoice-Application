@@ -5,8 +5,9 @@
 // guideline 1): @aws-sdk/lib-storage's Upload consumes the Readable in
 // bounded parts — no whole-body buffering, ever.
 import { Readable } from 'node:stream';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /** A streamed object read back from the media bucket (M1.9c recording serving). */
@@ -14,6 +15,12 @@ export interface MediaObject {
   body: Readable;
   contentType?: string;
   contentLength?: number;
+}
+
+/** Metadata for a stored object (outbound MMS: HeadObject before presigning). */
+export interface MediaHead {
+  contentType?: string;
+  size?: number;
 }
 
 export interface MediaStore {
@@ -28,6 +35,22 @@ export interface MediaStore {
    * already granted on MEDIA_BUCKET (the ec2 IAM role) — no new infra.
    */
   getStream(key: string): Promise<MediaObject | undefined>;
+  /**
+   * A time-limited, unauthenticated GET URL for `key` (outbound MMS: Twilio
+   * fetches the media over the public internet). Presigned URLs are BEARER
+   * TOKENS: never log them, never persist them as the source of truth. Signed
+   * with the store's OWN client so endpoint/forcePathStyle/creds/region are
+   * inherited (MinIO path-style parity). PRESIGN PER ATTEMPT (design Sec 4):
+   * every send/relay/retry re-presigns fresh from the durable s3Key.
+   */
+  presign(key: string, ttlSeconds: number): Promise<string>;
+  /**
+   * HeadObject metadata for `key` (outbound MMS send-route validation: confirm
+   * an uploaded attachment exists, and re-check its size + Content-Type before
+   * presigning). Returns undefined when the key does not exist (404), mirroring
+   * getStream's absent-object contract.
+   */
+  head(key: string): Promise<MediaHead | undefined>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -46,7 +69,16 @@ export class S3MediaStore implements MediaStore {
         ...(contentType !== undefined && { ContentType: contentType }),
       },
     });
-    await upload.done();
+    try {
+      await upload.done();
+    } catch (err) {
+      // Belt-and-suspenders: a destroyed/errored body stream (e.g. the upload
+      // route aborting an over-size file) rejects done(); explicitly abort the
+      // multipart upload too so no orphan partial object is ever committed.
+      // Best-effort - swallow abort failures and rethrow the ORIGINAL error.
+      await upload.abort().catch(() => {});
+      throw err;
+    }
   }
 
   async getStream(key: string): Promise<MediaObject | undefined> {
@@ -70,6 +102,41 @@ export class S3MediaStore implements MediaStore {
         err !== null &&
         ((err as { name?: string }).name === 'NoSuchKey' ||
           (err as { name?: string }).name === 'NotFound' ||
+          (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404)
+      ) {
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  async presign(key: string, ttlSeconds: number): Promise<string> {
+    // Reuse this.client (design/spike rule): a fresh client could reintroduce
+    // the MinIO virtual-host/region mismatch. Sign `host` only (the SDK
+    // default) so a plain fetch/GET with no extra headers verifies cleanly.
+    return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), {
+      expiresIn: ttlSeconds,
+    });
+  }
+
+  async head(key: string): Promise<MediaHead | undefined> {
+    try {
+      const out = await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return {
+        ...(out.ContentType !== undefined && { contentType: out.ContentType }),
+        ...(out.ContentLength !== undefined && { size: out.ContentLength }),
+      };
+    } catch (err) {
+      // Absent object -> undefined (caller answers 400 unknown_attachment). A
+      // HeadObject on a missing key throws NotFound (404); anything else
+      // (auth/network) is a real error and re-thrown.
+      if (
+        typeof err === 'object' &&
+        err !== null &&
+        ((err as { name?: string }).name === 'NotFound' ||
+          (err as { name?: string }).name === 'NoSuchKey' ||
           (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404)
       ) {
         return undefined;

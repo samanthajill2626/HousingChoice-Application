@@ -586,11 +586,128 @@ a.pill:focus-visible {
   outline-offset: 1px;
 }
 
+/* Outbound MMS attachment chips: a wrapping row between the textarea and the
+ * footer. Each chip shows a thumbnail (or a type tag), the filename, a status /
+ * size line, and a remove control. */
+.chips {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+  padding: 2px var(--sp-1) 2px 2px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.chipError {
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+}
+
+.chipThumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  flex: none;
+}
+
+.chipIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  font-size: 9px;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-subtle);
+  flex: none;
+}
+
+.chipName {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipMeta {
+  color: var(--c-text-subtle);
+  white-space: nowrap;
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.chipRemove:hover {
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+
+.chipRemove:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 .replyFoot {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   margin-top: var(--sp-1);
+}
+
+/* Attach control: a quiet outlined button that opens the (visually hidden) file
+ * input. Sits at the left of the composer footer. */
+.attachBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: transparent;
+  color: var(--c-text-muted);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.attachBtn:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.attachBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
 }
 
 .replyTarget {

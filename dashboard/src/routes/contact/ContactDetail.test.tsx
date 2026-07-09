@@ -686,3 +686,47 @@ describe('ContactDetail', () => {
     });
   });
 });
+
+// Wrong-recipient guard (outbound MMS review finding, 2026-07-09): the
+// /contacts/:contactId route re-renders the SAME ContactDetail instance on a
+// contact-to-contact param change (no remount), so the composer's LOCAL state
+// (the text draft AND the uploaded attachment chips) would leak into the next
+// contact's composer - a Send would deliver contact A's media to contact B.
+// The fix keys the Timeline by contactId; this pins the remount.
+describe('composer isolation across contact-to-contact navigation', () => {
+  it('clears the composer draft (and with it attachment chips) when the route param changes', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const { Link } = await import('react-router-dom');
+    const user = userEvent.setup();
+    getContact.mockImplementation((id: unknown) =>
+      id === 'z99' ? Promise.resolve(OTHER) : Promise.resolve(TENANT),
+    );
+    render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <Routes>
+          <Route
+            path="/contacts/:contactId"
+            element={
+              <>
+                <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                <ContactDetail />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Tasha Williams');
+    const box = screen.getByRole('textbox', { name: 'Reply message' });
+    await user.type(box, 'private note meant only for Tasha');
+    expect(box).toHaveValue('private note meant only for Tasha');
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+
+    // The keyed remount cleared the composer-local state; contact A's draft
+    // (and any attachment chips, which ride the same local state) can never be
+    // sent into contact B's conversation.
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+  });
+});

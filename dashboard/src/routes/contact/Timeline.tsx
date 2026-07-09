@@ -19,7 +19,7 @@ import type {
   TimelineMilestoneType,
   TimelineScheduled,
 } from '../../api/index.js';
-import { ApiError } from '../../api/index.js';
+import { ApiError, uploadMedia } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
@@ -58,6 +58,79 @@ function sendFailureMessage(err: unknown): string {
   return "Couldn't send — please try again.";
 }
 
+// Outbound MMS composer limits - MIRROR the server caps (spec Sec 9) so a file
+// that would be rejected server-side never uploads. The server re-validates.
+const MMS_MAX_MEDIA = 10;
+const MMS_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MMS_MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+const MMS_ALLOWED_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+];
+// The accept string offered to the file picker. Listing the image types keeps a
+// mobile browser's camera option available while still allowing a PDF.
+const MMS_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp,application/pdf';
+
+/** One composer-local attachment. Chip state is component-local (see the keyed-
+ *  remount note on TimelineProps.resetScrollKey) so it can never leak across
+ *  conversations/channels. `key` is the server-minted uploads/<uuid> once the
+ *  upload succeeds; only 'done' chips contribute to a send. */
+interface ComposerAttachment {
+  /** Stable local id: React key + the handle upload results reconcile against. */
+  localId: string;
+  name: string;
+  size: number;
+  contentType: string;
+  status: 'uploading' | 'done' | 'error';
+  /** The uploads/<uuid> key, present once the upload succeeds. */
+  key?: string;
+  /** Inline error when the upload fails (retry by re-picking the file). */
+  error?: string;
+  /** Object URL for an image thumbnail; revoked on remove / send / unmount. */
+  previewUrl?: string;
+}
+
+/** A short, human size label for a chip. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+/** Client-side pre-check for a picked file against the current chip set. Returns
+ *  a clear reason string when the file must be rejected, else null. Mirrors the
+ *  server allowlist + caps so a rejected file is never uploaded. */
+function attachmentReject(file: File, existing: ComposerAttachment[]): string | null {
+  if (!MMS_ALLOWED_TYPES.includes(file.type)) {
+    return `${file.name}: unsupported file type. Attach a JPEG, PNG, GIF, WEBP, or PDF.`;
+  }
+  if (file.size > MMS_MAX_FILE_BYTES) {
+    return `${file.name} is too large (max 5 MB per file).`;
+  }
+  if (existing.length >= MMS_MAX_MEDIA) {
+    return `You can attach at most ${MMS_MAX_MEDIA} files.`;
+  }
+  const total = existing.reduce((n, a) => n + a.size, 0) + file.size;
+  if (total > MMS_MAX_TOTAL_BYTES) {
+    return 'Attachments exceed the 5 MB total limit. Remove one and try again.';
+  }
+  return null;
+}
+
+/** An upload failure -> a short, human chip message. */
+function uploadFailureMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 413) return 'Too large (max 5 MB).';
+    if (err.status === 415) return 'Unsupported file type.';
+    if (err.code === 'rate_limited') return 'Uploading too fast - wait a moment.';
+  }
+  return 'Upload failed - remove and try again.';
+}
+
 export type TimelineStatus = 'loading' | 'ready' | 'error';
 
 export interface TimelineProps {
@@ -84,9 +157,12 @@ export interface TimelineProps {
   /** Whether a single conversation is resolvable to actually send into. When
    *  false the Send button is disabled with an explanatory tooltip. */
   canSend: boolean;
-  /** Called with the textarea body when the operator sends. Returns a promise so
-   *  the reply box can show an in-flight state and restore the draft on failure. */
-  onSend?: (body: string) => Promise<void>;
+  /** Called with the textarea body (and any successfully-uploaded attachment
+   *  keys) when the operator sends. Returns a promise so the reply box can show an
+   *  in-flight state and restore the draft + chips on failure. `attachmentKeys` is
+   *  passed only when at least one attachment uploaded (a text-only send calls
+   *  onSend(body) exactly as before). */
+  onSend?: (body: string, attachmentKeys?: string[]) => Promise<void>;
   /** Retry a failed outbound message — resends its body to its own conversation.
    *  May return the send promise: a rejection (e.g. 429 rate_limited — the retry
    *  shares the manual-send budget) is surfaced in the composer's error slot. */
@@ -469,15 +545,124 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Outbound MMS attachments. Component-local state (like `draft`) so the tour
+  // page's keyed remount (channels keyed by conversationId) gives each channel a
+  // FRESH chip set - attachments can never leak across tabs. Do NOT hoist above
+  // the keyed boundary. (spec Sec 6.)
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachSeqRef = useRef(0);
+  // Mirror attachments in a ref so the unmount cleanup revokes the CURRENT set of
+  // image object URLs (a bare [] effect closes over the initial empty array).
+  const attachmentsRef = useRef<ComposerAttachment[]>(attachments);
+  attachmentsRef.current = attachments;
+  useEffect(
+    () => () => {
+      for (const a of attachmentsRef.current) {
+        if (a.previewUrl !== undefined) URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    [],
+  );
 
-  // A deferred send (post-consent retry) landed: clear the draft the 409 refusal
-  // restored, matching a normal successful send. Guarded so the initial 0 is inert.
+  // A deferred send (post-consent retry) landed: clear the draft + chips the 409
+  // refusal restored, matching a normal successful send. Guarded so the initial 0
+  // is inert.
   useEffect(() => {
     if (clearDraftSignal) {
       setDraft('');
       setSendError(null);
+      for (const a of attachmentsRef.current) {
+        if (a.previewUrl !== undefined) URL.revokeObjectURL(a.previewUrl);
+      }
+      setAttachments([]);
+      setAttachError(null);
     }
   }, [clearDraftSignal]);
+
+  // Upload ONE picked file, reconciling its chip by localId as it completes.
+  const uploadOne = async (localId: string, file: File): Promise<void> => {
+    try {
+      const result = await uploadMedia(file);
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.localId === localId
+            ? {
+                ...a,
+                status: 'done',
+                key: result.key,
+                contentType: result.contentType,
+                size: result.size,
+              }
+            : a,
+        ),
+      );
+    } catch (err) {
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.localId === localId ? { ...a, status: 'error', error: uploadFailureMessage(err) } : a,
+        ),
+      );
+    }
+  };
+
+  // File pick: validate each file against the running set, add a chip, and start
+  // its upload immediately. A rejected file surfaces a reason and is NOT uploaded.
+  const onPickFiles = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const files = Array.from(e.target.files ?? []);
+    // Reset the input so re-picking the SAME file (a retry after remove) re-fires.
+    e.target.value = '';
+    if (files.length === 0) return;
+    const combined = [...attachments];
+    const accepted: { entry: ComposerAttachment; file: File }[] = [];
+    let reject: string | null = null;
+    for (const file of files) {
+      const why = attachmentReject(file, combined);
+      if (why !== null) {
+        reject = why;
+        continue;
+      }
+      const localId = `att:${(attachSeqRef.current += 1)}`;
+      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+      const entry: ComposerAttachment = {
+        localId,
+        name: file.name,
+        size: file.size,
+        contentType: file.type,
+        status: 'uploading',
+        ...(previewUrl !== undefined && { previewUrl }),
+      };
+      combined.push(entry);
+      accepted.push({ entry, file });
+    }
+    setAttachError(reject);
+    if (accepted.length > 0) {
+      setAttachments((prev) => [...prev, ...accepted.map((a) => a.entry)]);
+      for (const a of accepted) void uploadOne(a.entry.localId, a.file);
+    }
+  };
+
+  const removeAttachment = (localId: string): void => {
+    setAttachments((prev) => {
+      const target = prev.find((a) => a.localId === localId);
+      if (target?.previewUrl !== undefined) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((a) => a.localId !== localId);
+    });
+    setAttachError(null);
+  };
+
+  // Keys ready to send (uploads that finished); an in-flight upload blocks Send so
+  // a still-uploading attachment is never silently dropped from the message.
+  const uploadedKeys = attachments
+    .filter((a) => a.status === 'done' && a.key !== undefined)
+    .map((a) => a.key as string);
+  const hasUploading = attachments.some((a) => a.status === 'uploading');
+  // An errored chip is neither 'done' (so it's excluded from uploadedKeys) nor
+  // 'uploading' (so hasUploading doesn't block) - without this guard a send with
+  // a good chip + a failed chip would go out SILENTLY dropping the failed file.
+  // Block Send while any chip is errored and prompt the operator to remove it.
+  const hasErrored = attachments.some((a) => a.status === 'error');
   // The reply box starts one line and grows to fit the draft (up to its CSS
   // max-height); a manual drag-resize overrides that until the draft clears.
   const replyRef = useAutoGrowTextarea(draft);
@@ -609,24 +794,38 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const handleSend = async (): Promise<void> => {
     const original = draft;
     const text = draft.trim();
-    if (!text || !canSend || sending) return;
+    const keys = uploadedKeys;
+    // A send needs body OR at least one uploaded attachment; block while an upload
+    // is still in flight (so its key isn't lost).
+    if ((!text && keys.length === 0) || !canSend || sending || hasUploading || hasErrored) return;
     setSending(true);
     setSendError(null);
     // Optimistic: onSend shows the bubble ("Sending…") immediately, so clear the
-    // draft NOW rather than waiting on the POST — the operator sees their message
-    // land instantly instead of an ambiguous "did it go?" gap.
+    // draft + chips NOW rather than waiting on the POST - the operator sees their
+    // message land instantly instead of an ambiguous "did it go?" gap.
+    const sentAttachments = attachments;
     setDraft('');
+    setAttachments([]);
+    setAttachError(null);
     // The operator just sent — pin to the bottom so their own message is in view
     // even if they'd scrolled up while composing.
     atBottomRef.current = true;
     try {
-      await onSend?.(text);
+      // Pass attachmentKeys only when present, so a text-only send stays a plain
+      // onSend(body) call (unchanged contract for the no-attachment path).
+      if (keys.length > 0) await onSend?.(text, keys);
+      else await onSend?.(text);
+      // Success: release the sent chips' image object URLs.
+      for (const a of sentAttachments) {
+        if (a.previewUrl !== undefined) URL.revokeObjectURL(a.previewUrl);
+      }
     } catch (err) {
       // POST failed (Do-Not-Contact opt-out, paused thread, …): the optimistic
-      // bubble was removed upstream — surface the reason and restore the draft so
-      // the operator doesn't lose their message.
+      // bubble was removed upstream - surface the reason and restore the draft +
+      // chips so the operator doesn't lose their message OR their attachments.
       setSendError(sendFailureMessage(err));
       setDraft(original);
+      setAttachments(sentAttachments);
     } finally {
       setSending(false);
     }
@@ -753,12 +952,78 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKeyDown}
         />
+        {attachments.length > 0 ? (
+          <ul className={styles.chips} aria-label="Attachments">
+            {attachments.map((a) => (
+              <li
+                key={a.localId}
+                className={`${styles.chip} ${a.status === 'error' ? styles.chipError ?? '' : ''}`}
+                aria-busy={a.status === 'uploading'}
+              >
+                {a.previewUrl !== undefined ? (
+                  <img className={styles.chipThumb} src={a.previewUrl} alt="" />
+                ) : (
+                  <span className={styles.chipIcon} aria-hidden="true">
+                    {a.contentType === 'application/pdf' ? 'PDF' : 'FILE'}
+                  </span>
+                )}
+                <span className={styles.chipName}>{a.name}</span>
+                <span className={styles.chipMeta}>
+                  {a.status === 'uploading'
+                    ? 'Uploading...'
+                    : a.status === 'error'
+                      ? a.error ?? 'Upload failed'
+                      : formatBytes(a.size)}
+                </span>
+                <button
+                  type="button"
+                  className={styles.chipRemove}
+                  onClick={() => removeAttachment(a.localId)}
+                  aria-label={`Remove ${a.name}`}
+                >
+                  <span aria-hidden="true">x</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {hasErrored ? (
+          <p className={styles.error} role="alert">
+            An attachment failed to upload. Remove it to send.
+          </p>
+        ) : null}
+        {attachError ? (
+          <p className={styles.error} role="alert">
+            {attachError}
+          </p>
+        ) : null}
         {sendError ? (
           <p className={styles.error} role="alert">
             {sendError}
           </p>
         ) : null}
         <div className={styles.replyFoot}>
+          <label className={styles.srOnly} htmlFor="mms-attach-input">
+            Attach files
+          </label>
+          <input
+            ref={fileInputRef}
+            id="mms-attach-input"
+            className={styles.srOnly}
+            type="file"
+            multiple
+            accept={MMS_ACCEPT}
+            aria-label="Attach files"
+            onChange={onPickFiles}
+          />
+          <button
+            type="button"
+            className={styles.attachBtn}
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach a file"
+          >
+            <span aria-hidden="true">+</span> Attach
+          </button>
           <span className={styles.replyTarget}>
             {relayRoster !== undefined ? (
               // A relay GROUP: a reply fans out to every member, so naming a
@@ -779,8 +1044,20 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             type="button"
             className={styles.sendBtn}
             onClick={() => void handleSend()}
-            disabled={!canSend || draft.trim().length === 0 || sending}
-            title={canSend ? undefined : 'No single conversation to send into yet'}
+            disabled={
+              !canSend ||
+              sending ||
+              hasUploading ||
+              hasErrored ||
+              (draft.trim().length === 0 && uploadedKeys.length === 0)
+            }
+            title={
+              canSend
+                ? hasErrored
+                  ? 'Remove the failed attachment to send'
+                  : undefined
+                : 'No single conversation to send into yet'
+            }
           >
             {sending ? 'Sending…' : 'Send'}
           </button>

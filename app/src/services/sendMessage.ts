@@ -31,6 +31,7 @@ import {
 import {
   createMessagesRepo,
   type DeliveryStatus,
+  type MediaAttachment,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import { isKillSwitchOff, isManualMode, isOptedOut } from './scheduledSendSuppression.js';
@@ -135,6 +136,15 @@ export interface SendMessageInput {
   body?: string;
   mediaUrls?: string[];
   /**
+   * Outbound MMS attachments (design Sec 4): the durable {s3Key, contentType}
+   * pairs for this send. The ROUTE presigns each s3Key fresh (TTL 1h) and passes
+   * the presigned GET URLs in `mediaUrls` (for the adapter/Twilio fetch) AND
+   * these attachments here (for persistence). Persisted as media_attachments so
+   * sent media renders through the authed serve endpoint. Absent on text-only /
+   * legacy raw-mediaUrls sends.
+   */
+  attachments?: MediaAttachment[];
+  /**
    * True for machine-initiated sends (reminders, AI in Phase 2) — these are
    * what the circuit breaker meters and what manual mode refuses. M1.1's
    * dashboard route sends are human (false): always allowed, never counted.
@@ -203,7 +213,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
   const events = deps.events ?? appEvents;
 
   return async function sendMessage(input) {
-    const { conversationId, body, mediaUrls, automated = false, author = 'teammate', from, broadcastId, retryOf } = input;
+    const { conversationId, body, mediaUrls, attachments, automated = false, author = 'teammate', from, broadcastId, retryOf } = input;
     mergeContext({ conversationId });
 
     const conversation = await conversations.getById(conversationId);
@@ -298,7 +308,16 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       direction: 'outbound',
       author,
       ...(body !== undefined && { body }),
+      // The persisted mediaUrls are the PRESIGNED provider-fetch URLs: a
+      // historical record of exactly what was sent. They are EXPECTED to expire
+      // (1h TTL) and are NEVER reused - a resend/retry re-presigns FRESH from
+      // media_attachments (the durable truth). Presigned URLs are bearer tokens:
+      // never logged (see the send log line below - s3Key/count only).
       ...(mediaUrls !== undefined && { mediaUrls }),
+      // Outbound MMS gap #3: persist the durable attachment keys so sent media
+      // renders through the authed serve endpoint + timeline (same pipeline the
+      // inbound mirror feeds). Absent on text-only / legacy raw-mediaUrls sends.
+      ...(attachments !== undefined && attachments.length > 0 && { mediaAttachments: attachments }),
       deliveryStatus: result.status,
       // M1.8a: stamp the broadcast id so the delivery-callback rollup can find
       // this recipient's broadcast slot by the SID alone (additive — absent on

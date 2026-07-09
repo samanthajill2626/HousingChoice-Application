@@ -256,6 +256,42 @@ describe('sendMessage service', () => {
     expect(f.appended[0]).toMatchObject({ type: 'mms', mediaUrls: ['https://m/1'] });
   });
 
+  it('outbound MMS: persists media_attachments (durable s3Keys) alongside the presigned mediaUrls', async () => {
+    const f = makeFakes();
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'here is the flyer',
+      mediaUrls: ['https://s3.local/uploads/abc?X-Amz-Signature=deadbeef'],
+      attachments: [{ s3Key: 'uploads/abc', contentType: 'image/png' }],
+    });
+    // media_attachments carries the DURABLE key+type (renders via authed serve);
+    // mediaUrls carries the presigned (expiring) fetch URL (historical record).
+    expect(f.appended[0]).toMatchObject({
+      type: 'mms',
+      mediaAttachments: [{ s3Key: 'uploads/abc', contentType: 'image/png' }],
+      mediaUrls: ['https://s3.local/uploads/abc?X-Amz-Signature=deadbeef'],
+    });
+  });
+
+  it('never logs presigned mediaUrls (bearer tokens) on the send path (spec S12)', async () => {
+    const f = makeFakes();
+    const presigned = 'https://s3.local/uploads/abc?X-Amz-Signature=SECRETSIGNATURE&X-Amz-Expires=3600';
+    await f.service({
+      conversationId: 'conv-1',
+      body: 'flyer',
+      mediaUrls: [presigned],
+      attachments: [{ s3Key: 'uploads/abc', contentType: 'image/png' }],
+    });
+    // Flatten every captured log line to text and assert no presigned material
+    // (the full URL or its signature query) ever appears.
+    const logText = JSON.stringify(f.capture.lines);
+    expect(logText).not.toContain('X-Amz-Signature');
+    expect(logText).not.toContain('SECRETSIGNATURE');
+    expect(logText).not.toContain(presigned);
+    // Sanity: the send WAS logged (so the assertion is meaningful, not vacuous).
+    expect(f.capture.lines.some((l) => l['msg'] === 'outbound message sent')).toBe(true);
+  });
+
   it('throws ConversationNotFoundError for unknown conversations (nothing sent)', async () => {
     const f = makeFakes();
     await expect(f.service({ conversationId: 'conv-nope', body: 'x' })).rejects.toBeInstanceOf(

@@ -38,6 +38,8 @@ export type MessageId =
   | 'nudge.rta_window_closing'
   // Operational — relay group intro (jobs/relayFanOut.ts)
   | 'relay.intro'
+  // Operational - relay group media-only fan-out body (jobs/relayFanOut.ts)
+  | 'relay.media_only'
   // Compliance-derived, already editable
   | 'welcome.sms'
   | 'missed_call.autotext'
@@ -171,6 +173,16 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     editable: true,
     channel: 'sms',
     vars: ['members'],
+  },
+  // Body for a MEDIA-ONLY message fanned out to a relay group (no text to
+  // relay). "<name> sent an attachment." - the media rides along on the leg.
+  'relay.media_only': {
+    id: 'relay.media_only',
+    default: '{name} sent an attachment.',
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['name'],
   },
 
   // --- Compliance-derived, already editable (reference smsCompliance consts) ---

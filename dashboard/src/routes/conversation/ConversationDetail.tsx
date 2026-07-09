@@ -215,9 +215,12 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   // Composer: post a team reply (server fans out to all members). Optimistic,
   // mirroring ContactDetail's postSend. HARD-disabled when the group is closed.
   const canSend = !closed;
-  const onSend = (body: string): Promise<void> => {
-    const tempId = thread.addOptimistic(conversationId, body);
-    return sendMessage(conversationId, { body })
+  const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
+    const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
+    return sendMessage(conversationId, {
+      body,
+      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+    })
       .then((result) => {
         thread.resolveOptimistic(tempId, result);
       })

@@ -83,7 +83,12 @@ export interface RelayThreadState {
   items: TimelineItem[];
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
-  addOptimistic: (conversationId: string, body: string, toPhone?: string) => string;
+  addOptimistic: (
+    conversationId: string,
+    body: string,
+    toPhone?: string,
+    attachmentKeys?: string[],
+  ) => string;
   /** POST succeeded: stamp the real tsMsgId + status so the SSE refetch reconciles. */
   resolveOptimistic: (tempId: string, result: SendMessageResult) => void;
   /** POST failed: drop the optimistic bubble (the caller restores the draft). */
@@ -100,9 +105,13 @@ export function useRelayThread(conversationId: string): RelayThreadState {
   const abortRef = useRef<AbortController | null>(null);
 
   const addOptimistic = useCallback(
-    (convId: string, body: string, toPhone?: string): string => {
+    (convId: string, body: string, toPhone?: string, attachmentKeys?: string[]): string => {
       tempIdRef.current += 1;
       const tempId = `optimistic:${tempIdRef.current}`;
+      // Optimistic MMS: carry placeholder media_attachments so the bubble shows an
+      // attachment count immediately (no provider sid yet -> count chip; real
+      // thumbnails land on refetch). The placeholder contentType is not rendered.
+      const hasMedia = attachmentKeys !== undefined && attachmentKeys.length > 0;
       const item: TimelineMessage = {
         kind: 'message',
         id: tempId,
@@ -111,11 +120,17 @@ export function useRelayThread(conversationId: string): RelayThreadState {
         tsMsgId: tempId,
         direction: 'outbound',
         author: 'teammate',
-        type: 'sms',
+        type: hasMedia ? 'mms' : 'sms',
         body,
         delivery_status: 'queued',
         relay_sender_key: 'team',
         ...(toPhone !== undefined && { toPhone }),
+        ...(hasMedia && {
+          media_attachments: attachmentKeys.map((k) => ({
+            s3Key: k,
+            contentType: 'application/octet-stream',
+          })),
+        }),
       };
       setPending((p) => [...p, { tempId, item }]);
       return tempId;

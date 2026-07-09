@@ -321,12 +321,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
-    // Inbound MMS into a relay thread (tenant↔landlord photos/docs). Capture the
-    // provider media URLs so the message records the attachment, and mirror them
-    // to S3 below (the 1:1 path does the same). NOTE/FOLLOW-UP: this only SAVES +
-    // displays the media in the hub — it does NOT yet relay the media ON to the
-    // other thread members (the relay fan-out still forwards text only); that's a
-    // separate change to the fan-out.
+    // Inbound MMS into a relay thread (tenant<->landlord photos/docs). Capture
+    // the provider media URLs so the message records the attachment, and mirror
+    // them to S3 below (the 1:1 path does the same). The relay fan-out reads the
+    // mirrored media_attachments off this source message and forwards them ON to
+    // the other members (presigned per leg) - media relay is now real in both
+    // directions (jobs/relayFanOut.ts).
     const mediaUrls = parseInboundMediaUrls(msg.params);
 
     // Identify the sender = the member whose phone == From. A former member

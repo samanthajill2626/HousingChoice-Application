@@ -23,6 +23,7 @@
 // PII (doc §9): never log the body, the sender's phone, or member phones —
 // IDs / member keys / counts only, correlated via the pino mixin.
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { getContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { TokenBucket } from '../lib/tokenBucket.js';
@@ -34,6 +35,7 @@ import {
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createMessagesRepo,
+  mediaAttachmentsOf,
   relayMemberKey,
   type MessagesRepo,
   type RelayRecipientDelivery,
@@ -48,6 +50,13 @@ export const RELAY_INTRO_JOB = 'relay.intro';
 
 /** Continuation cap: a transient failure re-enqueues at most this many times. */
 export const MAX_FANOUT_ATTEMPTS = 3;
+
+/**
+ * Outbound MMS presign TTL for relay legs (design Sec 7): 1 hour. Presigned
+ * PER LEG at leg-send time - never batched up front - so a token-bucket-paced
+ * roster or a backed-off continuation never hands Twilio an expired URL.
+ */
+export const RELAY_PRESIGN_TTL_SECONDS = 3600;
 
 /** Exponential backoff for the transient-failure continuation: 5s, 10s, 20s. */
 export function fanOutBackoffMs(attempt: number): number {
@@ -205,6 +214,12 @@ export interface RelayFanOutJobDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
+  /**
+   * Media bucket store for presigning relay-leg media (outbound MMS). Undefined
+   * when MEDIA_BUCKET is unset (a no-bucket dev loop): the media-only body still
+   * relays as text, but no media is attached. Lazily created on first job run.
+   */
+  mediaStore?: MediaStore;
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   logger?: Logger;
@@ -244,6 +259,10 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
   let conversations = deps.conversationsRepo;
   let messages = deps.messagesRepo;
   let contacts = deps.contactsRepo;
+  // MediaStore can legitimately resolve to undefined (no MEDIA_BUCKET), so a
+  // separate init flag drives the lazy build (not `??=`, which would rebuild).
+  let mediaStore = deps.mediaStore;
+  let mediaStoreInit = deps.mediaStore !== undefined;
 
   defineJobHandler(RELAY_FANOUT_JOB, async (rawPayload) => {
     const payload = parseRelayFanOutPayload(rawPayload);
@@ -251,6 +270,10 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     contacts ??= createContactsRepo({ logger: deps.logger });
+    if (!mediaStoreInit) {
+      mediaStore = createMediaStore();
+      mediaStoreInit = true;
+    }
 
     // Whole-job duplicate-delivery guard (existing pattern): conditionally
     // mark this envelope jobId executed BEFORE any send. A redelivery resolves
@@ -292,12 +315,11 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       return;
     }
     const body = typeof sourceMessage.body === 'string' ? sourceMessage.body : '';
-    if (body.length === 0) {
-      // Nothing to relay (e.g. MMS-only). M1.7 relays text bodies; media relay
-      // is future work. Log and stop — never send an empty body.
-      log.info({ conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId }, 'relayFanOut: source has no text body — nothing relayed');
-      return;
-    }
+    // Media both directions (design Sec 7): the source's DURABLE attachment keys
+    // (a team MMS's hub attachments, or a member's mirrored inbound MMS keys) are
+    // re-presigned PER LEG below and forwarded to the other members.
+    const sourceMedia = mediaAttachmentsOf(sourceMessage);
+    const hasMedia = sourceMedia.length > 0;
 
     // Resolve CURRENT membership at execution time (a mid-thread remove must
     // take effect on the very next fan-out). Sender is excluded by key.
@@ -308,13 +330,39 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     // member-relayed message derives the prefix from the sender's name.
     const senderName = payload.senderNameOverride ?? senderMember?.name;
 
+    // Body for the leg: text (with the "<name>: " prefix) rides media along; a
+    // MEDIA-ONLY source uses the relay.media_only catalog copy (no hard-coded
+    // string). A source with NEITHER text NOR media is the only true no-op.
+    const senderLabel =
+      senderName && senderName.trim().length > 0 ? senderName : ANONYMOUS_SENDER_LABEL;
+    let relayBody: string;
+    if (body.length > 0) {
+      relayBody = composeRelayBody(senderName, body);
+    } else if (hasMedia) {
+      relayBody = resolveMessage('relay.media_only', { name: senderLabel });
+    } else {
+      // Nothing to relay - never send an empty body.
+      log.info(
+        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId },
+        'relayFanOut: source has neither text nor media - nothing relayed',
+      );
+      return;
+    }
+    if (hasMedia && !mediaStore) {
+      // Degenerate no-bucket config: relay the text notice, but there is no
+      // store to presign the media from. Log once (IDs/counts only).
+      log.warn(
+        { conversationId: payload.relayConversationId, tsMsgId: payload.sourceTsMsgId, mediaCount: sourceMedia.length },
+        'relayFanOut: source has media but no MediaStore - relaying body only, media dropped',
+      );
+    }
+
     let recipients = roster.filter((m) => relayMemberKey(m) !== payload.senderKey);
     if (payload.recipientKeys !== undefined) {
       const allowed = new Set(payload.recipientKeys);
       recipients = recipients.filter((m) => allowed.has(relayMemberKey(m)));
     }
 
-    const relayBody = composeRelayBody(senderName, body);
     const transientRemaining: string[] = [];
     let sentCount = 0;
 
@@ -365,9 +413,26 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       // producers do not throttle). Paces the fan-out under the registered tier.
       await deps.tokenBucket?.acquire(1);
 
+      // Presign the source media FRESH for THIS leg (design Sec 7: per leg, at
+      // leg-send time - a paced roster or backed-off continuation must never
+      // hand Twilio an expired URL). Presigned URLs are bearer tokens: passed to
+      // the adapter, never logged (the leg logs member keys / counts only).
+      let legMediaUrls: string[] | undefined;
+      if (hasMedia && mediaStore) {
+        const store = mediaStore; // pin for the closure (mediaStore is a let)
+        legMediaUrls = await Promise.all(
+          sourceMedia.map((a) => store.presign(a.s3Key, RELAY_PRESIGN_TTL_SECONDS)),
+        );
+      }
+
       let result;
       try {
-        result = await adapter.sendMessage({ to: member.phone, from: poolNumber, body: relayBody });
+        result = await adapter.sendMessage({
+          to: member.phone,
+          from: poolNumber,
+          body: relayBody,
+          ...(legMediaUrls !== undefined && { mediaUrls: legMediaUrls }),
+        });
       } catch (err) {
         if (err instanceof SendRefusedError) {
           // Opt-out / breaker / manual — by-design refusal for THIS recipient.

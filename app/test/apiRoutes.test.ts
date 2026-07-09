@@ -111,6 +111,123 @@ describe('POST /api/conversations/:conversationId/messages', () => {
   });
 });
 
+// POST /api/conversations/:id/messages with outbound MMS attachmentKeys: the
+// route regex-validates keys, HeadObjects each (type + total-size), presigns
+// per attempt, and threads the durable attachments + presigned mediaUrls into
+// the send service.
+describe('POST /api/conversations/:conversationId/messages (attachmentKeys)', () => {
+  function makeMmsApp(heads: Record<string, { contentType?: string; size?: number } | undefined>) {
+    const calls: SendMessageInput[] = [];
+    const presignCalls: string[] = [];
+    const mediaStore = {
+      async head(key: string) {
+        return heads[key];
+      },
+      async presign(key: string, ttl: number) {
+        presignCalls.push(key);
+        return `https://s3.local/${key}?X-Amz-Signature=sig-${key}&X-Amz-Expires=${ttl}`;
+      },
+      async getStream() {
+        return undefined;
+      },
+      async put() {
+        /* unused */
+      },
+    } as unknown as import('../src/adapters/mediaStore.js').MediaStore;
+    const app = buildApp({
+      config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
+      logger: createLogger({ destination: createLogCapture().stream }),
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: {
+          async getById() {
+            return undefined; // 1:1 path
+          },
+        } as unknown as ConversationsRepo,
+        mediaStore,
+        sendMessageService: async (input) => {
+          calls.push(input);
+          return {
+            conversationId: input.conversationId,
+            providerSid: 'SMfake-1',
+            tsMsgId: '2026-06-12T10:00:00.000Z#SMfake-1',
+            status: 'queued',
+          };
+        },
+      },
+    });
+    return { app, calls, presignCalls };
+  }
+
+  const send = (app: ReturnType<typeof makeMmsApp>['app'], payload: Record<string, unknown>) =>
+    request(app)
+      .post('/api/conversations/conv-1/messages')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(payload);
+
+  it('presigns validated keys and passes durable attachments + presigned mediaUrls to the send', async () => {
+    const { app, calls, presignCalls } = makeMmsApp({
+      'uploads/abc-123': { contentType: 'image/png', size: 1000 },
+    });
+    const res = await send(app, { body: 'flyer', attachmentKeys: ['uploads/abc-123'] });
+    expect(res.status).toBe(201);
+    expect(presignCalls).toEqual(['uploads/abc-123']);
+    expect(calls).toHaveLength(1);
+    // Durable attachments (s3Key + normalized type) reach the service.
+    expect(calls[0]?.attachments).toEqual([{ s3Key: 'uploads/abc-123', contentType: 'image/png' }]);
+    // The adapter mediaUrls are the PRESIGNED (bearer-token) URLs.
+    expect(calls[0]?.mediaUrls?.[0]).toContain('X-Amz-Signature=');
+    expect(calls[0]?.mediaUrls?.[0]).toContain('uploads/abc-123');
+  });
+
+  it('rejects a key that is not uploads/<uuid> (400 invalid_attachment_key)', async () => {
+    const { app, calls } = makeMmsApp({});
+    const res = await send(app, { attachmentKeys: ['media/other/evil'] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid_attachment_key' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects more than OUTBOUND_MMS_MAX_MEDIA keys (400 too_many_attachments)', async () => {
+    const { app, calls } = makeMmsApp({});
+    const keys = Array.from({ length: 11 }, (_, i) => `uploads/${'0'.repeat(8)}-${i}`);
+    const res = await send(app, { attachmentKeys: keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'too_many_attachments' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('400s unknown_attachment when a key does not exist (HeadObject 404)', async () => {
+    const { app, calls } = makeMmsApp({ 'uploads/deadbeef': { contentType: 'image/png', size: 10 } });
+    const res = await send(app, { attachmentKeys: ['uploads/deadf00d'] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'unknown_attachment' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('400s attachments_too_large when the summed size exceeds the total cap', async () => {
+    const { app, calls } = makeMmsApp({
+      'uploads/a': { contentType: 'image/png', size: 4 * 1024 * 1024 },
+      'uploads/b': { contentType: 'image/png', size: 2 * 1024 * 1024 },
+    });
+    const res = await send(app, { attachmentKeys: ['uploads/a', 'uploads/b'] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'attachments_too_large' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('400s unsupported_attachment_type when the stored type is not allowlisted', async () => {
+    const { app, calls } = makeMmsApp({
+      'uploads/cafe': { contentType: 'application/zip', size: 10 },
+    });
+    const res = await send(app, { attachmentKeys: ['uploads/cafe'] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'unsupported_attachment_type' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
 // POST /api/conversations/:id/messages/:providerSid/retry — re-send a FAILED
 // outbound message, stamping retry_of so the timeline collapses the stale bubble.
 describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', () => {
@@ -125,7 +242,10 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     delivery_status: 'failed' as const,
   };
 
-  function makeRetryApp(original: unknown) {
+  function makeRetryApp(
+    original: unknown,
+    mediaStore?: import('../src/adapters/mediaStore.js').MediaStore,
+  ) {
     const calls: SendMessageInput[] = [];
     const app = buildApp({
       config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
@@ -137,6 +257,7 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
             return original;
           },
         } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
+        ...(mediaStore !== undefined && { mediaStore }),
         sendMessageService: async (input) => {
           calls.push(input);
           return {
@@ -208,6 +329,104 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
       expect(res.body).toEqual({ error: 'not_failed' });
       expect(calls).toHaveLength(0);
     }
+  });
+
+  // THE Cameron rule (design Sec 5 / spec S5+S12): a retry of a message with
+  // media_attachments RE-PRESIGNS each s3Key FRESH - it must never replay the
+  // stored (expired) mediaUrls. Pinned: the retried URLs DIFFER from the
+  // originals AND derive from the durable s3Keys.
+  it('re-presigns media_attachments fresh on retry (URLs differ from the stored originals)', async () => {
+    let presignCount = 0;
+    const mediaStore = {
+      async presign(key: string, ttl: number) {
+        // Unique per call AND derived from the key: proves the retry re-presigns.
+        presignCount += 1;
+        return `https://s3.local/${key}?X-Amz-Signature=fresh${presignCount}&X-Amz-Expires=${ttl}`;
+      },
+      async head() {
+        return undefined;
+      },
+      async getStream() {
+        return undefined;
+      },
+      async put() {
+        /* unused */
+      },
+    } as unknown as import('../src/adapters/mediaStore.js').MediaStore;
+
+    const STALE_URL = 'https://s3.local/uploads/aaaa?X-Amz-Signature=STALEEXPIRED&X-Amz-Expires=3600';
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      // The durable truth (what a resend must re-derive from).
+      media_attachments: [{ s3Key: 'uploads/aaaa', contentType: 'image/png' }],
+      // The stale presigned URL from the FIRST send - must NOT be replayed.
+      mediaUrls: [STALE_URL],
+    };
+    const { app, calls } = makeRetryApp(original, mediaStore);
+
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(calls).toHaveLength(1);
+    const sentUrls = calls[0]?.mediaUrls ?? [];
+    // Differs from the stored original (not a verbatim replay).
+    expect(sentUrls).not.toContain(STALE_URL);
+    expect(sentUrls[0]).not.toBe(STALE_URL);
+    // Freshly presigned (bearer-token query present) AND derived from the s3Key.
+    expect(sentUrls[0]).toContain('X-Amz-Signature=fresh');
+    expect(sentUrls[0]).toContain('uploads/aaaa');
+    // The durable attachments ride along so the retried message persists them.
+    expect(calls[0]?.attachments).toEqual([{ s3Key: 'uploads/aaaa', contentType: 'image/png' }]);
+  });
+
+  // F2: attachments exist but no MediaStore is available (degenerate no-
+  // MEDIA_BUCKET config). We must NEVER replay the stored (expired) presigned
+  // URLs - retry the body only rather than ship an expired token.
+  it('with media_attachments but NO mediaStore, drops media (never replays the stale presigned URLs)', async () => {
+    const STALE_URL = 'https://s3.local/uploads/bbbb?X-Amz-Signature=STALEEXPIRED&X-Amz-Expires=3600';
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      media_attachments: [{ s3Key: 'uploads/bbbb', contentType: 'image/png' }],
+      mediaUrls: [STALE_URL],
+    };
+    // No mediaStore passed - route's mediaStore is undefined (no MEDIA_BUCKET).
+    const { app, calls } = makeRetryApp(original);
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(calls).toHaveLength(1);
+    // The stale token is NOT shipped, and no media rides along.
+    expect(calls[0]?.mediaUrls).toBeUndefined();
+    expect(calls[0]?.attachments).toBeUndefined();
+    // The body still retries.
+    expect(calls[0]?.body).toBe('this failed');
+  });
+
+  it('falls back to replaying raw mediaUrls when the original has NO media_attachments (e2e seam)', async () => {
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      mediaUrls: ['https://fake/canned/room.png'],
+    };
+    const { app, calls } = makeRetryApp(original);
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(201);
+    expect(calls[0]?.mediaUrls).toEqual(['https://fake/canned/room.png']);
+    expect(calls[0]?.attachments).toBeUndefined();
   });
 });
 

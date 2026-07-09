@@ -108,7 +108,7 @@ export function ContactDetail(): React.JSX.Element {
   // `contact_no_consent`, we hold the pending send here + open the hard-block
   // modal. On confirm we PATCH consent then RETRY this exact send.
   const [pendingConsentSend, setPendingConsentSend] = useState<
-    { conversationId: string; body: string; replyToPhone?: string } | null
+    { conversationId: string; body: string; replyToPhone?: string; attachmentKeys?: string[] } | null
   >(null);
   // Bumped by deferredSend when an out-of-band send (the post-consent retry) lands,
   // so the Timeline composer clears the draft it restored on the 409 refusal.
@@ -208,9 +208,17 @@ export function ContactDetail(): React.JSX.Element {
   // optimistic bubble and rethrow so the Timeline restores the draft + shows why.
   // The core optimistic POST into a specific conversation. Shared by the reply
   // box's onSend AND the just-in-time consent retry (after consent is recorded).
-  const postSend = (conversationId: string, body: string, toPhone?: string): Promise<void> => {
-    const tempId = timeline.addOptimistic(conversationId, body, toPhone);
-    return sendMessage(conversationId, { body })
+  const postSend = (
+    conversationId: string,
+    body: string,
+    toPhone?: string,
+    attachmentKeys?: string[],
+  ): Promise<void> => {
+    const tempId = timeline.addOptimistic(conversationId, body, toPhone, attachmentKeys);
+    return sendMessage(conversationId, {
+      body,
+      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+    })
       .then((result) => {
         timeline.resolveOptimistic(tempId, result);
       })
@@ -228,11 +236,16 @@ export function ContactDetail(): React.JSX.Element {
   //   NB: the NORMAL path (onSend, via the composer's handleSend) clears the draft
   //   SYNCHRONOUSLY before its POST and must NOT go through here — re-clearing after the
   //   POST resolves would wipe a message typed while it was in flight.
-  const deferredSend = (conversationId: string, body: string, toPhone?: string): Promise<void> =>
-    postSend(conversationId, body, toPhone).then(() => {
+  const deferredSend = (
+    conversationId: string,
+    body: string,
+    toPhone?: string,
+    attachmentKeys?: string[],
+  ): Promise<void> =>
+    postSend(conversationId, body, toPhone, attachmentKeys).then(() => {
       setClearDraftSignal((n) => n + 1);
     });
-  const onSend = async (body: string): Promise<void> => {
+  const onSend = async (body: string, attachmentKeys?: string[]): Promise<void> => {
     // No thread yet (a brand-new contact who has never messaged us): create-or-get
     // the primary number's 1:1 conversation first, THEN send into it. Idempotent —
     // a racing inbound resolves to the same thread. An ensure failure throws before
@@ -244,7 +257,7 @@ export function ContactDetail(): React.JSX.Element {
     }
     const convId = resolvedId;
     const toPhone = replyToPhone;
-    return postSend(convId, body, toPhone).catch((err: unknown) => {
+    return postSend(convId, body, toPhone, attachmentKeys).catch((err: unknown) => {
       // A2P/CTIA just-in-time gate: a proactive send to a no-consent contact is
       // refused with 409 `contact_no_consent`. Open the hard-block consent modal
       // (holding the pending send) instead of surfacing a generic error, and
@@ -255,6 +268,7 @@ export function ContactDetail(): React.JSX.Element {
           conversationId: convId,
           body,
           ...(toPhone !== undefined && { replyToPhone: toPhone }),
+          ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
         });
       }
       throw err;
@@ -484,7 +498,15 @@ export function ContactDetail(): React.JSX.Element {
 
       <div className={styles.body}>
         <div className={`${styles.left} ${pane === 'comms' ? styles.paneActive : styles.paneHidden}`}>
+          {/* key= REMOUNTS the Timeline when the route param changes: this page
+              re-renders the SAME component instance on contact-to-contact
+              navigation (no remount), so the composer's LOCAL state - the text
+              draft and, since outbound MMS, the uploaded attachment chips -
+              would otherwise survive into the NEXT contact's composer and a
+              Send would deliver contact A's media to contact B. Same keyed
+              isolation the tour channel switcher uses (TourConversation). */}
           <Timeline
+            key={contactId}
             status={timeline.status}
             items={timeline.items}
             upcoming={timeline.upcoming}
@@ -644,9 +666,12 @@ export function ContactDetail(): React.JSX.Element {
               // Out-of-band of the composer: deferredSend clears the restored draft on
               // success; a fresh refusal leaves it (message preserved). The no-op catch
               // avoids an unhandled rejection.
-              void deferredSend(retry.conversationId, retry.body, retry.replyToPhone).catch(
-                () => {},
-              );
+              void deferredSend(
+                retry.conversationId,
+                retry.body,
+                retry.replyToPhone,
+                retry.attachmentKeys,
+              ).catch(() => {});
             }
           }}
         />

@@ -1340,6 +1340,15 @@ export interface SendMessageResult {
   status: DeliveryStatus;
 }
 
+/** Result of POST /api/media/uploads - one uploaded attachment. `key` is the
+ *  server-minted `uploads/<uuid>` object key the composer passes back to the
+ *  send route as an attachmentKey; the raw presigned URL is never exposed. */
+export interface UploadMediaResult {
+  key: string;
+  contentType: string;
+  size: number;
+}
+
 // --- C5: Media aggregation (§API Contract C5) -------------------------------
 // Copied verbatim from the build plan §C5. The "Media from comms" card.
 

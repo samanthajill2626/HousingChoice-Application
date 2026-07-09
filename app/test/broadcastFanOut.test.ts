@@ -27,7 +27,11 @@ import {
 import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
-import type { BroadcastItem, BroadcastRecipient } from '../src/repos/broadcastsRepo.js';
+import type {
+  BroadcastItem,
+  BroadcastRecipient,
+  BroadcastStats,
+} from '../src/repos/broadcastsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
@@ -197,10 +201,11 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.recipients['c-alice']?.tsMsgId).toBeDefined();
     expect(bcast.recipients['c-alice']?.conversationId).toBeDefined();
 
-    // A broadcast.updated SSE event fired on completion.
-    const evt = world.emitted.find((e) => e.event === 'broadcast.updated');
-    expect(evt).toBeDefined();
-    expect((evt!.payload as { status: string }).status).toBe('sent');
+    // broadcast.updated SSE events fired: a live tick per recipient PLUS the
+    // terminal 'sent' on finalize (S2). The LAST one is the terminal emit.
+    const updates = world.emitted.filter((e) => e.event === 'broadcast.updated');
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    expect((updates.at(-1)!.payload as { status: string }).status).toBe('sent');
   });
 
   it('writes a units# broadcast_sent audit row with the recipient count on completion', async () => {
@@ -645,5 +650,87 @@ describe('broadcast.send (M1.8a)', () => {
     expect(acquireIdx).toBeGreaterThanOrEqual(0);
     // The recipient slot is persisted BEFORE the pacing token is acquired.
     expect(sentIdx).toBeLessThan(acquireIdx);
+  });
+
+  // --- S2: per-recipient live SSE ticks from the fan-out loop ---------------
+  function broadcastUpdates(): Array<{ status: string; stats: BroadcastStats }> {
+    return world.emitted
+      .filter((e) => e.event === 'broadcast.updated')
+      .map((e) => e.payload as { status: string; stats: BroadcastStats });
+  }
+  function bucketsSumToAudience(s: BroadcastStats): boolean {
+    return (
+      s.queued + s.sent + s.delivered + s.failed + s.skipped_opted_out + s.skipped_no_consent ===
+      s.audience
+    );
+  }
+
+  it('S2: emits broadcast.updated with DERIVED disjoint stats after each recipient transition (live ticks)', async () => {
+    const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [a, b]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // One tick per sent recipient (2) + the terminal finalize emit = 3.
+    expect(updates).toHaveLength(3);
+    // Every emit carries derived, disjoint stats that sum to the audience (2).
+    for (const u of updates) {
+      expect(u.stats.audience).toBe(2);
+      expect(bucketsSumToAudience(u.stats)).toBe(true);
+    }
+    // The first tick is the live mid-send state: one sent, one still queued.
+    expect(updates[0]!.status).toBe('sending');
+    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
+    // The terminal emit: both sent, none queued.
+    expect(updates.at(-1)!.status).toBe('sent');
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 2, queued: 0 });
+  });
+
+  it('S2: the transient-defer path (slot stays queued, no bumpStats) emits NOTHING for that recipient', async () => {
+    const a = seedTenant(world, { contactId: 'c-a', phone: '+15550100001' });
+    const b = seedTenant(world, { contactId: 'c-b', phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [a, b]);
+    wireHandler(world, logger);
+    // Bob rate-limits (429 transient) -> deferred to a continuation, slot stays
+    // queued, NO bumpStats. Alice succeeds.
+    world.adapter.sendMessage = async (params: SendMessageParams) => {
+      if (params.to === b.phone) throw Object.assign(new Error('rate limited'), { code: 429 });
+      return { providerSid: `SMok-${params.to}`, status: 'sent', providerTs: new Date().toISOString() };
+    };
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // ONLY Alice's send emitted. Bob's transient defer emits nothing, and a
+    // continuation is pending so finalize (its terminal emit) does NOT run.
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.status).toBe('sending');
+    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
+    expect(bucketsSumToAudience(updates[0]!.stats)).toBe(true);
+  });
+
+  it('S2: a skip transition emits a derived tick (skipped bucket, disjoint)', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', phone: '+15550100001' });
+    const stopped = seedTenant(world, { contactId: 'c-stop', sms_opt_out: true, phone: '+15550100002' });
+    seedUnit(world);
+    seedBroadcast(world, [ok, stopped]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const updates = broadcastUpdates();
+    // A tick for the skip + a tick for the send + the finalize emit.
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    for (const u of updates) expect(bucketsSumToAudience(u.stats)).toBe(true);
+    // Terminal: one sent, one skipped (opted-out), disjoint.
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 1, skipped_opted_out: 1, queued: 0 });
   });
 });

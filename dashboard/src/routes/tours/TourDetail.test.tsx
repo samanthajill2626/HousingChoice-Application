@@ -519,7 +519,11 @@ describe('TourDetail - right column cards', () => {
     renderDetail();
     await waitLoaded();
     await waitFor(() => expect(screen.getByRole('list', { name: 'Tour activity' })).toBeInTheDocument());
-    expect(screen.getAllByText('Tour scheduled').length).toBe(20);
+    // Scope to the card's list: the same rows ALSO render as transcript pins in
+    // the conversation pane (the milestones-interleave feature), so a page-wide
+    // count would double.
+    const list = screen.getByRole('list', { name: 'Tour activity' });
+    expect(within(list).getAllByText('Tour scheduled').length).toBe(20);
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
   });
 });
@@ -698,6 +702,51 @@ describe('TourDetail - three-channel switcher', () => {
         'Reply sends to (404) 555-0111',
       ),
     );
+  });
+});
+
+describe('TourDetail - tour milestones interleave into the conversation panes', () => {
+  it('the 1:1 transcript shows the tour lifecycle pins; "Comms only" hides them', async () => {
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-tenant', 'tenant-1', 0)],
+      nextCursor: null,
+    });
+    // Newest-first, like the API serves them.
+    getTourActivity.mockResolvedValue([
+      { id: '2026-07-03T00:00:00Z#1', at: '2026-07-03T00:00:00Z', type: 'tour_rescheduled' },
+      { id: '2026-07-01T00:00:00Z#0', at: '2026-07-01T00:00:00Z', type: 'tour_scheduled' },
+    ]);
+    renderDetail();
+    await waitLoaded();
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+
+    // Scope to the TRANSCRIPT region — the right-column Activity card shows the
+    // same labels, and it must not satisfy these assertions.
+    const transcript = screen.getByRole('region', { name: /Communications/i });
+    await waitFor(() => expect(within(transcript).getByText('Tour scheduled')).toBeInTheDocument());
+    expect(within(transcript).getByText('Tour rescheduled')).toBeInTheDocument();
+
+    // The "Comms only" toggle hides the pins (they are milestones, not comms).
+    await userEvent.click(within(transcript).getByRole('button', { name: /Comms only/i }));
+    expect(within(transcript).queryByText('Tour scheduled')).not.toBeInTheDocument();
+    expect(within(transcript).queryByText('Tour rescheduled')).not.toBeInTheDocument();
+  });
+
+  it('the GROUP transcript shows the pins too (with deep links kept)', async () => {
+    getTour.mockResolvedValue(makeTour({ groupThreadId: 'g1' }));
+    getConversations.mockResolvedValue({
+      conversations: [conv('g1', 'tenant-1', 0, 'relay_group')],
+      nextCursor: null,
+    });
+    getTourActivity.mockResolvedValue([
+      { id: '2026-07-02T00:00:00Z#1', at: '2026-07-02T00:00:00Z', type: 'tour_group_opened', conversationId: 'g1' },
+    ]);
+    renderDetail();
+    await waitLoaded();
+    const transcript = screen.getByRole('region', { name: /Communications/i });
+    const pin = await within(transcript).findByRole('link', { name: 'Group text opened' });
+    expect(pin).toHaveAttribute('href', '/conversations/g1');
   });
 });
 

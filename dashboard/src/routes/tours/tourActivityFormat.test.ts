@@ -1,8 +1,9 @@
 // tourActivityFormat tests - the Activity-row descriptor: labels for the known
 // tour lifecycle kinds, deep links for converted / group-opened, and a humanized
-// fallback for an unknown type.
+// fallback for an unknown type. Plus the Timeline-milestone projection the
+// conversation transcripts interleave.
 import { describe, expect, it } from 'vitest';
-import { describeTourActivity } from './tourActivityFormat.js';
+import { describeTourActivity, tourActivityToMilestone } from './tourActivityFormat.js';
 import type { TourActivityEvent } from '../../api/index.js';
 
 function ev(over: Partial<TourActivityEvent>): TourActivityEvent {
@@ -37,5 +38,50 @@ describe('describeTourActivity', () => {
 
   it('humanizes an unknown type', () => {
     expect(describeTourActivity(ev({ type: 'some_future_event' })).label).toBe('Some future event');
+  });
+});
+
+describe('tourActivityToMilestone', () => {
+  it('projects a lifecycle event to a Timeline milestone (label + at + namespaced id)', () => {
+    const ms = tourActivityToMilestone(ev({ type: 'tour_scheduled' }));
+    expect(ms).toMatchObject({
+      kind: 'milestone',
+      id: 'tour-activity:2026-07-01T00:00:00Z#0',
+      at: '2026-07-01T00:00:00Z',
+      type: 'tour_scheduled',
+      label: 'Tour scheduled',
+    });
+    expect(ms.refType).toBeUndefined(); // never a 'tour' self-link — we're ON the tour page
+  });
+
+  it('maps kinds the shared union lacks onto same-color neighbors (label stays exact)', () => {
+    expect(tourActivityToMilestone(ev({ type: 'tour_rescheduled' }))).toMatchObject({
+      type: 'tour_scheduled',
+      label: 'Tour rescheduled',
+    });
+    expect(tourActivityToMilestone(ev({ type: 'tour_group_opened' }))).toMatchObject({
+      type: 'added_to_group_text',
+      label: 'Group text opened',
+    });
+    expect(tourActivityToMilestone(ev({ type: 'tour_converted' }))).toMatchObject({
+      type: 'placement_opened',
+      label: 'Converted to placement',
+    });
+  });
+
+  it('keeps the converted/group-opened deep links via refType/refId', () => {
+    expect(
+      tourActivityToMilestone(ev({ type: 'tour_converted', placementId: 'plc-9' })),
+    ).toMatchObject({ refType: 'placement', refId: 'plc-9' });
+    expect(
+      tourActivityToMilestone(ev({ type: 'tour_group_opened', conversationId: 'g-9' })),
+    ).toMatchObject({ refType: 'conversation', refId: 'g-9' });
+  });
+
+  it('an unknown kind falls to the neutral stage_changed with a humanized label', () => {
+    expect(tourActivityToMilestone(ev({ type: 'some_future_event' }))).toMatchObject({
+      type: 'stage_changed',
+      label: 'Some future event',
+    });
   });
 });

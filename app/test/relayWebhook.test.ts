@@ -33,6 +33,8 @@ const ALICE = '+15550100001';
 const BOB = '+15550100002';
 const CAROL = '+15550100003';
 
+const ERROR = 50;
+
 function seedRelay(world: FakeWorld, overrides: Partial<ConversationItem> = {}): ConversationItem {
   const now = new Date().toISOString();
   const conv: ConversationItem = {
@@ -203,5 +205,61 @@ describe('relay inbound webhook (M1.7)', () => {
     });
     const after = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
     expect(after.delivery_recipients?.['c-bob']?.status).toBe('delivered'); // unchanged
+  });
+
+  it('raced fan-out leg: relaysid pointer ABSENT on the first lookup, PRESENT after the retry → processed, no unknown-SID drop', async () => {
+    seedRelay(world);
+    const { app, capture } = makeWebhookHarness({ world, statusUnknownSidRetryDelayMs: 5 });
+    // Fan out first so a relaysid pointer exists for Bob's send.
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+    const source = world.messages.find((m) => m.conversationId === 'conv-relay-1')!;
+    const bobPtrEntry = [...world.relaySidPointers.entries()].find(([, ref]) => ref.memberKey === 'c-bob');
+    expect(bobPtrEntry).toBeDefined();
+    const bobSid = bobPtrEntry![0];
+
+    // Reproduce the race: the pointer is written AFTER the provider send returns,
+    // so a fast delivery callback can miss it on the FIRST getRelaySidPointer
+    // lookup, then find it a beat later. Return undefined once, then delegate.
+    const realGetPtr = world.messagesRepo.getRelaySidPointer.bind(world.messagesRepo);
+    let ptrReads = 0;
+    world.messagesRepo.getRelaySidPointer = async (sid: string) => {
+      if (sid === bobSid) {
+        ptrReads += 1;
+        if (ptrReads === 1) return undefined; // the pacing gap — not yet visible
+      }
+      return realGetPtr(sid);
+    };
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/status', {
+      MessageSid: bobSid,
+      MessageStatus: 'delivered',
+      To: BOB,
+      From: POOL,
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    // The retry re-checked the pointer, found it, and advanced Bob's slot.
+    const updated = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(updated.delivery_recipients?.['c-bob']?.status).toBe('delivered');
+    expect(ptrReads).toBeGreaterThanOrEqual(2); // the retry actually re-checked the pointer
+    // NOT dropped: the outcome was recovered, so no unknown-SID ERROR fired.
+    const dropped = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID'));
+    expect(dropped).toBeUndefined();
+  });
+
+  it('relaysid pointer absent on BOTH attempts → unknown-SID ERROR + 200 ack (outcome genuinely lost)', async () => {
+    seedRelay(world);
+    const { app, capture } = makeWebhookHarness({ world, statusUnknownSidRetryDelayMs: 5 });
+    const res = await signedTwilioPost(app, '/webhooks/twilio/status', {
+      MessageSid: 'SM-never-persisted',
+      MessageStatus: 'delivered',
+      To: BOB,
+      From: POOL,
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID'));
+    expect(err).toBeDefined();
+    expect(err!['providerSid']).toBe('SM-never-persisted');
   });
 });

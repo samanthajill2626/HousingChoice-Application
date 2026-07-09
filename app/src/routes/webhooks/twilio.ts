@@ -791,63 +791,78 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       return;
     }
 
+    // Per-recipient relay handling (doc §9): a relay-group fan-out sends N
+    // outbound provider messages but persists NONE as their own message — each
+    // leg lives as a delivery_recipients slot on the source message, found via
+    // the relaysid pointer. Runs identically whether the pointer resolved on the
+    // first lookup or only after the retry below.
+    const handleRelayRecipientStatus = async (ptr: {
+      conversationId: string;
+      tsMsgId: string;
+      memberKey: string;
+    }): Promise<void> => {
+      mergeContext({ conversationId: ptr.conversationId });
+      const mapped = mapTwilioStatus(MessageStatus);
+      const transitioned = await messages.updateRecipientDeliveryStatus(
+        ptr.conversationId,
+        ptr.tsMsgId,
+        ptr.memberKey,
+        mapped,
+        ErrorCode,
+      );
+      log.info(
+        { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned, relay: true },
+        'twilio relay-recipient delivery status callback processed',
+      );
+      // Delivery-failure marker (doc §9): a relay fan-out leg that resolved
+      // undelivered/failed is also a countable failed delivery. Same `event`
+      // field the DeliveryFailures metric filter keys on; IDs/codes only.
+      if (mapped === 'undelivered' || mapped === 'failed') {
+        log.warn(
+          { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus, relay: true },
+          'twilio relay-recipient delivery failed (undelivered/failed)',
+        );
+      }
+      if (transitioned) {
+        // Refresh the UI: a per-recipient delivery move re-renders the relay
+        // thread (the source message's delivery_recipients changed).
+        events.emit('message.persisted', {
+          conversationId: ptr.conversationId,
+          tsMsgId: ptr.tsMsgId,
+          direction: 'inbound',
+          deliveryStatus: mapped,
+        });
+        // (M1.10c) A failed relay leg is a failed send on the placement
+        // (the relay thread carries conversation.placementId) → escalate.
+        if (mapped === 'undelivered' || mapped === 'failed') {
+          await flagPlacementAttention(ptr.conversationId, 'send_failed');
+        }
+      }
+    };
+
     // Context recovery by lookup (doc §9): status callbacks cannot carry the
     // correlation envelope — MessageSid → message → conversation.
     let message = await messages.getByProviderSid(MessageSid);
-    if (!message) {
-      // (M1.7) Before the slow send/append-race retry: the SID may belong to a
-      // relay-group fan-out, which sends N outbound provider messages but
-      // persists NONE as their own message — they live as delivery_recipients
-      // slots on the source message, found via the relaysid pointer (written
-      // synchronously at fan-out send time, so no race window to wait out).
-      const ptr = await messages.getRelaySidPointer(MessageSid);
-      if (ptr) {
-        mergeContext({ conversationId: ptr.conversationId });
-        const mapped = mapTwilioStatus(MessageStatus);
-        const transitioned = await messages.updateRecipientDeliveryStatus(
-          ptr.conversationId,
-          ptr.tsMsgId,
-          ptr.memberKey,
-          mapped,
-          ErrorCode,
-        );
-        log.info(
-          { providerSid: MessageSid, providerStatus: MessageStatus, errorCode: ErrorCode, transitioned, relay: true },
-          'twilio relay-recipient delivery status callback processed',
-        );
-        // Delivery-failure marker (doc §9): a relay fan-out leg that resolved
-        // undelivered/failed is also a countable failed delivery. Same `event`
-        // field the DeliveryFailures metric filter keys on; IDs/codes only.
-        if (mapped === 'undelivered' || mapped === 'failed') {
-          log.warn(
-            { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus, relay: true },
-            'twilio relay-recipient delivery failed (undelivered/failed)',
-          );
-        }
-        if (transitioned) {
-          // Refresh the UI: a per-recipient delivery move re-renders the relay
-          // thread (the source message's delivery_recipients changed).
-          events.emit('message.persisted', {
-            conversationId: ptr.conversationId,
-            tsMsgId: ptr.tsMsgId,
-            direction: 'inbound',
-            deliveryStatus: mapped,
-          });
-          // (M1.10c) A failed relay leg is a failed send on the placement
-          // (the relay thread carries conversation.placementId) → escalate.
-          if (mapped === 'undelivered' || mapped === 'failed') {
-            await flagPlacementAttention(ptr.conversationId, 'send_failed');
-          }
-        }
-        res.status(200).end();
-        return;
-      }
-      // Unknown SID and not a relay recipient: usually the callback outran the
-      // send wrapper's persist-at-send (Twilio can fire the first status before
-      // messages.append commits). Wait once and retry the lookup before
-      // declaring the message lost.
+    let relayPtr = message ? undefined : await messages.getRelaySidPointer(MessageSid);
+    if (!message && !relayPtr) {
+      // Neither a persisted message nor a relay-leg pointer resolved on the
+      // first lookup. TWO independent write-after-send races land here, and the
+      // ONE retry below must cover BOTH — re-checking only one leaks the other:
+      //  - send/append: a 1:1 / broadcast callback outran the send wrapper's
+      //    messages.append (Twilio can fire the first status before it commits).
+      //  - relay fan-out: the relaysid pointer is written AFTER the provider
+      //    send returns (relayFanOut send → markRecipient + putRelaySidPointer),
+      //    so a fast delivery callback (fake-twilio fires 'sent' at +150ms; real
+      //    Twilio can be just as fast) can arrive before the pointer lands.
+      // Wait once, then retry BOTH lookups before declaring the outcome lost.
       await delay(statusRetryDelayMs);
       message = await messages.getByProviderSid(MessageSid);
+      if (!message) relayPtr = await messages.getRelaySidPointer(MessageSid);
+    }
+    if (relayPtr) {
+      await handleRelayRecipientStatus(relayPtr);
+      res.status(200).end();
+      return;
     }
     if (!message) {
       // Still unknown after the retry: either the send/append race lasted

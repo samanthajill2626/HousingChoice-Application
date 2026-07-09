@@ -595,11 +595,11 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.getByText('Team')).toBeInTheDocument();
   });
 
-  it('suppresses the per-message status chip on a relay source bubble (delivered N/M is the truth)', () => {
+  it('suppresses the per-message status chip on a relay source bubble (the rollup is the truth)', () => {
     // A relay SOURCE message's own delivery_status stays at its initial
     // 'queued' forever — DLRs land in delivery_recipients slots, never on the
     // parent (relay-source-message-sending-chip). Rendering it would show a
-    // permanent "Sending…" contradicting a fully delivered "delivered 2/2".
+    // permanent "Sending…" contradicting a fully delivered rollup.
     const fullyDelivered: TimelineItem = {
       ...RELAY_OUT,
       delivery_status: 'queued',
@@ -609,8 +609,41 @@ describe('Timeline relay-group annotations', () => {
       },
     };
     renderTimeline({ items: [fullyDelivered], relayRoster: ROSTER });
-    expect(screen.getByText('delivered 2/2')).toBeInTheDocument();
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
     expect(screen.queryByText('Sending…')).not.toBeInTheDocument();
+  });
+
+  it('finalizes the rollup GREEN ("Delivered N/N") when every leg delivered — same cue as 1:1', () => {
+    const fullyDelivered: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [fullyDelivered], relayRoster: ROSTER });
+    const chip = screen.getByText('Delivered 2/2');
+    expect(chip.className).toMatch(/toneSuccess/);
+  });
+
+  it('turns the rollup red and counts failures when a leg hard-fails', () => {
+    const oneFailed: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'failed', errorCode: '30005' },
+      },
+    };
+    renderTimeline({ items: [oneFailed], relayRoster: ROSTER });
+    const chip = screen.getByText('delivered 1/2 - 1 failed');
+    expect(chip.className).toMatch(/toneDanger/);
+  });
+
+  it('keeps the in-flight rollup neutral while legs are still sending', () => {
+    // RELAY_OUT: c1 delivered, c2 only sent — not final, not failed.
+    renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
+    const chip = screen.getByText('delivered 1/2');
+    expect(chip.className).toMatch(/toneNeutral/);
   });
 
   it('attributes an inbound relay bubble to the sending member', () => {

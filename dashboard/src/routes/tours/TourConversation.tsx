@@ -19,7 +19,7 @@
 // ConsentCaptureModal the contact page uses; recording consent retries the exact
 // send and clears the composer's restored draft. Without this the refusal was
 // SILENT here — the optimistic bubble vanished, the draft came back, no error.
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ApiError,
   ensureContactConversation,
@@ -28,6 +28,8 @@ import {
   sendMessage,
   type Contact,
   type ConversationParticipant,
+  type TimelineItem,
+  type TimelineMilestone,
   type Tour,
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
@@ -60,6 +62,21 @@ export interface TourConversationProps {
    *  the page header banner. */
   onOpenGroup: () => void;
   openGroupBusy: boolean;
+  /** THIS tour's lifecycle events as shared-Timeline milestone pins (oldest →
+   *  newest), interleaved into ALL THREE transcripts so the panes show tour
+   *  activity, not just comms. The Timeline's "Comms only" toggle hides them. */
+  tourMilestones?: TimelineMilestone[];
+}
+
+/** A pane's stream: its messages + the tour milestone pins, oldest→newest. Both
+ *  inputs are already sorted; a plain merge-sort by `at` keeps ties stable
+ *  (messages first — the sort is stable and messages come first in the input). */
+function withMilestones(
+  items: TimelineItem[],
+  milestones: TimelineMilestone[] | undefined,
+): TimelineItem[] {
+  if (milestones === undefined || milestones.length === 0) return items;
+  return [...items, ...milestones].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
 /** A member's first name, or null when unknown. */
@@ -76,6 +93,7 @@ export function TourConversation({
   channels,
   onOpenGroup,
   openGroupBusy,
+  tourMilestones,
 }: TourConversationProps): React.JSX.Element {
   // Initial tab decided ONCE from the tour at first render; never re-synced.
   const [activeKey, setActiveKey] = useState<TourChannelKey>(
@@ -196,7 +214,10 @@ export function TourConversation({
       <div className={styles.channelPane}>
         {activeKey === 'group' ? (
           active.conversationId !== null ? (
-            <GroupChannel conversationId={active.conversationId} />
+            <GroupChannel
+              conversationId={active.conversationId}
+              {...(tourMilestones !== undefined && { tourMilestones })}
+            />
           ) : (
             <div className={styles.channelEmpty}>
               <p className={styles.emptyTitle}>No group text yet</p>
@@ -234,6 +255,7 @@ export function TourConversation({
             key={active.conversationId}
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+            {...(tourMilestones !== undefined && { tourMilestones })}
             clearDraftSignal={clearSignals[oneToOneKey]}
             onConsentRefused={(body, attachmentKeys) =>
               setPendingConsent({
@@ -255,6 +277,7 @@ export function TourConversation({
             contactId={oneToOneContactId}
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+            {...(tourMilestones !== undefined && { tourMilestones })}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
             clearDraftSignal={clearSignals[oneToOneKey]}
             onConsentRefused={(body, attachmentKeys) =>
@@ -287,8 +310,18 @@ export function TourConversation({
 /** The group-text transcript: the relay thread + roster + closed state, mirroring
  *  ConversationDetail's left pane. Sending is hard-disabled when the group is
  *  closed. Mounts only while the Group tab is active (lazy fetch). */
-function GroupChannel({ conversationId }: { conversationId: string }): React.JSX.Element {
+function GroupChannel({
+  conversationId,
+  tourMilestones,
+}: {
+  conversationId: string;
+  tourMilestones?: TimelineMilestone[];
+}): React.JSX.Element {
   const thread = useRelayThread(conversationId);
+  const items = useMemo(
+    () => withMilestones(thread.items, tourMilestones),
+    [thread.items, tourMilestones],
+  );
   const [members, setMembers] = useState<ConversationParticipant[]>([]);
   const [closed, setClosed] = useState(false);
 
@@ -324,7 +357,7 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
   return (
     <Timeline
       status={thread.status}
-      items={thread.items}
+      items={items}
       source="server"
       canSend={canSend}
       {...(canSend && { onSend })}
@@ -345,12 +378,15 @@ function isConsentRefusal(err: unknown): boolean {
 function ContactThread({
   conversationId,
   replyToPhone,
+  tourMilestones,
   clearDraftSignal,
   onConsentRefused,
 }: {
   conversationId: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
+  /** Tour lifecycle pins to interleave with the messages. */
+  tourMilestones?: TimelineMilestone[];
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
   /** The consent gate refused this send (409 contact_no_consent) — the parent
@@ -359,6 +395,10 @@ function ContactThread({
   onConsentRefused?: (body: string, attachmentKeys?: string[]) => void;
 }): React.JSX.Element {
   const thread = useRelayThread(conversationId);
+  const items = useMemo(
+    () => withMilestones(thread.items, tourMilestones),
+    [thread.items, tourMilestones],
+  );
   const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
     const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
     return sendMessage(conversationId, {
@@ -375,7 +415,7 @@ function ContactThread({
   return (
     <Timeline
       status={thread.status}
-      items={thread.items}
+      items={items}
       source="server"
       canSend
       onSend={onSend}
@@ -393,6 +433,7 @@ function NewContactThread({
   contactId,
   name,
   replyToPhone,
+  tourMilestones,
   onCreated,
   clearDraftSignal,
   onConsentRefused,
@@ -401,6 +442,8 @@ function NewContactThread({
   name: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
+  /** Tour lifecycle pins — shown even before the first message exists. */
+  tourMilestones?: TimelineMilestone[];
   onCreated: (conversationId: string) => void;
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
@@ -423,7 +466,7 @@ function NewContactThread({
   return (
     <Timeline
       status="ready"
-      items={[]}
+      items={tourMilestones ?? []}
       source="server"
       canSend
       onSend={onSend}

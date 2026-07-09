@@ -1,9 +1,11 @@
-// tourActivityFormat - pure presentation for the tour Activity card. Maps a
-// TourActivityEvent (the tour's OWN audit trail: GET /api/tours/:id/activity) to
-// a readable row line, an optional deep link (group-opened -> the conversation,
-// converted -> the placement), and reuses the shared date + humanize helpers.
-// Tested in isolation so the Activity card stays declarative.
-import { type TourActivityEvent } from '../../api/index.js';
+// tourActivityFormat - pure presentation for the tour's OWN audit trail
+// (GET /api/tours/:id/activity). Two consumers share these mappings:
+//   - the Activity card (describeTourActivity: a row line + optional deep link);
+//   - the conversation transcripts (tourActivityToMilestone: the same events as
+//     shared-Timeline milestone pins, so the tour's lifecycle interleaves with
+//     the group/tenant/landlord messages instead of the panes being comms-only).
+// Tested in isolation so both consumers stay declarative.
+import type { TimelineMilestone, TimelineMilestoneType, TourActivityEvent } from '../../api/index.js';
 import { humanize } from '../contact/format.js';
 
 /** Human titles for the tour lifecycle audit kinds (the recordTourEvent set +
@@ -36,4 +38,42 @@ export function describeTourActivity(e: TourActivityEvent): TourActivityDescript
     return { label, to: `/conversations/${encodeURIComponent(e.conversationId)}` };
   }
   return { label };
+}
+
+/** Tour audit kind → the closest shared TimelineMilestoneType. The type drives
+ *  ONLY the pin color (the label above is what renders); kinds the shared union
+ *  doesn't know map to a same-color neighbor rather than widening the server
+ *  timeline contract mirror. Unknown kinds fall to 'stage_changed' (neutral). */
+const MILESTONE_TYPE: Record<string, TimelineMilestoneType> = {
+  tour_scheduled: 'tour_scheduled',
+  tour_rescheduled: 'tour_scheduled',
+  tour_took_place: 'tour_took_place',
+  tour_no_show: 'tour_no_show',
+  tour_canceled: 'tour_canceled',
+  tour_outcome: 'tour_outcome',
+  tour_group_opened: 'added_to_group_text',
+  tour_converted: 'placement_opened',
+};
+
+/**
+ * The same audit event as a shared-Timeline milestone pin, for the tour page's
+ * conversation transcripts. No 'tour' ref (we are already ON the tour page);
+ * converted/group-opened keep their deep links via refType/refId.
+ */
+export function tourActivityToMilestone(e: TourActivityEvent): TimelineMilestone {
+  const { label } = describeTourActivity(e);
+  const ref: Pick<TimelineMilestone, 'refType' | 'refId'> =
+    e.type === 'tour_converted' && e.placementId
+      ? { refType: 'placement', refId: e.placementId }
+      : e.type === 'tour_group_opened' && e.conversationId
+        ? { refType: 'conversation', refId: e.conversationId }
+        : {};
+  return {
+    kind: 'milestone',
+    id: `tour-activity:${e.id}`,
+    at: e.at,
+    type: MILESTONE_TYPE[e.type] ?? 'stage_changed',
+    label,
+    ...ref,
+  };
 }

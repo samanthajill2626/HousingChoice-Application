@@ -12,7 +12,7 @@
 // Tours are SEPARATE from placements: the exit gate records the navigator's
 // decision; conversion (Start placement) is a downstream step. Audience: staff
 // see "property" for the unit (GLOSSARY).
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ApiError,
@@ -39,7 +39,7 @@ import { formatRent } from '../listing/listingFormat.js';
 import { dateTime, shortDate } from '../placements/placementsFormat.js';
 import { useTour } from './useTour.js';
 import { useTourChannels } from './useTourChannels.js';
-import { useTourActivity } from './useTourActivity.js';
+import { useTourActivity, type TourActivityState } from './useTourActivity.js';
 import { RemindersPanel } from './RemindersPanel.js';
 import { TourActionsMenu } from './TourActionsMenu.js';
 import { TourConversation } from './TourConversation.js';
@@ -49,7 +49,7 @@ import {
   RecordOutcomeModal,
   RescheduleTourModal,
 } from './TourModals.js';
-import { describeTourActivity } from './tourActivityFormat.js';
+import { describeTourActivity, tourActivityToMilestone } from './tourActivityFormat.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './TourDetail.module.css';
 
@@ -141,6 +141,16 @@ function TourDetailLoaded({
   const navigate = useNavigate();
   const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
   const channels = useTourChannels(tour, landlordId);
+  // ONE activity fetch feeds both the Activity card and the conversation
+  // transcripts (as interleaved milestone pins). Rows arrive newest-first;
+  // the transcripts want oldest-first, hence the reverse. Only the loaded
+  // page(s) interleave — a tour's whole lifecycle fits the first page in
+  // practice, and the card's "Load more" extends both.
+  const activity = useTourActivity(tour.tourId);
+  const tourMilestones = useMemo(
+    () => activity.rows.map(tourActivityToMilestone).reverse(),
+    [activity.rows],
+  );
 
   // Mobile pane: DETAILS first on narrow widths (per the 2026-07-08 decision).
   const [pane, setPane] = useState<'details' | 'conversation'>('details');
@@ -395,6 +405,7 @@ function TourDetailLoaded({
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
+            tourMilestones={tourMilestones}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
@@ -498,7 +509,7 @@ function TourDetailLoaded({
             </Card>
 
             {/* --- Activity --- */}
-            <TourActivityCard tourId={tour.tourId} />
+            <TourActivityCard activity={activity} />
           </div>
         </div>
       </div>
@@ -520,9 +531,11 @@ function TourDetailLoaded({
 }
 
 /** The tour's OWN lifecycle history, newest-first with "load more" - mirrors
- *  PlacementDetail's HistoryPanel, reading useTourActivity. */
-function TourActivityCard({ tourId }: { tourId: string }): React.JSX.Element {
-  const { status, rows, hasMore, loadingMore, loadMore } = useTourActivity(tourId);
+ *  PlacementDetail's HistoryPanel. The activity state is FETCHED BY THE PARENT
+ *  (one useTourActivity) because the conversation transcripts interleave the
+ *  same rows as milestone pins. */
+function TourActivityCard({ activity }: { activity: TourActivityState }): React.JSX.Element {
+  const { status, rows, hasMore, loadingMore, loadMore } = activity;
   return (
     <Card title="Activity" aside={rows.length > 0 ? String(rows.length) : undefined}>
       {status === 'loading' ? (

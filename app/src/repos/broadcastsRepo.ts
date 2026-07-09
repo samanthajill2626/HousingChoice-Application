@@ -150,6 +150,70 @@ export interface ListBroadcastsOpts {
   exclusiveStartKey?: Record<string, unknown>;
 }
 
+/**
+ * S4 (broadcast live progress): the SINGLE SOURCE OF TRUTH for the disjoint stat
+ * buckets, derived from the recipients map so a recipient is counted in EXACTLY
+ * ONE bucket and the buckets always sum to the audience (the map size).
+ *
+ * - EMPTY map (drafts, or a legacy row without a map): return the persisted
+ *   stats UNCHANGED (drafts show the audience estimate + zero buckets, today's
+ *   behavior). Same object reference - a pure passthrough.
+ * - NON-EMPTY map: compute every field from the slots:
+ *     audience  = number of slots
+ *     queued    = slots with status 'queued'
+ *     sent      = slots with status 'sent'
+ *     delivered = slots with status 'delivered'
+ *     failed    = slots with status 'failed'
+ *     skipped_no_consent = 'skipped' slots with errorCode 'no_consent'
+ *     skipped_opted_out  = every remaining 'skipped' slot
+ *   Legacy cumulative persisted stats are IGNORED when the map is present, so
+ *   historical broadcasts (whose persisted counters double-counted delivered)
+ *   still DISPLAY correctly. Same BroadcastStats shape as the persisted counters.
+ */
+export function deriveBroadcastStats(
+  b: Pick<BroadcastItem, 'recipients' | 'stats'>,
+): BroadcastStats {
+  const recipients = b.recipients ?? {};
+  const keys = Object.keys(recipients);
+  if (keys.length === 0) return b.stats;
+  let queued = 0;
+  let sent = 0;
+  let delivered = 0;
+  let failed = 0;
+  let skipped_no_consent = 0;
+  let skipped_opted_out = 0;
+  for (const key of keys) {
+    const slot = recipients[key]!;
+    switch (slot.status) {
+      case 'queued':
+        queued += 1;
+        break;
+      case 'sent':
+        sent += 1;
+        break;
+      case 'delivered':
+        delivered += 1;
+        break;
+      case 'failed':
+        failed += 1;
+        break;
+      case 'skipped':
+        if (slot.errorCode === 'no_consent') skipped_no_consent += 1;
+        else skipped_opted_out += 1;
+        break;
+    }
+  }
+  return {
+    audience: keys.length,
+    queued,
+    sent,
+    delivered,
+    failed,
+    skipped_opted_out,
+    skipped_no_consent,
+  };
+}
+
 /** Zero-valued stats for a fresh draft. */
 export function zeroStats(): BroadcastStats {
   return {

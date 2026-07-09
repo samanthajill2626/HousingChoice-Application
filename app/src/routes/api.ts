@@ -833,11 +833,41 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
 
+    // PRESIGN PER ATTEMPT (design Sec 5 - the Cameron rule): a retry is a NEW
+    // provider create + fetch. Presigned URLs are short-lived bearer tokens, so
+    // replaying the original's stored mediaUrls verbatim would hand Twilio an
+    // EXPIRED token 24h later. When the original carries media_attachments (the
+    // durable s3Keys), re-presign each FRESH and send those (the new message
+    // persists these fresh URLs + media_attachments via sendMessage). Only a
+    // message with NO media_attachments (the raw e2e/internal seam) falls back
+    // to replaying its raw mediaUrls.
+    const originalAttachments = mediaAttachmentsOf(original);
+    let retryMediaUrls: string[] | undefined;
+    let retryAttachments: MediaAttachment[] | undefined;
+    if (originalAttachments.length > 0 && mediaStore) {
+      retryMediaUrls = await Promise.all(
+        originalAttachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
+      );
+      retryAttachments = originalAttachments;
+      log.info(
+        {
+          conversationId,
+          providerSid,
+          attachmentCount: originalAttachments.length,
+          s3Keys: originalAttachments.map((a) => a.s3Key),
+        },
+        'retry: re-presigned attachments fresh (never replaying stored URLs)',
+      );
+    } else if (original.mediaUrls !== undefined) {
+      retryMediaUrls = original.mediaUrls;
+    }
+
     try {
       const outcome = await sendMessage({
         conversationId,
         ...(original.body !== undefined && { body: original.body }),
-        ...(original.mediaUrls !== undefined && { mediaUrls: original.mediaUrls }),
+        ...(retryMediaUrls !== undefined && { mediaUrls: retryMediaUrls }),
+        ...(retryAttachments !== undefined && { attachments: retryAttachments }),
         automated: false,
         // Carry the original author through (a retried AI message stays 'ai').
         author: original.author === 'ai' ? 'ai' : 'teammate',

@@ -242,7 +242,10 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     delivery_status: 'failed' as const,
   };
 
-  function makeRetryApp(original: unknown) {
+  function makeRetryApp(
+    original: unknown,
+    mediaStore?: import('../src/adapters/mediaStore.js').MediaStore,
+  ) {
     const calls: SendMessageInput[] = [];
     const app = buildApp({
       config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
@@ -254,6 +257,7 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
             return original;
           },
         } as unknown as import('../src/repos/messagesRepo.js').MessagesRepo,
+        ...(mediaStore !== undefined && { mediaStore }),
         sendMessageService: async (input) => {
           calls.push(input);
           return {
@@ -325,6 +329,76 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
       expect(res.body).toEqual({ error: 'not_failed' });
       expect(calls).toHaveLength(0);
     }
+  });
+
+  // THE Cameron rule (design Sec 5 / spec S5+S12): a retry of a message with
+  // media_attachments RE-PRESIGNS each s3Key FRESH - it must never replay the
+  // stored (expired) mediaUrls. Pinned: the retried URLs DIFFER from the
+  // originals AND derive from the durable s3Keys.
+  it('re-presigns media_attachments fresh on retry (URLs differ from the stored originals)', async () => {
+    let presignCount = 0;
+    const mediaStore = {
+      async presign(key: string, ttl: number) {
+        // Unique per call AND derived from the key: proves the retry re-presigns.
+        presignCount += 1;
+        return `https://s3.local/${key}?X-Amz-Signature=fresh${presignCount}&X-Amz-Expires=${ttl}`;
+      },
+      async head() {
+        return undefined;
+      },
+      async getStream() {
+        return undefined;
+      },
+      async put() {
+        /* unused */
+      },
+    } as unknown as import('../src/adapters/mediaStore.js').MediaStore;
+
+    const STALE_URL = 'https://s3.local/uploads/aaaa?X-Amz-Signature=STALEEXPIRED&X-Amz-Expires=3600';
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      // The durable truth (what a resend must re-derive from).
+      media_attachments: [{ s3Key: 'uploads/aaaa', contentType: 'image/png' }],
+      // The stale presigned URL from the FIRST send - must NOT be replayed.
+      mediaUrls: [STALE_URL],
+    };
+    const { app, calls } = makeRetryApp(original, mediaStore);
+
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+
+    expect(res.status).toBe(201);
+    expect(calls).toHaveLength(1);
+    const sentUrls = calls[0]?.mediaUrls ?? [];
+    // Differs from the stored original (not a verbatim replay).
+    expect(sentUrls).not.toContain(STALE_URL);
+    expect(sentUrls[0]).not.toBe(STALE_URL);
+    // Freshly presigned (bearer-token query present) AND derived from the s3Key.
+    expect(sentUrls[0]).toContain('X-Amz-Signature=fresh');
+    expect(sentUrls[0]).toContain('uploads/aaaa');
+    // The durable attachments ride along so the retried message persists them.
+    expect(calls[0]?.attachments).toEqual([{ s3Key: 'uploads/aaaa', contentType: 'image/png' }]);
+  });
+
+  it('falls back to replaying raw mediaUrls when the original has NO media_attachments (e2e seam)', async () => {
+    const original = {
+      ...FAILED_ORIGINAL,
+      type: 'mms' as const,
+      mediaUrls: ['https://fake/canned/room.png'],
+    };
+    const { app, calls } = makeRetryApp(original);
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/SMorig/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(201);
+    expect(calls[0]?.mediaUrls).toEqual(['https://fake/canned/room.png']);
+    expect(calls[0]?.attachments).toBeUndefined();
   });
 });
 

@@ -239,6 +239,7 @@ export function createFakeWorld(): FakeWorld {
   let sidCounter = 0;
   let provisionCounter = 0;
   let callCounter = 0;
+  let presignCounter = 0;
 
   const events = createEventBus();
   const emitted: FakeWorld['emitted'] = [];
@@ -1785,6 +1786,23 @@ export function createFakeWorld(): FakeWorld {
         body: Readable.from([obj.body]),
         ...(obj.contentType !== undefined && { contentType: obj.contentType }),
         contentLength: obj.body.length,
+      };
+    },
+    async presign(key, ttlSeconds) {
+      // A UNIQUE URL per call (presignCounter) that DERIVES from the s3Key, so
+      // the retry-re-presign test can assert a fresh URL differs from the
+      // original yet still points at the same durable key. Carries an
+      // X-Amz-Signature-style query so send-path tests can assert a presigned
+      // (bearer-token) URL reached the adapter.
+      presignCounter += 1;
+      return `https://fake-s3.local/${key}?X-Amz-Signature=fakesig${presignCounter}&X-Amz-Expires=${ttlSeconds}`;
+    },
+    async head(key) {
+      const obj = mediaObjects.get(key);
+      if (!obj) return undefined;
+      return {
+        ...(obj.contentType !== undefined && { contentType: obj.contentType }),
+        size: obj.body.length,
       };
     },
   };

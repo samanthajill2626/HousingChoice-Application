@@ -36,7 +36,7 @@ function results(over: Partial<BroadcastResultsType> = {}): BroadcastResultsType
     status: 'sending',
     unitId: 'unit-0001',
     audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
-    stats: { audience: 3, sent: 1, delivered: 1, failed: 0, skipped_opted_out: 0, queued: 1 },
+    stats: { audience: 3, sent: 1, delivered: 1, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 1 },
     recipients: {
       c1: { status: 'delivered' },
       c2: { status: 'queued' },
@@ -148,7 +148,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
     getBroadcastResults.mockResolvedValueOnce(
       results({
         status: 'sent',
-        stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, queued: 0 },
+        stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
         recipients: { c1: { status: 'delivered' }, c2: { status: 'delivered' } },
       }),
     );
@@ -156,7 +156,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
     const event: BroadcastUpdatedEvent = {
       broadcastId: 'bcast_1',
       status: 'sent',
-      stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, queued: 0 },
+      stats: { audience: 3, sent: 0, delivered: 3, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
     };
     act(() => sse.onBroadcastUpdated?.(event));
 
@@ -186,7 +186,7 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
       sse.onBroadcastUpdated?.({
         broadcastId: 'someone_else',
         status: 'sent',
-        stats: { audience: 1, sent: 0, delivered: 1, failed: 0, skipped_opted_out: 0, queued: 0 },
+        stats: { audience: 1, sent: 0, delivered: 1, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
       }),
     );
     // No overlay, no refetch.

@@ -1485,7 +1485,10 @@ export type BroadcastMergeField = (typeof BROADCAST_MERGE_FIELDS)[number];
 /** A broadcast's lifecycle status (byStatus GSI partition values). */
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 
-/** The delivery rollup carried on a summary / results row. */
+/** The delivery rollup carried on a summary / results row. Disjoint buckets:
+ *  queued + sent + delivered + failed + skipped_opted_out + skipped_no_consent
+ *  == audience (the server derives these from the recipients map). MIRRORS
+ *  app/src/repos/broadcastsRepo.ts BroadcastStats - keep in sync. */
 export interface BroadcastStats {
   /** The resolved audience size at send time. */
   audience: number;
@@ -1494,6 +1497,8 @@ export interface BroadcastStats {
   failed: number;
   /** Recipients dropped because they opted out between resolve + send. */
   skipped_opted_out: number;
+  /** Recipients fenced out for missing SMS consent (staff can record consent). */
+  skipped_no_consent: number;
   queued: number;
 }
 

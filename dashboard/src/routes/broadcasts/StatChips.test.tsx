@@ -10,7 +10,21 @@ import { DeliveryBadge } from './DeliveryBadge.js';
 import { BroadcastStatusPill } from './BroadcastStatusPill.js';
 
 function stats(over: Partial<BroadcastStats> = {}): BroadcastStats {
-  return { audience: 5, sent: 2, delivered: 1, failed: 0, skipped_opted_out: 0, queued: 2, ...over };
+  return {
+    audience: 5,
+    sent: 2,
+    delivered: 1,
+    failed: 0,
+    skipped_opted_out: 0,
+    skipped_no_consent: 0,
+    queued: 2,
+    ...over,
+  };
+}
+
+/** The count inside a given chip (looked up by its label). */
+function chipValue(list: HTMLElement, label: string): string {
+  return (within(list).getByText(label).closest('div') as HTMLElement).textContent ?? '';
 }
 
 describe('StatChips', () => {
@@ -24,6 +38,46 @@ describe('StatChips', () => {
     expect(within(within(list).getByText('Sent').closest('div') as HTMLElement).getByText('4')).toBeInTheDocument();
     expect(within(within(list).getByText('Queued').closest('div') as HTMLElement).getByText('1')).toBeInTheDocument();
     expect(within(within(list).getByText('Failed').closest('div') as HTMLElement).getByText('2')).toBeInTheDocument();
+  });
+
+  it('renders a Skipped chip summing opted-out + no-consent', () => {
+    render(<StatChips stats={stats({ skipped_opted_out: 2, skipped_no_consent: 3 })} />);
+    const list = screen.getByLabelText('Delivery stats');
+    // Skipped = 2 opted-out + 3 no-consent = 5, in one neutral chip.
+    expect(within(within(list).getByText('Skipped').closest('div') as HTMLElement).getByText('5')).toBeInTheDocument();
+  });
+
+  it('renders the disjoint bucket values exactly as given (no double-count)', () => {
+    // A fully delivered 11-recipient broadcast: Delivered 11, everything else 0.
+    render(
+      <StatChips
+        stats={stats({
+          audience: 11,
+          delivered: 11,
+          sent: 0,
+          queued: 0,
+          failed: 0,
+          skipped_opted_out: 0,
+          skipped_no_consent: 0,
+        })}
+      />,
+    );
+    const list = screen.getByLabelText('Delivery stats');
+    expect(chipValue(list, 'Recipients')).toContain('11');
+    expect(chipValue(list, 'Delivered')).toContain('11');
+    expect(chipValue(list, 'Sent')).toContain('0');
+    expect(chipValue(list, 'Queued')).toContain('0');
+    expect(chipValue(list, 'Failed')).toContain('0');
+    expect(chipValue(list, 'Skipped')).toContain('0');
+  });
+
+  it('orders chips Recipients, Delivered, Sent, Queued, Failed, Skipped', () => {
+    render(<StatChips stats={stats()} />);
+    const list = screen.getByLabelText('Delivery stats');
+    const labels = within(list)
+      .getAllByRole('term')
+      .map((dt) => dt.textContent);
+    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Queued', 'Failed', 'Skipped']);
   });
 });
 

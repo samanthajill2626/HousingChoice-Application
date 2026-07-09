@@ -53,6 +53,15 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
 
   const abortRef = useRef<AbortController | null>(null);
   const genRef = useRef(0);
+  /** True once a TERMINAL status (sent/failed) was observed via the SSE overlay.
+   *  The gen/abort guard protects fetches against EACH OTHER, but the overlay
+   *  owns no generation - so a poll that was already in flight when finalize's
+   *  event landed can resolve LATER with a stale pre-finalize 'sending' snapshot
+   *  and briefly regress the pill (sending -> sent -> sending -> sent). The
+   *  lifecycle is forward-only (a sent/failed broadcast can never resume
+   *  sending), so such a snapshot is stale BY DEFINITION and is discarded; the
+   *  debounced refetch delivers the terminal rows. Reset per broadcastId. */
+  const terminalSeenRef = useRef(false);
 
   const fetchResults = useCallback(
     async (background: boolean) => {
@@ -65,6 +74,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
       try {
         const data = await getBroadcastResults(broadcastId, controller.signal);
         if (controller.signal.aborted || gen !== genRef.current) return;
+        if (terminalSeenRef.current && data.status === 'sending') return;
         setResults(data);
         setStatus('ready');
         setNotFound(false);
@@ -94,6 +104,7 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
     setStatus('loading');
     setResults(null);
     setNotFound(false);
+    terminalSeenRef.current = false;
     void fetchResults(false);
     return () => abortRef.current?.abort();
   }, [fetchResults]);
@@ -110,6 +121,9 @@ export function useBroadcastResults(broadcastId: string): BroadcastResultsState 
   const onBroadcastUpdated = useCallback(
     (e: BroadcastUpdatedEvent) => {
       if (e.broadcastId !== broadcastId) return;
+      // Latch a terminal status BEFORE overlaying: any in-flight fetch that
+      // still says 'sending' is now stale and must not regress the pill.
+      if (e.status === 'sent' || e.status === 'failed') terminalSeenRef.current = true;
       // (1) Instant overlay of the live rollup onto whatever we have.
       setResults((prev) => (prev === null ? prev : { ...prev, status: e.status, stats: e.stats }));
       // (2) Debounced refetch to pick up the per-recipient changes.

@@ -107,6 +107,54 @@ describe('useBroadcastResults - live polling while sending', () => {
     expect(getBroadcastResults).toHaveBeenCalledTimes(1);
   });
 
+  it('a stale in-flight poll cannot regress a terminal SSE status back to sending', async () => {
+    // Regression (review S2): the gen/abort guard protects fetches against each
+    // other, but the SSE overlay owns no generation. A poll that was already in
+    // flight when finalize's event landed used to resolve LATER with its stale
+    // pre-finalize 'sending' snapshot and flap the pill sent -> sending -> sent.
+    // The terminal latch discards that snapshot (the lifecycle is forward-only).
+    getBroadcastResults.mockResolvedValueOnce(results('sending'));
+    let resolveStalePoll: (v: BroadcastResultsType) => void = () => {};
+    getBroadcastResults.mockImplementationOnce(
+      () => new Promise<BroadcastResultsType>((resolve) => (resolveStalePoll = resolve)),
+    );
+    getBroadcastResults.mockResolvedValue(results('sent'));
+
+    const { result } = renderHook(() => useBroadcastResults('bcast_1'));
+    await tick(0);
+    expect(result.current.results?.status).toBe('sending');
+
+    // The 2s poll starts and HANGS (in flight, holding a pre-finalize snapshot).
+    await tick(2000);
+    expect(getBroadcastResults).toHaveBeenCalledTimes(2);
+
+    // finalize's SSE event lands while that poll is still in flight.
+    act(() => {
+      sse.onBroadcastUpdated?.({
+        broadcastId: 'bcast_1',
+        status: 'sent',
+        stats: results('sent').stats,
+      });
+    });
+    expect(result.current.results?.status).toBe('sent');
+
+    // The stale poll NOW resolves with its 'sending' snapshot - it must be
+    // discarded, never applied (no sent -> sending regression, no re-armed poll).
+    await act(async () => {
+      resolveStalePoll(results('sending'));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.results?.status).toBe('sent');
+
+    // The SSE debounced refetch (+400ms) re-reads the terminal rows; after that
+    // the page is quiet - the poll never re-armed off the stale snapshot.
+    await tick(400);
+    expect(getBroadcastResults).toHaveBeenCalledTimes(3);
+    expect(result.current.results?.status).toBe('sent');
+    await tick(6000);
+    expect(getBroadcastResults).toHaveBeenCalledTimes(3);
+  });
+
   it('clears the polling interval on unmount', async () => {
     getBroadcastResults.mockResolvedValue(results('sending'));
     const { unmount } = renderHook(() => useBroadcastResults('bcast_1'));

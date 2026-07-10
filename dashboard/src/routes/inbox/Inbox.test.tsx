@@ -26,10 +26,6 @@ vi.mock('./useInbox.js', async () => {
   const actual = await vi.importActual<typeof import('./useInbox.js')>('./useInbox.js');
   return { ...actual, useInbox: () => state };
 });
-vi.mock('../../app/AuthContext.js', () => ({
-  useAuth: () => ({ me: { userId: 'me1', email: 'navi@example.com', role: 'va' } }),
-}));
-
 import { Inbox } from './Inbox.js';
 
 function mkRow(over: Partial<InboxRowData> = {}): InboxRowData {

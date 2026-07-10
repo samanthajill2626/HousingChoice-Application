@@ -636,7 +636,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       conversationsRepo: conversations,
       messagesRepo: messages,
-      auditRepo: audit,
       events,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),

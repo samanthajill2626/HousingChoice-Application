@@ -45,10 +45,6 @@ import {
 import { formatPhoneForDisplay } from '../lib/phone.js';
 import { STAGE_LABELS } from '../lib/statusModel.js';
 import {
-  createAuditRepo,
-  type AuditRepo,
-} from '../repos/auditRepo.js';
-import {
   createPlacementsRepo,
   type PlacementsRepo,
 } from '../repos/placementsRepo.js';
@@ -105,7 +101,6 @@ export interface InboxRouterDeps {
   contactsRepo?: ContactsRepo;
   messagesRepo?: MessagesRepo;
   placementsRepo?: PlacementsRepo;
-  auditRepo?: AuditRepo;
   events?: EventBus;
 }
 
@@ -613,7 +608,6 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
-  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const router = Router();
 

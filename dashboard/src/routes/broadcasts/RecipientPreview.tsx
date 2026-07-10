@@ -205,7 +205,7 @@ export function RecipientPreview({
         if (err.code === 'rate_limited' || err.status === 429) {
           setError('Sending too fast — wait a moment and try again.');
         } else if (err.status === 409) {
-          setError('This broadcast was already sent (or is sending).');
+          setError('This send already went out (or is sending).');
           setRacedToResults(true);
         } else if (err.status === 400 && err.code === 'empty_audience') {
           setError('Nothing selected — check at least one tenant to send.');

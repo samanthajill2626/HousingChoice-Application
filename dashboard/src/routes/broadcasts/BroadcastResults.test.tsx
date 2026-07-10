@@ -159,7 +159,7 @@ describe('BroadcastResults — not found', () => {
     renderResults();
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/doesn't exist/i);
-    expect(within(alert).getByRole('link', { name: /Back to broadcasts/i })).toBeInTheDocument();
+    expect(within(alert).getByRole('link', { name: /Back to Matching/i })).toBeInTheDocument();
   });
 });
 

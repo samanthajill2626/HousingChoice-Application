@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { BroadcastRecipient } from '../../api/index.js';
 import {
   audienceSummary,
+  sendReachLabel,
   splitContactKey,
   toRecipientViews,
   voucherSizeLabel,
@@ -26,6 +27,14 @@ describe('audienceSummary', () => {
     expect(
       audienceSummary({ contact_type: 'tenant', bedroomSize: 2, housing_authority: 'Atlanta' }),
     ).toBe('Tenants - 2-BR - Atlanta');
+  });
+});
+
+describe('sendReachLabel', () => {
+  it('pluralizes tenant/tenants by count', () => {
+    expect(sendReachLabel(1)).toBe('To 1 tenant');
+    expect(sendReachLabel(0)).toBe('To 0 tenants');
+    expect(sendReachLabel(5)).toBe('To 5 tenants');
   });
 });
 

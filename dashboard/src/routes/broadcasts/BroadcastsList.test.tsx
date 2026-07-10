@@ -69,7 +69,7 @@ describe('BroadcastsList — rows', () => {
   it('renders a row with the status pill, audience summary, delivered/total, and date', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary()]));
     renderList();
-    const list = await screen.findByRole('list', { name: 'Broadcasts' });
+    const list = await screen.findByRole('list', { name: 'Property sends' });
     expect(within(list).getByText('Sent')).toBeInTheDocument();
     expect(within(list).getByText('Tenants - 2-BR')).toBeInTheDocument();
     expect(within(list).getByText('3/4 delivered')).toBeInTheDocument();
@@ -78,7 +78,7 @@ describe('BroadcastsList — rows', () => {
   it('shows the empty state when there are no broadcasts', async () => {
     listBroadcasts.mockResolvedValue(pageOf([]));
     renderList();
-    expect(await screen.findByText('No broadcasts yet')).toBeInTheDocument();
+    expect(await screen.findByText('No sends yet')).toBeInTheDocument();
   });
 });
 
@@ -86,7 +86,7 @@ describe('BroadcastsList — status filter', () => {
   it('re-queries with the selected status when a filter tab is chosen', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary()]));
     renderList();
-    await screen.findByRole('list', { name: 'Broadcasts' });
+    await screen.findByRole('list', { name: 'Property sends' });
     // First call: no status (All).
     expect((listBroadcasts.mock.calls[0]?.[0] as { status?: BroadcastStatus }).status).toBeUndefined();
 
@@ -100,26 +100,26 @@ describe('BroadcastsList — status filter', () => {
 });
 
 describe('BroadcastsList — navigation', () => {
-  it('"New broadcast" routes to the composer', async () => {
+  it('"Send a property" routes to the composer', async () => {
     listBroadcasts.mockResolvedValue(pageOf([]));
     renderList();
-    await screen.findByText('No broadcasts yet');
+    await screen.findByText('No sends yet');
     const u = userEvent.setup();
-    await u.click(screen.getByRole('button', { name: 'New broadcast' }));
+    await u.click(screen.getByRole('button', { name: 'Send a property' }));
     expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new');
   });
 
   it('a sent row links to its Results view', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_X', status: 'sent' })]));
     renderList();
-    const list = await screen.findByRole('list', { name: 'Broadcasts' });
+    const list = await screen.findByRole('list', { name: 'Property sends' });
     expect(within(list).getByRole('link')).toHaveAttribute('href', '/broadcasts/bcast_X');
   });
 
   it('a draft row links to the composer resume (?draftId=)', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
     renderList();
-    const list = await screen.findByRole('list', { name: 'Broadcasts' });
+    const list = await screen.findByRole('list', { name: 'Property sends' });
     expect(within(list).getByRole('link')).toHaveAttribute('href', '/broadcasts/new?draftId=bcast_D');
   });
 });
@@ -133,7 +133,7 @@ describe('BroadcastsList — delete draft', () => {
       ]),
     );
     renderList();
-    const list = await screen.findByRole('list', { name: 'Broadcasts' });
+    const list = await screen.findByRole('list', { name: 'Property sends' });
     // One draft row → exactly one Delete button.
     expect(within(list).getAllByRole('button', { name: /^Delete draft:/ })).toHaveLength(1);
   });
@@ -141,14 +141,14 @@ describe('BroadcastsList — delete draft', () => {
   it('confirming the modal deletes the draft and removes its row', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
     renderList();
-    await screen.findByRole('list', { name: 'Broadcasts' });
+    await screen.findByRole('list', { name: 'Property sends' });
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
     await u.click(within(dialog).getByRole('button', { name: 'Delete draft' }));
     await waitFor(() => expect(deleteBroadcast).toHaveBeenCalledWith('bcast_D'));
     // Row dropped locally (no refetch) → the only row is gone → empty state.
-    expect(await screen.findByText('No broadcasts yet')).toBeInTheDocument();
+    expect(await screen.findByText('No sends yet')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(listBroadcasts).toHaveBeenCalledTimes(1);
   });
@@ -156,27 +156,27 @@ describe('BroadcastsList — delete draft', () => {
   it('Cancel closes the modal without deleting', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
     renderList();
-    await screen.findByRole('list', { name: 'Broadcasts' });
+    await screen.findByRole('list', { name: 'Property sends' });
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
     await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(deleteBroadcast).not.toHaveBeenCalled();
-    expect(screen.getByRole('list', { name: 'Broadcasts' })).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: 'Property sends' })).toBeInTheDocument();
   });
 
   it('explains a 409 (raced to sending) and refetches the list', async () => {
     listBroadcasts.mockResolvedValue(pageOf([summary({ broadcastId: 'bcast_D', status: 'draft' })]));
     deleteBroadcast.mockRejectedValue(new ApiError(409, 'broadcast_not_draft', 'not a draft'));
     renderList();
-    await screen.findByRole('list', { name: 'Broadcasts' });
+    await screen.findByRole('list', { name: 'Property sends' });
     const u = userEvent.setup();
     await u.click(screen.getByRole('button', { name: /^Delete draft:/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Delete draft?' });
     await u.click(within(dialog).getByRole('button', { name: 'Delete draft' }));
     expect(
-      await within(dialog).findByText(/already started sending, so it can no longer be deleted/),
+      await within(dialog).findByText(/already started, so it can no longer be deleted/),
     ).toBeInTheDocument();
     // The list refetched behind the modal so the row shows its real status.
     await waitFor(() => expect(listBroadcasts).toHaveBeenCalledTimes(2));
@@ -189,12 +189,12 @@ describe('BroadcastsList — load more', () => {
       .mockResolvedValueOnce(pageOf([summary({ broadcastId: 'b1' })], 'CUR'))
       .mockResolvedValueOnce(pageOf([summary({ broadcastId: 'b2' })], null));
     renderList();
-    await screen.findByRole('list', { name: 'Broadcasts' });
+    await screen.findByRole('list', { name: 'Property sends' });
     const u = userEvent.setup();
     const loadMore = screen.getByRole('button', { name: 'Load more' });
     await u.click(loadMore);
     await waitFor(() => {
-      const list = screen.getByRole('list', { name: 'Broadcasts' });
+      const list = screen.getByRole('list', { name: 'Property sends' });
       expect(within(list).getAllByRole('listitem')).toHaveLength(2);
     });
     expect((listBroadcasts.mock.calls.at(-1)?.[0] as { cursor?: string }).cursor).toBe('CUR');

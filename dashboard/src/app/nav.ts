@@ -75,7 +75,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Communications',
     items: [
       { to: '/inbox', label: 'Inbox', icon: 'inbox', badge: 'inbox-unread' },
-      { to: '/broadcasts', label: 'Broadcasts', icon: 'broadcasts' },
+      { to: '/broadcasts', label: 'Matching', icon: 'broadcasts' },
     ],
   },
 ];

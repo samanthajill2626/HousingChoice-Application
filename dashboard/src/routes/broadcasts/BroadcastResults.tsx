@@ -19,6 +19,7 @@ import { StatChips } from './StatChips.js';
 import {
   audienceSummary,
   formatBroadcastDate,
+  sendReachLabel,
   toRecipientViews,
 } from './broadcastFormat.js';
 import { useBroadcastResults } from './useBroadcastResults.js';
@@ -96,14 +97,14 @@ export function BroadcastResults(): React.JSX.Element {
       <div className={styles.error} role="alert">
         {notFound ? (
           <>
-            <p>This broadcast doesn&apos;t exist (it may have been deleted).</p>
+            <p>This send doesn&apos;t exist (it may have been deleted).</p>
             <Link to="/broadcasts" className={styles.backLink}>
-              Back to broadcasts
+              Back to Matching
             </Link>
           </>
         ) : (
           <>
-            <p>We couldn&apos;t load this broadcast.</p>
+            <p>We couldn&apos;t load this send.</p>
             <button type="button" className={styles.retry} onClick={retry}>
               Retry
             </button>
@@ -116,16 +117,20 @@ export function BroadcastResults(): React.JSX.Element {
   if (results === null) return <Spinner center />;
 
   const recipients = toRecipientViews(results.recipients);
+  const reachLabel =
+    results.audience_mode === 'seeds_only'
+      ? sendReachLabel(results.stats.audience)
+      : audienceSummary(results.audience_filter);
 
   return (
     <div className={styles.page}>
       <Link to="/broadcasts" className={styles.backLink}>
-        ← Broadcasts
+        ← Matching
       </Link>
 
       <header className={styles.header}>
         <div className={styles.headTop}>
-          <h1 className={styles.title}>{audienceSummary(results.audience_filter)}</h1>
+          <h1 className={styles.title}>{reachLabel}</h1>
           <BroadcastStatusPill status={results.status} />
         </div>
         <p className={styles.meta}>Started {formatBroadcastDate(results.created_at)}</p>

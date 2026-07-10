@@ -254,7 +254,7 @@ export function BroadcastComposer(): React.JSX.Element {
   // COMPOSE step.
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>New broadcast</h1>
+      <h1 className={styles.title}>Send a property</h1>
 
       <div className={styles.cols}>
         <div className={styles.col}>

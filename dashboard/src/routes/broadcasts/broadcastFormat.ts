@@ -57,6 +57,11 @@ export function audienceSummary(filter: AudienceFilter): string {
   return parts.join(' - ');
 }
 
+/** Reach line for a seeds-only send, where the audience filter says nothing. */
+export function sendReachLabel(count: number): string {
+  return `To ${count} ${count === 1 ? 'tenant' : 'tenants'}`;
+}
+
 /** Broadcast status → a human label. */
 export const BROADCAST_STATUS_LABELS: Readonly<Record<BroadcastStatus, string>> = {
   draft: 'Draft',

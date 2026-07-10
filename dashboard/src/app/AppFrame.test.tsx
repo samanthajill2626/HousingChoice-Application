@@ -72,7 +72,7 @@ describe('AppFrame', () => {
     }
 
     const comms = screen.getByRole('navigation', { name: 'Communications' });
-    for (const label of ['Inbox', 'Broadcasts']) {
+    for (const label of ['Inbox', 'Matching']) {
       expect(within(comms).getByRole('link', { name: label })).toBeInTheDocument();
     }
 

@@ -451,7 +451,7 @@ describe('RecipientPreview — send errors', () => {
     });
     await u.click(screen.getByRole('button', { name: /^Send to/ }));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(/already sent/i);
+    expect(alert).toHaveTextContent(/already went out/i);
     const viewResults = within(alert).getByRole('button', { name: /View results/i });
     await u.click(viewResults);
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/bcast_1'));

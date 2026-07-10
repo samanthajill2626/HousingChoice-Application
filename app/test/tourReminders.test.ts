@@ -24,6 +24,7 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
@@ -218,6 +219,56 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Second run — idempotent: no new sends.
     await runDueTourReminders(pollAt, runDeps);
     expect(world.sent).toHaveLength(2); // unchanged
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 2b — a fired rung emits scheduled.updated (the live Reminders panel /
+  // Upcoming bucket refetch on it; reaches SSE clients when the poll runs in
+  // the app process — the dev tick / e2e seam)
+  // ---------------------------------------------------------------------------
+  it('runDueTourReminders emits scheduled.updated per claimed rung (advisory tenant contactId)', async () => {
+    world.sent.length = 0;
+    const phone = '+15550200002';
+    const contactId = 'contact-emit-1';
+    const convId = 'conv-emit-1';
+    const now0 = '2026-07-13T10:00:00.000Z';
+    const scheduledAt = '2026-07-15T10:00:00.000Z';
+
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone,
+      created_at: now0,
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(convId, {
+      conversationId: convId,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: now0,
+      created_at: now0,
+    });
+    const tour = await tours.create({
+      tenantId: contactId,
+      unitId: 'unit-emit-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    const events = createEventBus({ logger });
+    const emitted: Array<{ contactId?: string }> = [];
+    events.on('scheduled.updated', (p) => emitted.push(p));
+
+    // Same window as Test 2: confirmation + day_before fire.
+    await runDueTourReminders('2026-07-14T10:01:00.000Z', { ...runDeps, events });
+    expect(emitted).toHaveLength(2);
+    for (const p of emitted) expect(p.contactId).toBe(contactId);
+
+    // Idempotent second run: nothing claims → nothing emits.
+    await runDueTourReminders('2026-07-14T10:01:00.000Z', { ...runDeps, events });
+    expect(emitted).toHaveLength(2);
   });
 
   // ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@
 //
 // PII (doc §9): NEVER log a phone number. Log only reminderId/tourId/tenantId/kind.
 import type { MessagingAdapter } from '../adapters/messaging.js';
+import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
 import type {
@@ -175,6 +176,16 @@ export interface RunDueTourRemindersDeps {
    * hermetic dev tick — the fake provider needs no pacing.
    */
   tokenBucket?: { acquire(n: number): Promise<void> };
+  /**
+   * Live-update bus (defaults to the appEvents singleton). A successful CLAIM
+   * emits `scheduled.updated` so the tour page's Reminders panel / the contact
+   * timeline's Upcoming bucket refetch the ladder. NOTE the lib/events.ts
+   * single-instance seam: this reaches SSE clients only when the poll runs in
+   * the APP process (the hermetic dev tick / e2e); the deployed worker's emit
+   * goes nowhere until the seam is bridged — the panel's dueAt-anchored
+   * refetch covers that case client-side.
+   */
+  events?: EventBus;
   logger?: Logger;
 }
 
@@ -292,6 +303,9 @@ async function processReminderRow(
     );
     return;
   }
+  // The rung just flipped to sent (whatever the send outcome below) — tell the
+  // live surfaces to refetch the ladder. Advisory + ID-only (see the deps note).
+  (deps.events ?? appEvents).emit('scheduled.updated', { contactId: tour.tenantId });
 
   // Claim succeeded — now send. A crash after this point drops this one
   // reminder (same accepted tradeoff as missedCallAutoText's marker pattern).
@@ -430,6 +444,8 @@ async function sendGroupReminder(
     );
     return;
   }
+  // Rung flipped to sent — same live-surface nudge as the 1:1 path.
+  (deps.events ?? appEvents).emit('scheduled.updated', { contactId: tour.tenantId });
 
   // Claim succeeded — send to each member. Per-member failures log and
   // CONTINUE with the remaining members; the claim is already stamped, so a

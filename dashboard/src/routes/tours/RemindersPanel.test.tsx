@@ -26,7 +26,7 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { RemindersPanel } from './RemindersPanel.js';
+import { nextReminderRefetchDelay, RemindersPanel } from './RemindersPanel.js';
 
 function rung(over: Partial<TourReminderView> = {}): TourReminderView {
   return {
@@ -172,5 +172,88 @@ describe('RemindersPanel', () => {
     act(() => streamHandlers?.onTourUpdated?.({ tourId: 'tour-1', status: 'toured' }));
     await waitFor(() => expect(getTourReminders).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText('Canceled')).toBeInTheDocument());
+  });
+});
+
+// ---- The dueAt-anchored self-refetch (worker-fire liveness) -----------------
+// A rung FIRING happens in the worker process, whose SSE events never reach the
+// browser (the lib/events.ts seam) — the panel anchors its own refetch to the
+// next rung's dueAt instead.
+
+describe('nextReminderRefetchDelay (pure)', () => {
+  const NOW = new Date('2026-07-10T12:00:00Z').getTime();
+
+  it('returns null when no rung is upcoming (nothing to wait for)', () => {
+    expect(nextReminderRefetchDelay([], NOW)).toBeNull();
+    expect(
+      nextReminderRefetchDelay(
+        [
+          { state: 'sent', dueAt: '2026-07-10T11:00:00Z' },
+          { state: 'canceled', dueAt: '2026-07-10T13:00:00Z' },
+        ],
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('anchors just past the EARLIEST upcoming dueAt', () => {
+    const delay = nextReminderRefetchDelay(
+      [
+        { state: 'upcoming', dueAt: '2026-07-10T14:00:00Z' },
+        { state: 'upcoming', dueAt: '2026-07-10T12:00:30Z' },
+      ],
+      NOW,
+    );
+    // 30s to the earliest fire + the 2s buffer.
+    expect(delay).toBe(32_000);
+  });
+
+  it('re-checks on a short interval while a due rung awaits the worker poll', () => {
+    expect(
+      nextReminderRefetchDelay([{ state: 'upcoming', dueAt: '2026-07-10T11:59:00Z' }], NOW),
+    ).toBe(20_000);
+  });
+
+  it('clamps a far-future anchor (each landed fetch re-anchors anyway)', () => {
+    expect(
+      nextReminderRefetchDelay([{ state: 'upcoming', dueAt: '2026-08-01T12:00:00Z' }], NOW),
+    ).toBe(6 * 3_600_000);
+  });
+});
+
+describe('RemindersPanel — dueAt-anchored self-refetch', () => {
+  it('refetches on its own just after the next rung fires, then stops once nothing is upcoming', async () => {
+    vi.useFakeTimers();
+    try {
+      const soon = new Date(Date.now() + 5_000).toISOString();
+      getTourReminders
+        .mockResolvedValueOnce({ reminders: [rung({ dueAt: soon })] } satisfies TourRemindersPage)
+        .mockResolvedValue({
+          reminders: [rung({ dueAt: soon, state: 'sent', sentAt: soon })],
+        } satisfies TourRemindersPage);
+      render(<RemindersPanel tourId="tour-1" />);
+
+      // Initial fetch lands (flush microtasks under fake timers).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(getTourReminders).toHaveBeenCalledTimes(1);
+
+      // Past dueAt + the fire buffer → the anchored timer refetches, and the
+      // fresh ladder shows the rung as sent. No SSE event was involved.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_000);
+      });
+      expect(getTourReminders).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/Sent/)).toBeInTheDocument();
+
+      // Nothing upcoming anymore → no further self-refetch is armed.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+      });
+      expect(getTourReminders).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

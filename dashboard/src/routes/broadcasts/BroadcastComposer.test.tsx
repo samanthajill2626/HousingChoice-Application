@@ -152,7 +152,7 @@ describe('BroadcastComposer — single draft / no orphan', () => {
 
 describe('BroadcastComposer — preview gate', () => {
   it('enables Preview only after a draft exists, then advances to the recipient list', async () => {
-    previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true }], priorRecipientContactIds: [] });
+    previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: false }], priorRecipientContactIds: [], seedContactIds: [], unresolvedSeedIds: [] });
     const u = userEvent.setup();
     renderComposer();
     const previewBtn = screen.getByRole('button', { name: 'Preview recipients' });

@@ -1,9 +1,8 @@
 // BE4/C4 integration tests against DynamoDB Local — the listing-sends repo:
-// recordSend creates a 'no_reply' row; a re-send refreshes sentAt but PRESERVES
-// a previously-set response (the no-reset invariant); setResponse updates;
-// listByUnit + listByContact both return the row (two query directions); a
-// missing-row setResponse throws the conditional-check error (route → 404); rows
-// are isolated per unit/contact.
+// recordSend creates a row; a re-send refreshes sentAt/via/broadcastId but
+// PRESERVES created_at (the idempotent upsert / no first-write reset invariant);
+// listByUnit + listByContact both return the row (two query directions); rows are
+// isolated per unit/contact.
 //
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
@@ -15,10 +14,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import {
-  createListingSendsRepo,
-  ListingSendNotFoundError,
-} from '../src/repos/listingSendsRepo.js';
+import { createListingSendsRepo } from '../src/repos/listingSendsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -57,7 +53,7 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     client.destroy();
   }, 120_000);
 
-  it('recordSend creates a no_reply row and stamps audit furniture', async () => {
+  it('recordSend creates a row and stamps audit furniture', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     const row = await repo.recordSend({
@@ -67,25 +63,25 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
       broadcastId: 'bcast-1',
       sentAt: '2026-06-16T10:00:00.000Z',
     });
-    expect(row.response).toBe('no_reply');
     expect(row.sentAt).toBe('2026-06-16T10:00:00.000Z');
     expect(row.via).toBe('broadcast');
     expect(row.broadcastId).toBe('bcast-1');
     expect(row.created_at).toBeDefined();
     expect(row.updated_at).toBeDefined();
+    // The removed `response` label is never written.
+    expect(row).not.toHaveProperty('response');
   });
 
-  it('re-send updates sentAt/via but PRESERVES a previously-set response (no reset)', async () => {
+  it('re-send updates sentAt/via but PRESERVES created_at (idempotent upsert, no first-write reset)', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    await repo.recordSend({
+    const first = await repo.recordSend({
       contactId,
       unitId,
       via: 'broadcast',
       broadcastId: 'bcast-1',
       sentAt: '2026-06-16T10:00:00.000Z',
     });
-    await repo.setResponse(unitId, contactId, 'interested');
 
     const resent = await repo.recordSend({
       contactId,
@@ -93,44 +89,24 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
       via: 'individual',
       sentAt: '2026-06-17T10:00:00.000Z',
     });
-    expect(resent.response).toBe('interested'); // NOT reset to no_reply
+    expect(resent.created_at).toBe(first.created_at); // first-write furniture preserved
     expect(resent.sentAt).toBe('2026-06-17T10:00:00.000Z');
     expect(resent.via).toBe('individual');
     // An individual re-send with no broadcastId clears the prior attribution.
     expect(resent.broadcastId).toBeUndefined();
   });
 
-  it('setResponse updates the response and both query directions return the row', async () => {
+  it('both query directions return the row', async () => {
     const unitId = `unit-${randomUUID().slice(0, 8)}`;
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     await repo.recordSend({ contactId, unitId, via: 'broadcast' });
-    const result = await repo.setResponse(unitId, contactId, 'not_a_fit');
-    // A real transition reports changed:true with the updated row.
-    expect(result.changed).toBe(true);
-    expect(result.row.response).toBe('not_a_fit');
 
     const byUnit = await repo.listByUnit(unitId);
     const byContact = await repo.listByContact(contactId);
     expect(byUnit).toHaveLength(1);
     expect(byContact).toHaveLength(1);
-    expect(byUnit[0]?.response).toBe('not_a_fit');
-    expect(byContact[0]?.response).toBe('not_a_fit');
     expect(byUnit[0]?.unitId).toBe(unitId);
     expect(byContact[0]?.contactId).toBe(contactId);
-  });
-
-  it('setResponse is atomic-conditional: an unchanged value is a no-op (changed:false), no double-write', async () => {
-    const unitId = `unit-${randomUUID().slice(0, 8)}`;
-    const contactId = `contact-${randomUUID().slice(0, 8)}`;
-    await repo.recordSend({ contactId, unitId, via: 'broadcast' });
-
-    const first = await repo.setResponse(unitId, contactId, 'interested');
-    expect(first.changed).toBe(true);
-
-    // Same value again — the conditional does NOT write; changed:false.
-    const second = await repo.setResponse(unitId, contactId, 'interested');
-    expect(second.changed).toBe(false);
-    expect(second.row.response).toBe('interested');
   });
 
   it('getByKey point-reads a single row (and returns undefined when absent)', async () => {
@@ -141,16 +117,9 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
     const row = await repo.getByKey(unitId, contactId);
     expect(row?.unitId).toBe(unitId);
     expect(row?.contactId).toBe(contactId);
-    expect(row?.response).toBe('no_reply');
   });
 
-  it('setResponse on a missing row throws ListingSendNotFoundError (route → 404)', async () => {
-    await expect(
-      repo.setResponse(`unit-${randomUUID().slice(0, 8)}`, `contact-${randomUUID().slice(0, 8)}`, 'interested'),
-    ).rejects.toBeInstanceOf(ListingSendNotFoundError);
-  });
-
-  it('listByContact returns a contact’s sends newest-first by sentAt', async () => {
+  it('listByContact returns a contacts sends newest-first by sentAt', async () => {
     const contactId = `contact-${randomUUID().slice(0, 8)}`;
     const u1 = `unit-${randomUUID().slice(0, 8)}`;
     const u2 = `unit-${randomUUID().slice(0, 8)}`;

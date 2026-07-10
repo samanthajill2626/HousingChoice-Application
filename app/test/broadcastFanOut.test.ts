@@ -539,7 +539,7 @@ describe('broadcast.send (M1.8a)', () => {
   });
 
   // --- BE4/C4: listing-send record per recipient (when unit-targeted) --------
-  it('records a listing-send row (via=broadcast, no_reply) per recipient sent when the broadcast has a unitId', async () => {
+  it('records a listing-send row (via=broadcast) per recipient sent when the broadcast has a unitId', async () => {
     const alice = seedTenant(world, { contactId: 'c-alice', firstName: 'Alice', phone: '+15550100001' });
     const bob = seedTenant(world, { contactId: 'c-bob', phone: '+15550100002' });
     seedUnit(world); // unit-1
@@ -554,7 +554,8 @@ describe('broadcast.send (M1.8a)', () => {
     expect(world.listingSends.every((r) => r.unitId === 'unit-1')).toBe(true);
     expect(world.listingSends.every((r) => r.via === 'broadcast')).toBe(true);
     expect(world.listingSends.every((r) => r.broadcastId === 'bcast-1')).toBe(true);
-    expect(world.listingSends.every((r) => r.response === 'no_reply')).toBe(true);
+    // The removed `response` label is never written.
+    expect(world.listingSends.every((r) => !('response' in r))).toBe(true);
   });
 
   it('records NO listing-send rows for a unit-less broadcast', async () => {

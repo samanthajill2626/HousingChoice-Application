@@ -982,17 +982,28 @@ export function listBroadcasts(
  *  the new draft's id, the estimated reach, and `truncated` (the estimate hit
  *  the page cap → incomplete). The client sends the `audience_filter` client
  *  shape (contact_type/housing_authority?/bedroomSize?); the server adds the
- *  always-on opt-out/unreachable fences. */
+ *  always-on opt-out/unreachable fences. Matching sends: `audience_filter` is
+ *  now OPTIONAL — omitting it while passing `seedContactIds` creates a
+ *  seeds_only draft (the seeded 1:1/1:N entry) instead of the whole tenant
+ *  base; `flyerUrl` on the response is present only when `unitId` was given. */
 export function createBroadcast(body: {
   unitId?: string;
   body_template: string;
-  audience_filter: AudienceFilter;
-}): Promise<{ broadcastId: string; status: 'draft'; estimatedCount: number; truncated: boolean }> {
+  audience_filter?: AudienceFilter;
+  seedContactIds?: string[];
+}): Promise<{
+  broadcastId: string;
+  status: 'draft';
+  estimatedCount: number;
+  truncated: boolean;
+  flyerUrl?: string;
+}> {
   return request<{
     broadcastId: string;
     status: 'draft';
     estimatedCount: number;
     truncated: boolean;
+    flyerUrl?: string;
   }>('/api/broadcasts', { method: 'POST', body });
 }
 
@@ -1018,6 +1029,17 @@ export function sendBroadcast(
     `/api/broadcasts/${encodeURIComponent(broadcastId)}/send`,
     { method: 'POST', body: { recipientContactIds } },
   );
+}
+
+/** PATCH /api/broadcasts/:id - replace the draft's hand-picked seed list. */
+export async function updateBroadcastSeeds(
+  broadcastId: string,
+  seedContactIds: string[],
+): Promise<{ broadcastId: string; seedContactIds: string[] }> {
+  return request(`/api/broadcasts/${encodeURIComponent(broadcastId)}`, {
+    method: 'PATCH',
+    body: { seedContactIds },
+  });
 }
 
 /** GET /api/broadcasts/:id/results — stats + the per-recipient delivery map. */

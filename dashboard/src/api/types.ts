@@ -1509,6 +1509,10 @@ export interface BroadcastSummary {
   /** The property this broadcast is about, or null (audience-only broadcast). */
   unitId: string | null;
   audience_filter: AudienceFilter;
+  /** Matching sends: 'seeds_only' when the draft was created from a hand-picked
+   *  seed list with no explicit filter (the seeded 1:1/1:N entry); absent/'filter'
+   *  is the ordinary filter-driven audience. */
+  audience_mode?: 'filter' | 'seeds_only';
   stats: BroadcastStats;
   created_at: string;
   /** The userId that created the broadcast. */
@@ -1549,6 +1553,10 @@ export interface BroadcastResults {
   status: BroadcastStatus;
   unitId: string | null;
   audience_filter: AudienceFilter;
+  /** Matching sends: 'seeds_only' when the draft was created from a hand-picked
+   *  seed list with no explicit filter (the seeded 1:1/1:N entry); absent/'filter'
+   *  is the ordinary filter-driven audience. */
+  audience_mode?: 'filter' | 'seeds_only';
   stats: BroadcastStats;
   /** contactKey → delivery slot. Key is the contactId (usual) else `phone#<E164>`. */
   recipients: Record<string, BroadcastRecipient>;
@@ -1591,16 +1599,25 @@ export interface PreviewCandidate {
    *  consent. `false` → the row is fenced out of the send + surfaced for staff to
    *  resolve (a broadcast can't pop a modal mid-fan-out). */
   has_consent: boolean;
+  /** Matching sends: whether this row came from the draft's seedContactIds (a
+   *  hand-picked recipient, or the seeded 1:1/1:N entry) rather than the audience
+   *  filter alone. A contact in BOTH audience and seeds is ONE row, flagged. */
+  seeded: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is the
  *  set already sent for this unit (so a MANUALLY-added tenant can be annotated
- *  client-side). `truncated` warns the audience hit the page/recipient cap. */
+ *  client-side). `truncated` warns the audience hit the page/recipient cap.
+ *  Matching sends: `seedContactIds` is the draft's stored seed list (as-is);
+ *  `unresolvedSeedIds` is the subset that failed to resolve (deleted/opted-out/
+ *  unreachable/non-tenant) so the composer can show which seeds dropped. */
 export interface PreviewResponse {
   count: number;
   truncated: boolean;
   candidates: PreviewCandidate[];
   priorRecipientContactIds: string[];
+  seedContactIds: string[];
+  unresolvedSeedIds: string[];
 }
 
 /** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup

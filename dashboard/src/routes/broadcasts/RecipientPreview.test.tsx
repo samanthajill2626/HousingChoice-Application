@@ -14,6 +14,7 @@ import type { Contact, PreviewResponse } from '../../api/index.js';
 
 const sendBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
+const updateBroadcastSeeds = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -21,6 +22,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     sendBroadcast: (...a: unknown[]) => sendBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
+    updateBroadcastSeeds: (...a: unknown[]) => updateBroadcastSeeds(...a),
   };
 });
 
@@ -105,6 +107,7 @@ function renderPreview(props: {
 beforeEach(() => {
   sendBroadcast.mockReset().mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
+  updateBroadcastSeeds.mockReset().mockResolvedValue({ broadcastId: 'bcast_1', seedContactIds: [] });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -452,6 +455,37 @@ describe('RecipientPreview — send errors', () => {
     const viewResults = within(alert).getByRole('button', { name: /View results/i });
     await u.click(viewResults);
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/bcast_1'));
+  });
+});
+
+// ── Matching sends (§8): seeded rows, hand-pick persistence, unresolved notice ──
+describe('RecipientPreview — seeded recipients', () => {
+  it('a seeded candidate is pre-checked even when alreadySentThisProperty', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', seeded: true, alreadySentThisProperty: true })],
+        seedContactIds: ['c1'],
+      }),
+    });
+    expect(screen.getByRole('checkbox')).toBeChecked();
+  });
+
+  it('adding a tenant persists it to the draft seeds (best-effort PATCH)', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ seedContactIds: ['c1'] }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Added' })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Added');
+    await u.click(await screen.findByRole('option', { name: /Added Tenant/ }));
+    await waitFor(() =>
+      expect(updateBroadcastSeeds).toHaveBeenCalledWith('bcast_1', ['c1', 'cX']),
+    );
+  });
+
+  it('shows a count-based notice when preview reports unresolved seeds', () => {
+    renderPreview({ preview: previewOf({ unresolvedSeedIds: ['ghost'] }) });
+    expect(screen.getByText(/1 added tenant can't receive texts/)).toBeInTheDocument();
   });
 });
 

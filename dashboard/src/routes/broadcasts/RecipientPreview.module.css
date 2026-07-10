@@ -210,6 +210,14 @@
   font-size: var(--fs-sm);
   color: var(--c-warning);
 }
+/* Matching sends: notice for hand-picked seeds the server dropped (unknown,
+ * opted out, or unreachable). Warning tone, mirrors the other inline notes. */
+.seedNotice {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-warning);
+}
 
 .actions {
   display: flex;

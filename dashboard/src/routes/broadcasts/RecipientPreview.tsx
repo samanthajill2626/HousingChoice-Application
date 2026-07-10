@@ -10,12 +10,13 @@
 // never a hard gate); "Select all" SKIPS already-sent rows. A live selected
 // count drives "Send to N tenants", which posts the EXACT checked contactIds.
 // 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
   deleteBroadcast,
   sendBroadcast,
+  updateBroadcastSeeds,
   type Contact,
   type PreviewResponse,
 } from '../../api/index.js';
@@ -58,9 +59,10 @@ function initialRows(preview: PreviewResponse): Row[] {
     phone: c.phone,
     alreadySentThisProperty: c.alreadySentThisProperty,
     hasConsent: c.has_consent,
-    // No-consent rows are a HARD fence — never checked; already-sent rows start
-    // unchecked (soft opt-in). Everyone else starts checked.
-    checked: c.has_consent && !c.alreadySentThisProperty,
+    // No-consent rows are a HARD fence — never checked. Already-sent rows start
+    // unchecked (soft opt-in) UNLESS they were hand-seeded: a seed is a
+    // deliberate choice, so pre-check it even when already sent this property.
+    checked: c.has_consent && (c.seeded || !c.alreadySentThisProperty),
   }));
 }
 
@@ -76,6 +78,9 @@ export function RecipientPreview({
     [preview.priorRecipientContactIds],
   );
   const [rows, setRows] = useState<Row[]>(() => initialRows(preview));
+  // The draft's current hand-picked seed list — persisted best-effort on each
+  // successful add-a-tenant so a hand-pick survives a reload of the review step.
+  const seedsRef = useRef<string[]>(preview.seedContactIds);
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState<ContactSearchValue>({ name: '' });
   const [sending, setSending] = useState(false);
@@ -160,6 +165,8 @@ export function RecipientPreview({
       return;
     }
     setSearch({ name: '' });
+    // Only a genuine add (not a dedupe hit) persists to the draft's seed list.
+    const alreadyListed = rows.some((r) => r.contactId === candidate.contactId);
     setRows((prev) => {
       if (prev.some((r) => r.contactId === candidate.contactId)) return prev; // already listed
       const already = priorIds.has(candidate.contactId);
@@ -176,6 +183,12 @@ export function RecipientPreview({
         },
       ];
     });
+    if (!alreadyListed) {
+      // Best-effort persistence — a failed PATCH never blocks or surfaces in the
+      // review UI (the send still posts the exact checked ids either way).
+      seedsRef.current = [...seedsRef.current, candidate.contactId];
+      void updateBroadcastSeeds(draftId, seedsRef.current).catch(() => {});
+    }
   }
 
   async function onSend(): Promise<void> {
@@ -267,6 +280,16 @@ export function RecipientPreview({
           onChange={(e) => setQuery(e.target.value)}
         />
       </label>
+
+      {/* Matching sends: hand-picked seeds the server couldn't deliver to
+          (unknown contact, opted out, or unreachable) were dropped — say so. */}
+      {preview.unresolvedSeedIds.length > 0 ? (
+        <p className={styles.seedNotice} role="status">
+          {preview.unresolvedSeedIds.length === 1
+            ? "1 added tenant can't receive texts (unknown, opted out, or unreachable) and was left out."
+            : `${preview.unresolvedSeedIds.length} added tenants can't receive texts (unknown, opted out, or unreachable) and were left out.`}
+        </p>
+      ) : null}
 
       {visibleRows.length === 0 ? (
         <p className={styles.emptyBody}>

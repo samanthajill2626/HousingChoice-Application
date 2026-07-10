@@ -296,7 +296,10 @@ export function ContactDetail(): React.JSX.Element {
     if (optOutBusy) return;
     setOptOutBusy(true);
     void setContactOptOut(contact.contactId, !optedOut)
-      .then((updated) => setContact(updated))
+      .then((updated) => {
+        setContact(updated);
+        timeline.refetch(); // opt_out_changed milestone — same no-SSE gap as status
+      })
       .catch(() => {
         /* leave the flag as-is; a transient failure just no-ops the toggle */
       })
@@ -308,7 +311,10 @@ export function ContactDetail(): React.JSX.Element {
     if (voiceOptOutBusy) return;
     setVoiceOptOutBusy(true);
     void setContactVoiceOptOut(contact.contactId, !voiceOptedOut)
-      .then((updated) => setContact(updated))
+      .then((updated) => {
+        setContact(updated);
+        timeline.refetch(); // opt_out_changed (voice) milestone — same gap
+      })
       .catch(() => {
         /* leave the flag as-is; a transient failure just no-ops the toggle */
       })
@@ -343,7 +349,13 @@ export function ContactDetail(): React.JSX.Element {
       toStatus: toStatus as TenantStatus | LandlordStatus,
       source: 'manual',
     })
-      .then((updated) => setContact(updated))
+      .then((updated) => {
+        setContact(updated);
+        // The transition wrote a contact_status_changed milestone; no SSE event
+        // covers it, so pull the timeline now — otherwise the pin only appears
+        // when some unrelated message event triggers a refetch.
+        timeline.refetch();
+      })
       .catch(() => setStatusError("Couldn't update the status - please try again."))
       .finally(() => setStatusBusy(false));
   };
@@ -614,7 +626,10 @@ export function ContactDetail(): React.JSX.Element {
           contact={contact}
           phones={phones}
           onClose={() => setManagingPhones(false)}
-          onChanged={(updated) => setContact(updated)}
+          onChanged={(updated) => {
+            setContact(updated);
+            timeline.refetch(); // number_added milestone — same no-SSE gap
+          }}
         />
       ) : null}
 

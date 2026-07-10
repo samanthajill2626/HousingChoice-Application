@@ -625,10 +625,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }),
   );
   // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,
-  // contact-aggregated lens over conversations/contacts/messages/placements/users —
+  // contact-aggregated lens over conversations/contacts/messages/placements -
   // its only path is GET / (GET /api/inbox), a distinct segment from every
   // router above. Shares the process conversations + messages repos; placements/
-  // contacts/users default to the real repos unless injected (tests pass the
+  // contacts default to the real repos unless injected (tests pass the
   // world fakes).
   router.use(
     '/inbox',
@@ -640,7 +640,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
-      ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
     }),
   );
 

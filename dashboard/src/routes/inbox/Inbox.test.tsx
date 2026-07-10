@@ -6,7 +6,6 @@ import type { InboxState } from './useInbox.js';
 
 let state: InboxState;
 const markRead = vi.fn();
-const assign = vi.fn();
 const loadMore = vi.fn();
 const retry = vi.fn();
 
@@ -19,7 +18,6 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     loadMore,
     retry,
     markRead,
-    assign,
     ...over,
   };
 }
@@ -59,7 +57,6 @@ function renderInbox(): void {
 beforeEach(() => {
   state = baseState();
   markRead.mockReset();
-  assign.mockReset();
   loadMore.mockReset();
   retry.mockReset();
 });
@@ -73,10 +70,10 @@ describe('Inbox', () => {
     expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
-  it('renders the four filter tabs with All selected by default', () => {
+  it('renders the three filter tabs with All selected by default', () => {
     renderInbox();
     const tabs = screen.getAllByRole('tab');
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(3);
     expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
   });
 

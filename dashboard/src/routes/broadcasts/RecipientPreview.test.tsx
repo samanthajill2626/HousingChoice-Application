@@ -34,6 +34,9 @@ function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): P
     voucherSize: 2,
     alreadySentThisProperty: false,
     has_consent: true,
+    // Matching sends (Task 5 dashboard types): default un-seeded; Task 8 covers
+    // the seeded-row rendering itself.
+    seeded: false,
     ...over,
   };
 }
@@ -44,6 +47,10 @@ function previewOf(over: Partial<PreviewResponse> = {}): PreviewResponse {
     truncated: false,
     candidates: [],
     priorRecipientContactIds: [],
+    // Matching sends (Task 5 dashboard types): default no seeds; Task 8 covers
+    // the seeded-recipient banner/notice itself.
+    seedContactIds: [],
+    unresolvedSeedIds: [],
     ...over,
   };
 }

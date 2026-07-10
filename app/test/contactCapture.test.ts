@@ -137,7 +137,6 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     touchLastActivity: async () => conversation,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
-    setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
     listByLastActivity: async () => ({ items: [] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async () => {},

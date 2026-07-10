@@ -99,7 +99,6 @@ describe('EventStreamProvider + useEventStream', () => {
       last_activity_at: '2026-06-16T00:00:00Z',
       unread_count: 2,
       type: 'tenant_1to1',
-      assignment: null,
       participant_display_name: 'Tasha',
     };
     act(() => {
@@ -125,7 +124,6 @@ describe('EventStreamProvider + useEventStream', () => {
       last_activity_at: '2026-06-16T00:00:00Z',
       unread_count: 2,
       type: 'tenant_1to1',
-      assignment: null,
       participant_display_name: 'Tasha',
     };
     const kase: PlacementUpdatedEvent = {
@@ -163,7 +161,6 @@ describe('EventStreamProvider + useEventStream', () => {
       last_activity_at: '2026-06-16T00:00:00Z',
       unread_count: 0,
       type: 'tenant_1to1',
-      assignment: null,
       participant_display_name: 'Tasha',
     };
     act(() => {
@@ -215,7 +212,6 @@ describe('EventStreamProvider + useEventStream', () => {
       last_activity_at: '2026-06-16T00:00:00Z',
       unread_count: 0,
       type: 'tenant_1to1',
-      assignment: null,
       participant_display_name: 'Tasha',
     };
     act(() => {

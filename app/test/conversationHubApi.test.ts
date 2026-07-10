@@ -300,7 +300,7 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
     expect(world.conversations.get('conv-1')!.unread_count).toBe(0);
     // SSE (M1.2): other dashboards drop their unread badge live — same
     // payload shape as every other conversation.updated (incl. the M1.4
-    // type + assignment wire fields).
+    // type wire field).
     expect(world.emitted).toEqual([
       {
         event: 'conversation.updated',
@@ -310,7 +310,6 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
           unread_count: 0,
           preview: 'seen now',
           type: 'tenant_1to1',
-          assignment: null,
           participant_display_name: null,
         },
       },

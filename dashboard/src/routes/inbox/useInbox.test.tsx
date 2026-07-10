@@ -167,7 +167,6 @@ describe('useInbox', () => {
         last_activity_at: '2026-06-17T11:00:00.000Z',
         unread_count: 1,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: 'Tasha',
       });
       sse.onConversationUpdated?.({
@@ -175,7 +174,6 @@ describe('useInbox', () => {
         last_activity_at: '2026-06-17T11:00:01.000Z',
         unread_count: 1,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: 'Bo',
       });
     });
@@ -195,7 +193,7 @@ describe('useInbox', () => {
     act(() => {
       sse.onConversationUpdated?.({
         conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
-        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+        type: 'tenant_1to1', participant_display_name: 'T',
       });
     });
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
@@ -237,7 +235,7 @@ describe('useInbox', () => {
     act(() => {
       sse.onConversationUpdated?.({
         conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
-        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+        type: 'tenant_1to1', participant_display_name: 'T',
       });
     });
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));

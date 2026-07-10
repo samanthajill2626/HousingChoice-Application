@@ -817,9 +817,6 @@ export interface ConversationUpdatedEvent {
   /** Conversation type carried on the event so the inbox can re-evaluate the
    *  needs-review chip live (e.g. unknown_1to1 → tenant_1to1 after triage). */
   type: ConversationType;
-  /** Assigned team member's userId, or null when unassigned — so the Assigned
-   *  chip re-evaluates live. */
-  assignment: string | null;
   /** Resolved contact name (or null) — so the inbox shows the name and clears
    *  the review chip the instant a contact is triaged, without a reload. */
   participant_display_name: string | null;

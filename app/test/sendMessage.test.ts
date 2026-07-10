@@ -107,7 +107,6 @@ function makeFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
-    setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async (_id, mode) => {
@@ -419,9 +418,8 @@ describe('sendMessage service', () => {
           unread_count: 2,
           preview: 'live update',
           // M1.4 wire fields (shared builder): the thread's current type +
-          // assignment + resolved name ride along on every conversation.updated.
+          // resolved name ride along on every conversation.updated.
           type: 'tenant_1to1',
-          assignment: null,
           participant_display_name: null,
         },
       },

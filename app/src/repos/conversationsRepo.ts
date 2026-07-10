@@ -117,8 +117,6 @@ export interface ConversationItem {
   participant_display_name?: string;
   /** Inbound messages since the last POST /:id/read (M1.2 unread tracking). */
   unread_count?: number;
-  /** Assigned team member's userId (M1.2; users-table validation is M1.3). */
-  assignment?: string;
   /**
    * The placement this relay_group is the thread for (M1.10): the
    * conversation→placement BACK-REFERENCE. It lets the voice masked-call seam resolve
@@ -337,16 +335,6 @@ export interface ConversationsRepo {
    * Throws ConditionalCheckFailedException for unknown conversations.
    */
   resetUnread(conversationId: string): Promise<ConversationItem>;
-  /**
-   * Set (string) or clear (null) the assignee. Returns the updated item plus
-   * the previous assignee — captured atomically (ALL_OLD) for the
-   * assignment_changed audit event. Throws ConditionalCheckFailedException
-   * for unknown conversations.
-   */
-  setAssignment(
-    conversationId: string,
-    assigneeUserId: string | null,
-  ): Promise<{ conversation: ConversationItem; previousAssigneeUserId: string | null }>;
   /**
    * THE inbox read (M1.2): ONE DynamoDB Query on the byLastActivity GSI
    * (status partition, last_activity_at descending) — never a Scan.
@@ -808,35 +796,6 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId }, 'conversation unread reset');
       return Attributes as ConversationItem;
-    },
-
-    async setAssignment(conversationId, assigneeUserId) {
-      // ALL_OLD captures the previous assignee atomically with the write —
-      // the assignment_changed audit event needs an honest old → new pair
-      // even under concurrent PATCHes.
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { conversationId },
-          UpdateExpression: assigneeUserId === null ? 'REMOVE assignment' : 'SET assignment = :a',
-          ConditionExpression: 'attribute_exists(conversationId)',
-          ...(assigneeUserId !== null && {
-            ExpressionAttributeValues: { ':a': assigneeUserId },
-          }),
-          ReturnValues: 'ALL_OLD',
-        }),
-      );
-      const previous = Attributes as ConversationItem;
-      const previousAssigneeUserId =
-        typeof previous.assignment === 'string' ? previous.assignment : null;
-      const conversation: ConversationItem = { ...previous };
-      if (assigneeUserId === null) delete conversation.assignment;
-      else conversation.assignment = assigneeUserId;
-      log.info(
-        { conversationId, assigneeUserId, previousAssigneeUserId },
-        'conversation assignment set',
-      );
-      return { conversation, previousAssigneeUserId };
     },
 
     async listByLastActivity({ status, limit, exclusiveStartKey }) {

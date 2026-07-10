@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
@@ -39,12 +39,21 @@ vi.mock('../../api/index.js', async () => {
 
 import { ListingDetail } from './ListingDetail.js';
 
+// Exposes the current router location as text (pathname + search) so a test can
+// assert where a navigation landed, e.g. the "+ Send" card action.
+function LocationProbe(): React.JSX.Element {
+  const loc = useLocation();
+  return <span data-testid="path">{`${loc.pathname}${loc.search}`}</span>;
+}
+
 function renderAt(unitId = 'u1'): void {
   render(
     <MemoryRouter initialEntries={[`/listings/${unitId}`]}>
       <Routes>
         <Route path="/listings/:unitId" element={<ListingDetail />} />
+        <Route path="*" element={<div />} />
       </Routes>
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
@@ -431,17 +440,25 @@ describe('ListingDetail', () => {
     );
   });
 
-  it('the ⋯ menu holds Start placement + Broadcast to tenants (moved off the hero)', async () => {
+  it('the ⋯ menu holds Start placement + Send to tenants (moved off the hero)', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(READY);
     renderAt();
     // Neither is a standalone hero button anymore.
     expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Broadcast to tenants/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Send to tenants/ })).not.toBeInTheDocument();
     // Both live in the ⋯ menu.
     await user.click(screen.getByRole('button', { name: /More actions/ }));
     expect(screen.getByRole('menuitem', { name: 'Start placement' })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'Broadcast to tenants' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Send to tenants' })).toBeInTheDocument();
+  });
+
+  it('Sent to tenants card has a "+ Send" action that opens the composer for this property', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(READY);
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Send this property to tenants' }));
+    expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new?unitId=u1');
   });
 
   it('the ⋯ menu "Start placement" opens the create dialog pre-filled+locked to this unit', async () => {

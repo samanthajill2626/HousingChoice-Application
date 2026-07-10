@@ -164,16 +164,16 @@ describe('describeUnitActivity', () => {
 
   it('describes broadcast_sent with a recipient count and a broadcast deep-link', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 5 }))).toEqual({
-      label: 'Broadcast to 5 tenants',
+      label: 'Sent to 5 tenants',
       to: '/broadcasts/b1',
     });
   });
 
   it('pluralizes the recipient count (1 → tenant) and omits the link when no broadcastId', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 1 }))).toEqual({
-      label: 'Broadcast to 1 tenant',
+      label: 'Sent to 1 tenant',
     });
-    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'Broadcast to 0 tenants' });
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'Sent to 0 tenants' });
   });
 
   it('describes tour lifecycle rows with tour deep-links', () => {

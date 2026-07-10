@@ -165,6 +165,9 @@ export function ListingDetail(): React.JSX.Element {
   // (it can be restored from the Deleted tab). Restore stays on the page and
   // applies the returned unit in place so the Deleted banner clears.
   const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
+  // Shared by both entry points to the send composer (the kebab item and the
+  // "Sent to tenants" card's "+ Send" action) — one URL, one place it's built.
+  const goToSend = (): void => void navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`);
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
@@ -226,9 +229,7 @@ export function ListingDetail(): React.JSX.Element {
           <ListingActionsMenu
             triggerClassName={styles.kebab ?? ''}
             {...(!deleted && { onEdit: () => setEditing(true) })}
-            {...(!deleted && {
-              onBroadcast: () => navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`),
-            })}
+            {...(!deleted && { onBroadcast: goToSend })}
             {...(!deleted && { onStartPlacement: () => setStartingPlacement(true) })}
             deleted={deleted}
             onDelete={() => setConfirmingDelete(true)}
@@ -440,7 +441,18 @@ export function ListingDetail(): React.JSX.Element {
             )}
           </Card>
 
-          <Card title="Sent to tenants" aside="recipients + responses">
+          <Card
+            title="Sent to tenants"
+            aside={
+              !deleted ? (
+                <CardAction onClick={goToSend} label="Send this property to tenants">
+                  + Send
+                </CardAction>
+              ) : (
+                'recipients + responses'
+              )
+            }
+          >
             {recipients.status === 'ready' ? (
               recipients.rows.length === 0 ? (
                 <EmptyRow>Not sent to anyone yet.</EmptyRow>

@@ -101,7 +101,7 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
   if (e.type === 'broadcast_sent') {
     const n = typeof e.tenantCount === 'number' ? e.tenantCount : 0;
     return {
-      label: `Broadcast to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+      label: `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
       ...(e.broadcastId ? { to: `/broadcasts/${e.broadcastId}` } : {}),
     };
   }

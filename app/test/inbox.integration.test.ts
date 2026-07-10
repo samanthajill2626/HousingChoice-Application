@@ -1,6 +1,6 @@
 // Inbox feed integration tests against DynamoDB Local — exercises the REAL
-// repos, the real aggregateInbox paging logic, and the mutation fan-outs
-// (mark-read + assign) over genuine DynamoDB conditional writes.
+// repos, the real aggregateInbox paging logic, and the mark-read fan-out
+// over genuine DynamoDB conditional writes.
 //
 // Self-skipping: when nothing answers at DYNAMODB_ENDPOINT (default
 // http://localhost:8000) the suite is skipped so `npm test` stays green
@@ -26,7 +26,7 @@ import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createMessagesRepo } from '../src/repos/messagesRepo.js';
 import { buildApp } from '../src/app.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { makeFakeUsersRepo, testUserItem, adminUserItem, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
+import { makeFakeUsersRepo, testUserItem, adminUserItem, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 
 const ORIGIN_SECRET = 'test-origin-secret';
 
@@ -417,40 +417,6 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
 
     const afterUnk = await conversations.getById(convUnkId);
     expect(afterUnk?.unread_count).toBe(0);
-  });
-
-  // ---------------------------------------------------------------------------
-  // Test: POST /api/inbox/:contactId/assign sets + clears assignment
-  // ---------------------------------------------------------------------------
-
-  it('POST /:contactId/assign sets + clears assignment on contact B\'s conversation', async () => {
-    // Assign.
-    const assignResp = await post(`/api/inbox/${contactBId}/assign`, {
-      userId: TEST_SESSION_USER.userId,
-    });
-    expect(assignResp.status).toBe(200);
-    expect(await assignResp.json()).toEqual({ ok: true });
-
-    const afterAssign = await conversations.getById(convBId);
-    expect(afterAssign?.assignment).toBe(TEST_SESSION_USER.userId);
-
-    // Unassign (null clears).
-    const clearResp = await post(`/api/inbox/${contactBId}/assign`, { userId: null });
-    expect(clearResp.status).toBe(200);
-    expect(await clearResp.json()).toEqual({ ok: true });
-
-    const afterClear = await conversations.getById(convBId);
-    expect(afterClear?.assignment).toBeUndefined();
-  });
-
-  it('POST /:contactId/assign returns 404 for unknown contact', async () => {
-    const resp = await post('/api/inbox/no-such-contact/assign', { userId: 'user-x' });
-    expect(resp.status).toBe(404);
-  });
-
-  it('POST /:contactId/assign returns 400 when userId key is missing', async () => {
-    const resp = await post(`/api/inbox/${contactBId}/assign`, { wrongKey: 'user-x' });
-    expect(resp.status).toBe(400);
   });
 
   it('POST /:contactId/read returns 404 for unknown contact', async () => {

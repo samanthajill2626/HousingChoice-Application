@@ -475,7 +475,7 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
 
 // WS3 Task 3.2 — a LANDLORD contact's owned-property lifecycle audit is
 // interleaved into their person-centric timeline as milestone pins. Lifecycle
-// only (broadcasts / tours / listing-status / roster / listing-response); routine
+// only (broadcasts / tours / listing-status / roster); routine
 // field edits (unit_updated/created/deleted/restored) are NEVER surfaced. The
 // property-audit candidate keys on the RAW audit SK (`<ISO>#<rand>`) so its
 // merged cursor lives in the audit's own `before` lexical space (page-safe).
@@ -499,17 +499,25 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't1' });
     await world.auditRepo.append('units#u1', 'listing_status_changed', { to: 'under_application' });
     await world.auditRepo.append('units#u1', 'unit_updated', { fields: ['rent_min'] }); // EXCLUDED
+    // A historical listing_response_set row (the response label was removed):
+    // it falls to the default:null mapping and must NOT render (graceful decay).
+    await world.auditRepo.append('units#u1', 'listing_response_set', {
+      contactId: 'c-old',
+      response: 'interested',
+    });
 
     const res = await authedGet(app, '/api/contacts/ll1/timeline');
     expect(res.status).toBe(200);
 
     const ms = res.body.items.filter((i: { kind: string }) => i.kind === 'milestone');
     // ONLY the three lifecycle rows interleave — the unit_updated field-edit is
-    // filtered out (never surfaced on any timeline; it stays in the audit trail).
+    // filtered out (never surfaced on any timeline; it stays in the audit trail),
+    // and the historical listing_response_set row maps to null (stops rendering).
     expect(ms).toHaveLength(3);
     const types = ms.map((m: { type: string }) => m.type);
     expect(types).toContain('tour_scheduled'); // tour_* maps 1:1 to the same-named type
     expect(types).not.toContain('unit_updated');
+    expect(types).not.toContain('listing_reviewed');
 
     // The broadcast row deep-links to the broadcast, with the recipient count in
     // its label. type reuses an existing member ('listing_sent'); refType carries

@@ -52,13 +52,36 @@ describe('resolveTemplateForTenant', () => {
     expect(out).not.toContain('[FlyerLink]');
   });
 
-  it('formats a structured address object like the property pages do', () => {
+  it('formats a structured address object EXACTLY like the backend formatAddress', () => {
     const out = resolveTemplateForTenant(
       DEFAULT_SEND_TEMPLATE,
       makeUnit({ address: { line1: '1450 Joseph E. Boone Blvd NW', city: 'Atlanta', state: 'GA', zip: '30314' } }),
       'Tasha',
       'https://x/p/u1',
     );
-    expect(out).toContain('1450 Joseph E. Boone Blvd NW, Atlanta, GA, 30314');
+    // Server parity (app/src/lib/address.ts formatAddress): "city, state zip" -
+    // a SPACE between state and zip, not a comma.
+    expect(out).toContain('1450 Joseph E. Boone Blvd NW, Atlanta, GA 30314');
+  });
+
+  it('joins line1 + line2 with a space, like the backend', () => {
+    const out = resolveTemplateForTenant(
+      DEFAULT_SEND_TEMPLATE,
+      makeUnit({ address: { line1: '77 Peachtree St', line2: 'Apt 4', city: 'Atlanta' } }),
+      'Tasha',
+      'https://x/p/u1',
+    );
+    expect(out).toContain('77 Peachtree St Apt 4, Atlanta');
+  });
+
+  it('drops non-finite beds/rent like the backend (Number.isFinite guards)', () => {
+    const out = resolveTemplateForTenant(
+      DEFAULT_SEND_TEMPLATE,
+      makeUnit({ beds: Number.NaN, rent_min: Number.POSITIVE_INFINITY, rent_max: Number.NaN }),
+      'Tasha',
+      'https://x/p/u1',
+    );
+    expect(out).not.toContain('NaN');
+    expect(out).not.toContain('Infinity');
   });
 });

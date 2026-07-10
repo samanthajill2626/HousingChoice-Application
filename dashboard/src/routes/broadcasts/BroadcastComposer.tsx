@@ -187,17 +187,22 @@ export function BroadcastComposer(): React.JSX.Element {
     setBodyTemplate(next);
   }
 
-  // "Add more tenants by filters" - the one-way flip out of seeds-only. When the
-  // operator has edited the resolved text, crossing the boundary would discard
-  // those edits (the audience is no longer a single person), so confirm first.
-  // On cancel the flip does not happen; on confirm the body resets to '' (token
-  // mode - they will compose a fresh template for the broader audience).
+  // "Add more tenants by filters" - the one-way flip out of seeds-only. Leaving
+  // resolved mode with a unit attached always resets the body: the resolved text
+  // names ONE tenant and must never send to a broader audience. When the operator
+  // has edited that text, confirm before discarding (cancel aborts the flip);
+  // when it is still the untouched auto-seed there is nothing to protect, so the
+  // reset is silent. Either way the body returns to '' (token mode - they will
+  // compose a fresh template). A no-unit typed body is a plain token template
+  // already and survives the flip untouched.
   function onEnableFilters(): void {
-    if (resolvedMode && unit !== null && bodyEdited) {
-      const ok = window.confirm(
-        'Switching the audience resets the message to the template. Discard your edits?',
-      );
-      if (!ok) return;
+    if (resolvedMode && unit !== null) {
+      if (bodyEdited) {
+        const ok = window.confirm(
+          'Switching the audience resets the message to the template. Discard your edits?',
+        );
+        if (!ok) return;
+      }
       setBodyTemplate('');
       setBodyEdited(false);
     }

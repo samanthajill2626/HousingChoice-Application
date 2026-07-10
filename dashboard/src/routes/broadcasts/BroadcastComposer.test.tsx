@@ -246,6 +246,21 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     expect(screen.queryByRole('group', { name: 'Insert a merge field' })).not.toBeInTheDocument();
   });
 
+  it('an UNEDITED auto-seeded body resets silently when filters are enabled (no name leak, no confirm)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001&contactId=c-seed');
+    const ta = (await screen.findByLabelText('Message')) as HTMLTextAreaElement;
+    await waitFor(() => expect(ta.value).toContain('Hi Tasha,'));
+    // No manual edit -> nothing to protect: the flip proceeds WITHOUT a confirm,
+    // and the resolved single-tenant text must NOT survive into the broader
+    // audience (it would send "Hi Tasha," to every filtered recipient).
+    await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
+    expect(ta.value).toBe('');
+  });
+
   it('editing the resolved text then "Add more tenants by filters" prompts to confirm; cancel keeps seeds-only', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const u = userEvent.setup();

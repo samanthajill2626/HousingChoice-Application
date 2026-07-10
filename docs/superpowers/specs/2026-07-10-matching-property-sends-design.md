@@ -84,23 +84,31 @@ row-level future use; nothing in v1 emits it but the composer must not break).
 
 - ?contactId= seeds the draft with that tenant as an explicit recipient. The
   recipients step opens showing the seeded tenant as a pre-checked row,
-  annotated exactly like any candidate (consent notes, opt-out, phone).
-- Audience filters remain available on a seeded draft: applying them unions
-  more candidates into the list; the seeded row stays pre-checked. Filters are
-  a way to PROPOSE candidates; the checked set is what sends.
+  annotated like any candidate.
+- A seeded draft starts in seeds-only audience mode: the audience filter does
+  NOT contribute candidates (otherwise the default filter would propose every
+  tenant on a 1:1 send). The compose step shows "Sending to <name>" plus an
+  "Add more tenants by filters" button; clicking it enables the normal
+  AudienceFilters and switches the draft to filter mode (candidates = filter
+  matches UNION seeds).
+- Property picker: a tenant-seeded entry arrives with no property. The compose
+  step shows a Property typeahead (the existing UnitSearchField over the unit
+  roster, as ScheduleTourForm uses) when no ?unitId= was given; picking a
+  property attaches it to the draft exactly as ?unitId= does (flyer,
+  bedroomSize prefill). ?unitId= entries keep today's fixed property context.
 - The seeded tenant can be unchecked like any row (a seed is a starting point,
   not a lock).
-- Unknown/missing contactId: composer loads as a normal unseeded draft and
-  shows a dismissible notice ("Could not preload that tenant"); no crash.
+- Seeds that cannot receive a send (unknown id, not a tenant, no phone, opted
+  out, unreachable) are excluded from candidates and reported by preview
+  (unresolvedSeedIds); the review step shows a count-based notice. No crash.
 
-### Hand-picking tenants (new capability, all sends)
+### Hand-picking tenants (already exists client-side; gains persistence)
 
-- The Review Recipients step gains an "Add tenant" search (name or phone,
-  contacts of type tenant only). Picking one adds them to the candidate list
-  as a checked row with the same consent/opt-out annotations.
-- Adding a tenant already in the list is a no-op highlight (no duplicates).
-- Hand-picked additions persist on the draft (survive ?draftId= resume) via
-  the same seed mechanism below.
+- The Review Recipients step ALREADY has the "Add a tenant" search
+  (ContactSearchField in RecipientPreview): picking a tenant adds a checked
+  annotated row, deduped. That behavior is unchanged.
+- New: hand-picked additions are written back to the draft's seed list
+  (best-effort PATCH) so they survive ?draftId= resume.
 
 ### Message step
 

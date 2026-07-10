@@ -59,6 +59,37 @@ async function createTenant(
   return { contactId, firstName, name: `${firstName} Bcastest`, phone };
 }
 
+/** Create a fresh per-run property via the API. New units start in 'setup'
+ *  (not shareable); pass available: true to flip it Available through the
+ *  transition route - the status the send guard (spec 2026-07-10) requires.
+ *  Hermetic on purpose: shared seeded units keep their statuses (unit-0001
+ *  MUST stay under_application for public-pages.spec.ts). */
+async function createUnitViaApi(
+  request: APIRequestContext,
+  stamp: string,
+  opts: { available: boolean },
+): Promise<string> {
+  const res = await request.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId: 'contact-landlord-0001',
+      beds: 2,
+      jurisdiction: 'atlanta_housing',
+      address: { line1: `${stamp} Broadcast Guard Ave`, city: 'Atlanta', state: 'GA', zip: '30314' },
+      rent_min: 1500,
+      rent_max: 1600,
+    },
+  });
+  expect(res.ok()).toBeTruthy();
+  const unitId = (await res.json()).unit.unitId as string;
+  if (opts.available) {
+    const flip = await request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+      data: { toStatus: 'available', source: 'manual' },
+    });
+    expect(flip.ok()).toBeTruthy();
+  }
+  return unitId;
+}
+
 test.describe('Broadcasts — compose from a property → curate → send → results', () => {
   test('pre-filled audience, uncheck one + add one + an already-sent flag, Send → Results', async ({
     page,
@@ -79,6 +110,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
 
     // --- Set up the audience: two fresh 2-BR tenants we control (unique names). ---
     const stamp = `${Date.now()}`.slice(-6);
+    // Per-run Available property (spec 2026-07-10): with the send guard live,
+    // sending against seeded unit-0001 would 400 (it is under_application, kept
+    // that way for public-pages.spec.ts). Create + publish our own.
+    const unitId = await createUnitViaApi(page.request, stamp, { available: true });
     const keep = await createTenant(page.request, `Keepme${stamp}`);
     const drop = await createTenant(page.request, `Dropme${stamp}`);
     // A 3-BR tenant: NOT caught by the 2-BR filter → must be added via search.
@@ -88,7 +123,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // next preview flags her "already sent". Built straight through the API. ---
     const draftRes = await page.request.post(`${NEXT}/api/broadcasts`, {
       data: {
-        unitId: SEEDED_UNIT,
+        unitId,
         body_template: `Prior send ${stamp} for [TenantName]`,
         audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
       },
@@ -101,10 +136,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     expect(sentRes.ok()).toBeTruthy();
 
     // --- Compose from the property: "Broadcast to tenants" in the kebab menu. ---
-    await page.goto(`${NEXT}/listings/${SEEDED_UNIT}`);
+    await page.goto(`${NEXT}/listings/${unitId}`);
     await page.getByRole('button', { name: 'More actions' }).click();
     await page.getByRole('menuitem', { name: 'Broadcast to tenants' }).click();
-    await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${SEEDED_UNIT}`));
+    await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unitId}`));
     await expect(page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
 
     // The voucher size is PRE-FILLED from the unit's 2 beds (the 2-BR chip is
@@ -190,6 +225,39 @@ test.describe('Broadcasts — compose from a property → curate → send → re
       ?.messages.some((m) => m.direction === 'outbound' && (m.body ?? '').includes(body));
     expect(droppedGotIt ?? false).toBe(false);
   });
+
+  test('sending a non-Available property warns, and Make Available & send flips it + sends', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    const stamp = `${Date.now()}`.slice(-6);
+    // A sendable 2-BR tenant the default audience will catch.
+    await createTenant(page.request, `Warnme${stamp}`);
+    // Fresh unit left in 'setup' - NOT shareable, so the flyer link is dead.
+    const unitId = await createUnitViaApi(page.request, stamp, { available: false });
+
+    await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
+    // The early banner names the coming ask.
+    await expect(page.getByText(/its flyer link won't work/i)).toBeVisible();
+
+    await page.getByLabel('Message').fill(`Warn flow ${stamp} - see [FlyerLink]`);
+    await page.getByRole('button', { name: 'Preview recipients' }).click();
+    await page.getByRole('button', { name: /^Send to \d+ tenants?$/ }).click();
+
+    // The blocking dialog - nothing sent yet.
+    const dialog = page.getByRole('dialog', { name: "Property isn't Available" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Make Available & send' }).click();
+
+    // The send proceeded to the results page (mirrors the compose test's
+    // Results-landing assertion - lands on /broadcasts/<id>).
+    await expect(page).toHaveURL(/\/broadcasts\/[A-Za-z0-9_-]+$/, { timeout: 15_000 });
+
+    // The flip really persisted server-side.
+    const unitRes = await page.request.get(`${NEXT}/api/units/${unitId}`);
+    expect(unitRes.ok()).toBeTruthy();
+    expect(((await unitRes.json()) as { unit: { status: string } }).unit.status).toBe('available');
+  });
 });
 
 test.describe('Broadcasts - live send progress + disjoint buckets + recipient identity', () => {
@@ -236,6 +304,10 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     }
     const N = tenants.length;
     const body = `Live progress ${stamp} - a 2BR home is available.`;
+    // Per-run Available property (spec 2026-07-10): the send guard rejects a
+    // non-available unit, and seeded unit-0001 must stay under_application for
+    // public-pages.spec.ts. Create + publish our own.
+    const unitId = await createUnitViaApi(page.request, stamp, { available: true });
 
     // A curated send (explicit recipientContactIds = the curation) driven straight
     // through the API - the SAME send mechanism the composer posts. The send POST
@@ -244,7 +316,7 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     // after it resolves lands us mid-send.
     const draftRes = await page.request.post(`${NEXT}/api/broadcasts`, {
       data: {
-        unitId: SEEDED_UNIT,
+        unitId,
         body_template: `${body} [TenantName]`,
         audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
       },

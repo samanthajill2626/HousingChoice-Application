@@ -895,7 +895,6 @@ const neverSignedLandlord = {
     firstName: 'Patricia',
     lastName: 'Shelton',
     contract_status: 'unsigned',
-    expected_rent: 1700,
     registered_landlord: true,
     // Auto-consent: her inbound reply (msg-cast-nsign-002 at C2) confers inbound_text.
     consent_method: 'inbound_text',
@@ -1092,7 +1091,6 @@ const midIntakeUnitLandlord = {
     lastName: 'Merritt',
     lead_status: 'registered',
     contract_status: 'signed',
-    expected_rent: 1600,
     registered_landlord: true,
     rta_within_48h: true,
     pass_inspection_first_try: true,

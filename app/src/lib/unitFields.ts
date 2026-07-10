@@ -56,6 +56,11 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // Internal staff notes ("In-unit washer/dryer", "No dishwasher"). NEVER on
   // the flyer projections below — internal only.
   notes: 'string',
+  // Lease terms — free-form per-unit fact ("12-month minimum, month-to-month
+  // after"). Moved OFF the landlord contact 2026-07-10 (with pet policy /
+  // accepted programs / expected rent — see GLOSSARY). Internal only, NEVER on
+  // the flyer projections below.
+  lease_terms: 'string',
   pets: 'pets',
   priority: 'string',
   media: 'string[]',
@@ -159,8 +164,8 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * link is allowed to expose. This is an allowlist (build up), never a denylist
  * (strip down): a future internal field added to UnitItem can NEVER leak,
  * because it simply won't be copied here. NEVER include tour_process,
- * application_process, primary_voice_contact, landlordId, notes, internal
- * status, deposit/LIF, or payment_standard.
+ * application_process, primary_voice_contact, landlordId, notes, lease_terms,
+ * internal status, deposit/LIF, or payment_standard.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -185,7 +190,7 @@ export interface UnitFlyer {
  * allowlist built UP from the teaser (never strip-down): a future internal field
  * on UnitItem can NEVER leak because it is simply not copied here. NEVER include
  * landlord/contact/internal fields (landlordId, primary_voice_contact,
- * tour_process, application_process, status, status_source, notes,
+ * tour_process, application_process, status, status_source, notes, lease_terms,
  * payment_standard, deposit, lif, propertyId, jurisdiction, priority,
  * accessibility, pets).
  */

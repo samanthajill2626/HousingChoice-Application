@@ -1,10 +1,11 @@
 // LandlordOnboardingCard — the landlord-only "Landlord onboarding" section of the
 // Details pane: the structured deal terms + approval criteria recorded during the
-// onboarding call (contract status, expected rent, and the four Yes/No criteria),
-// plus a Park reason row shown only when the lead is `parked`. Renders only the
-// fields actually recorded, and renders nothing at all when none are — so Team can
+// onboarding call (contract status and the four Yes/No criteria), plus a Park
+// reason row shown only when the lead is `parked`. Renders only the fields
+// actually recorded, and renders nothing at all when none are — so Team can
 // SEE the onboarding data without reopening the editor, without cluttering a fresh
 // landlord's file. Mirrors EligibilityIntakeCard (the tenant sibling).
+// (Expected rent moved to the UNIT 2026-07-10 — it is the property's rent range.)
 import type { Contact } from '../../api/index.js';
 import { Card, KV } from './Card.js';
 import { LANDLORD_ONBOARDING_HINTS } from './landlordOnboarding.js';
@@ -15,7 +16,6 @@ export interface LandlordOnboardingCardProps {
     | 'status'
     | 'park_reason'
     | 'contract_status'
-    | 'expected_rent'
     | 'registered_landlord'
     | 'rta_within_48h'
     | 'pass_inspection_first_try'
@@ -35,9 +35,6 @@ export function LandlordOnboardingCard({
       k: 'Contract status',
       v: contact.contract_status === 'signed' ? 'Signed' : 'Unsigned',
     });
-  }
-  if (typeof contact.expected_rent === 'number') {
-    rows.push({ k: 'Expected rent', v: String(contact.expected_rent) });
   }
   if (typeof contact.registered_landlord === 'boolean') {
     rows.push({

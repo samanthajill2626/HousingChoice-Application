@@ -927,10 +927,6 @@ export interface ContactCreate {
   phone?: string;
   voucherSize?: number;
   company?: string;
-  /** Landlord preference defaults (person-level policies). */
-  accepts_programs?: string[];
-  lease_terms?: string;
-  pet_policy?: string;
   role?: string;
   relationships?: Relationship[];
   customFields?: CustomField[];
@@ -1005,20 +1001,12 @@ export interface Contact {
    *  optional fields; not type-gated. `contract_status` records whether the external
    *  DocuSign contract was signed. */
   contract_status?: 'unsigned' | 'signed';
-  /** Expected contract rent (dollars, >= 0). */
-  expected_rent?: number;
   registered_landlord?: boolean;
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
-  /** Landlord preference DEFAULTS — person-level policies across their properties
-   *  (the per-unit facts stay on UnitItem.accepted_programs etc.). `pet_policy`
-   *  is distinct from `pets` (the TENANT intake answer above). */
-  accepts_programs?: string[];
-  /** Free-text lease-terms policy ("12-month minimum, month-to-month after"). */
-  lease_terms?: string;
-  /** Free-text pet policy ("small dogs OK, $300 deposit"). */
-  pet_policy?: string;
+  // NOTE (2026-07-10): expected_rent + accepts_programs/lease_terms/pet_policy
+  // moved to the UNIT (per-property facts — see UnitItem + GLOSSARY).
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -1048,16 +1036,10 @@ export interface ContactPatch {
   lifEligible?: boolean;
   /** Structured landlord deal terms + approval criteria (onboarding call). */
   contract_status?: 'unsigned' | 'signed';
-  expected_rent?: number;
   registered_landlord?: boolean;
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
-  /** Landlord preference defaults (person-level policies). An empty array /
-   *  empty string clears the field. */
-  accepts_programs?: string[];
-  lease_terms?: string;
-  pet_policy?: string;
   /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
   park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */
@@ -1133,6 +1115,8 @@ export interface UnitItem {
   accessibility?: string;
   /** Internal staff notes, e.g. "In-unit washer/dryer". Never public. */
   notes?: string;
+  /** Lease terms, e.g. "12-month minimum". Per-unit fact (moved off the landlord contact 2026-07-10). Never public. */
+  lease_terms?: string;
   /** Pet policy, e.g. "Cats only". */
   pets?: string;
   /** S3 keys / URLs of property media (the Photos gallery + hero). */

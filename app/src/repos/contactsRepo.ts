@@ -185,25 +185,16 @@ export interface ContactItem {
    * contract was signed; the booleans capture registration + approval criteria.
    */
   contract_status?: 'unsigned' | 'signed';
-  /** Expected contract rent (dollars, >= 0). */
-  expected_rent?: number;
   registered_landlord?: boolean;
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
-  /**
-   * Landlord preference DEFAULTS — person-level policies applied across their
-   * properties, distinct from the per-unit facts on UnitItem. Deliberately
-   * `accepts_programs` (not the unit's `accepted_programs`) so the default and
-   * the fact never conflate; `pet_policy` (not `pets`) because `pets` above is
-   * the TENANT intake answer. Same convention as the deal terms: first-class
-   * optional fields, NOT type-gated, validated only when supplied.
-   */
-  accepts_programs?: string[];
-  /** Free-text lease-terms policy ("12-month minimum, month-to-month after"). */
-  lease_terms?: string;
-  /** Free-text pet policy ("small dogs OK, $300 deposit"). */
-  pet_policy?: string;
+  // NOTE (2026-07-10): expected_rent + the landlord preference defaults
+  // (accepts_programs / lease_terms / pet_policy) MOVED to the UNIT — they are
+  // per-property facts (rent_min-rent_max / accepted_programs / lease_terms /
+  // pets on UnitItem; GLOSSARY "Feature & label notes"). Rows written before
+  // the move may still carry the attributes; flexible-doc posture — they
+  // simply go unread.
   [key: string]: unknown;
 }
 

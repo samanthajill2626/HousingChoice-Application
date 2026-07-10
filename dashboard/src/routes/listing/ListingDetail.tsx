@@ -302,6 +302,7 @@ export function ListingDetail(): React.JSX.Element {
               <KV k="Tenant-paid utilities" v={unit.utilities ?? '—'} />
               <KV k="Accessibility" v={unit.accessibility ?? '—'} />
               <KV k="Pets" v={unit.pets ?? '—'} />
+              <KV k="Lease terms" v={unit.lease_terms ?? '—'} />
               <KV k="Application fee" v={formatMoney(unit.application_fee) || '—'} />
               <KV
                 k="Same-day RTA"

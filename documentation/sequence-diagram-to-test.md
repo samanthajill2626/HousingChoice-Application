@@ -189,7 +189,8 @@ schema on a guess.
   `/tenant-status` route (it handles all types), not a landlord-specific endpoint.
 - **Hybrid data model (a real decision):** structure the fields that drive logic/matching
   (`contract_status`, `expected_rent`, `registered_landlord`, `rta_within_48h`,
-  `pass_inspection_first_try`, `income_includes_voucher`); leave soft terms (utilities, hold
+  `pass_inspection_first_try`, `income_includes_voucher`; since 2026-07-10 `expected_rent`
+  lives on the UNIT as `rent_min`/`rent_max`, not the contact — see GLOSSARY); leave soft terms (utilities, hold
   fee, tour logistics, comms prefs, evictions/credit/references prose) in the existing free-form
   `notes`/`customFields`. `teamRecordsApprovalCriteria` uses a **custom field** so it doesn't
   overwrite the onboarding `notes`.

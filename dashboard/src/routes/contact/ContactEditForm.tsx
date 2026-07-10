@@ -152,21 +152,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     str(contact.voucher_expiration_date).slice(0, 10),
   );
   const [company, setCompany] = useState(str(contact['company']));
-  // Landlord preference defaults (the Preferences & notes card). Programs as a
-  // comma-separated string (normalized to string[] on save — the ListingEditForm
-  // pattern); lease terms + pet policy as free text.
-  const [acceptsPrograms, setAcceptsPrograms] = useState(
-    (contact.accepts_programs ?? []).join(', '),
-  );
-  const [leaseTerms, setLeaseTerms] = useState(str(contact.lease_terms));
-  const [petPolicy, setPetPolicy] = useState(str(contact.pet_policy));
   // Landlord onboarding deal terms + approval criteria (edit form). contract_status
-  // as a select (''=unset); expected_rent as a numeric string ('' = unset); the four
-  // criteria as booleans; park_reason as free text.
+  // as a select (''=unset); the four criteria as booleans; park_reason as free
+  // text. (Preferences + expected rent moved to the UNIT, 2026-07-10 — edit them
+  // on the property.)
   const [contractStatus, setContractStatus] = useState(str(contact.contract_status));
-  const [expectedRent, setExpectedRent] = useState(
-    typeof contact.expected_rent === 'number' ? String(contact.expected_rent) : '',
-  );
   const [registeredLandlord, setRegisteredLandlord] = useState(contact.registered_landlord === true);
   const [rtaWithin48h, setRtaWithin48h] = useState(contact.rta_within_48h === true);
   const [passInspection, setPassInspection] = useState(contact.pass_inspection_first_try === true);
@@ -250,36 +240,12 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     if (notes !== str(contact.notes)) patch.notes = notes;
     if (isLandlord && company !== str(contact['company'])) patch.company = company;
 
-    // Landlord preference defaults — dirty-tracked like everything else. Programs:
-    // normalize the comma-separated input (trim, drop empties) and send the array
-    // only when the normalized form changed (mirrors ListingEditForm).
-    if (isLandlord) {
-      const normPrograms = acceptsPrograms
-        .split(',')
-        .map((p) => p.trim())
-        .filter(Boolean);
-      const initPrograms = (contact.accepts_programs ?? []).map((p) => p.trim()).filter(Boolean);
-      if (JSON.stringify(normPrograms) !== JSON.stringify(initPrograms)) {
-        patch.accepts_programs = normPrograms;
-      }
-      if (leaseTerms !== str(contact.lease_terms)) patch.lease_terms = leaseTerms;
-      if (petPolicy !== str(contact.pet_policy)) patch.pet_policy = petPolicy;
-    }
-
     // Landlord onboarding deal terms + approval criteria — dirty-tracked, only the
-    // changed fields ride the PATCH (the server SET-merges).
+    // changed fields ride the PATCH (the server SET-merges). (Preferences +
+    // expected rent moved to the UNIT, 2026-07-10.)
     if (isLandlord) {
       if (contractStatus !== str(contact.contract_status) && contractStatus !== '') {
         patch.contract_status = contractStatus === 'signed' ? 'signed' : 'unsigned';
-      }
-      const initialRent =
-        typeof contact.expected_rent === 'number' ? String(contact.expected_rent) : '';
-      if (expectedRent !== initialRent && expectedRent !== '') {
-        const n = Number(expectedRent);
-        if (!Number.isFinite(n) || n < 0) {
-          return { error: 'Expected rent must be a non-negative number.' };
-        }
-        patch.expected_rent = n;
       }
       if (registeredLandlord !== (contact.registered_landlord === true)) {
         patch.registered_landlord = registeredLandlord;
@@ -625,42 +591,6 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
         {isLandlord ? (
           <div className={styles.fieldset}>
-            <span className={styles.label}>Preferences</span>
-            <label className={styles.field}>
-              <span className={styles.label}>Accepted vouchers / programs</span>
-              <input
-                className={styles.input}
-                value={acceptsPrograms}
-                onChange={(e) => setAcceptsPrograms(e.target.value)}
-                placeholder="Comma-separated, e.g. HCV, VASH"
-                autoComplete="off"
-              />
-            </label>
-            <label className={styles.field}>
-              <span className={styles.label}>Lease terms</span>
-              <input
-                className={styles.input}
-                value={leaseTerms}
-                onChange={(e) => setLeaseTerms(e.target.value)}
-                placeholder="e.g. 12-month minimum, month-to-month after"
-                autoComplete="off"
-              />
-            </label>
-            <label className={styles.field}>
-              <span className={styles.label}>Pet policy</span>
-              <input
-                className={styles.input}
-                value={petPolicy}
-                onChange={(e) => setPetPolicy(e.target.value)}
-                placeholder="e.g. small dogs OK, $300 deposit"
-                autoComplete="off"
-              />
-            </label>
-          </div>
-        ) : null}
-
-        {isLandlord ? (
-          <div className={styles.fieldset}>
             <span className={styles.label}>Landlord onboarding</span>
             <label className={styles.field}>
               <span className={styles.label}>Contract status</span>
@@ -673,18 +603,6 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 <option value="unsigned">Unsigned</option>
                 <option value="signed">Signed</option>
               </select>
-            </label>
-            <label className={styles.field}>
-              <span className={styles.label}>Expected rent</span>
-              <input
-                className={styles.input}
-                type="number"
-                min={0}
-                step={1}
-                value={expectedRent}
-                onChange={(e) => setExpectedRent(e.target.value)}
-                placeholder="e.g. 1450"
-              />
             </label>
             <label className={styles.checkboxField}>
               <input

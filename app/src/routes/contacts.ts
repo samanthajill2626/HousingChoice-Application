@@ -249,17 +249,11 @@ const LANDLORD_BOOLEAN_FIELDS = [
   'income_includes_voucher',
 ] as const;
 
-/**
- * Landlord preference defaults (free text) — person-level policies applied
- * across the landlord's properties (the per-unit facts live on UnitItem).
- * Empty string clears, like `company`. `accepts_programs` (the string[] sibling)
- * is validated separately.
- */
-const LANDLORD_TEXT_PREFERENCE_FIELDS = ['lease_terms', 'pet_policy'] as const;
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((s) => typeof s === 'string');
-}
+// NOTE (2026-07-10): the landlord preference fields (accepts_programs /
+// lease_terms / pet_policy) and expected_rent MOVED to the UNIT (GLOSSARY —
+// they are per-property facts: accepted_programs / lease_terms / pets /
+// rent_min-rent_max on UnitItem). The contact parsers no longer accept them;
+// unknown keys are ignored, so a stale client sending them simply no-ops.
 
 // The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
 // lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
@@ -523,36 +517,10 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['contract_status'] = v;
     changedFields.push('contract_status');
   }
-  if ('expected_rent' in b) {
-    const v = b['expected_rent'];
-    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-      return { error: 'expected_rent must be a non-negative number' };
-    }
-    patch['expected_rent'] = v;
-    changedFields.push('expected_rent');
-  }
   for (const key of LANDLORD_BOOLEAN_FIELDS) {
     if (key in b) {
       const v = b[key];
       if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
-      patch[key] = v;
-      changedFields.push(key);
-    }
-  }
-
-  // Landlord preference defaults (person-level policies — see the repo doc).
-  // Programs as a string array (empty array clears); the two text policies as
-  // free text (empty string clears, like company).
-  if ('accepts_programs' in b) {
-    const v = b['accepts_programs'];
-    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
-    patch['accepts_programs'] = v;
-    changedFields.push('accepts_programs');
-  }
-  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
-    if (key in b) {
-      const v = b[key];
-      if (typeof v !== 'string') return { error: `${key} must be a string` };
       patch[key] = v;
       changedFields.push(key);
     }
@@ -708,31 +676,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     }
     item.contract_status = v;
   }
-  if ('expected_rent' in b) {
-    const v = b['expected_rent'];
-    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-      return { error: 'expected_rent must be a non-negative number' };
-    }
-    item.expected_rent = v;
-  }
   for (const key of LANDLORD_BOOLEAN_FIELDS) {
     if (key in b) {
       const v = b[key];
       if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
-      item[key] = v;
-    }
-  }
-
-  // Landlord preference defaults (see parseTriageBody).
-  if ('accepts_programs' in b) {
-    const v = b['accepts_programs'];
-    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
-    item.accepts_programs = v;
-  }
-  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
-    if (key in b) {
-      const v = b[key];
-      if (typeof v !== 'string') return { error: `${key} must be a string` };
       item[key] = v;
     }
   }

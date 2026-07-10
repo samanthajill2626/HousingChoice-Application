@@ -67,6 +67,22 @@ describe('ListingEditForm', () => {
     });
   });
 
+  it('prefills lease terms and PATCHes them when changed (moved off the landlord contact)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withTerms: UnitItem = { ...UNIT, lease_terms: '12-month minimum' };
+    render(<ListingEditForm unit={withTerms} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    const terms = screen.getByLabelText('Lease terms');
+    expect(terms).toHaveValue('12-month minimum');
+    await user.type(terms, ', month-to-month after');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', {
+      lease_terms: '12-month minimum, month-to-month after',
+    });
+  });
+
   it('sends a changed number as a number, and the programs array', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });

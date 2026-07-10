@@ -60,7 +60,7 @@ test.describe('Contact detail — header actions + edit', () => {
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
 
-    // The note now shows in the Preferences card (live, from the returned contact).
+    // The note now shows in the Notes card (live, from the returned contact).
     await expect(page.getByText(marker)).toBeVisible();
 
     // It really persisted to the backend: a full reload refetches and still shows it.
@@ -111,40 +111,27 @@ test.describe('Contact detail — header actions + edit', () => {
     await expect(page.getByText('dekalb_housing')).toHaveCount(0);
   });
 
-  test('landlord preferences (programs / lease terms / pet policy) persist across a reload', async ({
+  test('landlord contact carries notes only — preference fields moved to the property', async ({
     page,
   }) => {
+    // 2026-07-10: accepted programs / lease terms / pet policy / expected rent are
+    // per-property facts on the UNIT now (see GLOSSARY). The landlord contact keeps
+    // free-text notes only, and its card points staff at the property.
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${LANDLORD}`);
-    await expect(page.getByRole('heading', { name: 'Preferences & notes' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Notes' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Preferences & notes' })).toHaveCount(0);
+    await expect(page.getByText(/live on each property/)).toBeVisible();
 
-    // Fill the landlord-only Preferences fieldset in the edit dialog.
+    // The edit dialog no longer offers the moved fields.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
     await expect(page.getByRole('dialog', { name: /Edit contact/i })).toBeVisible();
-    await page.getByLabel('Accepted vouchers / programs').fill('HCV, VASH');
-    await page.getByLabel('Lease terms').fill('12-month minimum');
-    await page.getByLabel('Pet policy').fill('Small dogs OK');
-    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByLabel('Accepted vouchers / programs')).toHaveCount(0);
+    await expect(page.getByLabel('Lease terms')).toHaveCount(0);
+    await expect(page.getByLabel('Pet policy')).toHaveCount(0);
+    await expect(page.getByLabel('Expected rent')).toHaveCount(0);
+    await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
-
-    // The card renders program chips + the two policy rows (live, from the
-    // returned contact) — and still does after a full reload (persisted).
-    await expect(page.getByText('HCV', { exact: true })).toBeVisible();
-    await expect(page.getByText('VASH', { exact: true })).toBeVisible();
-    await expect(page.getByText('12-month minimum')).toBeVisible();
-    await expect(page.getByText('Small dogs OK')).toBeVisible();
-    await page.reload();
-    await expect(page.getByText('HCV', { exact: true })).toBeVisible();
-    await expect(page.getByText('12-month minimum')).toBeVisible();
-
-    // Cleanup — clear all three so the seeded landlord stays pristine.
-    await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await page.getByLabel('Accepted vouchers / programs').fill('');
-    await page.getByLabel('Lease terms').fill('');
-    await page.getByLabel('Pet policy').fill('');
-    await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(page.getByText('12-month minimum')).toHaveCount(0);
   });
 
   test('Manage numbers: add + remove a number round-trips through the backend', async ({ page }) => {

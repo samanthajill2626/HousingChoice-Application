@@ -134,6 +134,18 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   public flyer projections (`unitFields.ts` allowlists exclude it by
   construction).
 
+- **Landlord preferences + expected rent live on the UNIT** (2026-07-10,
+  reversing the 2026-07-02 contact-level-defaults design). Accepted
+  vouchers/programs, lease terms, pet policy, and expected rent are
+  PER-PROPERTY facts: `accepted_programs` / `lease_terms` / `pets` /
+  `rent_min`-`rent_max` on `UnitItem`. The landlord CONTACT no longer models
+  them (`accepts_programs` / `lease_terms` / `pet_policy` / `expected_rent`
+  were removed from `ContactItem` and the contact parsers ignore them); its
+  card keeps free-text `notes` only. The onboarding call still CAPTURES the
+  expected rent — it is recorded on the property created from the intake (the
+  New-property form's Rent fields), not on the person. `lease_terms` is
+  internal-only (never on the flyer projections).
+
 ---
 
 ## For the future AI layer

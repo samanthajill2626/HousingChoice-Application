@@ -67,6 +67,7 @@ const READY: ListingState = {
     utilities: 'Electric and gas',
     accessibility: 'Ground floor',
     pets: 'Cats only',
+    lease_terms: '12-month minimum',
     application_fee: 25,
     same_day_rta: true,
     voucher_size_accepted: 2,
@@ -199,6 +200,9 @@ describe('ListingDetail', () => {
     expect(screen.getByText('Tenant-paid utilities')).toBeInTheDocument();
     expect(screen.getByText('Electric and gas')).toBeInTheDocument();
     expect(screen.getByText('Cats only')).toBeInTheDocument();
+    // Lease terms are a per-unit fact (moved off the landlord contact 2026-07-10).
+    expect(screen.getByText('Lease terms')).toBeInTheDocument();
+    expect(screen.getByText('12-month minimum')).toBeInTheDocument();
     // Flyer-detail fields now surface on the read view (staff see what's on the flyer).
     expect(screen.getByText('Application fee')).toBeInTheDocument();
     expect(screen.getByText('$25')).toBeInTheDocument();

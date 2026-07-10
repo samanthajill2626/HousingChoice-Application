@@ -44,15 +44,17 @@ test.afterEach(async ({ page }) => {
   }
 });
 
-/** The onboarding-call deal terms shared by every "signed → onboarded" path. */
+/** The onboarding-call deal terms shared by every "signed → onboarded" path.
+ *  The call's EXPECTED RENT is a per-property fact (moved off the contact
+ *  2026-07-10) — it rides the New-property form below, not the contact edit. */
 const ONBOARDING = {
-  expectedRent: 1450,
   registeredLandlord: true,
   rta48h: true,
   inspectionFirstTry: true,
   softTermsNote:
     'Utilities on tenant; $50 hold fee; deposit = 1 month; LIF ok; tours by appt; text + group text fine.',
 } as const;
+const EXPECTED_RENT = 1450;
 const CRITERIA = {
   incomeIncludesVoucher: true,
   criteriaNote:
@@ -71,7 +73,6 @@ async function signedThroughHandoff(flow: Scenario, landlordId: string): Promise
   await flow.teamRecordsApprovalCriteria(CRITERIA);
   await flow.expectLandlordOnboardingRecorded({
     contractSigned: true,
-    expectedRent: ONBOARDING.expectedRent,
     registeredLandlord: ONBOARDING.registeredLandlord,
     rta48h: ONBOARDING.rta48h,
     inspectionFirstTry: ONBOARDING.inspectionFirstTry,
@@ -79,11 +80,13 @@ async function signedThroughHandoff(flow: Scenario, landlordId: string): Promise
   });
 
   // Property + unit intake → create the unit under the landlord → publish → hand off.
+  // The call's expected rent lands HERE, on the property record.
   const unit = await flow.teamCreatesUnitFromIntake(landlordId, {
     beds: 3,
     baths: 2,
     voucherSizeAccepted: 2,
     listingLink: 'https://www.zillow.com/homedetails/onboarded-unit',
+    expectedRent: EXPECTED_RENT,
   });
   await flow.expectUnitAvailableWithListingLink(unit);
   await flow.expectHandoffToMatching(unit);

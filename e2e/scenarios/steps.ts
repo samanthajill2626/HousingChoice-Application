@@ -1050,12 +1050,14 @@ export class Scenario {
   }
 
   /**
-   * [Team] Save the onboarding-call deal terms (expected rent + the operational
-   * criteria + a soft-terms note). One edit session. Approval criteria is recorded
-   * SEPARATELY (teamRecordsApprovalCriteria) so it doesn't overwrite Notes.
+   * [Team] Save the onboarding-call deal terms (the operational criteria + a
+   * soft-terms note). One edit session. Approval criteria is recorded SEPARATELY
+   * (teamRecordsApprovalCriteria) so it doesn't overwrite Notes. The call's
+   * EXPECTED RENT is a per-property fact (moved off the contact 2026-07-10):
+   * it rides the New-property form's Rent fields (teamCreatesUnitFromIntake's
+   * `expectedRent`), not this edit.
    */
   teamRecordsLandlordOnboarding(o: {
-    expectedRent: number;
     registeredLandlord: boolean;
     rta48h: boolean;
     inspectionFirstTry: boolean;
@@ -1064,7 +1066,6 @@ export class Scenario {
     return step('Team records the landlord onboarding details', async () => {
       await this.openEditDialog();
       const dialog = this.page.getByRole('dialog', { name: /Edit contact/i });
-      await dialog.getByLabel('Expected rent').fill(String(o.expectedRent));
       if (o.registeredLandlord) await dialog.getByLabel('Registered landlord').check();
       if (o.rta48h) await dialog.getByLabel('Submits RTA within 48h').check();
       if (o.inspectionFirstTry) await dialog.getByLabel('Passes inspection first try').check();
@@ -1097,7 +1098,6 @@ export class Scenario {
    */
   expectLandlordOnboardingRecorded(o: {
     contractSigned: boolean;
-    expectedRent: number;
     registeredLandlord: boolean;
     rta48h: boolean;
     inspectionFirstTry: boolean;
@@ -1109,7 +1109,6 @@ export class Scenario {
       expect(res.ok()).toBeTruthy();
       const { contact } = (await res.json()) as { contact: Record<string, unknown> };
       expect(contact['contract_status']).toBe(o.contractSigned ? 'signed' : 'unsigned');
-      expect(contact['expected_rent']).toBe(o.expectedRent);
       expect(contact['registered_landlord']).toBe(o.registeredLandlord);
       expect(contact['rta_within_48h']).toBe(o.rta48h);
       expect(contact['pass_inspection_first_try']).toBe(o.inspectionFirstTry);
@@ -1122,8 +1121,6 @@ export class Scenario {
       await expect(card).toBeVisible();
       await expect(card.getByText('Contract status')).toBeVisible();
       await expect(card.getByText(o.contractSigned ? 'Signed' : 'Unsigned')).toBeVisible();
-      await expect(card.getByText('Expected rent')).toBeVisible();
-      await expect(card.getByText(String(o.expectedRent), { exact: true })).toBeVisible();
       await expect(card.getByText('Registered landlord')).toBeVisible();
       await expect(card.getByText('Submits RTA within 48h')).toBeVisible();
       await expect(card.getByText('Passes inspection first try')).toBeVisible();
@@ -1206,6 +1203,9 @@ export class Scenario {
       voucherSizeAccepted?: number;
       listingLink?: string;
       jurisdiction?: string;
+      /** The onboarding call's EXPECTED RENT — a per-property fact (moved off
+       *  the contact 2026-07-10): fills Rent min AND max. Default 1400/1500. */
+      expectedRent?: number;
     },
   ): Promise<Unit> {
     return step('Team creates the unit under the landlord (New-property form)', async () => {
@@ -1223,8 +1223,8 @@ export class Scenario {
       await dialog.getByLabel('Housing authority').fill(opts.jurisdiction ?? 'atlanta_housing');
       await dialog.getByLabel('Beds').fill(String(opts.beds));
       await dialog.getByLabel('Baths').fill(String(opts.baths ?? 2));
-      await dialog.getByLabel('Rent min').fill('1400');
-      await dialog.getByLabel('Rent max').fill('1500');
+      await dialog.getByLabel('Rent min').fill(String(opts.expectedRent ?? 1400));
+      await dialog.getByLabel('Rent max').fill(String(opts.expectedRent ?? 1500));
       await dialog
         .getByLabel('Public listing link')
         .fill(opts.listingLink ?? 'https://www.zillow.com/homedetails/example');

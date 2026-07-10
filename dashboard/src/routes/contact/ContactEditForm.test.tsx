@@ -410,7 +410,6 @@ describe('ContactEditForm', () => {
       <ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />,
     );
     expect(screen.getByLabelText(/^Contract status$/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Expected rent$/i)).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /^Registered landlord$/i })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /^Submits RTA within 48h$/i })).toBeInTheDocument();
     expect(
@@ -425,7 +424,6 @@ describe('ContactEditForm', () => {
     // None of these show for a tenant.
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.queryByLabelText(/^Contract status$/i)).toBeNull();
-    expect(screen.queryByLabelText(/^Expected rent$/i)).toBeNull();
     expect(screen.queryByRole('checkbox', { name: /^Registered landlord$/i })).toBeNull();
     expect(screen.queryByLabelText(/^Park reason$/i)).toBeNull();
   });
@@ -436,7 +434,6 @@ describe('ContactEditForm', () => {
     render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
 
     await user.selectOptions(screen.getByLabelText(/^Contract status$/i), 'signed');
-    fireEvent.change(screen.getByLabelText(/^Expected rent$/i), { target: { value: '1450' } });
     await user.click(screen.getByRole('checkbox', { name: /^Registered landlord$/i }));
     await user.click(screen.getByRole('checkbox', { name: /^Submits RTA within 48h$/i }));
     await user.click(screen.getByRole('checkbox', { name: /^Voucher counts as income$/i }));
@@ -446,7 +443,6 @@ describe('ContactEditForm', () => {
     const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(patch).toMatchObject({
       contract_status: 'signed',
-      expected_rent: 1450,
       registered_landlord: true,
       rta_within_48h: true,
       income_includes_voucher: true,
@@ -455,59 +451,14 @@ describe('ContactEditForm', () => {
     expect('pass_inspection_first_try' in patch).toBe(false);
   });
 
-  it('shows the landlord preference fields for a landlord only', () => {
-    const { unmount } = render(
-      <ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />,
-    );
-    expect(screen.getByLabelText(/^Accepted vouchers \/ programs$/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Lease terms$/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Pet policy$/i)).toBeInTheDocument();
-    unmount();
-
-    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+  it('no landlord preference / expected-rent inputs — those fields moved to the property', () => {
+    // 2026-07-10: accepted programs / lease terms / pet policy / expected rent
+    // are per-property facts edited on the UNIT (ListingEditForm), not here.
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.queryByLabelText(/^Accepted vouchers \/ programs$/i)).toBeNull();
     expect(screen.queryByLabelText(/^Lease terms$/i)).toBeNull();
     expect(screen.queryByLabelText(/^Pet policy$/i)).toBeNull();
-  });
-
-  it('PATCHes changed landlord preferences (programs normalized to an array)', async () => {
-    const user = userEvent.setup();
-    updateContact.mockResolvedValue({ ...LANDLORD });
-    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
-
-    await user.type(
-      screen.getByLabelText(/^Accepted vouchers \/ programs$/i),
-      ' HCV , VASH ,, ',
-    );
-    await user.type(screen.getByLabelText(/^Lease terms$/i), '12-month minimum');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-
-    await waitFor(() => expect(updateContact).toHaveBeenCalled());
-    const patch = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(patch).toMatchObject({
-      accepts_programs: ['HCV', 'VASH'],
-      lease_terms: '12-month minimum',
-    });
-    // The untouched pet policy isn't sent.
-    expect('pet_policy' in patch).toBe(false);
-  });
-
-  it('does not send accepts_programs when only its formatting changed', async () => {
-    const user = userEvent.setup();
-    const withPrefs: Contact = { ...LANDLORD, accepts_programs: ['HCV', 'VASH'] };
-    updateContact.mockResolvedValue({ ...withPrefs, pet_policy: 'No pets' });
-    render(<ContactEditForm contact={withPrefs} onClose={vi.fn()} onSaved={vi.fn()} />);
-
-    // Re-key the same normalized list with different spacing/casing of separators.
-    const programs = screen.getByLabelText(/^Accepted vouchers \/ programs$/i);
-    await user.clear(programs);
-    await user.type(programs, 'HCV,VASH');
-    await user.type(screen.getByLabelText(/^Pet policy$/i), 'No pets');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-
-    await waitFor(() =>
-      expect(updateContact).toHaveBeenCalledWith('L1', { pet_policy: 'No pets' }),
-    );
+    expect(screen.queryByLabelText(/^Expected rent$/i)).toBeNull();
   });
 
   it('PATCHes a park_reason for a landlord', async () => {

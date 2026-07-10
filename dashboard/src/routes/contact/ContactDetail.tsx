@@ -600,6 +600,9 @@ export function ContactDetail(): React.JSX.Element {
                 onManagePhones={() => setManagingPhones(true)}
                 onStartPlacement={() => setStartingPlacement(true)}
                 onScheduleTour={() => setSchedulingTour(true)}
+                onSendProperty={() =>
+                  navigate(`/broadcasts/new?contactId=${encodeURIComponent(contact.contactId)}`)
+                }
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />

@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
@@ -48,6 +49,7 @@ describe('TenantFile', () => {
       tours?: Tour[];
       relayGroupsPending?: boolean;
       relayGroups?: RelayGroupRow[];
+      onSendProperty?: () => void;
     } = {},
   ) {
     return render(
@@ -63,6 +65,7 @@ describe('TenantFile', () => {
           relayGroupsPending={opts.relayGroupsPending ?? true}
           relayGroups={opts.relayGroups ?? []}
           media={opts.media ?? []}
+          onSendProperty={opts.onSendProperty}
         />
       </MemoryRouter>,
     );
@@ -125,6 +128,31 @@ describe('TenantFile', () => {
   it('shows "No properties sent yet." when the slice is ready but empty', () => {
     renderIt({ listingsSentPending: false, listingsSent: [] });
     expect(screen.getByText('No properties sent yet.')).toBeInTheDocument();
+  });
+
+  it('Properties sent card shows "+ Send" and fires onSendProperty', async () => {
+    const onSendProperty = vi.fn();
+    renderIt({ listingsSentPending: false, onSendProperty });
+    await userEvent.click(screen.getByRole('button', { name: 'Send a property to this tenant' }));
+    expect(onSendProperty).toHaveBeenCalled();
+  });
+
+  it('Properties sent keeps its count visible next to the action', () => {
+    const send = (unitId: string): ListingSendRow => ({
+      unitId,
+      contactId: 'T1',
+      via: 'broadcast',
+      response: 'no_reply',
+      sentAt: '2026-07-01T12:00:00.000Z',
+    });
+    renderIt({
+      listingsSentPending: false,
+      onSendProperty: vi.fn(),
+      listingsSent: [send('u1'), send('u2')],
+    });
+    // The count lives in the title text itself (not the aside, which is the "+ Send"
+    // action here), so it stays visible even though the aside is now interactive.
+    expect(screen.getByRole('heading', { name: /^Properties sent \(2\)/ })).toBeInTheDocument();
   });
 
   it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {

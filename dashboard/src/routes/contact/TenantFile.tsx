@@ -66,6 +66,8 @@ export interface TenantFileProps {
   onStartPlacement?: () => void;
   /** Open the "Schedule tour" dialog (Tours card "+ Schedule"). */
   onScheduleTour?: () => void;
+  /** Open the seeded composer for this tenant (Properties sent card "+ Send"). */
+  onSendProperty?: () => void;
 }
 
 /** A unit's address line (or its id as a last resort), for a row label. */
@@ -98,6 +100,7 @@ export function TenantFile({
   onManagePhones,
   onStartPlacement,
   onScheduleTour,
+  onSendProperty,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const myPlacements = tenantPlacements(placements, contact.contactId);
@@ -186,8 +189,16 @@ export function TenantFile({
       </Card>
 
       <Card
-        title="Properties sent"
-        aside={listingsSent.length > 0 ? String(listingsSent.length) : undefined}
+        title={listingsSent.length > 0 ? `Properties sent (${listingsSent.length})` : 'Properties sent'}
+        aside={
+          onSendProperty ? (
+            <CardAction onClick={onSendProperty} label="Send a property to this tenant">
+              + Send
+            </CardAction>
+          ) : listingsSent.length > 0 ? (
+            String(listingsSent.length)
+          ) : undefined
+        }
       >
         {listingsSentPending ? (
           <PendingPanel />

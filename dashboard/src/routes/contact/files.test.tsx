@@ -46,6 +46,7 @@ describe('TenantFile', () => {
       listingsSent?: ListingSendRow[];
       media?: CommsMediaItem[];
       tours?: Tour[];
+      units?: UnitItem[];
       relayGroupsPending?: boolean;
       relayGroups?: RelayGroupRow[];
     } = {},
@@ -57,7 +58,7 @@ describe('TenantFile', () => {
           phones={[{ phone: '+14040100007', primary: true }]}
           placements={[TENANT_CASE]}
           tours={opts.tours ?? []}
-          units={[UNIT]}
+          units={opts.units ?? [UNIT]}
           listingsSentPending={opts.listingsSentPending ?? true}
           listingsSent={opts.listingsSent ?? []}
           relayGroupsPending={opts.relayGroupsPending ?? true}
@@ -107,19 +108,61 @@ describe('TenantFile', () => {
     expect(screen.getAllByText(/Arrives with the backend/i).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('renders Properties-sent rows linking to the unit, with the response (C4 data)', () => {
+  it('renders Properties-sent rows linking to the unit (C4 data), no chip without a tour', () => {
     renderIt({
       listingsSentPending: false,
       listingsSent: [
-        { contactId: 'T1', unitId: 'u1', response: 'no_reply', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' },
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' },
       ],
     });
-    // The sent row links to the LISTING route (placements/tours link to /placements/* or /tours/*),
-    // so a /listings/u1 link uniquely identifies the Properties-sent row.
+    // The sent row's identity links to the LISTING route (placements/tours link to
+    // /placements/* or /tours/*), so a /listings/u1 link uniquely identifies it.
     const sentLink = screen.getAllByRole('link').find((a) => a.getAttribute('href') === '/listings/u1');
     expect(sentLink).toBeDefined();
     expect(sentLink).toHaveTextContent(/1450 Joseph Blvd/);
-    expect(screen.getByText('No reply')).toBeInTheDocument();
+    // The dead response label is gone entirely (no "No reply"/"Interested"/"Not a fit").
+    expect(screen.queryByText('No reply')).not.toBeInTheDocument();
+    // No qualifying tour -> no tour chip on the row.
+    expect(screen.queryByRole('link', { name: /^Tour|^Toured$/ })).not.toBeInTheDocument();
+  });
+
+  it('renders the tour chip on a Properties-sent row, linking to the tour', () => {
+    renderIt({
+      listingsSentPending: false,
+      listingsSent: [
+        {
+          contactId: 'T1',
+          unitId: 'u1',
+          sentAt: '2026-06-30T10:00:00Z',
+          via: 'broadcast',
+          tour: { tourId: 'tour-77', state: 'scheduled' },
+        },
+      ],
+    });
+    const chip = screen.getByRole('link', { name: 'Tour scheduled' });
+    expect(chip).toHaveAttribute('href', '/tours/tour-77');
+    // The identity link to the property is still present and distinct.
+    const identity = screen.getAllByRole('link').find((a) => a.getAttribute('href') === '/listings/u1');
+    expect(identity).toBeDefined();
+  });
+
+  it('renders each tour-chip state on Properties-sent rows', () => {
+    renderIt({
+      listingsSentPending: false,
+      units: [
+        UNIT,
+        { unitId: 'u2', landlordId: 'L1', status: 'available', address: { line1: '2 Peachtree' } },
+        { unitId: 'u3', landlordId: 'L1', status: 'available', address: { line1: '3 Peachtree' } },
+      ],
+      listingsSent: [
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' } },
+        { contactId: 'T1', unitId: 'u2', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' } },
+        { contactId: 'T1', unitId: 'u3', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' } },
+      ],
+    });
+    expect(screen.getByRole('link', { name: 'Tour requested' })).toHaveAttribute('href', '/tours/t-a');
+    expect(screen.getByRole('link', { name: 'Tour scheduled' })).toHaveAttribute('href', '/tours/t-b');
+    expect(screen.getByRole('link', { name: 'Toured' })).toHaveAttribute('href', '/tours/t-c');
   });
 
   it('shows "No properties sent yet." when the slice is ready but empty', () => {

@@ -22,7 +22,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, responseClass } from '../contact/Card.js';
+import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { useListing } from './useListing.js';
@@ -66,12 +66,6 @@ const STATUS_DOT: Record<ListingStatus, string> = {
   occupied: responseClass.placed,
   on_hold: responseClass.muted,
   off_market: responseClass.inactive,
-};
-
-const RESPONSE_META: Record<string, { label: string; cls: string }> = {
-  interested: { label: '?? Interested', cls: responseClass.yes },
-  not_a_fit: { label: '?? Not a fit', cls: responseClass.no },
-  no_reply: { label: '? No reply', cls: responseClass.wait },
 };
 
 /** How many rows the Related / Similar property lists show before collapsing. */
@@ -441,25 +435,19 @@ export function ListingDetail(): React.JSX.Element {
             )}
           </Card>
 
-          <Card title="Sent to tenants" aside="recipients + responses">
+          <Card title="Sent to tenants" aside="recipients">
             {recipients.status === 'ready' ? (
               recipients.rows.length === 0 ? (
                 <EmptyRow>Not sent to anyone yet.</EmptyRow>
               ) : (
-                recipients.rows.map((row) => {
-                  const meta = RESPONSE_META[row.response] ?? {
-                    label: row.response,
-                    cls: responseClass.muted,
-                  };
-                  return (
-                    <Row
-                      key={`${row.contactId}:${row.sentAt}`}
-                      to={`/contacts/${row.contactId}`}
-                      label={row.contactId}
-                      right={<span className={meta.cls}>{meta.label}</span>}
-                    />
-                  );
-                })
+                recipients.rows.map((row) => (
+                  <SendRosterRow
+                    key={`${row.contactId}:${row.sentAt}`}
+                    to={`/contacts/${row.contactId}`}
+                    identity={row.contactId}
+                    {...(row.tour && { tour: row.tour })}
+                  />
+                ))
               )
             ) : recipients.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load recipients.</EmptyRow>

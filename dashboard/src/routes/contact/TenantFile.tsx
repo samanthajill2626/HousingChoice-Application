@@ -15,7 +15,6 @@ import {
   type Tour,
   type UnitItem,
   type ListingSendRow,
-  type ListingResponse,
 } from '../../api/index.js';
 import { StatusBadge, contactStatusTone } from '../../ui/index.js';
 import {
@@ -27,6 +26,7 @@ import {
   KV,
   PendingPanel,
   Row,
+  SendRosterRow,
   responseClass,
 } from './Card.js';
 import { DeadlineChip } from '../placements/DeadlineChip.js';
@@ -74,13 +74,6 @@ function unitLabel(units: Map<string, UnitItem>, unitId: string): string {
   const addr = unit ? formatAddress(unit.address) : '';
   return addr || unitId;
 }
-
-/** The tenant's reaction to a sent listing, as a row's right-hand label. */
-const LISTING_RESPONSE_LABEL: Record<ListingResponse, string> = {
-  interested: 'Interested',
-  not_a_fit: 'Not a fit',
-  no_reply: 'No reply',
-};
 
 export function TenantFile({
   contact,
@@ -195,13 +188,11 @@ export function TenantFile({
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
           listingsSent.map((s) => (
-            <Row
+            <SendRosterRow
               key={`${s.unitId}:${s.sentAt}`}
               to={`/listings/${s.unitId}`}
-              label={unitLabel(unitMap, s.unitId)}
-              right={
-                <span className={responseClass.muted}>{LISTING_RESPONSE_LABEL[s.response]}</span>
-              }
+              identity={unitLabel(unitMap, s.unitId)}
+              {...(s.tour && { tour: s.tour })}
             />
           ))
         )}

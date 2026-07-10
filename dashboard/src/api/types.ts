@@ -1208,7 +1208,6 @@ export type TimelineMilestoneType =
   | 'placement_opened'
   | 'placement_closed'
   | 'listing_sent'
-  | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
   | 'tour_canceled'
@@ -1303,7 +1302,7 @@ export interface ContactTimelinePage {
 
 /** The derived tour signal a send row carries when a qualifying tour exists for
  *  the (unit, tenant) pairing. Hand-mirrored from the app-side declaration in
- *  app/src/lib/listingSendTour.ts (independent types — the assignment-yank
+ *  app/src/lib/listingSendTour.ts (independent types - the assignment-yank
  *  lesson); the lockstep pin is each side's own tsc plus the payload-shape route
  *  test. Keep in sync when the server projection changes. */
 export type TourSignalState = 'requested' | 'scheduled' | 'toured';
@@ -1311,15 +1310,13 @@ export interface TourSignal {
   tourId: string;
   state: TourSignalState;
 }
-export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
 export interface ListingSendRow {
   contactId: string;
   unitId: string;
-  response: ListingResponse;
   sentAt: string; // ISO
   via: 'broadcast' | 'individual';
   broadcastId?: string;
-  /** The pairing's most-progressed tour, when one qualifies — powers the roster
+  /** The pairing's most-progressed tour, when one qualifies - powers the roster
    *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
   tour?: TourSignal;
 }
@@ -1415,7 +1412,7 @@ export interface SimilarUnit {
 
 /** One property Activity row. `type` is the audit event_type — an OPEN set;
  *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- *  listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  *  tour_no_show, tour_canceled, tour_outcome.
  *  Unknown types must still render (humanized), never blank. */
@@ -1431,7 +1428,6 @@ export interface UnitActivityEvent {
   /** Server-resolved display name (best-effort) — absent when unknown. */
   contactName?: string;
   role?: string;
-  response?: string;
   fields?: string[];
   from?: string;
   to?: string;

@@ -207,7 +207,7 @@ export function TourChip({
  *  property card, a property on the tenant card) and, when a qualifying tour
  *  exists for the pairing, a `TourChip` links to that tour. The row is NOT a
  *  full-row link because the identity and the chip navigate to DIFFERENT places
- *  (nesting anchors would be invalid) — each is its own link. Rows without a
+ *  (nesting anchors would be invalid) - each is its own link. Rows without a
  *  tour render just the identity. */
 export function SendRosterRow({
   to,

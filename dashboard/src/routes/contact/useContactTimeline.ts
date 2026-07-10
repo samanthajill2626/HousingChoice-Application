@@ -39,6 +39,14 @@ interface TimelineData {
 }
 
 export interface ContactTimelineState extends TimelineData {
+  /**
+   * Refetch the timeline now (debounced with the SSE-driven refetches). Call
+   * after an ON-PAGE mutation that writes a milestone (status change, opt-out
+   * toggle, number added) — those emit no SSE event the hook listens to, so
+   * without this the new pin sits server-side until an unrelated message
+   * event happens to trigger a refetch.
+   */
+  refetch: () => void;
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
   addOptimistic: (
@@ -305,6 +313,9 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     items,
     upcoming: state.upcoming,
     source: state.source,
+    // Shares the SSE debounce, so an on-page mutation racing an SSE burst still
+    // coalesces into one refetch.
+    refetch: scheduleRefetch,
     addOptimistic,
     resolveOptimistic,
     failOptimistic,

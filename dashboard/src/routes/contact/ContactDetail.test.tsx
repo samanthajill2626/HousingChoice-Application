@@ -177,12 +177,22 @@ describe('ContactDetail', () => {
     }
     expect(screen.getByRole('menuitemradio', { name: 'Searching' })).toHaveAttribute('aria-checked', 'true');
 
+    // Capture the timeline fetch count BEFORE the change lands so the debounced
+    // post-change refetch can't race the baseline.
+    const fetchesBeforeChange = getContactTimeline.mock.calls.length;
     await user.click(screen.getByRole('menuitemradio', { name: 'On hold' }));
     // The change goes through the transition service (NEVER a plain PATCH), and
     // the returned contact is applied in place — the pill re-labels.
     expect(setTenantStatus).toHaveBeenCalledWith('k1', { toStatus: 'on_hold', source: 'manual' });
     await screen.findByRole('button', { name: 'Contact status: On hold' });
     expect(updateContact).not.toHaveBeenCalled();
+
+    // The transition wrote a contact_status_changed milestone server-side and no
+    // SSE event covers it — the page must refetch the timeline ITSELF so the pin
+    // appears immediately (behind the hook's 300ms debounce).
+    await waitFor(() =>
+      expect(getContactTimeline.mock.calls.length).toBeGreaterThan(fetchesBeforeChange),
+    );
   });
 
   it('landlord status pill: lists the landlord lead lifecycle (never tenant values)', async () => {

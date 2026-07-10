@@ -173,6 +173,9 @@ export function makeFakeUsersRepo(seed: UserItem[] = []): FakeUsersRepo {
       creates.push(userId);
       return { created: true, user: item };
     },
+    async remove(userId) {
+      users.delete(userId);
+    },
     async activateOnLogin(userId, googleSub, name, at = new Date().toISOString()) {
       const user = users.get(userId);
       if (!user) throw new Error(`activateOnLogin: no user ${userId}`);

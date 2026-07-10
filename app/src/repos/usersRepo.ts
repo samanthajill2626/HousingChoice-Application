@@ -23,6 +23,7 @@
 import { createHash } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -203,6 +204,14 @@ export interface UsersRepo {
    * are never reset). Returns { created, user }.
    */
   invite(input: { email: string; role: UserRole }): Promise<InviteResult>;
+  /**
+   * Hard-delete a user row (DeleteCommand). IDEMPOTENT: deleting an absent
+   * userId is a no-op. Because userId is deterministic from the email, the key
+   * is freed for a clean re-invite of the same email afterward. The CALLER
+   * enforces the self / last-admin / voice-line-holder guards BEFORE calling
+   * this -- the repo just deletes.
+   */
+  remove(userId: string): Promise<void>;
   /**
    * Activate an invited user on their first login: write google_sub, flip
    * status → 'active', stamp last_login_at — in ONE update. The google_sub
@@ -396,6 +405,13 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       // the email; that is an audit-relevant operator action.
       log.info({ userId: item.userId, role: item.role }, 'user invited');
       return { created: true, user: item };
+    },
+
+    async remove(userId) {
+      // Hard delete. Unconditional so it is idempotent (deleting an absent id
+      // is a no-op, not an error) -- the route has already run the guards.
+      await doc.send(new DeleteCommand({ TableName: table, Key: { userId } }));
+      log.info({ userId }, 'user removed');
     },
 
     async activateOnLogin(userId, googleSub, name, at = new Date().toISOString()) {

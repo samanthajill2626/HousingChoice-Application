@@ -166,6 +166,28 @@ describe.skipIf(!reachable)('M1.4 persistence against DynamoDB Local (throwaway 
     });
   });
 
+  describe('usersRepo remove (hard delete)', () => {
+    it('deletes the row and frees the key for a clean re-invite of the same email', async () => {
+      const email = `remove-${randomUUID()}@housingchoice.org`;
+      const { user, created } = await users.invite({ email, role: 'va' });
+      expect(created).toBe(true);
+      expect(await users.findById(user.userId)).toBeDefined();
+
+      // Hard delete -> the row is gone.
+      await users.remove(user.userId);
+      expect(await users.findById(user.userId)).toBeUndefined();
+
+      // Re-invite the SAME email -> same deterministic key, created:true again.
+      const again = await users.invite({ email, role: 'admin' });
+      expect(again.created).toBe(true);
+      expect(again.user.userId).toBe(user.userId);
+      expect(again.user.role).toBe('admin');
+
+      // remove is idempotent -- deleting an absent id is a no-op (does not throw).
+      await users.remove('usr_doesnotexist000000000');
+    });
+  });
+
   describe('conversation-type propagation (triage seam)', () => {
     it('contactsRepo.update merges, and setType flips the linked unknown_1to1 thread', async () => {
       const phone = `+1555${Math.floor(Math.random() * 9_000_000 + 1_000_000)}`;

@@ -285,6 +285,107 @@ describe('PATCH /api/users/:userId/role', () => {
   });
 });
 
+describe('DELETE /api/users/:userId', () => {
+  it('removes a VA target (200), deletes the row, audits user_removed with actor + email', async () => {
+    const { app, world, fakeUsers } = makeWebhookHarness();
+    // The harness seeds the VA (TEST_SESSION_USER) and the admin (TEST_ADMIN_USER).
+    const res = await request(app)
+      .delete(`/api/users/${TEST_SESSION_USER.userId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ removed: true });
+    // Row is gone.
+    expect(fakeUsers.users.has(TEST_SESSION_USER.userId)).toBe(false);
+    // Audit event with the acting admin + the target's email/role.
+    const audit = world.auditEvents.find((e) => e.event_type === 'user_removed');
+    expect(audit?.payload).toMatchObject({
+      email: TEST_SESSION_USER.email,
+      role: 'va',
+      actor: TEST_ADMIN_USER.userId,
+    });
+  });
+
+  it('refuses removing the LAST admin (409 cannot_remove_last_admin)', async () => {
+    // Harness seeds exactly ONE admin (TEST_ADMIN_USER). Removing them (self)
+    // would leave zero admins -> the last-admin guard fires first.
+    const { app, fakeUsers } = makeWebhookHarness();
+    const res = await request(app)
+      .delete(`/api/users/${TEST_ADMIN_USER.userId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'cannot_remove_last_admin' });
+    // The admin is still there.
+    expect(fakeUsers.users.has(TEST_ADMIN_USER.userId)).toBe(true);
+  });
+
+  it('a non-last admin removing THEMSELVES is refused (409 cannot_remove_self)', async () => {
+    // Two admins present, so the last-admin guard does NOT fire -- the self
+    // guard is what catches an admin removing their own account.
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set(
+      'usr_secondadmin',
+      adminUserItem({ userId: 'usr_secondadmin', email: 'a2@housingchoice.org' }),
+    );
+    const res = await request(app)
+      .delete(`/api/users/${TEST_ADMIN_USER.userId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE); // self
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'cannot_remove_self' });
+    // Still present (not removed).
+    expect(fakeUsers.users.has(TEST_ADMIN_USER.userId)).toBe(true);
+  });
+
+  it('removing one of TWO admins (a distinct target) is allowed (200)', async () => {
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set(
+      'usr_secondadmin',
+      adminUserItem({ userId: 'usr_secondadmin', email: 'a2@housingchoice.org' }),
+    );
+    const res = await request(app)
+      .delete('/api/users/usr_secondadmin')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE); // distinct actor
+    expect(res.status).toBe(200);
+    expect(fakeUsers.users.has('usr_secondadmin')).toBe(false);
+  });
+
+  it('refuses removing the inbound-voice-line holder (409 voice_line_assigned)', async () => {
+    const { app, fakeUsers } = makeWebhookHarness();
+    // Make the VA target the current inbound-voice-line holder.
+    await fakeUsers.repo.assignInboundVoiceLine(TEST_SESSION_USER.userId);
+    const res = await request(app)
+      .delete(`/api/users/${TEST_SESSION_USER.userId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'voice_line_assigned' });
+    // Still present (not removed).
+    expect(fakeUsers.users.has(TEST_SESSION_USER.userId)).toBe(true);
+  });
+
+  it('404s an unknown target user', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .delete('/api/users/usr_does_not_exist')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(res.status).toBe(404);
+  });
+
+  it('VA is forbidden (403)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .delete(`/api/users/${TEST_ADMIN_USER.userId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE); // VA
+    expect(res.status).toBe(403);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Task 3 — GET /api/users projection includes name via displayNameOf
 // ---------------------------------------------------------------------------

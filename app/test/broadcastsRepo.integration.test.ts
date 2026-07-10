@@ -10,6 +10,7 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -344,6 +345,28 @@ describe.skipIf(!reachable)('broadcast + relay repo UpdateExpressions against Dy
     const refused = await broadcasts.delete(sent.broadcastId);
     expect(refused).toEqual({ deleted: false, reason: 'not_draft' });
     expect(await broadcasts.getById(sent.broadcastId)).toBeDefined();
+  });
+
+  it('setSeedContactIds: replaces the seeds on a draft; a non-draft is refused (ConditionalCheckFailed)', async () => {
+    const draft = await broadcasts.create({
+      created_by: 'usr_test',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'seedable',
+    });
+    // Replace on a draft: the conditional (status='draft') passes.
+    const set = await broadcasts.setSeedContactIds(draft.broadcastId, ['c-1', 'c-2']);
+    expect(set.seed_contact_ids).toEqual(['c-1', 'c-2']);
+    expect((await broadcasts.getById(draft.broadcastId))?.seed_contact_ids).toEqual(['c-1', 'c-2']);
+
+    // An EMPTY array clears the list (valid — unlike create).
+    const cleared = await broadcasts.setSeedContactIds(draft.broadcastId, []);
+    expect(cleared.seed_contact_ids).toEqual([]);
+
+    // A non-draft (sending) is refused by the status condition.
+    await broadcasts.markSending(draft.broadcastId, { 'c-1': { status: 'queued' } });
+    await expect(broadcasts.setSeedContactIds(draft.broadcastId, ['c-3'])).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
   });
 
   it('conditional delete race: status flips draft→sending before the delete → not_draft, NO silent delete', async () => {

@@ -292,6 +292,15 @@ export interface BroadcastsRepo {
     recipients: Record<string, BroadcastRecipient>,
   ): Promise<BroadcastItem>;
   /**
+   * Replace the draft's hand-picked seed_contact_ids (the review step's curated
+   * additions / the seeded 1:1 entry). One conditional write gated on the
+   * broadcast still being a `draft` (a sent/sending broadcast's recipients are
+   * frozen). An EMPTY array is VALID here — it CLEARS the seed list. Throws
+   * ConditionalCheckFailedException when the broadcast is missing or not a
+   * draft (mirrors markSending's conditional shape).
+   */
+  setSeedContactIds(broadcastId: string, seedContactIds: string[]): Promise<BroadcastItem>;
+  /**
    * Set one recipient's delivery slot on the nested `recipients` map.
    *
    * Without `allowedPriorStatuses` this is a blind SET (the send job seeds the
@@ -511,6 +520,28 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         }),
       );
       log.info({ broadcastId, audience }, 'broadcast marked sending');
+      return Attributes as BroadcastItem;
+    },
+
+    async setSeedContactIds(broadcastId, seedContactIds) {
+      // Only a DRAFT may have its seeds re-picked — a sending/sent broadcast's
+      // recipients are frozen, so the same status='draft' condition markSending
+      // uses guards this write. An EMPTY array is a valid CLEAR (SET seeds to
+      // []). A missing/non-draft broadcast fails the condition and surfaces the
+      // ConditionalCheckFailedException for the route to map to 404/409.
+      const now = new Date().toISOString();
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { broadcastId },
+          UpdateExpression: 'SET seed_contact_ids = :s, updated_at = :now',
+          ConditionExpression: 'attribute_exists(broadcastId) AND #s = :draft',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':s': seedContactIds, ':draft': 'draft', ':now': now },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ broadcastId, seedCount: seedContactIds.length }, 'broadcast seeds replaced');
       return Attributes as BroadcastItem;
     },
 

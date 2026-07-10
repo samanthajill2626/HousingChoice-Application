@@ -1381,4 +1381,122 @@ describe('share-broadcast API (M1.8a)', () => {
     const stored = world.broadcasts.get(draft.body.broadcastId);
     expect(Object.keys(stored?.recipients ?? {})).toEqual(['c-seed']);
   });
+
+  // --- Matching sends: PATCH persists hand-picked seeds (Task 4) --------------
+  it('PATCH replaces seedContactIds on a draft', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedUnit(world);
+    const id = await createDraft(app);
+    const res = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: ['c-1'] });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ broadcastId: id, seedContactIds: ['c-1'] });
+    expect(world.broadcasts.get(id)?.seed_contact_ids).toEqual(['c-1']);
+  });
+
+  it('PATCH de-dupes and trims the seedContactIds it stores', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedTenant(world, { contactId: 'c-2', phone: '+15550001002' });
+    seedUnit(world);
+    const id = await createDraft(app);
+    const res = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: [' c-1 ', 'c-1', 'c-2'] });
+    expect(res.status).toBe(200);
+    expect(res.body.seedContactIds).toEqual(['c-1', 'c-2']);
+    expect(world.broadcasts.get(id)?.seed_contact_ids).toEqual(['c-1', 'c-2']);
+  });
+
+  it('PATCH with an EMPTY array clears the seed list (valid — unlike create)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedUnit(world);
+    // Start with a seeded draft, then clear it via PATCH.
+    const draft = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', seedContactIds: ['c-1'] });
+    const id = draft.body.broadcastId as string;
+    expect(world.broadcasts.get(id)?.seed_contact_ids).toEqual(['c-1']);
+    const res = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: [] });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ broadcastId: id, seedContactIds: [] });
+    expect(world.broadcasts.get(id)?.seed_contact_ids).toEqual([]);
+  });
+
+  it('PATCH with an absent/malformed seedContactIds → 400 bad_request', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedUnit(world);
+    const id = await createDraft(app);
+    // Absent.
+    const absent = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(absent.status).toBe(400);
+    expect(absent.body.error).toBe('bad_request');
+    // Malformed (non-string element).
+    const malformed = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: [123] });
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.error).toBe('bad_request');
+  });
+
+  it('PATCH on a missing broadcast → 404 broadcast_not_found', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    const res = await request(app)
+      .patch('/api/broadcasts/bcast-does-not-exist')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: ['c-1'] });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('broadcast_not_found');
+  });
+
+  it('PATCH on a non-draft returns 409 broadcast_not_draft', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedUnit(world);
+    const id = await createDraft(app);
+    await request(app)
+      .post(`/api/broadcasts/${id}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ recipientContactIds: ['c-1'] });
+    await queueAdapter.settle();
+    const res = await request(app)
+      .patch(`/api/broadcasts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ seedContactIds: ['c-1'] });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('broadcast_not_draft');
+  });
+
+  it('PATCH requires auth (no cookie → 401/403)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    const res = await request(app)
+      .patch('/api/broadcasts/bcast-anything')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .send({ seedContactIds: ['c-1'] });
+    expect(res.status).toBeGreaterThanOrEqual(401);
+    expect(res.status).toBeLessThan(404);
+  });
 });

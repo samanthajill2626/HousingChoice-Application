@@ -1460,6 +1460,19 @@ export function createFakeWorld(): FakeWorld {
       b.updated_at = new Date().toISOString();
       return { ...b };
     },
+    async setSeedContactIds(broadcastId, seedContactIds) {
+      // Mirror the real repo: conditional on status='draft' (missing/non-draft
+      // throws the SDK's ConditionalCheckFailedException). An EMPTY array is a
+      // valid CLEAR.
+      const b = broadcasts.get(broadcastId);
+      if (!b) throw conditionalCheckFailed(`setSeedContactIds: no broadcast ${broadcastId}`);
+      if (b.status !== 'draft') {
+        throw conditionalCheckFailed(`setSeedContactIds: broadcast ${broadcastId} is not a draft`);
+      }
+      b.seed_contact_ids = seedContactIds;
+      b.updated_at = new Date().toISOString();
+      return { ...b };
+    },
     async setRecipient(broadcastId, contactKey, recipient, allowedPriorStatuses) {
       const b = broadcasts.get(broadcastId);
       if (!b) throw conditionalCheckFailed(`setRecipient: no broadcast ${broadcastId}`);

@@ -816,6 +816,43 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     });
   });
 
+  // PATCH /api/broadcasts/:id — replace the draft's hand-picked seed_contact_ids
+  // (the review step's curated additions / the seeded 1:1 entry). Draft-only:
+  // the repo's conditional write refuses a sending/sent/failed broadcast (409).
+  // An EMPTY array is VALID here (it CLEARS the seed list) — unlike create, where
+  // an empty list is treated as absent. Absent/malformed body → 400 bad_request.
+  // VA-accessible (same posture as the rest of the router).
+  router.patch('/broadcasts/:broadcastId', async (req, res) => {
+    const broadcastId = String(req.params['broadcastId'] ?? '');
+    const parsed = parseRecipientContactIds(
+      (req.body as Record<string, unknown> | undefined)?.['seedContactIds'],
+    );
+    // Absent (undefined) OR malformed ({ error }) → a clean 400. An empty array
+    // is a valid clear and parses to { ids: [] } (never undefined/error).
+    if (parsed === undefined || 'error' in parsed) {
+      res.status(400).json({ error: 'bad_request' });
+      return;
+    }
+    const existing = await broadcasts.getById(broadcastId);
+    if (!existing) {
+      res.status(404).json({ error: 'broadcast_not_found' });
+      return;
+    }
+    try {
+      await broadcasts.setSeedContactIds(broadcastId, parsed.ids);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        // The broadcast is no longer a draft (a concurrent send flipped it, or it
+        // was already sending/sent/failed) — its recipients are frozen.
+        res.status(409).json({ error: 'broadcast_not_draft' });
+        return;
+      }
+      throw err;
+    }
+    log.info({ broadcastId, seedCount: parsed.ids.length }, 'broadcast seeds updated via api');
+    res.status(200).json({ broadcastId, seedContactIds: parsed.ids });
+  });
+
   // DELETE /api/broadcasts/:id — delete an UNSENT draft only. A sending/sent/
   // failed broadcast is permanent (409). The repo's conditional delete is the
   // race guard — a concurrent send that flips draft→sending mid-call yields 409,

@@ -1,11 +1,11 @@
 // /api router — dashboard-facing REST (M1.1 outbound send; M1.2 conversation
-// hub: inbox, thread, unread, assignment, SSE live updates).
+// hub: inbox, thread, unread, SSE live updates).
 //
 // AUTH (M1.3): every route in this router — the SSE stream included — sits
 // behind sessionMiddleware + requireAuth, mounted ahead of it in app.ts.
-// Role gates are deliberately MINIMAL: VAs run the day-to-day (assignment
-// included), so nothing here uses requireRole('admin') until a genuinely
-// admin-only surface exists (see middleware/auth.ts).
+// Role gates are deliberately MINIMAL: VAs run the day-to-day, so nothing here
+// uses requireRole('admin') until a genuinely admin-only surface exists (see
+// middleware/auth.ts).
 //
 // PII (doc §9): responses carry bodies/previews to the authenticated client;
 // LOG LINES never do — logs are IDs/counts only, correlated via the pino mixin.
@@ -256,7 +256,6 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
     participant_display_name: item.participant_display_name ?? null,
     last_activity_at: item.last_activity_at,
     unread_count: item.unread_count ?? 0,
-    assignment: item.assignment ?? null,
     sms_opt_out: item.sms_opt_out === true,
   };
 }
@@ -1245,45 +1244,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       const conversation = await conversations.resetUnread(conversationId);
       // SSE (M1.2): other connected dashboards drop their unread badge for
       // this thread live (same event shape as every inbox-row change).
-      events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
-      res.json({ conversation });
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'conversation_not_found' });
-        return;
-      }
-      throw err;
-    }
-  });
-
-  // PATCH /api/conversations/:conversationId/assignment { assigneeUserId }
-  // string = assign, null = unassign. Audited as assignment_changed old → new.
-  router.patch('/conversations/:conversationId/assignment', async (req, res) => {
-    const { conversationId } = req.params;
-    mergeContext({ conversationId });
-    const payload = (req.body ?? {}) as { assigneeUserId?: unknown };
-    const assigneeUserId = payload.assigneeUserId;
-    // TODO(validate-assignee-userid): not validated against the users table yet —
-    // any non-empty string is accepted (users exist since M1.3).
-    if (
-      !(assigneeUserId === null || (typeof assigneeUserId === 'string' && assigneeUserId.length > 0))
-    ) {
-      res.status(400).json({ error: 'assigneeUserId must be a non-empty string or null' });
-      return;
-    }
-
-    try {
-      const { conversation, previousAssigneeUserId } = await conversations.setAssignment(
-        conversationId,
-        assigneeUserId,
-      );
-      // §5 mandate: assignment flips are audit-trail events (old → new).
-      await audit.append(`conversations#${conversationId}`, 'assignment_changed', {
-        from: previousAssigneeUserId,
-        to: assigneeUserId,
-      });
-      // SSE (M1.2): assignment changes refresh the inbox row live (clients
-      // re-read the summary; the event shape stays the shared one).
       events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
       res.json({ conversation });
     } catch (err) {

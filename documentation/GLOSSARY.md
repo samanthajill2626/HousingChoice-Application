@@ -114,11 +114,14 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 
 ## Feature & label notes
 
-- **"Share Properties"** — the staff dashboard feature that fans a filtered broadcast
-  out to matched tenants. The human label is "Share Properties" (a prior rename had
-  briefly flipped it to "Share Listings"; the property relabel returns it to "Share
-  Properties"). Internal identifiers (the `broadcast` entity, routes, jobs) are
-  unchanged — only the displayed name follows the audience rule.
+- **"Matching"** - the staff dashboard section for sending properties to tenants,
+  one-to-one or one-to-many (nav item, list page). One item is a "send" or
+  "property send"; the primary action is "Send a property"; a property page
+  offers "Send to tenants". Replaces the earlier on-screen label "Broadcasts"
+  (and the still-earlier "Share Properties" note that had drifted from the UI).
+  Internal identifiers are unchanged: the `broadcast` entity, `/broadcasts`
+  routes, jobs, tables, and log fields all keep their names - only displayed
+  copy follows the audience rule.
 
 - **`utilities` = TENANT-PAID utilities** (2026-07-08). The unit's `utilities`
   field records **which utilities the tenant must pay** (free-form, e.g.

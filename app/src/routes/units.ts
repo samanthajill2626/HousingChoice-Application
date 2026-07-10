@@ -39,15 +39,9 @@ import {
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createListingSendsRepo,
-  ListingSendNotFoundError,
   toListingSendRow,
-  type ListingResponse,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
-import {
-  createActivityEventsRepo,
-  type ActivityEventsRepo,
-} from '../repos/activityEventsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
 
 export interface UnitsRouterDeps {
@@ -56,19 +50,10 @@ export interface UnitsRouterDeps {
   auditRepo?: AuditRepo;
   /** BE3/C3: resolve a roster contact's display name/company for denormalization. */
   contactsRepo?: ContactsRepo;
-  /** BE4/C4: the listing-send record (recipients + response). */
+  /** BE4/C4: the listing-send record (the "Sent to tenants" recipients read). */
   listingSendsRepo?: ListingSendsRepo;
-  /** BE4/C4: emit a `listing_reviewed` milestone on a real interested/not_a_fit change. */
-  activityEventsRepo?: ActivityEventsRepo;
   /** FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched). */
   placementsRepo?: PlacementsRepo;
-}
-
-/** The valid tenant responses (C4 `ListingResponse`). */
-const LISTING_RESPONSES: readonly ListingResponse[] = ['interested', 'not_a_fit', 'no_reply'] as const;
-
-function isListingResponse(value: unknown): value is ListingResponse {
-  return typeof value === 'string' && (LISTING_RESPONSES as readonly string[]).includes(value);
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -111,7 +96,7 @@ function toRelatedUnit(
  * One property Activity row (the dashboard's Activity card) — a unit audit
  * event projected onto the wire. `type` is the audit event_type (an open set;
  * today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- * listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ * listing_status_changed, unit_deleted, unit_restored,
  * broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  * tour_no_show, tour_canceled, tour_outcome).
  * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
@@ -129,7 +114,6 @@ interface UnitActivityEvent {
   /** Read-time enrichment (best-effort) — omitted when the contact is gone. */
   contactName?: string;
   role?: string;
-  response?: string;
   fields?: string[];
   from?: string;
   to?: string;
@@ -162,7 +146,6 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
     ...(typeof e.actorId === 'string' && { actorId: e.actorId }),
     ...(str('contactId') !== undefined && { contactId: str('contactId') }),
     ...(str('role') !== undefined && { role: str('role') }),
-    ...(str('response') !== undefined && { response: str('response') }),
     ...(fields !== undefined && { fields }),
     ...(str('from') !== undefined && { from: str('from') }),
     ...(str('to') !== undefined && { to: str('to') }),
@@ -234,8 +217,6 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
-  const activityEvents =
-    deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
 
   const router = Router();
@@ -628,7 +609,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // GET /api/units/:unitId/activity?limit= — the property Activity card read.
   // Serves the unit's AUDIT trail (entityKey `units#<unitId>` — unit_created /
-  // unit_updated / roster changes / listing_response_set / listing_status_changed
+  // unit_updated / roster changes / listing_status_changed
   // / delete+restore) NEWEST-FIRST via auditRepo.listByEntity, projected onto
   // UnitActivityEvent (fixed-key whitelist, never the raw payload). contactName
   // is resolved at read time (best-effort, mirrors /placements' tenantName).
@@ -678,70 +659,6 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // PII (doc §9): IDs/counts only — never labels/names/payloads in logs.
     log.info({ unitId, returned: events.length }, 'unit activity served');
     res.json({ events });
-  });
-
-  // PATCH /api/units/:unitId/recipients/:contactId { response } (BE4/C4).
-  // Set the tenant's response on an existing send row → { recipient }. 400 on an
-  // invalid response; 404 when the send row doesn't exist. On a CHANGE to
-  // 'interested' / 'not_a_fit', emit a `listing_reviewed` milestone (best-effort)
-  // + audit the change (listing_response_set).
-  router.patch('/:unitId/recipients/:contactId', async (req: AuthedRequest, res) => {
-    const unitId = String(req.params['unitId'] ?? '');
-    const contactId = String(req.params['contactId'] ?? '');
-    const body = req.body;
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-      res.status(400).json({ error: 'body must be a JSON object' });
-      return;
-    }
-    const response = (body as Record<string, unknown>)['response'];
-    if (!isListingResponse(response)) {
-      res.status(400).json({ error: `response must be one of: ${LISTING_RESPONSES.join(', ')}` });
-      return;
-    }
-
-    // Atomically set the response. `changed` reports a REAL value transition
-    // (the conditional only writes when the value actually changes), so two
-    // concurrent identical PATCHes collapse to one change — never a duplicate
-    // milestone. A missing row throws ListingSendNotFoundError → 404.
-    let result;
-    try {
-      result = await listingSends.setResponse(unitId, contactId, response);
-    } catch (err) {
-      if (err instanceof ListingSendNotFoundError) {
-        res.status(404).json({ error: 'listing_send_not_found' });
-        return;
-      }
-      throw err;
-    }
-    const { row: updated, changed } = result;
-
-    // Emit listing_reviewed ONLY on a real change to a reviewed response.
-    if (changed && (response === 'interested' || response === 'not_a_fit')) {
-      const label = response === 'interested' ? 'Property reviewed - Interested' : 'Property reviewed - Not a fit';
-      try {
-        await activityEvents.record({
-          contactId,
-          type: 'listing_reviewed',
-          label,
-          refType: 'unit',
-          refId: unitId,
-        });
-      } catch (err) {
-        log.error({ err, unitId, contactId }, 'unit recipients: recording listing_reviewed milestone failed (best-effort)');
-      }
-    }
-
-    // Audit only a REAL change (a no-op set writes nothing, so it warrants no
-    // audit row either — matches the milestone gate above).
-    if (changed) {
-      await audit.append(`units#${unitId}`, 'listing_response_set', {
-        actor: req.user?.userId,
-        contactId,
-        response,
-      });
-    }
-    log.info({ unitId, contactId, response, changed, actor: req.user?.userId }, 'listing response set via api');
-    res.json({ recipient: toListingSendRow(updated) });
   });
 
   // PATCH /api/units/:unitId — partial update (SET-merge, no-overwrite).

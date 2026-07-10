@@ -121,34 +121,6 @@ describe('GET /api/units/:id/activity (property Activity card)', () => {
     }
   });
 
-  it('maps a listing_response_set audit row with response + contactName', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'u-resp');
-    seedContact(world, 'c-tenant-r', { firstName: 'Tina', lastName: 'Renter' });
-    await world.listingSendsRepo.recordSend({
-      unitId: 'u-resp',
-      contactId: 'c-tenant-r',
-      via: 'broadcast',
-    });
-
-    const patch = await request(app)
-      .patch('/api/units/u-resp/recipients/c-tenant-r')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(patch.status).toBe(200);
-
-    const res = await authedGet(app, '/api/units/u-resp/activity');
-    expect(res.status).toBe(200);
-    expect(res.body.events).toHaveLength(1);
-    expect(res.body.events[0]).toMatchObject({
-      type: 'listing_response_set',
-      contactId: 'c-tenant-r',
-      contactName: 'Tina Renter',
-      response: 'interested',
-    });
-  });
-
   it('maps a listing_status_changed audit row with from/to/source', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-status', { status: 'setup' });

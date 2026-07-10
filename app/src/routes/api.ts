@@ -471,10 +471,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE3: POST/DELETE /:id/contacts resolve a roster contact's name/company.
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
-      // BE4: GET /:id/recipients + PATCH /:id/recipients/:contactId (response).
+      // BE4: GET /:id/recipients (the "Sent to tenants" recipients read).
       listingSendsRepo: listingSends,
-      // BE4: emit `listing_reviewed` on a real interested/not_a_fit change.
-      activityEventsRepo: activityEvents,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
     }),

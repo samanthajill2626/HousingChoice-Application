@@ -1,11 +1,8 @@
-// BE4/C4 route tests — the sent-to-tenants / listings-sent endpoints + the
-// response PATCH:
-//   GET   /api/units/:unitId/recipients            → { recipients: ListingSendRow[] }
-//   GET   /api/contacts/:contactId/listings-sent   → { sent: ListingSendRow[] }
-//   PATCH /api/units/:unitId/recipients/:contactId → { recipient }
-// Both query directions return the SAME row; the PATCH validates + 404s + emits
-// listing_reviewed only on a real interested/not_a_fit change; re-send (via the
-// repo) preserves an already-set response.
+// BE4/C4 route tests -- the sent-to-tenants / listings-sent endpoints:
+//   GET /api/units/:unitId/recipients            -> { recipients: ListingSendRow[] }
+//   GET /api/contacts/:contactId/listings-sent   -> { sent: ListingSendRow[] }
+// Both query directions return the SAME row. The former response PATCH route is
+// GONE (the `response` label was removed end to end) -- a 404 pin guards its removal.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -53,7 +50,9 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () 
     expect(res.status).toBe(200);
     expect(res.body.recipients).toHaveLength(2);
     const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
-    expect(c1).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'no_reply', via: 'broadcast', broadcastId: 'b-1' });
+    expect(c1).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
+    // The removed `response` label is gone from the wire.
+    expect(c1).not.toHaveProperty('response');
     // The wire shape drops audit furniture.
     expect(c1).not.toHaveProperty('created_at');
     expect(c1).not.toHaveProperty('updated_at');
@@ -94,7 +93,8 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
 
     expect(res.status).toBe(200);
     expect(res.body.sent).toHaveLength(1);
-    expect(res.body.sent[0]).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'no_reply', via: 'broadcast' });
+    expect(res.body.sent[0]).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    expect(res.body.sent[0]).not.toHaveProperty('response');
   });
 
   it('returns [] for a contact with no listings sent', async () => {
@@ -138,8 +138,11 @@ describe('the two directions return the SAME row', () => {
   });
 });
 
-describe('PATCH /api/units/:unitId/recipients/:contactId (BE4/C4 — response)', () => {
-  it('sets the response, returns { recipient }, audits, and emits listing_reviewed', async () => {
+describe('PATCH /api/units/:unitId/recipients/:contactId is GONE (response label removed)', () => {
+  it('404s -- the response PATCH route no longer exists', async () => {
+    // Regression pin: the `response` label was removed end to end, so the manual
+    // set-response route must be absent. An existing send row + a valid old-shape
+    // body must still 404 (route gone), not 200/400.
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
@@ -150,111 +153,31 @@ describe('PATCH /api/units/:unitId/recipients/:contactId (BE4/C4 — response)',
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ response: 'interested' });
 
-    expect(res.status).toBe(200);
-    expect(res.body.recipient).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'interested' });
-    // The row is updated.
-    expect(world.listingSends.find((r) => r.contactId === 'c-1')?.response).toBe('interested');
-    // listing_reviewed emitted, deep-linking to the unit.
-    const reviewed = world.activityEvents.filter((e) => e.type === 'listing_reviewed');
-    expect(reviewed).toHaveLength(1);
-    expect(reviewed[0]).toMatchObject({ contactId: 'c-1', refType: 'unit', refId: 'unit-1' });
-    // Audited.
-    expect(world.auditEvents).toContainEqual(
-      expect.objectContaining({ entityKey: 'units#unit-1', event_type: 'listing_response_set' }),
-    );
-  });
-
-  it('rejects an invalid response with 400', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-    const res = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'maybe' });
-    expect(res.status).toBe(400);
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(0);
-  });
-
-  it('404s when the send row does not exist', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    const res = await request(app)
-      .patch('/api/units/unit-1/recipients/c-missing')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
     expect(res.status).toBe(404);
+    // No listing_reviewed milestone can be emitted anymore (the type is gone too).
+    expect(world.activityEvents.filter((e) => String(e.type) === 'listing_reviewed')).toHaveLength(0);
   });
+});
 
-  it('does NOT emit listing_reviewed on a set to no_reply or an unchanged value', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-
-    // Set to no_reply (the default) — no reviewed milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'no_reply' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(0);
-
-    // Set to interested (a real change) — one milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-
-    // Set to interested AGAIN (no change) — still just one milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-  });
-
-  it('no double-emit: two identical interested sets collapse to ONE listing_reviewed (atomic conditional)', async () => {
-    // The atomic-conditional setResponse only "changes" on a real value
-    // transition. Two PATCHes of no_reply→interested (the second hitting the
-    // changed:false / ConditionalCheckFailed path) is exactly what a concurrent
-    // double-PATCH collapses to — exactly ONE milestone must result.
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-
-    const first = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(first.status).toBe(200);
-
-    // Second identical set: the row already === 'interested', so the conditional
-    // does NOT write and changed === false → NO second milestone.
-    const second = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(second.status).toBe(200);
-    expect(second.body.recipient).toMatchObject({ contactId: 'c-1', response: 'interested' });
-
-    // Exactly ONE listing_reviewed despite two interested PATCHes.
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-  });
-
-  it('a re-send does not reset an already-set response (no_reset invariant)', async () => {
+describe('recordSend upsert semantics (no `response` field)', () => {
+  it('a re-send refreshes broadcastId attribution and preserves created_at (idempotent upsert)', async () => {
     const { world } = makeWebhookHarness();
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
-    await world.listingSendsRepo.setResponse('unit-1', 'c-1', 'interested');
+    const first = await world.listingSendsRepo.recordSend({
+      contactId: 'c-1',
+      unitId: 'unit-1',
+      via: 'broadcast',
+      broadcastId: 'b-1',
+    });
     // Re-send (e.g. a second broadcast of the same unit to the same tenant).
-    const resent = await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-2' });
-    expect(resent.response).toBe('interested'); // preserved
+    const resent = await world.listingSendsRepo.recordSend({
+      contactId: 'c-1',
+      unitId: 'unit-1',
+      via: 'broadcast',
+      broadcastId: 'b-2',
+    });
     expect(resent.broadcastId).toBe('b-2'); // attribution refreshed
+    expect(resent.created_at).toBe(first.created_at); // first-write furniture preserved
+    // No `response` label is ever written.
+    expect(resent).not.toHaveProperty('response');
   });
 });

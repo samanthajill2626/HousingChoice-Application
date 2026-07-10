@@ -193,6 +193,7 @@ describe('share-broadcast API (M1.8a)', () => {
         phone: '+15550100001',
         has_consent: true,
         alreadySentThisProperty: false,
+        seeded: false,
       },
     ]);
     expect(res.body.priorRecipientContactIds).toEqual([]);
@@ -1293,5 +1294,65 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({ body_template: 'Hi!', seedContactIds: ['c-ok', 'c-optout', 'c-ghost'] });
     expect(res.status).toBe(201);
     expect(res.body.estimatedCount).toBe(1);
+  });
+
+  it('createDraft treats an EMPTY seedContactIds like an absent one (stays filter mode)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    const res = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body_template: 'Hi!', seedContactIds: [] });
+    expect(res.status).toBe(201);
+    const stored = world.broadcasts.get(res.body.broadcastId);
+    expect(stored?.audience_mode).toBe('filter');
+    expect(stored?.seed_contact_ids).toBeUndefined();
+  });
+
+  // --- Matching sends: preview unions seeds + reports unresolved (Task 2) -----
+  it('preview unions seeds into candidates, flags them seeded, and reports unresolved seeds', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-aud', phone: '+15550001001', voucherSize: 2 });
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550001002', voucherSize: 3 }); // outside bedroomSize filter
+    const draft = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        body_template: 'Hi!',
+        audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
+        seedContactIds: ['c-seed', 'c-ghost'],
+      });
+    const res = await request(app)
+      .post(`/api/broadcasts/${draft.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    const byId = new Map(res.body.candidates.map((c: { contactId: string }) => [c.contactId, c]));
+    expect(byId.get('c-aud')).toMatchObject({ seeded: false });
+    expect(byId.get('c-seed')).toMatchObject({ seeded: true });
+    expect(res.body.seedContactIds).toEqual(['c-seed', 'c-ghost']);
+    expect(res.body.unresolvedSeedIds).toEqual(['c-ghost']);
+  });
+
+  it('preview on a seeds_only draft returns ONLY the seeds (never the whole tenant base)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550001001' });
+    seedTenant(world, { contactId: 'c-other', phone: '+15550001002' });
+    const draft = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body_template: 'Hi!', seedContactIds: ['c-seed'] });
+    const res = await request(app)
+      .post(`/api/broadcasts/${draft.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.body.candidates.map((c: { contactId: string }) => c.contactId)).toEqual(['c-seed']);
+    expect(res.body.candidates[0]).toMatchObject({ seeded: true });
+    expect(res.body.count).toBe(1);
   });
 });

@@ -391,9 +391,12 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       res.status(400).json({ error: parsedSeeds.error });
       return;
     }
-    const seedContactIds = parsedSeeds !== undefined ? parsedSeeds.ids : undefined;
+    // An EMPTY parsed seed list behaves exactly like an absent one: no seeds
+    // stored, and the draft stays in filter mode (never flipped to seeds_only).
+    const seedContactIds =
+      parsedSeeds !== undefined && parsedSeeds.ids.length > 0 ? parsedSeeds.ids : undefined;
     // A draft carrying seeds but NO explicit audience_filter is a seeds_only
-    // draft (the seeded 1:1 entry) — the default tenant filter would otherwise
+    // draft (the seeded 1:1 entry) - the default tenant filter would otherwise
     // propose every tenant. Any explicit filter keeps it in filter mode.
     const rawFilterProvided =
       (req.body as Record<string, unknown> | undefined)?.['audience_filter'] !== undefined;
@@ -462,7 +465,24 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       res.status(404).json({ error: 'broadcast_not_found' });
       return;
     }
-    const audience = await resolveAudience(broadcast.audience_filter);
+    // Seeded recipients attached to the draft: resolve them (same fences as the
+    // send path), then UNION into the previewed candidate list. A seeds_only
+    // draft (the seeded 1:1 entry) skips the audience filter entirely so preview
+    // returns ONLY the seeds, never the whole tenant base.
+    const seedIds = broadcast.seed_contact_ids ?? [];
+    const seeds =
+      seedIds.length > 0 ? await resolveSeeds(seedIds) : { contacts: [], unresolved: [] };
+    const audience =
+      broadcast.audience_mode === 'seeds_only'
+        ? { contacts: [], contactIds: [], count: 0, truncated: false }
+        : await resolveAudience(broadcast.audience_filter);
+    const seedIdSet = new Set(seeds.contacts.map((c) => c.contactId));
+    // Union: audience rows first (stable order), then seeds not already present.
+    // A contact in BOTH audience and seeds is ONE row, flagged seeded.
+    const combined = [
+      ...audience.contacts.filter((c) => !seedIdSet.has(c.contactId)),
+      ...seeds.contacts,
+    ];
     // Prior-recipients for this unit (already-sent annotation). Only meaningful
     // with a unitId; degrades safely to an empty set otherwise (or when the
     // byUnit GSI is absent on an un-applied env). The set is contactKeys — which
@@ -474,7 +494,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         : new Set<string>();
     // The candidate list carries phones — authed/internal response only; the
     // log line below stays IDs/counts only (NEVER phones/names/bodies).
-    const candidates = audience.contacts.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
+    const candidates = combined.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
       contactId: c.contactId,
       ...(c.firstName !== undefined && { firstName: c.firstName }),
       // Full name for the review rows (same authed/internal PII class as
@@ -497,18 +517,28 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       alreadySentThisProperty:
         broadcast.unitId !== undefined &&
         (priorRecipients.has(c.contactId) || priorRecipients.has(`phone#${c.phone}`)),
+      // Whether this row came from the draft's seed_contact_ids (a hand-picked
+      // recipient, or the seeded 1:1 entry). A contact in BOTH audience and
+      // seeds is ONE row flagged seeded.
+      seeded: seedIdSet.has(c.contactId),
     }));
+    // count/truncated derive from the post-union, pre-slice list (+ the audience
+    // truncation flag) so the operator sees the true unioned reach.
+    const combinedCount = combined.length;
     log.info(
-      { broadcastId, count: audience.count, truncated: audience.truncated },
+      { broadcastId, count: combinedCount, truncated: audience.truncated },
       'broadcast audience previewed',
     );
     // Surface `truncated` (FIX 3+4) so the operator sees an incomplete/over-cap
-    // audience BEFORE sending (and the dashboard can warn).
+    // audience BEFORE sending (and the dashboard can warn). seedContactIds (as
+    // stored) + unresolvedSeedIds let the composer show which seeds dropped.
     res.json({
-      count: audience.count,
+      count: combinedCount,
       truncated: audience.truncated,
       candidates,
       priorRecipientContactIds: [...priorRecipients],
+      seedContactIds: seedIds,
+      unresolvedSeedIds: seeds.unresolved,
     });
   });
 

@@ -138,6 +138,144 @@ describe('the two directions return the SAME row', () => {
   });
 });
 
+describe('tour chip projection (listing-response-tour-chip section 5)', () => {
+  it('recipients: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-2', unitId: 'unit-1', via: 'individual' });
+    // c-1 has a scheduled tour on unit-1; c-2 has none.
+    await world.toursRepo.create({
+      tourId: 'tour-c1',
+      tenantId: 'c-1',
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+      status: 'scheduled',
+    });
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
+    const c2 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-2');
+    // Exact optional-field wire shape: tour is EXACTLY { tourId, state }.
+    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' } });
+    // c-2 (no tour) carries NO tour field (absent, not null).
+    expect(c2).not.toHaveProperty('tour');
+  });
+
+  it('recipients E2: tenant A tour on unit X does not light unit Y or tenant B', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-x');
+    seedUnit(world, 'unit-y');
+    // unit-x sent to A and B; unit-y sent to A.
+    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-x', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-b', unitId: 'unit-x', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-y', via: 'broadcast' });
+    // Tenant A has a tour on unit-x ONLY.
+    await world.toursRepo.create({
+      tourId: 'tour-ax',
+      tenantId: 'c-a',
+      unitId: 'unit-x',
+      tourType: 'self_guided',
+      status: 'toured',
+    });
+
+    const xRes = await request(app)
+      .get('/api/units/unit-x/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const yRes = await request(app)
+      .get('/api/units/unit-y/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    const xA = xRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-a');
+    const xB = xRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-b');
+    const yA = yRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-a');
+    // A's row on unit-x is lit.
+    expect(xA.tour).toEqual({ tourId: 'tour-ax', state: 'toured' });
+    // B's row on unit-x is NOT lit (tour belongs to A, not B).
+    expect(xB).not.toHaveProperty('tour');
+    // A's row on unit-y is NOT lit (tour is on unit-x, not unit-y).
+    expect(yA).not.toHaveProperty('tour');
+  });
+
+  it('listings-sent: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedUnit(world, 'unit-2');
+    seedTenant(world, 'c-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-2', via: 'broadcast' });
+    // c-1 has a requested tour on unit-2 only.
+    await world.toursRepo.create({
+      tourId: 'tour-u2',
+      tenantId: 'c-1',
+      unitId: 'unit-2',
+      tourType: 'self_guided',
+      status: 'requested',
+    });
+
+    const res = await request(app)
+      .get('/api/contacts/c-1/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const r1 = res.body.sent.find((r: { unitId: string }) => r.unitId === 'unit-1');
+    const r2 = res.body.sent.find((r: { unitId: string }) => r.unitId === 'unit-2');
+    expect(r1).not.toHaveProperty('tour');
+    expect(r2.tour).toEqual({ tourId: 'tour-u2', state: 'requested' });
+  });
+
+  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (recipients)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    world.toursRepo.listByUnit = async () => {
+      throw new Error('tours GSI unavailable');
+    };
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.recipients).toHaveLength(1);
+    expect(res.body.recipients[0]).not.toHaveProperty('tour');
+    expect(
+      capture.atLevel(40).some((l) => l['msg'] === 'recipients tour-chip hydration failed (best-effort)'),
+    ).toBe(true);
+  });
+
+  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (listings-sent)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    world.toursRepo.listByTenant = async () => {
+      throw new Error('tours GSI unavailable');
+    };
+
+    const res = await request(app)
+      .get('/api/contacts/c-1/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toHaveLength(1);
+    expect(res.body.sent[0]).not.toHaveProperty('tour');
+    expect(
+      capture.atLevel(40).some((l) => l['msg'] === 'listings-sent tour-chip hydration failed (best-effort)'),
+    ).toBe(true);
+  });
+});
+
 describe('PATCH /api/units/:unitId/recipients/:contactId is GONE (response label removed)', () => {
   it('404s -- the response PATCH route no longer exists', async () => {
     // Regression pin: the `response` label was removed end to end, so the manual

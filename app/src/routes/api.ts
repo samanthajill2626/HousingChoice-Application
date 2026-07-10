@@ -405,6 +405,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       activityEventsRepo: activityEvents,
       // BE4: serve GET /:id/listings-sent.
       listingSendsRepo: listingSends,
+      // listing-response-tour-chip: derive the per-row tour chip (byTenant GSI).
+      toursRepo: tours,
       // Task 4: vocabulary auto-suggest.
       ...(deps.contactVocabularyRepo !== undefined && { vocabularyRepo: deps.contactVocabularyRepo }),
       // Voucher sync (placement-deadline-model §6): a voucher_expiration_date edit
@@ -473,6 +475,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       // BE4: GET /:id/recipients (the "Sent to tenants" recipients read).
       listingSendsRepo: listingSends,
+      // listing-response-tour-chip: derive the per-row tour chip (byUnit GSI).
+      toursRepo: tours,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
     }),

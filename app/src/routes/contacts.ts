@@ -73,6 +73,8 @@ import {
   toListingSendRow,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
+import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { deriveTourSignal } from '../lib/listingSendTour.js';
 import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
@@ -89,6 +91,12 @@ export interface ContactsRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4: serve a contact's "Properties sent" (GET /:id/listings-sent). */
   listingSendsRepo?: ListingSendsRepo;
+  /**
+   * listing-response-tour-chip: GET /:id/listings-sent derives a per-row tour
+   * chip from the tenant's tours (byTenant GSI). Best-effort join - a query
+   * failure degrades to chipless rows, never a 500.
+   */
+  toursRepo?: ToursRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   vocabularyRepo?: ContactVocabularyRepo;
   /**
@@ -736,6 +744,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const vocabulary = deps.vocabularyRepo ?? createContactVocabularyRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const placementDeadlines =
@@ -923,7 +932,28 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByContact(contactId);
-    res.json({ sent: rows.map(toListingSendRow) });
+    // Derive the per-row tour chip from the tenant's tours (ONE byTenant GSI
+    // query, grouped by unitId). Best-effort (E3): a tours-query failure serves
+    // the rows WITHOUT any tour field and logs - never a 500 on the join.
+    let toursByUnit: Map<string, TourItem[]> | undefined;
+    try {
+      const tenantTours = await tours.listByTenant(contactId);
+      toursByUnit = new Map<string, TourItem[]>();
+      for (const t of tenantTours) {
+        const arr = toursByUnit.get(t.unitId);
+        if (arr === undefined) toursByUnit.set(t.unitId, [t]);
+        else arr.push(t);
+      }
+    } catch (err) {
+      log.warn({ err, contactId }, 'listings-sent tour-chip hydration failed (best-effort)');
+    }
+    res.json({
+      sent: rows.map((row) => {
+        const pairing = toursByUnit?.get(row.unitId);
+        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
+        return toListingSendRow(row, signal);
+      }),
+    });
   });
 
   // GET /api/contacts/:contactId/relay-groups → { groups: RelayGroupRow[] }.

@@ -25,6 +25,7 @@ import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import type { TourSignal } from '../lib/listingSendTour.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /** How the property reached the tenant (C4 `ListingSendRow.via`). */
@@ -51,6 +52,9 @@ export interface ListingSendItem {
 /**
  * The C4 wire shape (`ListingSendRow`, VERBATIM — the frontend imports it).
  * created_at/updated_at are dropped; broadcastId is included only when present.
+ * `tour` is the DERIVED chip signal for this (unit, tenant) pairing, attached by
+ * the GET projections (units recipients / contact listings-sent); ABSENT when no
+ * qualifying tour exists (never null). The dashboard mirrors this shape.
  */
 export interface ListingSendRow {
   contactId: string;
@@ -58,6 +62,7 @@ export interface ListingSendRow {
   sentAt: string;
   via: ListingSendVia;
   broadcastId?: string;
+  tour?: TourSignal;
 }
 
 /** recordSend() input — sentAt defaults to now. */
@@ -87,15 +92,18 @@ export interface ListingSendsRepo {
 
 /**
  * Pure serializer to the C4 wire shape. Drops the audit furniture
- * (created_at/updated_at); includes broadcastId only when present.
+ * (created_at/updated_at); includes broadcastId only when present. The optional
+ * `tour` chip signal (derived from the tours table by the caller) is attached
+ * only when supplied - a row with no qualifying tour carries no `tour` field.
  */
-export function toListingSendRow(item: ListingSendItem): ListingSendRow {
+export function toListingSendRow(item: ListingSendItem, tour?: TourSignal): ListingSendRow {
   return {
     contactId: item.contactId,
     unitId: item.unitId,
     sentAt: item.sentAt,
     via: item.via,
     ...(item.broadcastId !== undefined && { broadcastId: item.broadcastId }),
+    ...(tour !== undefined && { tour }),
   };
 }
 

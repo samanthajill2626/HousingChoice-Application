@@ -43,6 +43,8 @@ import {
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
+import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { deriveTourSignal } from '../lib/listingSendTour.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -54,6 +56,12 @@ export interface UnitsRouterDeps {
   listingSendsRepo?: ListingSendsRepo;
   /** FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched). */
   placementsRepo?: PlacementsRepo;
+  /**
+   * listing-response-tour-chip: GET /:id/recipients derives a per-row tour chip
+   * from the unit's tours (byUnit GSI). Best-effort join - a query failure
+   * degrades to chipless rows, never a 500.
+   */
+  toursRepo?: ToursRepo;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -218,6 +226,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -384,7 +393,28 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByUnit(unitId);
-    res.json({ recipients: rows.map(toListingSendRow) });
+    // Derive the per-row tour chip from the unit's tours (ONE byUnit GSI query,
+    // grouped by tenantId). Best-effort (E3): a tours-query failure serves the
+    // rows WITHOUT any tour field and logs - the roster never 500s on the join.
+    let toursByTenant: Map<string, TourItem[]> | undefined;
+    try {
+      const unitTours = await tours.listByUnit(unitId);
+      toursByTenant = new Map<string, TourItem[]>();
+      for (const t of unitTours) {
+        const arr = toursByTenant.get(t.tenantId);
+        if (arr === undefined) toursByTenant.set(t.tenantId, [t]);
+        else arr.push(t);
+      }
+    } catch (err) {
+      log.warn({ err, unitId }, 'recipients tour-chip hydration failed (best-effort)');
+    }
+    res.json({
+      recipients: rows.map((row) => {
+        const pairing = toursByTenant?.get(row.contactId);
+        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
+        return toListingSendRow(row, signal);
+      }),
+    });
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryVoice? } (BE3/C3).

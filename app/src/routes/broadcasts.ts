@@ -257,6 +257,25 @@ async function enrichRecipients(
   return out;
 }
 
+/**
+ * Build the recipients map from a list of already-sendable contacts: one
+ * `{ status: 'queued' }` slot per contact, keyed by the shared contactKey
+ * convention (contactId when present, else `phone#<E164>`). The map naturally
+ * de-dupes by key. Shared by the explicit-selection send path (post-fence
+ * survivors) and the seeds_only no-body path (resolved seeds) so both produce
+ * the identical stored shape.
+ */
+function buildRecipientsFrom(
+  list: Array<{ contactId?: string; phone: string }>,
+): Record<string, BroadcastRecipient> {
+  const recipients: Record<string, BroadcastRecipient> = {};
+  for (const c of list) {
+    const contactKey = c.contactId && c.contactId.length > 0 ? c.contactId : `phone#${c.phone}`;
+    recipients[contactKey] = { status: 'queued' };
+  }
+  return recipients;
+}
+
 /** The results-view projection of a broadcast (stats + recipients + lifecycle). */
 function toBroadcastResults(
   b: BroadcastItem,
@@ -267,6 +286,9 @@ function toBroadcastResults(
     status: b.status,
     unitId: b.unitId ?? null,
     audience_filter: b.audience_filter,
+    // Matching sends: surface the draft's audience mode when set so the composer
+    // can render the seeds_only (1:1) vs filter (1:N) affordances.
+    ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
     // S4: disjoint buckets derived from the recipients map (historical rows too).
     stats: deriveBroadcastStats(b),
     recipients,
@@ -282,6 +304,9 @@ function toBroadcastSummary(b: BroadcastItem): Record<string, unknown> {
     status: b.status,
     unitId: b.unitId ?? null,
     audience_filter: b.audience_filter,
+    // Matching sends: pass the audience mode through on list rows too (dashboard
+    // Task 5 reads it on BroadcastSummary).
+    ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
     // S4: derived disjoint stats (the byCreated GSI projects the map).
     stats: deriveBroadcastStats(b),
     created_at: b.created_at,
@@ -579,8 +604,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     //      hard fences the audience resolver applies (drop unknown / non-tenant
     //      / opted-out / unreachable / phone-less). The already-sent flag is a
     //      preview hint only — NEVER excluded here.
-    //  (b) filter-resolve (back-compat — no body): the existing snapshot path.
-    const recipients: Record<string, BroadcastRecipient> = {};
+    //  (b) seeds_only no-body - a seeded 1:1/1:N draft (the seeded entry): the
+    //      draft carries seed_contact_ids and audience_mode 'seeds_only', so
+    //      resolve THOSE seeds (same fences) instead of the default filter.
+    //  (c) filter-resolve (back-compat - no body): the existing snapshot path.
+    let recipients: Record<string, BroadcastRecipient> = {};
     let count: number;
 
     const selection = parseRecipientContactIds(
@@ -607,20 +635,18 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         const resolved = await Promise.all(chunk.map((id) => contacts.getById(id)));
         for (const contact of resolved) fetched.push(contact);
       }
+      const survivors: Array<{ contactId?: string; phone: string }> = [];
       for (const contact of fetched) {
         if (!contact) continue; // unknown id — drop
         if (contact.type !== 'tenant') continue; // never text a non-tenant
         if (contact.sms_opt_out === true) continue; // HARD exclusion (re-enforced)
         if (contact.sms_unreachable === true) continue; // HARD exclusion (re-enforced)
         if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue; // unsendable
-        // Same contactKey convention (contactId else phone#<E164>) — here ids
-        // are real contactIds, so the key is the contactId.
-        const contactKey =
-          contact.contactId && contact.contactId.length > 0
-            ? contact.contactId
-            : `phone#${contact.phone}`;
-        recipients[contactKey] = { status: 'queued' };
+        survivors.push({ contactId: contact.contactId, phone: contact.phone });
       }
+      // Same contactKey convention (contactId else phone#<E164>) + de-dupe - here
+      // ids are real contactIds, so keys are the contactIds.
+      recipients = buildRecipientsFrom(survivors);
       count = Object.keys(recipients).length;
       if (count === 0) {
         // Nothing survived the fences (all dropped) — refuse clearly, leave the
@@ -641,8 +667,21 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         });
         return;
       }
+    } else if (broadcast.audience_mode === 'seeds_only') {
+      // (b) seeds_only no-body - resolve the draft's seed_contact_ids (same
+      // fences as resolveSeeds), NOT the default tenant filter (which would
+      // otherwise send to every tenant). Reuse the explicit-path recipient build.
+      const seeds = await resolveSeeds(broadcast.seed_contact_ids ?? []);
+      if (seeds.contacts.length === 0) {
+        // Every seed dropped (unknown / non-tenant / opted-out / unreachable /
+        // phone-less) - refuse clearly, leave the draft for the operator.
+        res.status(400).json({ error: 'empty_audience' });
+        return;
+      }
+      recipients = buildRecipientsFrom(seeds.contacts);
+      count = Object.keys(recipients).length;
     } else {
-      // (b) Re-resolve the audience snapshot at send time (the source of truth —
+      // (c) Re-resolve the audience snapshot at send time (the source of truth -
       // the draft estimate may be stale). Build the recipients map keyed by
       // contactKey (contactId else phone#<E164>, the shared convention),
       // all 'queued'.

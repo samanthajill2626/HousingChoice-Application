@@ -1123,6 +1123,7 @@ describe('share-broadcast API (M1.8a)', () => {
     const created = await world.broadcastsRepo.create({ created_by: 'u', audience_filter: FILTER, body_template: 'hi' });
     const row = world.broadcasts.get(created.broadcastId)!;
     row.status = 'sent';
+    row.audience_mode = 'seeds_only'; // Matching sends: mode rides the wire
     row.recipients = {
       'c-1': { status: 'delivered' },
       'c-2': { status: 'sent' },
@@ -1137,6 +1138,8 @@ describe('share-broadcast API (M1.8a)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(200);
+    // audience_mode passes through the results payload when set on the row.
+    expect(res.body.audience_mode).toBe('seeds_only');
     expect(res.body.stats).toEqual({
       audience: 4,
       delivered: 1,
@@ -1354,5 +1357,28 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(res.body.candidates.map((c: { contactId: string }) => c.contactId)).toEqual(['c-seed']);
     expect(res.body.candidates[0]).toMatchObject({ seeded: true });
     expect(res.body.count).toBe(1);
+  });
+
+  // --- Matching sends: seeds_only no-body send resolves the seeds (Task 3) -----
+  it('send with NO body on a seeds_only draft sends to the seeds (not the whole base)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550001001' });
+    seedTenant(world, { contactId: 'c-other', phone: '+15550001002' });
+    const unitId = seedUnit(world).unitId;
+    const draft = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId, body_template: 'Hi [TenantName]!', seedContactIds: ['c-seed'] });
+    const res = await request(app)
+      .post(`/api/broadcasts/${draft.body.broadcastId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(1);
+    await queueAdapter.settle();
+    const stored = world.broadcasts.get(draft.body.broadcastId);
+    expect(Object.keys(stored?.recipients ?? {})).toEqual(['c-seed']);
   });
 });

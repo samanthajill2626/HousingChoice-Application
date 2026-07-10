@@ -1243,4 +1243,55 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(dump).not.toContain('Ann');
     expect(dump).not.toContain('Lee');
   });
+
+  // --- Matching sends: seeds + audience_mode on the draft (create path) ------
+  it('createDraft with seedContactIds and NO audience_filter stores a seeds_only draft and estimates from the seeds', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550001001', firstName: 'Brianna' });
+    seedTenant(world, { contactId: 'c-other', phone: '+15550001002' }); // must NOT count
+    const unitId = seedUnit(world).unitId;
+    const res = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId, body_template: 'Hi!', seedContactIds: ['c-seed'] });
+    expect(res.status).toBe(201);
+    expect(res.body.estimatedCount).toBe(1); // seeds only, not the whole tenant base
+    expect(typeof res.body.flyerUrl).toBe('string');
+    expect(res.body.flyerUrl).toContain(`/p/${unitId}`);
+    const stored = world.broadcasts.get(res.body.broadcastId);
+    expect(stored?.seed_contact_ids).toEqual(['c-seed']);
+    expect(stored?.audience_mode).toBe('seeds_only');
+  });
+
+  it('createDraft with seedContactIds AND an audience_filter stays in filter mode and estimates the union', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-1', phone: '+15550001001' });
+    seedTenant(world, { contactId: 'c-2', phone: '+15550001002' });
+    const res = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        body_template: 'Hi!',
+        audience_filter: { contact_type: 'tenant' },
+        seedContactIds: ['c-1'], // already inside the audience: union must not double-count
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.estimatedCount).toBe(2);
+    expect(world.broadcasts.get(res.body.broadcastId)?.audience_mode).toBe('filter');
+  });
+
+  it('createDraft drops unresolvable seeds from the estimate (unknown id, opted-out)', async () => {
+    const app = makeWebhookHarness({ world }).app;
+    seedTenant(world, { contactId: 'c-ok', phone: '+15550001001' });
+    seedTenant(world, { contactId: 'c-optout', phone: '+15550001002', sms_opt_out: true });
+    const res = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ body_template: 'Hi!', seedContactIds: ['c-ok', 'c-optout', 'c-ghost'] });
+    expect(res.status).toBe(201);
+    expect(res.body.estimatedCount).toBe(1);
+  });
 });

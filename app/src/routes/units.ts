@@ -381,14 +381,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     res.json({ unit: { ...unit, contacts: await enrichRoster(unit) } });
   });
 
-  // SEAM (BE4/C4 — individual flyer send): there is currently NO individual-send
-  // route in the codebase (only the share-broadcast fan-out sends a property). The
-  // data model already supports `via:'individual'`; when an individual-send
-  // endpoint lands, it should call
-  //   listingSends.recordSend({ contactId, unitId, via: 'individual' })
-  // (best-effort, alongside the send) so a one-off flyer send shows up in both
-  // the "Sent to tenants" and "Properties sent" lists, exactly like a broadcast.
-  // Individual-send CAPTURE is therefore a seam pending that endpoint.
+  // Individual flyer sends are the SEEDED broadcast-pipeline flow (see
+  // docs/superpowers/specs/2026-07-10-matching-property-sends-design.md):
+  // a draft created with seedContactIds sends through the same fan-out and
+  // records listing_sends per recipient. No separate individual-send route.
 
   // GET /api/units/:unitId/recipients — the "Sent to tenants" list (BE4/C4).
   // Returns { recipients: ListingSendRow[] } from listByUnit. Mirrors the units

@@ -37,6 +37,12 @@ import type { RepoDeps } from './conversationsRepo.js';
 /** Broadcast lifecycle status (the byCreated GSI's FilterExpression key). */
 export type BroadcastStatus = 'draft' | 'sending' | 'sent' | 'failed';
 
+/** How preview/send derive candidates: 'filter' resolves the audience filter
+ *  (and unions any seeds); 'seeds_only' uses ONLY seed_contact_ids (the seeded
+ *  1:1 entry - the default filter would otherwise propose every tenant).
+ *  Absent on legacy rows = 'filter'. */
+export type BroadcastAudienceMode = 'filter' | 'seeds_only';
+
 /**
  * The byCreated GSI's constant partition value (the tours `_schedPartition`
  * convention): every broadcast stamps `_listPartition = LIST_PARTITION` so the
@@ -134,6 +140,10 @@ export interface BroadcastItem {
    * `phone#<E164>` (the relay convention). Bounded (see the item-size note).
    */
   recipients: Record<string, BroadcastRecipient>;
+  /** Explicit recipients attached to the draft (entry-point seed or the
+   *  review step's hand-picked additions). Independent of audience_filter. */
+  seed_contact_ids?: string[];
+  audience_mode?: BroadcastAudienceMode;
   last_error?: string;
   updated_at?: string;
   [key: string]: unknown;
@@ -237,6 +247,8 @@ export interface CreateBroadcastInput {
   flyer_url?: string;
   /** Estimated audience computed at draft time (stats.audience seed). */
   estimatedAudience?: number;
+  seedContactIds?: string[];
+  audienceMode?: BroadcastAudienceMode;
 }
 
 export interface BroadcastsRepo {
@@ -416,6 +428,9 @@ export function createBroadcastsRepo(deps: RepoDeps = {}): BroadcastsRepo {
         updated_at: now,
         ...(input.unitId !== undefined && { unitId: input.unitId }),
         ...(input.flyer_url !== undefined && { flyer_url: input.flyer_url }),
+        ...(input.seedContactIds !== undefined &&
+          input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
+        ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
       };
       await doc.send(
         new PutCommand({

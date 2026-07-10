@@ -34,6 +34,7 @@ import {
   deriveBroadcastStats,
   MAX_BROADCAST_RECIPIENTS,
   type AudienceFilter,
+  type BroadcastAudienceMode,
   type BroadcastItem,
   type BroadcastRecipient,
   type BroadcastsRepo,
@@ -44,7 +45,9 @@ import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repo
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
+  type ResolvedContact,
 } from '../services/audienceResolution.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
 const BROADCAST_STATUSES: ReadonlySet<string> = new Set<BroadcastStatus>([
@@ -299,6 +302,41 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   // (on completion) and the delivery-callback rollup — NOT this router — so the
   // `events` dep is accepted for API symmetry but not used here.
 
+  /** Resolve seed contact ids to sendable tenants using the SAME fences as the
+   *  explicit-selection send path: exists, type 'tenant', has phone, not
+   *  sms_opt_out, not sms_unreachable. Anything else lands in `unresolved`.
+   *  Seeds are few (1..handful), so per-id getById is fine. */
+  async function resolveSeeds(
+    ids: string[],
+  ): Promise<{ contacts: ResolvedContact[]; unresolved: string[] }> {
+    const resolved: ResolvedContact[] = [];
+    const unresolved: string[] = [];
+    for (const id of ids) {
+      const c = await contacts.getById(id);
+      if (
+        !c ||
+        c.type !== 'tenant' ||
+        typeof c.phone !== 'string' ||
+        c.phone.length === 0 ||
+        c.sms_opt_out === true ||
+        c.sms_unreachable === true
+      ) {
+        unresolved.push(id);
+        continue;
+      }
+      resolved.push({
+        contactId: c.contactId,
+        phone: c.phone,
+        ...(typeof c.firstName === 'string' && { firstName: c.firstName }),
+        ...(typeof c.lastName === 'string' && { lastName: c.lastName }),
+        ...(typeof c.voucherSize === 'number' && { voucherSize: c.voucherSize }),
+        ...(typeof c.housingAuthority === 'string' && { housingAuthority: c.housingAuthority }),
+        has_consent: hasSmsConsent(c),
+      });
+    }
+    return { contacts: resolved, unresolved };
+  }
+
   const router = Router();
 
   // POST /api/broadcasts — create a DRAFT + estimate the audience (save-for-later).
@@ -343,33 +381,69 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       flyer_url = flyerUrl(config.publicBaseUrl, unit.unitId);
     }
 
+    // Optional seed recipients attached to the draft (the seeded 1:1 entry, or
+    // hand-picked additions). Parsed with the same shape/cap guard as the send
+    // path's recipientContactIds.
+    const parsedSeeds = parseRecipientContactIds(
+      (req.body as Record<string, unknown> | undefined)?.['seedContactIds'],
+    );
+    if (parsedSeeds !== undefined && 'error' in parsedSeeds) {
+      res.status(400).json({ error: parsedSeeds.error });
+      return;
+    }
+    const seedContactIds = parsedSeeds !== undefined ? parsedSeeds.ids : undefined;
+    // A draft carrying seeds but NO explicit audience_filter is a seeds_only
+    // draft (the seeded 1:1 entry) — the default tenant filter would otherwise
+    // propose every tenant. Any explicit filter keeps it in filter mode.
+    const rawFilterProvided =
+      (req.body as Record<string, unknown> | undefined)?.['audience_filter'] !== undefined;
+    const audienceMode: BroadcastAudienceMode =
+      seedContactIds !== undefined && !rawFilterProvided ? 'seeds_only' : 'filter';
+
     // Estimate the audience now (save-for-later shows the operator the reach).
-    const audience = await resolveAudience(filter);
+    const seeds =
+      seedContactIds !== undefined
+        ? await resolveSeeds(seedContactIds)
+        : { contacts: [], unresolved: [] };
+    let estimatedAudience: number;
+    let truncated = false;
+    if (audienceMode === 'seeds_only') {
+      estimatedAudience = seeds.contacts.length;
+    } else {
+      const audience = await resolveAudience(filter);
+      const union = new Set(audience.contactIds);
+      for (const s of seeds.contacts) union.add(s.contactId);
+      estimatedAudience = union.size;
+      truncated = audience.truncated;
+    }
 
     const created = await broadcasts.create({
       created_by: actor,
       audience_filter: filter,
       body_template: template,
-      estimatedAudience: audience.count,
+      estimatedAudience,
+      audienceMode,
       ...(unitId !== undefined && { unitId }),
       ...(flyer_url !== undefined && { flyer_url }),
+      ...(seedContactIds !== undefined && { seedContactIds }),
     });
     await audit.append(`broadcasts#${created.broadcastId}`, 'broadcast_created', {
       actor,
       ...(unitId !== undefined && { unitId }),
-      estimatedCount: audience.count,
+      estimatedCount: estimatedAudience,
     });
     log.info(
-      { broadcastId: created.broadcastId, estimatedCount: audience.count, actor },
+      { broadcastId: created.broadcastId, estimatedCount: estimatedAudience, actor },
       'broadcast draft created via api',
     );
     res.status(201).json({
       broadcastId: created.broadcastId,
       status: 'draft',
-      estimatedCount: audience.count,
+      estimatedCount: estimatedAudience,
       // FIX 3+4: surface whether the estimate was truncated (page cap hit) so
       // the operator knows the draft's reach is incomplete before sending.
-      truncated: audience.truncated,
+      truncated,
+      ...(flyer_url !== undefined && { flyerUrl: flyer_url }),
     });
   });
 

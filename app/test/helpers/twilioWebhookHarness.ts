@@ -1427,6 +1427,9 @@ export function createFakeWorld(): FakeWorld {
         updated_at: now,
         ...(input.unitId !== undefined && { unitId: input.unitId }),
         ...(input.flyer_url !== undefined && { flyer_url: input.flyer_url }),
+        ...(input.seedContactIds !== undefined &&
+          input.seedContactIds.length > 0 && { seed_contact_ids: input.seedContactIds }),
+        ...(input.audienceMode !== undefined && { audience_mode: input.audienceMode }),
       };
       broadcasts.set(item.broadcastId, item);
       return { ...item };

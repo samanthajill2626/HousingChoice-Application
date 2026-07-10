@@ -25,6 +25,11 @@ export interface UserRowProps {
    *  the component is safe even if the prop is omitted (the Team tab is
    *  admin-only via route guard, but defense-in-depth). */
   viewerIsAdmin?: boolean;
+  /** Open the remove-confirmation for this user. */
+  onRequestRemove: (user: AdminUserView) => void;
+  /** When set, the Remove button is DISABLED and this string is its tooltip
+   *  (self / last-admin / voice-line-holder). Undefined = removable. */
+  removeDisabledReason?: string;
 }
 
 /** Friendly "last login" — a localized date, or "Never" when unset. */
@@ -60,6 +65,8 @@ export function UserRow({
   onClearVoiceLine,
   variant,
   viewerIsAdmin = true,
+  onRequestRemove,
+  removeDisabledReason,
 }: UserRowProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -153,6 +160,19 @@ export function UserRow({
   const lastLogin = formatLastLogin(user.last_login_at);
   const statusText = user.status ?? '—';
 
+  const removeControl = (
+    <button
+      type="button"
+      className={styles.removeBtn}
+      disabled={removeDisabledReason !== undefined}
+      title={removeDisabledReason}
+      onClick={() => onRequestRemove(user)}
+      aria-label={`Remove ${user.email}`}
+    >
+      Remove
+    </button>
+  );
+
   if (variant === 'card') {
     return (
       <li className={styles.card}>
@@ -180,6 +200,7 @@ export function UserRow({
             <dd className={styles.cardMetaValue}>{lastLogin}</dd>
           </div>
         </dl>
+        <div className={styles.cardActions}>{removeControl}</div>
         {error !== null ? (
           <p role="alert" className={styles.error}>
             {error}
@@ -201,10 +222,11 @@ export function UserRow({
         <td className={styles.cell}>{voiceLineCell}</td>
         <td className={styles.cell}>{statusText}</td>
         <td className={styles.cell}>{lastLogin}</td>
+        <td className={styles.cell}>{removeControl}</td>
       </tr>
       {error !== null ? (
         <tr>
-          <td className={styles.cellError} colSpan={6}>
+          <td className={styles.cellError} colSpan={7}>
             <p role="alert" className={styles.error}>
               {error}
             </p>

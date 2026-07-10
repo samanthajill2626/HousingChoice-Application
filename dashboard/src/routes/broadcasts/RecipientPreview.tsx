@@ -100,6 +100,9 @@ export function RecipientPreview({
    *  non-Available status - renders the blocking Make-Available dialog. */
   const [availGate, setAvailGate] = useState<ListingStatus | string | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
+  /** True while the Send pre-flight is fetching the property's fresh status —
+   *  keeps the Send button honest (busy + non-reclickable) during the check. */
+  const [checkingUnit, setCheckingUnit] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
   // A2P/CTIA: how many listed recipients have NO recorded consent (fenced out of
@@ -193,18 +196,21 @@ export function RecipientPreview({
   }
 
   async function onSend(): Promise<void> {
-    if (sending || checkedCount === 0) return;
+    if (sending || checkingUnit || checkedCount === 0) return;
     // Pre-flight (spec 2026-07-10): the flyer link only resolves while the
     // property is Available. Check FRESH status (never the compose-time object;
     // a resumed draft can be days old).
     if (unitId !== undefined) {
       setError(null);
+      setCheckingUnit(true);
       let status: string;
       try {
         status = (await getUnit(unitId)).status;
       } catch {
         setError("Couldn't check the property's status. Try again.");
         return;
+      } finally {
+        setCheckingUnit(false);
       }
       if (status !== 'available') {
         setAvailGate(status);
@@ -437,10 +443,14 @@ export function RecipientPreview({
         <button
           type="button"
           className={styles.sendBtn}
-          disabled={checkedCount === 0 || sending}
+          disabled={checkedCount === 0 || sending || checkingUnit}
           onClick={() => void onSend()}
         >
-          {sending ? 'Sending…' : `Send to ${checkedCount} tenant${checkedCount === 1 ? '' : 's'}`}
+          {checkingUnit
+            ? 'Checking property…'
+            : sending
+              ? 'Sending…'
+              : `Send to ${checkedCount} tenant${checkedCount === 1 ? '' : 's'}`}
         </button>
         <button
           type="button"

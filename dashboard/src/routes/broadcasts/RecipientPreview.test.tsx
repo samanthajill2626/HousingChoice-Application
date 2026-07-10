@@ -481,6 +481,30 @@ describe('RecipientPreview — delete draft', () => {
 describe('availability pre-flight on Send (spec 2026-07-10)', () => {
   const PREVIEW = previewOf({ count: 1, candidates: [candidate()] });
 
+  it('shows a busy Send button while the pre-flight status check is in flight', async () => {
+    const user = userEvent.setup();
+    let resolveUnit!: (u: unknown) => void;
+    getUnit.mockReturnValue(
+      new Promise((resolve) => {
+        resolveUnit = resolve;
+      }),
+    );
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+
+    // Mid-pre-flight: the button says why it's busy and can't be re-clicked.
+    const busy = screen.getByRole('button', { name: /Checking property/ });
+    expect(busy).toBeDisabled();
+    expect(sendBroadcast).not.toHaveBeenCalled();
+
+    resolveUnit({ unitId: 'u1', landlordId: 'll1', status: 'on_hold' });
+    await screen.findByRole('dialog', { name: "Property isn't Available" });
+    // Pre-flight settled: the button is back to its idle label (the dialog now
+    // owns the flow; nothing was sent).
+    expect(screen.getByRole('button', { name: /Send to 1 tenant/ })).toBeEnabled();
+  });
+
   it('non-Available unit: Send opens the dialog and does NOT send', async () => {
     const user = userEvent.setup();
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'on_hold' });

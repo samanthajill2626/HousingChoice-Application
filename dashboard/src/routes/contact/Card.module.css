@@ -152,6 +152,41 @@ a.li:focus-visible {
   flex: 0 0 auto;
 }
 
+/* The identity link in a send-roster row (SendRosterRow). The row itself is a
+ * plain div (the tour chip is a second, separate link), so the identity carries
+ * its own text color + hover — matching the full-row-link idiom's look. */
+.rowLink {
+  color: var(--c-text);
+  text-decoration: none;
+}
+
+.rowLink:hover {
+  text-decoration: underline;
+}
+
+.rowLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The derived tour-state chip (TourChip) — a link to the tour, colored by the
+ * response palette (its `cls` sets the color). Reads as the existing colored
+ * right-slot label, but clickable. */
+.tourChip {
+  text-decoration: none;
+}
+
+.tourChip:hover {
+  text-decoration: underline;
+}
+
+.tourChip:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .yes {
   color: var(--c-resp-yes);
 }

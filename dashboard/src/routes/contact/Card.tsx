@@ -5,6 +5,7 @@
 // media) and the manual-now preferences — we never fabricate data.
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import type { TourSignalState } from '../../api/index.js';
 import styles from './Card.module.css';
 
 export interface CardProps {
@@ -171,6 +172,65 @@ export function Row({ to, label, right }: RowProps): React.JSX.Element {
     </Link>
   ) : (
     <div className={styles.li}>{inner}</div>
+  );
+}
+
+/** Copy + tone for the derived tour-state chip. `state` comes from the server's
+ *  live tour derivation (see the app-side `deriveTourSignal`): requested reads as
+ *  a neutral/wait signal; scheduled + toured are positive/progress. The label
+ *  IS the accessible name of the link (no extra aria needed). Staff copy. */
+const TOUR_CHIP_META: Record<TourSignalState, { label: string; cls: string }> = {
+  requested: { label: 'Tour requested', cls: styles.wait ?? '' },
+  scheduled: { label: 'Tour scheduled', cls: styles.statusAvailable ?? '' },
+  toured: { label: 'Toured', cls: styles.yes ?? '' },
+};
+
+/** The ONE shared tour-state chip both send-roster cards render ("Sent to
+ *  tenants" on the property page + "Properties sent" on the tenant file). It is a
+ *  link to the tour detail page; the chip text is its accessible name. */
+export function TourChip({
+  tourId,
+  state,
+}: {
+  tourId: string;
+  state: TourSignalState;
+}): React.JSX.Element {
+  const meta = TOUR_CHIP_META[state];
+  return (
+    <Link className={`${styles.tourChip ?? ''} ${meta.cls}`.trim()} to={`/tours/${encodeURIComponent(tourId)}`}>
+      {meta.label}
+    </Link>
+  );
+}
+
+/** A send-roster row: the identity links to its detail page (a contact on the
+ *  property card, a property on the tenant card) and, when a qualifying tour
+ *  exists for the pairing, a `TourChip` links to that tour. The row is NOT a
+ *  full-row link because the identity and the chip navigate to DIFFERENT places
+ *  (nesting anchors would be invalid) — each is its own link. Rows without a
+ *  tour render just the identity. */
+export function SendRosterRow({
+  to,
+  identity,
+  tour,
+}: {
+  to: string;
+  identity: React.ReactNode;
+  tour?: { tourId: string; state: TourSignalState };
+}): React.JSX.Element {
+  return (
+    <div className={styles.li}>
+      <span className={styles.liLabel}>
+        <Link className={styles.rowLink ?? ''} to={to}>
+          {identity}
+        </Link>
+      </span>
+      {tour ? (
+        <span className={styles.liRight}>
+          <TourChip tourId={tour.tourId} state={tour.state} />
+        </span>
+      ) : null}
+    </div>
   );
 }
 

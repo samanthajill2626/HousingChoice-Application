@@ -1301,6 +1301,16 @@ export interface ContactTimelinePage {
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------
 // Copied verbatim from the build plan §C4. The tenant file's "Properties sent".
 
+/** The derived tour signal a send row carries when a qualifying tour exists for
+ *  the (unit, tenant) pairing. Hand-mirrored from the app-side declaration in
+ *  app/src/lib/listingSendTour.ts (independent types — the assignment-yank
+ *  lesson); the lockstep pin is each side's own tsc plus the payload-shape route
+ *  test. Keep in sync when the server projection changes. */
+export type TourSignalState = 'requested' | 'scheduled' | 'toured';
+export interface TourSignal {
+  tourId: string;
+  state: TourSignalState;
+}
 export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
 export interface ListingSendRow {
   contactId: string;
@@ -1309,6 +1319,9 @@ export interface ListingSendRow {
   sentAt: string; // ISO
   via: 'broadcast' | 'individual';
   broadcastId?: string;
+  /** The pairing's most-progressed tour, when one qualifies — powers the roster
+   *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
+  tour?: TourSignal;
 }
 
 /** Result of POST /api/conversations/:id/messages (legacy reuse). */

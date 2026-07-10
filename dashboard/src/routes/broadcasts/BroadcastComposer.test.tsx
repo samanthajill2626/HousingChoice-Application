@@ -8,10 +8,12 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { ContactsPage, EventStreamHandlers, UnitItem } from '../../api/index.js';
+import type { Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
 
 const getUnit = vi.fn();
+const getUnits = vi.fn();
 const getContacts = vi.fn();
+const getContact = vi.fn();
 const createBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
 const previewBroadcast = vi.fn();
@@ -21,7 +23,9 @@ vi.mock('../../api/index.js', async () => {
   return {
     ...actual,
     getUnit: (...a: unknown[]) => getUnit(...a),
+    getUnits: (...a: unknown[]) => getUnits(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
+    getContact: (...a: unknown[]) => getContact(...a),
     createBroadcast: (...a: unknown[]) => createBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
     previewBroadcast: (...a: unknown[]) => previewBroadcast(...a),
@@ -44,6 +48,24 @@ function unit(over: Partial<UnitItem> = {}): UnitItem {
 
 const emptyContacts: ContactsPage = { contacts: [], nextCursor: null };
 
+const seedTenant: Contact = {
+  contactId: 'c-seed',
+  type: 'tenant',
+  firstName: 'Tasha',
+  lastName: 'Green',
+  phone: '+14040000001',
+};
+
+const pickableUnits: UnitsPage = {
+  units: [
+    unit({
+      unitId: 'u-1',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+    }),
+  ],
+  nextCursor: null,
+};
+
 function renderComposer(search = ''): void {
   render(
     <MemoryRouter initialEntries={[`/broadcasts/new${search}`]}>
@@ -57,7 +79,9 @@ function renderComposer(search = ''): void {
 
 beforeEach(() => {
   getUnit.mockReset().mockResolvedValue(unit());
+  getUnits.mockReset().mockResolvedValue(pickableUnits);
   getContacts.mockReset().mockResolvedValue(emptyContacts);
+  getContact.mockReset().mockResolvedValue(seedTenant);
   createBroadcast
     .mockReset()
     .mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false });
@@ -147,5 +171,89 @@ describe('BroadcastComposer — preview gate', () => {
     // Advances to the curated list step.
     expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
     expect(previewBroadcast).toHaveBeenCalledWith('draft_1');
+  });
+});
+
+describe('BroadcastComposer - ?contactId= seeding', () => {
+  it('?contactId= seeds the draft: createBroadcast gets seedContactIds and NO audience_filter', async () => {
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-seed');
+    await u.type(screen.getByLabelText('Message'), 'Hi!');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({
+      seedContactIds: ['c-seed'],
+    });
+    expect(createBroadcast.mock.calls.at(-1)?.[0]).not.toHaveProperty('audience_filter');
+  });
+
+  it('seeded entry shows the seeds-only banner; "Add more tenants by filters" enables the filter', async () => {
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-seed');
+    expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
+    // The banner resolves the tenant name via getContact.
+    expect(await screen.findByText('Tasha Green')).toBeInTheDocument();
+    // AudienceFilters is hidden until the operator opts into filters.
+    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
+    expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
+  });
+
+  it('falls back to the raw contactId in the banner when the contact cannot be resolved', async () => {
+    getContact.mockRejectedValue(new Error('not found'));
+    renderComposer('?contactId=c-seed');
+    expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
+    expect(await screen.findByText('c-seed')).toBeInTheDocument();
+  });
+
+  it('once filters are enabled, the draft recreates WITH audience_filter (seeds kept)', async () => {
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-seed');
+    await u.type(screen.getByLabelText('Message'), 'Hi!');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
+    await waitFor(
+      () =>
+        expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({
+          seedContactIds: ['c-seed'],
+          audience_filter: { contact_type: 'tenant' },
+        }),
+      { timeout: 4000 },
+    );
+  });
+
+  it('enabling filters pre-fills the voucher size from the attached property', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001&contactId=c-seed');
+    expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
+    // Filters hidden - no voucher chips yet.
+    expect(screen.queryByRole('button', { name: /2-BR/ })).not.toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
+    // The pre-fill applies at the moment filters become enabled (unit beds = 2).
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /2-BR/ })).toHaveAttribute('aria-pressed', 'true'),
+    );
+  });
+});
+
+describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
+  it('no ?unitId= shows the Property picker; picking a unit flows into the draft', async () => {
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-seed');
+    await u.type(screen.getByLabelText('Message'), 'Hi!');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    const picker = await screen.findByRole('combobox', { name: 'Property' });
+    await u.type(picker, 'Peachtree');
+    await u.click(await screen.findByRole('option', { name: /Peachtree/ }));
+    await waitFor(
+      () => expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({ unitId: 'u-1' }),
+      { timeout: 4000 },
+    );
+  });
+
+  it('?unitId= keeps the fixed property context - no Property picker rendered', async () => {
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('unit-0001', expect.anything()));
+    expect(screen.queryByRole('combobox', { name: 'Property' })).not.toBeInTheDocument();
+    expect(getUnits).not.toHaveBeenCalled();
   });
 });

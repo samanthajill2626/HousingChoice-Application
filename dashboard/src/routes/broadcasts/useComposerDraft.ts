@@ -6,8 +6,9 @@
 // so no orphan drafts leak. The current id is reused for Preview + Send.
 //
 // A draft is (re)created only when the message is non-empty (the backend requires
-// a non-empty body_template); until then the reach shows "unavailable". The
-// unitId never changes within a composer session, so it's a stable input.
+// a non-empty body_template); until then the reach shows "unavailable". A unitId
+// change (the Property picker), a filter enable/edit, or a seed-list change is a
+// material change like any other: the draft recreates.
 //
 // On unmount, if the current draft was never sent it stays a draft in the list
 // (the operator can resume it) — we do NOT auto-delete on unmount (that would
@@ -26,7 +27,11 @@ const DEBOUNCE_MS = 600;
 export interface ComposerDraftInput {
   unitId?: string;
   bodyTemplate: string;
-  filter: AudienceFilter;
+  /** ABSENT = seeds-only draft: the createBroadcast body omits audience_filter
+   *  entirely (the backend then resolves the seed list alone). */
+  filter?: AudienceFilter;
+  /** Hand-picked recipients seeded from the entry point (?contactId=). */
+  seedContactIds?: string[];
 }
 
 export interface ComposerDraftState {
@@ -38,6 +43,9 @@ export interface ComposerDraftState {
   truncated: boolean;
   /** True while a draft (re)creation is in flight. */
   reachPending: boolean;
+  /** The flyer link for the draft's unit from the latest create response, or
+   *  null when none (no unit / no flyer). Task 7's resolved editor uses it. */
+  flyerUrl: string | null;
   /** A non-validation creation error (network), or null. */
   error: string | null;
   /** True when the LAST (re)create FAILED, so the current draft id no longer
@@ -49,15 +57,21 @@ export interface ComposerDraftState {
   adoptDraftId: (id: string) => void;
 }
 
-/** Stable key for the material draft inputs — a change here triggers a recreate. */
+/** Stable key for the material draft inputs — a change here triggers a recreate.
+ *  Covers ALL four inputs: unit, body, the filter (null when the filter is OFF,
+ *  so enabling it is itself a material change), and the seed list. */
 function materialKey(input: ComposerDraftInput): string {
   return JSON.stringify({
     u: input.unitId ?? null,
     b: input.bodyTemplate.trim(),
-    f: {
-      h: input.filter.housing_authority ?? null,
-      s: input.filter.bedroomSize ?? null,
-    },
+    f:
+      input.filter === undefined
+        ? null
+        : {
+            h: input.filter.housing_authority ?? null,
+            s: input.filter.bedroomSize ?? null,
+          },
+    s: input.seedContactIds?.join(',') ?? null,
   });
 }
 
@@ -66,6 +80,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const [reachCount, setReachCount] = useState<number | undefined>(undefined);
   const [truncated, setTruncated] = useState(false);
   const [reachPending, setReachPending] = useState(false);
+  const [flyerUrl, setFlyerUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
 
@@ -98,6 +113,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
         lastKeyRef.current = null;
         setReachCount(undefined);
         setTruncated(false);
+        setFlyerUrl(null);
         setReachPending(false);
         setStale(false);
       }
@@ -118,7 +134,9 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       createBroadcast({
         ...(input.unitId !== undefined && { unitId: input.unitId }),
         body_template: input.bodyTemplate,
-        audience_filter: input.filter,
+        ...(input.filter !== undefined && { audience_filter: input.filter }),
+        ...(input.seedContactIds !== undefined &&
+          input.seedContactIds.length > 0 && { seedContactIds: input.seedContactIds }),
       })
         .then((created) => {
           if (gen !== genRef.current) {
@@ -132,6 +150,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
           setDraftId(created.broadcastId);
           setReachCount(created.estimatedCount);
           setTruncated(created.truncated);
+          setFlyerUrl(created.flyerUrl ?? null);
           setReachPending(false);
           setStale(false); // a fresh draft now matches the screen again
           // Clean up the PREVIOUS throwaway draft now that a fresh one supersedes it.
@@ -162,13 +181,14 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       // on an unmounted component (no React warning, no leaked orphan).
       genRef.current += 1;
     };
-  }, [key, hasBody, input.unitId, input.bodyTemplate, input.filter]);
+  }, [key, hasBody, input.unitId, input.bodyTemplate, input.filter, input.seedContactIds]);
 
   return {
     draftId,
     reachCount,
     truncated,
     reachPending,
+    flyerUrl,
     error,
     stale,
     adoptDraftId,

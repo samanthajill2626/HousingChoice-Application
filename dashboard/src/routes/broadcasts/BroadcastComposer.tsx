@@ -7,14 +7,19 @@
 //   2. PREVIEW — RecipientPreview (the editable curated list → Send / Delete).
 //
 // Optional query params: ?unitId= (compose from a property: pre-fill the voucher
-// size from its beds, attach the flyer link, show the property) and ?draftId=
-// (resume an existing draft row from the list → straight to Preview).
+// size from its beds, attach the flyer link, show the property), ?contactId=
+// (compose to ONE tenant: a seeds-only draft with the filters hidden behind an
+// "Add more tenants by filters" opt-in) and ?draftId= (resume an existing draft
+// row from the list → straight to Preview). Without ?unitId= a Property picker
+// lets the operator attach a property from the composer itself.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ApiError,
+  getContact,
   getContacts,
   getUnit,
+  getUnits,
   previewBroadcast,
   type AudienceFilter,
   type Contact,
@@ -22,6 +27,8 @@ import {
   type UnitItem,
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
+import { contactDisplayName } from '../contact/format.js';
+import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
@@ -33,10 +40,24 @@ export function BroadcastComposer(): React.JSX.Element {
   const [params] = useSearchParams();
   const unitId = params.get('unitId') ?? undefined;
   const resumeDraftId = params.get('draftId') ?? undefined;
+  const seedContactId = params.get('contactId') ?? undefined;
+  const seedContactIds = useMemo(
+    () => (seedContactId !== undefined ? [seedContactId] : []),
+    [seedContactId],
+  );
 
   const [unit, setUnit] = useState<UnitItem | null>(null);
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
   const [bodyTemplate, setBodyTemplate] = useState('');
+  // Seeded entry starts seeds-only: the audience filters are hidden until the
+  // operator opts in ("Add more tenants by filters" - a one-way flip).
+  const [audienceEnabled, setAudienceEnabled] = useState(seedContactIds.length === 0);
+  const [seedContact, setSeedContact] = useState<Contact | null>(null);
+
+  // Property picker state - only used when the entry point did NOT fix a unit.
+  const [unitCandidates, setUnitCandidates] = useState<UnitItem[]>([]);
+  const [unitPick, setUnitPick] = useState<UnitSearchValue>({ label: '' });
+  const effectiveUnitId = unitId ?? unitPick.unitId;
 
   // Preview step state.
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -48,9 +69,10 @@ export function BroadcastComposer(): React.JSX.Element {
   const [tenantsLoading, setTenantsLoading] = useState(true);
 
   const draft = useComposerDraft({
-    ...(unitId !== undefined && { unitId }),
+    ...(effectiveUnitId !== undefined && { unitId: effectiveUnitId }),
     bodyTemplate,
-    filter,
+    ...(audienceEnabled && { filter }),
+    ...(seedContactIds.length > 0 && { seedContactIds }),
   });
 
   // Resume an existing draft id (from a draft row) — adopt it WITHOUT creating one.
@@ -62,26 +84,52 @@ export function BroadcastComposer(): React.JSX.Element {
     }
   }, [resumeDraftId, draft]);
 
-  // Load the property (beds → pre-fill voucher size; address → property label).
+  // Resolve the seeded tenant for the banner (and Task 7's resolved mode).
   useEffect(() => {
-    if (unitId === undefined) return;
+    if (seedContactId === undefined) return;
     const controller = new AbortController();
-    getUnit(unitId, controller.signal)
-      .then((u) => {
-        setUnit(u);
-        // Pre-fill the voucher size from the property's beds (overridable). Only
-        // when the operator hasn't already set a size (fresh compose).
-        if (typeof u.beds === 'number') {
-          setFilter((prev) =>
-            prev.bedroomSize === undefined ? { ...prev, bedroomSize: u.beds } : prev,
-          );
-        }
-      })
+    getContact(seedContactId, controller.signal)
+      .then(setSeedContact)
+      .catch(() => setSeedContact(null)); // banner falls back to the raw id
+    return () => controller.abort();
+  }, [seedContactId]);
+
+  // Property-picker candidates - only when the entry point did not fix a unit.
+  useEffect(() => {
+    if (unitId !== undefined) return; // fixed by the entry point
+    const controller = new AbortController();
+    getUnits({}, controller.signal)
+      .then((page) => setUnitCandidates(page.units))
+      .catch(() => {
+        /* candidate load failed - the picker just has nothing to suggest */
+      });
+    return () => controller.abort();
+  }, [unitId]);
+
+  // Load the property (address -> property label; beds feed the pre-fill below).
+  useEffect(() => {
+    if (effectiveUnitId === undefined) {
+      setUnit(null); // picker cleared - drop the stale property context
+      return;
+    }
+    const controller = new AbortController();
+    getUnit(effectiveUnitId, controller.signal)
+      .then(setUnit)
       .catch(() => {
         /* property load failed — compose still works without the pre-fill */
       });
     return () => controller.abort();
-  }, [unitId]);
+  }, [effectiveUnitId]);
+
+  // Pre-fill the voucher size from the property's beds (overridable), only while
+  // the filters are ACTIVE (hidden filters have no state to pre-fill) and only
+  // when the operator hasn't already set a size. Enabling the filters with a
+  // property attached applies the pre-fill at that moment.
+  useEffect(() => {
+    if (!audienceEnabled || unit === null || typeof unit.beds !== 'number') return;
+    const beds = unit.beds;
+    setFilter((prev) => (prev.bedroomSize === undefined ? { ...prev, bedroomSize: beds } : prev));
+  }, [audienceEnabled, unit]);
 
   // Load tenant candidates once (first page; the search filters client-side).
   useEffect(() => {
@@ -149,14 +197,46 @@ export function BroadcastComposer(): React.JSX.Element {
 
       <div className={styles.cols}>
         <div className={styles.col}>
-          <AudienceFilters
-            filter={filter}
-            onChange={setFilter}
-            {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
-            {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
-            reachPending={draft.reachPending}
-            truncated={draft.truncated}
-          />
+          {seedContactIds.length > 0 && !audienceEnabled ? (
+            <div className={styles.seedBanner}>
+              <p className={styles.seedBannerText}>
+                Sending to{' '}
+                <strong>
+                  {seedContact !== null
+                    ? contactDisplayName(seedContact.firstName, seedContact.lastName, seedContact.phone)
+                    : seedContactId}
+                </strong>
+                .
+              </p>
+              <button
+                type="button"
+                className={styles.seedBannerBtn}
+                onClick={() => setAudienceEnabled(true)}
+              >
+                Add more tenants by filters
+              </button>
+            </div>
+          ) : (
+            <AudienceFilters
+              filter={filter}
+              onChange={setFilter}
+              {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
+              {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
+              reachPending={draft.reachPending}
+              truncated={draft.truncated}
+            />
+          )}
+          {unitId === undefined ? (
+            <div className={styles.pickerField}>
+              <span className={styles.pickerLabel}>Property</span>
+              <UnitSearchField
+                value={unitPick}
+                onChange={setUnitPick}
+                candidates={unitCandidates}
+                inputLabel="Property"
+              />
+            </div>
+          ) : null}
         </div>
         <div className={styles.col}>
           <MessageEditor

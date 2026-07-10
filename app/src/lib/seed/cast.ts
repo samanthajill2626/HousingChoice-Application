@@ -606,12 +606,11 @@ const searchingTenant = {
       ts: CU,
     },
   ],
-  // Listing sends (2: one not-a-fit reply, one pending)
+  // Listing sends (2 properties sent to this searching tenant)
   listingSend1: {
     unitId: unitId('searching-b'), // first unit sent (too-many-stairs one)
     contactId: C_SEARCHING,
     sentAt: CK,
-    response: 'not_a_fit',
     via: 'individual',
     created_at: CK,
     updated_at: CL,
@@ -635,7 +634,6 @@ const searchingTenant = {
     unitId: UNIT_CAST_SEARCHING,
     contactId: C_SEARCHING,
     sentAt: CN,
-    response: 'interested',
     via: 'individual',
     created_at: CN,
     updated_at: CO,

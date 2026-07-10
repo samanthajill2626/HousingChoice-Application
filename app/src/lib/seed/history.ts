@@ -539,7 +539,6 @@ export function entityHistory(
 //   • stage_changed     routes/placements.ts:556  ("Stage → <label>",  ref placement)
 //   • placement_closed  routes/placements.ts:552  ("Placement closed - <stage>[ - <cat>]")
 //   • listing_sent      jobs/broadcastFanOut.ts:309 ("Property sent", ref unit)
-//   • listing_reviewed  routes/units.ts:708        ("Property reviewed - <resp>", ref unit)
 //   • number_added      routes/contacts.ts:1473    ("Number added", no ref)
 //   • tour_scheduled/tour_took_place — tours emit NO milestone at runtime today
 //     (research §WRITE-SHAPES.3: tour_took_place retired, tour_scheduled only from the
@@ -673,17 +672,9 @@ export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
   return rows;
 }
 
-/** interested/not_a_fit → the reviewed-response label (routes/units.ts:708). */
-const LISTING_REVIEW_LABEL: Readonly<Record<string, string>> = {
-  interested: 'Property reviewed - Interested',
-  not_a_fit: 'Property reviewed - Not a fit',
-};
-
 /**
- * A listing-send row → a `listing_sent` milestone ("Property sent", ref unit), plus
- * a `listing_reviewed` when the recipient gave a reviewed response (interested/
- * not_a_fit). Both anchor at the send's `sentAt`. Faithful to broadcastFanOut.ts:308
- * (send) + units.ts:706-715 (review).
+ * A listing-send row -> a `listing_sent` milestone ("Property sent", ref unit),
+ * anchored at the send's `sentAt`. Faithful to broadcastFanOut.ts:308 (send).
  */
 export function listingSendMilestones(send: Record<string, unknown>): ActivityRow[] {
   const contactId = String(send['contactId'] ?? '');
@@ -693,12 +684,6 @@ export function listingSendMilestones(send: Record<string, unknown>): ActivityRo
   const rows: ActivityRow[] = [];
   const ref = unitId !== '' ? { refType: 'unit', refId: unitId } : undefined;
   rows.push(makeActivityRow(contactId, at, 'listing_sent', 'Property sent', ref));
-  const reviewLabel = LISTING_REVIEW_LABEL[String(send['response'] ?? '')];
-  if (reviewLabel !== undefined && unitId !== '') {
-    rows.push(
-      makeActivityRow(contactId, at, 'listing_reviewed', reviewLabel, { refType: 'unit', refId: unitId }),
-    );
-  }
   return rows;
 }
 
@@ -746,7 +731,7 @@ export function contactPhoneMilestones(contact: Record<string, unknown>): Activi
  * `activity_events` (Task 2, §4.6): the person-centric Contact Timeline milestones
  * — placement_opened/stage_changed/placement_closed per placement (same clock as
  * the audit trail via placementWalk), tour_scheduled/tour_took_place per tour,
- * listing_sent/listing_reviewed per listing-send, number_added per multi-phone
+ * listing_sent per listing-send, number_added per multi-phone
  * contact. Superseded ENTITY-SCOPED against the pre-existing matrix rows (§4.7):
  * pre-existing activity rows are dropped for any contact this module covers, and
  * preserved for contacts it does not.

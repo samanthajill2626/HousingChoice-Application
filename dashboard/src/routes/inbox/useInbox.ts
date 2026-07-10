@@ -1,5 +1,5 @@
 // useInbox — owns the entity-centric inbox list for the active filter: the first
-// page (GET /api/inbox), cursor "load more", optimistic mark-read / assign with
+// page (GET /api/inbox), cursor "load more", optimistic mark-read with
 // rollback, and live updates. Degrades to an honest 'pending' state until the C8
 // backend slice lands (GET /api/inbox 404s).
 //
@@ -9,13 +9,12 @@
 // reconcile'"), any inbox-affecting event schedules a debounced refetch of the
 // current filter's first page — the proven useToday policy. A future row-keyed
 // `inbox.updated` event would enable no-network patch-in-place (see the plan's
-// contract notes). Self-initiated mark-read/assign ARE patched optimistically
+// contract notes). Self-initiated mark-read IS patched optimistically
 // (we know the row), re-applied over a racing refetch while in flight, and
 // rolled back on failure.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
-  assignInbox,
   getInbox,
   markConversationRead,
   markInboxRead,
@@ -30,7 +29,6 @@ export type InboxStatus = 'loading' | 'pending' | 'ready' | 'error';
  *  until the request settles). */
 interface Pending {
   unreadCount?: number;
-  assignment?: { userId: string; name: string } | null;
 }
 
 export interface InboxState {
@@ -43,9 +41,6 @@ export interface InboxState {
   /** Optimistically mark a row's comms read (also called on row open). No-op if
    *  already read or the row can't be addressed. */
   markRead: (row: InboxRowData) => void;
-  /** Optimistically set (userId) / clear (userId=null) a CONTACT row's
-   *  assignment; `name` is the optimistic display name. No-op on unknown rows. */
-  assign: (row: InboxRowData, userId: string | null, name: string) => void;
 }
 
 const PAGE_LIMIT = 30;
@@ -167,8 +162,8 @@ export function useInbox(filter: InboxFilter): InboxState {
       return next;
     });
   }, []);
-  // Clear only the field this mutation owns — so a concurrent mark-read + assign
-  // on the same row don't wipe each other's still-in-flight overlay.
+  // Clear only the field this mutation owns - so concurrent overlays on the same
+  // row don't wipe each other's still-in-flight state.
   const clearPatch = useCallback((key: string, field: keyof Pending) => {
     setPending((prev) => {
       const entry = prev.get(key);
@@ -218,27 +213,6 @@ export function useInbox(filter: InboxFilter): InboxState {
     [setPatch, clearPatch],
   );
 
-  const assign = useCallback(
-    (row: InboxRowData, userId: string | null, name: string) => {
-      if (row.kind !== 'contact' || row.contactId === undefined) return;
-      const key = rowKey(row);
-      const optimistic = userId === null ? null : { userId, name };
-      setPatch(key, { assignment: optimistic });
-      assignInbox(row.contactId, userId)
-        .then(() => {
-          genRef.current += 1;
-          setBase((prev) =>
-            prev.map((r) => (rowKey(r) === key ? { ...r, assignment: optimistic ?? undefined } : r)),
-          );
-        })
-        .catch(() => {
-          /* rollback */
-        })
-        .finally(() => clearPatch(key, 'assignment'));
-    },
-    [setPatch, clearPatch],
-  );
-
   // --- Assemble the displayed rows ------------------------------------------
   const patched = base.map((row) => {
     const p = pending.get(rowKey(row));
@@ -246,7 +220,6 @@ export function useInbox(filter: InboxFilter): InboxState {
     return {
       ...row,
       ...(p.unreadCount !== undefined && { unreadCount: p.unreadCount }),
-      ...(p.assignment !== undefined && { assignment: p.assignment ?? undefined }),
     };
   });
   // On the Unread filter a row optimistically marked read drops out immediately,
@@ -254,5 +227,5 @@ export function useInbox(filter: InboxFilter): InboxState {
   const visible = filter === 'unread' ? patched.filter((r) => r.unreadCount > 0) : patched;
   const rows = sortByActivity(visible);
 
-  return { status, rows, hasMore: cursor !== null, loadingMore, loadMore, retry, markRead, assign };
+  return { status, rows, hasMore: cursor !== null, loadingMore, loadMore, retry, markRead };
 }

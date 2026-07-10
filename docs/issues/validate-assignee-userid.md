@@ -3,7 +3,7 @@ id: validate-assignee-userid
 title: assigneeUserId is not validated against the users table on assignment
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app/api
 created: 2026-06-18
 refs: app/src/routes/api.ts:861
@@ -18,3 +18,7 @@ M1.3, so validation is now possible.
 list) before `setAssignment`, returning 400/404 on an unknown id.
 
 Graduated 2026-06-18 from an inline `TODO(M1.4)` at `app/src/routes/api.ts:861`.
+
+**Resolved 2026-07-10:** the conversation-assignment feature was removed end to end
+(chore/remove-conversation-assignment). The `PATCH /api/conversations/:id/assignment`
+route no longer exists, so assignee validation is moot.

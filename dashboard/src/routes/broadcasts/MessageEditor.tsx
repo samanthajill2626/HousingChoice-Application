@@ -5,6 +5,7 @@
 // is shown and a note explains the [FlyerLink] is attached automatically.
 import { useId, useRef } from 'react';
 import { BROADCAST_MERGE_FIELDS } from '../../api/index.js';
+import { DEFAULT_SEND_TEMPLATE } from './resolveTemplate.js';
 import styles from './MessageEditor.module.css';
 
 const MAX_TEMPLATE_LEN = 1600;
@@ -15,12 +16,17 @@ export interface MessageEditorProps {
   /** A short property reference shown when this broadcast is for a unit (the
    *  flyer link is then attached). Absent → no property note. */
   propertyLabel?: string;
+  /** Resolved mode (a single recipient): the value is the FINAL rendered message,
+   *  not a template. Hide the merge-field chips AND the flyer note (there are no
+   *  tokens left to insert); keep the labeled textarea + live count. */
+  resolved?: boolean;
 }
 
 export function MessageEditor({
   value,
   onChange,
   propertyLabel,
+  resolved = false,
 }: MessageEditorProps): React.JSX.Element {
   const uid = useId();
   const textareaId = `${uid}-template`;
@@ -53,18 +59,20 @@ export function MessageEditor({
         <span className={styles.fieldLabel}>Message</span>
       </label>
 
-      <div className={styles.chips} role="group" aria-label="Insert a merge field">
-        {BROADCAST_MERGE_FIELDS.map((token) => (
-          <button
-            key={token}
-            type="button"
-            className={styles.chip}
-            onClick={() => insertToken(token)}
-          >
-            {token}
-          </button>
-        ))}
-      </div>
+      {resolved ? null : (
+        <div className={styles.chips} role="group" aria-label="Insert a merge field">
+          {BROADCAST_MERGE_FIELDS.map((token) => (
+            <button
+              key={token}
+              type="button"
+              className={styles.chip}
+              onClick={() => insertToken(token)}
+            >
+              {token}
+            </button>
+          ))}
+        </div>
+      )}
 
       <textarea
         id={textareaId}
@@ -73,7 +81,7 @@ export function MessageEditor({
         rows={6}
         maxLength={MAX_TEMPLATE_LEN}
         value={value}
-        placeholder="Hi [TenantName], a [Beds] home at [Address] is available for [Rent]/mo. Details: [FlyerLink]"
+        placeholder={DEFAULT_SEND_TEMPLATE}
         onChange={(e) => onChange(e.target.value)}
       />
       <div className={styles.footRow}>
@@ -82,7 +90,7 @@ export function MessageEditor({
         </span>
       </div>
 
-      {propertyLabel !== undefined ? (
+      {propertyLabel !== undefined && !resolved ? (
         <p className={styles.propertyNote}>
           For <strong>{propertyLabel}</strong> — the flyer link is attached automatically (use{' '}
           <code>[FlyerLink]</code> to place it).

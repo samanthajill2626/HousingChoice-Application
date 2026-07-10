@@ -74,3 +74,22 @@ describe('MessageEditor — property / flyer note', () => {
     expect(screen.getByText(/flyer link is attached/i)).toBeInTheDocument();
   });
 });
+
+describe('MessageEditor - resolved mode (single recipient)', () => {
+  it('hides the merge chips AND the flyer note but keeps the textarea + count', () => {
+    render(
+      <MessageEditor
+        value="Hi Tasha, a 2 home is available."
+        onChange={() => {}}
+        propertyLabel="123 Peachtree St"
+        resolved
+      />,
+    );
+    // The text IS the message now: no merge-field chips, no flyer note.
+    expect(screen.queryByRole('group', { name: 'Insert a merge field' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/flyer link is attached/i)).not.toBeInTheDocument();
+    // The labeled textarea and live count remain.
+    expect(screen.getByLabelText('Message')).toBeInTheDocument();
+    expect(screen.getByText('32/1600')).toBeInTheDocument();
+  });
+});

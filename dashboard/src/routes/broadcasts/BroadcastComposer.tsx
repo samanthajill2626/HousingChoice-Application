@@ -33,8 +33,15 @@ import { shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
+import { DEFAULT_SEND_TEMPLATE, resolveTemplateForTenant } from './resolveTemplate.js';
 import { useComposerDraft } from './useComposerDraft.js';
 import styles from './BroadcastComposer.module.css';
+
+/** The same-origin public flyer funnel URL (ListingDetail.tsx's pattern) - the
+ *  fallback [FlyerLink] until the first draft returns the server's flyerUrl. */
+function flyerLinkFor(unitId: string): string {
+  return `${window.location.origin}/p/${encodeURIComponent(unitId)}`;
+}
 
 export function BroadcastComposer(): React.JSX.Element {
   const [params] = useSearchParams();
@@ -49,6 +56,10 @@ export function BroadcastComposer(): React.JSX.Element {
   const [unit, setUnit] = useState<UnitItem | null>(null);
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
   const [bodyTemplate, setBodyTemplate] = useState('');
+  // Whether the staff user has hand-edited the message. Only textarea keystrokes
+  // flip this (NOT the programmatic auto-seed below), so the resolved default can
+  // keep re-seeding until the operator takes the pen.
+  const [bodyEdited, setBodyEdited] = useState(false);
   // Seeded entry starts seeds-only: the audience filters are hidden until the
   // operator opts in ("Add more tenants by filters" - a one-way flip).
   const [audienceEnabled, setAudienceEnabled] = useState(seedContactIds.length === 0);
@@ -58,6 +69,11 @@ export function BroadcastComposer(): React.JSX.Element {
   const [unitCandidates, setUnitCandidates] = useState<UnitItem[]>([]);
   const [unitPick, setUnitPick] = useState<UnitSearchValue>({ label: '' });
   const effectiveUnitId = unitId ?? unitPick.unitId;
+
+  // Resolved message mode: exactly ONE recipient and the filters are still off.
+  // The editor shows the FINAL rendered text (what will actually send), not a
+  // token template - there is no per-recipient variance to preserve.
+  const resolvedMode = seedContactIds.length === 1 && !audienceEnabled;
 
   // Preview step state.
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
@@ -121,6 +137,22 @@ export function BroadcastComposer(): React.JSX.Element {
     return () => controller.abort();
   }, [effectiveUnitId]);
 
+  // Auto-seed the resolved default message for the single recipient: only in
+  // resolved mode, only with a property attached (no unit -> leave the body
+  // alone until the operator types or picks one), and only while the operator
+  // has not hand-edited it. Re-seeds on unit/tenant/flyer change. Written via
+  // setBodyTemplate directly (NOT the edit-tracking onChange) so it never marks
+  // the body as edited. The flyer prefers the server's flyerUrl, falling back to
+  // the same-origin funnel until the first draft exists.
+  useEffect(() => {
+    if (!resolvedMode || unit === null || bodyEdited) return;
+    const flyer =
+      draft.flyerUrl ?? (effectiveUnitId !== undefined ? flyerLinkFor(effectiveUnitId) : undefined);
+    setBodyTemplate(
+      resolveTemplateForTenant(DEFAULT_SEND_TEMPLATE, unit, seedContact?.firstName, flyer),
+    );
+  }, [resolvedMode, unit, bodyEdited, draft.flyerUrl, effectiveUnitId, seedContact]);
+
   // Pre-fill the voucher size from the property's beds (overridable), only while
   // the filters are ACTIVE (hidden filters have no state to pre-fill) and only
   // when the operator hasn't already set a size. Enabling the filters with a
@@ -147,6 +179,30 @@ export function BroadcastComposer(): React.JSX.Element {
     () => (unit !== null ? shortAddress(unit.address, unit.unitId) : undefined),
     [unit],
   );
+
+  // A textarea keystroke (as opposed to the programmatic auto-seed): take the
+  // operator's edit AND latch bodyEdited so the auto-seed stops overwriting it.
+  function onBodyChange(next: string): void {
+    setBodyEdited(true);
+    setBodyTemplate(next);
+  }
+
+  // "Add more tenants by filters" - the one-way flip out of seeds-only. When the
+  // operator has edited the resolved text, crossing the boundary would discard
+  // those edits (the audience is no longer a single person), so confirm first.
+  // On cancel the flip does not happen; on confirm the body resets to '' (token
+  // mode - they will compose a fresh template for the broader audience).
+  function onEnableFilters(): void {
+    if (resolvedMode && unit !== null && bodyEdited) {
+      const ok = window.confirm(
+        'Switching the audience resets the message to the template. Discard your edits?',
+      );
+      if (!ok) return;
+      setBodyTemplate('');
+      setBodyEdited(false);
+    }
+    setAudienceEnabled(true);
+  }
 
   async function onPreview(): Promise<void> {
     if (draft.draftId === null || previewBusy) return;
@@ -211,7 +267,7 @@ export function BroadcastComposer(): React.JSX.Element {
               <button
                 type="button"
                 className={styles.seedBannerBtn}
-                onClick={() => setAudienceEnabled(true)}
+                onClick={onEnableFilters}
               >
                 Add more tenants by filters
               </button>
@@ -241,7 +297,8 @@ export function BroadcastComposer(): React.JSX.Element {
         <div className={styles.col}>
           <MessageEditor
             value={bodyTemplate}
-            onChange={setBodyTemplate}
+            onChange={onBodyChange}
+            resolved={resolvedMode}
             {...(propertyLabel !== undefined && { propertyLabel })}
           />
         </div>

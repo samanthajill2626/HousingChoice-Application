@@ -235,6 +235,34 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
   });
 });
 
+describe('BroadcastComposer - resolved message mode (single recipient)', () => {
+  it('a single seed + attached property auto-seeds the resolved text and hides the merge chips', async () => {
+    renderComposer('?unitId=unit-0001&contactId=c-seed');
+    // The editor auto-seeds the resolved DEFAULT template for the one tenant.
+    await waitFor(() =>
+      expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toContain('Hi Tasha,'),
+    );
+    // Resolved mode: the text IS the message, so no merge-field chips.
+    expect(screen.queryByRole('group', { name: 'Insert a merge field' })).not.toBeInTheDocument();
+  });
+
+  it('editing the resolved text then "Add more tenants by filters" prompts to confirm; cancel keeps seeds-only', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001&contactId=c-seed');
+    const ta = await screen.findByLabelText('Message');
+    await waitFor(() => expect((ta as HTMLTextAreaElement).value).toContain('Hi Tasha,'));
+    await u.type(ta, ' Come see it!'); // a manual edit -> bodyEdited
+    await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
+    expect(confirmSpy).toHaveBeenCalledWith(
+      'Switching the audience resets the message to the template. Discard your edits?',
+    );
+    // Cancelled -> the flip did NOT happen (still seeds-only, filters hidden).
+    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add more tenants by filters' })).toBeInTheDocument();
+  });
+});
+
 describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
   it('no ?unitId= shows the Property picker; picking a unit flows into the draft', async () => {
     const u = userEvent.setup();

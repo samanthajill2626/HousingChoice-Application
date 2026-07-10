@@ -15,11 +15,16 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
   deleteBroadcast,
+  getUnit,
   sendBroadcast,
+  setListingStatus,
+  LISTING_STATUS_LABELS,
   type Contact,
+  type ListingStatus,
   type PreviewResponse,
 } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
+import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
 import styles from './RecipientPreview.module.css';
@@ -46,6 +51,10 @@ export interface RecipientPreviewProps {
   tenantCandidates: Contact[];
   /** Whether the tenant-candidate list is still loading (disables add until ready). */
   candidatesLoading: boolean;
+  /** The attached property, when composing from one. Send re-checks its status
+   *  (spec 2026-07-10): a non-Available unit's flyer link is dead, so the send
+   *  is blocked behind a "Make Available & send" dialog. */
+  unitId?: string;
 }
 
 /** Build the initial rows from the preview candidates — already-sent rows start
@@ -69,6 +78,7 @@ export function RecipientPreview({
   preview,
   tenantCandidates,
   candidatesLoading,
+  unitId,
 }: RecipientPreviewProps): React.JSX.Element {
   const navigate = useNavigate();
   const priorIds = useMemo(
@@ -86,6 +96,10 @@ export function RecipientPreview({
   const [addNote, setAddNote] = useState<string | null>(null);
   /** When a 409 fired (already sent / raced), offer the Results link inline. */
   const [racedToResults, setRacedToResults] = useState(false);
+  /** Availability gate (spec 2026-07-10): set when Send found the property in a
+   *  non-Available status - renders the blocking Make-Available dialog. */
+  const [availGate, setAvailGate] = useState<ListingStatus | string | null>(null);
+  const [gateBusy, setGateBusy] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
   // A2P/CTIA: how many listed recipients have NO recorded consent (fenced out of
@@ -180,6 +194,28 @@ export function RecipientPreview({
 
   async function onSend(): Promise<void> {
     if (sending || checkedCount === 0) return;
+    // Pre-flight (spec 2026-07-10): the flyer link only resolves while the
+    // property is Available. Check FRESH status (never the compose-time object;
+    // a resumed draft can be days old).
+    if (unitId !== undefined) {
+      setError(null);
+      let status: string;
+      try {
+        status = (await getUnit(unitId)).status;
+      } catch {
+        setError("Couldn't check the property's status. Try again.");
+        return;
+      }
+      if (status !== 'available') {
+        setAvailGate(status);
+        return;
+      }
+    }
+    await doSend();
+  }
+
+  async function doSend(): Promise<void> {
+    if (sending || checkedCount === 0) return;
     setSending(true);
     setError(null);
     setRacedToResults(false);
@@ -196,6 +232,10 @@ export function RecipientPreview({
           setRacedToResults(true);
         } else if (err.status === 400 && err.code === 'empty_audience') {
           setError('Nothing selected — check at least one tenant to send.');
+        } else if (err.status === 400 && err.code === 'unit_not_available') {
+          // Race: the property left Available between our pre-flight and the
+          // server's own guard (or another session flipped it back).
+          setError("This property isn't Available, so its flyer link won't work. Make it Available, then send.");
         } else if (err.status === 400 && /cap/i.test(err.message)) {
           setError(err.message);
         } else if (err.status === 400) {
@@ -208,6 +248,23 @@ export function RecipientPreview({
       }
     } finally {
       setSending(false);
+    }
+  }
+
+  async function onMakeAvailableAndSend(): Promise<void> {
+    if (gateBusy || unitId === undefined) return;
+    setGateBusy(true);
+    try {
+      // Through the single status-transition service, same as the property
+      // page's status pill - the property's activity trail records it.
+      await setListingStatus(unitId, { toStatus: 'available', source: 'manual' });
+      setAvailGate(null);
+      await doSend();
+    } catch {
+      setAvailGate(null);
+      setError("Couldn't make the property Available. Change its status on the property page, then send.");
+    } finally {
+      setGateBusy(false);
     }
   }
 
@@ -394,6 +451,41 @@ export function RecipientPreview({
           {deleting ? 'Deleting…' : 'Delete draft'}
         </button>
       </div>
+
+      {availGate !== null ? (
+        <Modal
+          title="Property isn't Available"
+          onClose={() => setAvailGate(null)}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setAvailGate(null)}
+                disabled={gateBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                type="button"
+                onClick={() => void onMakeAvailableAndSend()}
+                disabled={gateBusy}
+              >
+                {gateBusy ? 'Working…' : 'Make Available & send'}
+              </Button>
+            </>
+          }
+        >
+          <p className={styles.availGateBody}>
+            The flyer link in this broadcast only works while the property is Available. Its
+            status is currently{' '}
+            <strong>{LISTING_STATUS_LABELS[availGate as ListingStatus] ?? availGate}</strong>.
+          </p>
+        </Modal>
+      ) : null}
     </div>
   );
 }

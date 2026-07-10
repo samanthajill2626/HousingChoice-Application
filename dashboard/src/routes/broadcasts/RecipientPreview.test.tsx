@@ -14,6 +14,8 @@ import type { Contact, PreviewResponse } from '../../api/index.js';
 
 const sendBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
+const getUnit = vi.fn();
+const setListingStatus = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -21,6 +23,8 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     sendBroadcast: (...a: unknown[]) => sendBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
+    getUnit: (...a: unknown[]) => getUnit(...a),
+    setListingStatus: (...a: unknown[]) => setListingStatus(...a),
   };
 });
 
@@ -73,6 +77,7 @@ function renderPreview(props: {
   tenantCandidates?: Contact[];
   candidatesLoading?: boolean;
   draftId?: string;
+  unitId?: string;
 }): void {
   render(
     <MemoryRouter initialEntries={['/broadcasts/new']}>
@@ -85,6 +90,7 @@ function renderPreview(props: {
               preview={props.preview}
               tenantCandidates={props.tenantCandidates ?? []}
               candidatesLoading={props.candidatesLoading ?? false}
+              {...(props.unitId !== undefined && { unitId: props.unitId })}
             />
           }
         />
@@ -98,6 +104,8 @@ function renderPreview(props: {
 beforeEach(() => {
   sendBroadcast.mockReset().mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
+  getUnit.mockReset();
+  setListingStatus.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -467,5 +475,94 @@ describe('RecipientPreview — delete draft', () => {
     });
     await u.click(screen.getByRole('button', { name: 'Delete draft' }));
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/bcast_1'));
+  });
+});
+
+describe('availability pre-flight on Send (spec 2026-07-10)', () => {
+  const PREVIEW = previewOf({ count: 1, candidates: [candidate()] });
+
+  it('non-Available unit: Send opens the dialog and does NOT send', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'on_hold' });
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: "Property isn't Available" });
+    expect(within(dialog).getByText(/On hold/)).toBeInTheDocument();
+    expect(getUnit).toHaveBeenCalledWith('u1');
+    expect(sendBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('"Make Available & send" flips the status FIRST, then sends', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'setup' });
+    setListingStatus.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available' });
+    sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(await screen.findByRole('button', { name: 'Make Available & send' }));
+
+    await waitFor(() =>
+      expect(setListingStatus).toHaveBeenCalledWith('u1', {
+        toStatus: 'available',
+        source: 'manual',
+      }),
+    );
+    await waitFor(() => expect(sendBroadcast).toHaveBeenCalledWith('bcast_1', ['c1']));
+    expect(setListingStatus.mock.invocationCallOrder[0]!).toBeLessThan(
+      sendBroadcast.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('Cancel closes the dialog without flipping or sending', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'occupied' });
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(setListingStatus).not.toHaveBeenCalled();
+    expect(sendBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('Available unit: sends straight through with no dialog', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available' });
+    sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+
+    await waitFor(() => expect(sendBroadcast).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(setListingStatus).not.toHaveBeenCalled();
+  });
+
+  it('no unitId prop: no pre-flight at all (legacy behavior)', async () => {
+    const user = userEvent.setup();
+    sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
+    renderPreview({ preview: PREVIEW });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+
+    await waitFor(() => expect(sendBroadcast).toHaveBeenCalled());
+    expect(getUnit).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the server race: 400 unit_not_available renders the inline error', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available' });
+    sendBroadcast.mockRejectedValue(new ApiError(400, 'unit_not_available', 'unit_not_available'));
+    renderPreview({ preview: PREVIEW, unitId: 'u1' });
+
+    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/isn't Available/),
+    );
   });
 });

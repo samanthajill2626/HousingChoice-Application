@@ -367,6 +367,55 @@ describe('DELETE /api/users/:userId', () => {
     expect(fakeUsers.users.has(TEST_SESSION_USER.userId)).toBe(true);
   });
 
+  it('concurrent cross-removal of two admins never reaches zero admins (verify-after-rollback)', async () => {
+    // Exactly TWO admins (A = the harness admin, B = a second). Each REMOVES the
+    // OTHER concurrently -- both pass the pre-check last-admin guard (each sees
+    // the other still admin), so WITHOUT the verify-after-write-and-rollback the
+    // table races to ZERO admins. The post-delete re-check must heal it by
+    // resurrecting the row the emptying delete removed.
+    //
+    // Warm the session-epoch cache for BOTH admins first with a cheap authed GET
+    // (same technique the PATCH C2 test uses): removal doesn't bump epochs, but a
+    // deleted-mid-flight actor's own session would otherwise fail the users-table
+    // epoch check (findById returns undefined) and 401 -- warming keeps both
+    // actors authenticated so the race reaches the route logic.
+    const { app, fakeUsers } = makeWebhookHarness();
+    fakeUsers.users.set(
+      'usr_secondadmin',
+      adminUserItem({ userId: 'usr_secondadmin', email: 'a2@housingchoice.org' }),
+    );
+    const secondAdminCookie = sessionCookieFor({
+      userId: 'usr_secondadmin',
+      email: 'a2@housingchoice.org',
+      role: 'admin',
+    });
+
+    // Warm the epoch cache for BOTH admins.
+    await request(app).get('/api/users').set('x-origin-verify', SECRET).set('cookie', TEST_ADMIN_COOKIE);
+    await request(app).get('/api/users').set('x-origin-verify', SECRET).set('cookie', secondAdminCookie);
+
+    // A removes B; B removes A -- fired together so they interleave at awaits.
+    const [resAremovesB, resBremovesA] = await Promise.all([
+      request(app)
+        .delete('/api/users/usr_secondadmin')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_ADMIN_COOKIE),
+      request(app)
+        .delete(`/api/users/${TEST_ADMIN_USER.userId}`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', secondAdminCookie),
+    ]);
+
+    // Both requests authenticated past the gate (warmed cache).
+    expect([resAremovesB.status, resBremovesA.status].every((s) => s === 200 || s === 409)).toBe(true);
+    // INVARIANT (the fix): at least one admin remains -- no zero-admin end state,
+    // even though both removals passed the pre-check last-admin guard.
+    const adminsRemaining = [...fakeUsers.users.values()].filter((u) => u.role === 'admin');
+    expect(adminsRemaining.length).toBeGreaterThanOrEqual(1);
+    // And the heal returned a 409 on the removal that would have emptied the set.
+    expect([resAremovesB.status, resBremovesA.status]).toContain(409);
+  });
+
   it('404s an unknown target user', async () => {
     const { app } = makeWebhookHarness();
     const res = await request(app)
@@ -374,6 +423,7 @@ describe('DELETE /api/users/:userId', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE);
     expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'user_not_found' });
   });
 
   it('VA is forbidden (403)', async () => {

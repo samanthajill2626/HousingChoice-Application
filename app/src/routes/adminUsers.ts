@@ -239,8 +239,25 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
     }
 
     await users.remove(userId);
-    // Audit records the removed user's email + role (an audit-relevant operator
-    // action, like user_invited); actor = the acting admin.
+
+    // ZERO-ADMIN LOCKOUT -- verify-after-write-and-rollback (mirrors the PATCH
+    // role path). The pre-check last-admin guard above is the fast path, but two
+    // concurrent removals of two different admins can both pass it and race the
+    // table to zero admins. So after deleting an admin, RE-LIST admins; if none
+    // remain, this delete emptied the set -- restore the row exactly and 409.
+    if (target.role === 'admin') {
+      const adminsNow = (await users.listAll()).filter((u) => u.role === 'admin');
+      if (adminsNow.length === 0) {
+        await users.restore(target); // undo -- resurrect the just-deleted row
+        log.warn(
+          { userId, actor: req.user?.userId },
+          'removal would leave zero admins -- rolled back (verify-after-write)',
+        );
+        res.status(409).json({ error: 'cannot_remove_last_admin' });
+        return;
+      }
+    }
+
     await audit.append(`users#${userId}`, 'user_removed', {
       email: target.email,
       role: target.role,

@@ -342,6 +342,8 @@ describe('TeamSection — non-admin (VA) viewer read-only', () => {
     expect(
       screen.queryByRole('button', { name: /Clear the inbound voice line/i }),
     ).not.toBeInTheDocument();
+    // The Remove control is admin-only too -- not rendered for a non-admin viewer.
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
   });
 });
 

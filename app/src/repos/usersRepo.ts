@@ -213,6 +213,13 @@ export interface UsersRepo {
    */
   remove(userId: string): Promise<void>;
   /**
+   * Re-put a full user row (unconditional PutCommand). Used ONLY by the DELETE
+   * route's verify-after-write-and-rollback: when a removal turns out to have
+   * emptied the admin set, the just-deleted `target` item is restored exactly.
+   * Unconditional (no attribute_not_exists) so it overwrites/re-creates.
+   */
+  restore(item: UserItem): Promise<void>;
+  /**
    * Activate an invited user on their first login: write google_sub, flip
    * status → 'active', stamp last_login_at — in ONE update. The google_sub
    * write is conditional-safe so two concurrent first logins don't clobber.
@@ -412,6 +419,13 @@ export function createUsersRepo(deps: RepoDeps = {}): UsersRepo {
       // is a no-op, not an error) -- the route has already run the guards.
       await doc.send(new DeleteCommand({ TableName: table, Key: { userId } }));
       log.info({ userId }, 'user removed');
+    },
+
+    async restore(item) {
+      // Unconditional re-put of the full item (rollback resurrect). No condition:
+      // the row was just deleted, so we are re-creating it exactly as it was.
+      await doc.send(new PutCommand({ TableName: table, Item: item }));
+      log.info({ userId: item.userId }, 'user restored (rollback)');
     },
 
     async activateOnLogin(userId, googleSub, name, at = new Date().toISOString()) {

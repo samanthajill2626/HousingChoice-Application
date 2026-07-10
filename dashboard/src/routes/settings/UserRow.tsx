@@ -200,7 +200,7 @@ export function UserRow({
             <dd className={styles.cardMetaValue}>{lastLogin}</dd>
           </div>
         </dl>
-        <div className={styles.cardActions}>{removeControl}</div>
+        {viewerIsAdmin ? <div className={styles.cardActions}>{removeControl}</div> : null}
         {error !== null ? (
           <p role="alert" className={styles.error}>
             {error}
@@ -222,7 +222,7 @@ export function UserRow({
         <td className={styles.cell}>{voiceLineCell}</td>
         <td className={styles.cell}>{statusText}</td>
         <td className={styles.cell}>{lastLogin}</td>
-        <td className={styles.cell}>{removeControl}</td>
+        <td className={styles.cell}>{viewerIsAdmin ? removeControl : null}</td>
       </tr>
       {error !== null ? (
         <tr>

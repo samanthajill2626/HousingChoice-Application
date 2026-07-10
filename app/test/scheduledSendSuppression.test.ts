@@ -104,7 +104,6 @@ function makeSendFakes(
     setParticipantsIfAbsent: async () => true,
     incrementUnread: async () => 1,
     resetUnread: async () => conversation,
-    setAssignment: async () => ({ conversation, previousAssigneeUserId: null }),
     listByLastActivity: async () => ({ items: [conversation] }),
     listRelayGroups: async () => ({ items: [], truncated: false }),
     setMode: async (_id, mode) => {

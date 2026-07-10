@@ -126,7 +126,6 @@ function conv(conversationId: string, contactId: string, unread = 0, type = 'ten
     preview: null,
     last_activity_at: '2026-07-05T00:00:00Z',
     unread_count: unread,
-    assignment: null,
     sms_opt_out: false,
     participant_display_name: null,
   };

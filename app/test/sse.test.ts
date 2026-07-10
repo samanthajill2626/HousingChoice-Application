@@ -115,7 +115,6 @@ describe('GET /api/events — stream mechanics', () => {
       unread_count: 3,
       preview: 'hi there',
       type: 'tenant_1to1',
-      assignment: null,
       participant_display_name: null,
     });
     world.events.emit('message.persisted', {
@@ -134,7 +133,6 @@ describe('GET /api/events — stream mechanics', () => {
         unread_count: 3,
         preview: 'hi there',
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: null,
       })}`,
     );
@@ -203,7 +201,6 @@ describe('event bus — listener isolation (M1.2)', () => {
         last_activity_at: '2026-06-12T12:00:00.000Z',
         unread_count: 0,
         type: 'unknown_1to1',
-        assignment: null,
         participant_display_name: null,
       }),
     ).not.toThrow();

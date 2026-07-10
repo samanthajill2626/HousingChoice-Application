@@ -1,10 +1,9 @@
 // C8 / "BE7" — Inbox feed. A READ-ONLY aggregation over the conversations,
-// contacts, messages, placements, and users repos (no new table) that assembles
+// contacts, messages, and placements repos (no new table) that assembles
 // the dashboard's secondary comms lens: ONE row per contact (or one untriaged
 // unknown number), newest-activity-first, with cross-number unread, the latest
-// item's channel/direction/preview, an optional placement context, and the assigned
-// team member. Mounted at /api/inbox (behind requireAuth via the /api mount in
-// app.ts).
+// item's channel/direction/preview, and an optional placement context. Mounted
+// at /api/inbox (behind requireAuth via the /api mount in app.ts).
 //
 // The wire shape (InboxFilter/InboxChannel/InboxRow/InboxPage) is copied
 // VERBATIM from the design spec's "Contract C8" (docs/superpowers/specs/
@@ -27,11 +26,11 @@
 // merge-sorted by last_activity_at. To keep paging split-proof they are emitted
 // ONLY on the first page and additively — see the merge note in aggregateInbox.
 //
-// Hydration (name / role / placementContext / assignment / channel / direction /
-// preview) is BEST-EFFORT and bounded to the page: every external lookup is
-// wrapped so a missing/failed read degrades to the id (or omits the field) and
-// NEVER throws a 500 — exactly the posture today.ts takes. Per-request caches
-// keep each contact/placement/user resolved at most once.
+// Hydration (name / role / placementContext / channel / direction / preview) is
+// BEST-EFFORT and bounded to the page: every external lookup is wrapped so a
+// missing/failed read degrades to the id (or omits the field) and NEVER throws
+// a 500 - exactly the posture today.ts takes. Per-request caches keep each
+// contact/placement resolved at most once.
 //
 // PII (doc §9): responses carry names/previews to the authed client; LOG LINES
 // are counts/IDs only.
@@ -45,10 +44,6 @@ import {
 } from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
 import { STAGE_LABELS } from '../lib/statusModel.js';
-import {
-  createAuditRepo,
-  type AuditRepo,
-} from '../repos/auditRepo.js';
 import {
   createPlacementsRepo,
   type PlacementsRepo,
@@ -68,12 +63,10 @@ import {
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
-import { createUsersRepo, displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
-import type { AuthedRequest } from '../middleware/auth.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
-export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
+export type InboxFilter = 'all' | 'unread' | 'unknown';
 export type InboxChannel = 'sms' | 'mms' | 'call';
 
 export interface InboxRow {
@@ -88,7 +81,6 @@ export interface InboxRow {
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' → "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
-  assignment?: { userId: string; name: string }; // the Assigned chip
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
@@ -109,8 +101,6 @@ export interface InboxRouterDeps {
   contactsRepo?: ContactsRepo;
   messagesRepo?: MessagesRepo;
   placementsRepo?: PlacementsRepo;
-  usersRepo?: UsersRepo;
-  auditRepo?: AuditRepo;
   events?: EventBus;
 }
 
@@ -129,12 +119,11 @@ export const MAX_INBOX_LIMIT = 100;
  */
 const FETCH_BATCH = 100;
 
-/** The four valid filter values (route allowlist → 400 on anything else). */
+/** The three valid filter values (route allowlist -> 400 on anything else). */
 export const INBOX_FILTERS: ReadonlySet<string> = new Set<InboxFilter>([
   'all',
   'unread',
   'unknown',
-  'mine',
 ]);
 
 export function isInboxFilter(value: unknown): value is InboxFilter {
@@ -212,9 +201,6 @@ function roleFromContact(contact: ContactItem | undefined): 'tenant' | 'landlord
   return 'unknown';
 }
 
-// userDisplayName removed — callers now route through displayNameOf (imported
-// from usersRepo) so the fallback chain (name → email → userId) is canonical.
-
 /**
  * The unread count carried on a conversation row (sparse → 0). Pulled into a
  * helper so the cross-number SUM and the per-row read share one definition.
@@ -272,7 +258,7 @@ function deriveLatest(
  * other repo reads are best-effort and degrade rather than throw.
  */
 export async function aggregateInbox(
-  opts: { filter: InboxFilter; limit: number; cursor?: string; userId: string },
+  opts: { filter: InboxFilter; limit: number; cursor?: string },
   deps: InboxRouterDeps,
 ): Promise<InboxPage> {
   const log = deps.logger ?? defaultLogger;
@@ -280,15 +266,13 @@ export async function aggregateInbox(
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
-  const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
 
-  const { filter, limit, cursor, userId } = opts;
+  const { filter, limit, cursor } = opts;
   const startKey = cursor !== undefined ? decodeCursor(cursor) : undefined;
 
   // Per-request memoization (each contact/placement/user resolved at most once).
   const contactConvsCache = new Map<string, ConversationItem[]>();
   const placementLabelCache = new Map<string, string | undefined>();
-  const userNameCache = new Map<string, string>();
   // Contacts already emitted in THIS page (the newest-conversation guard so a
   // multi-number contact never yields two rows on one page).
   const emittedContacts = new Set<string>();
@@ -339,21 +323,6 @@ export async function aggregateInbox(
     return label;
   };
 
-  /** Resolve a team user's display name; cached + best-effort. */
-  const resolveUserName = async (assigneeId: string): Promise<string> => {
-    if (userNameCache.has(assigneeId)) return userNameCache.get(assigneeId)!;
-    let name = assigneeId;
-    try {
-      const user = await users.findById(assigneeId);
-      // displayNameOf: name (trimmed) → email → userId — canonical, never inline.
-      name = user ? displayNameOf(user) : assigneeId;
-    } catch (err) {
-      log.warn({ err }, 'inbox: assignee name hydration failed (best-effort)');
-    }
-    userNameCache.set(assigneeId, name);
-    return name;
-  };
-
   /** Derive the newest message on a conversation; best-effort (degrades). */
   const latestMessageOf = async (
     conversationId: string,
@@ -376,8 +345,6 @@ export async function aggregateInbox(
         return row.unreadCount > 0;
       case 'unknown':
         return row.needsTriage;
-      case 'mine':
-        return row.assignment?.userId === userId;
       case 'all':
       default:
         return true;
@@ -444,12 +411,6 @@ export async function aggregateInbox(
       if (label !== undefined) placementContext = { placementId: maxConv.placementId, label };
     }
 
-    let assignment: { userId: string; name: string } | undefined;
-    if (typeof maxConv.assignment === 'string' && maxConv.assignment.length > 0) {
-      const name = await resolveUserName(maxConv.assignment);
-      assignment = { userId: maxConv.assignment, name };
-    }
-
     emittedContacts.add(contact.contactId);
     // A type='unknown' contact IS an untriaged inbound (it just already has a
     // record) — so it needs triage and belongs under the "unknown" filter, exactly
@@ -468,7 +429,6 @@ export async function aggregateInbox(
       channel,
       direction,
       lastActivityAt: maxConv.last_activity_at,
-      ...(assignment !== undefined && { assignment }),
       needsTriage: role === 'unknown',
     };
   };
@@ -504,12 +464,6 @@ export async function aggregateInbox(
       typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '';
     const status: 'open' | 'closed' = conv.status === 'closed' ? 'closed' : 'open';
 
-    let assignment: { userId: string; name: string } | undefined;
-    if (typeof conv.assignment === 'string' && conv.assignment.length > 0) {
-      const name = await resolveUserName(conv.assignment);
-      assignment = { userId: conv.assignment, name };
-    }
-
     return {
       kind: 'relay_group',
       conversationId: conv.conversationId,
@@ -519,7 +473,6 @@ export async function aggregateInbox(
       lastActivityAt: conv.last_activity_at,
       status,
       owner: getOwner(conv),
-      ...(assignment !== undefined && { assignment }),
       needsTriage: false, // relay rows never need triage (never under the "unknown" filter)
     };
   };
@@ -655,11 +608,10 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
-  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const router = Router();
 
-  // GET /api/inbox?filter=all|unread|unknown|mine&cursor=&limit= → InboxPage
+  // GET /api/inbox?filter=all|unread|unknown&cursor=&limit= -> InboxPage
   router.get('/', async (req, res) => {
     const rawFilter = req.query['filter'];
     // Default to 'all' when the param is absent; reject anything that's not a
@@ -676,11 +628,9 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
     const rawCursor = req.query['cursor'];
     const cursor = typeof rawCursor === 'string' && rawCursor.length > 0 ? rawCursor : undefined;
 
-    const userId = (req as AuthedRequest).user!.userId;
-
     try {
       const page = await aggregateInbox(
-        { filter, limit, userId, ...(cursor !== undefined && { cursor }) },
+        { filter, limit, ...(cursor !== undefined && { cursor }) },
         deps,
       );
       res.json(page);
@@ -769,63 +719,6 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
     );
 
     log.info({ contactId, count: all.length }, 'inbox: contact mark-read fan-out');
-    res.json({ ok: true });
-  });
-
-  // POST /api/inbox/:contactId/assign { userId: string | null } — fan-out
-  // assignment across ALL the contact's conversations.
-  router.post('/:contactId/assign', async (req, res) => {
-    const { contactId } = req.params;
-    const payload = (req.body ?? {}) as Record<string, unknown>;
-
-    // `userId` key must be present; value may be string (assign) or null (clear).
-    if (!('userId' in payload)) {
-      res.status(400).json({ error: 'userId is required (string or null)' });
-      return;
-    }
-    const userId = payload['userId'];
-    if (!(userId === null || (typeof userId === 'string' && userId.length > 0))) {
-      res.status(400).json({ error: 'userId must be a non-empty string or null' });
-      return;
-    }
-
-    const contact = await contacts.getById(contactId);
-    if (!contact) {
-      res.status(404).json({ error: 'contact_not_found' });
-      return;
-    }
-
-    // Gather all conversations across every phone number the contact owns.
-    const phones = contactPhones(contact);
-    const convMap = new Map<string, ConversationItem>();
-    for (const cp of phones) {
-      const convs = await conversations.findByParticipantPhone(cp.phone);
-      for (const c of convs) convMap.set(c.conversationId, c);
-    }
-    const all = [...convMap.values()];
-
-    await Promise.all(
-      all.map(async (c) => {
-        try {
-          const { conversation, previousAssigneeUserId } = await conversations.setAssignment(
-            c.conversationId,
-            userId,
-          );
-          // §5 mandate: assignment flips are audit-trail events (old → new),
-          // exactly as the existing PATCH /conversations/:id/assignment does.
-          await audit.append(`conversations#${c.conversationId}`, 'assignment_changed', {
-            from: previousAssigneeUserId,
-            to: userId,
-          });
-          events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
-        } catch (err) {
-          if (err instanceof ConditionalCheckFailedException) return; // race: already gone
-          throw err;
-        }
-      }),
-    );
-
-    log.info({ contactId, userId, count: all.length }, 'inbox: contact assign fan-out');
     res.json({ ok: true });
   });
 

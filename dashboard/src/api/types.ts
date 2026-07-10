@@ -220,8 +220,6 @@ export interface ConversationSummary {
   /** ISO 8601. */
   last_activity_at: string;
   unread_count: number;
-  /** Assigned team member's userId, or null when unassigned. */
-  assignment: string | null;
   sms_opt_out: boolean;
   /** Resolved contact name denormalized onto the conversation, or null when the
    *  participant is un-triaged (we never fabricate a name — fall back to phone). */
@@ -817,9 +815,6 @@ export interface ConversationUpdatedEvent {
   /** Conversation type carried on the event so the inbox can re-evaluate the
    *  needs-review chip live (e.g. unknown_1to1 → tenant_1to1 after triage). */
   type: ConversationType;
-  /** Assigned team member's userId, or null when unassigned — so the Assigned
-   *  chip re-evaluates live. */
-  assignment: string | null;
   /** Resolved contact name (or null) — so the inbox shows the name and clears
    *  the review chip the instant a contact is triaged, without a reload. */
   participant_display_name: string | null;
@@ -1603,7 +1598,7 @@ export interface BroadcastUpdatedEvent {
 // newest-activity-first, aggregating all of a contact's numbers. GET /api/inbox
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
-export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
+export type InboxFilter = 'all' | 'unread' | 'unknown';
 export type InboxChannel = 'sms' | 'mms' | 'call';
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's
@@ -1624,7 +1619,6 @@ export interface InboxRow {
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' → render "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
-  assignment?: { userId: string; name: string }; // the Assigned chip
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId

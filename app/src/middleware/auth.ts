@@ -228,10 +228,9 @@ export function requireAuth(): RequestHandler {
 
 /**
  * 403 unless the session user's role matches. Built for M1.3 but applied
- * NOWHERE yet (deliberate): VAs run the day-to-day — assignment included —
- * so every /api route is requireAuth-only until a genuinely admin-only
- * surface exists (e.g. user management UI). Gate such routes with
- * requireRole('admin') then.
+ * NOWHERE yet (deliberate): VAs run the day-to-day work, so every /api route is
+ * requireAuth-only until a genuinely admin-only surface exists (e.g. user
+ * management UI). Gate such routes with requireRole('admin') then.
  */
 export function requireRole(role: UserRole): RequestHandler {
   return (req: AuthedRequest, res, next) => {

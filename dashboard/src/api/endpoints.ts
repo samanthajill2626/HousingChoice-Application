@@ -912,7 +912,7 @@ export function devLogin(email = 'va@example.com'): Promise<DevLoginResult> {
 }
 
 // --- Inbox (/api/inbox) (API Contract C8) ----------------------------------
-// The entity-centric inbox feed + its read/assign mutations. GET 404s until the
+// The entity-centric inbox feed + its read mutations. GET 404s until the
 // BE7/C8 backend slice lands ? useInbox catches that and degrades to 'pending'.
 
 /** GET /api/inbox - one page of inbox rows for a filter (newest-activity-first,
@@ -942,20 +942,6 @@ export function markInboxRead(
   return request<void>('/api/inbox/read', {
     method: 'POST',
     body: { phone: target.phone },
-    ...(signal !== undefined && { signal }),
-  });
-}
-
-/** POST /api/inbox/:contactId/assign { userId } - set (userId) or clear
- *  (userId=null) the contact row's assignment. */
-export function assignInbox(
-  contactId: string,
-  userId: string | null,
-  signal?: AbortSignal,
-): Promise<void> {
-  return request<void>(`/api/inbox/${encodeURIComponent(contactId)}/assign`, {
-    method: 'POST',
-    body: { userId },
     ...(signal !== undefined && { signal }),
   });
 }

@@ -21,20 +21,12 @@ function mkRow(over: Partial<InboxRowData> = {}): InboxRowData {
 
 const onOpen = vi.fn();
 const onMarkRead = vi.fn();
-const onAssign = vi.fn();
 
 function renderRow(row: InboxRowData): void {
   render(
     <MemoryRouter>
       <ul>
-        <InboxRow
-          row={row}
-          currentUserId="me1"
-          currentUserName="navi@example.com"
-          onOpen={onOpen}
-          onMarkRead={onMarkRead}
-          onAssign={onAssign}
-        />
+        <InboxRow row={row} onOpen={onOpen} onMarkRead={onMarkRead} />
       </ul>
     </MemoryRouter>,
   );
@@ -43,7 +35,6 @@ function renderRow(row: InboxRowData): void {
 beforeEach(() => {
   onOpen.mockReset();
   onMarkRead.mockReset();
-  onAssign.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -89,29 +80,6 @@ describe('InboxRow', () => {
     expect(screen.queryByRole('button', { name: /mark .* read/i })).not.toBeInTheDocument();
   });
 
-  it('assigns to the current user from an unassigned contact row', () => {
-    renderRow(mkRow({ assignment: undefined }));
-    fireEvent.click(screen.getByRole('button', { name: /assign .* to me/i }));
-    expect(onAssign).toHaveBeenCalledWith(expect.objectContaining({ contactId: 'c1' }), 'me1', 'navi@example.com');
-  });
-
-  it('shows "You" on the Assigned chip when assigned to the current user', () => {
-    renderRow(mkRow({ assignment: { userId: 'me1', name: 'navi@example.com' } }));
-    expect(screen.getByText(/Assigned - You/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /unassign/i }));
-    expect(onAssign).toHaveBeenCalledWith(expect.objectContaining({ contactId: 'c1' }), null, '');
-  });
-
-  it('shows the assignee name on the Assigned chip when assigned to someone else', () => {
-    renderRow(mkRow({ assignment: { userId: 'other', name: 'Sam Lee' } }));
-    expect(screen.getByText(/Assigned - Sam Lee/)).toBeInTheDocument();
-  });
-
-  it('offers no assign action on an unknown row (no contactId)', () => {
-    renderRow(mkRow({ kind: 'unknown', contactId: undefined, phone: '+15555550123', name: '(555) 555-0123', needsTriage: true }));
-    expect(screen.queryByRole('button', { name: /assign/i })).not.toBeInTheDocument();
-  });
-
   it('shows a call channel label for call rows', () => {
     renderRow(mkRow({ channel: 'call', preview: 'Missed call' }));
     expect(screen.getByText('Call')).toBeInTheDocument();
@@ -135,8 +103,6 @@ describe('InboxRow', () => {
     expect(link).toHaveAttribute('href', '/conversations/conv-g1');
     expect(screen.getByText('Group text')).toBeInTheDocument();
     expect(within(link).getByText(/See you at 3/)).toBeInTheDocument();
-    // Group rows never offer assign (no contactId).
-    expect(screen.queryByRole('button', { name: /assign/i })).not.toBeInTheDocument();
   });
 
   it('flags a closed relay_group row', () => {

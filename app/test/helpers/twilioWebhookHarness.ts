@@ -305,14 +305,6 @@ export function createFakeWorld(): FakeWorld {
       conv.unread_count = 0;
       return conv;
     },
-    async setAssignment(conversationId, assigneeUserId) {
-      const conv = conversations.get(conversationId);
-      if (!conv) throw conditionalCheckFailed(`setAssignment: no conversation ${conversationId}`);
-      const previousAssigneeUserId = typeof conv.assignment === 'string' ? conv.assignment : null;
-      if (assigneeUserId === null) delete conv.assignment;
-      else conv.assignment = assigneeUserId;
-      return { conversation: conv, previousAssigneeUserId };
-    },
     async listByLastActivity({ status, limit }) {
       const items = [...conversations.values()]
         .filter((c) => c.status === status)

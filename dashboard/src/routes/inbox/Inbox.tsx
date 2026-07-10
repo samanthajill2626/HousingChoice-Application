@@ -1,13 +1,12 @@
 // Inbox — the entity-centric communications hub (§2026-06-17-inbox-design). One
 // row per contact (or untriaged unknown number), newest-activity-first, with All
-// (default) / Unread / Unknown / Assigned-to-me filters. Opening a row navigates
-// to the contact page AND marks its comms read (optimistic). Degrades to an
-// honest pending state until the C8 backend lands. New design language (tokens +
-// CSS Modules); state-sync handled in useInbox.
+// (default) / Unread / Unknown filters. Opening a row navigates to the contact
+// page AND marks its comms read (optimistic). Degrades to an honest pending state
+// until the C8 backend lands. New design language (tokens + CSS Modules);
+// state-sync handled in useInbox.
 import { useState } from 'react';
 import type { InboxFilter } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
-import { useAuth } from '../../app/AuthContext.js';
 import { INBOX_FILTERS, emptyCopy } from './inboxFilters.js';
 import { InboxRow } from './InboxRow.js';
 import { rowKey, useInbox } from './useInbox.js';
@@ -15,7 +14,6 @@ import styles from './Inbox.module.css';
 
 export function Inbox(): React.JSX.Element {
   const [filter, setFilter] = useState<InboxFilter>('all');
-  const { me } = useAuth();
   const inbox = useInbox(filter);
   const empty = emptyCopy(filter);
 
@@ -71,11 +69,8 @@ export function Inbox(): React.JSX.Element {
               <InboxRow
                 key={rowKey(row)}
                 row={row}
-                currentUserId={me?.userId}
-                currentUserName={me?.email ?? 'You'}
                 onOpen={inbox.markRead}
                 onMarkRead={inbox.markRead}
-                onAssign={inbox.assign}
               />
             ))}
           </ul>

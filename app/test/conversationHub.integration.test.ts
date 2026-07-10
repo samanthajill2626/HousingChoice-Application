@@ -1,6 +1,6 @@
 // M1.2 integration tests against DynamoDB Local — the conversation-hub
 // conditional writes: participants claim (the auto-capture race anchor),
-// unread increment/reset, assignment set/clear, touchLastActivity ALL_NEW,
+// unread increment/reset, touchLastActivity ALL_NEW,
 // the one-Query inbox pagination, contact createIfAbsent no-overwrite, and
 // the full contactCapture race on real conditional writes.
 //
@@ -183,35 +183,6 @@ describe.skipIf(!reachable)('conversation hub repos against DynamoDB Local (thro
         ConditionalCheckFailedException,
       );
       await expect(conversations.resetUnread('conv-ghost')).rejects.toBeInstanceOf(
-        ConditionalCheckFailedException,
-      );
-    });
-  });
-
-  describe('assignment', () => {
-    it('sets, reassigns, and clears — returning the atomic previous assignee each time', async () => {
-      const conv = await conversations.createOrGetByParticipantPhone('+15550203333', 'tenant_1to1');
-
-      const set = await conversations.setAssignment(conv.conversationId, 'user-va-1');
-      expect(set.previousAssigneeUserId).toBeNull();
-      expect(set.conversation.assignment).toBe('user-va-1');
-
-      const reassign = await conversations.setAssignment(conv.conversationId, 'user-va-2');
-      expect(reassign.previousAssigneeUserId).toBe('user-va-1');
-      expect(reassign.conversation.assignment).toBe('user-va-2');
-
-      const clear = await conversations.setAssignment(conv.conversationId, null);
-      expect(clear.previousAssigneeUserId).toBe('user-va-2');
-      expect(clear.conversation.assignment).toBeUndefined();
-
-      // REMOVE really removed the attribute (not set to null/empty).
-      const reread = await conversations.getById(conv.conversationId);
-      expect(reread).toBeDefined();
-      expect('assignment' in (reread as ConversationItem)).toBe(false);
-    });
-
-    it('is conditional on the conversation existing', async () => {
-      await expect(conversations.setAssignment('conv-ghost', 'user-x')).rejects.toBeInstanceOf(
         ConditionalCheckFailedException,
       );
     });

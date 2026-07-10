@@ -26,15 +26,12 @@ import type { RepoDeps } from './conversationsRepo.js';
 
 /**
  * The milestone/activity types (C2 `TimelineMilestoneType`, VERBATIM — the
- * frontend imports the identical union). `listing_reviewed` is part of the
- * contract but emitted by a LATER slice (BE4); the type is included here so the
- * timeline can render it once that lands. Do NOT rename any member.
+ * frontend imports the identical union). Do NOT rename any member.
  */
 export type ActivityEventType =
   | 'placement_opened'
   | 'placement_closed'
   | 'listing_sent'
-  | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
   | 'tour_canceled'

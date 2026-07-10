@@ -207,7 +207,6 @@ const LANDLORD_FEED_TYPES: ReadonlySet<string> = new Set([
   'listing_status_changed',
   'unit_contact_added',
   'unit_contact_removed',
-  'listing_response_set',
 ]);
 
 const ALL_KINDS = ['message', 'call', 'milestone', 'scheduled'] as const;
@@ -485,14 +484,6 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
         ...base,
         type: e.event_type === 'unit_contact_added' ? 'added_to_group_text' : 'removed_from_group_text',
         label: e.event_type === 'unit_contact_added' ? 'Property contact added' : 'Property contact removed',
-        refType: 'unit',
-        refId: unitId,
-      };
-    case 'listing_response_set':
-      return {
-        ...base,
-        type: 'listing_reviewed',
-        label: `Tenant response - ${typeof p['response'] === 'string' ? p['response'] : ''}`,
         refType: 'unit',
         refId: unitId,
       };

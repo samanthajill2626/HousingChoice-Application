@@ -1243,4 +1243,76 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(dump).not.toContain('Ann');
     expect(dump).not.toContain('Lee');
   });
+
+  describe('send guard: unit availability (spec 2026-07-10)', () => {
+    async function draftWithUnit(app: import('express').Express): Promise<string> {
+      const create = await request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({
+          unitId: 'unit-1',
+          body_template: 'Hi [TenantName], see [FlyerLink]',
+          audience_filter: { contact_type: 'tenant' },
+        });
+      expect(create.status).toBe(201);
+      return create.body.broadcastId as string;
+    }
+
+    it('refuses to send when the unit is not available (flyer link would be dead)', async () => {
+      seedTenant(world, { contactId: 'c-1' });
+      const unit = seedUnit(world);
+      unit.status = 'on_hold'; // any non-shareable status
+      const { app } = makeWebhookHarness({ world });
+      const id = await draftWithUnit(app);
+
+      const res = await request(app)
+        .post(`/api/broadcasts/${id}/send`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ recipientContactIds: ['c-1'] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('unit_not_available');
+      // The broadcast is untouched - still a sendable draft.
+      const after = await world.broadcastsRepo.getById(id);
+      expect(after?.status).toBe('draft');
+    });
+
+    it('refuses when the unit was deleted after the draft was created', async () => {
+      seedTenant(world, { contactId: 'c-1' });
+      seedUnit(world); // available at create time
+      const { app } = makeWebhookHarness({ world });
+      const id = await draftWithUnit(app);
+      world.units.delete('unit-1'); // gone by send time
+
+      const res = await request(app)
+        .post(`/api/broadcasts/${id}/send`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ recipientContactIds: ['c-1'] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('unit_not_available');
+    });
+
+    it('a broadcast with NO attached unit sends without any unit lookup', async () => {
+      seedTenant(world, { contactId: 'c-1' });
+      const { app } = makeWebhookHarness({ world });
+      const create = await request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ body_template: 'hi', audience_filter: { contact_type: 'tenant' } });
+      expect(create.status).toBe(201);
+
+      const res = await request(app)
+        .post(`/api/broadcasts/${create.body.broadcastId}/send`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ recipientContactIds: ['c-1'] });
+
+      expect(res.status).toBe(200);
+    });
+  });
 });

@@ -71,3 +71,15 @@
   font-size: var(--fs-sm);
   color: var(--c-danger);
 }
+
+/* Non-Available property warning — reuses the same amber the "already sent"
+   badge in RecipientPreview uses (one amber, not two). */
+.unavailableNote {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--c-evt-amber-border);
+  border-radius: var(--radius-md);
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-sm);
+}

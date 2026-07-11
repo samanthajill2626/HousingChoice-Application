@@ -192,6 +192,81 @@ export function createAdminUsersRouter(deps: AdminUsersRouterDeps = {}): Router 
     res.json({ user: toAdminUserView(updated ?? { ...target, role }), changed: true });
   });
 
+  // DELETE /api/users/:userId -- remove a team member (HARD delete). GUARDS
+  // (lockout + routing safety), each 409 with a stable code, in this order:
+  //   1. cannot_remove_last_admin -- the table must never reach zero admins.
+  //      (Every caller is an admin, so this fires when the sole admin removes
+  //      themselves -- the more fundamental invariant, checked first, exactly
+  //      like the PATCH-role path.)
+  //   2. cannot_remove_self       -- a non-last admin can't remove their own
+  //      account (a foot-gun even when other admins remain).
+  //   3. voice_line_assigned      -- the target holds the single inbound voice
+  //      line; it must be reassigned before removal (removal must not silently
+  //      drop inbound call routing).
+  // On success the row is deleted; sessionMiddleware revokes the removed user's
+  // sessions within the epoch-cache TTL (<=60s). Re-inviting the same email
+  // later lands on the same deterministic key cleanly.
+  router.delete('/:userId', async (req: AuthedRequest, res) => {
+    const userId = String(req.params['userId'] ?? '');
+
+    const target = await users.findById(userId);
+    if (!target) {
+      res.status(404).json({ error: 'user_not_found' });
+      return;
+    }
+
+    // 1. LAST-ADMIN guard (checked first -- the fundamental invariant).
+    if (target.role === 'admin') {
+      const admins = (await users.listAll()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        res.status(409).json({ error: 'cannot_remove_last_admin' });
+        return;
+      }
+    }
+
+    // 2. SELF guard.
+    if (req.user?.userId === userId) {
+      res.status(409).json({ error: 'cannot_remove_self' });
+      return;
+    }
+
+    // 3. VOICE-LINE guard -- the single inbound-voice-line holder must be
+    // reassigned first (removal doesn't silently drop inbound routing).
+    const holder = await users.getInboundVoiceLineHolder();
+    if (holder?.userId === userId) {
+      res.status(409).json({ error: 'voice_line_assigned' });
+      return;
+    }
+
+    await users.remove(userId);
+
+    // ZERO-ADMIN LOCKOUT -- verify-after-write-and-rollback (mirrors the PATCH
+    // role path). The pre-check last-admin guard above is the fast path, but two
+    // concurrent removals of two different admins can both pass it and race the
+    // table to zero admins. So after deleting an admin, RE-LIST admins; if none
+    // remain, this delete emptied the set -- restore the row exactly and 409.
+    if (target.role === 'admin') {
+      const adminsNow = (await users.listAll()).filter((u) => u.role === 'admin');
+      if (adminsNow.length === 0) {
+        await users.restore(target); // undo -- resurrect the just-deleted row
+        log.warn(
+          { userId, actor: req.user?.userId },
+          'removal would leave zero admins -- rolled back (verify-after-write)',
+        );
+        res.status(409).json({ error: 'cannot_remove_last_admin' });
+        return;
+      }
+    }
+
+    await audit.append(`users#${userId}`, 'user_removed', {
+      email: target.email,
+      role: target.role,
+      actor: req.user?.userId,
+    });
+    log.info({ userId, actor: req.user?.userId }, 'user removed via API');
+    res.json({ removed: true });
+  });
+
   // POST /api/users/:userId/inbound-voice-line — assign the SINGLE inbound-voice-
   // line holder (spec §6). PRECONDITION: the target has a verified cell (else 409
   // cell_not_verified — an unverified cell must never be dialed by inbound). The

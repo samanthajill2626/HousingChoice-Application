@@ -14,6 +14,7 @@ const inviteUser = vi.fn();
 const setUserRole = vi.fn();
 const assignInboundVoiceLine = vi.fn();
 const clearInboundVoiceLine = vi.fn();
+const removeUser = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -23,6 +24,7 @@ vi.mock('../../api/index.js', async () => {
     setUserRole: (...a: unknown[]) => setUserRole(...a),
     assignInboundVoiceLine: (...a: unknown[]) => assignInboundVoiceLine(...a),
     clearInboundVoiceLine: (...a: unknown[]) => clearInboundVoiceLine(...a),
+    removeUser: (...a: unknown[]) => removeUser(...a),
   };
 });
 
@@ -340,5 +342,97 @@ describe('TeamSection — non-admin (VA) viewer read-only', () => {
     expect(
       screen.queryByRole('button', { name: /Clear the inbound voice line/i }),
     ).not.toBeInTheDocument();
+    // The Remove control is admin-only too -- not rendered for a non-admin viewer.
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
+  });
+});
+
+describe('TeamSection -- remove teammate', () => {
+  it('removes a member after confirming in the dialog', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({ userId: 'admin1', email: 'admin@example.com', role: 'admin' }),
+      user({ userId: 'bob', email: 'bob@example.com', role: 'va' }),
+    ]);
+    removeUser.mockResolvedValue({ removed: true });
+    render(<TeamSection />);
+    await screen.findByText('bob@example.com');
+
+    // Open the confirm dialog for Bob (a removable VA).
+    await u.click(screen.getByRole('button', { name: 'Remove bob@example.com' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove teammate' });
+
+    // Confirm.
+    await u.click(within(dialog).getByRole('button', { name: 'Remove' }));
+
+    expect(removeUser).toHaveBeenCalledWith('bob');
+    // The row is dropped from the roster.
+    await waitFor(() => expect(screen.queryByText('bob@example.com')).not.toBeInTheDocument());
+  });
+
+  it('disables Remove for your own row (self)', async () => {
+    listUsers.mockResolvedValue([
+      user({ userId: 'admin1', email: 'admin@example.com', role: 'admin' }),
+      user({ userId: 'viewer', email: 'viewer@example.com', role: 'va' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('viewer@example.com');
+    const btn = screen.getByRole('button', { name: 'Remove viewer@example.com' });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', "You can't remove your own account.");
+  });
+
+  it('disables Remove for the last admin', async () => {
+    // Exactly one admin (not the viewer) -> that admin can't be removed.
+    listUsers.mockResolvedValue([
+      user({ userId: 'onlyadmin', email: 'onlyadmin@example.com', role: 'admin' }),
+      user({ userId: 'bob', email: 'bob@example.com', role: 'va' }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('onlyadmin@example.com');
+    const btn = screen.getByRole('button', { name: 'Remove onlyadmin@example.com' });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', 'The team must keep at least one admin.');
+  });
+
+  it('disables Remove for the inbound-voice-line holder', async () => {
+    listUsers.mockResolvedValue([
+      user({ userId: 'admin1', email: 'admin@example.com', role: 'admin' }),
+      user({
+        userId: 'holder',
+        email: 'holder@example.com',
+        role: 'va',
+        cell: '+14040100001',
+        cell_verified_at: '2026-06-01T00:00:00.000Z',
+        inbound_voice_line: true,
+      }),
+    ]);
+    render(<TeamSection />);
+    await screen.findByText('holder@example.com');
+    const btn = screen.getByRole('button', { name: 'Remove holder@example.com' });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', 'Reassign the inbound voice line first.');
+  });
+
+  it('keeps the row and shows the error in the dialog on a 409', async () => {
+    const u = userEvent.setup();
+    listUsers.mockResolvedValue([
+      user({ userId: 'admin1', email: 'admin@example.com', role: 'admin' }),
+      user({ userId: 'bob', email: 'bob@example.com', role: 'va' }),
+    ]);
+    // The button is enabled (Bob looks removable), but the server rejects (race).
+    removeUser.mockRejectedValue(
+      new ApiError(409, 'voice_line_assigned', 'holds the inbound line'),
+    );
+    render(<TeamSection />);
+    await screen.findByText('bob@example.com');
+
+    await u.click(screen.getByRole('button', { name: 'Remove bob@example.com' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove teammate' });
+    await u.click(within(dialog).getByRole('button', { name: 'Remove' }));
+
+    // Error shown in the dialog; the row is still present.
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Reassign the inbound voice line/i);
+    expect(screen.getByText('bob@example.com')).toBeInTheDocument();
   });
 });

@@ -304,3 +304,43 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* --- Remove control + confirm dialog ------------------------------------- */
+.removeBtn {
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  padding: var(--sp-1) var(--sp-2);
+  cursor: pointer;
+}
+
+.removeBtn:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.removeBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.removeBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: var(--c-text-muted);
+}
+
+.cardActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-2);
+}
+
+.dialogText {
+  margin: 0;
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}

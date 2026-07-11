@@ -14,10 +14,11 @@ import { listThreads } from '../../fixtures/fakeTwilio.js';
 //      "Sent to tenants" card lists them.
 //
 // Sends are asserted via the fake-twilio thread store (never real SMS), exactly
-// as broadcasts.spec.ts does. Fresh, uniquely-phoned tenants are created via the
-// API so every outbox thread has a clean, order-independent single message.
+// as broadcasts.spec.ts does. Fresh, uniquely-phoned tenants AND a fresh Available
+// per-run property are created via the API so every outbox thread has a clean,
+// order-independent single message and the availability guard (spec 2026-07-10) is
+// satisfied (the seeded unit-0001 stays under_application for public-pages.spec.ts).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
-const SEEDED_UNIT = 'unit-0001'; // 1450 Joseph E. Boone Blvd NW, Atlanta, GA (beds 2)
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
@@ -50,6 +51,36 @@ async function createTenant(
   return { contactId, firstName, name: `${firstName} Matchtest`, phone };
 }
 
+/** Create a fresh per-run property via the API and publish it Available (the
+ *  status the send guard, spec 2026-07-10, requires). Hermetic on purpose: the
+ *  seeded units keep their statuses (unit-0001 MUST stay under_application for
+ *  public-pages.spec.ts, and the availability guard rejects it), so every send
+ *  test creates + publishes its own. Returns the new unitId plus the unique
+ *  street line we can search the Property picker by. Mirrors broadcasts.spec.ts. */
+async function createUnitViaApi(
+  request: APIRequestContext,
+  stamp: string,
+): Promise<{ unitId: string; line1: string }> {
+  const line1 = `${stamp} Matching Entry Ave`;
+  const res = await request.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId: 'contact-landlord-0001',
+      beds: 2,
+      jurisdiction: 'atlanta_housing',
+      address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
+      rent_min: 1500,
+      rent_max: 1600,
+    },
+  });
+  expect(res.ok()).toBeTruthy();
+  const unitId = (await res.json()).unit.unitId as string;
+  const flip = await request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+    data: { toStatus: 'available', source: 'manual' },
+  });
+  expect(flip.ok()).toBeTruthy();
+  return { unitId, line1 };
+}
+
 /** Count the outbound messages to `phone` whose body contains `needle`, read
  *  from the fake-twilio thread store. A freshly-created tenant's thread only
  *  holds messages this test sent, so the count is exact and order-independent. */
@@ -74,9 +105,12 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // dev-login FIRST so page.request carries the session cookie for the setup calls.
     await devLogin(page);
 
-    // A fresh, consenting tenant with a unique phone (clean single-message outbox).
+    // A fresh, consenting tenant with a unique phone (clean single-message outbox)
+    // and a fresh Available property to send (the seeded unit-0001 is
+    // under_application and the availability guard would refuse it).
     const stamp = `${Date.now()}`.slice(-6);
     const tenant = await createTenant(page.request, `Sendto${stamp}`);
+    const { unitId, line1 } = await createUnitViaApi(page.request, stamp);
 
     // From the tenant's contact page, the "Properties sent" card "+ Send" action
     // opens the seeded 1:1 composer (?contactId=).
@@ -88,16 +122,16 @@ test.describe('Matching entry points - tenant file + property page', () => {
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
     await expect(page.getByText(/Sending to/)).toBeVisible();
 
-    // Pick the property via the typeahead (type a distinctive slice of the address,
-    // click the option). This attaches unit-0001 and triggers the auto-resolve.
-    await page.getByRole('combobox', { name: 'Property' }).fill('Joseph E. Boone');
-    await page.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+    // Pick the property via the typeahead (type the per-run unit's unique street,
+    // click the option). This attaches our fresh unit and triggers the auto-resolve.
+    await page.getByRole('combobox', { name: 'Property' }).fill(line1);
+    await page.getByRole('option', { name: new RegExp(`${stamp} Matching Entry`) }).click();
 
     // The message now holds the FINAL resolved text (no token template): it greets
     // the tenant by first name and carries the flyer link. No unresolved [TenantName].
     const message = page.getByLabel('Message');
     await expect(message).toHaveValue(/Hi /, { timeout: 10_000 });
-    await expect(message).toHaveValue(new RegExp(`/p/${SEEDED_UNIT}`));
+    await expect(message).toHaveValue(new RegExp(`/p/${unitId}`));
     await expect(message).not.toHaveValue(/\[TenantName\]/);
 
     // Preview -> exactly one pre-checked recipient row (the seeded tenant) -> Send.
@@ -115,7 +149,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // Proof of send: the tenant's outbox gained EXACTLY ONE message carrying the
     // property's flyer link.
     await expect
-      .poll(async () => outboundHits(request, tenant.phone, `/p/${SEEDED_UNIT}`), {
+      .poll(async () => outboundHits(request, tenant.phone, `/p/${unitId}`), {
         timeout: 15_000,
         message: 'the tenant should receive exactly one message with the flyer link',
       })
@@ -134,7 +168,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
           );
           if (!res.ok()) return false;
           const rows = (await res.json()).sent as Array<{ unitId: string }>;
-          return rows.some((r) => r.unitId === SEEDED_UNIT);
+          return rows.some((r) => r.unitId === unitId);
         },
         { timeout: 15_000, message: 'the listing send should be recorded for the tenant' },
       )
@@ -145,7 +179,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     const propertiesSent = page.locator('section', {
       has: page.getByRole('heading', { name: /Properties sent/ }),
     });
-    await expect(propertiesSent.locator(`a[href="/listings/${SEEDED_UNIT}"]`)).toBeVisible({
+    await expect(propertiesSent.locator(`a[href="/listings/${unitId}"]`)).toBeVisible({
       timeout: 10_000,
     });
   });
@@ -157,12 +191,15 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // A 3-BR tenant: NOT caught by the unit's 2-BR audience filter, so it must be
     // added by hand via the "Add a tenant" search.
     const added = await createTenant(page.request, `Addme${stamp}`, 3);
+    // A fresh Available 2-BR property (the seeded unit-0001 is under_application
+    // and the availability guard would refuse the send).
+    const { unitId } = await createUnitViaApi(page.request, stamp);
 
     // From the property page, the "Sent to tenants" card "+ Send" action opens the
     // audience-filtered composer with the unit pre-filled (?unitId=).
-    await page.goto(`${NEXT}/listings/${SEEDED_UNIT}`);
+    await page.goto(`${NEXT}/listings/${unitId}`);
     await page.getByRole('button', { name: 'Send this property to tenants' }).click();
-    await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${SEEDED_UNIT}`));
+    await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unitId}`));
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
 
     // Filters are visible + the 2-BR chip is pre-filled from the unit's beds.
@@ -206,7 +243,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     await expect
       .poll(
         async () => {
-          const res = await page.request.get(`${NEXT}/api/units/${SEEDED_UNIT}/recipients`);
+          const res = await page.request.get(`${NEXT}/api/units/${unitId}/recipients`);
           if (!res.ok()) return false;
           const rows = (await res.json()).recipients as Array<{ contactId: string }>;
           return rows.some((r) => r.contactId === added.contactId);
@@ -216,7 +253,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
       .toBe(true);
 
     // The property page's "Sent to tenants" card now lists the hand-picked tenant.
-    await page.goto(`${NEXT}/listings/${SEEDED_UNIT}`);
+    await page.goto(`${NEXT}/listings/${unitId}`);
     const sentCard = page.locator('section', {
       has: page.getByRole('heading', { name: 'Sent to tenants' }),
     });

@@ -299,6 +299,43 @@ describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
     expect(screen.queryByRole('combobox', { name: 'Property' })).not.toBeInTheDocument();
     expect(getUnits).not.toHaveBeenCalled();
   });
+
+  it('a picker-attached property reaches the preview step (effectiveUnitId, not the empty ?unitId)', async () => {
+    // I1: the preview must receive the PICKED unit id so its Send pre-flight +
+    // Make-Available recovery run. A non-Available picked unit makes the pre-flight
+    // observable: the "Property isn't Available" dialog only appears if the preview
+    // got unitId='u-1'. If the composer passed the URL's (empty) ?unitId instead,
+    // no pre-flight would run and no dialog would show.
+    getUnit.mockResolvedValue(unit({ unitId: 'u-1', status: 'on_hold' }));
+    previewBroadcast.mockResolvedValue({
+      count: 1,
+      truncated: false,
+      candidates: [{ contactId: 'c-seed', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: true }],
+      priorRecipientContactIds: [],
+      seedContactIds: ['c-seed'],
+      unresolvedSeedIds: [],
+    });
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-seed');
+
+    // Pick a property via the picker (no ?unitId in the URL).
+    const picker = await screen.findByRole('combobox', { name: 'Property' });
+    await u.type(picker, 'Peachtree');
+    await u.click(await screen.findByRole('option', { name: /Peachtree/ }));
+
+    // Resolved auto-seed fills the body → Preview enables → advance to the list.
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    const previewBtn = screen.getByRole('button', { name: 'Preview recipients' });
+    await waitFor(() => expect(previewBtn).toBeEnabled(), { timeout: 4000 });
+    await u.click(previewBtn);
+    await screen.findByRole('heading', { name: 'Review recipients' });
+
+    // Send → the preview's availability pre-flight checks the PICKED unit id.
+    getUnit.mockClear();
+    await u.click(screen.getByRole('button', { name: /^Send to 1 tenant/ }));
+    await screen.findByRole('dialog', { name: "Property isn't Available" });
+    expect(getUnit).toHaveBeenCalledWith('u-1');
+  });
 });
 
 describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)', () => {

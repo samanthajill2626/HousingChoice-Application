@@ -1,5 +1,5 @@
 // ListingDetail - the Listing detail page (B4), the locked v4 mockup. A
-// near-black header band (address - status badge - facts - "?? Broadcast to
+// near-black header band (address - status badge - facts - "?? Send to
 // tenants" + Edit + ?) over a two-column body and a full-width Photos gallery:
 //   LEFT  - a small hero image - a flyer line (View flyer ? + Copy public link)
 //           - Property details (with Accepted vouchers as a BULLETED list) - Tour
@@ -160,7 +160,7 @@ export function ListingDetail(): React.JSX.Element {
   // applies the returned unit in place so the Deleted banner clears.
   const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
   // Shared by both entry points to the send composer (the kebab item and the
-  // "Sent to tenants" card's "+ Send" action) — one URL, one place it's built.
+  // "Sent to tenants" card's "+ Send" action) - one URL, one place it's built.
   const goToSend = (): void => void navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`);
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;

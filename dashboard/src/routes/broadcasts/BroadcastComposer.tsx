@@ -182,6 +182,13 @@ export function BroadcastComposer(): React.JSX.Element {
     [unit],
   );
 
+  // The seeded tenant's display name (falls back to the raw id when the contact
+  // fetch failed) — shared by the seeds-only banner and the resolved 1:1 guard.
+  const seedDisplayName =
+    seedContact !== null
+      ? contactDisplayName(seedContact.firstName, seedContact.lastName, seedContact.phone)
+      : (seedContactId ?? '');
+
   // A textarea keystroke (as opposed to the programmatic auto-seed): take the
   // operator's edit AND latch bodyEdited so the auto-seed stops overwriting it.
   function onBodyChange(next: string): void {
@@ -261,7 +268,11 @@ export function BroadcastComposer(): React.JSX.Element {
           preview={preview}
           tenantCandidates={tenants}
           candidatesLoading={tenantsLoading}
-          {...(unitId !== undefined && { unitId })}
+          {...(effectiveUnitId !== undefined && { unitId: effectiveUnitId })}
+          {...(resolvedMode &&
+            seedContactIds[0] !== undefined && {
+              resolvedFor: { contactId: seedContactIds[0], name: seedDisplayName },
+            })}
         />
       </div>
     );
@@ -278,13 +289,7 @@ export function BroadcastComposer(): React.JSX.Element {
           {seedContactIds.length > 0 && !audienceEnabled ? (
             <div className={styles.seedBanner}>
               <p className={styles.seedBannerText}>
-                Sending to{' '}
-                <strong>
-                  {seedContact !== null
-                    ? contactDisplayName(seedContact.firstName, seedContact.lastName, seedContact.phone)
-                    : seedContactId}
-                </strong>
-                .
+                Sending to <strong>{seedDisplayName}</strong>.
               </p>
               <button
                 type="button"

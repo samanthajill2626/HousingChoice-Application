@@ -87,6 +87,7 @@ function renderPreview(props: {
   candidatesLoading?: boolean;
   draftId?: string;
   unitId?: string;
+  resolvedFor?: { contactId: string; name: string };
 }): void {
   render(
     <MemoryRouter initialEntries={['/broadcasts/new']}>
@@ -100,6 +101,7 @@ function renderPreview(props: {
               tenantCandidates={props.tenantCandidates ?? []}
               candidatesLoading={props.candidatesLoading ?? false}
               {...(props.unitId !== undefined && { unitId: props.unitId })}
+              {...(props.resolvedFor !== undefined && { resolvedFor: props.resolvedFor })}
             />
           }
         />
@@ -494,6 +496,78 @@ describe('RecipientPreview — seeded recipients', () => {
   it('shows a count-based notice when preview reports unresolved seeds', () => {
     renderPreview({ preview: previewOf({ unresolvedSeedIds: ['ghost'] }) });
     expect(screen.getByText(/1 added tenant can't receive texts/)).toBeInTheDocument();
+  });
+});
+
+// ── Resolved 1:1 guard (C1): the body names ONE tenant, so it must reach exactly
+// that tenant — the add-a-tenant search is hidden and Send is blocked otherwise. ──
+describe('RecipientPreview — resolved 1:1 audience guard', () => {
+  const resolvedFor = { contactId: 'c1', name: 'Brianna Smith' };
+
+  it('hides the Add-a-tenant search in resolved mode', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', firstName: 'Brianna', seeded: true })],
+        seedContactIds: ['c1'],
+      }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'New', lastName: 'Tenant' })],
+      resolvedFor,
+    });
+    // No "Add a tenant" label or combobox — a broader audience is unsafe here.
+    expect(screen.queryByRole('combobox', { name: 'Add a tenant' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Add a tenant')).not.toBeInTheDocument();
+    // Exactly the resolved tenant is checked → Send is enabled, no guard note.
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    expect(screen.queryByText(/This message was written for/)).not.toBeInTheDocument();
+  });
+
+  it('unchecking the seeded row disables Send and shows the guard note', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', firstName: 'Brianna', seeded: true })],
+        seedContactIds: ['c1'],
+      }),
+      resolvedFor,
+    });
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    await u.click(screen.getByRole('checkbox', { name: 'Brianna' }));
+    // The selection no longer matches the one tenant the message was written for.
+    const note = screen.getByRole('status');
+    expect(note).toHaveTextContent(
+      'This message was written for Brianna Smith. Head back to edit the audience or message.',
+    );
+    expect(screen.getByRole('button', { name: /^Send to 0 tenants/ })).toBeDisabled();
+  });
+
+  it('an extra checked recipient (not the resolved tenant) blocks Send with the note', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Brianna', seeded: true }),
+          candidate({ contactId: 'c2', firstName: 'Other', phone: '+14040000002' }),
+        ],
+        seedContactIds: ['c1'],
+      }),
+      resolvedFor,
+    });
+    // Both start checked → the checked set is not exactly [c1].
+    expect(
+      screen.getByText(
+        'This message was written for Brianna Smith. Head back to edit the audience or message.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Send to 2 tenants/ })).toBeDisabled();
+  });
+
+  it('a NON-resolved preview is unchanged: Add-a-tenant present, no guard note', () => {
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })] }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'New', lastName: 'Tenant' })],
+    });
+    expect(screen.getByRole('combobox', { name: 'Add a tenant' })).toBeInTheDocument();
+    expect(screen.queryByText(/This message was written for/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
   });
 });
 

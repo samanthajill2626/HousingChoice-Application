@@ -108,7 +108,10 @@ row-level future use; nothing in v1 emits it but the composer must not break).
   (ContactSearchField in RecipientPreview): picking a tenant adds a checked
   annotated row, deduped. That behavior is unchanged.
 - New: hand-picked additions are written back to the draft's seed list
-  (best-effort PATCH) so they survive ?draftId= resume.
+  (best-effort PATCH), persisting them to the draft record. NOTE: the write side
+  works, but ?draftId= resume does not yet rehydrate the body/seeds (the first
+  keystroke recreates the draft), so persisted seeds do not survive resume in
+  practice. Tracked as docs/issues/matching-draft-resume-seed-rehydration.
 
 ### Message step
 

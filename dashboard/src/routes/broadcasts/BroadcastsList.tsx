@@ -4,7 +4,7 @@
 // review/send step (the draft already has an id → preview it) and carries a
 // Delete action (confirm modal → DELETE — the list is the only reliable place to
 // kill a draft, since the composer can't rehydrate one yet); a sending/sent/
-// failed row opens its live Results view. A "New broadcast" button starts a fresh
+// failed row opens its live Results view. A "Send a property" button starts a fresh
 // composer. Accessibility-first (real headings, a labeled filter, link rows).
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';

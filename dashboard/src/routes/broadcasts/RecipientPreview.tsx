@@ -56,6 +56,11 @@ export interface RecipientPreviewProps {
    *  (spec 2026-07-10): a non-Available unit's flyer link is dead, so the send
    *  is blocked behind a "Make Available & send" dialog. */
   unitId?: string;
+  /** Resolved 1:1 mode (matching sends): the body was rendered with ONE tenant's
+   *  name baked in ("Hi Brianna, ..."), so it must reach exactly that tenant and
+   *  nobody else. When set: the add-a-tenant search is hidden, and Send is blocked
+   *  unless the checked set is exactly [contactId]. */
+  resolvedFor?: { contactId: string; name: string };
 }
 
 /** Build the initial rows from the preview candidates — already-sent rows start
@@ -81,6 +86,7 @@ export function RecipientPreview({
   tenantCandidates,
   candidatesLoading,
   unitId,
+  resolvedFor,
 }: RecipientPreviewProps): React.JSX.Element {
   const navigate = useNavigate();
   const priorIds = useMemo(
@@ -110,6 +116,12 @@ export function RecipientPreview({
   const [checkingUnit, setCheckingUnit] = useState(false);
 
   const checkedCount = rows.filter((r) => r.checked).length;
+  // Resolved 1:1 mode: the body names ONE tenant, so the send must land on exactly
+  // that contactId — no more, no fewer. A mismatched selection (extra recipients,
+  // or the seeded row unchecked) hard-blocks Send behind an inline explanation.
+  const resolvedMismatch =
+    resolvedFor !== undefined &&
+    !(checkedCount === 1 && rows.some((r) => r.checked && r.contactId === resolvedFor.contactId));
   // A2P/CTIA: how many listed recipients have NO recorded consent (fenced out of
   // the send + surfaced so staff can resolve them — mirrors the skipped counts).
   const noConsentCount = rows.filter((r) => !r.hasConsent).length;
@@ -209,7 +221,7 @@ export function RecipientPreview({
   }
 
   async function onSend(): Promise<void> {
-    if (sending || checkingUnit || checkedCount === 0) return;
+    if (sending || checkingUnit || checkedCount === 0 || resolvedMismatch) return;
     // Pre-flight (spec 2026-07-10): the flyer link only resolves while the
     // property is Available. Check FRESH status (never the compose-time object;
     // a resumed draft can be days old).
@@ -412,26 +424,39 @@ export function RecipientPreview({
         </ul>
       )}
 
-      {/* Add a tenant the filter didn't catch. */}
-      <div className={styles.addRow}>
-        <span className={styles.addLabel}>Add a tenant</span>
-        {candidatesLoading ? (
-          <Spinner />
-        ) : (
-          <ContactSearchField
-            value={search}
-            onChange={(v) => {
-              if (v.contactId !== undefined) addTenant(v);
-              else setSearch(v);
-            }}
-            candidates={tenantCandidates}
-            inputLabel="Add a tenant"
-          />
-        )}
-      </div>
-      {addNote !== null ? (
-        <p className={styles.addNote} role="alert">
-          {addNote}
+      {/* Add a tenant the filter didn't catch. Hidden in resolved 1:1 mode: the
+          body is written for one named tenant, so a broader audience is unsafe. */}
+      {resolvedFor === undefined ? (
+        <>
+          <div className={styles.addRow}>
+            <span className={styles.addLabel}>Add a tenant</span>
+            {candidatesLoading ? (
+              <Spinner />
+            ) : (
+              <ContactSearchField
+                value={search}
+                onChange={(v) => {
+                  if (v.contactId !== undefined) addTenant(v);
+                  else setSearch(v);
+                }}
+                candidates={tenantCandidates}
+                inputLabel="Add a tenant"
+              />
+            )}
+          </div>
+          {addNote !== null ? (
+            <p className={styles.addNote} role="alert">
+              {addNote}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+
+      {/* Resolved 1:1 guard: the selection no longer matches the one tenant the
+          message was written for — say so and block Send until it's corrected. */}
+      {resolvedMismatch && resolvedFor !== undefined ? (
+        <p className={styles.resolvedNote} role="status">
+          This message was written for {resolvedFor.name}. Head back to edit the audience or message.
         </p>
       ) : null}
 
@@ -466,7 +491,7 @@ export function RecipientPreview({
         <button
           type="button"
           className={styles.sendBtn}
-          disabled={checkedCount === 0 || sending || checkingUnit}
+          disabled={checkedCount === 0 || sending || checkingUnit || resolvedMismatch}
           onClick={() => void onSend()}
         >
           {checkingUnit
@@ -513,7 +538,7 @@ export function RecipientPreview({
           }
         >
           <p className={styles.availGateBody}>
-            The flyer link in this broadcast only works while the property is Available. Its
+            The flyer link in this send only works while the property is Available. Its
             status is currently{' '}
             <strong>{LISTING_STATUS_LABELS[availGate as ListingStatus] ?? availGate}</strong>.
           </p>

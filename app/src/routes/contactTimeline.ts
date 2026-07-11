@@ -451,7 +451,7 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
       return {
         ...base,
         type: 'listing_sent',
-        label: `Broadcast to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+        label: `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
         refType: 'broadcast',
         ...(typeof p['broadcastId'] === 'string' && { refId: p['broadcastId'] }),
       };

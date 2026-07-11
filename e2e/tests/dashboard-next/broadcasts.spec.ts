@@ -100,12 +100,12 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     });
     expect(sentRes.ok()).toBeTruthy();
 
-    // --- Compose from the property: "Broadcast to tenants" in the kebab menu. ---
+    // --- Compose from the property: "Send to tenants" in the kebab menu. ---
     await page.goto(`${NEXT}/listings/${SEEDED_UNIT}`);
     await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Broadcast to tenants' }).click();
+    await page.getByRole('menuitem', { name: 'Send to tenants' }).click();
     await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${SEEDED_UNIT}`));
-    await expect(page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
 
     // The voucher size is PRE-FILLED from the unit's 2 beds (the 2-BR chip is
     // pressed + tagged "matches property").
@@ -330,7 +330,7 @@ test.describe('Broadcasts — delete an unsent draft', () => {
     // composer's throwaway draft is (re)created on a debounced material change;
     // the LAST create for this compose is the one Preview/Delete acts on.)
     await page.goto(`${NEXT}/broadcasts/new?unitId=${SEEDED_UNIT}`);
-    await expect(page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
 
     const createResp = page.waitForResponse(
       (r) => r.url().endsWith('/api/broadcasts') && r.request().method() === 'POST',

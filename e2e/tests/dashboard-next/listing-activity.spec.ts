@@ -139,7 +139,7 @@ test.describe('Property detail — broadcast + tour Activity rows (activity cove
     const activity = page.locator('section', { has: page.getByRole('heading', { name: 'Activity' }) });
     await expect(activity).toBeVisible();
 
-    const bcast = activity.getByRole('link', { name: /Broadcast to 2 tenants/ });
+    const bcast = activity.getByRole('link', { name: /Sent to 2 tenants/ });
     await expect(bcast).toBeVisible();
     await expect(bcast).toHaveAttribute('href', `/broadcasts/${broadcastId}`);
 

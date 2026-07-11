@@ -228,7 +228,7 @@ test.describe('A2P §8.2 — JIT consent gate', () => {
     // then it enables once the timeline resolves a conversation to send into.
     const body = `Hi — a 2BR home just opened up. ${stamp}`;
     await page.getByRole('textbox', { name: 'Reply message' }).fill(body);
-    const sendBtn = page.getByRole('button', { name: 'Send' });
+    const sendBtn = page.getByRole('button', { name: 'Send', exact: true });
     await expect(sendBtn).toBeEnabled({ timeout: 20_000 });
 
     // Attempt a PROACTIVE 1:1 send → the JIT gate refuses it (409 contact_no_consent).
@@ -295,7 +295,7 @@ test.describe('A2P §8.2 — JIT consent gate', () => {
     await page.goto(`${NEXT}/contacts/${contactId}`);
     const reply = `Sure — let's find you one. ${stamp}`;
     await page.getByRole('textbox', { name: 'Reply message' }).fill(reply);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     await expect(page.getByRole('dialog', { name: 'Record consent before texting' })).toHaveCount(0);
     await expect
@@ -355,7 +355,7 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
 
     // Compose from the property → 2-BR audience pre-filled → Preview.
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
-    await expect(page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
     const body = `Open house ${stamp} — 2BR available.`;
     await page.getByLabel('Message').fill(body);
     const previewBtn = page.getByRole('button', { name: 'Preview recipients' });

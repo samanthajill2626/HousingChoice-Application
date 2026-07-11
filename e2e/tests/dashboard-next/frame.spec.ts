@@ -26,7 +26,7 @@ test('new dashboard: dev-login → AppFrame nav renders → sign out', async ({ 
     await expect(workspace.getByRole('link', { name: label, exact: true })).toBeVisible();
   }
   const comms = page.getByRole('navigation', { name: 'Communications' });
-  for (const label of ['Inbox', 'Broadcasts']) {
+  for (const label of ['Inbox', 'Matching']) {
     await expect(comms.getByRole('link', { name: label, exact: true })).toBeVisible();
   }
   await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible();

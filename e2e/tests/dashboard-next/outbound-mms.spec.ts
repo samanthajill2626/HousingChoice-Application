@@ -65,7 +65,7 @@ async function attachFixtureAndArmSend(page: Page, body?: string): Promise<void>
   await page.locator('#mms-attach-input').setInputFiles(FIXTURE_PNG);
   // The chip appears immediately (aria-busy while uploading); wait for the upload
   // to complete via the Send button re-enabling (disabled while hasUploading).
-  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled({ timeout: 20_000 });
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled({ timeout: 20_000 });
 }
 
 /** Outbound legs on a member's fake thread that carry at least one media URL. */
@@ -93,7 +93,7 @@ test.describe('Outbound MMS - 1:1 contact composer', () => {
 
     // Upload from device via the REAL file input, then send with a text body.
     await attachFixtureAndArmSend(page, token);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     // (i) Proof of send: the tenant's fake thread has an outbound leg carrying a
     //     presigned media URL (the app presigns per attempt and passes it to the
@@ -183,7 +183,7 @@ test.describe('Outbound MMS - relay group media both directions', () => {
 
     // Team send WITH text + an attachment through the group composer.
     await attachFixtureAndArmSend(page, token);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByText(token)).toBeVisible({ timeout: 15_000 });
 
     // Each member's fake thread gets exactly this run's leg carrying media (the
@@ -269,7 +269,7 @@ test.describe('Outbound MMS - relay group media both directions', () => {
 
     // Media-only: attach WITHOUT typing a body; Send arms on the attachment alone.
     await attachFixtureAndArmSend(page);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     // Each member gets a NEW leg whose body is the media_only catalog copy
     // ("<name> sent an attachment.") AND carries media.

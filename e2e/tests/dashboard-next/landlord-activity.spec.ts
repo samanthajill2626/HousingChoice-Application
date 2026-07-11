@@ -118,7 +118,7 @@ test.describe('Landlord timeline — owned-property activity interleave (activit
     await page.goto(`${NEXT}/contacts/${landlordId}`);
     const timeline = page.getByRole('region', { name: 'Communications and activity' });
 
-    const bcast = timeline.getByRole('link', { name: /Broadcast to 2 tenants/ }).first();
+    const bcast = timeline.getByRole('link', { name: /Sent to 2 tenants/ }).first();
     await expect(bcast).toBeVisible({ timeout: 10_000 });
     await expect(bcast).toHaveAttribute('href', `/broadcasts/${broadcastId}`);
 

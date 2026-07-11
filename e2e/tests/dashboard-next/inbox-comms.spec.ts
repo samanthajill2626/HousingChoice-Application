@@ -44,7 +44,7 @@ test('inbound SMS → new Inbox (unread) → open contact → reply round-trips 
   // 4) Staff replies from the contact page; it renders in the timeline.
   const reply = `Yes — touring this week? ${stamp}`;
   await page.getByRole('textbox', { name: 'Reply message' }).fill(reply);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText(reply)).toBeVisible();
 
   // 5) PROOF OF SEND: the outbound reply reached the tenant's fake thread and its

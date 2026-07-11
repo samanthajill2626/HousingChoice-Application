@@ -342,7 +342,7 @@ export class Scenario {
   teamReplies(body: string): Promise<void> {
     return step(`Team replies: "${body}"`, async () => {
       await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
-      await this.page.getByRole('button', { name: 'Send' }).click();
+      await this.page.getByRole('button', { name: 'Send', exact: true }).click();
       await expect(this.page.getByText(body)).toBeVisible();
     });
   }
@@ -649,12 +649,12 @@ export class Scenario {
     const firstName = this.requireActiveFirstName();
     return step(`Team sends a listing (${unit.unitId}) to the tenant`, async () => {
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
-      // "Broadcast to tenants" lives in the header kebab (More actions) menu now,
+      // "Send to tenants" lives in the header kebab (More actions) menu now,
       // not as a standalone hero button.
       await this.page.getByRole('button', { name: 'More actions' }).click();
-      await this.page.getByRole('menuitem', { name: 'Broadcast to tenants' }).click();
+      await this.page.getByRole('menuitem', { name: 'Send to tenants' }).click();
       await expect(this.page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unit.unitId}`));
-      await expect(this.page.getByRole('heading', { name: 'New broadcast' })).toBeVisible();
+      await expect(this.page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
       await this.page
         .getByLabel('Message')
         .fill('Take a look at this home: [Address] — details [FlyerLink]');
@@ -1981,7 +1981,7 @@ export class Scenario {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
       await this.page.getByRole('tab', { name: 'Group text' }).click();
       await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
-      await this.page.getByRole('button', { name: 'Send' }).click();
+      await this.page.getByRole('button', { name: 'Send', exact: true }).click();
       // Optimistic echo in the transcript (the sent bubble).
       const comms = this.page.getByRole('region', { name: 'Communications and activity' });
       await expect(comms.getByText(body).first()).toBeVisible({ timeout: 10_000 });
@@ -3017,7 +3017,7 @@ export class Scenario {
   private async teamTexts1to1(body: string): Promise<void> {
     await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
     await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
-    await this.page.getByRole('button', { name: 'Send' }).click();
+    await this.page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(this.page.getByText(body)).toBeVisible();
   }
 

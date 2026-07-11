@@ -21,7 +21,7 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Public form | submit | `getByRole('button', { name: 'Sign me up' })` |
 | Public form | success | `getByText("Thanks, we'll text you!")` |
 | Thread | reply box | `getByRole('textbox', { name: 'Message' })` — `getByLabel('Message')` would also match the timeline `role=log` and message bubbles whose `aria-label` contains "Message", causing a strict-mode violation |
-| Thread | send | `getByRole('button', { name: 'Send' })` |
+| Thread | send | `getByRole('button', { name: 'Send', exact: true })` — non-exact name matching is substring-based, so a bare `{ name: 'Send' }` also matches the tenant contact page's "+ Send" card action (aria-label "Send a property to this tenant"): a strict-mode violation |
 
 ## Dev-only assertions (not UI)
 - Outbox: `getOutbox(request, { to, since })` → `GET /__dev/outbox`.

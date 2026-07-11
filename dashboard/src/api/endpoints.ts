@@ -1063,6 +1063,15 @@ export function setUserRole(
   );
 }
 
+/** DELETE /api/users/:userId (admin) -- remove a team member (hard delete). 409
+ *  cannot_remove_last_admin / cannot_remove_self / voice_line_assigned on a
+ *  guard (surfaced inline). 200 { removed:true } on success. */
+export function removeUser(userId: string): Promise<{ removed: true }> {
+  return request<{ removed: true }>(`/api/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  });
+}
+
 // --- Voice: inbound-voice-line assignment (admin, Voice Phase 1 §6) ----------
 // The single "Inbound voice line" holder — exactly one user at a time. Assigning
 // MOVES it (the server clears any prior holder). The user must have a VERIFIED

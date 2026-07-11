@@ -21,8 +21,10 @@ import {
   getUnit,
   getUnits,
   previewBroadcast,
+  LISTING_STATUS_LABELS,
   type AudienceFilter,
   type Contact,
+  type ListingStatus,
   type PreviewResponse,
   type UnitItem,
 } from '../../api/index.js';
@@ -209,6 +211,18 @@ export function BroadcastComposer(): React.JSX.Element {
     setAudienceEnabled(true);
   }
 
+  // Spec 2026-07-10: a non-Available property's flyer link is dead (public.ts
+  // serves only 'available'). Warn EARLY — before the operator curates a whole
+  // audience — that the Send step will ask to make it Available.
+  const unavailableNote =
+    unit !== null && unit.status !== 'available' ? (
+      <p className={styles.unavailableNote} role="status">
+        This property is{' '}
+        <strong>{LISTING_STATUS_LABELS[unit.status as ListingStatus] ?? unit.status}</strong>, so
+        its flyer link won't work. You'll be asked to make it Available when you send.
+      </p>
+    ) : null;
+
   async function onPreview(): Promise<void> {
     if (draft.draftId === null || previewBusy) return;
     setPreviewBusy(true);
@@ -241,11 +255,13 @@ export function BroadcastComposer(): React.JSX.Element {
         <button type="button" className={styles.backStep} onClick={() => setPreview(null)}>
           ← Edit audience &amp; message
         </button>
+        {unavailableNote}
         <RecipientPreview
           draftId={draft.draftId}
           preview={preview}
           tenantCandidates={tenants}
           candidatesLoading={tenantsLoading}
+          {...(unitId !== undefined && { unitId })}
         />
       </div>
     );
@@ -255,6 +271,7 @@ export function BroadcastComposer(): React.JSX.Element {
   return (
     <div className={styles.page}>
       <h1 className={styles.title}>Send a property</h1>
+      {unavailableNote}
 
       <div className={styles.cols}>
         <div className={styles.col}>

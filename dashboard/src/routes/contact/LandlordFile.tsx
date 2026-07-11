@@ -1,10 +1,11 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) -
-// Preferences - Properties (their units, with status) - Tours on their properties -
+// Notes - Properties (their units, with status) - Tours on their properties -
 // Placements on their units - Group texts - Media. Properties + Placements + Tours +
 // Group texts are REAL (from /api/units + /api/placements + /api/tours?unitId= +
-// /api/contacts/:id/relay-groups); Preferences render the contact's
-// accepts_programs/lease_terms/pet_policy + notes.
+// /api/contacts/:id/relay-groups). Notes are free text only — the structured
+// preferences (accepted programs / lease terms / pet policy) and expected rent
+// are PER-PROPERTY facts on the unit (moved 2026-07-10; GLOSSARY).
 import {
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
@@ -20,7 +21,6 @@ import {
   Card,
   CardAction,
   CardInlineAction,
-  Chips,
   CollapsibleRows,
   EmptyRow,
   KV,
@@ -93,16 +93,10 @@ export function LandlordFile({
   const myPlacements = landlordPlacements(placements, units, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const company = typeof contact['company'] === 'string' ? contact['company'] : '—';
-  // Preferences & notes — the landlord's person-level defaults (their properties'
-  // per-unit facts live on the units). Programs as chips, the two policies as KV
-  // rows, free-text notes below; the empty panel only when ALL are absent.
-  const programs = Array.isArray(contact.accepts_programs)
-    ? contact.accepts_programs.filter((p): p is string => typeof p === 'string' && p.trim() !== '')
-    : [];
-  const leaseTerms = typeof contact.lease_terms === 'string' ? contact.lease_terms.trim() : '';
-  const petPolicy = typeof contact.pet_policy === 'string' ? contact.pet_policy.trim() : '';
+  // Notes — free-text only. The structured preferences (accepted programs,
+  // lease terms, pet policy) and expected rent MOVED to the property record
+  // (2026-07-10; per-unit facts on UnitItem — see each property's details card).
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
-  const hasPreferences = programs.length > 0 || leaseTerms !== '' || petPolicy !== '' || notes !== '';
 
   return (
     <>
@@ -142,7 +136,7 @@ export function LandlordFile({
       <LandlordOnboardingCard contact={contact} />
 
       <Card
-        title="Preferences & notes"
+        title="Notes"
         aside={
           onEdit ? (
             <CardAction onClick={onEdit} label="Add a note">
@@ -153,15 +147,10 @@ export function LandlordFile({
           )
         }
       >
-        {hasPreferences ? (
-          <>
-            {programs.length > 0 ? <Chips items={programs} /> : null}
-            {leaseTerms !== '' ? <KV k="Lease terms" v={leaseTerms} /> : null}
-            {petPolicy !== '' ? <KV k="Pet policy" v={petPolicy} /> : null}
-            {notes !== '' ? <NotesText text={notes} /> : null}
-          </>
+        {notes !== '' ? (
+          <NotesText text={notes} />
         ) : (
-          <PendingPanel note="No preferences yet — use + Add to record accepted programs, lease terms, a pet policy, or a note." />
+          <PendingPanel note="No notes yet — use + Add. (Programs, lease terms, and pet policy live on each property.)" />
         )}
       </Card>
 

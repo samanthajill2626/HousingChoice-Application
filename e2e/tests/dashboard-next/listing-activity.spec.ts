@@ -157,6 +157,103 @@ test.describe('Property detail — broadcast + tour Activity rows (activity cove
   });
 });
 
+test.describe('Property detail - "Sent to tenants" tour chip (listing-response-tour-chip)', () => {
+  test('sent rows carry no response chip until a tour lights exactly the toured recipient', async ({
+    page,
+  }) => {
+    // Proves the retired listing-send `response` label is GONE (no "No reply"
+    // anywhere) and the derived tour chip is TRUTHFUL: it appears only for the
+    // one recipient with a qualifying tour on THIS property, links to the tour,
+    // and leaves the other recipient's row chipless.
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+
+    // Own infra: a landlord, an available 2-BR property, two consented tenants.
+    const landlordId = await createLandlord(req, `Chipowner${stamp}`);
+    const unitId = await createAvailableUnit(req, landlordId);
+    const t1 = await createConsentedTenant(req, `Chipone${stamp}`);
+    const t2 = await createConsentedTenant(req, `Chiptwo${stamp}`);
+
+    // Send the property to both tenants via a broadcast -> each fan-out leg
+    // records a listing_sends row (the "Sent to tenants" ledger).
+    const draft = await req.post(`${NEXT}/api/broadcasts`, {
+      data: {
+        unitId,
+        body_template: `Open house ${stamp} at [Address]`,
+        audience_filter: { contact_type: 'tenant', bedroomSize: 2 },
+      },
+    });
+    expect(draft.ok()).toBeTruthy();
+    const broadcastId = (await draft.json()).broadcastId as string;
+    const send = await req.post(`${NEXT}/api/broadcasts/${broadcastId}/send`, {
+      data: { recipientContactIds: [t1.contactId, t2.contactId] },
+    });
+    expect(send.ok()).toBeTruthy();
+
+    // Fan-out (and its best-effort recordSend) is async -> poll the recipients
+    // API until BOTH send rows have landed, and both are chipless (no tour yet).
+    await expect
+      .poll(
+        async () => {
+          const res = await req.get(`${NEXT}/api/units/${unitId}/recipients`);
+          if (!res.ok()) return null;
+          const rows = (await res.json()).recipients as Array<{ contactId: string; tour?: unknown }>;
+          const ids = rows.map((r) => r.contactId);
+          if (!ids.includes(t1.contactId) || !ids.includes(t2.contactId)) return null;
+          return rows.every((r) => r.tour === undefined);
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    // The "Sent to tenants" card shows both recipients with NO tour chip, and
+    // the dead "No reply" label appears nowhere on the page.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const card = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Sent to tenants' }),
+    });
+    await expect(card).toBeVisible();
+    // Each row's identity link's accessible name IS the recipient's contactId
+    // (the roster renders raw ids); scope a per-recipient row by that link.
+    const rowFor = (contactId: string) =>
+      card.locator('div').filter({ has: page.getByRole('link', { name: contactId, exact: true }) });
+    await expect(rowFor(t1.contactId)).toBeVisible();
+    await expect(rowFor(t2.contactId)).toBeVisible();
+    await expect(card.getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ })).toHaveCount(0);
+    await expect(page.getByText(/No reply/i)).toHaveCount(0);
+
+    // Schedule a tour for ONE recipient (t1) on THIS property -> status 'scheduled'.
+    const tourRes = await req.post(`${NEXT}/api/tours`, {
+      data: {
+        tenantId: t1.contactId,
+        unitId,
+        scheduledAt: '2026-10-01T15:00:00.000Z',
+        tourType: 'self_guided',
+      },
+    });
+    expect(tourRes.ok()).toBeTruthy();
+    const tourId = (await tourRes.json()).tour.tourId as string;
+
+    // Reload until the derived chip surfaces (one byUnit GSI read per card load):
+    // t1's row gains a "Tour scheduled" chip linking to the tour.
+    await expect(async () => {
+      await page.reload();
+      const chip = rowFor(t1.contactId).getByRole('link', { name: 'Tour scheduled' });
+      await expect(chip).toBeVisible();
+      await expect(chip).toHaveAttribute('href', `/tours/${tourId}`);
+    }).toPass({ timeout: 20_000 });
+
+    // The OTHER recipient stays chipless; exactly one chip on the card; still no
+    // "No reply" text anywhere.
+    await expect(
+      rowFor(t2.contactId).getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ }),
+    ).toHaveCount(0);
+    await expect(card.getByRole('link', { name: 'Tour scheduled' })).toHaveCount(1);
+    await expect(page.getByText(/No reply/i)).toHaveCount(0);
+  });
+});
+
 test.describe('Property detail — Notes card (internal staff notes)', () => {
   test('+ Add opens the edit dialog; saved notes render on the card', async ({ page }) => {
     await devLogin(page);

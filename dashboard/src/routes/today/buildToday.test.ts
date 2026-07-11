@@ -24,7 +24,6 @@ function convOf(
     preview: null,
     last_activity_at: NOW.toISOString(),
     unread_count: 0,
-    assignment: null,
     sms_opt_out: false,
     participant_display_name: null,
     ...partial,

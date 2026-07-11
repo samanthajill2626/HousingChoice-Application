@@ -124,14 +124,6 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     }
     case 'unit_contact_removed':
       return { label: 'Contact removed', ...(who !== undefined && { sub: who }), ...contactLink };
-    case 'listing_response_set': {
-      const response = e.response !== undefined ? humanize(e.response) : undefined;
-      return {
-        label: response !== undefined ? `Tenant response - ${response}` : 'Tenant response',
-        ...(who !== undefined && { sub: who }),
-        ...contactLink,
-      };
-    }
     case 'listing_status_changed': {
       const to = e.to !== undefined ? statusLabel(e.to) : undefined;
       const from = e.from !== undefined ? statusLabel(e.from) : undefined;

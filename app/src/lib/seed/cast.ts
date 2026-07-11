@@ -606,12 +606,11 @@ const searchingTenant = {
       ts: CU,
     },
   ],
-  // Listing sends (2: one not-a-fit reply, one pending)
+  // Listing sends (2 properties sent to this searching tenant)
   listingSend1: {
     unitId: unitId('searching-b'), // first unit sent (too-many-stairs one)
     contactId: C_SEARCHING,
     sentAt: CK,
-    response: 'not_a_fit',
     via: 'individual',
     created_at: CK,
     updated_at: CL,
@@ -635,7 +634,6 @@ const searchingTenant = {
     unitId: UNIT_CAST_SEARCHING,
     contactId: C_SEARCHING,
     sentAt: CN,
-    response: 'interested',
     via: 'individual',
     created_at: CN,
     updated_at: CO,
@@ -895,7 +893,6 @@ const neverSignedLandlord = {
     firstName: 'Patricia',
     lastName: 'Shelton',
     contract_status: 'unsigned',
-    expected_rent: 1700,
     registered_landlord: true,
     // Auto-consent: her inbound reply (msg-cast-nsign-002 at C2) confers inbound_text.
     consent_method: 'inbound_text',
@@ -1092,7 +1089,6 @@ const midIntakeUnitLandlord = {
     lastName: 'Merritt',
     lead_status: 'registered',
     contract_status: 'signed',
-    expected_rent: 1600,
     registered_landlord: true,
     rta_within_48h: true,
     pass_inspection_first_try: true,

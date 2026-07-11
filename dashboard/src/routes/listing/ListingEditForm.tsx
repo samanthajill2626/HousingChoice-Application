@@ -35,6 +35,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [utilities, setUtilities] = useState(str(unit.utilities));
   const [accessibility, setAccessibility] = useState(str(unit.accessibility));
   const [notes, setNotes] = useState(str(unit.notes));
+  const [leaseTerms, setLeaseTerms] = useState(str(unit.lease_terms));
   const [pets, setPets] = useState(
     typeof unit.pets === 'string'
       ? unit.pets
@@ -106,6 +107,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
     if (accessibility !== str(unit.accessibility)) patch['accessibility'] = accessibility;
     if (notes !== str(unit.notes)) patch['notes'] = notes;
+    if (leaseTerms !== str(unit.lease_terms)) patch['lease_terms'] = leaseTerms;
     if (listingLink !== str(unit.listing_link)) patch['listing_link'] = listingLink;
     if (tourProcess !== str(unit.tour_process)) patch['tour_process'] = tourProcess;
     if (applicationProcess !== str(unit.application_process)) {
@@ -384,6 +386,17 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             value={pets}
             onChange={(e) => setPets(e.target.value)}
             placeholder="e.g. Cats only"
+            autoComplete="off"
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Lease terms</span>
+          <input
+            className={styles.input}
+            value={leaseTerms}
+            onChange={(e) => setLeaseTerms(e.target.value)}
+            placeholder="e.g. 12-month minimum, month-to-month after"
             autoComplete="off"
           />
         </label>

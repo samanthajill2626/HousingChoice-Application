@@ -77,7 +77,6 @@ describe('UnreadProvider', () => {
         last_activity_at: '2026-06-17T11:00:00.000Z',
         unread_count: 1,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: 'A',
       });
     });

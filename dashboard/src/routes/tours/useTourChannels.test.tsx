@@ -40,7 +40,6 @@ function conv(conversationId: string, contactId: string, unread: number, type: s
     preview: null,
     last_activity_at: '2026-07-05T00:00:00Z',
     unread_count: unread,
-    assignment: null,
     sms_opt_out: false,
     participant_display_name: null,
   } as ConversationSummary;
@@ -177,7 +176,6 @@ describe('useTourChannels', () => {
         last_activity_at: '2026-07-06T00:00:00Z',
         unread_count: 5,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: null,
       }),
     );
@@ -219,7 +217,6 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
         last_activity_at: '2026-07-06T00:00:00Z',
         unread_count: 4,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: null,
       }),
     );
@@ -253,7 +250,6 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
         last_activity_at: '2026-07-06T00:00:00Z',
         unread_count: 5,
         type: 'landlord_1to1',
-        assignment: null,
         participant_display_name: null,
       }),
     );

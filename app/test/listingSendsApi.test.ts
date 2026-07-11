@@ -1,11 +1,8 @@
-// BE4/C4 route tests — the sent-to-tenants / listings-sent endpoints + the
-// response PATCH:
-//   GET   /api/units/:unitId/recipients            → { recipients: ListingSendRow[] }
-//   GET   /api/contacts/:contactId/listings-sent   → { sent: ListingSendRow[] }
-//   PATCH /api/units/:unitId/recipients/:contactId → { recipient }
-// Both query directions return the SAME row; the PATCH validates + 404s + emits
-// listing_reviewed only on a real interested/not_a_fit change; re-send (via the
-// repo) preserves an already-set response.
+// BE4/C4 route tests -- the sent-to-tenants / listings-sent endpoints:
+//   GET /api/units/:unitId/recipients            -> { recipients: ListingSendRow[] }
+//   GET /api/contacts/:contactId/listings-sent   -> { sent: ListingSendRow[] }
+// Both query directions return the SAME row. The former response PATCH route is
+// GONE (the `response` label was removed end to end) -- a 404 pin guards its removal.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -53,7 +50,9 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () 
     expect(res.status).toBe(200);
     expect(res.body.recipients).toHaveLength(2);
     const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
-    expect(c1).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'no_reply', via: 'broadcast', broadcastId: 'b-1' });
+    expect(c1).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
+    // The removed `response` label is gone from the wire.
+    expect(c1).not.toHaveProperty('response');
     // The wire shape drops audit furniture.
     expect(c1).not.toHaveProperty('created_at');
     expect(c1).not.toHaveProperty('updated_at');
@@ -94,7 +93,8 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
 
     expect(res.status).toBe(200);
     expect(res.body.sent).toHaveLength(1);
-    expect(res.body.sent[0]).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'no_reply', via: 'broadcast' });
+    expect(res.body.sent[0]).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    expect(res.body.sent[0]).not.toHaveProperty('response');
   });
 
   it('returns [] for a contact with no listings sent', async () => {
@@ -138,123 +138,184 @@ describe('the two directions return the SAME row', () => {
   });
 });
 
-describe('PATCH /api/units/:unitId/recipients/:contactId (BE4/C4 — response)', () => {
-  it('sets the response, returns { recipient }, audits, and emits listing_reviewed', async () => {
+describe('tour chip projection (listing-response-tour-chip section 5)', () => {
+  it('recipients: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-2', unitId: 'unit-1', via: 'individual' });
+    // c-1 has a scheduled tour on unit-1; c-2 has none.
+    await world.toursRepo.create({
+      tourId: 'tour-c1',
+      tenantId: 'c-1',
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+      status: 'scheduled',
+    });
 
     const res = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
+      .get('/api/units/unit-1/recipients')
       .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
+      .set('cookie', TEST_SESSION_COOKIE);
 
     expect(res.status).toBe(200);
-    expect(res.body.recipient).toMatchObject({ contactId: 'c-1', unitId: 'unit-1', response: 'interested' });
-    // The row is updated.
-    expect(world.listingSends.find((r) => r.contactId === 'c-1')?.response).toBe('interested');
-    // listing_reviewed emitted, deep-linking to the unit.
-    const reviewed = world.activityEvents.filter((e) => e.type === 'listing_reviewed');
-    expect(reviewed).toHaveLength(1);
-    expect(reviewed[0]).toMatchObject({ contactId: 'c-1', refType: 'unit', refId: 'unit-1' });
-    // Audited.
-    expect(world.auditEvents).toContainEqual(
-      expect.objectContaining({ entityKey: 'units#unit-1', event_type: 'listing_response_set' }),
-    );
+    const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
+    const c2 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-2');
+    // Exact optional-field wire shape: tour is EXACTLY { tourId, state }.
+    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' } });
+    // c-2 (no tour) carries NO tour field (absent, not null).
+    expect(c2).not.toHaveProperty('tour');
   });
 
-  it('rejects an invalid response with 400', async () => {
+  it('recipients E2: tenant A tour on unit X does not light unit Y or tenant B', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-x');
+    seedUnit(world, 'unit-y');
+    // unit-x sent to A and B; unit-y sent to A.
+    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-x', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-b', unitId: 'unit-x', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-a', unitId: 'unit-y', via: 'broadcast' });
+    // Tenant A has a tour on unit-x ONLY.
+    await world.toursRepo.create({
+      tourId: 'tour-ax',
+      tenantId: 'c-a',
+      unitId: 'unit-x',
+      tourType: 'self_guided',
+      status: 'toured',
+    });
+
+    const xRes = await request(app)
+      .get('/api/units/unit-x/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    const yRes = await request(app)
+      .get('/api/units/unit-y/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    const xA = xRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-a');
+    const xB = xRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-b');
+    const yA = yRes.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-a');
+    // A's row on unit-x is lit.
+    expect(xA.tour).toEqual({ tourId: 'tour-ax', state: 'toured' });
+    // B's row on unit-x is NOT lit (tour belongs to A, not B).
+    expect(xB).not.toHaveProperty('tour');
+    // A's row on unit-y is NOT lit (tour is on unit-x, not unit-y).
+    expect(yA).not.toHaveProperty('tour');
+  });
+
+  it('listings-sent: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedUnit(world, 'unit-2');
+    seedTenant(world, 'c-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-2', via: 'broadcast' });
+    // c-1 has a requested tour on unit-2 only.
+    await world.toursRepo.create({
+      tourId: 'tour-u2',
+      tenantId: 'c-1',
+      unitId: 'unit-2',
+      tourType: 'self_guided',
+      status: 'requested',
+    });
+
+    const res = await request(app)
+      .get('/api/contacts/c-1/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const r1 = res.body.sent.find((r: { unitId: string }) => r.unitId === 'unit-1');
+    const r2 = res.body.sent.find((r: { unitId: string }) => r.unitId === 'unit-2');
+    expect(r1).not.toHaveProperty('tour');
+    expect(r2.tour).toEqual({ tourId: 'tour-u2', state: 'requested' });
+  });
+
+  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (recipients)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    world.toursRepo.listByUnit = async () => {
+      throw new Error('tours GSI unavailable');
+    };
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.recipients).toHaveLength(1);
+    expect(res.body.recipients[0]).not.toHaveProperty('tour');
+    expect(
+      capture.atLevel(40).some((l) => l['msg'] === 'recipients tour-chip hydration failed (best-effort)'),
+    ).toBe(true);
+  });
+
+  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (listings-sent)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+    world.toursRepo.listByTenant = async () => {
+      throw new Error('tours GSI unavailable');
+    };
+
+    const res = await request(app)
+      .get('/api/contacts/c-1/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toHaveLength(1);
+    expect(res.body.sent[0]).not.toHaveProperty('tour');
+    expect(
+      capture.atLevel(40).some((l) => l['msg'] === 'listings-sent tour-chip hydration failed (best-effort)'),
+    ).toBe(true);
+  });
+});
+
+describe('PATCH /api/units/:unitId/recipients/:contactId is GONE (response label removed)', () => {
+  it('404s -- the response PATCH route no longer exists', async () => {
+    // Regression pin: the `response` label was removed end to end, so the manual
+    // set-response route must be absent. An existing send row + a valid old-shape
+    // body must still 404 (route gone), not 200/400.
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
+
     const res = await request(app)
       .patch('/api/units/unit-1/recipients/c-1')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'maybe' });
-    expect(res.status).toBe(400);
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(0);
-  });
-
-  it('404s when the send row does not exist', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    const res = await request(app)
-      .patch('/api/units/unit-1/recipients/c-missing')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
       .send({ response: 'interested' });
+
     expect(res.status).toBe(404);
+    // No listing_reviewed milestone can be emitted anymore (the type is gone too).
+    expect(world.activityEvents.filter((e) => String(e.type) === 'listing_reviewed')).toHaveLength(0);
   });
+});
 
-  it('does NOT emit listing_reviewed on a set to no_reply or an unchanged value', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-
-    // Set to no_reply (the default) — no reviewed milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'no_reply' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(0);
-
-    // Set to interested (a real change) — one milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-
-    // Set to interested AGAIN (no change) — still just one milestone.
-    await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-  });
-
-  it('no double-emit: two identical interested sets collapse to ONE listing_reviewed (atomic conditional)', async () => {
-    // The atomic-conditional setResponse only "changes" on a real value
-    // transition. Two PATCHes of no_reply→interested (the second hitting the
-    // changed:false / ConditionalCheckFailed path) is exactly what a concurrent
-    // double-PATCH collapses to — exactly ONE milestone must result.
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast' });
-
-    const first = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(first.status).toBe(200);
-
-    // Second identical set: the row already === 'interested', so the conditional
-    // does NOT write and changed === false → NO second milestone.
-    const second = await request(app)
-      .patch('/api/units/unit-1/recipients/c-1')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ response: 'interested' });
-    expect(second.status).toBe(200);
-    expect(second.body.recipient).toMatchObject({ contactId: 'c-1', response: 'interested' });
-
-    // Exactly ONE listing_reviewed despite two interested PATCHes.
-    expect(world.activityEvents.filter((e) => e.type === 'listing_reviewed')).toHaveLength(1);
-  });
-
-  it('a re-send does not reset an already-set response (no_reset invariant)', async () => {
+describe('recordSend upsert semantics (no `response` field)', () => {
+  it('a re-send refreshes broadcastId attribution and preserves created_at (idempotent upsert)', async () => {
     const { world } = makeWebhookHarness();
-    await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-1' });
-    await world.listingSendsRepo.setResponse('unit-1', 'c-1', 'interested');
+    const first = await world.listingSendsRepo.recordSend({
+      contactId: 'c-1',
+      unitId: 'unit-1',
+      via: 'broadcast',
+      broadcastId: 'b-1',
+    });
     // Re-send (e.g. a second broadcast of the same unit to the same tenant).
-    const resent = await world.listingSendsRepo.recordSend({ contactId: 'c-1', unitId: 'unit-1', via: 'broadcast', broadcastId: 'b-2' });
-    expect(resent.response).toBe('interested'); // preserved
+    const resent = await world.listingSendsRepo.recordSend({
+      contactId: 'c-1',
+      unitId: 'unit-1',
+      via: 'broadcast',
+      broadcastId: 'b-2',
+    });
     expect(resent.broadcastId).toBe('b-2'); // attribution refreshed
+    expect(resent.created_at).toBe(first.created_at); // first-write furniture preserved
+    // No `response` label is ever written.
+    expect(resent).not.toHaveProperty('response');
   });
 });

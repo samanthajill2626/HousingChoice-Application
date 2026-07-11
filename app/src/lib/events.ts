@@ -38,8 +38,6 @@ export interface ConversationUpdatedEvent {
    * when triage flips unknown_1to1 → tenant_1to1/landlord_1to1.
    */
   type: ConversationType;
-  /** Assigned team member's userId, or null when unassigned. */
-  assignment: string | null;
   /**
    * Denormalized resolved contact name, or null when none is known. Carried on
    * the event so the inbox shows the name (and clears the review chip) the
@@ -69,16 +67,16 @@ export interface ConversationUpdatedEvent {
 
 /**
  * THE ONE conversation.updated payload builder for a fresh ConversationItem —
- * every emit site uses this (api.ts /read + /assignment + the relay-group send,
- * the contacts triage router, the relay-group routes, the inbound webhook) so
- * the wire shape stays identical across all of them.
+ * every emit site uses this (api.ts /read + the relay-group send, the contacts
+ * triage router, the relay-group routes, the inbound webhook) so the wire shape
+ * stays identical across all of them.
  *
  * FIX 4: the relay fields (status / pool_number / members) live HERE so no
  * emit site can forget them on a relay thread. For a relay_group they carry
  * the live status, pool number, and roster; for a 1:1 thread they are
  * null/[]/absent — the same wire behavior 1:1 clients already saw (the fields
- * are optional/nullable, a strict superset). This is why /read and /assignment
- * on a relay group now keep the roster fresh without a dedicated builder.
+ * are optional/nullable, a strict superset). This is why /read on a relay
+ * group now keeps the roster fresh without a dedicated builder.
  *
  * PII (doc §9): the payload carries the denormalized preview and display name
  * — it is DATA for authenticated dashboard clients, never logged.
@@ -91,7 +89,6 @@ export function toConversationUpdatedEvent(item: ConversationItem): Conversation
     unread_count: item.unread_count ?? 0,
     ...(item.last_message_preview !== undefined && { preview: item.last_message_preview }),
     type: item.type,
-    assignment: item.assignment ?? null,
     participant_display_name: item.participant_display_name ?? null,
     // Relay fields (FIX 4): present (live status/pool/roster) ONLY for a
     // relay_group; ABSENT on a 1:1 thread so the 1:1 wire shape is byte-for-byte

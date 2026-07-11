@@ -160,6 +160,12 @@ export interface UnitItem {
    * (unitFields.ts allowlists exclude it by construction).
    */
   notes?: string;
+  /**
+   * Lease terms — free-form per-unit fact ("12-month minimum, month-to-month
+   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). Internal
+   * only — never on the flyer projections.
+   */
+  lease_terms?: string;
   /** Pets policy — free-form (string or boolean). */
   pets?: string | boolean;
   /** Property priority — free-form. */

@@ -59,6 +59,7 @@ export function UnitCreateForm({
   const [utilities, setUtilities] = useState('');
   const [accessibility, setAccessibility] = useState('');
   const [notes, setNotes] = useState('');
+  const [leaseTerms, setLeaseTerms] = useState('');
   const [pets, setPets] = useState('');
   const [programs, setPrograms] = useState('');
   const [listingLink, setListingLink] = useState('');
@@ -146,6 +147,7 @@ export function UnitCreateForm({
     addStr('utilities', utilities);
     addStr('accessibility', accessibility);
     addStr('notes', notes);
+    addStr('lease_terms', leaseTerms);
     addStr('pets', pets);
     addStr('listing_link', listingLink);
     addStr('video_url', videoUrl);
@@ -412,6 +414,17 @@ export function UnitCreateForm({
             value={pets}
             onChange={(e) => setPets(e.target.value)}
             placeholder="e.g. Cats only"
+            autoComplete="off"
+          />
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Lease terms</span>
+          <input
+            className={styles.input}
+            value={leaseTerms}
+            onChange={(e) => setLeaseTerms(e.target.value)}
+            placeholder="e.g. 12-month minimum, month-to-month after"
             autoComplete="off"
           />
         </label>

@@ -300,3 +300,29 @@ describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
     expect(getUnits).not.toHaveBeenCalled();
   });
 });
+
+describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)', () => {
+  it('warns when the attached property is not Available (with the human label)', async () => {
+    getUnit.mockResolvedValue(unit({ status: 'on_hold' }));
+    renderComposer('?unitId=unit-0001');
+    // The compose step already renders a role="status" reach element (AudienceFilters),
+    // so scope on the banner text and assert on its paragraph (plan Task 3 fallback).
+    const note = await screen.findByText(/flyer link won't work/);
+    expect(note).toHaveTextContent(/This property is On hold/);
+    expect(note).toHaveTextContent(/its flyer link won't work/);
+    expect(note).toHaveTextContent(/make it Available when you send/);
+  });
+
+  it('no banner for an Available property', async () => {
+    getUnit.mockResolvedValue(unit()); // status 'available'
+    renderComposer('?unitId=unit-0001');
+    // Wait for the unit load to land (the pre-fill tag proves it).
+    await screen.findByText(/matches property/i);
+    expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
+  });
+
+  it('no banner when composing without a property', () => {
+    renderComposer();
+    expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
+  });
+});

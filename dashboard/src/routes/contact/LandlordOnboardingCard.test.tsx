@@ -8,7 +8,6 @@ describe('LandlordOnboardingCard', () => {
       <LandlordOnboardingCard
         contact={{
           contract_status: 'signed',
-          expected_rent: 1450,
           registered_landlord: true,
           rta_within_48h: true,
           pass_inspection_first_try: false,
@@ -19,8 +18,8 @@ describe('LandlordOnboardingCard', () => {
     expect(screen.getByText('Landlord onboarding')).toBeInTheDocument();
     expect(screen.getByText('Contract status')).toBeInTheDocument();
     expect(screen.getByText('Signed')).toBeInTheDocument();
-    expect(screen.getByText('Expected rent')).toBeInTheDocument();
-    expect(screen.getByText('1450')).toBeInTheDocument();
+    // Expected rent moved to the UNIT (2026-07-10) — never a row here.
+    expect(screen.queryByText('Expected rent')).not.toBeInTheDocument();
     expect(screen.getByText('Registered landlord')).toBeInTheDocument();
     expect(screen.getByText('Submits RTA within 48h')).toBeInTheDocument();
     expect(screen.getByText('Passes inspection first try')).toBeInTheDocument();
@@ -56,11 +55,11 @@ describe('LandlordOnboardingCard', () => {
   });
 
   it('omits fields that are unset', () => {
-    render(<LandlordOnboardingCard contact={{ expected_rent: 1200 }} />);
-    expect(screen.getByText('Expected rent')).toBeInTheDocument();
-    expect(screen.getByText('1200')).toBeInTheDocument();
+    render(<LandlordOnboardingCard contact={{ registered_landlord: true }} />);
+    expect(screen.getByText('Registered landlord')).toBeInTheDocument();
+    expect(screen.getByText('Yes')).toBeInTheDocument();
     expect(screen.queryByText('Contract status')).not.toBeInTheDocument();
-    expect(screen.queryByText('Registered landlord')).not.toBeInTheDocument();
+    expect(screen.queryByText('Submits RTA within 48h')).not.toBeInTheDocument();
   });
 
   it('renders nothing when no onboarding data is recorded', () => {

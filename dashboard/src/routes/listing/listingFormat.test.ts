@@ -137,14 +137,6 @@ describe('describeUnitActivity', () => {
     ).toEqual({ label: 'Contact removed', sub: 'Pat Manager', to: '/contacts/c1' });
   });
 
-  it('describes a tenant response with the response in the label', () => {
-    expect(
-      describeUnitActivity(
-        evt({ type: 'listing_response_set', contactId: 'c1', contactName: 'Tina Renter', response: 'not_a_fit' }),
-      ),
-    ).toEqual({ label: 'Tenant response - Not a fit', sub: 'Tina Renter', to: '/contacts/c1' });
-  });
-
   it('describes status changes via the property-status labels, flagging derived ones', () => {
     expect(
       describeUnitActivity(

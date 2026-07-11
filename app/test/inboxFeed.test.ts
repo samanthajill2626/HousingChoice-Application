@@ -7,7 +7,7 @@
 //   - conversationsRepo.findByParticipantPhone — every conversation on a number.
 //   - contactsRepo.findByPhone — pointer-aware phone → contact resolution.
 //   - contactsRepo.getById / messagesRepo.listByConversation (latest message) /
-//     placementsRepo.getById / usersRepo.findById — best-effort hydration.
+//     placementsRepo.getById - best-effort hydration.
 //
 // The aggregator emits ONE row per contact at its NEWEST conversation (the
 // newest-conversation rule) so paging is split-proof: a contact represented on
@@ -23,7 +23,6 @@ interface Seed {
   contacts: ContactItem[];
   /** Latest message per conversationId (drives channel/direction/preview). */
   latestMessage?: Record<string, Partial<MessageItem>>;
-  users?: Record<string, { name?: string; email?: string }>;
   placements?: Record<string, { stage: string }>;
 }
 
@@ -105,12 +104,6 @@ function makeDeps(seed: Seed): InboxRouterDeps {
         return c ? ({ placementId, stage: c.stage } as unknown) : undefined;
       },
     } as unknown as NonNullable<InboxRouterDeps['placementsRepo']>,
-    usersRepo: {
-      async findById(userId: string) {
-        const u = seed.users?.[userId];
-        return u ? ({ userId, ...u } as unknown) : undefined;
-      },
-    } as unknown as NonNullable<InboxRouterDeps['usersRepo']>,
   };
 }
 
@@ -166,7 +159,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
 
     expect(page.rows).toHaveLength(1);
     expect(page.rows[0]).toMatchObject({ kind: 'contact', contactId: 'c-1', unreadCount: 5 });
@@ -183,7 +176,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
 
     expect(page.rows).toHaveLength(1);
     expect(page.rows[0]).toMatchObject({
@@ -215,10 +208,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const all = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const all = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
     expect(all.rows[0]).toMatchObject({ kind: 'contact', contactId: 'c-unk', role: 'unknown', needsTriage: true });
 
-    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25, userId: 'u-1' }, deps);
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, deps);
     expect(unknown.rows).toHaveLength(1);
     expect(unknown.rows[0]!.contactId).toBe('c-unk');
   });
@@ -243,7 +236,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
 
     expect(page.rows).toHaveLength(2);
     const relay = page.rows.find((r) => r.kind === 'relay_group')!;
@@ -265,20 +258,20 @@ describe('aggregateInbox — one row per contact (C8)', () => {
 
   it('relay label precedence: member names → placement_tag → formatted pool number → "Group text"', async () => {
     const base = { last_activity_at: '2026-06-12T10:00:00.000Z' };
-    const tagOnly = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+    const tagOnly = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps({
       contacts: [],
       conversations: [relayConv({ conversationId: 'r-tag', pool_number: '+15550160001', placement_tag: '123 Maple tour', ...base })],
     }));
     expect(tagOnly.rows[0]!.name).toBe('123 Maple tour');
 
-    const poolOnly = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+    const poolOnly = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps({
       contacts: [],
       conversations: [relayConv({ conversationId: 'r-pool', pool_number: '+15550160001', ...base })],
     }));
     // formatPhoneForDisplay renders the pool number.
     expect(poolOnly.rows[0]!.name).toBe('(555) 016-0001');
 
-    const emptyGroup = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps({
+    const emptyGroup = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps({
       contacts: [],
       // No members, no tag, no pool number → the "Group text" fallback.
       conversations: [relayConv({ conversationId: 'r-bare', pool_number: '', participant_phone: 'x', ...base })],
@@ -300,38 +293,34 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
     expect(page.rows.map((r) => r.contactId ?? r.conversationId)).toEqual(['c-1', 'r-mid', 'c-2']);
   });
 
-  it('relay filter matrix: in "all"+"unread" (when unread>0); NEVER in "unknown"; in "mine" only when assigned to the user', async () => {
+  it('relay filter matrix: in "all"+"unread" (when unread>0); NEVER in "unknown"', async () => {
     const seed: Seed = {
       contacts: [{ contactId: 'c-unk', type: 'unknown', phone: '+14049824978' }],
       conversations: [
         relayConv({ conversationId: 'r-unread', pool_number: '+15550160001', last_activity_at: '2026-06-14T10:00:00.000Z', unread_count: 3,
           participants: [{ contactId: 'c-x', phone: '+15550000201', name: 'Keisha' }] }),
-        relayConv({ conversationId: 'r-mine', pool_number: '+15550160002', last_activity_at: '2026-06-13T10:00:00.000Z', assignment: 'u-1',
+        relayConv({ conversationId: 'r-read', pool_number: '+15550160002', last_activity_at: '2026-06-13T10:00:00.000Z',
           participants: [{ contactId: 'c-y', phone: '+15550000202', name: 'Lars' }] }),
         conv({ conversationId: 'conv-unk', participant_phone: '+14049824978', last_activity_at: '2026-06-12T10:00:00.000Z', type: 'unknown_1to1', unread_count: 1 }),
       ],
     };
 
-    const all = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps(seed));
+    const all = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(seed));
     expect(all.rows.filter((r) => r.kind === 'relay_group').map((r) => r.conversationId).sort())
-      .toEqual(['r-mine', 'r-unread']);
+      .toEqual(['r-read', 'r-unread']);
 
-    const unread = await aggregateInbox({ filter: 'unread', limit: 25, userId: 'u-1' }, makeDeps(seed));
-    // r-unread (unread 3) qualifies; r-mine (unread 0) does not.
+    const unread = await aggregateInbox({ filter: 'unread', limit: 25 }, makeDeps(seed));
+    // r-unread (unread 3) qualifies; r-read (unread 0) does not.
     expect(unread.rows.filter((r) => r.kind === 'relay_group').map((r) => r.conversationId)).toEqual(['r-unread']);
 
-    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25, userId: 'u-1' }, makeDeps(seed));
-    // NO relay row ever appears under "unknown" — only the untriaged 1:1.
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(seed));
+    // NO relay row ever appears under "unknown" - only the untriaged 1:1.
     expect(unknown.rows.every((r) => r.kind !== 'relay_group')).toBe(true);
     expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
-
-    const mine = await aggregateInbox({ filter: 'mine', limit: 25, userId: 'u-1' }, makeDeps(seed));
-    expect(mine.rows.map((r) => r.conversationId)).toEqual(['r-mine']);
-    expect(mine.rows[0]!.assignment).toEqual({ userId: 'u-1', name: 'u-1' }); // fake users repo → id fallback
   });
 
   it('rows are newest-activity-first', async () => {
@@ -348,7 +337,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       ],
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
 
     expect(page.rows.map((r) => r.contactId)).toEqual(['c-2', 'c-3', 'c-1']);
   });
@@ -372,7 +361,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       },
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
     const byId = Object.fromEntries(page.rows.map((r) => [r.contactId, r]));
 
     expect(byId['c-sms']).toMatchObject({ channel: 'sms', direction: 'inbound', preview: 'hi there' });
@@ -380,33 +369,28 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(byId['c-call']).toMatchObject({ channel: 'call', direction: 'inbound' });
   });
 
-  it('filter "unread" keeps only unreadCount>0; "unknown" keeps only needsTriage; "mine" keeps only rows assigned to userId', async () => {
+  it('filter "unread" keeps only unreadCount>0; "unknown" keeps only needsTriage', async () => {
     const baseSeed: Seed = {
       contacts: [
         { contactId: 'c-read', type: 'tenant', phone: '+15550000001' },
         { contactId: 'c-unread', type: 'tenant', phone: '+15550000002' },
-        { contactId: 'c-mine', type: 'tenant', phone: '+15550000003' },
       ],
       conversations: [
         conv({ conversationId: 'conv-read', participant_phone: '+15550000001', last_activity_at: '2026-06-10T10:00:00.000Z', unread_count: 0 }),
         conv({ conversationId: 'conv-unread', participant_phone: '+15550000002', last_activity_at: '2026-06-11T10:00:00.000Z', unread_count: 4 }),
-        conv({ conversationId: 'conv-mine', participant_phone: '+15550000003', last_activity_at: '2026-06-12T10:00:00.000Z', assignment: 'u-1' }),
         conv({ conversationId: 'conv-unk', participant_phone: '+14049824978', last_activity_at: '2026-06-09T10:00:00.000Z', type: 'unknown_1to1', unread_count: 1 }),
       ],
     };
 
-    const unread = await aggregateInbox({ filter: 'unread', limit: 25, userId: 'u-1' }, makeDeps(baseSeed));
+    const unread = await aggregateInbox({ filter: 'unread', limit: 25 }, makeDeps(baseSeed));
     expect(unread.rows.every((r) => r.unreadCount > 0)).toBe(true);
     expect(unread.rows.map((r) => r.contactId ?? r.phone).sort()).toEqual(
       ['+14049824978', 'c-unread'].sort(),
     );
 
-    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25, userId: 'u-1' }, makeDeps(baseSeed));
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, makeDeps(baseSeed));
     expect(unknown.rows.every((r) => r.needsTriage)).toBe(true);
     expect(unknown.rows.map((r) => r.phone)).toEqual(['+14049824978']);
-
-    const mine = await aggregateInbox({ filter: 'mine', limit: 25, userId: 'u-1' }, makeDeps(baseSeed));
-    expect(mine.rows.map((r) => r.contactId)).toEqual(['c-mine']);
   });
 
   it('placementContext present {placementId,label} when the representative conversation has a placementId', async () => {
@@ -418,28 +402,10 @@ describe('aggregateInbox — one row per contact (C8)', () => {
       placements: { 'placement-9': { stage: 'awaiting_inspection' } },
     });
 
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
     expect(page.rows[0]!.placementContext).toEqual({ placementId: 'placement-9', label: 'Awaiting inspection' });
   });
 
-  it('assignment resolves {userId,name} from the users repo when assigned; omitted when unassigned', async () => {
-    const deps = makeDeps({
-      contacts: [
-        { contactId: 'c-assigned', type: 'tenant', phone: '+15550000001' },
-        { contactId: 'c-free', type: 'tenant', phone: '+15550000002' },
-      ],
-      conversations: [
-        conv({ conversationId: 'conv-assigned', participant_phone: '+15550000001', last_activity_at: '2026-06-12T10:00:00.000Z', assignment: 'u-9' }),
-        conv({ conversationId: 'conv-free', participant_phone: '+15550000002', last_activity_at: '2026-06-11T10:00:00.000Z' }),
-      ],
-      users: { 'u-9': { name: 'Val Agent' } },
-    });
-
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, deps);
-    const byId = Object.fromEntries(page.rows.map((r) => [r.contactId, r]));
-    expect(byId['c-assigned']!.assignment).toEqual({ userId: 'u-9', name: 'Val Agent' });
-    expect(byId['c-free']!.assignment).toBeUndefined();
-  });
 });
 
 describe('aggregateInbox — cursor paging (split-proof)', () => {
@@ -470,8 +436,8 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
   }
 
   it('a contact emitted on page 1 (its newest conv) does NOT reappear on page 2 even though it has an older conv in the page-2 window', async () => {
-    const p1 = await aggregateInbox({ filter: 'all', limit: 3, userId: 'u-1' }, makeDeps(splitSeed()));
-    const p2 = await aggregateInbox({ filter: 'all', limit: 3, cursor: p1.nextCursor!, userId: 'u-1' }, makeDeps(splitSeed()));
+    const p1 = await aggregateInbox({ filter: 'all', limit: 3 }, makeDeps(splitSeed()));
+    const p2 = await aggregateInbox({ filter: 'all', limit: 3, cursor: p1.nextCursor! }, makeDeps(splitSeed()));
     const ids = [...p1.rows, ...p2.rows].map((r) => r.contactId);
     expect(new Set(ids).size).toBe(ids.length); // no duplicate contact across pages
     expect(ids).toContain('c-1');
@@ -480,7 +446,7 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
   });
 
   it('nextCursor is null when the conversation stream is exhausted', async () => {
-    const page = await aggregateInbox({ filter: 'all', limit: 25, userId: 'u-1' }, makeDeps(splitSeed()));
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, makeDeps(splitSeed()));
     expect(page.nextCursor).toBeNull();
   });
 
@@ -490,7 +456,7 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
     // Bounded loop guard.
     for (let i = 0; i < 20; i++) {
       const page = await aggregateInbox(
-        { filter: 'all', limit: 2, userId: 'u-1', ...(cursor !== undefined && { cursor }) },
+        { filter: 'all', limit: 2, ...(cursor !== undefined && { cursor }) },
         makeDeps(splitSeed()),
       );
       for (const r of page.rows) seen.push(r.contactId!);
@@ -532,7 +498,7 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
     let cursor: string | undefined;
     for (let i = 0; i < 20; i++) {
       const page = await aggregateInbox(
-        { filter: 'all', limit: 2, userId: 'u-1', ...(cursor !== undefined && { cursor }) },
+        { filter: 'all', limit: 2, ...(cursor !== undefined && { cursor }) },
         makeDeps(mixedSeed()),
       );
       for (const r of page.rows) seen.push((r.contactId ?? r.conversationId)!);
@@ -551,7 +517,7 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
 
   it('a malformed cursor is rejected (the route maps it to 400, never a 500)', async () => {
     await expect(
-      aggregateInbox({ filter: 'all', limit: 25, cursor: 'not-base64-json!!!', userId: 'u-1' }, makeDeps(splitSeed())),
+      aggregateInbox({ filter: 'all', limit: 25, cursor: 'not-base64-json!!!' }, makeDeps(splitSeed())),
     ).rejects.toMatchObject({ name: 'InboxBadRequestError' });
   });
 });

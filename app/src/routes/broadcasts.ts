@@ -40,7 +40,7 @@ import {
   type BroadcastsRepo,
   type BroadcastStatus,
 } from '../repos/broadcastsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, SHAREABLE_STATUSES, isDeleted, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createAudienceResolutionService,
@@ -595,6 +595,20 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // Only a draft may be sent — a sending/sent broadcast is not re-sendable.
       res.status(409).json({ error: 'broadcast_not_draft', status: broadcast.status });
       return;
+    }
+
+    // Availability guard (spec 2026-07-10): the flyer link stamped into every
+    // recipient's message only resolves while the unit is SHAREABLE (only
+    // 'available' - the same gate public.ts serves). Re-check at SEND time,
+    // not create time - a draft can outlive a status change. Missing and
+    // soft-deleted units get the same refusal (the link is equally dead).
+    // The dashboard maps this 400 to its make-available dialog.
+    if (broadcast.unitId !== undefined) {
+      const unit = await units.getById(broadcast.unitId);
+      if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
+        res.status(400).json({ error: 'unit_not_available' });
+        return;
+      }
     }
 
     // Two send paths share the rest of the flow once they've produced a bounded

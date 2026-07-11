@@ -3,7 +3,6 @@
 //   GET   /api/conversations/:id              (single item)
 //   GET   /api/conversations/:id/messages     (timeline page)
 //   POST  /api/conversations/:id/read         (unread reset)
-//   PATCH /api/conversations/:id/assignment   (assign/unassign + audit)
 // The inbox's Query-not-Scan mandate is asserted against a FAKE DocumentClient
 // (every command the repo sends is captured and inspected); everything else
 // runs on the shared in-memory world fakes.
@@ -49,7 +48,6 @@ describe('GET /api/conversations — the inbox', () => {
       last_activity_at: '2026-06-12T11:00:00.000Z',
       last_message_preview: 'newest preview',
       unread_count: 4,
-      assignment: 'user-va-1',
       sms_opt_out: true,
       participants: [{ contactId: 'contact-1', phone: '+15550100001' }],
     });
@@ -71,7 +69,6 @@ describe('GET /api/conversations — the inbox', () => {
       participant_display_name: null,
       last_activity_at: '2026-06-12T11:00:00.000Z',
       unread_count: 4,
-      assignment: 'user-va-1',
       sms_opt_out: true,
     });
     // Defaults for sparse attributes:
@@ -80,7 +77,6 @@ describe('GET /api/conversations — the inbox', () => {
       preview: null,
       participant_display_name: null,
       unread_count: 0,
-      assignment: null,
       sms_opt_out: false,
     });
     expect(res.body.nextCursor).toBeNull();
@@ -304,7 +300,7 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
     expect(world.conversations.get('conv-1')!.unread_count).toBe(0);
     // SSE (M1.2): other dashboards drop their unread badge live — same
     // payload shape as every other conversation.updated (incl. the M1.4
-    // type + assignment wire fields).
+    // type wire field).
     expect(world.emitted).toEqual([
       {
         event: 'conversation.updated',
@@ -314,7 +310,6 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
           unread_count: 0,
           preview: 'seen now',
           type: 'tenant_1to1',
-          assignment: null,
           participant_display_name: null,
         },
       },
@@ -332,78 +327,3 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
   });
 });
 
-describe('PATCH /api/conversations/:conversationId/assignment', () => {
-  it('assigns, reassigns, and unassigns — auditing each change as old → new', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedConversation(world, 'conv-1');
-
-    const assign = await request(app)
-      .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
-      .send({ assigneeUserId: 'user-va-1' });
-    expect(assign.status).toBe(200);
-    expect(assign.body.conversation.assignment).toBe('user-va-1');
-
-    const reassign = await request(app)
-      .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
-      .send({ assigneeUserId: 'user-va-2' });
-    expect(reassign.status).toBe(200);
-    expect(reassign.body.conversation.assignment).toBe('user-va-2');
-
-    const unassign = await request(app)
-      .patch('/api/conversations/conv-1/assignment')
-      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
-      .send({ assigneeUserId: null });
-    expect(unassign.status).toBe(200);
-    expect(unassign.body.conversation.assignment).toBeUndefined();
-    expect(world.conversations.get('conv-1')!.assignment).toBeUndefined();
-
-    expect(world.auditEvents).toEqual([
-      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: null, to: 'user-va-1' } },
-      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: 'user-va-1', to: 'user-va-2' } },
-      { entityKey: 'conversations#conv-1', event_type: 'assignment_changed', payload: { from: 'user-va-2', to: null } },
-    ]);
-
-    // SSE (M1.2): each assignment change pushes one conversation.updated
-    // (shared event shape; clients re-read the summary for the assignee).
-    expect(world.emitted).toEqual([
-      expect.objectContaining({ event: 'conversation.updated' }),
-      expect.objectContaining({ event: 'conversation.updated' }),
-      expect.objectContaining({ event: 'conversation.updated' }),
-    ]);
-    expect(world.emitted[0]!.payload).toEqual({
-      conversationId: 'conv-1',
-      last_activity_at: '2026-06-12T10:00:00.000Z',
-      unread_count: 0,
-      type: 'tenant_1to1',
-      assignment: 'user-va-1',
-      participant_display_name: null,
-    });
-  });
-
-  it('400s on malformed payloads without touching the conversation or audit trail', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedConversation(world, 'conv-1', { assignment: 'user-va-1' });
-
-    for (const payload of [{}, { assigneeUserId: '' }, { assigneeUserId: 42 }, { assigneeUserId: ['x'] }]) {
-      const res = await request(app)
-        .patch('/api/conversations/conv-1/assignment')
-        .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
-        .send(payload);
-      expect(res.status, JSON.stringify(payload)).toBe(400);
-    }
-    expect(world.conversations.get('conv-1')!.assignment).toBe('user-va-1');
-    expect(world.auditEvents).toHaveLength(0);
-  });
-
-  it('404s for unknown conversations and writes no audit event', async () => {
-    const { app, world } = makeWebhookHarness();
-    const res = await request(app)
-      .patch('/api/conversations/conv-nope/assignment')
-      .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE)
-      .send({ assigneeUserId: 'user-va-1' });
-    expect(res.status).toBe(404);
-    expect(world.auditEvents).toHaveLength(0);
-  });
-});

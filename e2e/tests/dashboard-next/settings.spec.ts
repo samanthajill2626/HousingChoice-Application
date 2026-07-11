@@ -157,6 +157,30 @@ test.describe('Settings — admin path', () => {
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('Saved')).toBeVisible();
   });
+
+  test('admin can remove an invited teammate', async ({ page }) => {
+    await devLoginAs(page, 'founder@example.com');
+    await page.goto(`${NEXT}/settings/team`);
+    await expect(page.getByRole('heading', { name: 'Team', level: 2 })).toBeVisible();
+
+    // Invite a throwaway VA (default role) -- not self, not an admin, no voice
+    // line, so it is removable.
+    const email = `removeme-${Date.now()}@example.com`;
+    await page.getByLabel('Email').fill(email);
+    await page.getByRole('button', { name: 'Invite' }).click();
+    await expect(page.getByRole('status')).toContainText(/Invited/i);
+    await expect(page.getByLabel(`Role for ${email}`)).toBeVisible();
+
+    // Remove -> confirm in the dialog -> the row disappears.
+    await page.getByRole('button', { name: `Remove ${email}` }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove teammate' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Remove' }).click();
+
+    // The teammate's row (identified by its per-row role control) is gone.
+    await expect(page.getByLabel(`Role for ${email}`)).toHaveCount(0);
+    await expect(dialog).not.toBeVisible();
+  });
 });
 
 test.describe('Settings — VA path', () => {

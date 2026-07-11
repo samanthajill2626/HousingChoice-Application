@@ -75,8 +75,7 @@
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
 }
-.tag,
-.assigned {
+.tag {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-surface-2);

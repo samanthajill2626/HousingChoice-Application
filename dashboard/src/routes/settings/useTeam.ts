@@ -9,6 +9,7 @@ import {
   clearInboundVoiceLine,
   inviteUser,
   listUsers,
+  removeUser,
   setUserRole,
   type AdminUserView,
   type UserRole,
@@ -31,6 +32,10 @@ export type RoleChangeResult = { ok: true } | { ok: false; error: string };
  *  show inline (e.g. the user has no verified cell → can't hold the line). */
 export type VoiceLineResult = { ok: true } | { ok: false; error: string };
 
+/** The result of a remove: ok (row dropped from the roster), or a per-row error
+ *  to show in the confirm dialog (e.g. a 409 guard). Never throws. */
+export type RemoveResult = { ok: true } | { ok: false; error: string };
+
 export interface TeamState {
   status: TeamStatus;
   users: AdminUserView[];
@@ -46,12 +51,24 @@ export interface TeamState {
   assignVoiceLine: (userId: string) => Promise<VoiceLineResult>;
   /** Clear the inbound voice line from its current holder. Never throws. */
   clearVoiceLine: (userId: string) => Promise<VoiceLineResult>;
+  /** Remove a teammate (hard delete). On success the row is dropped from the
+   *  roster; on a 409 guard returns a friendly error. Never throws. */
+  remove: (userId: string) => Promise<RemoveResult>;
 }
 
 /** Map the server's lockout `error` codes to a friendly inline message. */
 function lockoutMessage(code: string): string | undefined {
   if (code === 'cannot_demote_self') return "You can't remove your own admin access.";
   if (code === 'cannot_demote_last_admin') return 'The team must keep at least one admin.';
+  return undefined;
+}
+
+/** Map the server's remove-guard `error` codes to a friendly message. */
+function removeMessage(code: string): string | undefined {
+  if (code === 'cannot_remove_last_admin') return 'The team must keep at least one admin.';
+  if (code === 'cannot_remove_self') return "You can't remove your own account.";
+  if (code === 'voice_line_assigned')
+    return 'Reassign the inbound voice line before removing this teammate.';
   return undefined;
 }
 
@@ -172,5 +189,20 @@ export function useTeam(): TeamState {
     }
   }, []);
 
-  return { status, users, retry, invite, changeRole, assignVoiceLine, clearVoiceLine };
+  const remove = useCallback(async (userId: string): Promise<RemoveResult> => {
+    try {
+      await removeUser(userId);
+      // Drop the row locally so the roster reflects the removal without a reload.
+      setUsers((prev) => prev.filter((u) => u.userId !== userId));
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const msg = removeMessage(err.code);
+        return { ok: false, error: msg ?? "Couldn't remove the teammate. Please try again." };
+      }
+      return { ok: false, error: "Couldn't remove the teammate. Please try again." };
+    }
+  }, []);
+
+  return { status, users, retry, invite, changeRole, assignVoiceLine, clearVoiceLine, remove };
 }

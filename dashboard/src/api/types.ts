@@ -220,8 +220,6 @@ export interface ConversationSummary {
   /** ISO 8601. */
   last_activity_at: string;
   unread_count: number;
-  /** Assigned team member's userId, or null when unassigned. */
-  assignment: string | null;
   sms_opt_out: boolean;
   /** Resolved contact name denormalized onto the conversation, or null when the
    *  participant is un-triaged (we never fabricate a name — fall back to phone). */
@@ -817,9 +815,6 @@ export interface ConversationUpdatedEvent {
   /** Conversation type carried on the event so the inbox can re-evaluate the
    *  needs-review chip live (e.g. unknown_1to1 → tenant_1to1 after triage). */
   type: ConversationType;
-  /** Assigned team member's userId, or null when unassigned — so the Assigned
-   *  chip re-evaluates live. */
-  assignment: string | null;
   /** Resolved contact name (or null) — so the inbox shows the name and clears
    *  the review chip the instant a contact is triaged, without a reload. */
   participant_display_name: string | null;
@@ -927,10 +922,6 @@ export interface ContactCreate {
   phone?: string;
   voucherSize?: number;
   company?: string;
-  /** Landlord preference defaults (person-level policies). */
-  accepts_programs?: string[];
-  lease_terms?: string;
-  pet_policy?: string;
   role?: string;
   relationships?: Relationship[];
   customFields?: CustomField[];
@@ -1005,20 +996,12 @@ export interface Contact {
    *  optional fields; not type-gated. `contract_status` records whether the external
    *  DocuSign contract was signed. */
   contract_status?: 'unsigned' | 'signed';
-  /** Expected contract rent (dollars, >= 0). */
-  expected_rent?: number;
   registered_landlord?: boolean;
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
-  /** Landlord preference DEFAULTS — person-level policies across their properties
-   *  (the per-unit facts stay on UnitItem.accepted_programs etc.). `pet_policy`
-   *  is distinct from `pets` (the TENANT intake answer above). */
-  accepts_programs?: string[];
-  /** Free-text lease-terms policy ("12-month minimum, month-to-month after"). */
-  lease_terms?: string;
-  /** Free-text pet policy ("small dogs OK, $300 deposit"). */
-  pet_policy?: string;
+  // NOTE (2026-07-10): expected_rent + accepts_programs/lease_terms/pet_policy
+  // moved to the UNIT (per-property facts — see UnitItem + GLOSSARY).
   /** Structured postal address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   /** Contact's role within the organisation (e.g. case manager, property manager). */
@@ -1048,16 +1031,10 @@ export interface ContactPatch {
   lifEligible?: boolean;
   /** Structured landlord deal terms + approval criteria (onboarding call). */
   contract_status?: 'unsigned' | 'signed';
-  expected_rent?: number;
   registered_landlord?: boolean;
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
-  /** Landlord preference defaults (person-level policies). An empty array /
-   *  empty string clears the field. */
-  accepts_programs?: string[];
-  lease_terms?: string;
-  pet_policy?: string;
   /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
   park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */
@@ -1133,6 +1110,8 @@ export interface UnitItem {
   accessibility?: string;
   /** Internal staff notes, e.g. "In-unit washer/dryer". Never public. */
   notes?: string;
+  /** Lease terms, e.g. "12-month minimum". Per-unit fact (moved off the landlord contact 2026-07-10). Never public. */
+  lease_terms?: string;
   /** Pet policy, e.g. "Cats only". */
   pets?: string;
   /** S3 keys / URLs of property media (the Photos gallery + hero). */
@@ -1229,7 +1208,6 @@ export type TimelineMilestoneType =
   | 'placement_opened'
   | 'placement_closed'
   | 'listing_sent'
-  | 'listing_reviewed'
   | 'tour_scheduled'
   | 'tour_took_place'
   | 'tour_canceled'
@@ -1322,14 +1300,25 @@ export interface ContactTimelinePage {
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------
 // Copied verbatim from the build plan §C4. The tenant file's "Properties sent".
 
-export type ListingResponse = 'interested' | 'not_a_fit' | 'no_reply';
+/** The derived tour signal a send row carries when a qualifying tour exists for
+ *  the (unit, tenant) pairing. Hand-mirrored from the app-side declaration in
+ *  app/src/lib/listingSendTour.ts (independent types - the assignment-yank
+ *  lesson); the lockstep pin is each side's own tsc plus the payload-shape route
+ *  test. Keep in sync when the server projection changes. */
+export type TourSignalState = 'requested' | 'scheduled' | 'toured';
+export interface TourSignal {
+  tourId: string;
+  state: TourSignalState;
+}
 export interface ListingSendRow {
   contactId: string;
   unitId: string;
-  response: ListingResponse;
   sentAt: string; // ISO
   via: 'broadcast' | 'individual';
   broadcastId?: string;
+  /** The pairing's most-progressed tour, when one qualifies - powers the roster
+   *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
+  tour?: TourSignal;
 }
 
 /** Result of POST /api/conversations/:id/messages (legacy reuse). */
@@ -1423,7 +1412,7 @@ export interface SimilarUnit {
 
 /** One property Activity row. `type` is the audit event_type — an OPEN set;
  *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
- *  listing_response_set, listing_status_changed, unit_deleted, unit_restored,
+ *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  *  tour_no_show, tour_canceled, tour_outcome.
  *  Unknown types must still render (humanized), never blank. */
@@ -1439,7 +1428,6 @@ export interface UnitActivityEvent {
   /** Server-resolved display name (best-effort) — absent when unknown. */
   contactName?: string;
   role?: string;
-  response?: string;
   fields?: string[];
   from?: string;
   to?: string;
@@ -1636,7 +1624,7 @@ export interface BroadcastUpdatedEvent {
 // newest-activity-first, aggregating all of a contact's numbers. GET /api/inbox
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
-export type InboxFilter = 'all' | 'unread' | 'unknown' | 'mine';
+export type InboxFilter = 'all' | 'unread' | 'unknown';
 export type InboxChannel = 'sms' | 'mms' | 'call';
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's
@@ -1657,7 +1645,6 @@ export interface InboxRow {
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' → render "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
-  assignment?: { userId: string; name: string }; // the Assigned chip
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId

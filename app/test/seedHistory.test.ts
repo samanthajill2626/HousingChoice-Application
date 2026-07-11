@@ -494,8 +494,8 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     if (requested) expect(tourMilestones(requested).length).toBe(0);
   });
 
-  it('listing_sends produce faithful listing_sent (+ listing_reviewed on a reviewed response)', () => {
-    const send = LISTING_SENDS.find((s) => s['response'] === 'interested');
+  it('listing_sends produce a faithful listing_sent milestone (no response label)', () => {
+    const send = LISTING_SENDS[0];
     expect(send).toBeDefined();
     const rows = listingSendMilestones(send!);
     const sent = rows.find((r) => r.type === 'listing_sent')!;
@@ -503,12 +503,9 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     expect(sent.refType).toBe('unit');
     expect(sent.refId).toBe(send!['unitId']);
     expect(iso(sent.tsEventId)).toBe(iso(String(send!['sentAt'])));
-    const reviewed = rows.find((r) => r.type === 'listing_reviewed')!;
-    expect(reviewed.label).toBe('Property reviewed - Interested'); // units.ts:708
-    // a no_reply send has no review milestone
-    const noReply = LISTING_SENDS.find((s) => s['response'] === 'no_reply');
-    if (noReply) {
-      expect(listingSendMilestones(noReply).some((r) => r.type === 'listing_reviewed')).toBe(false);
+    // The removed `response` label yields NO listing_reviewed milestone anymore.
+    for (const s of LISTING_SENDS) {
+      expect(listingSendMilestones(s).some((r) => r.type === 'listing_reviewed')).toBe(false);
     }
   });
 

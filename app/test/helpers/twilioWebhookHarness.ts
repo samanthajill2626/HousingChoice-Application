@@ -67,7 +67,6 @@ import {
   type ActivityEventsRepo,
 } from '../../src/repos/activityEventsRepo.js';
 import {
-  ListingSendNotFoundError,
   type ListingSendItem,
   type ListingSendsRepo,
 } from '../../src/repos/listingSendsRepo.js';
@@ -304,14 +303,6 @@ export function createFakeWorld(): FakeWorld {
       if (!conv) throw conditionalCheckFailed(`resetUnread: no conversation ${conversationId}`);
       conv.unread_count = 0;
       return conv;
-    },
-    async setAssignment(conversationId, assigneeUserId) {
-      const conv = conversations.get(conversationId);
-      if (!conv) throw conditionalCheckFailed(`setAssignment: no conversation ${conversationId}`);
-      const previousAssigneeUserId = typeof conv.assignment === 'string' ? conv.assignment : null;
-      if (assigneeUserId === null) delete conv.assignment;
-      else conv.assignment = assigneeUserId;
-      return { conversation: conv, previousAssigneeUserId };
     },
     async listByLastActivity({ status, limit }) {
       const items = [...conversations.values()]
@@ -1299,11 +1290,10 @@ export function createFakeWorld(): FakeWorld {
   };
 
   // In-memory listing sends (BE4/C4): mirror the repo's contractual semantics —
-  // an UPSERT keyed by (unitId, contactId) that seeds response='no_reply' on the
-  // FIRST send and NEVER resets it on a re-send (only refreshes sentAt/via/
-  // broadcastId), setResponse conditional on the row existing (404-shaped throw
-  // when absent), listByUnit (base table) + listByContact (newest-first by
-  // sentAt, the byContact GSI direction).
+  // an UPSERT keyed by (unitId, contactId) that stamps created_at on the FIRST
+  // send and refreshes sentAt/via/broadcastId on a re-send (created_at preserved),
+  // listByUnit (base table) + listByContact (newest-first by sentAt, the byContact
+  // GSI direction).
   const listingSends: ListingSendItem[] = [];
   const findListingSend = (unitId: string, contactId: string): ListingSendItem | undefined =>
     listingSends.find((r) => r.unitId === unitId && r.contactId === contactId);
@@ -1313,9 +1303,9 @@ export function createFakeWorld(): FakeWorld {
       const sentAt = input.sentAt ?? now;
       const existing = findListingSend(input.unitId, input.contactId);
       if (existing) {
-        // RE-SEND: refresh sentAt/via/broadcastId + updated_at; NEVER reset
-        // response. An individual re-send with no broadcastId clears the prior
-        // attribution (mirrors the real repo's REMOVE).
+        // RE-SEND: refresh sentAt/via/broadcastId + updated_at. An individual
+        // re-send with no broadcastId clears the prior attribution (mirrors the
+        // real repo's REMOVE).
         existing.sentAt = sentAt;
         existing.via = input.via;
         existing.updated_at = now;
@@ -1326,7 +1316,6 @@ export function createFakeWorld(): FakeWorld {
       const item: ListingSendItem = {
         unitId: input.unitId,
         contactId: input.contactId,
-        response: 'no_reply',
         sentAt,
         via: input.via,
         created_at: now,
@@ -1339,21 +1328,6 @@ export function createFakeWorld(): FakeWorld {
     async getByKey(unitId, contactId) {
       const existing = findListingSend(unitId, contactId);
       return existing ? { ...existing } : undefined;
-    },
-    async setResponse(unitId, contactId, response) {
-      // Mirror the real repo's atomic conditional: not-found throws; an
-      // unchanged value is a no-op (changed:false, NO milestone); a real
-      // transition writes and returns changed:true.
-      const existing = findListingSend(unitId, contactId);
-      if (!existing) {
-        throw new ListingSendNotFoundError(unitId, contactId);
-      }
-      if (existing.response === response) {
-        return { row: { ...existing }, changed: false };
-      }
-      existing.response = response;
-      existing.updated_at = new Date().toISOString();
-      return { row: { ...existing }, changed: true };
     },
     async listByUnit(unitId) {
       return listingSends.filter((r) => r.unitId === unitId).map((r) => ({ ...r }));

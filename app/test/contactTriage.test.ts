@@ -80,8 +80,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.conversations.get('conv-triage-1')?.participant_display_name).toBe('Keisha Jones');
 
     // LIVE EMIT (Cluster C): one conversation.updated carrying the new wire
-    // shape (type + assignment + the denormalized resolved name) for the
-    // touched thread.
+    // shape (type + the denormalized resolved name) for the touched thread.
     expect(world.emitted).toEqual([
       {
         event: 'conversation.updated',
@@ -90,7 +89,6 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
           last_activity_at: '2026-06-12T10:00:00.000Z',
           type: 'tenant_1to1',
           unread_count: 0,
-          assignment: null,
           participant_display_name: 'Keisha Jones',
         },
       },

@@ -1,7 +1,11 @@
-// Task 2: structured landlord contact fields — contract_status/expected_rent/
+// Task 2: structured landlord contact fields — contract_status/
 // registered_landlord/rta_within_48h/pass_inspection_first_try/income_includes_voucher.
 // Verifies that PATCH persists the fields, GET returns them, type validation fires,
 // and POST create accepts them on creation. Mirrors contactIntakeFields.test.ts.
+//
+// NOTE (2026-07-10): expected_rent + the preference defaults (accepts_programs/
+// lease_terms/pet_policy) MOVED to the UNIT — the contact parsers no longer
+// accept them (ignored as unknown keys; pinned at the bottom of this file).
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -24,7 +28,6 @@ describe('structured landlord fields', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({
         contract_status: 'signed',
-        expected_rent: 1450,
         registered_landlord: true,
         rta_within_48h: true,
         pass_inspection_first_try: false,
@@ -38,40 +41,13 @@ describe('structured landlord fields', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .expect(200);
     expect(got.body.contact.contract_status).toBe('signed');
-    expect(got.body.contact.expected_rent).toBe(1450);
     expect(got.body.contact.registered_landlord).toBe(true);
     expect(got.body.contact.rta_within_48h).toBe(true);
     expect(got.body.contact.pass_inspection_first_try).toBe(false);
     expect(got.body.contact.income_includes_voucher).toBe(true);
   });
 
-  it('accepts expected_rent of 0 and contract_status unsigned', async () => {
-    const { app } = makeWebhookHarness();
-    const created = await request(app)
-      .post('/api/contacts')
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ type: 'landlord' })
-      .expect(201);
-    const id = created.body.contact.contactId;
-
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ contract_status: 'unsigned', expected_rent: 0 })
-      .expect(200);
-
-    const got = await request(app)
-      .get(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .expect(200);
-    expect(got.body.contact.contract_status).toBe('unsigned');
-    expect(got.body.contact.expected_rent).toBe(0);
-  });
-
-  it('rejects a non-enum contract_status, a string expected_rent, and a non-boolean flag', async () => {
+  it('rejects a non-enum contract_status and a non-boolean flag', async () => {
     const { app } = makeWebhookHarness();
     const created = await request(app)
       .post('/api/contacts')
@@ -91,18 +67,6 @@ describe('structured landlord fields', () => {
       .patch(`/api/contacts/${id}`)
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ expected_rent: '1450' })
-      .expect(400);
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ expected_rent: -5 })
-      .expect(400);
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
       .send({ registered_landlord: 'yes' })
       .expect(400);
   });
@@ -116,23 +80,24 @@ describe('structured landlord fields', () => {
       .send({
         type: 'landlord',
         contract_status: 'signed',
-        expected_rent: 1200,
         registered_landlord: false,
         income_includes_voucher: true,
       })
       .expect(201);
     expect(created.body.contact.contract_status).toBe('signed');
-    expect(created.body.contact.expected_rent).toBe(1200);
     expect(created.body.contact.registered_landlord).toBe(false);
     expect(created.body.contact.income_includes_voucher).toBe(true);
   });
 });
 
-// Landlord preference defaults — accepts_programs/lease_terms/pet_policy: the
-// person-level policies the Preferences & notes card renders (the per-unit facts
-// live on units). Same first-class-optional-field convention as the deal terms.
-describe('landlord preference defaults', () => {
-  it('PATCH persists the preference fields and GET returns them', async () => {
+// MOVED TO THE UNIT (2026-07-10): expected_rent + the preference defaults
+// (accepts_programs / lease_terms / pet_policy) are per-property facts now
+// (rent_min-rent_max / accepted_programs / lease_terms / pets on UnitItem).
+// The contact parsers treat them like any other unknown key — silently
+// ignored, never persisted — so a stale client sending them cannot resurrect
+// contact-level copies.
+describe('moved-to-unit fields are ignored on the contact', () => {
+  it('PATCH ignores the moved fields (200, nothing persisted)', async () => {
     const { app } = makeWebhookHarness();
     const created = await request(app)
       .post('/api/contacts')
@@ -147,9 +112,12 @@ describe('landlord preference defaults', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({
-        accepts_programs: ['HCV', 'VASH'],
-        lease_terms: '12-month minimum, month-to-month after',
-        pet_policy: 'Small dogs OK, $300 deposit',
+        // Ride alongside a REAL field so the PATCH itself is valid.
+        company: 'Shelton Homes',
+        expected_rent: 1450,
+        accepts_programs: ['HCV'],
+        lease_terms: '12-month minimum',
+        pet_policy: 'No pets',
       })
       .expect(200);
 
@@ -158,75 +126,14 @@ describe('landlord preference defaults', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .expect(200);
-    expect(got.body.contact.accepts_programs).toEqual(['HCV', 'VASH']);
-    expect(got.body.contact.lease_terms).toBe('12-month minimum, month-to-month after');
-    expect(got.body.contact.pet_policy).toBe('Small dogs OK, $300 deposit');
+    expect(got.body.contact.company).toBe('Shelton Homes');
+    expect(got.body.contact.expected_rent).toBeUndefined();
+    expect(got.body.contact.accepts_programs).toBeUndefined();
+    expect(got.body.contact.lease_terms).toBeUndefined();
+    expect(got.body.contact.pet_policy).toBeUndefined();
   });
 
-  it('accepts an empty programs array and empty strings (clearing)', async () => {
-    const { app } = makeWebhookHarness();
-    const created = await request(app)
-      .post('/api/contacts')
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ type: 'landlord', accepts_programs: ['HCV'], lease_terms: 'x', pet_policy: 'y' })
-      .expect(201);
-    const id = created.body.contact.contactId;
-
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ accepts_programs: [], lease_terms: '', pet_policy: '' })
-      .expect(200);
-
-    const got = await request(app)
-      .get(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .expect(200);
-    expect(got.body.contact.accepts_programs).toEqual([]);
-    expect(got.body.contact.lease_terms).toBe('');
-    expect(got.body.contact.pet_policy).toBe('');
-  });
-
-  it('rejects a non-array programs value, non-string elements, and non-string text fields', async () => {
-    const { app } = makeWebhookHarness();
-    const created = await request(app)
-      .post('/api/contacts')
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ type: 'landlord' })
-      .expect(201);
-    const id = created.body.contact.contactId;
-
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ accepts_programs: 'HCV' })
-      .expect(400);
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ accepts_programs: ['HCV', 42] })
-      .expect(400);
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ lease_terms: 12 })
-      .expect(400);
-    await request(app)
-      .patch(`/api/contacts/${id}`)
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ pet_policy: false })
-      .expect(400);
-  });
-
-  it('POST create accepts the preference fields', async () => {
+  it('POST create ignores the moved fields', async () => {
     const { app } = makeWebhookHarness();
     const created = await request(app)
       .post('/api/contacts')
@@ -234,14 +141,16 @@ describe('landlord preference defaults', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({
         type: 'landlord',
+        expected_rent: 1200,
         accepts_programs: ['HCV'],
         lease_terms: 'Year lease',
         pet_policy: 'No pets',
       })
       .expect(201);
-    expect(created.body.contact.accepts_programs).toEqual(['HCV']);
-    expect(created.body.contact.lease_terms).toBe('Year lease');
-    expect(created.body.contact.pet_policy).toBe('No pets');
+    expect(created.body.contact.expected_rent).toBeUndefined();
+    expect(created.body.contact.accepts_programs).toBeUndefined();
+    expect(created.body.contact.lease_terms).toBeUndefined();
+    expect(created.body.contact.pet_policy).toBeUndefined();
   });
 });
 

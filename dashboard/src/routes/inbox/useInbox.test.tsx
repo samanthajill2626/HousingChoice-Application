@@ -6,7 +6,6 @@ import type { InboxFilter, InboxPage, InboxRow } from '../../api/index.js';
 
 const getInbox = vi.fn();
 const markInboxRead = vi.fn();
-const assignInbox = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -15,7 +14,6 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getInbox: (...a: unknown[]) => getInbox(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
-    assignInbox: (...a: unknown[]) => assignInbox(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
     },
@@ -50,14 +48,11 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="status">{s.status}</span>
       <span data-testid="count">{s.rows.length}</span>
       <span data-testid="unread">{s.rows.map((r) => r.unreadCount).join(',')}</span>
-      <span data-testid="assigned">{s.rows.map((r) => r.assignment?.name ?? '-').join(',')}</span>
       <span data-testid="hasMore">{String(s.hasMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
           <button onClick={() => s.markRead(r)}>read:{rowKey(r)}</button>
-          <button onClick={() => s.assign(r, 'u9', 'Nav')}>assign:{rowKey(r)}</button>
-          <button onClick={() => s.assign(r, null, '')}>unassign:{rowKey(r)}</button>
         </span>
       ))}
     </div>
@@ -67,7 +62,6 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
 beforeEach(() => {
   getInbox.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
-  assignInbox.mockReset().mockResolvedValue(undefined);
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -144,18 +138,6 @@ describe('useInbox', () => {
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ phone: '+15555550123' }));
   });
 
-  it('optimistically assigns, posts userId, and rolls back on failure', async () => {
-    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1' })]));
-    assignInbox.mockRejectedValueOnce(new ApiError(500, 'http_500', 'no'));
-    render(<Probe filter="all" />);
-    await waitFor(() => expect(screen.getByTestId('assigned')).toHaveTextContent('-'));
-    act(() => screen.getByRole('button', { name: 'assign:c:c1' }).click());
-    // Optimistic name shows, then rolls back to unassigned on failure.
-    await waitFor(() => expect(screen.getByTestId('assigned')).toHaveTextContent('Nav'));
-    await waitFor(() => expect(screen.getByTestId('assigned')).toHaveTextContent('-'));
-    expect(assignInbox).toHaveBeenCalledWith('c1', 'u9');
-  });
-
   it('refetches (coalesced) the current page on an SSE conversation.updated', async () => {
     getInbox.mockResolvedValue(pageOf([mkRow()]));
     render(<Probe filter="all" />);
@@ -167,7 +149,6 @@ describe('useInbox', () => {
         last_activity_at: '2026-06-17T11:00:00.000Z',
         unread_count: 1,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: 'Tasha',
       });
       sse.onConversationUpdated?.({
@@ -175,7 +156,6 @@ describe('useInbox', () => {
         last_activity_at: '2026-06-17T11:00:01.000Z',
         unread_count: 1,
         type: 'tenant_1to1',
-        assignment: null,
         participant_display_name: 'Bo',
       });
     });
@@ -195,31 +175,11 @@ describe('useInbox', () => {
     act(() => {
       sse.onConversationUpdated?.({
         conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
-        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+        type: 'tenant_1to1', participant_display_name: 'T',
       });
     });
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
     // The in-flight overlay protects it — still 0.
-    expect(screen.getByTestId('unread')).toHaveTextContent('0');
-    act(() => releaseRead());
-    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
-  });
-
-  it('keeps BOTH overlays when mark-read and assign run concurrently on one row', async () => {
-    getInbox.mockResolvedValue(pageOf([mkRow({ contactId: 'c1', unreadCount: 2, assignment: undefined })]));
-    let releaseRead: () => void = () => {};
-    let releaseAssign: () => void = () => {};
-    markInboxRead.mockImplementation(() => new Promise<void>((res) => { releaseRead = () => res(); }));
-    assignInbox.mockImplementation(() => new Promise<void>((res) => { releaseAssign = () => res(); }));
-    render(<Probe filter="all" />);
-    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
-    act(() => screen.getByRole('button', { name: 'read:c:c1' }).click());
-    act(() => screen.getByRole('button', { name: 'assign:c:c1' }).click());
-    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
-    expect(screen.getByTestId('assigned')).toHaveTextContent('Nav');
-    // Assign settles first — its field-scoped clear must NOT drop the unread overlay.
-    act(() => releaseAssign());
-    await waitFor(() => expect(assignInbox).toHaveBeenCalled());
     expect(screen.getByTestId('unread')).toHaveTextContent('0');
     act(() => releaseRead());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
@@ -237,7 +197,7 @@ describe('useInbox', () => {
     act(() => {
       sse.onConversationUpdated?.({
         conversationId: 'x', last_activity_at: '2026-06-17T11:00:00.000Z', unread_count: 2,
-        type: 'tenant_1to1', assignment: null, participant_display_name: 'T',
+        type: 'tenant_1to1', participant_display_name: 'T',
       });
     });
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));

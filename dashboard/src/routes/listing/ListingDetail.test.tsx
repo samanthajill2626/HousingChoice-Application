@@ -76,6 +76,7 @@ const READY: ListingState = {
     utilities: 'Electric and gas',
     accessibility: 'Ground floor',
     pets: 'Cats only',
+    lease_terms: '12-month minimum',
     application_fee: 25,
     same_day_rta: true,
     voucher_size_accepted: 2,
@@ -208,6 +209,9 @@ describe('ListingDetail', () => {
     expect(screen.getByText('Tenant-paid utilities')).toBeInTheDocument();
     expect(screen.getByText('Electric and gas')).toBeInTheDocument();
     expect(screen.getByText('Cats only')).toBeInTheDocument();
+    // Lease terms are a per-unit fact (moved off the landlord contact 2026-07-10).
+    expect(screen.getByText('Lease terms')).toBeInTheDocument();
+    expect(screen.getByText('12-month minimum')).toBeInTheDocument();
     // Flyer-detail fields now surface on the read view (staff see what's on the flyer).
     expect(screen.getByText('Application fee')).toBeInTheDocument();
     expect(screen.getByText('$25')).toBeInTheDocument();
@@ -321,6 +325,41 @@ describe('ListingDetail', () => {
     expect(screen.getAllByText('Arrives with the backend.').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('renders "Sent to tenants" rows: identity links to the contact, no chip without a tour', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      recipients: {
+        status: 'ready',
+        rows: [{ contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' }],
+      },
+    });
+    renderAt();
+    const identity = screen.getByRole('link', { name: 'c-t9' });
+    expect(identity).toHaveAttribute('href', '/contacts/c-t9');
+    // The dead response label is gone (no "No reply"/"Interested"/"Not a fit").
+    expect(screen.queryByText('No reply')).not.toBeInTheDocument();
+    // No qualifying tour -> no tour chip.
+    expect(screen.queryByRole('link', { name: /^Tour|^Toured$/ })).not.toBeInTheDocument();
+  });
+
+  it('renders each tour-chip state on "Sent to tenants" rows, linking to the tour', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      recipients: {
+        status: 'ready',
+        rows: [
+          { contactId: 'c-r', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' } },
+          { contactId: 'c-s', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' } },
+          { contactId: 'c-t', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' } },
+        ],
+      },
+    });
+    renderAt();
+    expect(screen.getByRole('link', { name: 'Tour requested' })).toHaveAttribute('href', '/tours/t-a');
+    expect(screen.getByRole('link', { name: 'Tour scheduled' })).toHaveAttribute('href', '/tours/t-b');
+    expect(screen.getByRole('link', { name: 'Toured' })).toHaveAttribute('href', '/tours/t-c');
+  });
+
   it('renders Activity rows: staff copy labels, times, and contact link-outs', () => {
     useListing.mockReturnValue({
       ...READY,
@@ -330,10 +369,10 @@ describe('ListingDetail', () => {
           {
             id: '2026-07-02T14:30:00.000Z#000002',
             at: '2026-07-02T14:30:00.000Z',
-            type: 'listing_response_set',
+            type: 'unit_contact_added',
             contactId: 'c-t1',
             contactName: 'Tina Renter',
-            response: 'interested',
+            role: 'pm',
           },
           {
             id: '2026-07-01T09:00:00.000Z#000001',
@@ -353,12 +392,12 @@ describe('ListingDetail', () => {
       },
     });
     renderAt();
-    // The response event links out to the tenant's contact file.
-    expect(screen.getByRole('link', { name: /Tenant response - Interested/ })).toHaveAttribute(
+    // A contact-referencing event links out to the tenant's contact file.
+    expect(screen.getByRole('link', { name: /Contact added/ })).toHaveAttribute(
       'href',
       '/contacts/c-t1',
     );
-    expect(screen.getByText('Tina Renter')).toBeInTheDocument();
+    expect(screen.getByText(/Tina Renter/)).toBeInTheDocument();
     // Edit event: label + humanized changed fields.
     expect(screen.getByText('Property updated')).toBeInTheDocument();
     expect(screen.getByText('Rent min, Deposit')).toBeInTheDocument();

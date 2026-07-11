@@ -108,6 +108,24 @@ describe('validateUnitBody — property notes (internal)', () => {
   });
 });
 
+describe('validateUnitBody — lease_terms (moved off the landlord contact 2026-07-10)', () => {
+  it('accepts lease_terms (a string)', () => {
+    expect(
+      validateUnitBody({ lease_terms: '12-month minimum, month-to-month after' }, 'update'),
+    ).toEqual({
+      ok: true,
+      fields: { lease_terms: '12-month minimum, month-to-month after' },
+    });
+  });
+
+  it('rejects a non-string lease_terms', () => {
+    expect(validateUnitBody({ lease_terms: 12 }, 'update')).toEqual({
+      ok: false,
+      error: 'lease_terms must be a string',
+    });
+  });
+});
+
 describe('toUnitFlyerDetails — the reveal allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
@@ -136,6 +154,7 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       same_day_rta: true,
       accessibility: 'SECRET ground floor',
       notes: 'SECRET in-unit washer note',
+      lease_terms: 'SECRET 12-month minimum',
       pets: 'SECRET cats only',
       priority: 'SECRET high',
       tour_process: 'SECRET lockbox 9999',
@@ -182,6 +201,7 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       'status',
       'status_source',
       'notes',
+      'lease_terms',
       'payment_standard',
       'deposit',
       'lif',

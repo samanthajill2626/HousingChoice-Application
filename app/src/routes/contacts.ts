@@ -73,6 +73,8 @@ import {
   toListingSendRow,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
+import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { deriveTourSignal } from '../lib/listingSendTour.js';
 import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
@@ -89,6 +91,12 @@ export interface ContactsRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4: serve a contact's "Properties sent" (GET /:id/listings-sent). */
   listingSendsRepo?: ListingSendsRepo;
+  /**
+   * listing-response-tour-chip: GET /:id/listings-sent derives a per-row tour
+   * chip from the tenant's tours (byTenant GSI). Best-effort join - a query
+   * failure degrades to chipless rows, never a 500.
+   */
+  toursRepo?: ToursRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   vocabularyRepo?: ContactVocabularyRepo;
   /**
@@ -249,17 +257,11 @@ const LANDLORD_BOOLEAN_FIELDS = [
   'income_includes_voucher',
 ] as const;
 
-/**
- * Landlord preference defaults (free text) — person-level policies applied
- * across the landlord's properties (the per-unit facts live on UnitItem).
- * Empty string clears, like `company`. `accepts_programs` (the string[] sibling)
- * is validated separately.
- */
-const LANDLORD_TEXT_PREFERENCE_FIELDS = ['lease_terms', 'pet_policy'] as const;
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((s) => typeof s === 'string');
-}
+// NOTE (2026-07-10): the landlord preference fields (accepts_programs /
+// lease_terms / pet_policy) and expected_rent MOVED to the UNIT (GLOSSARY —
+// they are per-property facts: accepted_programs / lease_terms / pets /
+// rent_min-rent_max on UnitItem). The contact parsers no longer accept them;
+// unknown keys are ignored, so a stale client sending them simply no-ops.
 
 // The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
 // lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
@@ -523,36 +525,10 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['contract_status'] = v;
     changedFields.push('contract_status');
   }
-  if ('expected_rent' in b) {
-    const v = b['expected_rent'];
-    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-      return { error: 'expected_rent must be a non-negative number' };
-    }
-    patch['expected_rent'] = v;
-    changedFields.push('expected_rent');
-  }
   for (const key of LANDLORD_BOOLEAN_FIELDS) {
     if (key in b) {
       const v = b[key];
       if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
-      patch[key] = v;
-      changedFields.push(key);
-    }
-  }
-
-  // Landlord preference defaults (person-level policies — see the repo doc).
-  // Programs as a string array (empty array clears); the two text policies as
-  // free text (empty string clears, like company).
-  if ('accepts_programs' in b) {
-    const v = b['accepts_programs'];
-    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
-    patch['accepts_programs'] = v;
-    changedFields.push('accepts_programs');
-  }
-  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
-    if (key in b) {
-      const v = b[key];
-      if (typeof v !== 'string') return { error: `${key} must be a string` };
       patch[key] = v;
       changedFields.push(key);
     }
@@ -708,31 +684,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     }
     item.contract_status = v;
   }
-  if ('expected_rent' in b) {
-    const v = b['expected_rent'];
-    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-      return { error: 'expected_rent must be a non-negative number' };
-    }
-    item.expected_rent = v;
-  }
   for (const key of LANDLORD_BOOLEAN_FIELDS) {
     if (key in b) {
       const v = b[key];
       if (typeof v !== 'boolean') return { error: `${key} must be a boolean` };
-      item[key] = v;
-    }
-  }
-
-  // Landlord preference defaults (see parseTriageBody).
-  if ('accepts_programs' in b) {
-    const v = b['accepts_programs'];
-    if (!isStringArray(v)) return { error: 'accepts_programs must be an array of strings' };
-    item.accepts_programs = v;
-  }
-  for (const key of LANDLORD_TEXT_PREFERENCE_FIELDS) {
-    if (key in b) {
-      const v = b[key];
-      if (typeof v !== 'string') return { error: `${key} must be a string` };
       item[key] = v;
     }
   }
@@ -789,6 +744,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const activityEvents =
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const vocabulary = deps.vocabularyRepo ?? createContactVocabularyRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const placementDeadlines =
@@ -976,7 +932,28 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByContact(contactId);
-    res.json({ sent: rows.map(toListingSendRow) });
+    // Derive the per-row tour chip from the tenant's tours (ONE byTenant GSI
+    // query, grouped by unitId). Best-effort (E3): a tours-query failure serves
+    // the rows WITHOUT any tour field and logs - never a 500 on the join.
+    let toursByUnit: Map<string, TourItem[]> | undefined;
+    try {
+      const tenantTours = await tours.listByTenant(contactId);
+      toursByUnit = new Map<string, TourItem[]>();
+      for (const t of tenantTours) {
+        const arr = toursByUnit.get(t.unitId);
+        if (arr === undefined) toursByUnit.set(t.unitId, [t]);
+        else arr.push(t);
+      }
+    } catch (err) {
+      log.warn({ err, contactId }, 'listings-sent tour-chip hydration failed (best-effort)');
+    }
+    res.json({
+      sent: rows.map((row) => {
+        const pairing = toursByUnit?.get(row.unitId);
+        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
+        return toListingSendRow(row, signal);
+      }),
+    });
   });
 
   // GET /api/contacts/:contactId/relay-groups → { groups: RelayGroupRow[] }.

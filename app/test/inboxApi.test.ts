@@ -1,6 +1,6 @@
 // Task 1 + Task 2 (Contract C8) API tests: GET /api/inbox (Task 1), and the
-// mutation routes POST /api/inbox/:contactId/read, POST /api/inbox/read,
-// POST /api/inbox/:contactId/assign (Task 2). Runs on the shared in-memory
+// mutation routes POST /api/inbox/:contactId/read + POST /api/inbox/read
+// (Task 2). Runs on the shared in-memory
 // world fakes (makeWebhookHarness) — seed conversations / contacts / messages
 // directly, then assert the C8 wire shape end-to-end through the real Express
 // router (no mocked handlers).
@@ -9,7 +9,7 @@
 // integration test (inbox.integration.test.ts) over real DynamoDB Local.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -163,14 +163,12 @@ describe('GET /api/inbox (C8)', () => {
     expect(res.body.rows[0].contactId).toBeUndefined();
   });
 
-  it('filter=unread only unread; filter=unknown only needsTriage; filter=mine only the session user', async () => {
+  it('filter=unread only unread; filter=unknown only needsTriage', async () => {
     const { app, world } = makeWebhookHarness();
     seedContact(world, { contactId: 'c-read', type: 'tenant', phone: '+15550000001' });
     seedContact(world, { contactId: 'c-unread', type: 'tenant', phone: '+15550000002' });
-    seedContact(world, { contactId: 'c-mine', type: 'tenant', phone: '+15550000003' });
     seedConversation(world, 'conv-read', { participant_phone: '+15550000001', last_activity_at: '2026-06-10T10:00:00.000Z', unread_count: 0 });
     seedConversation(world, 'conv-unread', { participant_phone: '+15550000002', last_activity_at: '2026-06-11T10:00:00.000Z', unread_count: 4 });
-    seedConversation(world, 'conv-mine', { participant_phone: '+15550000003', last_activity_at: '2026-06-12T10:00:00.000Z', assignment: TEST_SESSION_USER.userId });
     seedConversation(world, 'conv-unk', { participant_phone: '+14049824978', last_activity_at: '2026-06-09T10:00:00.000Z', type: 'unknown_1to1', unread_count: 1 });
 
     const unread = await auth(request(app).get('/api/inbox?filter=unread'));
@@ -184,14 +182,6 @@ describe('GET /api/inbox (C8)', () => {
     expect(unknown.status).toBe(200);
     expect(unknown.body.rows.every((r: { needsTriage: boolean }) => r.needsTriage)).toBe(true);
     expect(unknown.body.rows.map((r: { phone: string }) => r.phone)).toEqual(['+14049824978']);
-
-    const mine = await auth(request(app).get('/api/inbox?filter=mine'));
-    expect(mine.status).toBe(200);
-    expect(mine.body.rows.map((r: { contactId: string }) => r.contactId)).toEqual(['c-mine']);
-    expect(mine.body.rows[0].assignment).toEqual({
-      userId: TEST_SESSION_USER.userId,
-      name: TEST_SESSION_USER.email, // the fake users repo has no name → email
-    });
   });
 
   it('placementContext is surfaced when the representative conversation has a placementId', async () => {
@@ -213,6 +203,14 @@ describe('GET /api/inbox (C8)', () => {
   it('400 on an invalid filter value (NOT 500)', async () => {
     const { app } = makeWebhookHarness();
     const res = await auth(request(app).get('/api/inbox?filter=bogus'));
+    expect(res.status).toBe(400);
+  });
+
+  // Regression pin: the removed "mine" (Assigned to me) filter is no longer in
+  // the allowlist, so it 400s like any other unknown value (the surface is gone).
+  it('400 on filter=mine now that conversation assignment is removed', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await auth(request(app).get('/api/inbox?filter=mine'));
     expect(res.status).toBe(400);
   });
 
@@ -370,169 +368,3 @@ describe('POST /api/inbox/read { phone } — unknown number (C8)', () => {
   });
 });
 
-describe('POST /api/inbox/:contactId/assign (C8)', () => {
-  it('sets assignment across all the contact\'s conversations and emits conversation.updated', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedContact(world, {
-      contactId: 'c-4',
-      type: 'tenant',
-      phone: '+15550000020',
-      created_at: '2026-06-01T00:00:00.000Z',
-    });
-    await world.contactsRepo.addPhone('c-4', { phone: '+15550000021' });
-    seedConversation(world, 'conv-4a', {
-      participant_phone: '+15550000020',
-      last_activity_at: '2026-06-10T10:00:00.000Z',
-    });
-    seedConversation(world, 'conv-4b', {
-      participant_phone: '+15550000021',
-      last_activity_at: '2026-06-11T10:00:00.000Z',
-    });
-
-    const emittedBefore = world.emitted.length;
-    const res = await auth(
-      request(app)
-        .post('/api/inbox/c-4/assign')
-        .send({ userId: TEST_SESSION_USER.userId }),
-    );
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true });
-
-    // Both conversations now assigned.
-    expect(world.conversations.get('conv-4a')?.assignment).toBe(TEST_SESSION_USER.userId);
-    expect(world.conversations.get('conv-4b')?.assignment).toBe(TEST_SESSION_USER.userId);
-
-    // conversation.updated emitted for each conversation.
-    const newEmits = world.emitted.slice(emittedBefore);
-    expect(newEmits.every((e) => e.event === 'conversation.updated')).toBe(true);
-    const emittedIds = newEmits.map((e) => (e.payload as { conversationId: string }).conversationId).sort();
-    expect(emittedIds).toEqual(['conv-4a', 'conv-4b'].sort());
-
-    // assignment_changed audit written for each conversation.
-    const audits = world.auditEvents.filter(
-      (a) =>
-        a.event_type === 'assignment_changed' &&
-        (a.entityKey === 'conversations#conv-4a' || a.entityKey === 'conversations#conv-4b'),
-    );
-    expect(audits).toHaveLength(2);
-    for (const a of audits) {
-      expect(a.payload).toMatchObject({ from: null, to: TEST_SESSION_USER.userId });
-    }
-  });
-
-  it('null userId clears assignment across all conversations', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedContact(world, { contactId: 'c-5', type: 'tenant', phone: '+15550000022' });
-    seedConversation(world, 'conv-5', {
-      participant_phone: '+15550000022',
-      last_activity_at: '2026-06-10T10:00:00.000Z',
-      assignment: TEST_SESSION_USER.userId,
-    });
-
-    const res = await auth(
-      request(app).post('/api/inbox/c-5/assign').send({ userId: null }),
-    );
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true });
-    expect(world.conversations.get('conv-5')?.assignment).toBeUndefined();
-
-    const audit = world.auditEvents.find(
-      (a) => a.entityKey === 'conversations#conv-5' && a.event_type === 'assignment_changed',
-    );
-    expect(audit?.payload).toMatchObject({ from: TEST_SESSION_USER.userId, to: null });
-  });
-
-  it('404 when the contact does not exist', async () => {
-    const { app } = makeWebhookHarness();
-    const res = await auth(
-      request(app).post('/api/inbox/no-such-contact/assign').send({ userId: 'user-x' }),
-    );
-    expect(res.status).toBe(404);
-  });
-
-  it('400 when userId key is missing from the body', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedContact(world, { contactId: 'c-6', type: 'tenant', phone: '+15550000023' });
-
-    const res = await auth(
-      request(app).post('/api/inbox/c-6/assign').send({ wrongKey: 'user-x' }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it('400 when userId is an empty string', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedContact(world, { contactId: 'c-7', type: 'tenant', phone: '+15550000024' });
-
-    const res = await auth(
-      request(app).post('/api/inbox/c-7/assign').send({ userId: '' }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it('401 without a session', async () => {
-    const { app } = makeWebhookHarness();
-    const res = await request(app)
-      .post('/api/inbox/c-4/assign')
-      .set('x-origin-verify', ORIGIN_SECRET)
-      .send({ userId: 'user-x' });
-    expect(res.status).toBe(401);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Task 3 — displayNameOf routing for inbox assignment.name (C8)
-// ---------------------------------------------------------------------------
-
-describe('GET /api/inbox — assignment.name resolved through displayNameOf', () => {
-  it('assignee with name → assignment.name equals the stored name', async () => {
-    const { app, world, fakeUsers } = makeWebhookHarness();
-    // Seed the assignee user with a real name — Sam Rivera is the seeded VA.
-    fakeUsers.users.set(TEST_SESSION_USER.userId, {
-      userId: TEST_SESSION_USER.userId,
-      email: TEST_SESSION_USER.email,
-      role: 'va',
-      status: 'active',
-      session_epoch: 1,
-      created_at: '2026-06-01T00:00:00.000Z',
-      name: 'Sam Rivera',
-    });
-
-    seedContact(world, { contactId: 'c-named', type: 'tenant', phone: '+15550000031' });
-    seedConversation(world, 'conv-named', {
-      participant_phone: '+15550000031',
-      last_activity_at: '2026-06-12T10:00:00.000Z',
-      assignment: TEST_SESSION_USER.userId,
-    });
-
-    const res = await auth(request(app).get('/api/inbox?filter=mine'));
-    expect(res.status).toBe(200);
-    expect(res.body.rows).toHaveLength(1);
-    expect(res.body.rows[0].assignment).toEqual({
-      userId: TEST_SESSION_USER.userId,
-      name: 'Sam Rivera', // name present → use it
-    });
-  });
-
-  it('assignee without name → assignment.name falls back to email', async () => {
-    const { app, world } = makeWebhookHarness();
-    // Default testUserItem() has no name → falls back to email.
-
-    seedContact(world, { contactId: 'c-noname', type: 'tenant', phone: '+15550000032' });
-    seedConversation(world, 'conv-noname', {
-      participant_phone: '+15550000032',
-      last_activity_at: '2026-06-12T10:00:00.000Z',
-      assignment: TEST_SESSION_USER.userId,
-    });
-
-    const res = await auth(request(app).get('/api/inbox?filter=mine'));
-    expect(res.status).toBe(200);
-    expect(res.body.rows).toHaveLength(1);
-    expect(res.body.rows[0].assignment).toEqual({
-      userId: TEST_SESSION_USER.userId,
-      name: TEST_SESSION_USER.email, // no name → email fallback
-    });
-  });
-});

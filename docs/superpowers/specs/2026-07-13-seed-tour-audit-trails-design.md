@@ -43,9 +43,16 @@ must use ONLY these types so no unknown-type fallback ever renders.
 Given a seeded tour row (status, createdAt, scheduledAt?, updatedAt?, outcome?,
 groupThreadId?, convertedPlacementId?):
 
-- requested: ZERO rows (mirrors the runtime writer AND the existing
-  "requested tours have zero reminder rows" invariant). Documented: a requested
-  tour's panes legitimately show comms only and "No activity yet".
+- requested: ZERO SCHEDULING rows (the runtime writer emits nothing on a
+  timeless create, mirroring the zero-reminder-rows invariant) - BUT the
+  group_opened appendix below still applies: the provisioning route has NO
+  status gate (its only guard is the double-provision 409), so a requested
+  tour with a provisioned group carries exactly [tour_group_opened] at
+  runtime, and the seed mirrors that (the cast searching tenant's requested
+  tour is precisely this case). A requested tour WITHOUT a group thread has
+  zero rows (panes legitimately comms-only, "No activity yet"). The outcome /
+  converted appendices CANNOT apply to requested (the exit gate 409s unless
+  toured; conversion requires toured).
 - scheduled: [tour_scheduled @ booking].
 - toured: [tour_scheduled @ booking, tour_took_place @ scheduledAt].
 - no_show: [tour_scheduled @ booking, tour_no_show @ scheduledAt].
@@ -123,7 +130,9 @@ seedRosterShape.test.ts conventions; DB-free over the in-memory map, plus the
 existing DB round-trip where cheap):
 
 - Every seeded NON-requested tour (cast + matrix + live-shaped fixtures) has a
-  non-empty tours# trail; every REQUESTED tour has ZERO tours# rows.
+  non-empty tours# trail; a REQUESTED tour WITHOUT a group thread has ZERO
+  tours# rows; a REQUESTED tour WITH groupThreadId has exactly
+  [tour_group_opened] (the cast searching tenant pins this).
 - Every generated row's type is a key of the dashboard TOUR_EVENT_LABELS map
   (import the literal list into the test as a pinned mirror - the dashboard
   module is not importable from app tests; a drift test pins the 8 types).

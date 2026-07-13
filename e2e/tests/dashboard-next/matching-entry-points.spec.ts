@@ -261,4 +261,47 @@ test.describe('Matching entry points - tenant file + property page', () => {
       sentCard.locator(`a[href="/contacts/${added.contactId}"]`),
     ).toBeVisible({ timeout: 10_000 });
   });
+
+  test('Matching page "Send a property": property-first step, then a prefilled token message', async ({
+    page,
+  }) => {
+    // Property-first (spec 2026-07-13): the bare entry starts on a dedicated
+    // property-selection step - no message or audience until a property is
+    // chosen - and the pick prefills the message with the property's REAL
+    // details while [TenantName] stays a per-recipient token.
+    await devLogin(page);
+    const stamp = `${Date.now()}`.slice(-6);
+    const { unitId, line1 } = await createUnitViaApi(page.request, stamp);
+
+    await page.goto(`${NEXT}/broadcasts`);
+    await page.getByRole('button', { name: 'Send a property' }).click();
+    await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
+
+    // The property step shows ONLY the choice: no message, no audience filters.
+    await expect(page.getByRole('textbox', { name: 'Message' })).toHaveCount(0);
+    await expect(page.getByLabel('Housing authority')).toHaveCount(0);
+
+    // Search narrows the BROWSABLE list; click the fresh unit's row (a button,
+    // distinct from the typeahead's role=option entries).
+    await page.getByRole('combobox', { name: 'Property' }).fill(line1);
+    // Dismiss the typeahead dropdown (it overlays the list) - the browsable
+    // rows below are the click target under test.
+    await page.getByRole('combobox', { name: 'Property' }).press('Escape');
+    await page.getByRole('button', { name: new RegExp(`${stamp} Matching Entry`) }).click();
+
+    // Compose appears: property details resolved, [TenantName] preserved.
+    const box = page.getByRole('textbox', { name: 'Message' });
+    await expect(box).toBeVisible();
+    // Substring assertions (no regex - brackets are literal in the template).
+    await expect
+      .poll(() => box.inputValue())
+      .toContain(`Hi [TenantName], a 2 home at ${stamp} Matching Entry Ave`);
+    await expect.poll(() => box.inputValue()).toContain(`/p/${unitId}`);
+    await expect(page.getByLabel('Housing authority')).toBeVisible();
+
+    // "Change" returns to the property step (message gone again).
+    await page.getByRole('button', { name: 'Change property' }).click();
+    await expect(page.getByRole('textbox', { name: 'Message' })).toHaveCount(0);
+    await expect(page.getByRole('combobox', { name: 'Property' })).toBeVisible();
+  });
 });

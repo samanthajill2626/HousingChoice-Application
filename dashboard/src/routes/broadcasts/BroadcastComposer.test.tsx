@@ -91,6 +91,67 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+describe('BroadcastComposer - property-first step (spec 2026-07-13)', () => {
+  it('a bare entry shows ONLY the property choice - no message, no audience', async () => {
+    renderComposer();
+    expect(await screen.findByRole('heading', { name: 'Send a property' })).toBeInTheDocument();
+    // The browsable candidate list renders without any typing.
+    expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
+    // Compose-step sections are NOT on this screen yet.
+    expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Preview recipients/ })).not.toBeInTheDocument();
+  });
+
+  it('picking a property reveals compose with the message pre-filled: unit fields resolved, [TenantName] kept', async () => {
+    const user = userEvent.setup();
+    getUnit.mockResolvedValue(
+      unit({
+        unitId: 'u-1',
+        address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+        rent_min: 1500,
+        rent_max: 1500,
+      }),
+    );
+    renderComposer();
+    await user.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    const box = await screen.findByRole('textbox', { name: 'Message' });
+    await waitFor(() => {
+      expect(box).toHaveValue(
+        'Hi [TenantName], a 2 home at 77 Peachtree St, Atlanta, GA 30303 is available for $1500/mo. Details: ' +
+          `${window.location.origin}/p/u-1`,
+      );
+    });
+    // Audience section arrives with compose.
+    expect(screen.getByLabelText('Housing authority')).toBeInTheDocument();
+  });
+
+  it('a seeded entry goes through the property step too, showing the recipient context', async () => {
+    renderComposer('?contactId=c-seed');
+    expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
+  });
+
+  it('?unitId= entries skip the property step (fixed context, message immediately)', async () => {
+    renderComposer('?unitId=unit-0001');
+    expect(await screen.findByRole('textbox', { name: 'Message' })).toBeInTheDocument();
+    // No browsable candidate list on the fixed-property entry.
+    expect(screen.queryByRole('button', { name: /77 Peachtree St/ })).not.toBeInTheDocument();
+  });
+
+  it('"Change" returns to the property step; an unedited body refills for the new pick', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    await user.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await screen.findByRole('textbox', { name: 'Message' });
+    await user.click(screen.getByRole('button', { name: 'Change property' }));
+    // Back on the property step.
+    expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
+  });
+});
+
 describe('BroadcastComposer — voucher size pre-fill from ?unitId', () => {
   it('pre-fills the voucher size from the unit beds + tags the matching chip', async () => {
     renderComposer('?unitId=unit-0001');
@@ -115,20 +176,17 @@ describe('BroadcastComposer — voucher size pre-fill from ?unitId', () => {
 });
 
 describe('BroadcastComposer — reach count + truncated', () => {
-  it('shows the reach count from createBroadcast once a message is typed', async () => {
-    const u = userEvent.setup();
-    renderComposer();
-    await u.type(screen.getByLabelText('Message'), 'Hi there');
-    // After the debounce, the draft is created and the reach shows.
+  it('shows the reach count from createBroadcast once the prefilled draft settles', async () => {
+    renderComposer('?unitId=unit-0001');
+    // The property-first prefill gives a non-empty body with zero keystrokes;
+    // after the debounce the draft is created and the reach shows.
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/Reaches\s*5\s*tenants/));
   });
 
   it('shows the truncated/capped warning when the estimate is truncated', async () => {
     createBroadcast.mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 500, truncated: true });
-    const u = userEvent.setup();
-    renderComposer();
-    await u.type(screen.getByLabelText('Message'), 'Hi there');
+    renderComposer('?unitId=unit-0001');
     await waitFor(() => expect(screen.getByText(/list is capped/i)).toBeInTheDocument(), { timeout: 4000 });
   });
 });
@@ -139,32 +197,34 @@ describe('BroadcastComposer — single draft / no orphan', () => {
     createBroadcast
       .mockResolvedValueOnce({ broadcastId: 'draft_A', status: 'draft', estimatedCount: 5, truncated: false })
       .mockResolvedValueOnce({ broadcastId: 'draft_B', status: 'draft', estimatedCount: 2, truncated: false });
-    renderComposer();
-    await u.type(screen.getByLabelText('Message'), 'Hello');
+    renderComposer('?unitId=unit-0001');
     await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
 
-    // A material audience change (pick a voucher size) → a fresh draft, and the
-    // PRIOR throwaway (draft_A) is deleted (no orphan).
-    await u.click(screen.getByRole('button', { name: '2-BR' }));
+    // A material audience change (a DIFFERENT voucher size - 2-BR is already
+    // pre-filled from the property's beds) → a fresh draft, and the PRIOR
+    // throwaway (draft_A) is deleted (no orphan).
+    await u.click(screen.getByRole('button', { name: '3-BR' }));
     await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
     await waitFor(() => expect(deleteBroadcast).toHaveBeenCalledWith('draft_A'));
   });
 });
 
 describe('BroadcastComposer — preview gate', () => {
-  it('the pre-filled default enables Preview by itself, then advances to the recipient list', async () => {
+  it('the property prefill enables Preview by itself, then advances to the recipient list', async () => {
     previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: false }], priorRecipientContactIds: [], seedContactIds: [], unresolvedSeedIds: [] });
     const u = userEvent.setup();
-    renderComposer();
-    // A fresh compose starts with the DEFAULT template as the ACTUAL message
-    // (not a placeholder) — no typing needed to move on.
-    expect(screen.getByLabelText('Message')).toHaveValue(DEFAULT_SEND_TEMPLATE);
+    renderComposer('?unitId=unit-0001');
+    // The property's details prefill the message ([TenantName] preserved) —
+    // no typing needed to move on.
+    await waitFor(() =>
+      expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toMatch(
+        /Hi \[TenantName\], a 2 home at/,
+      ),
+    );
     expect(screen.queryByText('Write a message to enable the preview.')).not.toBeInTheDocument();
     // The auto-draft (debounced) enables Preview with zero keystrokes.
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
-    expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({
-      body_template: DEFAULT_SEND_TEMPLATE,
-    });
+    expect(String(createBroadcast.mock.calls.at(-1)?.[0]?.body_template)).toContain('[TenantName]');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
     expect(screen.queryByText('Sizing the audience…')).not.toBeInTheDocument();
 
@@ -176,7 +236,8 @@ describe('BroadcastComposer — preview gate', () => {
 
   it('clearing the message disables Preview again, with the why-hint', async () => {
     const u = userEvent.setup();
-    renderComposer();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByLabelText('Message')).not.toHaveValue(''));
     await u.clear(screen.getByLabelText('Message'));
     expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeDisabled();
     // An unexplained disabled button is a dead end for a first-time operator.
@@ -184,17 +245,22 @@ describe('BroadcastComposer — preview gate', () => {
   });
 });
 
-describe('BroadcastComposer - pre-filled default template (fresh compose only)', () => {
-  it('?unitId= entry starts with the default template pre-filled too', async () => {
+describe('BroadcastComposer - property-details prefill (fresh compose only)', () => {
+  it('?unitId= entry prefills the property details with [TenantName] preserved', async () => {
     renderComposer('?unitId=unit-0001');
-    expect(screen.getByLabelText('Message')).toHaveValue(DEFAULT_SEND_TEMPLATE);
+    await waitFor(() => {
+      const v = (screen.getByLabelText('Message') as HTMLTextAreaElement).value;
+      expect(v).toContain('Hi [TenantName],');
+      expect(v).toContain('1450 Joseph E. Boone Blvd NW');
+      expect(v).not.toContain('[Address]');
+    });
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
   });
 
-  it('?contactId= entry starts EMPTY (resolved mode seeds its own final text, never the token template)', async () => {
+  it('?contactId= entry has NO message editor before a property is chosen (property step)', async () => {
     renderComposer('?contactId=c-seed');
-    expect(screen.getByLabelText('Message')).toHaveValue('');
-    // Let the seeded-banner fetch settle (act hygiene).
+    expect(screen.queryByLabelText('Message')).not.toBeInTheDocument();
+    // Let the seeded-context fetch settle (act hygiene).
     await screen.findByText(/Sending to/);
   });
 
@@ -210,7 +276,10 @@ describe('BroadcastComposer - pre-filled default template (fresh compose only)',
   });
 
   it('an untouched pre-filled draft is deleted on unmount (open-and-leave leaves no junk row)', async () => {
+    const u = userEvent.setup();
     const { unmount } = renderComposer();
+    // Property-first: pick from the browsable list, then the prefill auto-drafts.
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     // The auto-draft resolved (Preview enabled proves draft_1 is current).
     await waitFor(() =>
@@ -223,8 +292,9 @@ describe('BroadcastComposer - pre-filled default template (fresh compose only)',
   it('a hand-edited draft SURVIVES unmount (stays resumable in the Matching list)', async () => {
     const u = userEvent.setup();
     const { unmount } = renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     // Edit within the debounce window: exactly one create, with the edited body.
-    await u.type(screen.getByLabelText('Message'), ' Call us!');
+    await u.type(await screen.findByLabelText('Message'), ' Call us!');
     await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(),
@@ -239,7 +309,8 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
   it('?contactId= seeds the draft: createBroadcast gets seedContactIds and NO audience_filter', async () => {
     const u = userEvent.setup();
     renderComposer('?contactId=c-seed');
-    await u.type(screen.getByLabelText('Message'), 'Hi!');
+    // Property-first: pick, then the resolved auto-seed drafts by itself.
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({
       seedContactIds: ['c-seed'],
@@ -250,6 +321,7 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
   it('seeded entry shows the seeds-only banner; "Add more tenants by filters" enables the filter', async () => {
     const u = userEvent.setup();
     renderComposer('?contactId=c-seed');
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
     // The banner resolves the tenant name via getContact.
     expect(await screen.findByText('Tasha Green')).toBeInTheDocument();
@@ -269,7 +341,7 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
   it('once filters are enabled, the draft recreates WITH audience_filter (seeds kept)', async () => {
     const u = userEvent.setup();
     renderComposer('?contactId=c-seed');
-    await u.type(screen.getByLabelText('Message'), 'Hi!');
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     await waitFor(
@@ -319,9 +391,12 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
-    // Token mode's starting point — the DEFAULT template, same as a fresh
-    // compose (never the resolved single-tenant text).
-    expect(ta.value).toBe(DEFAULT_SEND_TEMPLATE);
+    // Token mode's starting point - the property-details prefill with
+    // [TenantName] as a token (never the resolved single-tenant text).
+    await waitFor(() => {
+      expect(ta.value).toContain('Hi [TenantName],');
+      expect(ta.value).not.toContain('Tasha');
+    });
   });
 
   it('editing the resolved text then "Add more tenants by filters" prompts to confirm; cancel keeps seeds-only', async () => {
@@ -342,14 +417,13 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
 });
 
 describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
-  it('no ?unitId= shows the Property picker; picking a unit flows into the draft', async () => {
+  it('no ?unitId= shows the Property step; picking a unit flows into the draft', async () => {
     const u = userEvent.setup();
     renderComposer('?contactId=c-seed');
-    await u.type(screen.getByLabelText('Message'), 'Hi!');
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
     const picker = await screen.findByRole('combobox', { name: 'Property' });
     await u.type(picker, 'Peachtree');
     await u.click(await screen.findByRole('option', { name: /Peachtree/ }));
+    // The pick reveals compose; the resolved auto-seed drafts with the picked unit.
     await waitFor(
       () => expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({ unitId: 'u-1' }),
       { timeout: 4000 },

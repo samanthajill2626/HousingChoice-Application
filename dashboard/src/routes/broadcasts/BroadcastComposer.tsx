@@ -1,17 +1,19 @@
-// BroadcastComposer — the /broadcasts/new orchestrator. Two steps in one route:
+// BroadcastComposer — the /broadcasts/new orchestrator. Three steps in one route:
+//   0. PROPERTY — every Matching send carries a property (spec 2026-07-13:
+//      there is no property-less send), so until one is attached the ONLY thing
+//      on screen is the property choice: a browsable candidate list + search.
+//      ?unitId= entries arrive with the property fixed and skip this step.
 //   1. COMPOSE — AudienceFilters (voucher size + housing authority, pre-filled
-//      from the property when ?unitId) + MessageEditor (template + merge fields),
-//      with a LIVE reach backed by a single throwaway draft (useComposerDraft:
-//      debounced create + delete-previous, so no orphan drafts leak). "Preview"
-//      resolves the draft's full candidate list.
+//      from the property) + MessageEditor, pre-filled with the property's REAL
+//      details ([Beds]/[Address]/[Rent]/[FlyerLink] resolved; [TenantName]
+//      stays a per-recipient token), with a LIVE reach backed by a single
+//      throwaway draft (useComposerDraft). "Preview" resolves the candidates.
 //   2. PREVIEW — RecipientPreview (the editable curated list → Send / Delete).
 //
-// Optional query params: ?unitId= (compose from a property: pre-fill the voucher
-// size from its beds, attach the flyer link, show the property), ?contactId=
-// (compose to ONE tenant: a seeds-only draft with the filters hidden behind an
-// "Add more tenants by filters" opt-in) and ?draftId= (resume an existing draft
-// row from the list → straight to Preview). Without ?unitId= a Property picker
-// lets the operator attach a property from the composer itself.
+// Optional query params: ?unitId= (property fixed by the entry point),
+// ?contactId= (compose to ONE tenant: property step first, then a seeds-only
+// draft with the filters hidden behind an "Add more tenants by filters" opt-in)
+// and ?draftId= (resume an existing draft row from the list).
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -35,7 +37,11 @@ import { shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
-import { DEFAULT_SEND_TEMPLATE, resolveTemplateForTenant } from './resolveTemplate.js';
+import {
+  DEFAULT_SEND_TEMPLATE,
+  resolveTemplateForTenant,
+  resolveTemplateForUnit,
+} from './resolveTemplate.js';
 import { useComposerDraft } from './useComposerDraft.js';
 import styles from './BroadcastComposer.module.css';
 
@@ -57,17 +63,13 @@ export function BroadcastComposer(): React.JSX.Element {
 
   const [unit, setUnit] = useState<UnitItem | null>(null);
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
-  // The message starts as the ACTUAL default template on a fresh compose (the
-  // send is usually close to it, so the operator can go straight to Preview).
-  // Two entries still start EMPTY: ?contactId= (resolved mode auto-seeds its
-  // own FINAL text once the property loads — a raw token template must never
-  // sit in a resolved editor) and ?draftId= (a non-empty body would recreate
-  // the draft and DELETE the one being resumed).
-  const [bodyTemplate, setBodyTemplate] = useState(() =>
-    params.get('contactId') !== null || params.get('draftId') !== null
-      ? ''
-      : DEFAULT_SEND_TEMPLATE,
-  );
+  // The message starts EMPTY everywhere: compose is unreachable until a
+  // property is attached (the property step), and the moment one loads the
+  // auto-fill effects below seed the REAL prefill (unit tokens resolved;
+  // [TenantName] kept - or fully resolved in single-recipient mode). ?draftId=
+  // must stay empty regardless (a non-empty body would recreate the draft and
+  // DELETE the one being resumed).
+  const [bodyTemplate, setBodyTemplate] = useState('');
   // Whether the staff user has hand-edited the message. Only textarea keystrokes
   // flip this (NOT the programmatic auto-seed below), so the resolved default can
   // keep re-seeding until the operator takes the pen.
@@ -169,6 +171,19 @@ export function BroadcastComposer(): React.JSX.Element {
     );
   }, [resolvedMode, unit, bodyEdited, draft.flyerUrl, effectiveUnitId, seedContact]);
 
+  // Multi-recipient prefill (property-first, spec 2026-07-13): the moment a
+  // property is attached OUTSIDE resolved mode, fill the message with its REAL
+  // details - unit tokens resolve to text, [TenantName] STAYS a token so every
+  // recipient still gets their own name at send time. Re-seeds on unit/flyer
+  // change until the operator edits. Never on ?draftId= resume (a non-empty
+  // body would recreate-and-delete the resumed draft).
+  useEffect(() => {
+    if (resolvedMode || unit === null || bodyEdited || resumeDraftId !== undefined) return;
+    const flyer =
+      draft.flyerUrl ?? (effectiveUnitId !== undefined ? flyerLinkFor(effectiveUnitId) : undefined);
+    setBodyTemplate(resolveTemplateForUnit(DEFAULT_SEND_TEMPLATE, unit, flyer));
+  }, [resolvedMode, unit, bodyEdited, resumeDraftId, draft.flyerUrl, effectiveUnitId]);
+
   // Pre-fill the voucher size from the property's beds (overridable), only while
   // the filters are ACTIVE (hidden filters have no state to pre-fill) and only
   // when the operator hasn't already set a size. Enabling the filters with a
@@ -215,9 +230,9 @@ export function BroadcastComposer(): React.JSX.Element {
   // names ONE tenant and must never send to a broader audience. When the operator
   // has edited that text, confirm before discarding (cancel aborts the flip);
   // when it is still the untouched auto-seed there is nothing to protect, so the
-  // reset is silent. Either way the body returns to the DEFAULT token template
-  // (token mode's starting point, same as a fresh compose). A no-unit typed body
-  // is a plain token template already and survives the flip untouched.
+  // reset is silent. The body clears and the multi-recipient prefill effect
+  // refills it with the property's details + a [TenantName] token. A no-unit
+  // typed body is a plain token template already and survives the flip untouched.
   function onEnableFilters(): void {
     if (resolvedMode && unit !== null) {
       if (bodyEdited) {
@@ -226,10 +241,25 @@ export function BroadcastComposer(): React.JSX.Element {
         );
         if (!ok) return;
       }
-      setBodyTemplate(DEFAULT_SEND_TEMPLATE);
+      setBodyTemplate('');
       setBodyEdited(false);
     }
     setAudienceEnabled(true);
+  }
+
+  // "Change property" (picked entries only) - back to the property step. An
+  // edited message was written for THIS property, so confirm the discard; an
+  // untouched prefill just refills for the next pick.
+  function onChangeProperty(): void {
+    if (bodyEdited) {
+      const ok = window.confirm(
+        'Changing the property resets the message for the new property. Discard your edits?',
+      );
+      if (!ok) return;
+    }
+    setBodyTemplate('');
+    setBodyEdited(false);
+    setUnitPick({ label: '' });
   }
 
   // Spec 2026-07-10: a non-Available property's flyer link is dead (public.ts
@@ -267,6 +297,64 @@ export function BroadcastComposer(): React.JSX.Element {
   // must not Preview/Send against it. Editing again retries the recreate.
   const canPreview =
     bodyTemplate.trim().length > 0 && draft.draftId !== null && !draft.reachPending && !draft.stale;
+
+  // PROPERTY step - a Matching send ALWAYS carries a property, so until one is
+  // attached the only thing on screen is the choice itself: a search field plus
+  // a browsable candidate list (no typing needed to see options). ?unitId=
+  // entries skip this (property fixed); a resumed draft keeps its stored unit
+  // server-side and resumes at compose.
+  if (effectiveUnitId === undefined && resumeDraftId === undefined) {
+    const query = unitPick.label.trim().toLowerCase();
+    const shown = (
+      query.length > 0
+        ? unitCandidates.filter((u) =>
+            shortAddress(u.address, u.unitId).toLowerCase().includes(query),
+          )
+        : unitCandidates
+    ).slice(0, 12);
+    return (
+      <div className={styles.page}>
+        <h1 className={styles.title}>Send a property</h1>
+        {seedContactIds.length > 0 ? (
+          <p className={styles.seedBannerText}>
+            Sending to <strong>{seedDisplayName}</strong>.
+          </p>
+        ) : null}
+        <p className={styles.pickerHint}>Choose the property to send.</p>
+        <div className={styles.pickerField}>
+          <span className={styles.pickerLabel}>Property</span>
+          <UnitSearchField
+            value={unitPick}
+            onChange={setUnitPick}
+            candidates={unitCandidates}
+            inputLabel="Property"
+          />
+        </div>
+        <ul className={styles.unitList} aria-label="Properties">
+          {shown.map((u) => (
+            <li key={u.unitId} className={styles.unitListItem}>
+              <button
+                type="button"
+                className={styles.unitRow}
+                onClick={() =>
+                  setUnitPick({ label: shortAddress(u.address, u.unitId), unitId: u.unitId })
+                }
+              >
+                <span>{shortAddress(u.address, u.unitId)}</span>
+                <span className={styles.unitMeta}>
+                  {typeof u.beds === 'number' ? `${u.beds} BR - ` : ''}
+                  {LISTING_STATUS_LABELS[u.status as ListingStatus] ?? u.status}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        {unitCandidates.length === 0 ? (
+          <p className={styles.pickerHint}>No properties yet - add one from the Properties page.</p>
+        ) : null}
+      </div>
+    );
+  }
 
   // PREVIEW step — the curated list.
   if (preview !== null && draft.draftId !== null) {
@@ -324,15 +412,17 @@ export function BroadcastComposer(): React.JSX.Element {
             />
           )}
           {unitId === undefined ? (
-            <div className={styles.pickerField}>
-              <span className={styles.pickerLabel}>Property</span>
-              <UnitSearchField
-                value={unitPick}
-                onChange={setUnitPick}
-                candidates={unitCandidates}
-                inputLabel="Property"
-              />
-            </div>
+            <p className={styles.changeProperty}>
+              Property: <strong>{propertyLabel ?? effectiveUnitId}</strong>{' '}
+              <button
+                type="button"
+                className={styles.changePropertyBtn}
+                onClick={onChangeProperty}
+                aria-label="Change property"
+              >
+                Change
+              </button>
+            </p>
           ) : null}
         </div>
         <div className={styles.col}>

@@ -214,12 +214,17 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
       has: page.getByRole('heading', { name: 'Sent to tenants' }),
     });
     await expect(card).toBeVisible();
-    // Each row's identity link's accessible name IS the recipient's contactId
-    // (the roster renders raw ids); scope a per-recipient row by that link.
-    const rowFor = (contactId: string) =>
-      card.locator('div').filter({ has: page.getByRole('link', { name: contactId, exact: true }) });
-    await expect(rowFor(t1.contactId)).toBeVisible();
-    await expect(rowFor(t2.contactId)).toBeVisible();
+    // Each row's identity link's accessible name is the recipient's DISPLAY
+    // NAME (the wire's tenantName enrichment; raw ids are only the fallback for
+    // nameless contacts); scope a per-recipient row by that link.
+    const t1Name = `Chipone${stamp} Actcov`;
+    const t2Name = `Chiptwo${stamp} Actcov`;
+    const rowFor = (name: string) =>
+      card.locator('div').filter({ has: page.getByRole('link', { name, exact: true }) });
+    await expect(rowFor(t1Name)).toBeVisible();
+    await expect(rowFor(t2Name)).toBeVisible();
+    // The raw contact id never renders once the name is known.
+    await expect(card.getByText(t1.contactId)).toHaveCount(0);
     await expect(card.getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ })).toHaveCount(0);
     await expect(page.getByText(/No reply/i)).toHaveCount(0);
 
@@ -239,7 +244,7 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
     // t1's row gains a "Tour scheduled" chip linking to the tour.
     await expect(async () => {
       await page.reload();
-      const chip = rowFor(t1.contactId).getByRole('link', { name: 'Tour scheduled' });
+      const chip = rowFor(t1Name).getByRole('link', { name: 'Tour scheduled' });
       await expect(chip).toBeVisible();
       await expect(chip).toHaveAttribute('href', `/tours/${tourId}`);
     }).toPass({ timeout: 20_000 });
@@ -247,7 +252,7 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
     // The OTHER recipient stays chipless; exactly one chip on the card; still no
     // "No reply" text anywhere.
     await expect(
-      rowFor(t2.contactId).getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ }),
+      rowFor(t2Name).getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ }),
     ).toHaveCount(0);
     await expect(card.getByRole('link', { name: 'Tour scheduled' })).toHaveCount(1);
     await expect(page.getByText(/No reply/i)).toHaveCount(0);

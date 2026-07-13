@@ -126,3 +126,61 @@
   color: var(--c-evt-amber-text);
   font-size: var(--fs-sm);
 }
+
+/* --- Property step (property-first flow, spec 2026-07-13) ----------------- */
+.pickerHint {
+  margin: 0 0 var(--sp-4);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+}
+.unitList {
+  list-style: none;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.unitListItem {
+  margin: 0;
+}
+.unitRow {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+.unitRow:hover {
+  border-color: var(--c-brand);
+}
+.unitMeta {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+/* Compose-step property context line ("Property: <address> - Change"). */
+.changeProperty {
+  margin: var(--sp-4) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+.changePropertyBtn {
+  margin-left: var(--sp-2);
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-decoration: underline;
+}

@@ -68,7 +68,9 @@ export function AudienceFilters({
       <h2 id={`${uid}-heading`} className={styles.heading}>
         Audience
       </h2>
-      <p className={styles.audienceKind}>Tenants</p>
+      {/* No audience-base line: property sends are ALWAYS tenants (the filter is
+          pinned to contact_type:'tenant'; the backend rejects anything else), so
+          naming it here told the operator nothing they could act on. */}
 
       {/* Voucher size — the prominent criterion. */}
       <div className={styles.criterion}>

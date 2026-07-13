@@ -4,7 +4,11 @@
 // (and a missing first name -> "there") never leak a raw id/phone.
 import { describe, it, expect } from 'vitest';
 import type { UnitItem } from '../../api/index.js';
-import { resolveTemplateForTenant, DEFAULT_SEND_TEMPLATE } from './resolveTemplate.js';
+import {
+  resolveTemplateForTenant,
+  resolveTemplateForUnit,
+  DEFAULT_SEND_TEMPLATE,
+} from './resolveTemplate.js';
 
 /** A minimal, properly-typed UnitItem fixture (only unitId/landlordId/status are
  *  required; the rest feed the merge tokens under test). */
@@ -21,12 +25,25 @@ function makeUnit(over: Partial<UnitItem> = {}): UnitItem {
   };
 }
 
+describe('resolveTemplateForUnit', () => {
+  it('resolves the unit tokens + flyer but PRESERVES [TenantName] for per-recipient rendering', () => {
+    const out = resolveTemplateForUnit(DEFAULT_SEND_TEMPLATE, makeUnit(), 'https://x/p/u1');
+    expect(out).toContain('Hi [TenantName],');
+    expect(out).toContain('a 2-bedroom home at');
+    expect(out).toContain('44 Clifton Rd NE');
+    expect(out).toContain('$1600/mo');
+    expect(out).toContain('https://x/p/u1');
+    expect(out).not.toContain('[Beds]');
+    expect(out).not.toContain('[FlyerLink]');
+  });
+});
+
 describe('resolveTemplateForTenant', () => {
   it('resolves every token for a known tenant + unit + link', () => {
     const out = resolveTemplateForTenant(DEFAULT_SEND_TEMPLATE, makeUnit(), 'Brianna', 'https://x/p/u1');
     expect(out).toContain('Hi Brianna,');
-    // [Beds] mirrors the backend: String(beds) -> "2" (so "a 2 home at ...").
-    expect(out).toContain('a 2 home at');
+    // [Beds] mirrors the backend: String(beds) -> "2" (so "a 2-bedroom home at ...").
+    expect(out).toContain('a 2-bedroom home at');
     expect(out).toContain('44 Clifton Rd NE');
     // [Rent] mirrors mergeFields.formatRent: min===max -> "$1600" (no separator).
     expect(out).toContain('$1600/mo');

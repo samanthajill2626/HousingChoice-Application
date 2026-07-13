@@ -58,6 +58,28 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () 
     expect(c1).not.toHaveProperty('updated_at');
   });
 
+  it('enriches each recipient with the tenant display name; honest absence when unknown', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const named = seedTenant(world, 'c-named');
+    named.firstName = 'Brianna';
+    named.lastName = 'Whitfield';
+    await world.listingSendsRepo.recordSend({ contactId: 'c-named', unitId: 'unit-1', via: 'individual' });
+    // No contact row for c-ghost - the row must still serve, without a name.
+    await world.listingSendsRepo.recordSend({ contactId: 'c-ghost', unitId: 'unit-1', via: 'individual' });
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const namedRow = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-named');
+    expect(namedRow.tenantName).toBe('Brianna Whitfield');
+    const ghostRow = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-ghost');
+    expect(ghostRow).not.toHaveProperty('tenantName');
+  });
+
   it('returns [] for a real unit with zero recipients', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-empty');

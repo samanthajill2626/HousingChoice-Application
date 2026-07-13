@@ -404,11 +404,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     } catch (err) {
       log.warn({ err, unitId }, 'recipients tour-chip hydration failed (best-effort)');
     }
+    // Denormalize each recipient's display name (same contacts join the roster
+    // uses). Best-effort like the tour join: a failed lookup serves the row
+    // nameless (the dashboard falls back to the id) - never a 500. Lookups are
+    // deduped by contactId so a tenant sent to N times costs one read.
+    const namesByContact = new Map<string, string | undefined>();
+    for (const row of rows) {
+      if (namesByContact.has(row.contactId)) continue;
+      try {
+        const contact = await contacts.getById(row.contactId);
+        namesByContact.set(row.contactId, contact ? displayNameOfContact(contact) : undefined);
+      } catch (err) {
+        log.warn({ err, unitId, contactId: row.contactId }, 'recipients name hydration failed (best-effort)');
+        namesByContact.set(row.contactId, undefined);
+      }
+    }
     res.json({
       recipients: rows.map((row) => {
         const pairing = toursByTenant?.get(row.contactId);
         const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
-        return toListingSendRow(row, signal);
+        return toListingSendRow(row, signal, namesByContact.get(row.contactId));
       }),
     });
   });

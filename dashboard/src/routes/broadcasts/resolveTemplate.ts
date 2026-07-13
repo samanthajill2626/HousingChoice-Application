@@ -22,7 +22,7 @@ import type { UnitItem } from '../../api/index.js';
  *  Preview), and MessageEditor keeps it as the placeholder for a cleared
  *  textarea - ONE source of the copy for both. */
 export const DEFAULT_SEND_TEMPLATE =
-  'Hi [TenantName], a [Beds] home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
+  'Hi [TenantName], a [Beds]-bedroom home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
 
 /** Neutral [TenantName] fallback when no first name is known - NEVER a phone. */
 const NEUTRAL_TENANT_NAME = 'there';
@@ -62,9 +62,28 @@ function tokenRegex(token: string): RegExp {
   return new RegExp(token.replace(/[[\]]/g, '\\$&'), 'g');
 }
 
-/** Client-side mirror of the backend's renderBody (mergeFields.ts). firstName
- *  undefined/blank -> the neutral fallback; a null unit (or missing field)
- *  drops the token to ''. */
+/** Resolve the UNIT-derived tokens ([Beds]/[Address]/[Rent]/[FlyerLink]) to
+ *  literal text while PRESERVING [TenantName] - the one per-recipient token,
+ *  rendered per recipient by the backend at send time. This is the multi-
+ *  recipient prefill (property-first flow): staff see the real property
+ *  details, and each tenant still gets their own name. */
+export function resolveTemplateForUnit(
+  template: string,
+  unit: UnitItem | null,
+  flyerLink: string | undefined,
+): string {
+  const beds = unit !== null ? finite(unit.beds) : undefined;
+  return template
+    .replace(tokenRegex('[Beds]'), beds !== undefined ? String(beds) : '')
+    .replace(tokenRegex('[Address]'), unit !== null ? serverFormatAddress(unit.address) : '')
+    .replace(tokenRegex('[Rent]'), unit !== null ? rentText(unit) : '')
+    .replace(tokenRegex('[FlyerLink]'), flyerLink ?? '');
+}
+
+/** Client-side mirror of the backend's renderBody (mergeFields.ts): the unit
+ *  resolution above PLUS [TenantName] (single-recipient resolved mode).
+ *  firstName undefined/blank -> the neutral fallback; a null unit (or missing
+ *  field) drops the token to ''. */
 export function resolveTemplateForTenant(
   template: string,
   unit: UnitItem | null,
@@ -73,11 +92,8 @@ export function resolveTemplateForTenant(
 ): string {
   const name =
     firstName !== undefined && firstName.trim().length > 0 ? firstName.trim() : NEUTRAL_TENANT_NAME;
-  const beds = unit !== null ? finite(unit.beds) : undefined;
-  return template
-    .replace(tokenRegex('[TenantName]'), name)
-    .replace(tokenRegex('[Beds]'), beds !== undefined ? String(beds) : '')
-    .replace(tokenRegex('[Address]'), unit !== null ? serverFormatAddress(unit.address) : '')
-    .replace(tokenRegex('[Rent]'), unit !== null ? rentText(unit) : '')
-    .replace(tokenRegex('[FlyerLink]'), flyerLink ?? '');
+  return resolveTemplateForUnit(template, unit, flyerLink).replace(
+    tokenRegex('[TenantName]'),
+    name,
+  );
 }

@@ -456,7 +456,7 @@ export function ListingDetail(): React.JSX.Element {
                   <SendRosterRow
                     key={`${row.contactId}:${row.sentAt}`}
                     to={`/contacts/${row.contactId}`}
-                    identity={row.contactId}
+                    identity={row.tenantName ?? row.contactId}
                     {...(row.tour && { tour: row.tour })}
                   />
                 ))

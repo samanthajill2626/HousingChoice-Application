@@ -1314,6 +1314,9 @@ export interface TourSignal {
 }
 export interface ListingSendRow {
   contactId: string;
+  /** Denormalized tenant display name (server contacts join). HONEST - absent
+   *  when the contact is unknown or nameless; render the id as the fallback. */
+  tenantName?: string;
   unitId: string;
   sentAt: string; // ISO
   via: 'broadcast' | 'individual';

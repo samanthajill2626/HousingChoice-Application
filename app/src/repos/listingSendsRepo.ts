@@ -58,6 +58,10 @@ export interface ListingSendItem {
  */
 export interface ListingSendRow {
   contactId: string;
+  /** Denormalized tenant display name, attached by the GET projections (same
+   *  contacts join as the roster's `name`). HONEST - absent when the contact is
+   *  unknown or has no name; the dashboard then falls back to the id. */
+  tenantName?: string;
   unitId: string;
   sentAt: string;
   via: ListingSendVia;
@@ -96,9 +100,14 @@ export interface ListingSendsRepo {
  * `tour` chip signal (derived from the tours table by the caller) is attached
  * only when supplied - a row with no qualifying tour carries no `tour` field.
  */
-export function toListingSendRow(item: ListingSendItem, tour?: TourSignal): ListingSendRow {
+export function toListingSendRow(
+  item: ListingSendItem,
+  tour?: TourSignal,
+  tenantName?: string,
+): ListingSendRow {
   return {
     contactId: item.contactId,
+    ...(tenantName !== undefined && { tenantName }),
     unitId: item.unitId,
     sentAt: item.sentAt,
     via: item.via,

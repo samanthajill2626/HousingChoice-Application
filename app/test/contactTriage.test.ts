@@ -105,7 +105,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(audit?.payload?.['actor']).toBe('usr_testva00000000000000000');
   });
 
-  it('setting type=landlord propagates → landlord_1to1 and auto-advances status', async () => {
+  it('setting type=landlord propagates -> landlord_1to1 and auto-advances to interested (a LEAD)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);
     const res = await request(app)
@@ -114,7 +114,25 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ type: 'landlord' });
     expect(world.conversations.get('conv-triage-1')?.type).toBe('landlord_1to1');
-    expect(res.body.contact.status).toBe('active');
+    // D1: a freshly identified landlord is a LEAD -> 'interested', NOT 'active'
+    // ('active' means their properties are onboarded).
+    expect(res.body.contact.status).toBe('interested');
+  });
+
+  it('E1: an explicit landlord status on triage wins over the interested auto-advance', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', status: 'onboarding' });
+    expect(res.status).toBe(200);
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('landlord_1to1');
+    // The explicit status is honored, not overwritten by the auto-advance.
+    expect(res.body.contact.status).toBe('onboarding');
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
+    expect(audit?.payload?.['fields']).toEqual(['type', 'status']);
   });
 
   it('does NOT auto-advance status when the caller set status explicitly (explicit status wins)', async () => {
@@ -207,6 +225,73 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(res.body.contact.type).toBe('team_member');
     expect(res.body.contact.status).toBe('active');
     expect(world.contacts.find((c) => c.contactId === 'contact-retype-1')!.status).toBe('active');
+  });
+
+  it('REGRESSION: a conversation-less re-type to tenant lands onboarding, never the invalid (tenant, active)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A contact with NO attached conversation, currently a non-tenant carrying
+    // 'active'. Re-type to tenant WITHOUT a status. Under the old fallback
+    // (`newType==='unknown' ? 'needs_review' : 'active'`) a conversation-less
+    // re-type could persist (tenant, 'active') - the invalid pair the fallback
+    // exists to prevent. The tenant lifecycle start is 'onboarding'.
+    world.contacts.push({
+      contactId: 'contact-retype-tenant',
+      type: 'team_member',
+      status: 'active',
+      phone: '+15550100888',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-retype-tenant')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.type).toBe('tenant');
+    expect(res.body.contact.status).toBe('onboarding');
+    expect(world.contacts.find((c) => c.contactId === 'contact-retype-tenant')!.status).toBe(
+      'onboarding',
+    );
+  });
+
+  it('a conversation-less re-type to landlord lands interested (a LEAD), never active', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-retype-ll',
+      type: 'team_member',
+      status: 'active',
+      phone: '+15550100777',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-retype-ll')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.type).toBe('landlord');
+    expect(res.body.contact.status).toBe('interested');
+  });
+
+  it('re-typing a tenant (with a lifecycle status) to unknown returns it to the needs_review front door', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A tenant carrying a section 5 value invalid for 'unknown'; re-type WITHOUT a
+    // status must land the unknown fallback default 'needs_review'.
+    world.contacts.push({
+      contactId: 'contact-retype-unk',
+      type: 'tenant',
+      status: 'placing',
+      phone: '+15550100666',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-retype-unk')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'unknown' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.type).toBe('unknown');
+    expect(res.body.contact.status).toBe('needs_review');
   });
 
   it('a partial patch (only status) leaves an already-set name untouched', async () => {

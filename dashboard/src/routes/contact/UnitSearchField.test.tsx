@@ -65,17 +65,61 @@ describe('UnitSearchField', () => {
   it('free typing fires onChange with { label } and NO unitId', () => {
     const onChange = vi.fn();
     render(
-      <UnitSearchField
-        value={{ label: '', unitId: 'unit-0001' }}
-        onChange={onChange}
-        candidates={CANDIDATES}
-      />,
+      <UnitSearchField value={{ label: 'Syc' }} onChange={onChange} candidates={CANDIDATES} />,
     );
     const input = screen.getByRole('combobox');
     fireEvent.change(input, { target: { value: '500 Nowhere Ave' } });
     const call = onChange.mock.calls[0] as [{ label: string; unitId?: string }];
     expect(call[0]).toEqual({ label: '500 Nowhere Ave' });
     expect(call[0]).not.toHaveProperty('unitId');
+  });
+
+  // Committed selection — a picked unit locks the field until cleared.
+  it('picking an option hides the suggestion list', () => {
+    function Wrapper(): React.JSX.Element {
+      const [value, setValue] = useState<{ label: string; unitId?: string }>({
+        label: 'Sycamore',
+      });
+      return <UnitSearchField value={value} onChange={setValue} candidates={CANDIDATES} />;
+    }
+    render(<Wrapper />);
+
+    fireEvent.click(screen.getByRole('option', { name: /88 Sycamore St/i }));
+
+    // The full label still matches its own unit — the list must be hidden anyway.
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('combobox')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('a selected value renders the input read-only (typing cannot break the link)', () => {
+    render(
+      <UnitSearchField
+        value={{ label: '88 Sycamore St, Decatur, GA, 30030', unitId: 'unit-0002' }}
+        onChange={vi.fn()}
+        candidates={CANDIDATES}
+      />,
+    );
+    expect(screen.getByRole('combobox')).toHaveAttribute('readonly');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('the clear button resets the selection and returns focus to the input', () => {
+    function Wrapper(): React.JSX.Element {
+      const [value, setValue] = useState<{ label: string; unitId?: string }>({
+        label: '88 Sycamore St, Decatur, GA, 30030',
+        unitId: 'unit-0002',
+      });
+      return <UnitSearchField value={value} onChange={setValue} candidates={CANDIDATES} />;
+    }
+    render(<Wrapper />);
+
+    fireEvent.click(screen.getByRole('button', { name: /clear unit search/i }));
+
+    const input = screen.getByRole('combobox');
+    expect(input).toHaveValue('');
+    expect(input).not.toHaveAttribute('readonly');
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole('button', { name: /clear unit search/i })).toBeNull();
   });
 
   it('falls back to unitId as the label when a unit has no address', () => {

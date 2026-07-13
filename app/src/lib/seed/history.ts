@@ -76,6 +76,25 @@ export const LIFECYCLE_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   'listing_status_changed',
 ]);
 
+/**
+ * The tour lifecycle audit event_types this module OWNS on `tours#<tourId>` in
+ * the full profile. MIRRORS the live writer's recordTourEvent set + the
+ * group-opened / converted milestones (routes/tours.ts, routes/placements.ts)
+ * AND the dashboard's tourActivityFormat.ts TOUR_EVENT_LABELS keys - seeded
+ * rows use ONLY these so no unknown-type fallback ever renders. Used for the
+ * entity-scoped supersede of pre-existing tours# rows in historyItems.
+ */
+export const TOUR_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
+  'tour_scheduled',
+  'tour_rescheduled',
+  'tour_took_place',
+  'tour_no_show',
+  'tour_canceled',
+  'tour_outcome',
+  'tour_group_opened',
+  'tour_converted',
+]);
+
 // ---------------------------------------------------------------------------
 // Activity-milestone row shape (mirrors activityEventsRepo.ActivityEventItem —
 // what activityEventsRepo.record persists; PK contactId, SK `<ISO at>#<eventId>`).
@@ -672,6 +691,140 @@ export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
   return rows;
 }
 
+// ---------------------------------------------------------------------------
+// Tour audit-trail generator (`tours#<tourId>` rows) - the tour detail page's
+// own lifecycle history (GET /api/tours/:id/activity), interleaved into all
+// three conversation panes + the Activity card. FAITHFUL MIRROR of the live
+// writer's event vocabulary + per-status sequences (spec section 3, derived
+// from recordTourEvent + group-opened/converted call sites). NO actor - these
+// are archive writes describing actions the API never ran (same posture as the
+// seeded reminder rows that carry sentAt directly). The instants agree with
+// tourMilestones (booking = createdAt, took_place = scheduledAt) so the tenant
+// timeline and the tour trail tell one same-clock story.
+// ---------------------------------------------------------------------------
+
+/** A small fixed spacing used to place appendix rows strictly after the visit. */
+const TOUR_APPENDIX_OFFSET_MS = 2 * 60 * 60 * 1000; // 2h
+
+/**
+ * One seeded tour's `tours#<tourId>` audit trail. Per-status base sequence
+ * (spec section 3):
+ *   requested -> []                                    (timeless; mirrors the runtime writer)
+ *   scheduled -> [tour_scheduled @ booking]
+ *   toured    -> [tour_scheduled @ booking, tour_took_place @ scheduledAt]
+ *   no_show   -> [tour_scheduled @ booking, tour_no_show  @ scheduledAt]
+ *   canceled  -> [tour_scheduled @ booking, tour_canceled @ cancel instant]
+ *   closed    -> [tour_scheduled @ booking, tour_took_place @ scheduledAt]  (a closed tour happened)
+ * PLUS per-field appendices (non-requested only):
+ *   groupThreadId        -> tour_group_opened @ booking, { tourId, conversationId }
+ *   outcome              -> tour_outcome @ outcome instant (after took_place)
+ *   convertedPlacementId -> tour_converted @ conversion instant, { tourId, placementId }
+ *
+ * Instants: booking = createdAt (createdAt <= booking < scheduledAt); took_place/
+ * no_show = scheduledAt; canceled = the row's own canceledAt when present else a
+ * deterministic instant between booking and scheduledAt (never after scheduledAt);
+ * outcome = updatedAt when later than scheduledAt else scheduledAt + a small fixed
+ * offset; converted = after the outcome/visit. Rows are emitted in monotonically
+ * non-decreasing instant order with distinct SK suffixes (event_type differs, so
+ * two rows sharing an instant get distinct hashes).
+ *
+ * Defensive: a tour with no tourId, an unknown status, or a non-requested status
+ * lacking a scheduledAt contributes NO rows (seed guards own shape validation).
+ */
+export function tourTrail(tour: Record<string, unknown>): AuditRow[] {
+  const tourId = String(tour['tourId'] ?? '');
+  const status = String(tour['status'] ?? '');
+  if (tourId === '' || !(status in TOUR_STATUS_LABELS)) return [];
+  // requested is TIMELESS: zero rows, short-circuit BEFORE the appendices (a
+  // requested tour that already owns its group thread STILL emits nothing -
+  // mirrors the runtime writer + the existing zero-reminder invariant).
+  if (status === 'requested') return [];
+
+  const scheduledAtRaw = tour['scheduledAt'];
+  const scheduledAt =
+    typeof scheduledAtRaw === 'string' && scheduledAtRaw.length > 0 ? scheduledAtRaw : '';
+  if (scheduledAt === '') return []; // non-requested tour without a schedule -> skip
+  const schedMs = Date.parse(scheduledAt);
+  if (Number.isNaN(schedMs)) return [];
+
+  // booking = createdAt (mirror tourMilestones' fallback so the two align).
+  const createdAt = String(tour['createdAt'] ?? tour['updatedAt'] ?? '');
+  const booking = createdAt !== '' ? createdAt : scheduledAt;
+  const bookingMs = Date.parse(booking);
+  if (Number.isNaN(bookingMs)) return [];
+
+  const entityKey = `tours#${tourId}`;
+
+  // Build descriptors (instant + a stable priority to order same-instant rows),
+  // then sort so the emitted array is monotonically non-decreasing.
+  interface Desc {
+    ms: number;
+    prio: number;
+    type: string;
+    payload: Record<string, unknown>;
+  }
+  const descs: Desc[] = [];
+
+  // tour_scheduled @ booking - every non-requested tour was booked.
+  descs.push({ ms: bookingMs, prio: 0, type: 'tour_scheduled', payload: { tourId } });
+
+  // group_opened appendix (at/near booking - the group is provisioned at
+  // coordination time, before the visit). tours#-ONLY; no actor (archive write).
+  const groupThreadId = tour['groupThreadId'];
+  if (typeof groupThreadId === 'string' && groupThreadId.length > 0) {
+    descs.push({
+      ms: bookingMs,
+      prio: 1,
+      type: 'tour_group_opened',
+      payload: { tourId, conversationId: groupThreadId },
+    });
+  }
+
+  // Status body.
+  if (status === 'toured' || status === 'closed') {
+    descs.push({ ms: schedMs, prio: 2, type: 'tour_took_place', payload: { tourId } });
+  } else if (status === 'no_show') {
+    descs.push({ ms: schedMs, prio: 2, type: 'tour_no_show', payload: { tourId } });
+  } else if (status === 'canceled') {
+    const canceledAtRaw = tour['canceledAt'];
+    let cancelMs =
+      typeof canceledAtRaw === 'string' && canceledAtRaw.length > 0 && !Number.isNaN(Date.parse(canceledAtRaw))
+        ? Date.parse(canceledAtRaw)
+        : Math.floor((bookingMs + schedMs) / 2); // deterministic mid-instant
+    if (cancelMs > schedMs) cancelMs = schedMs; // never after it would have happened
+    if (cancelMs < bookingMs) cancelMs = bookingMs; // never before booking
+    descs.push({ ms: cancelMs, prio: 2, type: 'tour_canceled', payload: { tourId } });
+  }
+  // scheduled: no body row beyond tour_scheduled.
+
+  // outcome appendix (after took_place): updatedAt when later than scheduledAt,
+  // else scheduledAt + a small fixed offset.
+  const outcome = tour['outcome'];
+  let outcomeMs: number | undefined;
+  if (typeof outcome === 'string' && outcome.length > 0) {
+    const updatedMs = Date.parse(String(tour['updatedAt'] ?? ''));
+    outcomeMs =
+      !Number.isNaN(updatedMs) && updatedMs > schedMs ? updatedMs : schedMs + TOUR_APPENDIX_OFFSET_MS;
+    descs.push({ ms: outcomeMs, prio: 3, type: 'tour_outcome', payload: { tourId } });
+  }
+
+  // converted appendix (after took_place, the final chapter): after the outcome
+  // instant when present, else after the visit.
+  const convertedPlacementId = tour['convertedPlacementId'];
+  if (typeof convertedPlacementId === 'string' && convertedPlacementId.length > 0) {
+    const base = outcomeMs !== undefined ? outcomeMs : schedMs;
+    descs.push({
+      ms: base + TOUR_APPENDIX_OFFSET_MS,
+      prio: 4,
+      type: 'tour_converted',
+      payload: { tourId, placementId: convertedPlacementId },
+    });
+  }
+
+  descs.sort((a, b) => a.ms - b.ms || a.prio - b.prio);
+  return descs.map((d) => makeRow(entityKey, new Date(d.ms).toISOString(), d.type, d.payload));
+}
+
 /**
  * A listing-send row -> a `listing_sent` milestone ("Property sent", ref unit),
  * anchored at the send's `sentAt`. Faithful to broadcastFanOut.ts:308 (send).
@@ -763,6 +916,8 @@ export function historyItems(tables: Record<string, Record<string, unknown>[]>):
     if (id === '' || placementUnitIds.has(id)) continue; // placement-linked → derived trail already emitted
     generated.push(...standaloneUnitHistory(u));
   }
+  // Tour lifecycle trails (`tours#<tourId>`) - every tour in the assembled map.
+  for (const t of tours) generated.push(...tourTrail(t));
 
   // Dedupe: this module owns all lifecycle-class rows in the full profile — but only
   // for entities it actually regenerates. Drop a pre-existing lifecycle row ONLY when
@@ -772,11 +927,14 @@ export function historyItems(tables: Record<string, Record<string, unknown>[]>):
   // trail) is preserved, so we never silently lose it. Non-lifecycle rows are always
   // kept verbatim.
   const regeneratedEntityKeys = new Set(generated.map((r) => r.entityKey));
-  const keptPre = preAudit.filter(
-    (r) =>
-      !LIFECYCLE_EVENT_TYPES.has(String(r['event_type'])) ||
-      !regeneratedEntityKeys.has(String(r['entityKey'])),
-  ) as AuditRow[];
+  const keptPre = preAudit.filter((r) => {
+    const type = String(r['event_type']);
+    // Lifecycle-class rows (placement/tenant/unit trails) AND tour lifecycle
+    // rows are OWNED here: a pre-existing one is superseded only for an entity
+    // this pass actually regenerated; foreign rows are preserved verbatim.
+    const isOwned = LIFECYCLE_EVENT_TYPES.has(type) || TOUR_EVENT_TYPES.has(type);
+    return !isOwned || !regeneratedEntityKeys.has(String(r['entityKey']));
+  }) as AuditRow[];
 
   // ---- activity_events (Contact Timeline milestones, §4.6) ----
   const generatedActivity: ActivityRow[] = [];

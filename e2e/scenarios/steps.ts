@@ -836,7 +836,7 @@ export class Scenario {
   // ==== Landlord-onboarding verbs (documentation/landlord-onboarding-sequence.mermaid) ====
   // A landlord is modelled with the SAME contact machinery as a tenant (inbound via the
   // fake persona registry, triage/edit via the real dashboard), differing only by
-  // `type=landlord`, the landlord lead lifecycle (needs_review|interested|active|parked),
+  // `type=landlord`, the landlord lead lifecycle (needs_review|interested|onboarding|active|parked),
   // and the structured deal-terms card ("Landlord onboarding"). Audited live against the
   // running e2e:session stack (2026-06-30): selectors match the Task-6 audited list.
 
@@ -1014,6 +1014,38 @@ export class Scenario {
       await expect(this.page.getByRole('button', { name: 'Mark as Landlord' })).toHaveCount(0, {
         timeout: 10_000,
       });
+      // Tagging a contact as landlord now lands them at 'interested' (a freshly
+      // identified landlord is a LEAD), not 'active'. Pin the new default here.
+      await this.assertStatus('interested');
+    });
+  }
+
+  /** [Team] Move the landlord status via the header StatusMenu pill on the contact
+   *  page - the interactive pill IS the manual transition control (goes through the
+   *  transition route, source: manual). `label` is the LANDLORD_STATUS label
+   *  ("Onboarding", "Active", ...). Waits for the pill to re-label to the target,
+   *  which only happens once the transition write lands. */
+  teamMovesLandlordStatus(label: string): Promise<void> {
+    return step(`Team moves the landlord status -> ${label}`, async () => {
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      const pill = this.page.getByRole('button', { name: /^Contact status:/ });
+      await expect(pill).toBeVisible({ timeout: 10_000 });
+      await pill.click();
+      await this.page.getByRole('menuitemradio', { name: label, exact: true }).click();
+      await expect(
+        this.page.getByRole('button', { name: `Contact status: ${label}` }),
+      ).toBeVisible({ timeout: 10_000 });
+    });
+  }
+
+  /** [App] The landlord status pill reads `label` (and the raw API status is `raw`). */
+  expectLandlordStatus(raw: string, label: string): Promise<void> {
+    return step(`App: landlord status is ${label}`, async () => {
+      await this.assertStatus(raw);
+      await this.page.goto(`${NEXT}/contacts/${this.requireActiveContactId()}`);
+      await expect(
+        this.page.getByRole('button', { name: `Contact status: ${label}` }),
+      ).toBeVisible({ timeout: 10_000 });
     });
   }
 

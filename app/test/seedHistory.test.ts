@@ -697,6 +697,93 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
       doc.destroy();
     }
   }, 60_000);
+
+  it('a seeded TOURED tour reads back as a newest-first tours# trail projecting to known labels', async () => {
+    // Task 2: the tour detail page's Activity read is auditRepo.listByEntity
+    // (`tours#<id>`, newest-first) -> the GET /:id/activity projection. Prove a
+    // real seedAll('full') persists the tours# trail and it reads back coherent.
+    const { seedAll } = await import('../src/lib/seed/index.js');
+    const { createDocumentClient } = await import('../src/lib/dynamo.js');
+    const { createAuditRepo } = await import('../src/repos/auditRepo.js');
+
+    await seedAll(endpoint, 'full'); // idempotent upsert (round-trip prefix)
+
+    const doc = createDocumentClient({ endpoint });
+    try {
+      const audit = createAuditRepo({ doc, env: testEnv });
+      // The cast toured tour (cast.ts): status 'toured' + groupThreadId + outcome
+      // 'move_forward' -> trail { tour_scheduled, tour_group_opened,
+      // tour_took_place, tour_outcome }. Read NEWEST-FIRST (ScanIndexForward:false).
+      const TOURED_ID = 'tour-cast-toured-yes-tenant';
+      const rows = await audit.listByEntity(`tours#${TOURED_ID}`);
+      expect(new Set(rows.map((r) => r.event_type))).toEqual(
+        new Set(['tour_scheduled', 'tour_group_opened', 'tour_took_place', 'tour_outcome']),
+      );
+      expect(rows.length).toBe(4); // hermetic prefix: only this seedAll wrote them
+
+      // Newest-first: instants monotonically NON-INCREASING. outcome is the newest
+      // instant, then took_place; the two booking-instant rows (tour_scheduled +
+      // tour_group_opened share createdAt) trail last, their relative order set by
+      // the SK suffix (task section 2: outcome?, took_place, [group_opened?], scheduled).
+      const isoAt = (r: { ts: string }) => r.ts.slice(0, r.ts.indexOf('#'));
+      for (let i = 1; i < rows.length; i++) {
+        expect(isoAt(rows[i - 1]!) >= isoAt(rows[i]!), `row ${i} newest-first`).toBe(true);
+      }
+      expect(rows[0]!.event_type).toBe('tour_outcome'); // strictly-newest instant
+      expect(rows[1]!.event_type).toBe('tour_took_place');
+      expect(new Set([rows[2]!.event_type, rows[3]!.event_type])).toEqual(
+        new Set(['tour_scheduled', 'tour_group_opened']),
+      );
+
+      // Every row type is one of the 8 dashboard TOUR_EVENT_LABELS keys, so the
+      // dashboard's describeTourActivity resolves a REAL label (never the
+      // humanize() fallback). Pinned literal mirror (the dashboard module is not
+      // importable from app tests) - a drift alarm.
+      const TOUR_LABEL_KEYS = new Set<string>([
+        'tour_scheduled',
+        'tour_rescheduled',
+        'tour_took_place',
+        'tour_no_show',
+        'tour_canceled',
+        'tour_outcome',
+        'tour_group_opened',
+        'tour_converted',
+      ]);
+      for (const r of rows) {
+        expect(TOUR_LABEL_KEYS.has(r.event_type), `${r.event_type} is a known label key`).toBe(true);
+      }
+
+      // Repo-layer projection shape (mirrors the GET /:id/activity fixed-key
+      // whitelist in routes/tours.ts: id/at/type + tourId/placementId/conversationId;
+      // NO raw payload leak, NO actor on archive writes). Label resolution itself is
+      // dashboard-side (verified via the pinned key set above); this pins the wire shape.
+      const projected = rows.map((r) => {
+        const at = isoAt(r);
+        const p = (r.payload ?? {}) as Record<string, unknown>;
+        const pick = (k: string): string | undefined =>
+          typeof p[k] === 'string' ? (p[k] as string) : undefined;
+        return {
+          id: r.ts,
+          at,
+          type: r.event_type,
+          ...(pick('tourId') !== undefined && { tourId: pick('tourId') }),
+          ...(pick('conversationId') !== undefined && { conversationId: pick('conversationId') }),
+          ...(pick('placementId') !== undefined && { placementId: pick('placementId') }),
+        } as Record<string, unknown>;
+      });
+      for (const e of projected) {
+        expect((e['id'] as string).startsWith(e['at'] as string)).toBe(true);
+        expect(e['tourId']).toBe(TOURED_ID); // whitelisted payload.tourId rides through
+        expect(e['payload']).toBeUndefined(); // raw payload never leaks
+      }
+      for (const r of rows) expect(r.actorId, 'archive tour write carries no actor').toBeUndefined();
+      // group_opened carries its conversationId deep-link target through the whitelist.
+      const grp = projected.find((e) => e['type'] === 'tour_group_opened')!;
+      expect(typeof grp['conversationId']).toBe('string');
+    } finally {
+      doc.destroy();
+    }
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,10 @@
 // ContactSearchField — a text input with a client-side filtered candidate list.
-// Picking a candidate sets { name, contactId }; free typing clears contactId.
+// Picking a candidate sets { name, contactId } and COMMITS the field: the list
+// hides, the input goes read-only, and the Clear button is the only way back
+// to free typing (so typing can never silently drop a selection). Free typing
+// (uncommitted only) clears contactId.
 // Candidates are rendered as JSX text nodes — never dangerouslySetInnerHTML.
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { type Contact } from '../../api/index.js';
 import { contactDisplayName } from './format.js';
 import styles from './ContactSearchField.module.css';
@@ -48,13 +51,17 @@ export function ContactSearchField({
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   // Fix 4 (a11y): dismissed flag — Escape collapses the popup; typing clears it
   const [dismissed, setDismissed] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Fix 5: stable, instance-unique ids
   const uid = useId();
   const listboxId = `${uid}-listbox`;
 
+  // Committed: a contact is linked. The picked display name always matches its
+  // own candidate, so the list must be gated on this, not just on matches.
+  const isSelected = value.contactId !== undefined;
   const matches = filterCandidates(candidates, value.name);
-  const isListShown = !dismissed && matches.length > 0;
+  const isListShown = !dismissed && !isSelected && matches.length > 0;
 
   // Build a stable option id for aria-activedescendant
   const activeOptionId =
@@ -74,6 +81,13 @@ export function ContactSearchField({
     const displayName = contactDisplayName(candidate.firstName, candidate.lastName, phone);
     setActiveIndex(-1);
     onChange({ name: displayName, contactId: candidate.contactId });
+  }
+
+  function handleClear(): void {
+    setActiveIndex(-1);
+    setDismissed(false);
+    onChange({ name: '' });
+    inputRef.current?.focus();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
@@ -101,7 +115,8 @@ export function ContactSearchField({
   return (
     <div className={styles.wrapper}>
       <input
-        className={styles.input}
+        ref={inputRef}
+        className={isSelected ? `${styles.input} ${styles.inputSelected}` : styles.input}
         type="text"
         aria-label={inputLabel}
         role="combobox"
@@ -110,11 +125,23 @@ export function ContactSearchField({
         aria-controls={listboxId}
         aria-activedescendant={activeOptionId}
         value={value.name}
+        readOnly={isSelected}
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
         placeholder="Search contacts…"
         autoComplete="off"
       />
+      {isSelected && (
+        <button
+          type="button"
+          className={styles.clearButton}
+          aria-label={`Clear ${inputLabel}`}
+          title={`Clear ${inputLabel}`}
+          onClick={handleClear}
+        >
+          {'×'}
+        </button>
+      )}
       {isListShown && (
         <ul
           id={listboxId}

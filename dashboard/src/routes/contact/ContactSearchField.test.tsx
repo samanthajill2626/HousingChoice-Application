@@ -48,17 +48,62 @@ describe('ContactSearchField', () => {
   it('typing a non-matching/free string fires onChange with { name } and NO contactId', () => {
     const onChange = vi.fn();
     render(
-      <ContactSearchField
-        value={{ name: '', contactId: 'c1' }}
-        onChange={onChange}
-        candidates={CANDIDATES}
-      />,
+      <ContactSearchField value={{ name: 'Ali' }} onChange={onChange} candidates={CANDIDATES} />,
     );
     const input = screen.getByRole('combobox');
     fireEvent.change(input, { target: { value: 'Zara' } });
     const call = onChange.mock.calls[0] as [{ name: string; contactId?: string }];
     expect(call[0]).toEqual({ name: 'Zara' });
     expect(call[0]).not.toHaveProperty('contactId');
+  });
+
+  // Committed selection — a picked contact locks the field until cleared.
+  it('picking a candidate hides the suggestion list', () => {
+    function Wrapper(): React.JSX.Element {
+      const [value, setValue] = useState<{ name: string; contactId?: string }>({
+        name: 'Ali',
+      });
+      return <ContactSearchField value={value} onChange={setValue} candidates={CANDIDATES} />;
+    }
+    render(<Wrapper />);
+
+    fireEvent.click(screen.getByRole('option', { name: /Alice Smith/i }));
+
+    // The picked display name still matches its own candidate — the list must
+    // be hidden anyway.
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('combobox')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('a selected value renders the input read-only (typing cannot break the link)', () => {
+    render(
+      <ContactSearchField
+        value={{ name: 'Alice Smith', contactId: 'c1' }}
+        onChange={vi.fn()}
+        candidates={CANDIDATES}
+      />,
+    );
+    expect(screen.getByRole('combobox')).toHaveAttribute('readonly');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('the clear button resets the selection and returns focus to the input', () => {
+    function Wrapper(): React.JSX.Element {
+      const [value, setValue] = useState<{ name: string; contactId?: string }>({
+        name: 'Alice Smith',
+        contactId: 'c1',
+      });
+      return <ContactSearchField value={value} onChange={setValue} candidates={CANDIDATES} />;
+    }
+    render(<Wrapper />);
+
+    fireEvent.click(screen.getByRole('button', { name: /clear contact search/i }));
+
+    const input = screen.getByRole('combobox');
+    expect(input).toHaveValue('');
+    expect(input).not.toHaveAttribute('readonly');
+    expect(input).toHaveFocus();
+    expect(screen.queryByRole('button', { name: /clear contact search/i })).toBeNull();
   });
 
   it('shows no more than 8 candidates even when more match', () => {

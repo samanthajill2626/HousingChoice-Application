@@ -230,6 +230,64 @@ export function UnitCreateForm({
           )}
         </div>
 
+        {/* Address directly under the owner (the two identity fields first —
+            everything else describes the property they anchor). */}
+        <div className={styles.fieldset}>
+          <span className={styles.label}>Address</span>
+          <label className={styles.field}>
+            <span className={styles.srLabel}>Street address</span>
+            <input
+              className={styles.input}
+              value={line1}
+              onChange={(e) => setLine1(e.target.value)}
+              placeholder="Street address"
+              autoComplete="off"
+            />
+          </label>
+          <label className={styles.field}>
+            <span className={styles.srLabel}>Apt / unit</span>
+            <input
+              className={styles.input}
+              value={line2}
+              onChange={(e) => setLine2(e.target.value)}
+              placeholder="Apt, suite, unit (optional)"
+              autoComplete="off"
+            />
+          </label>
+          <div className={styles.row}>
+            <label className={styles.field}>
+              <span className={styles.srLabel}>City</span>
+              <input
+                className={styles.input}
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="City"
+                autoComplete="off"
+              />
+            </label>
+            <label className={`${styles.field} ${styles.stateField}`}>
+              <span className={styles.srLabel}>State</span>
+              <input
+                className={styles.input}
+                value={stateField}
+                onChange={(e) => setStateField(e.target.value)}
+                placeholder="State"
+                autoComplete="off"
+              />
+            </label>
+            <label className={`${styles.field} ${styles.zipField}`}>
+              <span className={styles.srLabel}>ZIP</span>
+              <input
+                className={styles.input}
+                value={zip}
+                onChange={(e) => setZip(e.target.value)}
+                placeholder="ZIP"
+                autoComplete="off"
+              />
+            </label>
+          </div>
+        </div>
+
         <div className={styles.row}>
           <label className={styles.field}>
             <span className={styles.label}>Housing authority</span>
@@ -316,62 +374,6 @@ export function UnitCreateForm({
               onChange={(e) => setDeposit(e.target.value)}
             />
           </label>
-        </div>
-
-        <div className={styles.fieldset}>
-          <span className={styles.label}>Address</span>
-          <label className={styles.field}>
-            <span className={styles.srLabel}>Street address</span>
-            <input
-              className={styles.input}
-              value={line1}
-              onChange={(e) => setLine1(e.target.value)}
-              placeholder="Street address"
-              autoComplete="off"
-            />
-          </label>
-          <label className={styles.field}>
-            <span className={styles.srLabel}>Apt / unit</span>
-            <input
-              className={styles.input}
-              value={line2}
-              onChange={(e) => setLine2(e.target.value)}
-              placeholder="Apt, suite, unit (optional)"
-              autoComplete="off"
-            />
-          </label>
-          <div className={styles.row}>
-            <label className={styles.field}>
-              <span className={styles.srLabel}>City</span>
-              <input
-                className={styles.input}
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                placeholder="City"
-                autoComplete="off"
-              />
-            </label>
-            <label className={`${styles.field} ${styles.stateField}`}>
-              <span className={styles.srLabel}>State</span>
-              <input
-                className={styles.input}
-                value={stateField}
-                onChange={(e) => setStateField(e.target.value)}
-                placeholder="State"
-                autoComplete="off"
-              />
-            </label>
-            <label className={`${styles.field} ${styles.zipField}`}>
-              <span className={styles.srLabel}>ZIP</span>
-              <input
-                className={styles.input}
-                value={zip}
-                onChange={(e) => setZip(e.target.value)}
-                placeholder="ZIP"
-                autoComplete="off"
-              />
-            </label>
-          </div>
         </div>
 
         <label className={styles.field}>

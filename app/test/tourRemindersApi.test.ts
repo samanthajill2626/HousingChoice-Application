@@ -38,6 +38,8 @@ function seedReminder(
     dueAt: string;
     sentAt?: string;
     canceledAt?: string;
+    skippedAt?: string;
+    skipReason?: TourReminderItem['skipReason'];
   },
 ): void {
   const item: TourReminderItem = {
@@ -49,6 +51,8 @@ function seedReminder(
     createdAt: '2026-07-13T00:00:00.000Z',
     ...(input.sentAt !== undefined && { sentAt: input.sentAt }),
     ...(input.canceledAt !== undefined && { canceledAt: input.canceledAt }),
+    ...(input.skippedAt !== undefined && { skippedAt: input.skippedAt }),
+    ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.tourRemindersMap.set(item.reminderId, item);
 }
@@ -125,6 +129,49 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(next?.kind).toBe('day_before');
     expect(next?.state).toBe('upcoming');
     expect(next?.reminderId).toBe('rem-daybefore');
+  });
+
+  it('surfaces a claim-skipped rung as state "skipped" with skipReason, excluded from next', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    const created = await world.toursRepo.create({
+      tenantId: 'contact-skipview-1',
+      unitId: 'unit-skipview-1',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'landlord_led',
+    });
+    const tourId = created.tourId;
+
+    // A rung the poll retired unsent + a genuinely upcoming one.
+    seedReminder(world, {
+      reminderId: 'rem-skipped',
+      tourId,
+      kind: 'confirmation',
+      dueAt: '2026-07-13T10:00:00.000Z',
+      skippedAt: '2026-07-13T10:01:00.000Z',
+      skipReason: 'no_conversation',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-upcoming',
+      tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-14T10:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const { reminders, next } = res.body as {
+      reminders: { reminderId: string; state: string; skippedAt?: string; skipReason?: string }[];
+      next?: { reminderId: string };
+    };
+
+    const skipped = reminders.find((r) => r.reminderId === 'rem-skipped');
+    expect(skipped?.state).toBe('skipped');
+    expect(skipped?.skippedAt).toBe('2026-07-13T10:01:00.000Z');
+    expect(skipped?.skipReason).toBe('no_conversation');
+
+    // A skipped rung is terminal — never the NEXT rung to fire.
+    expect(next?.reminderId).toBe('rem-upcoming');
   });
 
   it('carries a contact_opted_out suppression estimate on an upcoming 1:1 (self_guided) rung', async () => {

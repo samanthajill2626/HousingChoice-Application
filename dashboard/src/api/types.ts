@@ -634,11 +634,15 @@ export interface TourReminderView {
   kind: ReminderKind;
   /** ISO 8601 — when the rung is due to fire. */
   dueAt: string;
-  state: 'upcoming' | 'sent' | 'canceled';
+  state: 'upcoming' | 'sent' | 'canceled' | 'skipped';
   /** ISO 8601 — when it was sent (present when state === 'sent'). */
   sentAt?: string;
   /** ISO 8601 — when it was canceled (present when state === 'canceled'). */
   canceledAt?: string;
+  /** ISO 8601 — when the poll retired the rung unsent (state === 'skipped'). */
+  skippedAt?: string;
+  /** Why the poll could not deliver it (present when state === 'skipped'). */
+  skipReason?: 'no_conversation' | 'contact_missing' | 'contact_no_phone' | 'tour_missing';
   body: string;
   /** Present when the rung is armed but will be skipped at fire time. */
   suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
@@ -668,6 +672,16 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   contact_opted_out: 'contact opted out',
   manual_mode: 'manual mode',
   stale_stage: 'tour no longer at this stage',
+};
+
+/** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */
+export const REMINDER_SKIP_REASON_LABELS: Readonly<
+  Record<NonNullable<TourReminderView['skipReason']>, string>
+> = {
+  no_conversation: 'no conversation',
+  contact_missing: 'contact missing',
+  contact_no_phone: 'no phone on file',
+  tour_missing: 'tour missing',
 };
 
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */

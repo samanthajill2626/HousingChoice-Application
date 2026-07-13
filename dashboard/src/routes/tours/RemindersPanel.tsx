@@ -30,6 +30,7 @@ import {
   useEventStream,
   ApiError,
   REMINDER_KIND_LABELS,
+  REMINDER_SKIP_REASON_LABELS,
   REMINDER_SUPPRESSION_LABELS,
   type TourReminderView,
   type TourUpdatedEvent,
@@ -80,6 +81,17 @@ function StateChip({ rung }: { rung: TourReminderView }): React.JSX.Element {
   }
   if (rung.state === 'canceled') {
     return <span className={`${styles.chip} ${styles.canceled}`}>Canceled</span>;
+  }
+  if (rung.state === 'skipped') {
+    // The poll retired the rung UNSENT (claim-skip) — say why, so the chip is
+    // never a permanent "sending shortly" lie. Plain-hyphen copy (Cameron).
+    const reason =
+      rung.skipReason !== undefined ? REMINDER_SKIP_REASON_LABELS[rung.skipReason] : undefined;
+    return (
+      <span className={`${styles.chip} ${styles.skipped}`}>
+        {reason !== undefined ? `Skipped - ${reason}` : 'Skipped'}
+      </span>
+    );
   }
   // upcoming — amber, with the relative FIRE time. These are reminders that WILL
   // be sent, so the wording is "sends in Nh" / "sending shortly" (mirrors the

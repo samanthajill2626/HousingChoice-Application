@@ -1646,22 +1646,43 @@ export function createFakeWorld(): FakeWorld {
     },
     async listDue(now) {
       return [...tourRemindersMap.values()]
-        .filter((r) => r.dueAt <= now && r.sentAt === undefined && r.canceledAt === undefined)
+        .filter(
+          (r) =>
+            r.dueAt <= now &&
+            r.sentAt === undefined &&
+            r.canceledAt === undefined &&
+            r.skippedAt === undefined,
+        )
         .map((r) => ({ ...r }));
     },
     async claimSend(reminderId, claimedAt) {
       const r = tourRemindersMap.get(reminderId);
-      if (!r || r.sentAt !== undefined || r.canceledAt !== undefined) {
+      if (!r || r.sentAt !== undefined || r.canceledAt !== undefined || r.skippedAt !== undefined) {
         return false;
       }
       r.sentAt = claimedAt;
       tourRemindersMap.set(reminderId, r);
       return true;
     },
+    async claimSkip(reminderId, skippedAt, reason) {
+      const r = tourRemindersMap.get(reminderId);
+      if (!r || r.sentAt !== undefined || r.canceledAt !== undefined || r.skippedAt !== undefined) {
+        return false;
+      }
+      r.skippedAt = skippedAt;
+      r.skipReason = reason;
+      tourRemindersMap.set(reminderId, r);
+      return true;
+    },
     async cancelForTour(tourId) {
       const now = new Date().toISOString();
       for (const r of tourRemindersMap.values()) {
-        if (r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined) {
+        if (
+          r.tourId === tourId &&
+          r.sentAt === undefined &&
+          r.canceledAt === undefined &&
+          r.skippedAt === undefined
+        ) {
           r.canceledAt = now;
           tourRemindersMap.set(r.reminderId, r);
         }

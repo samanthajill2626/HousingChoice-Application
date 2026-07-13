@@ -582,7 +582,9 @@ async function gatherUpcoming(params: {
     const perTour = await Promise.all(
       tours.map(async (tour: TourItem): Promise<TimelineScheduled[]> => {
         const rows = await repos.tourRemindersRepo.listByTour(tour.tourId);
-        const upcomingRows = rows.filter((r) => r.sentAt === undefined && r.canceledAt === undefined);
+        const upcomingRows = rows.filter(
+          (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
+        );
         if (upcomingRows.length === 0) return [];
         // Route decision — mirror the poller EXACTLY: self_guided always 1:1;
         // any other type is 1:1 ONLY when its group is unusable (M3). A

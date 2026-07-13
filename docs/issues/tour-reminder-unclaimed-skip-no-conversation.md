@@ -3,9 +3,10 @@ id: tour-reminder-unclaimed-skip-no-conversation
 title: "Tour reminder rungs for tenants without a 1:1 conversation are skipped WITHOUT being claimed - due forever, panel says 'sending shortly' indefinitely"
 type: bug
 severity: medium
-status: open
+status: resolved
 area: app
 created: 2026-07-13
+resolved: 2026-07-13
 refs: app/src/jobs/tourReminders.ts:282, app/src/jobs/tourReminders.ts:240, app/src/jobs/tourReminders.ts:261
 ---
 
@@ -49,3 +50,17 @@ no-conversation guard predates that pattern.
 Either way the panel's amber chip should never be a permanent lie. Not a
 regression from c7c33a9 (the skip predates it); graduated to the registry
 because it silently drops a tenant-facing communication.
+
+**Resolution (2026-07-13) - option 2, Cameron's call.** All four undeliverable
+guards (tour missing / contact missing / no phone / no 1:1 conversation) now
+CLAIM-SKIP the row: `tourRemindersRepo.claimSkip(reminderId, now, reason)`
+stamps `skippedAt` + `skipReason` under the same atomic condition claimSend
+uses, listDue/claimSend/cancelForTour all treat skipped as terminal, and the
+skip emits `scheduled.updated`. The reminders view surfaces `state: 'skipped'`
++ `skipReason`; the Reminders panel chip reads `Skipped - <reason>` (plain
+hyphen, danger tone) and the contact timeline's upcoming bucket excludes
+skipped rows. Live-verified on the dev stack: an open tour page flipped from
+"sending shortly" to "Skipped - no conversation" with no reload, ~80s end to
+end. Option 1 (create the 1:1 on demand so the reminder DELIVERS) remains a
+possible future improvement; the visible skip makes the gap actionable by
+staff in the meantime.

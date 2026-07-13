@@ -1,6 +1,6 @@
 // MessageEditor — the broadcast template editor. One job: a labeled <textarea>
 // (≤1600 chars with a live count) plus merge-field insert chips that drop a token
-// at the cursor (so the operator builds "Hi [TenantName], a [Beds] home at
+// at the cursor (so the operator builds "Hi [TenantName], a [Beds]-bedroom home at
 // [Address] …"). When the broadcast is for a property (unitId set) the property
 // is shown and a note explains the [FlyerLink] is attached automatically.
 import { useId, useRef } from 'react';

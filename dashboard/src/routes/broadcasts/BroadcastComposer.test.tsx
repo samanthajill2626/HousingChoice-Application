@@ -118,7 +118,7 @@ describe('BroadcastComposer - property-first step (spec 2026-07-13)', () => {
     const box = await screen.findByRole('textbox', { name: 'Message' });
     await waitFor(() => {
       expect(box).toHaveValue(
-        'Hi [TenantName], a 2 home at 77 Peachtree St, Atlanta, GA 30303 is available for $1500/mo. Details: ' +
+        'Hi [TenantName], a 2-bedroom home at 77 Peachtree St, Atlanta, GA 30303 is available for $1500/mo. Details: ' +
           `${window.location.origin}/p/u-1`,
       );
     });
@@ -218,7 +218,7 @@ describe('BroadcastComposer — preview gate', () => {
     // no typing needed to move on.
     await waitFor(() =>
       expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toMatch(
-        /Hi \[TenantName\], a 2 home at/,
+        /Hi \[TenantName\], a 2-bedroom home at/,
       ),
     );
     expect(screen.queryByText('Write a message to enable the preview.')).not.toBeInTheDocument();

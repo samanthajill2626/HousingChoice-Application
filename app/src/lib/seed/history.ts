@@ -177,13 +177,15 @@ const TENANT_STATUS_DURATION_DAYS: Readonly<Record<string, number>> = {
   inactive: 0,
 };
 
-// Landlord linear progression (needs_review → interested → active; parked is a branch).
+// Landlord linear progression (needs_review -> interested -> onboarding -> active;
+// parked is a branch off 'interested').
 const LANDLORD_LINEAR = LANDLORD_STATUSES.filter((s) => s !== 'parked');
 const LANDLORD_OVERRIDES: ReadonlySet<string> = new Set(['parked']);
 const LANDLORD_BRANCH_FROM = 'interested';
 const LANDLORD_STATUS_DURATION_DAYS: Readonly<Record<string, number>> = {
   needs_review: 1,
   interested: 5,
+  onboarding: 4,
   active: 0,
   parked: 0,
 };

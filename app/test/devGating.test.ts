@@ -459,8 +459,11 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
 
   /** Seed a tenant + 1:1 conversation + an awaiting_receipt placement, then arm a
    *  due receipt_check nudge row directly in the world's repo (the choke point's
-   *  arm path, minus the transition — this suite tests the tick, not the arming). */
-  async function armReceiptNudge(world: FakeWorld): Promise<void> {
+   *  arm path, minus the transition — this suite tests the tick, not the arming).
+   *  `dueAt` defaults to FIXED_NOW; the wall-clock test overrides it with a
+   *  future-relative instant (a fixed "future" date is a time bomb — the suite
+   *  outlived 2026-07-13 once and the row started firing for real). */
+  async function armReceiptNudge(world: FakeWorld, dueAt: string = FIXED_NOW): Promise<void> {
     world.contacts.push({
       contactId: 'contact-nudge-tenant',
       type: 'tenant',
@@ -487,7 +490,7 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
     await world.placementNudgesRepo.create({
       placementId: 'placement-nudge-1',
       kind: 'receipt_check',
-      dueAt: FIXED_NOW,
+      dueAt,
     });
   }
 
@@ -524,7 +527,10 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
 
   it('defaults now to the wall clock when the body carries none', async () => {
     const { app, world } = buildTickHarness();
-    await armReceiptNudge(world);
+    // Arm the row a day AHEAD of the real wall clock (never a fixed date —
+    // FIXED_NOW expired on 2026-07-13 and this test started firing the row):
+    // a wall-clock tick must find nothing due, on any run date.
+    await armReceiptNudge(world, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
 
     const res = await request(app).post('/__dev/placement-nudges/tick').send();
     expect(res.status).toBe(200);
@@ -532,9 +538,7 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
     // The echoed now is a full canonical ISO instant.
     expect(typeof res.body.now).toBe('string');
     expect(new Date(res.body.now as string).toISOString()).toBe(res.body.now);
-    // The armed row's dueAt (FIXED_NOW) is in the FUTURE relative to the real
-    // wall clock, so nothing is due — deterministic either way: the endpoint ran
-    // a poll pass without error and sent nothing.
+    // The armed row is due tomorrow, so the wall-clock poll sends nothing.
     expect(world.sent).toHaveLength(0);
   });
 

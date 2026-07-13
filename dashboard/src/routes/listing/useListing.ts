@@ -13,6 +13,7 @@ import {
   ApiError,
   getPlacements,
   getContact,
+  getTours,
   getUnit,
   getUnitActivity,
   getUnitRecipients,
@@ -23,6 +24,7 @@ import {
   type ListingSendRow,
   type RelatedUnit,
   type SimilarUnit,
+  type Tour,
   type UnitActivityEvent,
   type UnitItem,
 } from '../../api/index.js';
@@ -54,6 +56,8 @@ export interface ListingState {
   similar: Slice<SimilarUnit>;
   /** The property's audit-trail Activity rows — 'pending' on an older backend. */
   activity: Slice<UnitActivityEvent>;
+  /** Tours on this unit (GET /api/tours?unitId=), unbooked first then newest. */
+  tours: Slice<Tour>;
 }
 
 const LOADING: Omit<ListingState, 'setUnit'> = {
@@ -66,7 +70,20 @@ const LOADING: Omit<ListingState, 'setUnit'> = {
   recipients: { status: 'loading' },
   similar: { status: 'loading' },
   activity: { status: 'loading' },
+  tours: { status: 'loading' },
 };
+
+/** Panel order for the tours card: unbooked requests first (the active asks),
+ *  then booked tours newest-first — so what needs attention leads and history
+ *  reads downward. */
+export function sortToursForPanel(tours: Tour[]): Tour[] {
+  return [...tours].sort((a, b) => {
+    if (a.scheduledAt === undefined && b.scheduledAt === undefined) return 0;
+    if (a.scheduledAt === undefined) return -1;
+    if (b.scheduledAt === undefined) return 1;
+    return a.scheduledAt < b.scheduledAt ? 1 : a.scheduledAt > b.scheduledAt ? -1 : 0;
+  });
+}
 
 /** Resolve a maybe-not-live slice: a 404 → 'pending'; other errors → 'error'. */
 async function loadSlice<T>(
@@ -126,7 +143,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
         const unit = await getUnit(unitId, signal);
         if (signal.aborted) return;
 
-        const [landlord, units, placements, relatedSlice, recipients, similar, activity] = await Promise.all([
+        const [landlord, units, placements, relatedSlice, recipients, similar, activity, toursSlice] = await Promise.all([
           loadLandlord(unit.landlordId, signal),
           // NOTE: first inbox page only (nextCursor not paged) for the
           // same-landlord Related + placements-on-unit derivations — a transitional
@@ -138,8 +155,14 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           loadSlice((s) => getUnitRecipients(unitId, s), signal),
           loadSlice((s) => getUnitSimilar(unitId, s), signal),
           loadSlice((s) => getUnitActivity(unitId, s), signal),
+          loadSlice((s) => getTours({ unitId }, s), signal),
         ]);
         if (signal.aborted) return;
+
+        const tours: Slice<Tour> =
+          toursSlice.status === 'ready'
+            ? { status: 'ready', rows: sortToursForPanel(toursSlice.rows) }
+            : toursSlice;
 
         // Related: prefer the live endpoint; on pending (404), fall back to the
         // derived same-landlord list (real data → 'ready', not 'pending').
@@ -158,6 +181,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           recipients,
           similar,
           activity,
+          tours,
           forId: unitId,
         });
       } catch (err) {

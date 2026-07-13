@@ -19,6 +19,7 @@ import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
+  TOUR_STATUS_LABELS,
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
@@ -75,8 +76,9 @@ export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
   const state = useListing(unitId);
-  // Contacts back the "Placements on this property" rows: resolve each placement's
-  // tenantId to a display name (falls back to the id when a contact hasn't loaded).
+  // Contacts back the "Placements on this property" + "Tours on this property"
+  // rows: resolve each row's tenantId to a display name (falls back to the id
+  // when a contact hasn't loaded).
   const { contacts: contactsList } = useContacts('all');
   const contactsMap = useMemo(() => {
     const m = new Map<string, Contact>();
@@ -131,7 +133,7 @@ export function ListingDetail(): React.JSX.Element {
     );
   }
 
-  const { unit, roster, placementsOnUnit, related, recipients, similar, activity } = state;
+  const { unit, roster, placementsOnUnit, related, recipients, similar, activity, tours } = state;
   const address = shortAddress(unit.address, unit.unitId);
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
@@ -463,6 +465,47 @@ export function ListingDetail(): React.JSX.Element {
               )
             ) : recipients.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load recipients.</EmptyRow>
+            ) : (
+              <PendingPanel />
+            )}
+          </Card>
+
+          {/* Tours sit between Sent-to-tenants and Placements — the flow order
+              (send -> tour -> placement). Rows: tenant + date, right = status. */}
+          <Card
+            title="Tours on this property"
+            aside={
+              tours.status === 'ready' && tours.rows.length > 0
+                ? String(tours.rows.length)
+                : undefined
+            }
+          >
+            {tours.status === 'ready' ? (
+              tours.rows.length === 0 ? (
+                <EmptyRow>No tours on this property yet.</EmptyRow>
+              ) : (
+                <CollapsibleRows
+                  rows={tours.rows.map((t) => (
+                    <Row
+                      key={t.tourId}
+                      to={`/tours/${t.tourId}`}
+                      label={
+                        <span>
+                          {tenantName(contactsMap, t.tenantId)}
+                          <span className={styles.subLabel}>
+                            {t.scheduledAt !== undefined
+                              ? new Date(t.scheduledAt).toLocaleDateString()
+                              : 'Not booked'}
+                          </span>
+                        </span>
+                      }
+                      right={TOUR_STATUS_LABELS[t.status] ?? t.status}
+                    />
+                  ))}
+                />
+              )
+            ) : tours.status === 'error' ? (
+              <EmptyRow>We couldn&apos;t load tours.</EmptyRow>
             ) : (
               <PendingPanel />
             )}

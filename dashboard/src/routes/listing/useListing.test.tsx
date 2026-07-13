@@ -11,6 +11,7 @@ const getUnitRelated = vi.fn();
 const getUnitRecipients = vi.fn();
 const getUnitSimilar = vi.fn();
 const getUnitActivity = vi.fn();
+const getTours = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -24,10 +25,11 @@ vi.mock('../../api/index.js', async () => {
     getUnitRecipients: (...a: unknown[]) => getUnitRecipients(...a),
     getUnitSimilar: (...a: unknown[]) => getUnitSimilar(...a),
     getUnitActivity: (...a: unknown[]) => getUnitActivity(...a),
+    getTours: (...a: unknown[]) => getTours(...a),
   };
 });
 
-import { useListing } from './useListing.js';
+import { sortToursForPanel, useListing } from './useListing.js';
 
 function Probe({ unitId }: { unitId: string }): React.JSX.Element {
   const s = useListing(unitId);
@@ -46,6 +48,8 @@ function Probe({ unitId }: { unitId: string }): React.JSX.Element {
       <span data-testid="activity-rows">
         {s.activity.status === 'ready' ? s.activity.rows.length : -1}
       </span>
+      <span data-testid="tours">{s.tours.status}</span>
+      <span data-testid="tours-rows">{s.tours.status === 'ready' ? s.tours.rows.length : -1}</span>
     </div>
   );
 }
@@ -70,6 +74,8 @@ beforeEach(() => {
   getUnitRecipients.mockReset();
   getUnitSimilar.mockReset();
   getUnitActivity.mockReset();
+  // Default: no tours (individual tests override with rows / a 404).
+  getTours.mockReset().mockResolvedValue([]);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -123,6 +129,37 @@ describe('useListing', () => {
     expect(screen.getByTestId('similar').textContent).toBe('ready');
     expect(screen.getByTestId('activity').textContent).toBe('ready');
     expect(screen.getByTestId('activity-rows').textContent).toBe('1');
+  });
+
+  it('loads tours by unitId, unbooked first then newest; a 404 degrades to pending', async () => {
+    getUnit.mockResolvedValue(UNIT);
+    getUnits.mockResolvedValue(UNITS);
+    getPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getTours.mockResolvedValue([
+      { tourId: 'tour-old', tenantId: 't1', unitId: 'u1', status: 'toured', scheduledAt: '2026-07-01T15:00:00.000Z' },
+      { tourId: 'tour-new', tenantId: 't2', unitId: 'u1', status: 'scheduled', scheduledAt: '2026-07-20T15:00:00.000Z' },
+    ]);
+
+    render(<Probe unitId="u1" />);
+
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
+    expect(getTours).toHaveBeenCalledWith({ unitId: 'u1' }, expect.anything());
+    expect(screen.getByTestId('tours').textContent).toBe('ready');
+    expect(screen.getByTestId('tours-rows').textContent).toBe('2');
+  });
+
+  it('sortToursForPanel: unbooked requests lead, then booked tours newest-first', () => {
+    const sorted = sortToursForPanel([
+      { tourId: 'a', tenantId: 't', unitId: 'u', status: 'toured', scheduledAt: '2026-07-01T15:00:00.000Z' },
+      { tourId: 'b', tenantId: 't', unitId: 'u', status: 'requested' },
+      { tourId: 'c', tenantId: 't', unitId: 'u', status: 'scheduled', scheduledAt: '2026-07-20T15:00:00.000Z' },
+    ] as Parameters<typeof sortToursForPanel>[0]);
+    expect(sorted.map((t) => t.tourId)).toEqual(['b', 'c', 'a']);
   });
 
   it('errors when the unit itself fails to load', async () => {

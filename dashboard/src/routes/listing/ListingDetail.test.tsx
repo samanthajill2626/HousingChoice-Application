@@ -105,6 +105,7 @@ const READY: ListingState = {
   recipients: { status: 'pending' },
   similar: { status: 'pending' },
   activity: { status: 'pending' },
+  tours: { status: 'pending' },
 };
 
 // Default contacts so the placement card can resolve tenantId 't1' → "Fixture Tenant"
@@ -290,6 +291,41 @@ describe('ListingDetail', () => {
     expect(row).toHaveAttribute('href', '/placements/c1');
     // The raw tenantId must never be surfaced.
     expect(screen.queryByText('t1')).not.toBeInTheDocument();
+  });
+
+  it('renders the "Tours on this property" card: tenant name + date rows linking to the tour, status on the right', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      tours: {
+        status: 'ready',
+        rows: [
+          // Pre-sorted by the hook (unbooked first, then newest) — the card renders as given.
+          { tourId: 'tour-1', tenantId: 't1', unitId: 'u1', status: 'requested' },
+          {
+            tourId: 'tour-2',
+            tenantId: 't1',
+            unitId: 'u1',
+            status: 'toured',
+            scheduledAt: '2026-07-05T15:00:00.000Z',
+          },
+        ],
+      },
+    });
+    renderAt();
+
+    expect(screen.getByRole('heading', { name: /Tours on this property/ })).toBeInTheDocument();
+    // Unbooked request: tenant name + "Not booked", status label on the right.
+    const requested = screen.getByRole('link', { name: /Fixture Tenant.*Not booked.*Requested/s });
+    expect(requested).toHaveAttribute('href', '/tours/tour-1');
+    // Booked + toured: carries the date and the Toured status.
+    const toured = screen.getByRole('link', { name: /Fixture Tenant.*Toured/s });
+    expect(toured).toHaveAttribute('href', '/tours/tour-2');
+  });
+
+  it('shows the tours empty state when the property has no tours', () => {
+    useListing.mockReturnValue({ ...READY, tours: { status: 'ready', rows: [] } });
+    renderAt();
+    expect(screen.getByText('No tours on this property yet.')).toBeInTheDocument();
   });
 
   it('caps related properties at 4 with a "Show more" toggle that expands + collapses', async () => {

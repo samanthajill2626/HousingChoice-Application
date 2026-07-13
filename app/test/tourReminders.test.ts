@@ -272,6 +272,62 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Test 2c — a due rung the poll cannot deliver is CLAIM-SKIPPED (retired
+  // unsent): stamped skippedAt + skipReason, gone from listDue (no perpetual
+  // re-list/re-skip every 60s), never claimable for a send afterwards, and the
+  // skip emits scheduled.updated so an open Reminders panel flips its chip.
+  // ---------------------------------------------------------------------------
+  it('claim-skips a due rung whose tenant has no 1:1 conversation (terminal, emits, leaves listDue)', async () => {
+    world.sent.length = 0;
+
+    const contactId = 'contact-skip-1';
+    const now0 = '2026-07-13T10:00:00.000Z';
+    const scheduledAt = '2026-07-15T10:00:00.000Z';
+
+    // Contact exists WITH a phone — but NO conversation in the world.
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone: '+15550200099',
+      created_at: now0,
+    } as Parameters<typeof world.contacts.push>[0]);
+
+    const tour = await tours.create({
+      tenantId: contactId,
+      unitId: 'unit-skip-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+
+    const events = createEventBus({ logger });
+    const emitted: Array<{ contactId?: string }> = [];
+    events.on('scheduled.updated', (p) => emitted.push(p));
+
+    // Only the confirmation rung (dueAt = now0) is due in this window.
+    const pollAt = '2026-07-13T10:01:00.000Z';
+    await runDueTourReminders(pollAt, { ...runDeps, events });
+
+    // Nothing sent; the rung is retired with the stamp + reason.
+    expect(world.sent).toHaveLength(0);
+    const rows = await tourReminders.listByTour(tour.tourId);
+    const confirmation = rows.find((r) => r.kind === 'confirmation');
+    expect(confirmation?.sentAt).toBeUndefined();
+    expect(confirmation?.skippedAt).toBe(pollAt);
+    expect(confirmation?.skipReason).toBe('no_conversation');
+
+    // The skip told live surfaces to refetch (advisory tenant contactId).
+    expect(emitted.filter((p) => p.contactId === contactId)).toHaveLength(1);
+
+    // Retired = gone from listDue: the next poll has nothing to re-skip …
+    const due = await tourReminders.listDue(pollAt);
+    expect(due.find((r) => r.reminderId === confirmation!.reminderId)).toBeUndefined();
+
+    // … and the row can never be claimed for a send later (terminal).
+    await expect(tourReminders.claimSend(confirmation!.reminderId, pollAt)).resolves.toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
   // Test 3 — reschedule: cancel old reminders, re-arm with new scheduledAt
   // ---------------------------------------------------------------------------
   it('cancel + re-arm on reschedule produces new rows with updated dueAts', async () => {

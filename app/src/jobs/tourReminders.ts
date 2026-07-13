@@ -32,6 +32,7 @@ import type {
 
 import {
   type ReminderKind,
+  type ReminderSkipReason,
   type TourReminderItem,
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
@@ -229,6 +230,28 @@ export async function runDueTourReminders(
   }
 }
 
+/**
+ * Retire a rung the poll cannot deliver (claim-skip): stamps skippedAt +
+ * skipReason so the row leaves listDue exactly once (instead of being
+ * re-listed and re-skipped every 60s forever — the perpetual "sending
+ * shortly" bug), and tells live surfaces to refetch so the panel flips to
+ * its "Skipped - <reason>" chip.
+ */
+async function claimSkipRow(
+  row: TourReminderItem,
+  reason: ReminderSkipReason,
+  now: string,
+  deps: RunDueTourRemindersDeps,
+  tenantId?: string,
+): Promise<void> {
+  const claimed = await deps.tourRemindersRepo.claimSkip(row.reminderId, now, reason);
+  if (claimed) {
+    (deps.events ?? appEvents).emit('scheduled.updated', {
+      ...(tenantId !== undefined && { contactId: tenantId }),
+    });
+  }
+}
+
 async function processReminderRow(
   row: TourReminderItem,
   now: string,
@@ -238,7 +261,11 @@ async function processReminderRow(
   // Resolve the tour.
   const tour = await deps.toursRepo.get(row.tourId);
   if (!tour) {
-    log.warn({ reminderId: row.reminderId, tourId: row.tourId }, 'tour reminder: tour not found — skipping');
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId },
+      'tour reminder: tour not found — retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'tour_missing', now, deps);
     return;
   }
 
@@ -261,8 +288,9 @@ async function processReminderRow(
   if (!contact) {
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: contact not found — skipping',
+      'tour reminder: contact not found — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'contact_missing', now, deps, tour.tenantId);
     return;
   }
 
@@ -271,8 +299,9 @@ async function processReminderRow(
   if (typeof phone !== 'string' || phone.length === 0) {
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: contact has no phone — skipping',
+      'tour reminder: contact has no phone — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'contact_no_phone', now, deps, tour.tenantId);
     return;
   }
 
@@ -282,8 +311,9 @@ async function processReminderRow(
   if (!conv) {
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: no 1:1 conversation found — skipping',
+      'tour reminder: no 1:1 conversation found — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'no_conversation', now, deps, tour.tenantId);
     return;
   }
 

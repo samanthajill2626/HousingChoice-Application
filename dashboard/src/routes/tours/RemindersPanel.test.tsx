@@ -87,6 +87,27 @@ describe('RemindersPanel', () => {
     expect(screen.getByText(/Sent -/i)).toBeInTheDocument();
   });
 
+  it('a claim-skipped rung reads "Skipped - <reason>" (plain hyphen), never "sending shortly"', async () => {
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-1',
+          kind: 'confirmation',
+          state: 'skipped',
+          skippedAt: '2026-07-13T16:00:00Z',
+          skipReason: 'no_conversation',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText('Skipped - no conversation')).toBeInTheDocument(),
+    );
+    // The retired rung must never keep the amber "sending shortly" lie.
+    expect(screen.queryByText(/sending shortly/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sends in/i)).not.toBeInTheDocument();
+  });
+
   it('an upcoming rung reads "sends in" (a reminder is sent, not "due")', async () => {
     getTourReminders.mockResolvedValue({
       // Far-future dueAt → sendRelative yields "sends in Nd".
@@ -190,6 +211,8 @@ describe('nextReminderRefetchDelay (pure)', () => {
         [
           { state: 'sent', dueAt: '2026-07-10T11:00:00Z' },
           { state: 'canceled', dueAt: '2026-07-10T13:00:00Z' },
+          // A claim-skipped rung is terminal — no timer, even when past-due.
+          { state: 'skipped', dueAt: '2026-07-10T11:30:00Z' },
         ],
         NOW,
       ),

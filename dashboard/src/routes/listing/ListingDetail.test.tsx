@@ -342,6 +342,23 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('link', { name: /^Tour|^Toured$/ })).not.toBeInTheDocument();
   });
 
+  it('identifies a "Sent to tenants" row by the tenant NAME when the wire provides one', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      recipients: {
+        status: 'ready',
+        rows: [
+          { contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Brianna Whitfield' },
+        ],
+      },
+    });
+    renderAt();
+    const identity = screen.getByRole('link', { name: 'Brianna Whitfield' });
+    expect(identity).toHaveAttribute('href', '/contacts/c-t9');
+    // The raw id never renders once a name is known.
+    expect(screen.queryByText('c-t9')).not.toBeInTheDocument();
+  });
+
   it('renders each tour-chip state on "Sent to tenants" rows, linking to the tour', () => {
     useListing.mockReturnValue({
       ...READY,

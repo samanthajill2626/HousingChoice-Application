@@ -95,6 +95,15 @@
   color: var(--c-text-muted);
 }
 
+/* Retired unsent by the poll (claim-skip) — the DeliveryBadge danger tone
+ * (amber bg + danger text), NOT muted: a reminder that never reached the
+ * tenant deserves attention, unlike a deliberate cancel, and must read
+ * differently from the amber "sending shortly" upcoming chip. */
+.skipped {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-danger);
+}
+
 /* --- Row body + suppression note ------------------------------------------ */
 
 .body {

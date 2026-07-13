@@ -33,6 +33,14 @@ export type ReminderKind =
   | 'en_route'
   | 'no_show_checkin';
 
+/** Why the poll retired a rung WITHOUT sending (claim-skip; terminal, like
+ *  sent/canceled — a later poll never retries it). */
+export type ReminderSkipReason =
+  | 'no_conversation'
+  | 'contact_missing'
+  | 'contact_no_phone'
+  | 'tour_missing';
+
 export interface TourReminderItem {
   /** PK */
   reminderId: string;
@@ -47,6 +55,12 @@ export interface TourReminderItem {
   sentAt?: string;
   /** ISO — set when canceled */
   canceledAt?: string;
+  /** ISO — set when the poll retired the rung unsent (see skipReason). Without
+   *  this stamp a skipped row stayed in listDue FOREVER: re-listed and
+   *  re-skipped every poll, panel chip a permanent "sending shortly"
+   *  (docs/issues/tour-reminder-unclaimed-skip-no-conversation.md). */
+  skippedAt?: string;
+  skipReason?: ReminderSkipReason;
   createdAt: string;
 }
 
@@ -63,7 +77,14 @@ export interface TourRemindersRepo {
    * (benign no-op; caller skips the send).
    */
   claimSend(reminderId: string, claimedAt: string): Promise<boolean>;
-  /** Cancel all pending (not yet sent or canceled) reminders for this tour. */
+  /**
+   * Atomically retire a rung WITHOUT sending (claim-skip): stamps skippedAt +
+   * skipReason under the same no-sentAt/no-canceledAt/no-skippedAt condition
+   * claimSend uses, so a skipped row leaves listDue exactly once and can never
+   * be sent later. Returns `true` when this call won the claim.
+   */
+  claimSkip(reminderId: string, skippedAt: string, reason: ReminderSkipReason): Promise<boolean>;
+  /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */
   cancelForTour(tourId: string): Promise<void>;
 }
 
@@ -119,12 +140,14 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
         TableName: table,
         IndexName: 'byDueAt',
         KeyConditionExpression: '#rp = :rp AND #dueAt <= :now',
-        FilterExpression: 'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt)',
+        FilterExpression:
+          'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
         ExpressionAttributeNames: {
           '#rp': '_reminderPartition',
           '#dueAt': 'dueAt',
           '#sentAt': 'sentAt',
           '#canceledAt': 'canceledAt',
+          '#skippedAt': 'skippedAt',
         },
         ExpressionAttributeValues: {
           ':rp': 'reminders',
@@ -159,10 +182,11 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
             Key: { reminderId },
             UpdateExpression: 'SET #sentAt = :sentAt',
             ConditionExpression:
-              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt)',
+              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
+              '#skippedAt': 'skippedAt',
             },
             ExpressionAttributeValues: { ':sentAt': claimedAt },
           }),
@@ -179,9 +203,43 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
       }
     },
 
+    async claimSkip(reminderId, skippedAt, reason) {
+      // Claim-retire without sending — the skip twin of claimSend above. Same
+      // atomic condition so a concurrent send/cancel/skip race resolves to
+      // exactly one terminal state.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { reminderId },
+            UpdateExpression: 'SET #skippedAt = :skippedAt, #skipReason = :reason',
+            ConditionExpression:
+              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+            ExpressionAttributeNames: {
+              '#sentAt': 'sentAt',
+              '#canceledAt': 'canceledAt',
+              '#skippedAt': 'skippedAt',
+              '#skipReason': 'skipReason',
+            },
+            ExpressionAttributeValues: { ':skippedAt': skippedAt, ':reason': reason },
+          }),
+        );
+        log.info({ reminderId, skippedAt, reason }, 'tour reminder claim-skipped (retired unsent)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ reminderId }, 'tour reminder skip-claim lost (already terminal) — skipping');
+          return false;
+        }
+        throw err;
+      }
+    },
+
     async cancelForTour(tourId) {
       const rows = await this.listByTour(tourId);
-      const pending = rows.filter((r) => r.sentAt === undefined && r.canceledAt === undefined);
+      const pending = rows.filter(
+        (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
+      );
       const canceledAt = new Date().toISOString();
       // Promise.allSettled so one lost conditional-update race (e.g., the poll
       // claimed sentAt between listByTour and now) does not abort the remaining
@@ -193,10 +251,12 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
               TableName: table,
               Key: { reminderId: r.reminderId },
               UpdateExpression: 'SET #canceledAt = :canceledAt',
-              ConditionExpression: 'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt)',
+              ConditionExpression:
+                'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
               ExpressionAttributeNames: {
                 '#canceledAt': 'canceledAt',
                 '#sentAt': 'sentAt',
+                '#skippedAt': 'skippedAt',
               },
               ExpressionAttributeValues: { ':canceledAt': canceledAt },
             }),

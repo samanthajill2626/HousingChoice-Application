@@ -25,6 +25,7 @@ import { resolveMessage } from '../messages/index.js';
 import {
   createTourRemindersRepo,
   type ReminderKind,
+  type ReminderSkipReason,
   type TourReminderItem,
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
@@ -51,18 +52,24 @@ export interface TourReminderView {
   kind: ReminderKind;
   /** ISO 8601 — when the rung is/was scheduled to fire. */
   dueAt: string;
-  state: 'upcoming' | 'sent' | 'canceled';
+  state: 'upcoming' | 'sent' | 'canceled' | 'skipped';
   sentAt?: string;
   canceledAt?: string;
+  /** Present when state === 'skipped': the poll retired the rung unsent. */
+  skippedAt?: string;
+  skipReason?: ReminderSkipReason;
   body: string;
   /** Only computed for `upcoming` 1:1-routed rungs (see file header). */
   suppression?: ScheduledSuppression;
 }
 
-/** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe). */
+/** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe);
+ *  skippedAt is terminal like both, ranked after them (the claims are mutually
+ *  exclusive by condition, so the order is belt-and-suspenders only). */
 function stateOf(row: TourReminderItem): TourReminderView['state'] {
   if (row.canceledAt !== undefined) return 'canceled';
   if (row.sentAt !== undefined) return 'sent';
+  if (row.skippedAt !== undefined) return 'skipped';
   return 'upcoming';
 }
 
@@ -109,6 +116,8 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           body: resolveMessage(`tour.${row.kind}`),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
+          ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
+          ...(row.skipReason !== undefined && { skipReason: row.skipReason }),
           ...(state === 'upcoming' && suppression !== undefined && { suppression }),
         };
         return view;

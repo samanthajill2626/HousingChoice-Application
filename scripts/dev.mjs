@@ -43,6 +43,9 @@
 //            (app/src/lib/seedData.ts) into DynamoDB Local and create tables
 //            idempotently (no wipe). Without it the hermetic DB is dropped +
 //            recreated empty each boot. No effect in live mode (never seeds AWS).
+//   --seeded-lean like --seeded, but loads ONLY the lean profile (canonical
+//            byte-stable fixtures; no demo cast/matrix/live items). Lean wins
+//            if both seed flags are passed.
 //   --no-web skip the Vite server — backend only.
 // `--local --mock --seeded` is the fully self-consistent combo: the fake's
 // seeded +1555… personas match the hermetic seed data. `--mock` alone redirects
@@ -88,7 +91,13 @@ const mockEnabled = process.argv.includes('--mock');
 
 // --seeded loads the demo fixtures (app/src/lib/seedData.ts) into DynamoDB Local.
 // Local-only: live mode talks to the real AWS dev backend and is never seeded.
-const seedEnabled = process.argv.includes('--seeded');
+// --seeded-lean is the same boot but loads ONLY the lean profile (the
+// byte-stable canonical fixtures the e2e suite runs on) instead of the full
+// demo world (cast + matrix + live items). When both flags are passed, lean
+// wins (the step-4 log prints the profile either way).
+const seedLean = process.argv.includes('--seeded-lean');
+const seedEnabled = process.argv.includes('--seeded') || seedLean;
+const seedProfile = seedLean ? 'lean' : 'full';
 
 // Live unless --local or a DynamoDB Local endpoint is in play (mirrors
 // resolveDevEnv's mode decision below). --mock does NOT affect this — it only
@@ -268,8 +277,8 @@ if (mode === 'local') {
     console.log(`dev — step 3/${localSteps}: tables (reset — fresh slate) + media bucket`);
     await runTsx('app/scripts/db-create.ts', ['--reset']);
     await runTsx('app/scripts/s3-create.ts');
-    console.log(`dev — step 4/${localSteps}: seed data (--seeded, profile: full)`);
-    await runTsx('app/scripts/db-seed.ts', [], { SEED_PROFILE: 'full' });
+    console.log(`dev — step 4/${localSteps}: seed data (--seeded, profile: ${seedProfile})`);
+    await runTsx('app/scripts/db-seed.ts', [], { SEED_PROFILE: seedProfile });
   } else {
     // No --seeded: DROP + recreate the tables so a previously-seeded container
     // can't leak stale fixtures — a true zero-data start. (--reset is hard-
@@ -278,11 +287,11 @@ if (mode === 'local') {
     console.log(`dev — step 3/${localSteps}: tables (reset — empty DB) + media bucket`);
     await runTsx('app/scripts/db-create.ts', ['--reset']);
     await runTsx('app/scripts/s3-create.ts');
-    console.log('dev — seed data: SKIPPED (empty DB; pass --seeded to load demo fixtures)');
+    console.log('dev — seed data: SKIPPED (empty DB; pass --seeded for the full demo fixtures, --seeded-lean for the canonical lean set)');
   }
 } else {
   if (seedEnabled) {
-    console.warn('dev — --seeded ignored in live mode (the AWS dev backend is never seeded).');
+    console.warn('dev — --seeded/--seeded-lean ignored in live mode (the AWS dev backend is never seeded).');
   }
   const driver =
     childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');

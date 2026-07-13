@@ -87,7 +87,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // --- Operational: tour reminders (moved out of jobs/tourReminders.ts) ---
   'tour.confirmation': {
     id: 'tour.confirmation',
-    default: "[AUTO] Your tour is confirmed. We'll send reminders as it approaches.",
+    default: "Your tour is confirmed. We'll send reminders as it approaches.",
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -95,7 +95,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.day_before': {
     id: 'tour.day_before',
-    default: '[AUTO] Reminder: your property tour is tomorrow.',
+    default: 'Reminder: your property tour is tomorrow.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -103,7 +103,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.morning_of': {
     id: 'tour.morning_of',
-    default: '[AUTO] Good morning! Your property tour is today.',
+    default: 'Good morning! Your property tour is today.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -111,7 +111,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.en_route': {
     id: 'tour.en_route',
-    default: '[AUTO] Your tour is coming up soon. Text us when you\'re on the way!',
+    default: 'Your tour is coming up soon. Text us when you\'re on the way!',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -119,7 +119,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'tour.no_show_checkin': {
     id: 'tour.no_show_checkin',
-    default: '[AUTO] Hi! We noticed you may have missed your tour. Want to reschedule?',
+    default: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -130,7 +130,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.receipt_check': {
     id: 'nudge.receipt_check',
     default:
-      '[AUTO] Just checking in — did the rental application come through? Let us know if you need it re-sent.',
+      'Just checking in — did the rental application come through? Let us know if you need it re-sent.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -138,7 +138,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'nudge.completion_check': {
     id: 'nudge.completion_check',
-    default: '[AUTO] How is the application coming along? Text us here if you are stuck on anything.',
+    default: 'How is the application coming along? Text us here if you are stuck on anything.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -146,7 +146,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'nudge.approval_check': {
     id: 'nudge.approval_check',
-    default: '[AUTO] Checking in — any decision yet on the application we sent over?',
+    default: 'Checking in — any decision yet on the application we sent over?',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -155,7 +155,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.rta_window_closing': {
     id: 'nudge.rta_window_closing',
     default:
-      '[AUTO] Friendly reminder — the 48-hour RTA window is closing. Have you been able to submit it?',
+      'Friendly reminder — the 48-hour RTA window is closing. Have you been able to submit it?',
     class: 'operational',
     editable: true,
     channel: 'sms',

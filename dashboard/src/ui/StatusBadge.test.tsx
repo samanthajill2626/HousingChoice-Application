@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { StatusBadge } from './StatusBadge.js';
+import { StatusBadge, contactStatusTone } from './StatusBadge.js';
 
 describe('StatusBadge', () => {
   it('renders the tenant-status label from the F1 map', () => {
@@ -41,5 +41,14 @@ describe('StatusBadge', () => {
   it('falls back to a humanized form for an off-list tour value', () => {
     render(<StatusBadge kind="tour" status="some_future_status" />);
     expect(screen.getByText('Some future status')).toBeInTheDocument();
+  });
+});
+
+describe('contactStatusTone', () => {
+  it('gives landlord onboarding the same tone as tenant onboarding (progress)', () => {
+    expect(contactStatusTone('landlord', 'onboarding')).toBe('progress');
+    expect(contactStatusTone('tenant', 'onboarding')).toBe(
+      contactStatusTone('landlord', 'onboarding'),
+    );
   });
 });

@@ -412,15 +412,17 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
 // A landlord contact carries its own lead lifecycle on the SAME `status` field
 // tenants use (type-scoped — MIRRORS app/src/lib/statusModel.ts LANDLORD_STATUSES).
 // `needs_review` is the triage front door; a lead worth pursuing is `interested`;
-// an onboarded landlord is `active`; a declined/not-a-fit/never-signed lead is the
+// a SIGNED landlord whose properties we are bringing in is `onboarding`; a landlord
+// with onboarded properties is `active`; a declined/not-a-fit/backed-out lead is the
 // terminal `parked` (with a `park_reason` captured on the move).
-export const LANDLORD_STATUSES = ['needs_review', 'interested', 'active', 'parked'] as const;
+export const LANDLORD_STATUSES = ['needs_review', 'interested', 'onboarding', 'active', 'parked'] as const;
 
 export type LandlordStatus = (typeof LANDLORD_STATUSES)[number];
 
 export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = {
   needs_review: 'Needs review',
   interested: 'Interested',
+  onboarding: 'Onboarding',
   active: 'Active',
   parked: 'Parked',
 };

@@ -105,7 +105,7 @@ const TENANT_STATUS_OPTIONS: { value: string; label: string }[] = TENANT_STATUSE
   label: TENANT_STATUS_LABELS[s],
 }));
 
-// Landlords use the 4-value lead lifecycle (needs_review|interested|active|parked).
+// Landlords use the 5-value lead lifecycle (needs_review|interested|onboarding|active|parked).
 const LANDLORD_STATUS_OPTIONS: { value: string; label: string }[] = LANDLORD_STATUSES.map((s) => ({
   value: s,
   label: LANDLORD_STATUS_LABELS[s],

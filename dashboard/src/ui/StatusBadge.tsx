@@ -31,11 +31,14 @@ const TENANT_TONE: Record<TenantStatus, BadgeTone> = {
 };
 
 /** landlord lead status → tone. `needs_review` is the triage front door (warn);
- *  a pursued lead is `interested` (progress); an onboarded landlord is `active`
- *  (positive); a declined/dead lead is `parked` (muted). */
+ *  a pursued lead is `interested` (progress); a SIGNED landlord being onboarded is
+ *  `onboarding` (progress -- same tone the tenant `onboarding` status uses); an
+ *  onboarded landlord is `active` (positive); a declined/dead lead is `parked`
+ *  (muted). */
 const LANDLORD_TONE: Record<LandlordStatus, BadgeTone> = {
   needs_review: 'warn',
   interested: 'progress',
+  onboarding: 'progress',
   active: 'positive',
   parked: 'muted',
 };

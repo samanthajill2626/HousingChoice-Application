@@ -276,11 +276,12 @@ describe('ContactEditForm', () => {
     expect(within(tenantSelect).getByRole('option', { name: 'Searching' })).toBeInTheDocument();
     expect(within(tenantSelect).getByRole('option', { name: 'On hold' })).toBeInTheDocument();
 
-    // A landlord → the 4-value lead lifecycle (needs_review|interested|active|parked).
+    // A landlord -> the 5-value lead lifecycle (needs_review|interested|onboarding|active|parked).
     render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
     const landlordSelect = screen.getAllByRole('combobox', { name: /Status/i }).at(-1)!;
-    expect(within(landlordSelect).getAllByRole('option')).toHaveLength(4);
+    expect(within(landlordSelect).getAllByRole('option')).toHaveLength(5);
     expect(within(landlordSelect).getByRole('option', { name: 'Interested' })).toBeInTheDocument();
+    expect(within(landlordSelect).getByRole('option', { name: 'Onboarding' })).toBeInTheDocument();
     expect(within(landlordSelect).getByRole('option', { name: 'Parked' })).toBeInTheDocument();
   });
 

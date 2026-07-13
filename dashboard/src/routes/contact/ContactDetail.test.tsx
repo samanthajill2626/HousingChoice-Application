@@ -203,7 +203,7 @@ describe('ContactDetail', () => {
 
     const pill = await screen.findByRole('button', { name: 'Contact status: Active' });
     await user.click(pill);
-    for (const label of ['Needs review', 'Interested', 'Active', 'Parked']) {
+    for (const label of ['Needs review', 'Interested', 'Onboarding', 'Active', 'Parked']) {
       expect(screen.getByRole('menuitemradio', { name: label })).toBeInTheDocument();
     }
     // Tenant-only values never leak into a landlord's menu.

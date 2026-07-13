@@ -1,7 +1,10 @@
 // UnitSearchField — a text input with a client-side filtered candidate list.
-// Picking a candidate sets { label, unitId }; free typing clears unitId.
+// Picking a candidate sets { label, unitId } and COMMITS the field: the list
+// hides, the input goes read-only, and the Clear button is the only way back
+// to free typing (so typing can never silently drop a selection). Free typing
+// (uncommitted only) clears unitId.
 // Candidates are rendered as JSX text nodes — never dangerouslySetInnerHTML.
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { type UnitItem } from '../../api/index.js';
 import { formatAddress } from './format.js';
 import styles from './UnitSearchField.module.css';
@@ -53,13 +56,17 @@ export function UnitSearchField({
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   // a11y: dismissed flag — Escape collapses the popup; typing clears it
   const [dismissed, setDismissed] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // stable, instance-unique ids
   const uid = useId();
   const listboxId = `${uid}-listbox`;
 
+  // Committed: a unit is linked. The picked label always matches its own unit,
+  // so the list must be gated on this, not just on matches.
+  const isSelected = value.unitId !== undefined;
   const matches = filterCandidates(candidates, value.label);
-  const isListShown = !dismissed && matches.length > 0;
+  const isListShown = !dismissed && !isSelected && matches.length > 0;
 
   // Build a stable option id for aria-activedescendant
   const activeOptionId =
@@ -77,6 +84,13 @@ export function UnitSearchField({
   function handlePick(candidate: UnitItem): void {
     setActiveIndex(-1);
     onChange({ label: unitLabel(candidate), unitId: candidate.unitId });
+  }
+
+  function handleClear(): void {
+    setActiveIndex(-1);
+    setDismissed(false);
+    onChange({ label: '' });
+    inputRef.current?.focus();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
@@ -104,7 +118,8 @@ export function UnitSearchField({
   return (
     <div className={styles.wrapper}>
       <input
-        className={styles.input}
+        ref={inputRef}
+        className={isSelected ? `${styles.input} ${styles.inputSelected}` : styles.input}
         type="text"
         aria-label={inputLabel}
         role="combobox"
@@ -113,11 +128,23 @@ export function UnitSearchField({
         aria-controls={listboxId}
         aria-activedescendant={activeOptionId}
         value={value.label}
+        readOnly={isSelected}
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
         placeholder="Search properties…"
         autoComplete="off"
       />
+      {isSelected && (
+        <button
+          type="button"
+          className={styles.clearButton}
+          aria-label={`Clear ${inputLabel}`}
+          title={`Clear ${inputLabel}`}
+          onClick={handleClear}
+        >
+          {'×'}
+        </button>
+      )}
       {isListShown && (
         <ul
           id={listboxId}

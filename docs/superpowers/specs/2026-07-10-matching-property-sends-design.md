@@ -45,8 +45,11 @@ entry points that seed the recipient scope.
   audience filter semantics, or response tracking (interested / not_a_fit).
 - No preference-capture or match-suggestion features (future Matching surface
   growth; out of scope here).
-- Generic no-property sends remain supported and unchanged (composer without
-  a property attached).
+- REVERSED 2026-07-13 (design review with Cameron): generic no-property sends
+  are REMOVED, not preserved. This surface exists to send property information;
+  a send always carries a property. The original bullet had inherited the
+  capability from the pre-Matching broadcast composer without questioning it.
+  See "Property-first composer" below.
 
 ## Naming and glossary
 
@@ -91,11 +94,18 @@ row-level future use; nothing in v1 emits it but the composer must not break).
   "Add more tenants by filters" button; clicking it enables the normal
   AudienceFilters and switches the draft to filter mode (candidates = filter
   matches UNION seeds).
-- Property picker: a tenant-seeded entry arrives with no property. The compose
-  step shows a Property typeahead (the existing UnitSearchField over the unit
-  roster, as ScheduleTourForm uses) when no ?unitId= was given; picking a
-  property attaches it to the draft exactly as ?unitId= does (flyer,
-  bedroomSize prefill). ?unitId= entries keep today's fixed property context.
+- Property-first composer (amended 2026-07-13, replacing the inline picker):
+  every send carries a property, so any entry WITHOUT one (the Matching page's
+  "Send a property", a tenant-seeded "+ Send") starts on a dedicated property-
+  selection step - a browsable candidate list plus the UnitSearchField search,
+  with the seeded-recipient context shown - BEFORE the message or audience
+  sections render. Picking attaches the property exactly as ?unitId= does
+  (flyer, bedroomSize prefill) and reveals compose, where the message prefills
+  with the property's REAL details: [Beds]/[Address]/[Rent]/[FlyerLink]
+  resolve to text and [TenantName] STAYS a per-recipient token (single-
+  recipient seeded sends still resolve the name fully). A "Change" affordance
+  returns to the selection step (confirm when the message was hand-edited).
+  ?unitId= entries keep today's fixed property context and skip the step.
 - The seeded tenant can be unchecked like any row (a seed is a starting point,
   not a lock).
 - Seeds that cannot receive a send (unknown id, not a tenant, no phone, opted

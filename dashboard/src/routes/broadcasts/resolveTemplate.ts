@@ -22,7 +22,7 @@ import type { UnitItem } from '../../api/index.js';
  *  Preview), and MessageEditor keeps it as the placeholder for a cleared
  *  textarea - ONE source of the copy for both. */
 export const DEFAULT_SEND_TEMPLATE =
-  'Hi [TenantName], a [Beds] home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
+  'Hi [TenantName], a [Beds]-bedroom home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
 
 /** Neutral [TenantName] fallback when no first name is known - NEVER a phone. */
 const NEUTRAL_TENANT_NAME = 'there';

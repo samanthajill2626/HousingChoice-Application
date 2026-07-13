@@ -295,7 +295,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // Substring assertions (no regex - brackets are literal in the template).
     await expect
       .poll(() => box.inputValue())
-      .toContain(`Hi [TenantName], a 2 home at ${stamp} Matching Entry Ave`);
+      .toContain(`Hi [TenantName], a 2-bedroom home at ${stamp} Matching Entry Ave`);
     await expect.poll(() => box.inputValue()).toContain(`/p/${unitId}`);
     await expect(page.getByLabel('Housing authority')).toBeVisible();
 

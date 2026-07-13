@@ -17,8 +17,10 @@
 //   [FlyerLink] - the argument (server truth, else the same-origin funnel).
 import type { UnitItem } from '../../api/index.js';
 
-/** The default single-recipient message template (also the MessageEditor
- *  placeholder - imported there so there is ONE source of the copy). */
+/** The default message template: a fresh compose PRE-FILLS it as the actual
+ *  message (the send is usually close to it, so staff can go straight to
+ *  Preview), and MessageEditor keeps it as the placeholder for a cleared
+ *  textarea - ONE source of the copy for both. */
 export const DEFAULT_SEND_TEMPLATE =
   'Hi [TenantName], a [Beds] home at [Address] is available for [Rent]/mo. Details: [FlyerLink]';
 

@@ -4,7 +4,7 @@
 // count updates from createBroadcast (estimatedCount/truncated) + the truncated
 // warning; the single-draft/no-orphan behavior (a material audience change
 // recreates the draft and deleteBroadcasts the prior id).
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
@@ -34,6 +34,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { BroadcastComposer } from './BroadcastComposer.js';
+import { DEFAULT_SEND_TEMPLATE } from './resolveTemplate.js';
 
 function unit(over: Partial<UnitItem> = {}): UnitItem {
   return {
@@ -66,8 +67,8 @@ const pickableUnits: UnitsPage = {
   nextCursor: null,
 };
 
-function renderComposer(search = ''): void {
-  render(
+function renderComposer(search = ''): ReturnType<typeof render> {
+  return render(
     <MemoryRouter initialEntries={[`/broadcasts/new${search}`]}>
       <Routes>
         <Route path="/broadcasts/new" element={<BroadcastComposer />} />
@@ -151,26 +152,86 @@ describe('BroadcastComposer — single draft / no orphan', () => {
 });
 
 describe('BroadcastComposer — preview gate', () => {
-  it('enables Preview only after a draft exists, then advances to the recipient list', async () => {
+  it('the pre-filled default enables Preview by itself, then advances to the recipient list', async () => {
     previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: false }], priorRecipientContactIds: [], seedContactIds: [], unresolvedSeedIds: [] });
     const u = userEvent.setup();
     renderComposer();
-    const previewBtn = screen.getByRole('button', { name: 'Preview recipients' });
-    // No message yet → disabled, WITH the why-hint (an unexplained disabled
-    // button is a dead end for a first-time operator).
-    expect(previewBtn).toBeDisabled();
-    expect(screen.getByText('Write a message to enable the preview.')).toBeInTheDocument();
-    await u.type(screen.getByLabelText('Message'), 'Hello tenants');
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
-    // Enabled → the hint is gone.
+    // A fresh compose starts with the DEFAULT template as the ACTUAL message
+    // (not a placeholder) — no typing needed to move on.
+    expect(screen.getByLabelText('Message')).toHaveValue(DEFAULT_SEND_TEMPLATE);
     expect(screen.queryByText('Write a message to enable the preview.')).not.toBeInTheDocument();
+    // The auto-draft (debounced) enables Preview with zero keystrokes.
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({
+      body_template: DEFAULT_SEND_TEMPLATE,
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
     expect(screen.queryByText('Sizing the audience…')).not.toBeInTheDocument();
 
     await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
     // Advances to the curated list step.
     expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
     expect(previewBroadcast).toHaveBeenCalledWith('draft_1');
+  });
+
+  it('clearing the message disables Preview again, with the why-hint', async () => {
+    const u = userEvent.setup();
+    renderComposer();
+    await u.clear(screen.getByLabelText('Message'));
+    expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeDisabled();
+    // An unexplained disabled button is a dead end for a first-time operator.
+    expect(screen.getByText('Write a message to enable the preview.')).toBeInTheDocument();
+  });
+});
+
+describe('BroadcastComposer - pre-filled default template (fresh compose only)', () => {
+  it('?unitId= entry starts with the default template pre-filled too', async () => {
+    renderComposer('?unitId=unit-0001');
+    expect(screen.getByLabelText('Message')).toHaveValue(DEFAULT_SEND_TEMPLATE);
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+  });
+
+  it('?contactId= entry starts EMPTY (resolved mode seeds its own final text, never the token template)', async () => {
+    renderComposer('?contactId=c-seed');
+    expect(screen.getByLabelText('Message')).toHaveValue('');
+    // Let the seeded-banner fetch settle (act hygiene).
+    await screen.findByText(/Sending to/);
+  });
+
+  it('?draftId= resume starts EMPTY and never auto-creates (a non-empty body would delete the resumed draft)', async () => {
+    const { unmount } = renderComposer('?draftId=bcast_resume');
+    expect(screen.getByLabelText('Message')).toHaveValue('');
+    // Outlast the create debounce (600ms): no draft may be created.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 800)));
+    expect(createBroadcast).not.toHaveBeenCalled();
+    // Leaving must NOT delete the adopted draft (it is the operator's saved work).
+    unmount();
+    expect(deleteBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('an untouched pre-filled draft is deleted on unmount (open-and-leave leaves no junk row)', async () => {
+    const { unmount } = renderComposer();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    // The auto-draft resolved (Preview enabled proves draft_1 is current).
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(),
+    );
+    unmount();
+    await waitFor(() => expect(deleteBroadcast).toHaveBeenCalledWith('draft_1'));
+  });
+
+  it('a hand-edited draft SURVIVES unmount (stays resumable in the Matching list)', async () => {
+    const u = userEvent.setup();
+    const { unmount } = renderComposer();
+    // Edit within the debounce window: exactly one create, with the edited body.
+    await u.type(screen.getByLabelText('Message'), ' Call us!');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(),
+    );
+    unmount();
+    // No churn happened (one create) and no unmount delete: the draft persists.
+    expect(deleteBroadcast).not.toHaveBeenCalled();
   });
 });
 
@@ -258,7 +319,9 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
-    expect(ta.value).toBe('');
+    // Token mode's starting point — the DEFAULT template, same as a fresh
+    // compose (never the resolved single-tenant text).
+    expect(ta.value).toBe(DEFAULT_SEND_TEMPLATE);
   });
 
   it('editing the resolved text then "Add more tenants by filters" prompts to confirm; cancel keeps seeds-only', async () => {
@@ -358,8 +421,11 @@ describe('BroadcastComposer — non-Available property banner (spec 2026-07-10)'
     expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
   });
 
-  it('no banner when composing without a property', () => {
+  it('no banner when composing without a property', async () => {
     renderComposer();
     expect(screen.queryByText(/flyer link won't work/)).not.toBeInTheDocument();
+    // Let the picker-candidates fetch settle (act hygiene — the pre-filled
+    // default also kicks the auto-draft on a bare compose now).
+    await screen.findByRole('combobox', { name: 'Property' });
   });
 });

@@ -57,7 +57,17 @@ export function BroadcastComposer(): React.JSX.Element {
 
   const [unit, setUnit] = useState<UnitItem | null>(null);
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
-  const [bodyTemplate, setBodyTemplate] = useState('');
+  // The message starts as the ACTUAL default template on a fresh compose (the
+  // send is usually close to it, so the operator can go straight to Preview).
+  // Two entries still start EMPTY: ?contactId= (resolved mode auto-seeds its
+  // own FINAL text once the property loads — a raw token template must never
+  // sit in a resolved editor) and ?draftId= (a non-empty body would recreate
+  // the draft and DELETE the one being resumed).
+  const [bodyTemplate, setBodyTemplate] = useState(() =>
+    params.get('contactId') !== null || params.get('draftId') !== null
+      ? ''
+      : DEFAULT_SEND_TEMPLATE,
+  );
   // Whether the staff user has hand-edited the message. Only textarea keystrokes
   // flip this (NOT the programmatic auto-seed below), so the resolved default can
   // keep re-seeding until the operator takes the pen.
@@ -91,6 +101,10 @@ export function BroadcastComposer(): React.JSX.Element {
     bodyTemplate,
     ...(audienceEnabled && { filter }),
     ...(seedContactIds.length > 0 && { seedContactIds }),
+    // Untouched pre-fill/auto-seed = zero operator work: the draft is deleted
+    // on unmount instead of littering the Matching list. A resumed draft is
+    // the operator's saved work — never disposable.
+    disposable: !bodyEdited && resumeDraftId === undefined,
   });
 
   // Resume an existing draft id (from a draft row) — adopt it WITHOUT creating one.
@@ -201,9 +215,9 @@ export function BroadcastComposer(): React.JSX.Element {
   // names ONE tenant and must never send to a broader audience. When the operator
   // has edited that text, confirm before discarding (cancel aborts the flip);
   // when it is still the untouched auto-seed there is nothing to protect, so the
-  // reset is silent. Either way the body returns to '' (token mode - they will
-  // compose a fresh template). A no-unit typed body is a plain token template
-  // already and survives the flip untouched.
+  // reset is silent. Either way the body returns to the DEFAULT token template
+  // (token mode's starting point, same as a fresh compose). A no-unit typed body
+  // is a plain token template already and survives the flip untouched.
   function onEnableFilters(): void {
     if (resolvedMode && unit !== null) {
       if (bodyEdited) {
@@ -212,7 +226,7 @@ export function BroadcastComposer(): React.JSX.Element {
         );
         if (!ok) return;
       }
-      setBodyTemplate('');
+      setBodyTemplate(DEFAULT_SEND_TEMPLATE);
       setBodyEdited(false);
     }
     setAudienceEnabled(true);

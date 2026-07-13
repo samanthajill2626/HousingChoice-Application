@@ -14,6 +14,9 @@
 // (the operator can resume it) — we do NOT auto-delete on unmount (that would
 // drop a draft the user may want). Orphan avoidance targets the rapid-iteration
 // churn (each keystroke-batch's superseded draft), which IS cleaned up here.
+// EXCEPTION: a `disposable` draft (the pre-filled default template, untouched —
+// zero operator work) IS deleted on unmount, so opening the composer and
+// leaving never litters the Matching list.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -32,6 +35,13 @@ export interface ComposerDraftInput {
   filter?: AudienceFilter;
   /** Hand-picked recipients seeded from the entry point (?contactId=). */
   seedContactIds?: string[];
+  /** True while the draft carries NO operator work — the pre-filled default
+   *  template, untouched. A disposable draft is DELETED on unmount instead of
+   *  staying in the Matching list (open-and-leave must not leak a junk row).
+   *  Adopted (resumed) drafts and anything hand-edited must pass false — those
+   *  keep the stays-in-the-list behavior. A delete racing a just-sent broadcast
+   *  is harmless: the DELETE route is draft-guarded (409, no side effects). */
+  disposable?: boolean;
 }
 
 export interface ComposerDraftState {
@@ -99,6 +109,22 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
 
   const key = materialKey(input);
   const hasBody = input.bodyTemplate.trim().length > 0;
+
+  // Pristine-draft cleanup: mirror `disposable` into a ref so the unmount-only
+  // effect below reads the LATEST value (an effect dep would re-run it).
+  const disposableRef = useRef(input.disposable === true);
+  disposableRef.current = input.disposable === true;
+  useEffect(
+    () => () => {
+      if (disposableRef.current && currentIdRef.current !== null) {
+        // Fire-and-forget through Promise.resolve: this runs at teardown, where
+        // a test-restored (un-mocked-mid-cleanup) client may not hand back a
+        // real promise - never let cleanup throw.
+        void Promise.resolve(deleteBroadcast(currentIdRef.current)).catch(() => {});
+      }
+    },
+    [],
+  );
 
   // Tracks whether the reach is currently cleared, so the "no body" reset below
   // runs at most once per empty→empty stretch (no cascading re-render, no need

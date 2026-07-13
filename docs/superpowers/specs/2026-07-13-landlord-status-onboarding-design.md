@@ -82,11 +82,15 @@ the name is consistent, and type-scoped allowlists mean zero collision.
   block (~1141-1151), keeping the no-status_source-stamp rationale.
 - RE-TYPE FALLBACK (~line 1169): make the default fully type-correct:
   unknown -> 'needs_review', tenant -> 'onboarding', landlord ->
-  'interested', team_member -> 'active'. This FIXES a pre-existing latent
-  bug: the old `newType==='unknown' ? 'needs_review' : 'active'` could
-  persist the invalid pair (tenant, 'active') on a conversation-less re-type
-  to tenant - exactly what the branch exists to prevent. Note the fix in the
-  comment; pin it with a test.
+  'interested', team_member -> 'active'.
+  CORRECTION (review, 2026-07-13): the spec originally claimed this fixes a
+  latent bug (the old else-arm could persist (tenant, 'active')). That claim
+  was WRONG - convType is derived from the TARGET type, so a re-type to
+  tenant/landlord always takes the auto-advance branch and the fallback's
+  tenant/landlord arms are unreachable in old and new code alike (and an
+  explicit invalid pair is rejected by parseTriageBody). The type-correct
+  rewrite is DEFENSIVE hardening only; comments and tests state that
+  honestly rather than claiming a regression fix.
 
 ### S3. Transition route (app/src/routes/statusTransition.ts)
 

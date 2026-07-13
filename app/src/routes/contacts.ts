@@ -1165,16 +1165,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // Re-typing without an explicit status: if the STORED status isn't valid for
     // the new type (e.g. a tenant lifecycle value like 'placing' lingering after
     // a tenant is re-typed to team_member), normalize it to the new type's
-    // default so we never persist an invalid (type, status) pair. tenant/landlord
-    // re-types normally hit the conversation-driven auto-advance above (convType
-    // defined) and never reach here; this fallback covers the convType===undefined
-    // path (team_member/unknown) but is written FULLY type-correct as defense:
-    //   - unknown -> 'needs_review' (back to the front door)
-    //   - tenant -> 'onboarding', landlord -> 'interested' (their lead defaults)
-    //   - team_member -> 'active' (no lifecycle).
-    // This FIXES a latent bug: the old `newType==='unknown' ? 'needs_review' :
-    // 'active'` mapped tenant to 'active' - the invalid (tenant, 'active') pair
-    // this branch exists to prevent - on any conversation-less re-type to tenant.
+    // default so we never persist an invalid (type, status) pair.
+    //
+    // REACHABILITY (be precise - review 2026-07-13): convType is derived from the
+    // TARGET type (conversationTypeFor above), so a re-type to tenant/landlord
+    // ALWAYS takes the auto-advance branch and never reaches this fallback. The
+    // only reachable targets here are team_member and unknown. The tenant/
+    // landlord arms below are therefore UNREACHABLE defensive mappings, kept
+    // type-correct so this branch stays safe if the auto-advance guard ever
+    // changes:
+    //   - unknown -> 'needs_review' (back to the front door)  [reachable]
+    //   - team_member -> 'active' (no lifecycle)              [reachable]
+    //   - tenant -> 'onboarding', landlord -> 'interested'    [defensive only]
     if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });

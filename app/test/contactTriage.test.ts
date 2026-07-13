@@ -227,13 +227,14 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.contacts.find((c) => c.contactId === 'contact-retype-1')!.status).toBe('active');
   });
 
-  it('REGRESSION: a conversation-less re-type to tenant lands onboarding, never the invalid (tenant, active)', async () => {
+  it('re-typing a team_member to tenant lands onboarding via the auto-advance (never keeps active)', async () => {
     const { app, world } = makeWebhookHarness();
-    // A contact with NO attached conversation, currently a non-tenant carrying
-    // 'active'. Re-type to tenant WITHOUT a status. Under the old fallback
-    // (`newType==='unknown' ? 'needs_review' : 'active'`) a conversation-less
-    // re-type could persist (tenant, 'active') - the invalid pair the fallback
-    // exists to prevent. The tenant lifecycle start is 'onboarding'.
+    // NOTE (review 2026-07-13): this exercises the AUTO-ADVANCE branch, not the
+    // re-type fallback - convType derives from the TARGET type, so a re-type to
+    // tenant always auto-advances (the fallback's tenant arm is unreachable
+    // defensive code). The pin: a team_member carrying 'active' re-typed to
+    // tenant WITHOUT a status lands the tenant lifecycle start 'onboarding';
+    // (tenant, 'active') can never persist.
     world.contacts.push({
       contactId: 'contact-retype-tenant',
       type: 'team_member',
@@ -254,7 +255,7 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     );
   });
 
-  it('a conversation-less re-type to landlord lands interested (a LEAD), never active', async () => {
+  it('re-typing a team_member to landlord lands interested via the auto-advance (a LEAD, never active)', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({
       contactId: 'contact-retype-ll',

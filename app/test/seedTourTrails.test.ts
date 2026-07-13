@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { SEED } from '../src/lib/seed/lean.js';
 import { castItems } from '../src/lib/seed/cast.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
+import { LIVE_IDS } from '../src/lib/seed/live.js';
 import { tourTrail, historyItems, tourMilestones, type AuditRow } from '../src/lib/seed/history.js';
 
 // A fixed clock so matrixItems(now) is fully deterministic.
@@ -378,5 +379,92 @@ describe('seed tour trails: lean profile untouched', () => {
     for (const [base, items] of Object.entries(SEED)) leanTables[base] = [...items];
     const rows = historyItems(leanTables).audit_events.filter((r) => r.entityKey.startsWith('tours#'));
     expect(rows).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. Live-path coverage (VERIFIED, not assumed). seedLive builds its item map
+// with buildLiveStaticItems (live.ts:314 returns a `tours` slice) and passes
+// that map straight to historyItems(staticItems) at live.ts:480. historyItems
+// reads tables['tours'] (history.ts) - the SAME key - so live tours get their
+// tours# trails with NO live.ts change. This block pins that contract: a
+// live-SHAPED fixture keyed exactly as buildLiveStaticItems keys it, run through
+// historyItems, yields the expected trail per live tour shape. Live tours are
+// ALL status 'scheduled' (the 'confirmed' status was dropped 2026-07-08 -
+// toursModel.ts NOTE): tour-live-today (no group) -> [tour_scheduled];
+// tour-live-tomorrow / tour-live-upcoming (groupThreadId set) ->
+// [tour_scheduled, tour_group_opened].
+// ---------------------------------------------------------------------------
+describe('seed tour trails: live-path coverage (historyItems reads the tours slice)', () => {
+  // Faithful to buildLiveStaticItems (live.ts:314-353): three scheduled tours;
+  // tomorrow + upcoming carry the relay group thread. Clocks kept coherent
+  // (createdAt < scheduledAt) - the live now-relative clock is orthogonal here.
+  const liveTours: Row[] = [
+    {
+      tourId: LIVE_IDS.tourToday,
+      tenantId: LIVE_IDS.tenantA,
+      unitId: LIVE_IDS.unitA,
+      tourType: 'self_guided',
+      status: 'scheduled',
+      scheduledAt: '2026-07-14T14:00:00.000Z',
+      createdAt: '2026-07-13T09:00:00.000Z',
+      updatedAt: '2026-07-13T09:00:00.000Z',
+    },
+    {
+      tourId: LIVE_IDS.tourTomorrow,
+      tenantId: LIVE_IDS.tenantA,
+      unitId: LIVE_IDS.unitB,
+      tourType: 'landlord_led',
+      status: 'scheduled',
+      scheduledAt: '2026-07-15T14:00:00.000Z',
+      groupThreadId: LIVE_IDS.relayGroup,
+      createdAt: '2026-07-13T09:00:00.000Z',
+      updatedAt: '2026-07-13T09:00:00.000Z',
+    },
+    {
+      tourId: LIVE_IDS.tourUpcoming,
+      tenantId: LIVE_IDS.tenantA,
+      unitId: LIVE_IDS.unitB,
+      tourType: 'landlord_led',
+      status: 'scheduled',
+      scheduledAt: '2026-07-16T14:00:00.000Z',
+      groupThreadId: LIVE_IDS.relayGroup,
+      createdAt: '2026-07-13T09:00:00.000Z',
+      updatedAt: '2026-07-13T09:00:00.000Z',
+    },
+  ];
+  // The live-SHAPED item map: keyed 'tours' exactly as buildLiveStaticItems
+  // returns it and seedLive passes it (live.ts:408 -> :480).
+  const liveStaticItems: Record<string, Row[]> = { tours: liveTours };
+  const liveHistory = historyItems(liveStaticItems);
+  const liveTourRowsFor = (id: string): AuditRow[] =>
+    liveHistory.audit_events.filter((r) => r.entityKey === `tours#${id}`);
+
+  it('a scheduled live tour WITHOUT a group thread yields exactly [tour_scheduled]', () => {
+    const rows = liveTourRowsFor(LIVE_IDS.tourToday);
+    expect(typesOf(rows)).toEqual(['tour_scheduled']);
+    expect(rows[0]!.payload).toEqual({ tourId: LIVE_IDS.tourToday });
+    expect(rows[0]!.actorId).toBeUndefined();
+  });
+
+  it('a scheduled live tour WITH a group thread yields [tour_scheduled, tour_group_opened]', () => {
+    for (const id of [LIVE_IDS.tourTomorrow, LIVE_IDS.tourUpcoming]) {
+      const rows = liveTourRowsFor(id);
+      expect([...typesOf(rows)].sort()).toEqual(['tour_group_opened', 'tour_scheduled']);
+      const grp = rows.find((r) => r.event_type === 'tour_group_opened')!;
+      expect(grp.payload).toEqual({ tourId: id, conversationId: LIVE_IDS.relayGroup });
+      expect(grp.actorId).toBeUndefined();
+      // booking (tour_scheduled) sits in [createdAt, scheduledAt).
+      const sched = rows.find((r) => r.event_type === 'tour_scheduled')!;
+      expect(isoOf(sched.ts)).toBe('2026-07-13T09:00:00.000Z');
+    }
+  });
+
+  it('every live tour trail type is one of the pinned 8 dashboard label keys', () => {
+    const rows = liveHistory.audit_events.filter((r) => r.entityKey.startsWith('tours#'));
+    expect(rows.length, 'live map must produce tour rows').toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(TOUR_EVENT_LABEL_SET.has(r.event_type), `live tour type '${r.event_type}' known`).toBe(true);
+    }
   });
 });

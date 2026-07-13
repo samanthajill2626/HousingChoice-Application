@@ -79,7 +79,7 @@ describe('GET /api/contacts — list/filter', () => {
 });
 
 describe('POST /api/contacts — manual create', () => {
-  it('creates a contact, normalizes phone, defaults status active, audits', async () => {
+  it('creates a landlord contact, normalizes phone, defaults status interested, audits', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/contacts')
@@ -93,7 +93,7 @@ describe('POST /api/contacts — manual create', () => {
       firstName: 'Pat',
       lastName: 'Owner',
       phone: '+15550107000', // normalized
-      status: 'active', // manual create asserts identity
+      status: 'interested', // a day-to-day manual landlord create is a LEAD (D1/D3)
     });
     expect(world.auditEvents).toContainEqual(
       expect.objectContaining({
@@ -101,6 +101,47 @@ describe('POST /api/contacts — manual create', () => {
         event_type: 'contact_created',
       }),
     );
+  });
+
+  it('manual create defaults are type-scoped: tenant->onboarding, else->active', async () => {
+    const { app } = makeWebhookHarness();
+    const tenant = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', firstName: 'Tam', lastName: 'Tenant' });
+    expect(tenant.status).toBe(201);
+    expect(tenant.body.contact.status).toBe('onboarding');
+
+    const team = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'team_member', firstName: 'Mel', lastName: 'Member' });
+    expect(team.status).toBe(201);
+    expect(team.body.contact.status).toBe('active');
+  });
+
+  it('E1: an explicit status in the create body wins over the type-scoped default', async () => {
+    const { app } = makeWebhookHarness();
+    // A landlord create that explicitly asks for 'active' keeps 'active' (the
+    // M1.6 import sets landlord statuses explicitly and must not be overridden).
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', firstName: 'Onb', lastName: 'Oarded', status: 'active' });
+    expect(res.status).toBe(201);
+    expect(res.body.contact.status).toBe('active');
+
+    // And an explicit 'onboarding' on a landlord is accepted (new status).
+    const onb = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'landlord', firstName: 'Sign', lastName: 'Ed', status: 'onboarding' });
+    expect(onb.status).toBe(201);
+    expect(onb.body.contact.status).toBe('onboarding');
   });
 
   it('supports the "First Last - N Bed" convenience string', async () => {

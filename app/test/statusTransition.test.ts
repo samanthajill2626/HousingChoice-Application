@@ -954,7 +954,7 @@ describe('statusTransition — contact_status_changed milestone', () => {
   beforeEach(async () => {
     world = createFakeWorld();
     // Landlord fixture — exercises the LANDLORD_STATUS_LABELS branch. Landlord
-    // statuses are needs_review|interested|active|parked (statusModel.ts:173).
+    // statuses are needs_review|interested|onboarding|active|parked (statusModel.ts).
     await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'interested' });
   });
 

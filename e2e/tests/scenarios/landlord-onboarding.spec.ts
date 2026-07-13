@@ -142,6 +142,32 @@ test('inbound text → worth pursuing → interested → signed → onboarded �
   await signedThroughHandoff(flow, flow.landlordId());
 });
 
+test('lead lifecycle -> interested -> onboarding -> active via the status menu', async ({
+  page,
+  request,
+}) => {
+  const flow = new Scenario(page, request);
+  const landlord = freshLandlord('Landlord');
+
+  await flow.login();
+  // A day-to-day manual create is a LEAD: the new landlord lands at 'interested'
+  // (D3), not 'active' - no explicit "mark interested" move needed.
+  await flow.teamCreatesLandlord({
+    firstName: landlord.firstName,
+    lastName: landlord.lastName,
+    phone: landlord.phone,
+  });
+  await flow.expectLandlordStatus('interested', 'Interested');
+
+  // Signed the contract, we are bringing their properties in: 'onboarding'.
+  await flow.teamMovesLandlordStatus('Onboarding');
+  await flow.expectLandlordStatus('onboarding', 'Onboarding');
+
+  // Properties onboarded -> 'active'. Manual transitions, no enforced graph (D5).
+  await flow.teamMovesLandlordStatus('Active');
+  await flow.expectLandlordStatus('active', 'Active');
+});
+
 test('cold call → declines → parked (reason)', async ({ page, request }) => {
   const flow = new Scenario(page, request);
   const landlord = freshLandlord('Landlord');

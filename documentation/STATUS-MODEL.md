@@ -175,6 +175,39 @@ Needs review → Onboarding → Searching → Placing → Placed
 - **`Placed`** ✓ is the win. **`Inactive`** ✕ is the terminal exit. **`On hold`** is a
   pause that doesn't lose their spot.
 
+### 5a. Landlord - lead lifecycle
+
+A landlord contact carries its own lead lifecycle on the SAME `status` field tenants
+use (type-scoped: `LANDLORD_STATUSES` in `app/src/lib/statusModel.ts`; the values are
+DISJOINT from the tenant lifecycle so a landlord can never be pushed into a tenant
+state). Where the *landlord relationship* is, from first capture to onboarded.
+
+```
+Needs review -> Interested -> Onboarding -> Active
+   terminal branch: Parked (reachable from ANY state, park_reason required)
+```
+
+- **`Needs review`** - the auto-capture/triage front door (same front door tenants and
+  untriaged contacts land at). A contact whose type is not yet resolved sits here.
+- **`Interested`** - a landlord lead worth pursuing. Tagging/triaging a contact as a
+  landlord (inbox triage, a plain re-type, or a manual create with no explicit status)
+  lands them HERE, not `Active` - a freshly identified landlord is a LEAD, not an
+  onboarded partner. An explicit status in a create/PATCH body still wins.
+- **`Onboarding`** - the landlord has been sold to and **SIGNED** a contract, and we
+  are working to bring their properties in. (Shares the name with the tenant
+  `Onboarding` status and the LandlordOnboardingCard deal-terms vocabulary; the
+  type-scoped allowlist means zero collision.)
+- **`Active`** - a landlord with **onboarded** properties. This is the "done onboarding"
+  state, not "we know who they are".
+- **`Parked`** - the terminal branch for a declined / not-a-fit / backed-out lead
+  (a signed landlord can still back out). Reachable from ANY state; `park_reason` is
+  required on the move to `Parked`.
+
+Transitions are **manual** via the status menu (no enforced transition graph, no
+derivation from `contract_status` or from units added) - the menu must stay free to
+correct a mis-set status. Landlord statuses take no part in placement/property
+derivation (see section 7).
+
 ---
 
 ## 6. Property — coarse lifecycle (derived)

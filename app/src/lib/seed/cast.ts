@@ -1069,7 +1069,8 @@ const parkedLandlord = {
 
 // ---------------------------------------------------------------------------
 // CAST PERSONA 9: Mid-Intake Unit Landlord
-// landlord active/signed; unit setup (missing voucher_size_accepted)
+// landlord onboarding/signed (SIGNED contract, property still being brought in);
+// unit setup (missing voucher_size_accepted)
 // inbound MMS photo referencing a media key (seeded Task 5)
 // Team follow-up outstanding
 // ---------------------------------------------------------------------------
@@ -1083,7 +1084,8 @@ const midIntakeUnitLandlord = {
   contact: {
     contactId: C_MID_INTAKE_LL,
     type: 'landlord',
-    status: 'active',
+    // 'onboarding': signed a contract, property still being brought in (unit=setup).
+    status: 'onboarding',
     phone: PHONES.midIntakeLandlord,
     firstName: 'Constance',
     lastName: 'Merritt',

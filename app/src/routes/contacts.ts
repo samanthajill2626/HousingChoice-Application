@@ -573,8 +573,10 @@ interface CreateContactResult {
  * firstName/lastName/phone/voucherSize/notes/status, plus the "First Last - N
  * Bed" convenience string via `contactName` (the one true parser). Phone is
  * normalized to E.164 and rejected when it can't be canonicalized. A manual
- * create defaults status to 'active' (the human entering it knows who it is) —
- * unlike auto-capture stubs, which are 'needs_review'.
+ * create defaults status type-scoped (tenant -> 'onboarding', landlord ->
+ * 'interested', else -> 'active') - the human entering it knows who it is,
+ * unlike auto-capture stubs, which are 'needs_review'. An explicit status in
+ * the body still wins.
  */
 function parseCreateBody(body: unknown): CreateContactResult | { error: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -697,7 +699,10 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   //   - tenant → 'onboarding': the §5 lifecycle starts here once identity is
   //     asserted (the operator is making this person; they are no longer at the
   //     'needs_review' front door).
-  //   - non-tenant → 'active' (unchanged: they have no lifecycle).
+  //   - landlord -> 'interested': a day-to-day manual create is a LEAD, not an
+  //     onboarded landlord ('active' means their properties are onboarded). The
+  //     M1.6 import sets landlord statuses explicitly, so it is unaffected.
+  //   - other (team_member/unknown) -> 'active' (unchanged: no lifecycle).
   // We deliberately DO NOT stamp status_source here. The prior tenant_status
   // behavior left provenance UNSET on create, so the first placement transition
   // could still DERIVE the lifecycle forward (Onboarding → Placing). Stamping
@@ -706,7 +711,8 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   // (docs/issues/status-pin-vs-terminal-derivation.md). An explicit lifecycle
   // pin is the transition service's job (PATCH …/tenant-status), not create.
   if (item.status === undefined) {
-    item.status = item.type === 'tenant' ? 'onboarding' : 'active';
+    item.status =
+      item.type === 'tenant' ? 'onboarding' : item.type === 'landlord' ? 'interested' : 'active';
   }
 
   // A2P/CTIA consent (spec §3.3): the optional "Consent to text" section on the
@@ -1142,31 +1148,49 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact off the needs_review triage front door at the moment the identity
     // is known — but only when the caller didn't set status itself (an explicit
     // status always wins). Type-scoped (status-model unification — one `status`
-    // field): tenant → 'onboarding' (the §5 lifecycle starts past the front
-    // door); landlord → 'active' (unchanged). We do NOT stamp status_source —
+    // field): tenant -> 'onboarding' (the section 5 lifecycle starts past the
+    // front door); landlord -> 'interested' (a freshly identified landlord is a
+    // LEAD; 'active' means their properties are onboarded -
+    // landlord-status-onboarding design D1). We do NOT stamp status_source -
     // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
     // placement transition (a 'manual' pin would block it: the create-pin
-    // regression — docs/issues/status-pin-vs-terminal-derivation.md). We never
-    // auto-advance for unknown/team_member (no 1:1 identity) — and never
+    // regression - docs/issues/status-pin-vs-terminal-derivation.md). We never
+    // auto-advance for unknown/team_member (no 1:1 identity) - and never
     // fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
-      parsed.patch['status'] = newType === 'tenant' ? 'onboarding' : 'active';
+      parsed.patch['status'] = newType === 'tenant' ? 'onboarding' : 'interested';
       parsed.changedFields.push('status');
     }
 
-    // Re-typing to a type with no 1:1 auto-advance (team_member/unknown) and no
-    // explicit status: if the STORED status isn't valid for the new type (e.g. a
-    // tenant lifecycle value like 'placing' lingering after a tenant is re-typed
-    // to team_member), normalize it to the new type's default so we never persist
-    // an invalid (type, status) pair. tenant/landlord are handled by the
-    // auto-advance above; unknown returns to the 'needs_review' front door.
+    // Re-typing without an explicit status: if the STORED status isn't valid for
+    // the new type (e.g. a tenant lifecycle value like 'placing' lingering after
+    // a tenant is re-typed to team_member), normalize it to the new type's
+    // default so we never persist an invalid (type, status) pair.
+    //
+    // REACHABILITY (be precise - review 2026-07-13): convType is derived from the
+    // TARGET type (conversationTypeFor above), so a re-type to tenant/landlord
+    // ALWAYS takes the auto-advance branch and never reaches this fallback. The
+    // only reachable targets here are team_member and unknown. The tenant/
+    // landlord arms below are therefore UNREACHABLE defensive mappings, kept
+    // type-correct so this branch stays safe if the auto-advance guard ever
+    // changes:
+    //   - unknown -> 'needs_review' (back to the front door)  [reachable]
+    //   - team_member -> 'active' (no lifecycle)              [reachable]
+    //   - tenant -> 'onboarding', landlord -> 'interested'    [defensive only]
     if (isContactType(newType) && convType === undefined && !('status' in parsed.patch)) {
       if (!stored) {
         res.status(404).json({ error: 'contact_not_found' });
         return;
       }
       if (!statusAllowlistFor(newType).includes(stored.status ?? '')) {
-        parsed.patch['status'] = newType === 'unknown' ? 'needs_review' : 'active';
+        parsed.patch['status'] =
+          newType === 'unknown'
+            ? 'needs_review'
+            : newType === 'tenant'
+              ? 'onboarding'
+              : newType === 'landlord'
+                ? 'interested'
+                : 'active';
         parsed.changedFields.push('status');
       }
     }

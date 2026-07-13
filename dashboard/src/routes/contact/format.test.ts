@@ -28,6 +28,7 @@ describe('contactStatusLabel', () => {
   });
   it('uses the landlord lead vocabulary for landlords', () => {
     expect(contactStatusLabel('landlord', 'needs_review')).toBe('Needs review');
+    expect(contactStatusLabel('landlord', 'onboarding')).toBe('Onboarding');
     expect(contactStatusLabel('landlord', 'parked')).toBe('Parked');
   });
   it('humanizes for unknown/other types and off-list values (never raw snake_case)', () => {

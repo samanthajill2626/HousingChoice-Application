@@ -823,7 +823,7 @@ function buildTenantsMatrix(placementGroups: PlacementGroup[]): TenantGroup[] {
 
 // ---------------------------------------------------------------------------
 // Standalone landlords — every LANDLORD_STATUS ×2 net of placement-derived
-// (placements don't derive landlord status, so all 4 ×2 = 8 standalone rows)
+// (placements don't derive landlord status, so all 5 x2 = 10 standalone rows)
 // ---------------------------------------------------------------------------
 interface LandlordGroup {
   landlord: Record<string, unknown>;
@@ -844,7 +844,8 @@ function buildLandlordsMatrix(): LandlordGroup[] {
         phone: phoneBase(400 + counter),
         firstName: firstName(LANDLORD_FIRST, counter),
         lastName: lastName(LANDLORD_LAST, counter),
-        contract_status: status === 'active' ? 'signed' : 'unsigned',
+        // 'onboarding' and 'active' both imply a SIGNED contract (D2 semantics).
+        contract_status: status === 'active' || status === 'onboarding' ? 'signed' : 'unsigned',
         registered_landlord: counter % 2 === 0,
         rta_within_48h: counter % 3 !== 0,
         pass_inspection_first_try: counter % 4 !== 0,

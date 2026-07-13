@@ -14,6 +14,7 @@ import {
   isTenantStatus,
   isTransitionSource,
   LANDLORD_STATUSES,
+  LANDLORD_STATUS_LABELS,
   LISTING_OVERRIDE_STATES,
   LISTING_STATUSES,
   LOST_REASON_CATEGORIES,
@@ -143,13 +144,42 @@ describe('statusModel — guards reject junk', () => {
     for (const s of LANDLORD_STATUSES) {
       expect(isLandlordStatus(s)).toBe(true);
     }
-    expect([...LANDLORD_STATUSES].sort()).toEqual(['active', 'interested', 'needs_review', 'parked']);
+    expect([...LANDLORD_STATUSES].sort()).toEqual([
+      'active',
+      'interested',
+      'needs_review',
+      'onboarding',
+      'parked',
+    ]);
     // Tenant-only lifecycle values are NOT landlord statuses (the leak we close).
     expect(isLandlordStatus('on_hold')).toBe(false);
     expect(isLandlordStatus('inactive')).toBe(false);
     expect(isLandlordStatus('searching')).toBe(false);
     expect(isLandlordStatus('bogus')).toBe(false);
     expect(isLandlordStatus(undefined)).toBe(false);
+  });
+
+  it('landlord lifecycle ORDER: onboarding sits between interested and active', () => {
+    // The lead lifecycle order is load-bearing (menus/badges render from it):
+    // needs_review -> interested -> onboarding -> active, with terminal parked.
+    expect([...LANDLORD_STATUSES]).toEqual([
+      'needs_review',
+      'interested',
+      'onboarding',
+      'active',
+      'parked',
+    ]);
+    const idx = (s: string) => LANDLORD_STATUSES.indexOf(s as (typeof LANDLORD_STATUSES)[number]);
+    expect(idx('interested')).toBeLessThan(idx('onboarding'));
+    expect(idx('onboarding')).toBeLessThan(idx('active'));
+  });
+
+  it('landlord labels: onboarding is "Onboarding"; every status has a label', () => {
+    expect(LANDLORD_STATUS_LABELS.onboarding).toBe('Onboarding');
+    for (const s of LANDLORD_STATUSES) {
+      expect(typeof LANDLORD_STATUS_LABELS[s]).toBe('string');
+      expect(LANDLORD_STATUS_LABELS[s].length).toBeGreaterThan(0);
+    }
   });
 
   it('isLostReasonCategory / isTransitionSource', () => {

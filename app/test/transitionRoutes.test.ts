@@ -194,12 +194,35 @@ describe('status-model transition routes', () => {
         await world.contactsRepo.create({ contactId: 'll-1', type: 'landlord', status: 'needs_review' });
       });
 
-      it('accepts interested / active / needs_review for a landlord', async () => {
-        for (const toStatus of ['interested', 'active', 'needs_review'] as const) {
+      it('accepts interested / onboarding / active / needs_review for a landlord', async () => {
+        // 'onboarding' is the new signed-landlord status; it validates against
+        // LANDLORD_STATUSES automatically (statusAllowlistFor(type)) - no route
+        // change (landlord-status-onboarding design S3).
+        for (const toStatus of ['interested', 'onboarding', 'active', 'needs_review'] as const) {
           const res = await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus, source: 'manual' });
           expect(res.status, toStatus).toBe(200);
           expect(res.body.contact.status, toStatus).toBe(toStatus);
         }
+      });
+
+      it('parks a landlord FROM onboarding, persisting the supplied reason as park_reason (E2)', async () => {
+        // A signed landlord can still back out: parked is reachable from ANY
+        // state incl. onboarding, and the park move persists the reason.
+        const onb = await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus: 'onboarding', source: 'manual' });
+        expect(onb.status).toBe(200);
+        expect(onb.body.contact.status).toBe('onboarding');
+
+        const res = await authedPatch('/api/contacts/ll-1/tenant-status', {
+          toStatus: 'parked',
+          source: 'manual',
+          reason: 'signed then backed out - sold the building',
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.contact.status).toBe('parked');
+        expect(res.body.contact.park_reason).toBe('signed then backed out - sold the building');
+        expect((await world.contactsRepo.getById('ll-1'))!.park_reason).toBe(
+          'signed then backed out - sold the building',
+        );
       });
 
       it('moves a landlord to parked and persists the supplied reason as park_reason', async () => {

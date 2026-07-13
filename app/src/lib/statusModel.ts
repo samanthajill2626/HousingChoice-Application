@@ -165,12 +165,14 @@ export const TENANT_STATUS_LABELS: Readonly<Record<TenantStatus, string>> = {
 // A landlord contact carries its own lead lifecycle on the SAME `status` field
 // tenants use (type-scoped — STATUS-MODEL §5 / docs/issues/landlord-lead-status-
 // and-park.md). `needs_review` is the auto-capture/triage front door; a lead
-// worth pursuing is `interested`; an onboarded landlord is `active`; a declined/
-// not-a-fit/never-signed lead is the terminal `parked` (with a `park_reason`
-// captured on the move). Landlord statuses are DISJOINT from tenant-only values
-// (on_hold/inactive/searching/…): a landlord must never be pushed into a tenant
-// lifecycle state (the `/tenant-status` type-guard leak this set closes).
-export const LANDLORD_STATUSES = ['needs_review', 'interested', 'active', 'parked'] as const;
+// worth pursuing is `interested`; a SIGNED landlord whose properties we are
+// bringing in is `onboarding`; a landlord with onboarded properties is `active`;
+// a declined/not-a-fit/backed-out lead is the terminal `parked` (with a
+// `park_reason` captured on the move, reachable from ANY state). Landlord
+// statuses are DISJOINT from tenant-only values (on_hold/inactive/searching/...):
+// a landlord must never be pushed into a tenant lifecycle state (the
+// `/tenant-status` type-guard leak this set closes).
+export const LANDLORD_STATUSES = ['needs_review', 'interested', 'onboarding', 'active', 'parked'] as const;
 
 export type LandlordStatus = (typeof LANDLORD_STATUSES)[number];
 
@@ -179,6 +181,7 @@ const LANDLORD_STATUS_SET: ReadonlySet<string> = new Set(LANDLORD_STATUSES);
 export const LANDLORD_STATUS_LABELS: Readonly<Record<LandlordStatus, string>> = {
   needs_review: 'Needs review',
   interested: 'Interested',
+  onboarding: 'Onboarding',
   active: 'Active',
   parked: 'Parked',
 };

@@ -172,8 +172,9 @@ describe('RelationshipsEditor', () => {
     expect(aliceOptionAfter).toHaveAttribute('aria-selected', 'true');
   });
 
-  // Fix 4: free-typing after a pick must drop the contactId key entirely
-  it('free-typing after a pick emits a row with NO contactId key', () => {
+  // A linked row is COMMITTED: read-only, unlinked only via its Clear button
+  // (which must drop the contactId key entirely).
+  it('a linked row is read-only; its Clear button emits a row with NO contactId key', () => {
     const onChange = vi.fn();
     // Start with a linked row (has contactId)
     render(
@@ -184,7 +185,32 @@ describe('RelationshipsEditor', () => {
       />,
     );
 
-    // Type something free-form in the contact search input (not a candidate pick)
+    // The linked row's search input is committed — typing is not possible.
+    const searchInput = screen.getByLabelText('Contact search 1');
+    expect(searchInput).toHaveAttribute('readonly');
+
+    // Clear unlinks: empty name, contactId key absent.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Contact search 1' }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const emittedRows = onChange.mock.calls[0]?.[0] as Relationship[];
+    const emittedRow = emittedRows?.[0];
+    expect(emittedRow).toBeDefined();
+    expect(emittedRow!.name).toBe('');
+    expect('contactId' in emittedRow!).toBe(false);
+  });
+
+  // An unlinked row still accepts free typing (the pre-pick contract holds).
+  it('free-typing in an UNLINKED row emits the typed name with NO contactId key', () => {
+    const onChange = vi.fn();
+    render(
+      <RelationshipsEditor
+        rows={[{ role: 'Spouse', name: 'Ali' }]}
+        onChange={onChange}
+        candidates={CANDIDATES}
+      />,
+    );
+
     const searchInput = screen.getByLabelText('Contact search 1');
     fireEvent.change(searchInput, { target: { value: 'Someone Else' } });
 

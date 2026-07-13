@@ -26,6 +26,36 @@
   color: var(--c-text-subtle);
 }
 
+/* Committed selection — leave room for the clear button. */
+.inputSelected {
+  padding-right: calc(var(--sp-3) + 1.25rem);
+}
+
+.clearButton {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-1);
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  color: var(--c-text-subtle);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.clearButton:hover {
+  color: var(--c-text);
+}
+
+.clearButton:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 .listbox {
   position: absolute;
   top: calc(100% + var(--sp-1));

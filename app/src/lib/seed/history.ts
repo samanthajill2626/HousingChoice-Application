@@ -709,16 +709,22 @@ const TOUR_APPENDIX_OFFSET_MS = 2 * 60 * 60 * 1000; // 2h
 /**
  * One seeded tour's `tours#<tourId>` audit trail. Per-status base sequence
  * (spec section 3):
- *   requested -> []                                    (timeless; mirrors the runtime writer)
+ *   requested -> [] scheduling rows (timeless create emits nothing) - but the
+ *                group_opened appendix STILL applies: the provisioning route has
+ *                NO status gate (only the double-provision 409), so a requested
+ *                tour with a provisioned group carries exactly [tour_group_opened]
  *   scheduled -> [tour_scheduled @ booking]
  *   toured    -> [tour_scheduled @ booking, tour_took_place @ scheduledAt]
  *   no_show   -> [tour_scheduled @ booking, tour_no_show  @ scheduledAt]
  *   canceled  -> [tour_scheduled @ booking, tour_canceled @ cancel instant]
  *   closed    -> [tour_scheduled @ booking, tour_took_place @ scheduledAt]  (a closed tour happened)
- * PLUS per-field appendices (non-requested only):
+ * PLUS per-field appendices:
  *   groupThreadId        -> tour_group_opened @ booking, { tourId, conversationId }
- *   outcome              -> tour_outcome @ outcome instant (after took_place)
+ *                           (ANY status incl. requested, where booking = createdAt)
+ *   outcome              -> tour_outcome @ outcome instant (after took_place;
+ *                           unreachable on requested - the exit gate 409s unless toured)
  *   convertedPlacementId -> tour_converted @ conversion instant, { tourId, placementId }
+ *                           (unreachable on requested - conversion requires toured)
  *
  * Instants: booking = createdAt (createdAt <= booking < scheduledAt); took_place/
  * no_show = scheduledAt; canceled = the row's own canceledAt when present else a
@@ -735,10 +741,26 @@ export function tourTrail(tour: Record<string, unknown>): AuditRow[] {
   const tourId = String(tour['tourId'] ?? '');
   const status = String(tour['status'] ?? '');
   if (tourId === '' || !(status in TOUR_STATUS_LABELS)) return [];
-  // requested is TIMELESS: zero rows, short-circuit BEFORE the appendices (a
-  // requested tour that already owns its group thread STILL emits nothing -
-  // mirrors the runtime writer + the existing zero-reminder invariant).
-  if (status === 'requested') return [];
+  // requested is TIMELESS: zero SCHEDULING rows (the runtime writer emits
+  // nothing on a timeless create) - but a provisioned group thread still has
+  // its tour_group_opened row: the provisioning route has NO status gate (its
+  // only guard is the double-provision 409). The outcome/converted appendices
+  // are structurally unreachable here (exit gate / conversion require toured),
+  // so a requested tour emits exactly [] or [tour_group_opened].
+  if (status === 'requested') {
+    const requestedGroupId = tour['groupThreadId'];
+    if (typeof requestedGroupId !== 'string' || requestedGroupId.length === 0) return [];
+    // The booking-equivalent instant on a timeless tour: its createdAt.
+    const requestedAt = String(tour['createdAt'] ?? tour['updatedAt'] ?? '');
+    const requestedMs = Date.parse(requestedAt);
+    if (Number.isNaN(requestedMs)) return [];
+    return [
+      makeRow(`tours#${tourId}`, new Date(requestedMs).toISOString(), 'tour_group_opened', {
+        tourId,
+        conversationId: requestedGroupId,
+      }),
+    ];
+  }
 
   const scheduledAtRaw = tour['scheduledAt'];
   const scheduledAt =

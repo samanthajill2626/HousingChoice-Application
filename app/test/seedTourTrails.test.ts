@@ -87,19 +87,42 @@ describe('seed tour trails: presence per status', () => {
     }
   });
 
-  it('every REQUESTED seeded tour has ZERO tours# rows (even with a groupThreadId)', () => {
-    const requested = TOURS.filter((t) => statusOf(t) === 'requested');
-    expect(requested.length, 'assembled map must include requested tours').toBeGreaterThanOrEqual(1);
-    // The cast searching-tenant requested tour carries a groupThreadId - it must
-    // STILL emit zero rows (requested short-circuits before the appendices).
-    const withGroup = requested.filter((t) => typeof t['groupThreadId'] === 'string');
-    expect(withGroup.length, 'a requested tour with a groupThreadId must be exercised').toBeGreaterThanOrEqual(1);
-    for (const t of requested) {
+  it('every REQUESTED tour WITHOUT a group thread has ZERO tours# rows', () => {
+    const requestedNoGroup = TOURS.filter(
+      (t) => statusOf(t) === 'requested' && typeof t['groupThreadId'] !== 'string',
+    );
+    expect(
+      requestedNoGroup.length,
+      'assembled map must include group-less requested tours (matrix)',
+    ).toBeGreaterThanOrEqual(1);
+    for (const t of requestedNoGroup) {
       expect(
         tourRowsFor(tourIdOf(t)).length,
         `requested tour ${tourIdOf(t)} must have zero rows`,
       ).toBe(0);
     }
+  });
+
+  it('a REQUESTED tour WITH a groupThreadId emits exactly [tour_group_opened] (cast searching tenant)', () => {
+    // Runtime truth: the relay provisioning route has NO status gate (its only
+    // guard is the double-provision 409), so a requested tour with a
+    // provisioned group carries exactly one tours# row - the group-opened
+    // milestone. The cast searching tenant pins this from the real assembled map.
+    const t = tourById.get('tour-cast-searching-tenant');
+    expect(t, 'cast searching-tenant requested tour must exist').toBeDefined();
+    expect(statusOf(t!)).toBe('requested');
+    expect(typeof t!['groupThreadId']).toBe('string');
+    const rows = tourRowsFor(tourIdOf(t!));
+    expect(typesOf(rows)).toEqual(['tour_group_opened']);
+    const row = rows[0]!;
+    // Payload: { tourId, conversationId } exactly; no actor.
+    expect(row.payload).toEqual({
+      tourId: tourIdOf(t!),
+      conversationId: t!['groupThreadId'],
+    });
+    expect(row.actorId).toBeUndefined();
+    // Instant: the booking-equivalent on a timeless tour = its createdAt.
+    expect(isoOf(row.ts)).toBe(t!['createdAt']);
   });
 });
 
@@ -133,11 +156,14 @@ const BASE_SEQUENCE: Record<string, string[]> = {
 
 function expectedTypes(tour: Row): string[] {
   const status = statusOf(tour);
-  if (status === 'requested') return [];
   const set = new Set<string>(BASE_SEQUENCE[status] ?? []);
+  // group_opened applies to EVERY status incl. requested (the provisioning
+  // route has no status gate); outcome/converted are impossible on requested
+  // (exit gate / conversion require toured) and no seed data carries them there.
   if (typeof tour['groupThreadId'] === 'string' && tour['groupThreadId'].length > 0) {
     set.add('tour_group_opened');
   }
+  if (status === 'requested') return [...set].sort();
   if (typeof tour['outcome'] === 'string' && tour['outcome'].length > 0) set.add('tour_outcome');
   if (typeof tour['convertedPlacementId'] === 'string' && tour['convertedPlacementId'].length > 0) {
     set.add('tour_converted');
@@ -146,9 +172,8 @@ function expectedTypes(tour: Row): string[] {
 }
 
 describe('seed tour trails: per-status sequence + payloads', () => {
-  it('every non-requested tour emits exactly its status body + field appendices', () => {
+  it('every tour emits exactly its status body + field appendices', () => {
     for (const t of TOURS) {
-      if (statusOf(t) === 'requested') continue;
       const rows = tourRowsFor(tourIdOf(t));
       expect([...typesOf(rows)].sort(), `tour ${tourIdOf(t)} (${statusOf(t)}) type set`).toEqual(
         expectedTypes(t),

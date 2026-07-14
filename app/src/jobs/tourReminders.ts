@@ -41,7 +41,8 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
-import { isMemberSuppressed } from './relayFanOut.js';
+import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
+import type { MessagesRepo } from '../repos/messagesRepo.js';
 import { resolveMessage } from '../messages/index.js';
 
 // ---------------------------------------------------------------------------
@@ -165,10 +166,18 @@ export interface RunDueTourRemindersDeps {
    * (RelayFanOutJobDeps / SendMessageServiceDeps). The group route CANNOT go
    * through sendMessageService — it throws RelaySendNotSupportedError for
    * relay_group conversations — and the worker cannot enqueue relay.fanOut
-   * (no OutboundQueueAdapter in the worker process), so reminders mirror the
-   * relay.intro precedent: per-member adapter sends FROM the pool number.
+   * (no OutboundQueueAdapter in the worker process), so reminders go through
+   * sendRelayAnnouncement (the relay.intro chain): persist the rung ONCE in
+   * the thread, then per-member adapter sends FROM the pool number.
    */
   adapter: MessagingAdapter;
+  /**
+   * Message persistence for the GROUP route: sendRelayAnnouncement stores each
+   * rung as a system announcement in the relay thread (founder decision
+   * 2026-07-14: everything sent into a group text must be visible in its
+   * dashboard thread) and records per-member delivery slots on it.
+   */
+  messagesRepo: MessagesRepo;
   /**
    * Shared A2P pacing bucket (optional): group-route reminders send N member
    * messages per rung through the raw adapter, so they must draw from the SAME
@@ -432,27 +441,16 @@ export async function resolveUsableGroup(
 }
 
 /**
- * Log-safe member key (doc §9): the contactId when the member has one, else a
- * redaction constant. NOT relayMemberKey() — its `phone#<E164>` fallback for
- * contact-less members would put a raw phone number in the log line.
- */
-function logSafeMemberKey(member: { contactId?: string }): string {
-  return member.contactId !== undefined && member.contactId.length > 0
-    ? member.contactId
-    : 'phone-only-member';
-}
-
-/**
- * Send one reminder rung into the tour's masked group: claim ONCE, then a
- * direct adapter send per member FROM the pool number — the relay.intro
- * precedent (relayFanOut.ts). sendMessageService is unusable here (it throws
- * RelaySendNotSupportedError for relay_group threads) and the worker cannot
- * enqueue relay.fanOut (no OutboundQueueAdapter in the worker process).
- *
- * Deliberately NOT persisted as app messages: like the relay.intro
- * announcement, a reminder is a system announcement FROM the app — there is
- * no member-authored source message to relay, and the relay thread's storage
- * model is one SOURCE message fanned out, never N outbound copies.
+ * Send one reminder rung into the tour's masked group: claim ONCE, then hand
+ * the rung to sendRelayAnnouncement — the relay.intro chain. It persists the
+ * rung as a SYSTEM announcement in the thread (founder decision 2026-07-14:
+ * everything sent into a group text must be visible in its dashboard thread),
+ * then sends per member FROM the pool number with opt-out suppression, A2P
+ * pacing, and per-member delivery slots. sendMessageService is unusable here
+ * (it throws RelaySendNotSupportedError for relay_group threads) and the
+ * worker cannot enqueue relay.fanOut (no OutboundQueueAdapter in the worker
+ * process). Per-member failures are the service's accepted post-claim
+ * tradeoff: the claim is already stamped, a failed member is not retried.
  */
 async function sendGroupReminder(
   row: TourReminderItem,
@@ -477,38 +475,18 @@ async function sendGroupReminder(
   // Rung flipped to sent — same live-surface nudge as the 1:1 path.
   (deps.events ?? appEvents).emit('scheduled.updated', { contactId: tour.tenantId });
 
-  // Claim succeeded — send to each member. Per-member failures log and
-  // CONTINUE with the remaining members; the claim is already stamped, so a
-  // failed member is not retried (same accepted post-claim tradeoff as the
-  // 1:1 path). PII: log logSafeMemberKey (contactId or a redaction constant)
-  // — NEVER a phone number, and NOT relayMemberKey (phone#<E164> fallback).
-  let sentCount = 0;
-  for (const member of group.members) {
-    try {
-      // Opt-out suppression (mirrors relay.intro exactly — shared helper):
-      // direct adapter sends bypass the 1:1 opt-out gate, so STOP must be
-      // re-enforced here. A repo error is caught below and skips this member
-      // without sending (fail CLOSED — never text a possibly-opted-out number).
-      if (await isMemberSuppressed(deps.contactsRepo, member)) {
-        log.info(
-          { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
-          'tour reminder: group member opted out (sms_opt_out) — skipped',
-        );
-        continue;
-      }
-      // A2P pacing: draw from the shared combined-rate bucket before every
-      // adapter send, exactly like the relay fan-out / intro loops.
-      await deps.tokenBucket?.acquire(1);
-      await deps.adapter.sendMessage({ to: member.phone, from: group.poolNumber, body });
-      sentCount += 1;
-    } catch (err) {
-      // One member's failure must not block the others (relay.intro precedent).
-      log.error(
-        { err, reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, memberKey: logSafeMemberKey(member) },
-        'tour reminder: group send failed for a member — continuing',
-      );
-    }
-  }
+  const result = await sendRelayAnnouncement(
+    {
+      conversationsRepo: deps.conversationsRepo,
+      messagesRepo: deps.messagesRepo,
+      contactsRepo: deps.contactsRepo,
+      adapter: deps.adapter,
+      ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+      ...(deps.events !== undefined && { events: deps.events }),
+      ...(deps.logger !== undefined && { logger: deps.logger }),
+    },
+    { conversationId: group.conversationId, body, kind: `tour.${row.kind}` },
+  );
 
   log.info(
     {
@@ -519,7 +497,7 @@ async function sendGroupReminder(
       route: 'group',
       conversationId: group.conversationId,
       memberCount: group.members.length,
-      sentCount,
+      sentCount: result?.sentCount ?? 0,
     },
     'tour reminder sent',
   );

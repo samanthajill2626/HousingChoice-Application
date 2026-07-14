@@ -29,6 +29,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
+import { createMessagesRepo } from '../repos/messagesRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
 import { createPlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
@@ -233,6 +234,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       toursRepo: createToursRepo({ logger: log }),
       contactsRepo: createContactsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
+      messagesRepo: createMessagesRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
       adapter: createMessagingAdapter({ config, logger: log }),
       logger: log,
@@ -373,11 +375,13 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // dev.mjs boot POSTs this once under `--mock --seeded` (NOT wired into
   // /__dev/reseed — that keeps the e2e outbox byte-stable).
   //
-  // The intro job is a SYSTEM ANNOUNCEMENT: it sends per-member legs but persists
-  // NO message rows (relayFanOut.ts — putJobExecutionMarker is the only write, an
-  // idempotency marker, not a message), so the seeded DB stays byte-stable. A
-  // repeat POST re-fires the intros (more fake legs) — acceptable for a dev tool,
-  // and it never duplicates anything in the DB. Cast/matrix seeds' bare-id or
+  // The replay enqueues the intro with persist:false (LEGS-ONLY): a REAL
+  // provisioning intro persists a system-announcement row in the thread
+  // (services/relayAnnouncements.ts), but the replay sends only the per-member
+  // legs — putJobExecutionMarker is its only write (an idempotency marker, not
+  // a message), so the seeded DB stays byte-stable. A repeat POST re-fires the
+  // intros (more fake legs) — acceptable for a dev tool, and it never
+  // duplicates anything in the DB. Cast/matrix seeds' bare-id or
   // empty rosters, and (via the 'open' query) closed groups, are skipped
   // gracefully and counted. Same triple-gate/hermetic-LOCAL-only construction as
   // the tick seams above (the dev router only mounts behind lib/devRoutes.ts).
@@ -386,7 +390,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     replayDeps ??= {
       conversationsRepo: createConversationsRepo({ logger: log }),
       enqueueIntro: async (relayConversationId) => {
-        await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId });
+        // persist:false — the replay is a fake-phones materialization tool; a
+        // real provisioning intro persists a thread row, but a per-boot replay
+        // must never grow the seeded threads (byte-stable seeded DB).
+        await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId, persist: false });
       },
     };
     return replayDeps;

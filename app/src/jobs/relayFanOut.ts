@@ -42,8 +42,13 @@ import {
 } from '../repos/messagesRepo.js';
 import { SMS_BRAND_NAME } from '../lib/smsCompliance.js';
 import { SendRefusedError } from '../services/sendMessage.js';
+import { isMemberSuppressed, sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import { resolveMessage } from '../messages/index.js';
 import { defineJobHandler, enqueue } from './jobs.js';
+
+// Canonical home moved to services/relayAnnouncements.ts (tourReminders.ts and
+// this module's fan-out loop import it from here historically) — re-exported.
+export { isMemberSuppressed } from '../services/relayAnnouncements.js';
 
 export const RELAY_FANOUT_JOB = 'relay.fanOut';
 export const RELAY_INTRO_JOB = 'relay.intro';
@@ -196,6 +201,14 @@ export function composeIntroBody(memberNames: (string | undefined)[]): string {
 
 export interface RelayIntroPayload {
   relayConversationId: string;
+  /**
+   * false = legs-only: send the intro texts but persist NO announcement row.
+   * The dev replay seam's mode (POST /__dev/relay/replay-intros re-fires
+   * intros at every boot to materialize fake-phones groups — it must never
+   * grow the seeded threads). Absent/true on real provisioning: the intro is
+   * persisted so the dashboard thread shows it (founder decision 2026-07-14).
+   */
+  persist?: boolean;
 }
 
 export function parseRelayIntroPayload(payload: unknown): RelayIntroPayload {
@@ -206,7 +219,10 @@ export function parseRelayIntroPayload(payload: unknown): RelayIntroPayload {
   if (typeof p.relayConversationId !== 'string' || p.relayConversationId.length === 0) {
     throw new Error('relayIntro: missing relayConversationId');
   }
-  return { relayConversationId: p.relayConversationId };
+  return {
+    relayConversationId: p.relayConversationId,
+    ...(p.persist === false && { persist: false }),
+  };
 }
 
 export interface RelayFanOutJobDeps {
@@ -223,33 +239,6 @@ export interface RelayFanOutJobDeps {
   /** Shared A2P token bucket (worker boot). Optional — tests may omit pacing. */
   tokenBucket?: TokenBucket;
   logger?: Logger;
-}
-
-/**
- * Opt-out suppression for a relay recipient (spec §6 / doc §7.1). Relay sends
- * go STRAIGHT to the adapter — the 1:1 `sendMessage` opt-out gate targets the
- * thread's participant_phone (the pool number), not the individual member, so
- * it never fires here. STOP suppression MUST therefore be re-enforced at this
- * seam or an opted-out member would keep receiving relayed messages. A member
- * who STOP'd carries contact-level `sms_opt_out` (the same signal the 1:1 +
- * broadcast gates read). Resolves the member's contact by id (phone fallback).
- * Deliberately NOT wrapped in try/catch: a repo failure propagates so the caller
- * fails CLOSED (no send, job redelivers) — we never text a possibly-opted-out
- * number on a transient read error.
- *
- * Exported: the tour-reminder GROUP route (tourReminders.ts) sends direct
- * per-member adapter messages exactly like relay.intro does, so it shares
- * this suppression rule (one source of truth, no drift).
- */
-export async function isMemberSuppressed(
-  contacts: ContactsRepo,
-  member: ConversationParticipant,
-): Promise<boolean> {
-  const contact =
-    typeof member.contactId === 'string' && member.contactId.length > 0
-      ? await contacts.getById(member.contactId)
-      : await contacts.findByPhone(member.phone);
-  return contact?.sms_opt_out === true;
 }
 
 export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): void {
@@ -525,9 +514,12 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
 
   // relay.intro (M1.7): on relay-group creation, announce the group to each
   // member FROM the pool number, throttled by the shared bucket. The intro
-  // names everyone connected (display names where known, never a phone). Not
-  // persisted as a relayed message — it is a system announcement; idempotent
-  // via the job execution marker so a redelivery never re-texts everyone.
+  // names everyone connected (display names where known, never a phone).
+  // Persisted in the thread as a SYSTEM announcement (relayAnnouncements.ts —
+  // founder decision 2026-07-14: everything sent into a group text must be
+  // visible in its dashboard thread) UNLESS payload.persist === false (the dev
+  // replay seam). Idempotent via the job execution marker so a redelivery
+  // never re-texts everyone or double-persists.
   defineJobHandler(RELAY_INTRO_JOB, async (rawPayload) => {
     const payload = parseRelayIntroPayload(rawPayload);
     adapter ??= createMessagingAdapter({ logger: deps.logger });
@@ -544,36 +536,27 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       }
     }
 
+    // Compose from the CURRENT roster; sendRelayAnnouncement re-validates the
+    // conversation (unusable → logged no-op, matching the old intro behavior).
     const conversation = await conversations.getById(payload.relayConversationId);
-    const poolNumber = conversation?.pool_number;
-    if (!conversation || typeof poolNumber !== 'string' || poolNumber.length === 0) {
-      log.warn({ conversationId: payload.relayConversationId }, 'relayIntro: relay conversation/pool number missing — skipping');
-      return;
-    }
-    const roster = (conversation.participants ?? []) as ConversationParticipant[];
+    const roster = (conversation?.participants ?? []) as ConversationParticipant[];
     const body = composeIntroBody(roster.map((m) => m.name));
-    let sentCount = 0;
-    for (const member of roster) {
-      await deps.tokenBucket?.acquire(1);
-      try {
-        // Opt-out suppression: skip an opted-out member (the intro is a
-        // first-contact send — never text a STOP'd number). A repo error is
-        // caught below and skips this member (fail CLOSED for the intro).
-        if (await isMemberSuppressed(contacts, member)) {
-          log.info(
-            { conversationId: payload.relayConversationId, memberKey: relayMemberKey(member) },
-            'relayIntro: member opted out (sms_opt_out) — intro skipped',
-          );
-          continue;
-        }
-        await adapter.sendMessage({ to: member.phone, from: poolNumber, body });
-        sentCount += 1;
-      } catch (err) {
-        // One member's intro failure must not block the others.
-        log.error({ err, conversationId: payload.relayConversationId, memberKey: relayMemberKey(member) }, 'relayIntro: intro send failed for a member — continuing');
-      }
-    }
-    log.info({ conversationId: payload.relayConversationId, memberCount: roster.length, sentCount }, 'relay intro sent');
+    await sendRelayAnnouncement(
+      {
+        conversationsRepo: conversations,
+        messagesRepo: messages,
+        contactsRepo: contacts,
+        adapter,
+        ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      },
+      {
+        conversationId: payload.relayConversationId,
+        body,
+        kind: 'relay.intro',
+        ...(payload.persist === false && { persist: false }),
+      },
+    );
   });
 }
 

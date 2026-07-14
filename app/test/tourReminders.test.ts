@@ -694,6 +694,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: world.contactsRepo,
       conversationsRepo: world.conversationsRepo,
+      // Group rungs persist a system announcement row in the relay thread
+      // (sendRelayAnnouncement) — the world's message store backs it.
+      messagesRepo: world.messagesRepo,
       sendMessageService: send,
       adapter: spy.adapter,
       logger,
@@ -792,6 +795,19 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       expect(s.from).toBe(poolNumber);
       expect(s.body).toBe(CONFIRMATION_BODY);
     }
+
+    // Founder decision 2026-07-14: the rung is VISIBLE in the group thread —
+    // persisted ONCE as a system announcement with per-member delivery slots.
+    const announcementRows = rig.world.messages.filter(
+      (m) => m.conversationId === groupConvId,
+    );
+    expect(announcementRows).toHaveLength(1);
+    const announcement = announcementRows[0]!;
+    expect(announcement.direction).toBe('outbound');
+    expect(announcement.author).toBe('system');
+    expect(announcement.relay_sender_key).toBe('system');
+    expect(announcement.body).toBe(CONFIRMATION_BODY);
+    expect(Object.keys(announcement.delivery_recipients ?? {})).toHaveLength(2);
     // Nothing through the 1:1 send service.
     expect(rig.world.sent).toHaveLength(0);
 

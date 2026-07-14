@@ -595,6 +595,26 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.getByText('Team')).toBeInTheDocument();
   });
 
+  it('labels a system announcement (group intro / tour reminder rung) "Automated" with its rollup', () => {
+    const SYSTEM_OUT: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'r2',
+      tsMsgId: 'r2',
+      author: 'system',
+      body: 'Reminder: your property tour is tomorrow.',
+      relay_sender_key: 'system',
+      delivery_recipients: {
+        c1: { status: 'delivered' },
+        c2: { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [SYSTEM_OUT], relayRoster: ROSTER });
+    expect(screen.getByText('Automated')).toBeInTheDocument();
+    expect(screen.getByText('Reminder: your property tour is tomorrow.')).toBeInTheDocument();
+    // The per-member rollup works for announcements exactly like team sends.
+    expect(screen.getByText('Delivered 2/2')).toBeInTheDocument();
+  });
+
   it('suppresses the per-message status chip on a relay source bubble (the rollup is the truth)', () => {
     // A relay SOURCE message's own delivery_status stays at its initial
     // 'queued' forever — DLRs land in delivery_recipients slots, never on the

@@ -1496,6 +1496,13 @@ export class Scenario {
       await expect(
         this.page.getByRole('button', { name: 'Open group text' }),
       ).toHaveCount(0, { timeout: 10_000 });
+      // Everything sent into a group text is VISIBLE in its dashboard thread
+      // (2026-07-14): the intro persists as an "Automated" bubble, appearing
+      // via the SSE refetch once the intro job lands.
+      await expect(this.page.getByText(/You're now connected with/)).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(this.page.getByText('Automated').first()).toBeVisible();
     });
   }
 
@@ -1650,6 +1657,19 @@ export class Scenario {
           )
           .toBe(true);
       }
+    });
+  }
+
+  /** [App→Team] The group rung is VISIBLE in the DASHBOARD group thread
+   *  (2026-07-14: everything sent into a group text shows in its thread) — an
+   *  "Automated" bubble carrying the rung body on the conversation view. */
+  expectReminderVisibleInGroupThread(kind: ReminderKind): Promise<void> {
+    const groupThreadId = this.requireActiveTourGroup().groupThreadId;
+    const body = TOUR_REMINDER_BODIES[kind];
+    return step(`Team sees the '${kind}' reminder in the group thread (Automated bubble)`, async () => {
+      await this.page.goto(`${NEXT}/conversations/${groupThreadId}`);
+      await expect(this.page.getByText(body)).toBeVisible({ timeout: 15_000 });
+      await expect(this.page.getByText('Automated').first()).toBeVisible();
     });
   }
 

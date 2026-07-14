@@ -774,8 +774,10 @@ export interface PlacementsPage {
 /** Message direction relative to the platform. */
 export type MessageDirection = 'inbound' | 'outbound';
 
-/** Who authored a message. `unknown` = from an un-triaged contact (never guessed). */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown';
+/** Who authored a message. `unknown` = from an un-triaged contact (never
+ *  guessed); `system` = an app-authored relay announcement (group intro /
+ *  tour reminder rung). */
+export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
 export type MessageType = 'sms' | 'mms' | 'call';
@@ -1263,8 +1265,10 @@ export interface TimelineMessage extends TimelineBase {
    *  on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
   /** Relay group (M1.7): who authored a relayed message — a member's key
-   *  (contactId, else `phone#<E164>`) or the `'team'` sentinel (a team reply).
-   *  The relay-group view resolves it to a sender name; absent on 1:1 messages. */
+   *  (contactId, else `phone#<E164>`), the `'team'` sentinel (a team reply),
+   *  or the `'system'` sentinel (an app announcement: group intro / tour
+   *  reminder rung). The relay-group view resolves it to a sender label;
+   *  absent on 1:1 messages. */
   relay_sender_key?: string;
 }
 export interface TimelineCall extends TimelineBase {

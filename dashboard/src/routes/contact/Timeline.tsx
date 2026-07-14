@@ -204,15 +204,18 @@ function relayMemberKey(member: ConversationParticipant): string {
     : `phone#${member.phone}`;
 }
 
-/** Resolve a relayed message's sender label: the `'team'` sentinel → "Team"; a
- *  member key → that member's name (roster lookup); otherwise undefined (no
- *  attribution line). Only meaningful for a relay bubble (relay_sender_key set). */
+/** Resolve a relayed message's sender label: the `'team'` sentinel → "Team";
+ *  the `'system'` sentinel → "Automated" (an app announcement: group intro /
+ *  tour reminder rung); a member key → that member's name (roster lookup);
+ *  otherwise undefined (no attribution line). Only meaningful for a relay
+ *  bubble (relay_sender_key set). */
 function relaySenderLabel(
   senderKey: string | undefined,
   roster: ConversationParticipant[] | undefined,
 ): string | undefined {
   if (senderKey === undefined || senderKey.length === 0) return undefined;
   if (senderKey === 'team') return 'Team';
+  if (senderKey === 'system') return 'Automated';
   for (const m of roster ?? []) {
     if (relayMemberKey(m) === senderKey) {
       const name = m.name?.trim();

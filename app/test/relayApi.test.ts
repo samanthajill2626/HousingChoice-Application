@@ -468,11 +468,15 @@ describe('relay-group API (M1.7)', () => {
     expect(res.body.status).toBe('queued');
     expect(typeof res.body.tsMsgId).toBe('string');
 
-    // Stored ONCE — exactly one outbound source message on the relay thread.
+    // The thread carries the PERSISTED intro announcement (2026-07-14:
+    // everything sent into a group text is visible in its thread) plus the
+    // team message stored ONCE — never N outbound copies of the team send.
     const onThread = world.messages.filter((m) => m.conversationId === id);
-    expect(onThread).toHaveLength(1);
-    expect(onThread[0]!.direction).toBe('outbound');
-    expect(onThread[0]!.author).toBe('teammate');
+    expect(onThread.filter((m) => m.relay_sender_key === 'system')).toHaveLength(1);
+    const teamRows = onThread.filter((m) => m.relay_sender_key !== 'system');
+    expect(teamRows).toHaveLength(1);
+    expect(teamRows[0]!.direction).toBe('outbound');
+    expect(teamRows[0]!.author).toBe('teammate');
 
     // Fanned out to BOTH members FROM the pool number — never participant_phone.
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());

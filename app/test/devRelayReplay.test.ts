@@ -175,9 +175,10 @@ describe('POST /__dev/relay/replay-intros — route behavior', () => {
 describe('POST /__dev/relay/replay-intros — the real relay.intro job persists no message rows', () => {
   // Wire the route's enqueue to the REAL job machinery so the POST runs the
   // actual relay.intro handler in-process (InProcess dispatch), then assert the
-  // spec's load-bearing claim: the message-row store is UNCHANGED (the intro is a
-  // system announcement — it sends fake legs but writes no message rows), so the
-  // seeded DB stays byte-stable across replays.
+  // spec's load-bearing claim: the message-row store is UNCHANGED. A real
+  // provisioning intro now PERSISTS a system-announcement row (founder decision
+  // 2026-07-14), so the replay seam passes persist:false — legs-only, keeping
+  // the seeded DB byte-stable across replays.
   let world: FakeWorld;
 
   beforeEach(() => {
@@ -227,7 +228,10 @@ describe('POST /__dev/relay/replay-intros — the real relay.intro job persists 
       relayReplayDeps: {
         conversationsRepo: repo,
         // The REAL enqueue → InProcess dispatch → real relay.intro handler.
-        enqueueIntro: async (id) => void (await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: id })),
+        // persist:false mirrors the route's default seam (dev.ts): the replay
+        // is legs-only so the seeded DB never grows.
+        enqueueIntro: async (id) =>
+          void (await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: id, persist: false })),
       },
     });
     const app = buildApp({ config: cfg, devRouter });

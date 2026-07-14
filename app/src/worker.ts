@@ -98,6 +98,7 @@ runWithContext(bootContext, () => {
   const { createToursRepo } = await import('./repos/toursRepo.js');
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
   const { createMessagingAdapter } = await import('./adapters/messaging.js');
   const { runDueTourReminders } = await import('./jobs/tourReminders.js');
@@ -107,6 +108,9 @@ runWithContext(bootContext, () => {
     toursRepo: createToursRepo({ logger }),
     contactsRepo: createContactsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
+    // GROUP-route rungs persist a system announcement row in the relay thread
+    // (sendRelayAnnouncement) — messagesRepo backs that persistence.
+    messagesRepo: createMessagesRepo({ logger }),
     sendMessageService: createSendMessageService({ config, logger }),
     // GROUP-route reminders (landlord_led/pm_team with a group thread) send
     // directly per member from the pool number — same construction the relay

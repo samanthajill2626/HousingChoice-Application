@@ -392,6 +392,67 @@ describe('relay.fanOut (M1.7)', () => {
       expect(sent.body).toContain('Carol');
     }
   });
+
+  // Founder decision 2026-07-14: everything sent into a group text must be
+  // visible in its dashboard thread — the intro persists as a SYSTEM row.
+  it('relay.intro PERSISTS one system announcement row with per-member delivery slots', async () => {
+    seedRelay(world);
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-relay-1');
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.direction).toBe('outbound');
+    expect(row.author).toBe('system');
+    expect(row.relay_sender_key).toBe('system');
+    // The stored body IS the sent body (verbatim — no "<name>: " prefix).
+    expect(row.body).toBe(world.sent[0]!.body);
+    // One slot per member, stamped with the leg's SID; pointer per leg so the
+    // delivery callback can finalize the rollup chip.
+    expect(Object.keys(row.delivery_recipients ?? {}).sort()).toEqual([
+      'c-alice',
+      'c-bob',
+      'c-carol',
+    ]);
+    expect(row.delivery_recipients?.['c-alice']?.sid).toMatch(/^SMfake-out-/);
+    expect(world.relaySidPointers.size).toBe(3);
+    // The inbox preview was touched with the intro text (repo truncates — a
+    // prefix match is the honest assertion).
+    const conv = world.conversations.get('conv-relay-1')!;
+    const preview = conv.last_message_preview ?? '';
+    expect(preview.length).toBeGreaterThan(0);
+    expect(row.body!.startsWith(preview.slice(0, 20))).toBe(true);
+  });
+
+  it('relay.intro marks an opted-out member failed/contact_opted_out on the persisted row', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });
+    await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: 'conv-relay-1' });
+    await outbound.settle();
+
+    const row = world.messages.find((m) => m.conversationId === 'conv-relay-1')!;
+    expect(row.delivery_recipients?.['c-bob']).toEqual({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+    });
+    expect(row.delivery_recipients?.['c-alice']?.status).toBe('queued'); // fake adapter returns 'queued'
+  });
+
+  // persist:false = the dev replay seam (POST /__dev/relay/replay-intros): the
+  // legs send, the DB stays byte-stable — no announcement row, no pointers.
+  it('relay.intro with persist:false sends the legs but persists NOTHING', async () => {
+    seedRelay(world);
+    await enqueueImmediate(RELAY_INTRO_JOB, {
+      relayConversationId: 'conv-relay-1',
+      persist: false,
+    });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
+    expect(world.messages.filter((m) => m.conversationId === 'conv-relay-1')).toHaveLength(0);
+    expect(world.relaySidPointers.size).toBe(0);
+  });
 });
 
 describe('relay body/intro composition (M1.7)', () => {

@@ -75,9 +75,12 @@ export function allowedPriorCallStatuses(next: CallStatus): CallStatus[] {
  * Who authored the message (doc §5; `ai` is Phase 2). `unknown` is the
  * operator-mandated honesty value (deviations table 2026-06-12): inbound from
  * an unreviewed contact must not be recorded as a guessed `tenant` — it
- * resolves when the contact is typed in the M1.4/M1.5 review flows.
+ * resolves when the contact is typed in the M1.4/M1.5 review flows. `system`
+ * is an app-authored relay announcement (relay intro / tour reminder rung —
+ * services/relayAnnouncements.ts): no human wrote it, so neither `teammate`
+ * nor `ai` would be honest.
  */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown';
+export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /**
  * Outbound delivery status machine (doc §7.1):

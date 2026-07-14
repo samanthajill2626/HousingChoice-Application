@@ -124,6 +124,8 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   await flow.teamBooksTour(times);
   await flow.tickTourReminders();
   await flow.expectReminderInGroup('confirmation', [tenant, owner]);
+  // 2026-07-14: the rung is ALSO visible in the dashboard group thread.
+  await flow.expectReminderVisibleInGroupThread('confirmation');
   await flow.tickTourReminders(justAfter(times.dayBefore));
   await flow.expectReminderInGroup('day_before', [tenant, owner]);
 

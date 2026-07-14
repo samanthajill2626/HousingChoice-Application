@@ -22,9 +22,11 @@ import {
 import {
   RELAY_FANOUT_JOB,
   RELAY_INTRO_JOB,
+  RELAY_MEMBER_ADDED_JOB,
   TEAM_SENDER_KEY,
   TEAM_SENDER_LABEL,
   composeIntroBody,
+  composeMemberAddedBody,
   composeRelayBody,
   registerRelayFanOutJobHandler,
 } from '../src/jobs/relayFanOut.js';
@@ -453,6 +455,43 @@ describe('relay.fanOut (M1.7)', () => {
     expect(world.messages.filter((m) => m.conversationId === 'conv-relay-1')).toHaveLength(0);
     expect(world.relaySidPointers.size).toBe(0);
   });
+
+  // Member added to an EXISTING group (founder decision 2026-07-14): one
+  // announcement to the WHOLE group, persisted as a system row in the thread.
+  it('relay.memberAdded names the new member, sends to EVERYONE, and persists a system row', async () => {
+    seedRelay(world);
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-relay-1',
+      addedMemberKey: 'c-carol',
+    });
+    await outbound.settle();
+
+    // Every member gets the same body FROM the pool (Carol's welcome doubles
+    // as Alice/Bob's join notice).
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
+    expect(world.sent.every((s) => s.from === POOL)).toBe(true);
+    expect(world.sent[0]!.body).toContain('Carol joined this group text.');
+    expect(world.sent[0]!.body).toContain('Alice, Bob, and Carol');
+
+    // Persisted once as a system announcement with a slot per member.
+    const rows = world.messages.filter((m) => m.conversationId === 'conv-relay-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.relay_sender_key).toBe('system');
+    expect(rows[0]!.body).toBe(world.sent[0]!.body);
+    expect(Object.keys(rows[0]!.delivery_recipients ?? {})).toHaveLength(3);
+  });
+
+  it('relay.memberAdded degrades to the neutral joined label when the key matches no member', async () => {
+    seedRelay(world);
+    // Raced remove: the added member is already off the roster at job time.
+    await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+      relayConversationId: 'conv-relay-1',
+      addedMemberKey: 'phone#+15550109999',
+    });
+    await outbound.settle();
+
+    expect(world.sent[0]!.body).toContain('A new member joined this group text.');
+  });
 });
 
 describe('relay body/intro composition (M1.7)', () => {
@@ -476,6 +515,20 @@ describe('relay body/intro composition (M1.7)', () => {
       const body = composeIntroBody(names);
       expect(body.startsWith(resolveMessage('relay.identity'))).toBe(true);
     }
+  });
+
+  it('composeMemberAddedBody names the joiner (neutral fallback) and carries identity + connection', () => {
+    const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
+    expect(body.startsWith(resolveMessage('relay.identity'))).toBe(true);
+    expect(body).toContain('Carol Brown joined this group text.');
+    expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
+    // No name (phone-only member) → neutral label, NEVER a phone.
+    expect(composeMemberAddedBody(undefined, ['Alice', undefined])).toContain(
+      'A new member joined this group text.',
+    );
+    expect(composeMemberAddedBody('  ', ['Alice'])).toContain(
+      'A new member joined this group text.',
+    );
   });
 });
 

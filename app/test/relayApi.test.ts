@@ -486,6 +486,52 @@ describe('relay-group API (M1.7)', () => {
     expect(world.sent.every((s) => s.body === 'Tenant Place LLC: Showing is at 4pm')).toBe(true);
   });
 
+  // Member added to an EXISTING group (2026-07-14): announced to the whole
+  // group + persisted in the thread; an idempotent re-add stays silent.
+  it('adding a member announces the join to the whole group; a re-add of the same phone does NOT', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    const poolNumber = created.body.conversation.pool_number;
+    world.sent.length = 0; // drop the intro sends — assert only the join notice
+
+    const add = await request(app)
+      .post(`/api/conversations/${id}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, name: 'Bob' });
+    expect(add.status).toBe(200);
+
+    // Announced to BOTH members (Bob's welcome doubles as Alice's notice).
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
+    expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
+    expect(world.sent[0]!.body).toContain('Bob joined this group text.');
+    // Persisted in the thread: the intro row + ONE join-notice row.
+    const systemRows = world.messages.filter(
+      (m) => m.conversationId === id && m.relay_sender_key === 'system',
+    );
+    expect(systemRows).toHaveLength(2);
+    expect(systemRows.some((m) => (m.body ?? '').includes('Bob joined this group text.'))).toBe(true);
+
+    // Idempotent re-add: no new announcement, no new sends.
+    world.sent.length = 0;
+    const readd = await request(app)
+      .post(`/api/conversations/${id}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, name: 'Bob' });
+    expect(readd.status).toBe(200);
+    expect(world.sent).toHaveLength(0);
+    expect(
+      world.messages.filter((m) => m.conversationId === id && m.relay_sender_key === 'system'),
+    ).toHaveLength(2);
+  });
+
   it('FIX 2: POST a message to a CLOSED relay group → 409', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);

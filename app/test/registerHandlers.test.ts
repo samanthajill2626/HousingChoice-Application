@@ -23,6 +23,7 @@ describe('registerAllJobHandlers', () => {
         'messaging.retrySend',
         'relay.fanOut',
         'relay.intro',
+        'relay.memberAdded',
       ].sort(),
     );
   });

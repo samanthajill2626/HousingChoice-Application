@@ -25,6 +25,8 @@ import { VoiceCapabilityError } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { relayMemberKey } from '../repos/messagesRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
+import { enqueueImmediate } from '../jobs/jobs.js';
+import { RELAY_MEMBER_ADDED_JOB } from '../jobs/relayFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -236,6 +238,24 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         });
       } catch (err) {
         log.error({ err, conversationId }, 'relay member add: recording milestone failed');
+      }
+    }
+    // Announce a REAL add to the WHOLE group (founder decision 2026-07-14):
+    // the new member's welcome + everyone else's join notice, persisted in the
+    // thread as a system announcement (relay.memberAdded job → the intro
+    // chain). Best-effort — a failed enqueue must not fail the roster mutation
+    // (the member IS on the roster; log + continue).
+    if (!wasMember) {
+      try {
+        await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
+          relayConversationId: conversationId,
+          addedMemberKey: relayMemberKey(member),
+        });
+      } catch (err) {
+        log.error(
+          { err, conversationId },
+          'relay member add: announcement enqueue failed — member added without a join notice',
+        );
       }
     }
     events.emit('conversation.updated', toConversationUpdatedEvent(updated));

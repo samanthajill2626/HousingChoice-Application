@@ -143,19 +143,27 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await page.getByRole('button', { name: 'Add member' }).click();
   const search = page.getByRole('combobox', { name: 'Add member' });
   await search.fill('Leon');
+  // Picking COMMITS the field (committed-selection typeahead): the listbox
+  // hides itself and the input goes read-only until cleared.
   await page.getByRole('option', { name: /Leon Abara/ }).click();
-  // The picked name still matches its own suggestion, so the listbox stays open
-  // and overlays the Add button — dismiss it (Escape) as a user would.
-  await search.press('Escape');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(list.getByRole('listitem')).toHaveCount(3);
   await expect(list.getByText('Leon Abara')).toBeVisible();
+  // The join is ANNOUNCED in the thread (2026-07-14 visibility rule): an
+  // "Automated" bubble naming the new member appears via the SSE refetch.
+  await expect(page.getByText('Leon Abara joined this group text', { exact: false })).toBeVisible({
+    timeout: 15_000,
+  });
 
   // --- Add by RAW PHONE (normalize path; a non-seed number, no suggestions) ---
   await page.getByRole('button', { name: 'Add member' }).click();
   await page.getByRole('combobox', { name: 'Add member' }).fill('4045550199');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(list.getByRole('listitem')).toHaveCount(4);
+  // A phone-only member has no name — the join notice uses the neutral label.
+  await expect(
+    page.getByText('A new member joined this group text', { exact: false }),
+  ).toBeVisible({ timeout: 15_000 });
 
   // --- Remove a member (× → confirm) → roster shrinks ------------------------
   await page.getByRole('button', { name: 'Remove Leon Abara' }).click();

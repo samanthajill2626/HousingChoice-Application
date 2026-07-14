@@ -52,6 +52,7 @@ export { isMemberSuppressed } from '../services/relayAnnouncements.js';
 
 export const RELAY_FANOUT_JOB = 'relay.fanOut';
 export const RELAY_INTRO_JOB = 'relay.intro';
+export const RELAY_MEMBER_ADDED_JOB = 'relay.memberAdded';
 
 /** Continuation cap: a transient failure re-enqueues at most this many times. */
 export const MAX_FANOUT_ATTEMPTS = 3;
@@ -163,40 +164,67 @@ export function composeRelayBody(senderName: string | undefined, body: string): 
 }
 
 /**
- * Intro body naming everyone connected (M1.7). Uses member display names where
- * known, a neutral count phrasing otherwise — NEVER a phone number (PII). E.g.
- * "Tenant Place LLC. Reply STOP to opt out. You're connected with Alice, Bob,
- * and Carol on this number."
+ * The "You're now connected with …" connection sentence shared by the intro
+ * and the member-added announcement. Uses member display names where known, a
+ * neutral count phrasing otherwise — NEVER a phone number (PII).
+ */
+export function composeConnectionSentence(memberNames: (string | undefined)[]): string {
+  const named = memberNames
+    .map((n) => (n && n.trim().length > 0 ? n.trim() : undefined))
+    .filter((n): n is string => n !== undefined);
+  if (named.length === 0) {
+    const others = Math.max(memberNames.length - 1, 0);
+    return others > 0
+      ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
+      : `You're now connected on this number. Reply here and the group sees it.`;
+  }
+  const list =
+    named.length === 1
+      ? named[0]
+      : named.length === 2
+        ? `${named[0]} and ${named[1]}`
+        : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
+  return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
+}
+
+/**
+ * Intro body naming everyone connected (M1.7). E.g. "Tenant Place LLC. Reply
+ * STOP to opt out. You're connected with Alice, Bob, and Carol on this number."
  *
  * A2P (spec §5): the intro is a first-contact message, so it is PREPENDED with
  * RELAY_INTRO_IDENTITY (business identity + "Reply STOP to opt out.") — today's
  * intro carried neither. The identity comes from the single source of truth.
  */
 export function composeIntroBody(memberNames: (string | undefined)[]): string {
-  const named = memberNames
-    .map((n) => (n && n.trim().length > 0 ? n.trim() : undefined))
-    .filter((n): n is string => n !== undefined);
-  const connection =
-    named.length === 0
-      ? (() => {
-          const others = Math.max(memberNames.length - 1, 0);
-          return others > 0
-            ? `You're now connected with ${others} other ${others === 1 ? 'person' : 'people'} on this number. Reply here and everyone in the group sees it.`
-            : `You're now connected on this number. Reply here and the group sees it.`;
-        })()
-      : (() => {
-          const list =
-            named.length === 1
-              ? named[0]
-              : named.length === 2
-                ? `${named[0]} and ${named[1]}`
-                : `${named.slice(0, -1).join(', ')}, and ${named[named.length - 1]}`;
-          return `You're now connected with ${list} on this number. Reply here and everyone in the group sees it.`;
-        })();
   // The RELAY_INTRO_IDENTITY prefix + a space is folded into the `relay.intro`
   // catalog default; the count-plurality / Oxford-list `connection` string feeds
   // the {members} token. Net sent text is byte-identical to before.
-  return resolveMessage('relay.intro', { members: connection });
+  return resolveMessage('relay.intro', { members: composeConnectionSentence(memberNames) });
+}
+
+/** Neutral joined label when the added member has no resolved name (never a phone). */
+const ANONYMOUS_JOINED_LABEL = 'A new member';
+
+/**
+ * Member-added announcement (founder decision 2026-07-14): one body sent to
+ * the WHOLE group — the new member's first contact on this number (identity +
+ * STOP fold in like the intro) doubling as the join notice for everyone else.
+ * E.g. "Tenant Place LLC. Reply STOP to opt out. Carol Brown joined this group
+ * text. You're now connected with Alice, Bob, and Carol Brown on this number.
+ * Reply here and everyone in the group sees it."
+ */
+export function composeMemberAddedBody(
+  newMemberName: string | undefined,
+  memberNames: (string | undefined)[],
+): string {
+  const who =
+    newMemberName && newMemberName.trim().length > 0
+      ? newMemberName.trim()
+      : ANONYMOUS_JOINED_LABEL;
+  return resolveMessage('relay.member_added', {
+    joined: `${who} joined this group text.`,
+    members: composeConnectionSentence(memberNames),
+  });
 }
 
 export interface RelayIntroPayload {
@@ -223,6 +251,28 @@ export function parseRelayIntroPayload(payload: unknown): RelayIntroPayload {
     relayConversationId: p.relayConversationId,
     ...(p.persist === false && { persist: false }),
   };
+}
+
+export interface RelayMemberAddedPayload {
+  relayConversationId: string;
+  /** relayMemberKey of the just-added member — resolved against the CURRENT
+   *  roster at job time for the display name (a raced remove degrades to the
+   *  neutral joined label, never a failure). */
+  addedMemberKey: string;
+}
+
+export function parseRelayMemberAddedPayload(payload: unknown): RelayMemberAddedPayload {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('relayMemberAdded: payload is not an object');
+  }
+  const p = payload as Partial<RelayMemberAddedPayload>;
+  if (typeof p.relayConversationId !== 'string' || p.relayConversationId.length === 0) {
+    throw new Error('relayMemberAdded: missing relayConversationId');
+  }
+  if (typeof p.addedMemberKey !== 'string' || p.addedMemberKey.length === 0) {
+    throw new Error('relayMemberAdded: missing addedMemberKey');
+  }
+  return { relayConversationId: p.relayConversationId, addedMemberKey: p.addedMemberKey };
 }
 
 export interface RelayFanOutJobDeps {
@@ -556,6 +606,47 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
         kind: 'relay.intro',
         ...(payload.persist === false && { persist: false }),
       },
+    );
+  });
+
+  // relay.memberAdded (founder decision 2026-07-14): announce a member added
+  // to an EXISTING group to the WHOLE group — the new member's welcome (their
+  // first contact on this number) doubling as everyone else's join notice.
+  // Persisted as a system announcement (visible in the dashboard thread) with
+  // per-member delivery slots. Idempotent via the job execution marker.
+  defineJobHandler(RELAY_MEMBER_ADDED_JOB, async (rawPayload) => {
+    const payload = parseRelayMemberAddedPayload(rawPayload);
+    adapter ??= createMessagingAdapter({ logger: deps.logger });
+    conversations ??= createConversationsRepo({ logger: deps.logger });
+    messages ??= createMessagesRepo({ logger: deps.logger });
+    contacts ??= createContactsRepo({ logger: deps.logger });
+
+    const jobId = getContext()?.jobId;
+    if (typeof jobId === 'string' && jobId.length > 0) {
+      const first = await messages.putJobExecutionMarker(jobId, payload.relayConversationId);
+      if (!first) {
+        log.info({ jobId, conversationId: payload.relayConversationId }, 'relay member-added duplicate delivery suppressed');
+        return;
+      }
+    }
+
+    const conversation = await conversations.getById(payload.relayConversationId);
+    const roster = (conversation?.participants ?? []) as ConversationParticipant[];
+    const added = roster.find((m) => relayMemberKey(m) === payload.addedMemberKey);
+    const body = composeMemberAddedBody(
+      added?.name,
+      roster.map((m) => m.name),
+    );
+    await sendRelayAnnouncement(
+      {
+        conversationsRepo: conversations,
+        messagesRepo: messages,
+        contactsRepo: contacts,
+        adapter,
+        ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+        ...(deps.logger !== undefined && { logger: deps.logger }),
+      },
+      { conversationId: payload.relayConversationId, body, kind: 'relay.member_added' },
     );
   });
 }

@@ -38,6 +38,8 @@ export type MessageId =
   | 'nudge.rta_window_closing'
   // Operational — relay group intro (jobs/relayFanOut.ts)
   | 'relay.intro'
+  // Operational - relay group member-added announcement (jobs/relayFanOut.ts)
+  | 'relay.member_added'
   // Operational - relay group media-only fan-out body (jobs/relayFanOut.ts)
   | 'relay.media_only'
   // Compliance-derived, already editable
@@ -173,6 +175,19 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     editable: true,
     channel: 'sms',
     vars: ['members'],
+  },
+  // Member added to an EXISTING group: announced to the WHOLE group (the new
+  // member's first contact on this number, so the identity prefix folds in
+  // exactly like the intro). {joined} = "<Name> joined this group text." and
+  // {members} = the connection sentence, both computed in code
+  // (jobs/relayFanOut.ts composeMemberAddedBody).
+  'relay.member_added': {
+    id: 'relay.member_added',
+    default: `${RELAY_INTRO_IDENTITY} {joined} {members}`,
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['joined', 'members'],
   },
   // Body for a MEDIA-ONLY message fanned out to a relay group (no text to
   // relay). "<name> sent an attachment." - the media rides along on the leg.

@@ -288,6 +288,7 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         toursRepo: world.toursRepo,
         contactsRepo: world.contactsRepo,
         conversationsRepo: world.conversationsRepo,
+        messagesRepo: world.messagesRepo,
         sendMessageService,
         adapter: world.adapter,
         logger,

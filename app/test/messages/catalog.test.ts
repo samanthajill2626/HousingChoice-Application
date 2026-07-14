@@ -6,6 +6,7 @@ import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
   RELAY_INTRO_IDENTITY,
+  SMS_BRAND_NAME,
   STOP_CONFIRMATION,
   WEB_FORM_CONSENT_COPY,
   WELCOME_SMS,
@@ -75,7 +76,13 @@ describe('MESSAGE_CATALOG', () => {
     expect(MESSAGE_CATALOG['keyword.help'].default).toBe(HELP_REPLY);
     expect(MESSAGE_CATALOG['consent.web_form'].default).toBe(WEB_FORM_CONSENT_COPY);
     expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
-    // relay.intro folds the identity prefix + a space + {members}.
-    expect(MESSAGE_CATALOG['relay.intro'].default).toBe(`${RELAY_INTRO_IDENTITY} {members}`);
+    // The relay announcements lead with the brand and TRAIL the opt-out
+    // (founder wording 2026-07-14: content first, STOP last).
+    expect(MESSAGE_CATALOG['relay.intro'].default).toBe(
+      `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`,
+    );
+    expect(MESSAGE_CATALOG['relay.member_added'].default).toBe(
+      `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`,
+    );
   });
 });

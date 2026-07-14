@@ -80,12 +80,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // Shared deps for runDueTourReminders. The adapter (group route) is a spy
-  // that must stay untouched here — these tours have no group thread.
+  // that must stay untouched here — these tours have no group thread (and so
+  // is messagesRepo: group rungs persist announcement rows through it).
   const runDeps = {
     tourRemindersRepo: tourReminders,
     toursRepo: tours,
     contactsRepo: world.contactsRepo,
     conversationsRepo: world.conversationsRepo,
+    messagesRepo: world.messagesRepo,
     sendMessageService,
     adapter: createAdapterSpy().adapter,
     logger,
@@ -530,6 +532,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: racingWorld.contactsRepo,
       conversationsRepo: racingWorld.conversationsRepo,
+      messagesRepo: racingWorld.messagesRepo,
       sendMessageService: racingSend,
       adapter: createAdapterSpy().adapter,
       logger,
@@ -607,6 +610,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: cancelWorld.contactsRepo,
       conversationsRepo: cancelWorld.conversationsRepo,
+      messagesRepo: cancelWorld.messagesRepo,
       sendMessageService: cancelSend,
       adapter: createAdapterSpy().adapter,
       logger,

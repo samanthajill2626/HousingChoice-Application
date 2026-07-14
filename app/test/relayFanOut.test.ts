@@ -509,17 +509,19 @@ describe('relay body/intro composition (M1.7)', () => {
     expect(composeIntroBody([undefined, undefined])).toMatch(/connected with 1 other person/);
   });
 
-  it('A2P/CTIA (spec §5): the intro is PREPENDED with business identity + opt-out', () => {
-    // Every intro (named or count-phrasing) leads with the registered brand + STOP.
+  it('A2P/CTIA (spec §5): every intro leads with the brand and TRAILS the opt-out', () => {
+    // Founder wording (2026-07-14): content first, "Reply STOP to opt out." last.
     for (const names of [['Alice', 'Bob', 'Carol'], ['Alice'], [undefined, undefined]] as (string | undefined)[][]) {
       const body = composeIntroBody(names);
-      expect(body.startsWith(resolveMessage('relay.identity'))).toBe(true);
+      expect(body.startsWith('Tenant Place LLC.')).toBe(true);
+      expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
     }
   });
 
-  it('composeMemberAddedBody names the joiner (neutral fallback) and carries identity + connection', () => {
+  it('composeMemberAddedBody names the joiner (neutral fallback) with brand-first, STOP-last framing', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
-    expect(body.startsWith(resolveMessage('relay.identity'))).toBe(true);
+    expect(body.startsWith('Tenant Place LLC.')).toBe(true);
+    expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
     expect(body).toContain('Carol Brown joined this group text.');
     expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
     // No name (phone-only member) → neutral label, NEVER a phone.

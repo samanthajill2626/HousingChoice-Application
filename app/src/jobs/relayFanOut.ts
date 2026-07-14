@@ -188,17 +188,17 @@ export function composeConnectionSentence(memberNames: (string | undefined)[]): 
 }
 
 /**
- * Intro body naming everyone connected (M1.7). E.g. "Tenant Place LLC. Reply
- * STOP to opt out. You're connected with Alice, Bob, and Carol on this number."
+ * Intro body naming everyone connected (M1.7). E.g. "Tenant Place LLC. You're
+ * now connected with Alice, Bob, and Carol on this number. Reply here and
+ * everyone in the group sees it. Reply STOP to opt out."
  *
- * A2P (spec §5): the intro is a first-contact message, so it is PREPENDED with
- * RELAY_INTRO_IDENTITY (business identity + "Reply STOP to opt out.") — today's
- * intro carried neither. The identity comes from the single source of truth.
+ * A2P (spec §5): the intro is a first-contact message, so it carries the brand
+ * identity (leading) and the opt-out instruction (trailing — founder wording
+ * 2026-07-14: content first, STOP last). Both fold into the catalog default.
  */
 export function composeIntroBody(memberNames: (string | undefined)[]): string {
-  // The RELAY_INTRO_IDENTITY prefix + a space is folded into the `relay.intro`
-  // catalog default; the count-plurality / Oxford-list `connection` string feeds
-  // the {members} token. Net sent text is byte-identical to before.
+  // The count-plurality / Oxford-list `connection` string feeds the {members}
+  // token of the `relay.intro` catalog default (brand … opt-out shell).
   return resolveMessage('relay.intro', { members: composeConnectionSentence(memberNames) });
 }
 
@@ -207,11 +207,11 @@ const ANONYMOUS_JOINED_LABEL = 'A new member';
 
 /**
  * Member-added announcement (founder decision 2026-07-14): one body sent to
- * the WHOLE group — the new member's first contact on this number (identity +
- * STOP fold in like the intro) doubling as the join notice for everyone else.
- * E.g. "Tenant Place LLC. Reply STOP to opt out. Carol Brown joined this group
+ * the WHOLE group — the new member's first contact on this number (leading
+ * brand + trailing STOP fold in like the intro) doubling as the join notice
+ * for everyone else. E.g. "Tenant Place LLC. Carol Brown joined this group
  * text. You're now connected with Alice, Bob, and Carol Brown on this number.
- * Reply here and everyone in the group sees it."
+ * Reply here and everyone in the group sees it. Reply STOP to opt out."
  */
 export function composeMemberAddedBody(
   newMemberName: string | undefined,

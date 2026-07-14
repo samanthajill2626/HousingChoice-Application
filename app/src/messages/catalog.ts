@@ -15,6 +15,7 @@ import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
   RELAY_INTRO_IDENTITY,
+  SMS_BRAND_NAME,
   STOP_CONFIRMATION,
   WEB_FORM_CONSENT_COPY,
   WELCOME_SMS,
@@ -165,25 +166,27 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
 
   // --- Operational: relay group intro ---
-  // §7: the RELAY_INTRO_IDENTITY prefix + a space folds INTO the default; the
-  // {members} token is the count-plurality / Oxford-list `connection` string,
-  // computed in code (jobs/relayFanOut.ts composeIntroBody) and passed in.
+  // §7 + founder wording (2026-07-14): the brand leads, the "Reply STOP to opt
+  // out." opt-out TRAILS (a first-contact message needs both — the A2P floor —
+  // but the content reads first). {members} is the count-plurality /
+  // Oxford-list `connection` string, computed in code (jobs/relayFanOut.ts
+  // composeIntroBody) and passed in.
   'relay.intro': {
     id: 'relay.intro',
-    default: `${RELAY_INTRO_IDENTITY} {members}`,
+    default: `${SMS_BRAND_NAME}. {members} Reply STOP to opt out.`,
     class: 'operational',
     editable: true,
     channel: 'sms',
     vars: ['members'],
   },
   // Member added to an EXISTING group: announced to the WHOLE group (the new
-  // member's first contact on this number, so the identity prefix folds in
+  // member's first contact on this number, so brand + trailing opt-out fold in
   // exactly like the intro). {joined} = "<Name> joined this group text." and
   // {members} = the connection sentence, both computed in code
   // (jobs/relayFanOut.ts composeMemberAddedBody).
   'relay.member_added': {
     id: 'relay.member_added',
-    default: `${RELAY_INTRO_IDENTITY} {joined} {members}`,
+    default: `${SMS_BRAND_NAME}. {joined} {members} Reply STOP to opt out.`,
     class: 'operational',
     editable: true,
     channel: 'sms',

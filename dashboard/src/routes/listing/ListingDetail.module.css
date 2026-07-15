@@ -325,6 +325,14 @@ a:hover .contactName {
   flex-wrap: wrap;
 }
 
+/* Each thumbnail is a positioned box so its actions overlay can sit over the
+ * image; the actions reveal on hover OR keyboard focus (focus-within). */
+.thumbWrap {
+  position: relative;
+  width: 92px;
+  height: 64px;
+}
+
 .thumb {
   width: 92px;
   height: 64px;
@@ -332,6 +340,67 @@ a:hover .contactName {
   background: var(--c-surface-2);
   border: 1px solid var(--c-media-placeholder-border);
   border-radius: var(--radius-sm);
+}
+
+/* An honest tile for a photo whose display URL couldn't be resolved. */
+.thumbUnavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 92px;
+  height: 64px;
+  background: var(--c-surface-2);
+  border: 1px dashed var(--c-media-placeholder-border);
+  border-radius: var(--radius-sm);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+/* Per-thumbnail action bar (Make cover / Remove), hidden until hover/focus. */
+.thumbActions {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-bottom-left-radius: var(--radius-sm);
+  border-bottom-right-radius: var(--radius-sm);
+  background: var(--c-header-bg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+}
+
+.thumbWrap:hover .thumbActions,
+.thumbWrap:focus-within .thumbActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.thumbBtn {
+  flex: 1 1 auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--c-text-inverse);
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-1);
+  cursor: pointer;
+}
+
+.thumbBtn:hover {
+  text-decoration: underline;
+}
+
+.thumbBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.thumbBtn:disabled {
+  cursor: default;
+  color: var(--c-text-subtle);
 }
 
 .addPhoto {
@@ -345,10 +414,21 @@ a:hover .contactName {
   cursor: pointer;
 }
 
+.addPhoto:disabled {
+  cursor: default;
+  color: var(--c-text-subtle);
+}
+
 .photosNote {
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
+}
+
+.photosError {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
 }
 
 /* --- Mobile (≤768px) ------------------------------------------------------- */

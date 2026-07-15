@@ -83,7 +83,7 @@
   - `provisionPlacementRelay(placementId): Promise<{conversationId: string}>` (verify the route's actual response shape in placements.ts and unwrap accordingly)
   - `setPlacementFollowUp(placementId, at: string): Promise<void>` and `clearPlacementFollowUp(placementId): Promise<void>`
 
-- [ ] Steps: write bindings mirroring `getTourReminders`/`patchTourReminder` in the same file; `npm run typecheck` BARE; commit.
+- [x] Steps: write bindings mirroring `getTourReminders`/`patchTourReminder` in the same file; `npm run typecheck` BARE; commit.
 
 ### Task 4: Date vocabulary formatters
 

@@ -767,6 +767,34 @@ export interface PlacementsPage {
   nextCursor: string | null;
 }
 
+/** The automated application-nudge rungs (mirrors the server NudgeKind ladder in
+ *  app/src/repos/placementNudgesRepo.ts). */
+export type NudgeKind =
+  | 'receipt_check'
+  | 'completion_check'
+  | 'approval_check'
+  | 'rta_window_closing';
+
+/**
+ * One nudge rung as the dashboard renders it
+ * (GET /api/placements/:placementId/nudges). Mirrors the server's
+ * PlacementNudgeView shape verbatim (app/src/routes/placementNudges.ts).
+ */
+export interface PlacementNudgeView {
+  nudgeId: string;
+  placementId: string;
+  kind: NudgeKind;
+  /** The party a rung's automated text goes to, derived from kind. */
+  recipient: 'tenant' | 'landlord';
+  /** ISO 8601 — when the rung is/was scheduled to fire. */
+  dueAt: string;
+  state: 'upcoming' | 'sent' | 'canceled';
+  /** ISO 8601 — when it was sent (present when state === 'sent'). */
+  sentAt?: string;
+  /** ISO 8601 — when it was canceled (present when state === 'canceled'). */
+  canceledAt?: string;
+}
+
 // --- SSE (legacy reuse — verbatim) ------------------------------------------
 // Copied unchanged from the legacy dashboard. useEventStream
 // dispatches these; useToday refetches on placement.updated + conversation.updated.

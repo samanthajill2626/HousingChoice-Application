@@ -52,8 +52,11 @@ describe('PlacementRow', () => {
     expect(screen.getByRole('button', { name: 'kebab' })).toBeInTheDocument();
   });
 
-  it('shows tenant status badge and tour date when present', () => {
-    renderRow(mkRow({ tenantStatus: 'placing' }, { tour_date: '2026-07-16' }));
+  it('shows the tour date when present (no tenant-status badge - dropped 2026-07-15)', () => {
+    renderRow(mkRow({}, { tour_date: '2026-07-16' }));
     expect(screen.getByText(/Tour Jul 16/)).toBeInTheDocument();
+    // The old board's tenant-status badge is gone: on this page an active
+    // tenant is always "Placing", so the chip was a stuck duplicate.
+    expect(screen.queryByText('Placing')).not.toBeInTheDocument();
   });
 });

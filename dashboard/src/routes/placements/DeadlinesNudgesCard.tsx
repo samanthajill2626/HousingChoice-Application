@@ -8,38 +8,28 @@
 //     binding directly. All follow-up writes emit placement.updated, so the parent
 //     refetches the placement bundle and passes the new deadline props back down.
 //
-//   Nudges block: the armed application-nudge ladder (GET /nudges) - each rung's
-//     kind label, recipient (tenant / landlord, by NAME), a "sends ..." chip
-//     (the shared sendRelative), and a per-rung Cancel / Restore. Cancel/restore
-//     mirrors RemindersPanel exactly: a busyId single-flight so a double-click
-//     can't fire two PATCHes, a 409 (lost race / already sent) resolves silently
-//     via the post-PATCH refetch (the ladder IS the honest answer, no banner).
+//   Nudges block: the armed application-nudge ladder - each rung's kind label,
+//     recipient (tenant / landlord, by NAME), a "sends ..." chip (the shared
+//     sendRelative), and a per-rung Cancel / Restore. The ladder itself is fetched
+//     ONCE by the parent (usePlacementNudges) and passed in as props, shared with
+//     the Now card's safety-net line - the spec's "do not fetch twice" rule. The
+//     cancel/restore + busyId single-flight live in that shared hook; this card is
+//     the presentation of its state.
 //
 //   UI copy states the RE-ARM semantic: a stage move cancels-then-arms that
 //   stage's nudge (jobs/placementNudges armNudgeForStage), so a cancel holds only
 //   within the current stage.
 //
-// LIVE: arming/canceling a nudge emits scheduled.updated (advisory - no
-// placementId, so we refetch on any). And a nudge FIRING happens in the WORKER
-// process, whose events never reach the app's SSE clients (the lib/events.ts
-// single-instance seam) - so, like RemindersPanel, the card anchors its own
-// refetch to the next upcoming rung's dueAt via the IMPORTED nextReminderRefetchDelay.
-//
 // Staff-facing card on a staff-only page: "property"/"landlord"/"tenant" wording
 // per the GLOSSARY. Plain-hyphen chips, plain ASCII copy.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
-  getPlacementNudges,
-  patchPlacementNudge,
   clearPlacementFollowUp,
-  useEventStream,
-  ApiError,
   type NudgeKind,
   type PlacementNudgeView,
 } from '../../api/index.js';
 import { Card } from '../contact/Card.js';
 import { closesAt, dateTime, expiresOn, sendRelative, wasDue } from './placementsFormat.js';
-import { nextReminderRefetchDelay } from '../tours/RemindersPanel.js';
 import styles from './DeadlinesNudgesCard.module.css';
 
 /** Human-readable labels for the application-nudge rungs (staff-facing). Mirrors
@@ -69,18 +59,6 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
   return <span className={`${styles.chip} ${styles.upcoming}`}>{text || 'Upcoming'}</span>;
 }
 
-/** The last LANDED fetch: the ladder + which placementId it describes (loading is
- *  derived when it doesn't match - the RemindersPanel pattern, no setState in the
- *  effect body). */
-interface Committed {
-  nudges: PlacementNudgeView[];
-  error: string | null;
-  /** Which placementId this state describes. */
-  forId: string;
-  /** False until the first fetch for forId lands. */
-  loaded: boolean;
-}
-
 export function DeadlinesNudgesCard({
   placementId,
   tenantName,
@@ -89,6 +67,11 @@ export function DeadlinesNudgesCard({
   rtaWindowAt,
   followUpAt,
   onEditFollowUp,
+  nudges,
+  nudgesLoading,
+  nudgesError,
+  busyId,
+  onToggleCanceled,
 }: {
   placementId: string;
   tenantName: string;
@@ -102,95 +85,17 @@ export function DeadlinesNudgesCard({
   followUpAt?: string;
   /** Open the parent's follow-up date/time modal (shared with the header kebab). */
   onEditFollowUp: () => void;
+  /** The nudge ladder, fetched ONCE by the parent (usePlacementNudges) and shared
+   *  with the Now card - this card presents it, it does not fetch it. */
+  nudges: PlacementNudgeView[];
+  /** True until the first nudge fetch lands. */
+  nudgesLoading: boolean;
+  nudgesError: string | null;
+  /** The single in-flight cancel/restore rung id, or null. */
+  busyId: string | null;
+  /** Cancel/restore one rung (the shared hook's single-flight PATCH + refetch). */
+  onToggleCanceled: (nudge: PlacementNudgeView) => void;
 }): React.JSX.Element {
-  const [state, setState] = useState<Committed>({
-    nudges: [],
-    error: null,
-    forId: placementId,
-    loaded: false,
-  });
-
-  // Track the in-flight request so a refetch (SSE-driven or placementId change)
-  // supersedes the previous one and a late response can't clobber fresher data.
-  const abortRef = useRef<AbortController | null>(null);
-  // The dueAt-anchored self-refetch timer (see the worker-fire liveness note).
-  const anchorRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const fetchNow = useCallback(() => {
-    if (!placementId) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    getPlacementNudges(placementId, controller.signal)
-      .then((nudges) => {
-        if (controller.signal.aborted) return;
-        setState({ nudges, error: null, forId: placementId, loaded: true });
-      })
-      .catch((err: unknown) => {
-        if (
-          controller.signal.aborted ||
-          (err instanceof DOMException && err.name === 'AbortError')
-        ) {
-          return;
-        }
-        setState({
-          nudges: [],
-          error: err instanceof ApiError ? err.message : 'Failed to load nudges',
-          forId: placementId,
-          loaded: true,
-        });
-      });
-  }, [placementId]);
-
-  useEffect(() => {
-    fetchNow();
-    return () => abortRef.current?.abort();
-  }, [fetchNow]);
-
-  // Re-anchor the self-refetch timer on every landed ladder: fire just after the
-  // next upcoming rung's dueAt (then short re-checks while the worker's poll
-  // catches up). Runs off COMMITTED state so each refetch reschedules itself;
-  // cleared on placementId change/unmount. REUSES the RemindersPanel delay math.
-  useEffect(() => {
-    if (anchorRef.current !== null) clearTimeout(anchorRef.current);
-    anchorRef.current = null;
-    if (state.forId !== placementId || !state.loaded) return undefined;
-    const delay = nextReminderRefetchDelay(state.nudges, Date.now());
-    if (delay === null) return undefined;
-    anchorRef.current = setTimeout(fetchNow, delay);
-    return () => {
-      if (anchorRef.current !== null) clearTimeout(anchorRef.current);
-      anchorRef.current = null;
-    };
-  }, [state, placementId, fetchNow]);
-
-  // Live: refetch when a nudge ladder changes anywhere (scheduled.updated carries
-  // no placementId to filter on). Refetches are QUIET: the prior ladder stays up
-  // until the fresh one lands - no loading flash.
-  const onScheduledUpdated = useCallback(() => fetchNow(), [fetchNow]);
-  useEventStream({ onScheduledUpdated });
-
-  // Cancel/restore one rung: PATCH, then refetch for the honest ladder. A 409
-  // means the transition lost a race (the rung fired/was claimed between render
-  // and click) - the refetch shows the real state, no error banner. One in-flight
-  // action at a time (busyId) so a double-click can't fire two PATCHes.
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const onToggleCanceled = useCallback(
-    (nudge: PlacementNudgeView) => {
-      if (busyId !== null) return;
-      setBusyId(nudge.nudgeId);
-      patchPlacementNudge(placementId, nudge.nudgeId, nudge.state === 'upcoming')
-        .catch(() => {
-          /* 409 race / transient - the refetch below reports the honest state */
-        })
-        .finally(() => {
-          setBusyId(null);
-          fetchNow();
-        });
-    },
-    [busyId, placementId, fetchNow],
-  );
-
   // Clear the manual follow-up (the write emits placement.updated - the parent
   // refetches the bundle and passes followUpAt=undefined back down).
   const [clearing, setClearing] = useState(false);
@@ -199,9 +104,6 @@ export function DeadlinesNudgesCard({
     setClearing(true);
     clearPlacementFollowUp(placementId).finally(() => setClearing(false));
   }, [clearing, placementId]);
-
-  const loading = state.forId !== placementId || !state.loaded;
-  const { nudges, error } = state;
 
   const recipientName = (r: PlacementNudgeView['recipient']): string =>
     r === 'landlord' ? (landlordName ?? 'Landlord') : tenantName;
@@ -268,13 +170,13 @@ export function DeadlinesNudgesCard({
       {/* --- Nudges --------------------------------------------------------- */}
       <div className={styles.section}>
         <p className={styles.sectionLabel}>Nudges</p>
-        {loading ? (
+        {nudgesLoading ? (
           <p className={styles.muted} aria-live="polite">
             Loading nudges...
           </p>
-        ) : error !== null ? (
+        ) : nudgesError !== null ? (
           <p className={styles.muted} role="alert">
-            {error}
+            {nudgesError}
           </p>
         ) : nudges.length === 0 ? (
           <p className={styles.muted}>No nudges armed.</p>

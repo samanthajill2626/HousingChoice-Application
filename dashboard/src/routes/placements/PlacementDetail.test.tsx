@@ -179,6 +179,14 @@ function factsCard(): HTMLElement {
   return screen.getByRole('heading', { name: 'Placement facts' }).closest('section') as HTMLElement;
 }
 
+/** The dark header band (the <header> holding the back crumb). The Now card
+ *  repeats the stage label, phase, and an "Advance to <next>" button, so
+ *  header-specific assertions scope here to disambiguate from the Now card's
+ *  copies. (Scoped via the back crumb - the left comms pane also has a <header>.) */
+function banner(): HTMLElement {
+  return screen.getByRole('link', { name: 'Back to placements' }).closest('header') as HTMLElement;
+}
+
 describe('PlacementDetail - header', () => {
   it('renders the title, stage pill, and date-vocabulary facts line', async () => {
     renderAt();
@@ -187,10 +195,10 @@ describe('PlacementDetail - header', () => {
     // address also appears as the People-card property link, so match the whole
     // title string here rather than the ambiguous address alone).
     expect(screen.getByText(/Placement - Tasha Nguyen .* 12 Oak St/)).toBeInTheDocument();
-    // Stage pill shows the current stage label.
-    expect(screen.getByText('Awaiting inspection')).toBeInTheDocument();
+    // Stage pill shows the current stage label (header band - the Now card repeats it).
+    expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument();
     // Facts line rides the date vocabulary (phase + in-stage-since + voucher).
-    expect(screen.getByText(/Inspection phase/)).toBeInTheDocument();
+    expect(within(banner()).getByText(/Inspection phase/)).toBeInTheDocument();
     expect(screen.getByText(/in stage since Jun 18/)).toBeInTheDocument();
     expect(screen.getByText(/voucher expires Aug 2/)).toBeInTheDocument();
   });
@@ -199,7 +207,8 @@ describe('PlacementDetail - header', () => {
     // awaiting_inspection -> determine_rent is the next rung.
     renderAt();
     await waitLoaded();
-    expect(screen.getByRole('button', { name: 'Advance to Determine rent' })).toBeInTheDocument();
+    // Header CTA (the Now card also renders an Advance button - scope to the band).
+    expect(within(banner()).getByRole('button', { name: 'Advance to Determine rent' })).toBeInTheDocument();
   });
 
   it('shows no Advance CTA at the terminal moved_in stage', async () => {
@@ -245,8 +254,8 @@ describe('PlacementDetail', () => {
     getPlacement.mockResolvedValue({ ...CASE, inspection_outcome: 'pass' });
     renderAt();
     await waitLoaded();
-    // Stage pill (header).
-    expect(screen.getByText('Awaiting inspection')).toBeInTheDocument();
+    // Stage pill (header band - the Now card repeats the stage label).
+    expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument();
     // M4: the Tenant link shows the contact NAME, not the raw id.
     expect(screen.getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute('href', '/contacts/t1');
     expect(screen.getByRole('link', { name: '12 Oak St' })).toHaveAttribute('href', '/listings/u1');
@@ -402,7 +411,7 @@ describe('PlacementDetail', () => {
   it('live-updates the page fields when a placement.updated event for this placement arrives', async () => {
     renderAt();
     await waitLoaded();
-    await waitFor(() => expect(screen.getByText('Awaiting inspection')).toBeInTheDocument());
+    await waitFor(() => expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument());
     expect(getPlacement).toHaveBeenCalledTimes(1);
 
     // Another tab/user (or our own transition) moved the placement -> placement.updated.
@@ -412,14 +421,14 @@ describe('PlacementDetail', () => {
       emitCaseUpdated({ placementId: 'c1', stage: 'determine_rent' });
     });
 
-    await waitFor(() => expect(screen.getByText('Determine rent')).toBeInTheDocument());
+    await waitFor(() => expect(within(banner()).getByText('Determine rent')).toBeInTheDocument());
     expect(getPlacement).toHaveBeenCalledTimes(2);
   });
 
   it('ignores a placement.updated event for a different placement', async () => {
     renderAt();
     await waitLoaded();
-    await waitFor(() => expect(screen.getByText('Awaiting inspection')).toBeInTheDocument());
+    await waitFor(() => expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument());
     await act(async () => {
       emitCaseUpdated({ placementId: 'some-other-placement', stage: 'moved_in' });
     });

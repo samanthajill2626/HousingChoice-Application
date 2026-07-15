@@ -196,8 +196,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: Task 5 descriptors, Task 4 formatters, Task 8's nudge data (lift the nudges fetch into PlacementDetail or a small shared hook so NowCard's safety-net line and DeadlinesNudgesCard share ONE fetch - do not fetch twice), existing StageDataCard/PaperworkCard recorder logic (move, do not rewrite).
 - Produces: `<PlacementNowCard placement unit tenant landlord nudges onAdvance />` rendering the spec's 5-part anatomy; gate line amber for 'them' / blue accent for 'us' (tokens only); "Record: nothing at this stage" when record === 'none'; missing expected gate date renders "no date recorded".
 
-- [ ] **Step 1: Failing tests** for the three shapes: waiting stage (awaiting_inspection with and without inspection_date), our-move stage (send_application), recording stage (complete_paperwork checklist incl. LIF gating on tenant.lifEligible); terminal stages render completed/lost summary and NO Advance.
-- [ ] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.** Then run the FULL dashboard suite BARE - the StageDataCard/PaperworkCard migration must leave zero orphaned tests.
+- [x] **Step 1: Failing tests** for the three shapes: waiting stage (awaiting_inspection with and without inspection_date), our-move stage (send_application), recording stage (complete_paperwork checklist incl. LIF gating on tenant.lifEligible); terminal stages render completed/lost summary and NO Advance.
+- [x] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.** Then run the FULL dashboard suite BARE - the StageDataCard/PaperworkCard migration must leave zero orphaned tests.
 
 ### Task 10: E2e + mobile pass + full gates
 

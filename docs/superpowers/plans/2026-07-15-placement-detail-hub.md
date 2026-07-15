@@ -153,9 +153,9 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: `useTourChannels.ts` + `TourConversation.tsx` as line-for-line templates; `placement.group_thread`, `placement.tenantId`, `unit.landlordId`; Task 3's `provisionPlacementRelay`.
 - Produces: `usePlacementChannels(placement, landlordId)` returning the same channel-state shape as useTourChannels (group/tenant/landlord, unread, markRead, setConversationId); `<PlacementConversation placement unit tenant landlord channels onConsentRefused/>` mirroring TourConversation's props pattern.
 
-- [ ] **Step 1: Failing hook tests** mirroring useTourChannels.test.tsx: group from group_thread, tenant/landlord resolved to most-recent non-relay 1:1, setConversationId injection survives refetch.
-- [ ] **Step 2-4: FAIL -> implement as mirrors -> PASS.** Differences from the tour versions, and ONLY these: channel source fields (group_thread), no pm_team label branch (labels: "Group text" / "Tenant - {first}" / "Landlord - {first}"), group empty-state button calls provisionPlacementRelay then setConversationId('group', id). Everything else (lazy single mount, remount on switch, per-tab markRead, unread dots, consent-refusal bubble-up) copies the template.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Failing hook tests** mirroring useTourChannels.test.tsx: group from group_thread, tenant/landlord resolved to most-recent non-relay 1:1, setConversationId injection survives refetch.
+- [x] **Step 2-4: FAIL -> implement as mirrors -> PASS.** Differences from the tour versions, and ONLY these: channel source fields (group_thread), no pm_team label branch (labels: "Group text" / "Tenant - {first}" / "Landlord - {first}"), group empty-state button calls provisionPlacementRelay then setConversationId('group', id). Everything else (lazy single mount, remount on switch, per-tab markRead, unread dots, consent-refusal bubble-up) copies the template.
+- [x] **Step 5: Commit.**
 
 ### Task 7: Page rebuild - twoPaneShell, header, right-pane assembly
 

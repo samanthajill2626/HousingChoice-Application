@@ -78,6 +78,18 @@ function makeFakeNudgesRepo(seed: PlacementNudgeItem[] = []) {
       row.sentAt = nowIso;
       return true;
     },
+    async cancel(nudgeId, canceledAt) {
+      const row = rows.find((r) => r.nudgeId === nudgeId);
+      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined) return false;
+      row.canceledAt = canceledAt;
+      return true;
+    },
+    async uncancel(nudgeId) {
+      const row = rows.find((r) => r.nudgeId === nudgeId);
+      if (!row || row.canceledAt === undefined || row.sentAt !== undefined) return false;
+      row.canceledAt = undefined;
+      return true;
+    },
     async cancelForPlacement(placementId) {
       for (const r of rows) {
         if (r.placementId === placementId && r.sentAt === undefined && r.canceledAt === undefined) {

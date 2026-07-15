@@ -44,11 +44,11 @@
   - `cancel(nudgeId: string, canceledAt: string): Promise<boolean>`
   - `uncancel(nudgeId: string): Promise<boolean>`
 
-- [ ] **Step 1: Failing tests.** Mirror `app/test` coverage of tourRemindersRepo cancel/uncancel: cancel succeeds on a pending row; cancel returns false when sentAt already set (lost race) and when already canceled; uncancel removes canceledAt only when present and never resurrects a sent row; listByPlacement returns only that placement's rows.
-- [ ] **Step 2: Run to verify FAIL** (`cd /w/tmp/placement-hub && npm test --workspace app -- placementNudgesRepo`).
-- [ ] **Step 3: Implement.** Copy the conditional-write idiom from `tourRemindersRepo.cancel/uncancel` verbatim, renamed to nudge fields: cancel = UpdateCommand SET canceledAt with `attribute_not_exists(sentAt) AND attribute_not_exists(canceledAt)`; uncancel = REMOVE canceledAt with `attribute_exists(canceledAt) AND attribute_not_exists(sentAt)`; ConditionalCheckFailedException -> return false.
-- [ ] **Step 4: Run to PASS.**
-- [ ] **Step 5: Commit** (explicit paths, gating `git status` first).
+- [x] **Step 1: Failing tests.** Mirror `app/test` coverage of tourRemindersRepo cancel/uncancel: cancel succeeds on a pending row; cancel returns false when sentAt already set (lost race) and when already canceled; uncancel removes canceledAt only when present and never resurrects a sent row; listByPlacement returns only that placement's rows.
+- [x] **Step 2: Run to verify FAIL** (`cd /w/tmp/placement-hub && npm test --workspace app -- placementNudgesRepo`).
+- [x] **Step 3: Implement.** Copy the conditional-write idiom from `tourRemindersRepo.cancel/uncancel` verbatim, renamed to nudge fields: cancel = UpdateCommand SET canceledAt with `attribute_not_exists(sentAt) AND attribute_not_exists(canceledAt)`; uncancel = REMOVE canceledAt with `attribute_exists(canceledAt) AND attribute_not_exists(sentAt)`; ConditionalCheckFailedException -> return false.
+- [x] **Step 4: Run to PASS.**
+- [x] **Step 5: Commit** (explicit paths, gating `git status` first).
 
 ### Task 2: Routes - GET nudges + PATCH cancel/restore
 

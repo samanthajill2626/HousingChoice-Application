@@ -1751,6 +1751,20 @@ export function createFakeWorld(): FakeWorld {
       placementNudgesMap.set(nudgeId, n);
       return true;
     },
+    async cancel(nudgeId: string, canceledAt: string) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined) return false;
+      n.canceledAt = canceledAt;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
+    async uncancel(nudgeId: string) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.canceledAt === undefined || n.sentAt !== undefined) return false;
+      delete n.canceledAt;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
     async cancelForPlacement(placementId: string) {
       const now = new Date().toISOString();
       for (const n of placementNudgesMap.values()) {

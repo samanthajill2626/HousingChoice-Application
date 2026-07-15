@@ -66,6 +66,21 @@ export interface PlacementNudgesRepo {
    * (benign no-op; caller skips the send).
    */
   claimSend(nudgeId: string, nowIso: string): Promise<boolean>;
+  /**
+   * Cancel ONE pending nudge (operator action). Same atomic no-terminal
+   * condition as claimSend, so a cancel racing the poll's send claim resolves to
+   * exactly one outcome. Returns true when this call won (the row is now
+   * canceled), false when it was already sent/canceled (benign — the caller
+   * reports the honest state).
+   */
+  cancel(nudgeId: string, canceledAt: string): Promise<boolean>;
+  /**
+   * Restore ONE canceled nudge to pending (operator un-cancel). Conditional on
+   * canceledAt existing AND no sentAt — restoring a sent or never-canceled row
+   * is a benign false, and a sent row can never be resurrected. A restored
+   * PAST-DUE row fires on the next poll tick.
+   */
+  uncancel(nudgeId: string): Promise<boolean>;
   /** Cancel all pending (not yet sent or canceled) nudges for this placement. */
   cancelForPlacement(placementId: string): Promise<void>;
 }
@@ -176,6 +191,66 @@ export function createPlacementNudgesRepo(deps: RepoDeps = {}): PlacementNudgesR
         if (err instanceof ConditionalCheckFailedException) {
           // Benign: another poll tick or a cancel won the race. Not an error.
           log.debug({ nudgeId }, 'placement nudge claim lost (already claimed/canceled) — skipping');
+          return false;
+        }
+        throw err;
+      }
+    },
+
+    async cancel(nudgeId, canceledAt) {
+      // The per-row twin of cancelForPlacement's update — same atomic
+      // no-terminal condition, so a race with claimSend resolves to exactly one
+      // outcome. (Nudge rows have no skippedAt field, so the guard is the
+      // two-clause no-sentAt/no-canceledAt condition — this diverges from
+      // tourRemindersRepo, whose rows also carry skippedAt.)
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { nudgeId },
+            UpdateExpression: 'SET #canceledAt = :canceledAt',
+            ConditionExpression:
+              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt)',
+            ExpressionAttributeNames: {
+              '#canceledAt': 'canceledAt',
+              '#sentAt': 'sentAt',
+            },
+            ExpressionAttributeValues: { ':canceledAt': canceledAt },
+          }),
+        );
+        log.info({ nudgeId, canceledAt }, 'placement nudge canceled (operator)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ nudgeId }, 'placement nudge cancel lost (already terminal) — skipping');
+          return false;
+        }
+        throw err;
+      }
+    },
+
+    async uncancel(nudgeId) {
+      // REMOVE canceledAt, conditional on the row actually being canceled and
+      // NOT sent — so an un-cancel can never resurrect a fired row.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { nudgeId },
+            UpdateExpression: 'REMOVE #canceledAt',
+            ConditionExpression:
+              'attribute_exists(#canceledAt) AND attribute_not_exists(#sentAt)',
+            ExpressionAttributeNames: {
+              '#canceledAt': 'canceledAt',
+              '#sentAt': 'sentAt',
+            },
+          }),
+        );
+        log.info({ nudgeId }, 'placement nudge restored (operator un-cancel)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ nudgeId }, 'placement nudge un-cancel lost (not canceled / already terminal) — skipping');
           return false;
         }
         throw err;

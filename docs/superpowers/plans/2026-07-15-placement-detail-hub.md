@@ -139,8 +139,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 | moved_in | terminal | - | none | none |
 | lost | terminal | - | none | none |
 
-- [ ] **Step 1: Failing completeness test**: `Object.keys(STAGE_DESCRIPTORS)` set-equals the full stage ladder; every 'them' gate has non-empty waitingOn; recording stages match today's StageDataCard/PaperworkCard set (the five above).
-- [ ] **Steps 2-5: FAIL -> implement the table -> PASS -> commit.**
+- [x] **Step 1: Failing completeness test**: `Object.keys(STAGE_DESCRIPTORS)` set-equals the full stage ladder; every 'them' gate has non-empty waitingOn; recording stages match today's StageDataCard/PaperworkCard set (the five above).
+- [x] **Steps 2-5: FAIL -> implement the table -> PASS -> commit.**
 
 ### Task 6: usePlacementChannels + PlacementConversation
 

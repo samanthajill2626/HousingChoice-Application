@@ -115,13 +115,8 @@ function photoUploadMessage(err: unknown): string {
   switch (code) {
     case 'unsupported_media_type':
       return "That file type isn't supported - add JPEG, PNG, GIF, or WebP photos.";
-    case 'file_too_large':
-      return 'A photo is too large - each photo must be under 5 MB.';
     case 'photo_cap_exceeded':
       return 'That would go past the 100-photo limit for this property.';
-    case 'no_files':
-    case 'empty_file':
-      return 'No photo was selected.';
     case 'no_valid_photos':
       return "None of the photos could be uploaded - please try again.";
     case 'media_storage_unavailable':

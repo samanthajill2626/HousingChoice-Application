@@ -1601,21 +1601,22 @@ export class Scenario {
   }
 
   /** [Team, MANUAL] Book the tour: set the agreed date/time on the 'requested'
-   *  tour via the TourDetail Book control. Booking auto-advances to 'Scheduled'
-   *  and arms the reminder ladder off the booked time (server-side). */
+   *  tour via the TourDetail "Schedule tour" control (the model's verb stays
+   *  'book'; the displayed copy is "Schedule", 2026-07-14). Booking auto-advances
+   *  to 'Scheduled' and arms the reminder ladder off the booked time (server-side). */
   teamBooksTour(times: TourTimes): Promise<void> {
     const tour = this.requireActiveTour();
     return step(`Team books the tour (${times.scheduledAtLocal})`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('button', { name: 'Book tour' }).click();
-      const form = this.page.getByRole('form', { name: 'Book tour form' });
+      await this.page.getByRole('button', { name: 'Schedule tour' }).click();
+      const form = this.page.getByRole('form', { name: 'Schedule tour form' });
       await expect(form).toBeVisible();
       // datetime-local input — fill takes the raw 'YYYY-MM-DDTHH:mm' value; the
       // form sends it as-is (valid ISO for the backend's Date.parse).
       await form.getByLabel('Date and time').fill(times.scheduledAtLocal);
       // The Confirm button sits in the modal FOOTER (outside the <form>, wired via
       // form=), so it's scoped to the page, not the form.
-      await this.page.getByRole('button', { name: 'Confirm booking' }).click();
+      await this.page.getByRole('button', { name: 'Confirm schedule' }).click();
       await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2128,9 +2129,9 @@ export class Scenario {
       await expect(
         this.page.getByRole('tablist', { name: 'Conversation channel' }),
       ).toBeHidden();
-      // The primary CTA (a requested tour -> "Book tour") is visible and its right
-      // edge fits within the 360px viewport (no horizontal scroll).
-      const cta = this.page.getByRole('button', { name: 'Book tour' });
+      // The primary CTA (a requested tour -> "Schedule tour") is visible and its
+      // right edge fits within the 360px viewport (no horizontal scroll).
+      const cta = this.page.getByRole('button', { name: 'Schedule tour' });
       await expect(cta).toBeVisible();
       const box = await cta.boundingBox();
       expect(box, 'the CTA has a bounding box').not.toBeNull();

@@ -195,11 +195,11 @@ describe('TourDetail - load + header', () => {
 });
 
 describe('TourDetail - primary CTA ladder', () => {
-  it('requested -> Book tour', async () => {
+  it('requested -> Schedule tour', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     renderDetail();
     await waitLoaded();
-    expect(screen.getByRole('button', { name: 'Book tour' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Schedule tour' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
     // Not booked shows in the facts + Schedule card.
     expect(screen.getByText(/Not booked - Self-guided/)).toBeInTheDocument();
@@ -253,7 +253,7 @@ describe('TourDetail - primary CTA ladder', () => {
     getTour.mockResolvedValue(makeTour({ status: 'canceled' }));
     renderDetail();
     await waitLoaded();
-    for (const name of ['Book tour', 'Mark toured', 'Record outcome', 'Start placement', 'View placement']) {
+    for (const name of ['Schedule tour', 'Mark toured', 'Record outcome', 'Start placement', 'View placement']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
     }
   });
@@ -376,30 +376,30 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     renderDetail();
     await waitLoaded();
     const at = localDatetime(2 * DAY);
-    await userEvent.click(screen.getByRole('button', { name: 'Book tour' }));
-    expect(screen.getByRole('form', { name: 'Book tour form' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule tour' }));
+    expect(screen.getByRole('form', { name: 'Schedule tour form' })).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('Date and time'), at);
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm schedule' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
       expect.objectContaining({ scheduledAt: new Date(at).toISOString(), status: 'scheduled' }),
     );
   });
 
-  it('Book with a PAST time warns first; "Book anyway" confirms the PATCH', async () => {
+  it('Schedule with a PAST time warns first; "Schedule anyway" confirms the PATCH', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     patchTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     renderDetail();
     await waitLoaded();
     const past = localDatetime(-1 * DAY);
-    await userEvent.click(screen.getByRole('button', { name: 'Book tour' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule tour' }));
     await userEvent.type(screen.getByLabelText('Date and time'), past);
-    await userEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm schedule' }));
     // First submit: the odd-time warning, NO patch, button re-labeled.
     expect(screen.getByRole('alert')).toHaveTextContent(/in the past/i);
     expect(patchTour).not.toHaveBeenCalled();
     // Second submit is the confirmation.
-    await userEvent.click(screen.getByRole('button', { name: 'Book anyway' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule anyway' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
       expect.objectContaining({ scheduledAt: new Date(past).toISOString(), status: 'scheduled' }),

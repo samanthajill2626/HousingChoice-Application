@@ -4,7 +4,7 @@
 //     runs on a timeless 'requested' tour (sets scheduledAt + status scheduled);
 //     Reschedule runs on an already-timed tour (same PATCH shape). An odd time
 //     (past / >14 days out) stops the first submit with a confirmable warning
-//     and the button becomes "Book anyway"/"Reschedule anyway" — submitting
+//     and the button becomes "Schedule anyway"/"Reschedule anyway" — submitting
 //     again confirms; editing the time clears it (tourTime.ts, shared with
 //     ScheduleTourForm).
 //   - RecordOutcomeModal: the exit gate - a move-forward / not-a-fit radio choice.
@@ -130,15 +130,18 @@ function DateTimeModal({
 }
 
 export function BookTourModal({ onClose, onConfirm }: DateModalProps): React.JSX.Element {
+  // "Schedule" vocabulary (Cameron, 2026-07-14) — matches the contact page's
+  // "+ Schedule" tours card. The component keeps its BookTourModal name (and
+  // the tour model its 'book' verb) — only displayed copy changes.
   return (
     <DateTimeModal
-      title="Book tour"
-      formLabel="Book tour form"
+      title="Schedule tour"
+      formLabel="Schedule tour form"
       fieldLabel="Date and time"
-      confirmLabel="Confirm booking"
-      anywayLabel="Book anyway"
-      busyLabel="Booking..."
-      errorText="Couldn't book the tour - please try again."
+      confirmLabel="Confirm schedule"
+      anywayLabel="Schedule anyway"
+      busyLabel="Scheduling..."
+      errorText="Couldn't schedule the tour - please try again."
       inputId="tour-book-at"
       onClose={onClose}
       onConfirm={onConfirm}

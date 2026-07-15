@@ -288,7 +288,7 @@ function TourDetailLoaded({
   } else if (tour.status === 'requested') {
     primaryCta = (
       <Button size="sm" onClick={() => setModal('book')}>
-        Book tour
+        Schedule tour
       </Button>
     );
   } else if (tour.status === 'scheduled') {

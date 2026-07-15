@@ -63,11 +63,11 @@
   - `PATCH /api/placements/:placementId/nudges/:nudgeId` body `{canceled: boolean}` -> 200 `{nudge}`; 400 non-boolean; 404 unknown placement / nudge-not-of-this-placement; 409 `{error: 'nudge_not_cancelable' | 'nudge_not_restorable', nudge}` with the honestly re-read row.
   - `PlacementNudgeView = {nudgeId, placementId, kind, recipient: 'tenant'|'landlord', dueAt, state: 'upcoming'|'sent'|'canceled', sentAt?, canceledAt?}`. recipient derives from kind: approval_check + rta_window_closing -> landlord, else tenant (matches NUDGE_RUNGS routing in `app/src/jobs/placementNudges.ts` - verify there, do not trust this line).
 
-- [ ] **Step 1: Failing tests.** Mirror `app/test/tourRemindersApi.test.ts` case-for-case: cancel happy path (200 + canceledAt + scheduled.updated emitted), restore happy path, 409 lost-race (pre-stamp sentAt), 400/404 taxonomy, GET returns views with recipient mapping.
-- [ ] **Step 2: Run to verify FAIL.**
-- [ ] **Step 3: Implement.** Mirror `app/src/routes/tourReminders.ts` PATCH structure. scheduled.updated emit keys on the RECIPIENT's contactId: tenant kinds -> placement.tenantId; landlord kinds -> unit.landlordId (best-effort lookup; if unresolvable, emit with tenantId - the dashboard panels refetch on any scheduled.updated anyway).
-- [ ] **Step 4: Run to PASS**, then `npm run typecheck` BARE.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Failing tests.** Mirror `app/test/tourRemindersApi.test.ts` case-for-case: cancel happy path (200 + canceledAt + scheduled.updated emitted), restore happy path, 409 lost-race (pre-stamp sentAt), 400/404 taxonomy, GET returns views with recipient mapping.
+- [x] **Step 2: Run to verify FAIL.**
+- [x] **Step 3: Implement.** Mirror `app/src/routes/tourReminders.ts` PATCH structure. scheduled.updated emit keys on the RECIPIENT's contactId: tenant kinds -> placement.tenantId; landlord kinds -> unit.landlordId (best-effort lookup; if unresolvable, emit with tenantId - the dashboard panels refetch on any scheduled.updated anyway).
+- [x] **Step 4: Run to PASS**, then `npm run typecheck` BARE.
+- [x] **Step 5: Commit.**
 
 ### Task 3: Dashboard API bindings + types
 

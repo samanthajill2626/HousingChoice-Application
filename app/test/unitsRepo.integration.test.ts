@@ -149,4 +149,48 @@ describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)
     expect(new Set(collected).size).toBe(3); // no gaps or dupes
     expect(pages).toBeGreaterThanOrEqual(3); // really paginated
   });
+
+  // unit-photos S1: the ATOMIC media array ops against the REAL DynamoDB item
+  // (list_append + if_not_exists seed + the size-guard ConditionExpression).
+  it('appendMedia atomically list_appends (seeds a missing attribute; first = cover)', async () => {
+    const unit = await units.create({ landlordId: 'contact-ll-media', status: 'available' });
+    // First append seeds the absent attribute (if_not_exists -> []), then appends.
+    const a = await units.appendMedia(unit.unitId, ['unit-media/x/k1', 'unit-media/x/k2']);
+    expect(a.media).toEqual(['unit-media/x/k1', 'unit-media/x/k2']);
+    // A second append lands AFTER (list_append order), never clobbering.
+    const b = await units.appendMedia(unit.unitId, ['unit-media/x/k3']);
+    expect(b.media).toEqual(['unit-media/x/k1', 'unit-media/x/k2', 'unit-media/x/k3']);
+  });
+
+  it('appendMedia cap guard rejects a batch that would exceed the cap (ConditionalCheckFailed)', async () => {
+    const unit = await units.create({ landlordId: 'contact-ll-cap', status: 'available' });
+    // Seed to one below a small cap, then a 2-key batch would exceed it.
+    await units.appendMedia(unit.unitId, ['unit-media/y/k1', 'unit-media/y/k2'], 3);
+    await expect(
+      units.appendMedia(unit.unitId, ['unit-media/y/k3', 'unit-media/y/k4'], 3),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    // The rejected append wrote NOTHING - the array is unchanged.
+    const read = await units.getById(unit.unitId);
+    expect(read?.media).toEqual(['unit-media/y/k1', 'unit-media/y/k2']);
+  });
+
+  it('removeMedia drops the entry (404-signal when absent); makeCover moves to front (no-op when already cover)', async () => {
+    const unit = await units.create({ landlordId: 'contact-ll-rm', status: 'available' });
+    await units.appendMedia(unit.unitId, ['k1', 'k2', 'k3']);
+
+    const removed = await units.removeMedia(unit.unitId, 'k2');
+    expect(removed.media).toEqual(['k1', 'k3']);
+    await expect(units.removeMedia(unit.unitId, 'gone')).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+
+    const covered = await units.makeCover(unit.unitId, 'k3');
+    expect(covered.media).toEqual(['k3', 'k1']);
+    // Already the cover -> no-op success (unchanged).
+    const noop = await units.makeCover(unit.unitId, 'k3');
+    expect(noop.media).toEqual(['k3', 'k1']);
+    await expect(units.makeCover(unit.unitId, 'gone')).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+  });
 });

@@ -296,9 +296,10 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     const { flyer } = res.body;
 
     // The shareable set is present and correct (voucher_size derived from beds).
-    expect(flyer).toEqual({
+    // unit-photos: media is now the RESOLVED render-time presigned URL list (the
+    // two stored keys each presign fresh), not a raw key pass-through.
+    expect(flyer).toMatchObject({
       unitId: 'unit-1',
-      media: ['s3://photo1.jpg', 's3://photo2.jpg'],
       beds: 2,
       baths: 1,
       area: 'Westside',
@@ -309,6 +310,24 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       rent_min: 1400,
       rent_max: 1600,
     });
+    expect(flyer.media).toHaveLength(2);
+    for (const url of flyer.media) expect(url).toMatch(/^https:\/\/fake-s3\.local\//);
+    // The flyer shape carries no keys BEYOND the allowlist + media.
+    expect(Object.keys(flyer).sort()).toEqual(
+      [
+        'accepted_programs',
+        'area',
+        'baths',
+        'beds',
+        'listing_link',
+        'media',
+        'rent_max',
+        'rent_min',
+        'subzone',
+        'unitId',
+        'voucher_size',
+      ].sort(),
+    );
 
     // INTERNAL fields must never appear in the response.
     const serialized = JSON.stringify(res.body);
@@ -560,5 +579,54 @@ describe('/public sits behind the origin-secret validator (locked chain stage 2)
   it('403s without the origin secret (chain intact — public means no requireAuth, not no origin secret)', async () => {
     const { app } = makeWebhookHarness();
     expect((await request(app).post(FAIR).send(signupBody())).status).toBe(403);
+  });
+});
+
+// unit-photos: the flyer renders the unit's photos via render-time presigned
+// URLs (D1/D2/E1), inheriting the whole-flyer shareable gate.
+describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
+  function seedShareable(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
+    const unit: UnitItem = {
+      unitId: 'unit-photo',
+      landlordId: 'contact-ll-1',
+      status: 'available',
+      media: ['unit-media/unit-photo/k1', 'unit-media/unit-photo/k2'],
+      ...overrides,
+    };
+    world.units.set(unit.unitId, unit);
+    return unit;
+  }
+
+  it('an AVAILABLE unit exposes its photos as presigned URLs (stored keys resolved)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedShareable(world);
+    const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.flyer.media).toHaveLength(2);
+    // Each entry is a signed URL (bearer signature), not a bare key.
+    for (const url of res.body.flyer.media) {
+      expect(url).toMatch(/^https:\/\/fake-s3\.local\//);
+      expect(url).toContain('X-Amz-Signature=');
+    }
+  });
+
+  it('E1: flipping the SAME unit to on_hold 404s the WHOLE flyer (photos included)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedShareable(world, { status: 'on_hold' });
+    const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'not_found' });
+  });
+
+  it('omits unresolvable entries but keeps legacy absolute-URL photos (E2/E4)', async () => {
+    const { app, world } = makeWebhookHarness({ withoutMediaStore: true });
+    seedShareable(world, {
+      media: ['unit-media/unit-photo/stored', 'https://legacy.example/p.jpg'],
+    });
+    // With no media store, the stored key can't presign (omitted); the legacy URL
+    // passes through - the flyer still renders, never 500s.
+    const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.flyer.media).toEqual(['https://legacy.example/p.jpg']);
   });
 });

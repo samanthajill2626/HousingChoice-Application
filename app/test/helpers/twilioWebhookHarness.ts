@@ -55,6 +55,7 @@ import {
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
+import { UNIT_MEDIA_MAX } from '../../src/lib/unitMedia.js';
 import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   deadlineIdFor,
@@ -1121,6 +1122,38 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
+    // Property photos (unit-photos S1): mirror the real repo's atomic append +
+    // cap guard, entry-conditioned remove, and move-to-front cover.
+    async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`appendMedia: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (media.length > cap - keys.length) {
+        throw conditionalCheckFailed(`appendMedia: unit ${unitId} media cap ${cap} exceeded`);
+      }
+      unit.media = [...media, ...keys];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async removeMedia(unitId, entry) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`removeMedia: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) throw conditionalCheckFailed(`removeMedia: unit ${unitId} has no media entry`);
+      unit.media = media.filter((e) => e !== entry);
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async makeCover(unitId, entry) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`makeCover: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) throw conditionalCheckFailed(`makeCover: unit ${unitId} has no media entry`);
+      if (media[0] === entry) return unit; // already the cover -> no-op success
+      unit.media = [entry, ...media.filter((e) => e !== entry)];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
   };
 
   // In-memory placements (M1.10): mirror the repo's contractual semantics —
@@ -2048,6 +2081,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // unit-photos: the flyer/details resolve stored photo keys to presigned
+      // URLs through the SAME fake media store the authed API + webhooks use.
+      ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
       // The housing-fair welcome reads the operator's welcomeText override (with
       // a constant fallback) — share the world's fake settings repo so a
       // welcomeText edit is reflected without touching DynamoDB.

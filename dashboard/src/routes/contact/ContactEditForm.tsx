@@ -434,6 +434,20 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           </div>
         )}
 
+        {/* Status directly under name + type (Cameron, 2026-07-14): the identity
+            trio leads; the type-scoped detail fields follow. The options are
+            already re-scoped by the type change handler above. */}
+        <label className={styles.field}>
+          <span className={styles.label}>Status</span>
+          <select className={styles.input} value={status} onChange={(e) => setStatus(e.target.value)}>
+            {statusOptions.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         {isTenant ? (
           <label className={styles.field}>
             <span className={styles.label}>Voucher size (bedrooms)</span>
@@ -692,17 +706,6 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
             </label>
           </div>
         ) : null}
-
-        <label className={styles.field}>
-          <span className={styles.label}>Status</span>
-          <select className={styles.input} value={status} onChange={(e) => setStatus(e.target.value)}>
-            {statusOptions.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
 
         {isTenant ? (
           <label className={styles.checkboxField}>

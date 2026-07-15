@@ -277,8 +277,11 @@ describe('ContactEditForm', () => {
     expect(within(tenantSelect).getByRole('option', { name: 'On hold' })).toBeInTheDocument();
 
     // A landlord -> the 5-value lead lifecycle (needs_review|interested|onboarding|active|parked).
+    // EXACT 'Status' name: the landlord dialog also has "Contract status", and
+    // the Status select now sits ABOVE the onboarding fieldset (2026-07-14
+    // reorder), so a regex + positional pick would grab the wrong combobox.
     render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
-    const landlordSelect = screen.getAllByRole('combobox', { name: /Status/i }).at(-1)!;
+    const landlordSelect = screen.getAllByRole('combobox', { name: 'Status' }).at(-1)!;
     expect(within(landlordSelect).getAllByRole('option')).toHaveLength(5);
     expect(within(landlordSelect).getByRole('option', { name: 'Interested' })).toBeInTheDocument();
     expect(within(landlordSelect).getByRole('option', { name: 'Onboarding' })).toBeInTheDocument();

@@ -221,7 +221,15 @@ now exists; its external-URL caveat is obsolete).
 Three hardenings added during the merge review; the spec text above predates
 them:
 
-- F1 MEMORY FENCES: the E3 validate-then-store buffering this spec mandated
+- F1 MEMORY FENCES: SUPERSEDED by the DIRECT-UPLOAD REVISION
+  (2026-07-15-unit-photos-direct-upload-revision.md). The revision moves the
+  bytes OFF EC2 entirely (the browser uploads each file DIRECTLY to S3 via a
+  presigned POST), so the buffering these fences bounded no longer exists - the
+  whole busboy upload route, UNIT_PHOTO_MAX_REQUEST_BYTES,
+  UNIT_PHOTO_MAX_CONCURRENT_UPLOADS, and the dashboard's 10-file batching were
+  REMOVED, not kept. See the revision for the presign/confirm route pair that
+  replaces this route. The original F1 text is retained below for history only.
+  ORIGINAL F1: the E3 validate-then-store buffering this spec mandated
   bounded ONE request at 5MB x 100 files (~500MB), and the D4 limiter counts
   per MINUTE, not concurrency - ~30 in-flight requests could hold ~15GB on a
   2GB box. Added: UNIT_PHOTO_MAX_REQUEST_BYTES (60MB aggregate per request ->

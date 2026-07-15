@@ -156,6 +156,8 @@ export interface FakeWorld {
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
+  /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
+  presignPosts: { key: string; contentType: string }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -230,6 +232,7 @@ export function createFakeWorld(): FakeWorld {
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
   const mediaPuts: FakeWorld['mediaPuts'] = [];
+  const presignPosts: FakeWorld['presignPosts'] = [];
   const failMediaUrls = new Set<string>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
@@ -1878,6 +1881,23 @@ export function createFakeWorld(): FakeWorld {
         size: obj.body.length,
       };
     },
+    async createPresignedPost(key, opts) {
+      // Mirror the real store's contract: record the mint (so presign-route
+      // tests can assert the key + content-type policy WITHOUT a live S3), and
+      // return a plausible { url, fields } shape. The `key` + `Content-Type`
+      // fields stand in for the SDK's policy-pinned form fields.
+      presignPosts.push({ key, contentType: opts.contentType });
+      return {
+        url: 'https://fake-s3.local/hc-local-media',
+        fields: {
+          key,
+          'Content-Type': opts.contentType,
+          bucket: 'hc-local-media',
+          Policy: `fakepolicy-${key}`,
+          'X-Amz-Signature': `fakesig-${key}`,
+        },
+      };
+    },
   };
 
   return {
@@ -1895,6 +1915,7 @@ export function createFakeWorld(): FakeWorld {
     sent,
     initiatedCalls,
     mediaPuts,
+    presignPosts,
     failMediaUrls,
     failRecordingUrls,
     mediaObjects,

@@ -2,16 +2,20 @@ import { fileURLToPath } from 'node:url';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { dashboardUrl } from '../../support/urls.js';
 
-// Property photos (unit-photos, spec Sec 6) - drives the REAL dashboard Photos
-// gallery against the hermetic lane stack + MinIO and proves the feature end to
-// end through the private-bucket presign-per-read pipeline:
+// Property photos (unit-photos direct-upload, spec Sec 5) - drives the REAL
+// dashboard Photos gallery against the hermetic lane stack + MinIO and proves the
+// feature end to end. The upload now flows through the REAL direct-upload path:
+// the browser presigns, POSTs the bytes STRAIGHT to MinIO, then confirms - no
+// test-side special-casing (setInputFiles drives the app UI, which does it all).
 //   (1) upload a REAL image -> the thumbnail AND the hero render loaded bytes
 //       (naturalWidth > 0 - proof MinIO stored + served the object back);
 //   (2) upload a SECOND photo + "Make cover" on it -> the hero flips to the new
 //       cover key (the presigned pathname changes);
 //   (3) "Remove" a photo (confirmed) -> it drops from the gallery;
 //   (4) the PUBLIC flyer for that available unit renders the photo;
-//   (5) E1 - flipping the unit to a non-shareable status (On hold) 404s the whole
+//   (5) NO multipart body ever hits the APP origin during upload (the bytes went
+//       browser->MinIO) - pins the direct-upload architecture;
+//   (6) E1 - flipping the unit to a non-shareable status (On hold) 404s the whole
 //       flyer, photos included (the public must never learn a held unit exists).
 //
 // Isolation: every test owns a RUN-UNIQUE available unit created via the
@@ -91,6 +95,26 @@ async function activateThumbAction(button: Locator): Promise<void> {
   await button.press('Enter');
 }
 
+/**
+ * Watch every BROWSER-initiated request for a multipart/form-data POST that hits
+ * the APP origin (NEXT). The direct-upload architecture REQUIRES the photo bytes
+ * go browser->MinIO; the app mints presigned grants + records keys over plain
+ * JSON and must NEVER receive a multipart body again (the removed busboy route).
+ * Any offender fails the architecture pin. The MinIO POST is multipart too but on
+ * a DIFFERENT origin (:9000), so it is correctly ignored by the NEXT filter.
+ */
+function watchForMultipartToApp(page: Page): { offenders: string[] } {
+  const offenders: string[] = [];
+  page.on('request', (req) => {
+    if (req.method() !== 'POST') return;
+    const url = req.url();
+    if (!url.startsWith(NEXT)) return;
+    const ct = req.headers()['content-type'] ?? '';
+    if (ct.includes('multipart/form-data')) offenders.push(`${req.method()} ${url} (${ct})`);
+  });
+  return { offenders };
+}
+
 /** Poll an <img> until it has actually decoded bytes (naturalWidth > 0). */
 async function expectLoadedBytes(img: Locator, message: string): Promise<void> {
   await expect(img).toBeVisible({ timeout: 20_000 });
@@ -117,6 +141,9 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
   }) => {
     await devLogin(page);
     const unitId = await createAvailableUnit(page.request);
+
+    // Pin the architecture: from here on, no multipart POST may hit the app.
+    const watch = watchForMultipartToApp(page);
 
     await page.goto(`${NEXT}/listings/${unitId}`);
     await expect(page.getByRole('heading', { name: 'Photos' })).toBeVisible();
@@ -163,6 +190,13 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
       page.getByRole('img', { name: 'Home photo 1' }),
       'the public flyer photo never loaded bytes (public presign-per-read)',
     );
+
+    // (5) The bytes went browser->MinIO: the app origin saw ZERO multipart POSTs
+    // across both uploads (presign + confirm are plain JSON).
+    expect(
+      watch.offenders,
+      `a multipart body reached the app origin - the direct-upload path regressed: ${watch.offenders.join(', ')}`,
+    ).toEqual([]);
   });
 
   test('E1: a non-shareable (On hold) unit 404s the whole flyer, photos included', async ({

@@ -515,6 +515,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // PATCH cancel/restore emits scheduled.updated on this bus.
+      events,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).
@@ -535,6 +537,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // BE2: emit added_to_group_text / removed_from_group_text on membership.
       activityEventsRepo: activityEvents,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
+      // The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled)
+      // resolves the owner tour + its pending reminder rungs.
+      ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       events,
     }),
   );

@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTourReminders,
+  patchTourReminder,
   useEventStream,
   ApiError,
   REMINDER_KIND_LABELS,
@@ -197,6 +198,29 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
   );
   useEventStream({ onScheduledUpdated, onTourUpdated });
 
+  // Cancel/restore one rung (2026-07-14): PATCH, then refetch for the honest
+  // ladder (the server also emits scheduled.updated — the refetch here just
+  // beats the SSE round-trip). A 409 means the transition lost a race (e.g.
+  // the rung fired between render and click) — refetch shows the real state;
+  // no error banner needed, the ladder IS the answer. One in-flight action at
+  // a time (busyId) so a double-click can't fire two PATCHes.
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const onToggleCanceled = useCallback(
+    (rung: TourReminderView) => {
+      if (busyId !== null) return;
+      setBusyId(rung.reminderId);
+      patchTourReminder(tourId, rung.reminderId, rung.state === 'upcoming')
+        .catch(() => {
+          /* 409 race / transient — the refetch below reports the honest state */
+        })
+        .finally(() => {
+          setBusyId(null);
+          fetchNow();
+        });
+    },
+    [busyId, tourId, fetchNow],
+  );
+
   // Committed state is for a previous tourId (or nothing landed yet) -> loading.
   const loading = state.forId !== tourId || !state.loaded;
   const { reminders, nextId, error } = state;
@@ -235,6 +259,17 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   </span>
                   {isNext ? <span className={styles.nextTag}>Next</span> : null}
                   <StateChip rung={rung} />
+                  {rung.state === 'upcoming' || rung.state === 'canceled' ? (
+                    <button
+                      type="button"
+                      className={styles.action}
+                      disabled={busyId !== null}
+                      aria-label={`${rung.state === 'upcoming' ? 'Cancel' : 'Restore'} ${REMINDER_KIND_LABELS[rung.kind] ?? rung.kind} reminder`}
+                      onClick={() => onToggleCanceled(rung)}
+                    >
+                      {rung.state === 'upcoming' ? 'Cancel' : 'Restore'}
+                    </button>
+                  ) : null}
                 </div>
                 <p className={`${styles.body} ${rung.state === 'canceled' ? styles.struck : ''}`}>
                   {rung.body}

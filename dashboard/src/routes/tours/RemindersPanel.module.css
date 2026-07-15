@@ -66,6 +66,37 @@
   letter-spacing: 0.04em;
 }
 
+/* Per-rung Cancel/Restore — a quiet text action pushed to the row's right edge. */
+.action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+  cursor: pointer;
+}
+
+.action:hover {
+  color: var(--c-text);
+  text-decoration: underline;
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
+.action:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 /* --- State chips (mirror DeadlineChip tone) -------------------------------- */
 
 .chip {

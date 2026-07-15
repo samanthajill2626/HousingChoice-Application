@@ -32,6 +32,36 @@
   color: var(--c-text-muted);
 }
 
+/* The "Show closed" opt-in toggle - same chip language as the properties
+ * list's filter chips (ListingsList.module.css .chip/.chipOn). */
+.filterToggle {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.filterToggle:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+
+.filterToggleOn,
+.filterToggleOn:hover {
+  background: var(--c-nav-bg);
+  border-color: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+}
+
+.filterToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 /* --- Sections (Upcoming / Needs booking) ----------------------------------- */
 
 .section {

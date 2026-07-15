@@ -3,6 +3,10 @@
 //      (scheduled future window, grouped by local date on the view layer).
 //   2. Needs-booking tours: GET /api/tours?status=requested
 //      (time-less tours awaiting a scheduled time, oldest first).
+// Plus useClosedTours(enabled) — the opt-in Closed section's LAZY fetch:
+// GET /api/tours?status=closed, newest first. Nothing is fetched until the
+// staff member flips the "Show closed" toggle (closed tours are off the page
+// by default and only grow over time).
 //
 // Both fetches run in parallel, each with its own AbortController so the caller
 // (useEffect cleanup) can cancel both together. Mirrors useContacts / useListings:
@@ -77,6 +81,47 @@ export function useTours(): ToursPageState {
 
     return () => controller.abort();
   }, []);
+
+  return state;
+}
+
+export interface ClosedToursState {
+  /** 'idle' until the toggle enables the fetch (nothing loads by default). */
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  /** Closed tours, newest activity first (updatedAt desc — the close is the
+   *  last write in practice — falling back to createdAt). */
+  closed: Tour[];
+}
+
+/** LAZY closed-tours fetch for the opt-in "Show closed" toggle: fetches only
+ *  while `enabled` is true (re-fetching fresh each time it flips on). */
+export function useClosedTours(enabled: boolean): ClosedToursState {
+  const [state, setState] = useState<ClosedToursState>({ status: 'idle', closed: [] });
+
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    setState({ status: 'loading', closed: [] });
+
+    (async () => {
+      try {
+        const closed = await getTours({ status: 'closed' }, signal);
+        if (signal.aborted) return;
+        const sorted = [...closed].sort((a, b) => {
+          const aAt = a.updatedAt ?? a.createdAt ?? '';
+          const bAt = b.updatedAt ?? b.createdAt ?? '';
+          return aAt > bAt ? -1 : aAt < bAt ? 1 : 0;
+        });
+        setState({ status: 'ready', closed: sorted });
+      } catch (err) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        setState({ status: 'error', closed: [] });
+      }
+    })();
+
+    return () => controller.abort();
+  }, [enabled]);
 
   return state;
 }

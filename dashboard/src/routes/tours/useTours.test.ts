@@ -21,7 +21,7 @@ vi.mock('../../api/index.js', () => ({
   getTours: (...args: unknown[]) => getToursMock(...args),
 }));
 
-import { useTours } from './useTours.js';
+import { useClosedTours, useTours } from './useTours.js';
 
 // ---------------------------------------------------------------------------
 // toursDateRange
@@ -128,5 +128,52 @@ describe('useTours', () => {
     await waitFor(() => expect(result.current.status).toBe('error'));
     expect(result.current.upcoming).toHaveLength(0);
     expect(result.current.needsBooking).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useClosedTours hook (the opt-in Closed section's lazy fetch)
+// ---------------------------------------------------------------------------
+
+describe('useClosedTours', () => {
+  beforeEach(() => {
+    getToursMock.mockReset();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Arrives OLDEST-first so the newest-first sort assertion below proves the
+  // comparator reorders. x2's close (updatedAt) is newer than x1's.
+  const CLOSED = [
+    { tourId: 'x1', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-06-02T18:00:00Z', tourType: 'self_guided', status: 'closed', createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-02T19:00:00Z' },
+    { tourId: 'x2', tenantId: 'c2', unitId: 'u2', scheduledAt: '2026-07-14T18:00:00Z', tourType: 'landlord_led', status: 'closed', createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-14T20:00:00Z' },
+  ];
+
+  it('stays idle and fetches NOTHING while disabled (the default page load)', () => {
+    const { result } = renderHook(() => useClosedTours(false));
+    expect(result.current.status).toBe('idle');
+    expect(getToursMock).not.toHaveBeenCalled();
+  });
+
+  it('fetches status=closed once enabled and sorts newest first (updatedAt desc)', async () => {
+    getToursMock.mockResolvedValue(CLOSED);
+    const { result, rerender } = renderHook(({ enabled }) => useClosedTours(enabled), {
+      initialProps: { enabled: false },
+    });
+    expect(getToursMock).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(getToursMock).toHaveBeenCalledWith({ status: 'closed' }, expect.anything());
+    // x2 (closed Jul 14) before x1 (closed Jun 2).
+    expect(result.current.closed.map((t) => t.tourId)).toEqual(['x2', 'x1']);
+  });
+
+  it('sets status=error when the closed fetch fails', async () => {
+    getToursMock.mockRejectedValue(new Error('network error'));
+    const { result } = renderHook(() => useClosedTours(true));
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(result.current.closed).toHaveLength(0);
   });
 });

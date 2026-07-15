@@ -369,4 +369,52 @@ test.describe('Tours page', () => {
     const tour = ((await tourRes.json()) as { tour: { tourType: string } }).tour;
     expect(tour.tourType).toBe('self_guided');
   });
+
+  // Closed tours are OFF the page by default; the header "Show closed" toggle
+  // reveals them (Cameron 2026-07-15). Builds a CLOSED tour via the API -
+  // booked YESTERDAY (outside the Upcoming window, so it can't leak into the
+  // other tests' sections), toured, then exit-gated not-a-fit (the same PATCH
+  // shape the Record-outcome modal sends; closes in the same PATCH).
+  test('closed tours: hidden by default, revealed by the "Show closed" toggle', async ({
+    page,
+  }) => {
+    await devLogin(page); // page.request needs the session cookie for /api writes
+
+    const yesterday = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const created = await page.request.post(`${NEXT}/api/tours`, {
+      data: { tenantId: TENANT_ID, unitId: 'unit-0002', scheduledAt: yesterday, tourType: 'self_guided' },
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const tourId = ((await created.json()) as { tour: { tourId: string } }).tour.tourId;
+    const toured = await page.request.patch(`${NEXT}/api/tours/${tourId}`, {
+      data: { status: 'toured' },
+    });
+    expect(toured.ok(), await toured.text()).toBeTruthy();
+    const closed = await page.request.patch(`${NEXT}/api/tours/${tourId}`, {
+      data: { outcome: 'not_a_fit', moveForward: false, status: 'closed' },
+    });
+    expect(closed.ok(), await closed.text()).toBeTruthy();
+
+    await page.goto(`${NEXT}/tours`);
+    await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
+
+    // Hidden by default.
+    await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
+
+    // Toggle on -> the Closed section lists the tour, linking to its detail.
+    const toggle = page.getByRole('button', { name: 'Show closed' });
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await toggle.click();
+    const region = page.getByRole('region', { name: 'Closed tours' });
+    await expect(region).toBeVisible();
+    const row = region.getByRole('link', {
+      name: new RegExp(`Tour for Tasha Nguyen at .*Sycamore`, 'i'),
+    });
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).toHaveAttribute('href', `/tours/${tourId}`);
+
+    // Toggle off hides the section again.
+    await toggle.click();
+    await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
+  });
 });

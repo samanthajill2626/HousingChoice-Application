@@ -1,4 +1,4 @@
-// ToursPage — the /tours list page. Two sections:
+// ToursPage — the /tours list page. Two always-on sections plus an opt-in one:
 //
 //   Upcoming  — tours in the next 30 days (from=start-of-today, to=+30d),
 //               grouped by local date (soonest first; "Today" label for today).
@@ -7,11 +7,16 @@
 //   Needs booking — time-less tours (status='requested'), oldest first.
 //               Row: tenant name - property - status - type (no time column).
 //
+//   Closed    — OPT-IN via the header "Show closed" toggle (hidden by default;
+//               Cameron 2026-07-15). Terminal status='closed' tours, newest
+//               first, fetched LAZILY on first toggle. Rows show the tour DATE
+//               (not time-of-day - these can be months old).
+//
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference
 // pattern used by PlacementsBoard / TenantFile). Staff-facing vocabulary: "property"
 // for the unit (per GLOSSARY.md).
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   TOUR_STATUS_LABELS,
@@ -22,7 +27,7 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { useTours } from './useTours.js';
+import { useClosedTours, useTours } from './useTours.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { useListings } from '../listings/useListings.js';
 import styles from './ToursPage.module.css';
@@ -54,6 +59,16 @@ function formatTime(iso: string | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+/** Format the DATE of a scheduledAt ISO string, e.g. "Jul 14, 2026" — the
+ *  Closed section's lead column (a months-old tour's time-of-day is noise).
+ *  Returns '' when absent or unparseable. */
+function formatDate(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 /** YYYY-MM-DD local key for grouping. Returns '' for undefined input. */
@@ -92,13 +107,21 @@ interface TourRowProps {
   tour: Tour;
   contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
-  showTime: boolean;
+  /** The lead meta column: the tour's time (Upcoming - the date is the group
+   *  header), its date (Closed - possibly months old), or nothing (Needs
+   *  booking - timeless). */
+  timeDisplay: 'time' | 'date' | 'none';
 }
 
-function TourRow({ tour, contacts, units, showTime }: TourRowProps): React.JSX.Element {
+function TourRow({ tour, contacts, units, timeDisplay }: TourRowProps): React.JSX.Element {
   const tenant = tenantName(contacts, tour.tenantId);
   const property = propertyLabel(units, tour.unitId);
-  const timeLabel = showTime ? formatTime(tour.scheduledAt) : undefined;
+  const timeLabel =
+    timeDisplay === 'time'
+      ? formatTime(tour.scheduledAt)
+      : timeDisplay === 'date'
+        ? formatDate(tour.scheduledAt)
+        : undefined;
   const statusLabel = TOUR_STATUS_LABELS[tour.status] ?? tour.status;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
 
@@ -134,6 +157,10 @@ export function ToursPage(): React.JSX.Element {
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
+
+  // Closed tours are OFF by default; the toggle lazily fetches them.
+  const [showClosed, setShowClosed] = useState(false);
+  const { status: closedStatus, closed } = useClosedTours(showClosed);
 
   const loading =
     toursStatus === 'loading' || contactsStatus === 'loading' || unitsStatus === 'loading';
@@ -177,6 +204,14 @@ export function ToursPage(): React.JSX.Element {
     <div className={styles.page}>
       <div className={styles.header}>
         <h1 className={styles.title}>Tours</h1>
+        <button
+          type="button"
+          className={`${styles.filterToggle} ${showClosed ? styles.filterToggleOn : ''}`}
+          aria-pressed={showClosed}
+          onClick={() => setShowClosed((v) => !v)}
+        >
+          Show closed
+        </button>
       </div>
       <p className={styles.sub}>
         Upcoming scheduled tours and unbooked tour requests.
@@ -210,7 +245,7 @@ export function ToursPage(): React.JSX.Element {
                         tour={t}
                         contacts={contactsMap}
                         units={unitsMap}
-                        showTime={true}
+                        timeDisplay="time"
                       />
                     ))}
                   </ul>
@@ -234,12 +269,42 @@ export function ToursPage(): React.JSX.Element {
                     tour={t}
                     contacts={contactsMap}
                     units={unitsMap}
-                    showTime={false}
+                    timeDisplay="none"
                   />
                 ))}
               </ul>
             )}
           </section>
+
+          {/* --- Closed section (opt-in via the header toggle) --- */}
+          {showClosed ? (
+            <section className={styles.section} aria-label="Closed tours">
+              <h2 className={styles.sectionTitle}>Closed</h2>
+              {closedStatus === 'loading' || closedStatus === 'idle' ? (
+                <Spinner center />
+              ) : closedStatus === 'error' ? (
+                <p className={styles.error} role="alert">
+                  We couldn&apos;t load closed tours. Please try again.
+                </p>
+              ) : closed.length === 0 ? (
+                <div className={styles.empty}>
+                  <p className={styles.emptyText}>No closed tours yet.</p>
+                </div>
+              ) : (
+                <ul className={styles.rows} aria-label="Closed tours list">
+                  {closed.map((t) => (
+                    <TourRow
+                      key={t.tourId}
+                      tour={t}
+                      contacts={contactsMap}
+                      units={unitsMap}
+                      timeDisplay="date"
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
+          ) : null}
         </>
       ) : null}
     </div>

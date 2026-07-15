@@ -370,12 +370,13 @@ test.describe('Tours page', () => {
     expect(tour.tourType).toBe('self_guided');
   });
 
-  // Closed tours are OFF the page by default; the header "Show closed" toggle
-  // reveals them (Cameron 2026-07-15). Builds a CLOSED tour via the API -
-  // booked YESTERDAY (outside the Upcoming window, so it can't leak into the
-  // other tests' sections), toured, then exit-gated not-a-fit (the same PATCH
-  // shape the Record-outcome modal sends; closes in the same PATCH).
-  test('closed tours: hidden by default, revealed by the "Show closed" toggle', async ({
+  // Closed tours live behind the Active | Closed view tabs (URL-backed, like
+  // the properties list's Active/Deleted tabs; Cameron 2026-07-15) - off the
+  // default view. Builds a CLOSED tour via the API - booked YESTERDAY (outside
+  // the Upcoming window, so it can't leak into the other tests' sections),
+  // toured, then exit-gated not-a-fit (the same PATCH shape the Record-outcome
+  // modal sends; closes in the same PATCH).
+  test('closed tours: absent from the Active view, listed on the Closed tab (/tours/closed)', async ({
     page,
   }) => {
     await devLogin(page); // page.request needs the session cookie for /api writes
@@ -398,23 +399,29 @@ test.describe('Tours page', () => {
     await page.goto(`${NEXT}/tours`);
     await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
 
-    // Hidden by default.
+    // The Active view carries the tabs but no closed rows.
+    const tabs = page.getByRole('navigation', { name: 'Tours view' });
+    await expect(tabs.getByRole('link', { name: 'Active' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
     await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
+    await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
 
-    // Toggle on -> the Closed section lists the tour, linking to its detail.
-    const toggle = page.getByRole('button', { name: 'Show closed' });
-    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    await toggle.click();
+    // The Closed tab navigates to /tours/closed and lists the tour.
+    await tabs.getByRole('link', { name: 'Closed' }).click();
+    await expect(page).toHaveURL(/\/tours\/closed$/);
+    await expect(page.getByRole('heading', { name: 'Closed tours' })).toBeVisible();
     const region = page.getByRole('region', { name: 'Closed tours' });
-    await expect(region).toBeVisible();
     const row = region.getByRole('link', {
       name: new RegExp(`Tour for Tasha Nguyen at .*Sycamore`, 'i'),
     });
     await expect(row).toBeVisible({ timeout: 10_000 });
     await expect(row).toHaveAttribute('href', `/tours/${tourId}`);
 
-    // Toggle off hides the section again.
-    await toggle.click();
+    // The Active tab returns to the default view.
+    await page.getByRole('navigation', { name: 'Tours view' }).getByRole('link', { name: 'Active' }).click();
+    await expect(page).toHaveURL(/\/tours$/);
     await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
   });
 });

@@ -1,22 +1,23 @@
-// ToursPage — the /tours list page. Two always-on sections plus an opt-in one:
+// ToursPage — the /tours list page, in two URL-backed VIEWS switched by the
+// Active | Closed tabs (mirrors the properties list's Active/Deleted tabs;
+// Cameron 2026-07-15 - the URL is the source of truth):
 //
-//   Upcoming  — tours in the next 30 days (from=start-of-today, to=+30d),
-//               grouped by local date (soonest first; "Today" label for today).
-//               Row: tenant name - property (unit address) - time - status - type.
+//   Active (/tours) — two sections:
+//     Upcoming  — tours in the next 30 days (from=start-of-today, to=+30d),
+//                 grouped by local date (soonest first; "Today" label for today).
+//                 Row: tenant name - property (unit address) - time - status - type.
+//     Needs booking — time-less tours (status='requested'), oldest first.
+//                 Row: tenant name - property - status - type (no time column).
 //
-//   Needs booking — time-less tours (status='requested'), oldest first.
-//               Row: tenant name - property - status - type (no time column).
-//
-//   Closed    — OPT-IN via the header "Show closed" toggle (hidden by default;
-//               Cameron 2026-07-15). Terminal status='closed' tours, newest
-//               first, fetched LAZILY on first toggle. Rows show the tour DATE
-//               (not time-of-day - these can be months old).
+//   Closed (/tours/closed) — terminal status='closed' tours, newest first
+//                 (fetched only on this view). Rows show the tour DATE (not
+//                 time-of-day - these can be months old).
 //
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference
 // pattern used by PlacementsBoard / TenantFile). Staff-facing vocabulary: "property"
 // for the unit (per GLOSSARY.md).
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   TOUR_STATUS_LABELS,
@@ -153,19 +154,32 @@ function TourRow({ tour, contacts, units, timeDisplay }: TourRowProps): React.JS
 // Page
 // ---------------------------------------------------------------------------
 
-export function ToursPage(): React.JSX.Element {
+export interface ToursPageProps {
+  /** The "Closed" view (terminal tours) vs the default active list. */
+  closed?: boolean;
+}
+
+/** Active / Closed view tabs. Links to the two routes so the URL is the source
+ *  of truth (mirrors the properties list's Active/Deleted tabs). */
+const VIEW_TABS: { closed: boolean; label: string; to: string }[] = [
+  { closed: false, label: 'Active', to: '/tours' },
+  { closed: true, label: 'Closed', to: '/tours/closed' },
+];
+
+export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element {
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
 
-  // Closed tours are OFF by default; the toggle lazily fetches them.
-  const [showClosed, setShowClosed] = useState(false);
-  const { status: closedStatus, closed } = useClosedTours(showClosed);
+  // Closed tours are fetched only when the Closed view is showing.
+  const { status: closedStatus, closed: closedTours } = useClosedTours(closed);
 
-  const loading =
-    toursStatus === 'loading' || contactsStatus === 'loading' || unitsStatus === 'loading';
-  const error =
-    toursStatus === 'error' || contactsStatus === 'error' || unitsStatus === 'error';
+  const crossRefLoading = contactsStatus === 'loading' || unitsStatus === 'loading';
+  const crossRefError = contactsStatus === 'error' || unitsStatus === 'error';
+  const loading = closed
+    ? closedStatus === 'loading' || closedStatus === 'idle' || crossRefLoading
+    : toursStatus === 'loading' || crossRefLoading;
+  const error = closed ? closedStatus === 'error' || crossRefError : toursStatus === 'error' || crossRefError;
 
   // Build lookup maps for cross-referencing.
   const contactsMap = useMemo(() => {
@@ -203,19 +217,26 @@ export function ToursPage(): React.JSX.Element {
   return (
     <div className={styles.page}>
       <div className={styles.header}>
-        <h1 className={styles.title}>Tours</h1>
-        <button
-          type="button"
-          className={`${styles.filterToggle} ${showClosed ? styles.filterToggleOn : ''}`}
-          aria-pressed={showClosed}
-          onClick={() => setShowClosed((v) => !v)}
-        >
-          Show closed
-        </button>
+        <h1 className={styles.title}>{closed ? 'Closed tours' : 'Tours'}</h1>
       </div>
       <p className={styles.sub}>
-        Upcoming scheduled tours and unbooked tour requests.
+        {closed
+          ? 'Tours that reached their exit - converted into a placement or closed as not a fit.'
+          : 'Upcoming scheduled tours and unbooked tour requests.'}
       </p>
+
+      <nav className={styles.tabs} aria-label="Tours view">
+        {VIEW_TABS.map((t) => (
+          <Link
+            key={t.label}
+            to={t.to}
+            className={`${styles.tab} ${t.closed === closed ? styles.tabActive : ''}`}
+            {...(t.closed === closed && { 'aria-current': 'page' })}
+          >
+            {t.label}
+          </Link>
+        ))}
+      </nav>
 
       {loading ? <Spinner center /> : null}
 
@@ -225,7 +246,7 @@ export function ToursPage(): React.JSX.Element {
         </p>
       ) : null}
 
-      {!loading && !error ? (
+      {!loading && !error && !closed ? (
         <>
           {/* --- Upcoming section --- */}
           <section className={styles.section} aria-label="Upcoming tours">
@@ -276,36 +297,30 @@ export function ToursPage(): React.JSX.Element {
             )}
           </section>
 
-          {/* --- Closed section (opt-in via the header toggle) --- */}
-          {showClosed ? (
-            <section className={styles.section} aria-label="Closed tours">
-              <h2 className={styles.sectionTitle}>Closed</h2>
-              {closedStatus === 'loading' || closedStatus === 'idle' ? (
-                <Spinner center />
-              ) : closedStatus === 'error' ? (
-                <p className={styles.error} role="alert">
-                  We couldn&apos;t load closed tours. Please try again.
-                </p>
-              ) : closed.length === 0 ? (
-                <div className={styles.empty}>
-                  <p className={styles.emptyText}>No closed tours yet.</p>
-                </div>
-              ) : (
-                <ul className={styles.rows} aria-label="Closed tours list">
-                  {closed.map((t) => (
-                    <TourRow
-                      key={t.tourId}
-                      tour={t}
-                      contacts={contactsMap}
-                      units={unitsMap}
-                      timeDisplay="date"
-                    />
-                  ))}
-                </ul>
-              )}
-            </section>
-          ) : null}
         </>
+      ) : null}
+
+      {/* --- Closed view (/tours/closed) --- */}
+      {!loading && !error && closed ? (
+        <section className={styles.section} aria-label="Closed tours">
+          {closedTours.length === 0 ? (
+            <div className={styles.empty}>
+              <p className={styles.emptyText}>No closed tours yet.</p>
+            </div>
+          ) : (
+            <ul className={styles.rows} aria-label="Closed tours list">
+              {closedTours.map((t) => (
+                <TourRow
+                  key={t.tourId}
+                  tour={t}
+                  contacts={contactsMap}
+                  units={unitsMap}
+                  timeDisplay="date"
+                />
+              ))}
+            </ul>
+          )}
+        </section>
       ) : null}
     </div>
   );

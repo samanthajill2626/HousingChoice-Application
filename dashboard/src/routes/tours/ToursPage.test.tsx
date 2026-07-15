@@ -11,7 +11,7 @@
 //   - getTours is called with the right params (asserted via useTours mock below)
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Tour, Contact, UnitItem } from '../../api/index.js';
 import type { ClosedToursState, ToursPageState } from './useTours.js';
@@ -176,10 +176,15 @@ const TOUR_REQUESTED_NEW: Tour = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function renderPage(): void {
+/** Render with BOTH view routes wired (the Active/Closed tabs are real links,
+ *  so navigation between the views works in-test). */
+function renderPage(initialPath = '/tours'): void {
   render(
-    <MemoryRouter>
-      <ToursPage />
+    <MemoryRouter initialEntries={[initialPath]}>
+      <Routes>
+        <Route path="/tours" element={<ToursPage />} />
+        <Route path="/tours/closed" element={<ToursPage closed />} />
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -358,29 +363,34 @@ describe('ToursPage', () => {
     updatedAt: '2026-06-02T19:00:00Z',
   };
 
-  it('hides the Closed section by default and does NOT enable the closed fetch', () => {
+  it('Active view: renders the view tabs with Active current, no Closed section, closed fetch OFF', () => {
     readyAll([TOUR_TODAY], []);
     renderPage();
+    const tabs = screen.getByRole('navigation', { name: 'Tours view' });
+    const active = within(tabs).getByRole('link', { name: 'Active' });
+    const closedTab = within(tabs).getByRole('link', { name: 'Closed' });
+    expect(active).toHaveAttribute('aria-current', 'page');
+    expect(active).toHaveAttribute('href', '/tours');
+    expect(closedTab).not.toHaveAttribute('aria-current');
+    expect(closedTab).toHaveAttribute('href', '/tours/closed');
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
-    const toggle = screen.getByRole('button', { name: 'Show closed' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    // The lazy hook was only ever asked with enabled=false.
+    // The lazy hook was only ever asked with enabled=false on the Active view.
     expect(useClosedToursSpy).toHaveBeenCalled();
     expect(useClosedToursSpy.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
   });
 
-  it('"Show closed" reveals the Closed section: rows with tenant, property, DATE, and badges', async () => {
+  it('clicking the Closed tab switches views: title, rows with tenant, property, DATE, and badges', async () => {
     const user = userEvent.setup();
     readyAll([], []);
     closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW, TOUR_CLOSED_OLD] };
     renderPage();
 
-    await user.click(screen.getByRole('button', { name: 'Show closed' }));
-    expect(screen.getByRole('button', { name: 'Show closed' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    await user.click(screen.getByRole('link', { name: 'Closed' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Closed tours' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Closed' })).toHaveAttribute('aria-current', 'page');
     expect(useClosedToursSpy).toHaveBeenCalledWith(true);
+    // The Active sections are gone on this view.
+    expect(screen.queryByRole('region', { name: 'Upcoming tours' })).not.toBeInTheDocument();
 
     const region = screen.getByRole('region', { name: 'Closed tours' });
     const items = within(region).getAllByRole('listitem');
@@ -395,38 +405,33 @@ describe('ToursPage', () => {
     expect(within(items[1]!).getByRole('link')).toHaveAttribute('href', '/tours/x2');
   });
 
-  it('toggling "Show closed" off hides the section again', async () => {
+  it('clicking Active from the Closed view returns to the two main sections', async () => {
     const user = userEvent.setup();
-    readyAll([], []);
+    readyAll([TOUR_TODAY], []);
     closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW] };
-    renderPage();
+    renderPage('/tours/closed');
 
-    await user.click(screen.getByRole('button', { name: 'Show closed' }));
     expect(screen.getByRole('region', { name: 'Closed tours' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Show closed' }));
+    await user.click(screen.getByRole('link', { name: 'Active' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Tours' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Upcoming tours' })).toBeInTheDocument();
   });
 
-  it('shows the Closed empty state when there are no closed tours', async () => {
-    const user = userEvent.setup();
+  it('shows the Closed empty state when there are no closed tours', () => {
     readyAll([], []);
     closedState = { status: 'ready', closed: [] };
-    renderPage();
-    await user.click(screen.getByRole('button', { name: 'Show closed' }));
+    renderPage('/tours/closed');
     const region = screen.getByRole('region', { name: 'Closed tours' });
     expect(within(region).getByText(/no closed tours/i)).toBeInTheDocument();
   });
 
-  it('shows an inline alert when the closed fetch fails (main sections unaffected)', async () => {
-    const user = userEvent.setup();
-    readyAll([TOUR_TODAY], []);
+  it('shows the page alert when the closed fetch fails on the Closed view', () => {
+    readyAll([], []);
     closedState = { status: 'error', closed: [] };
-    renderPage();
-    await user.click(screen.getByRole('button', { name: 'Show closed' }));
-    const region = screen.getByRole('region', { name: 'Closed tours' });
-    expect(within(region).getByRole('alert').textContent).toMatch(/closed tours/i);
-    // Upcoming still renders.
-    expect(screen.getByRole('region', { name: 'Upcoming tours' })).toBeInTheDocument();
+    renderPage('/tours/closed');
+    expect(screen.getByRole('alert').textContent).toMatch(/couldn.t load|try again/i);
+    expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
   });
 
   // --- Rendering order (component respects hook-provided order) ---

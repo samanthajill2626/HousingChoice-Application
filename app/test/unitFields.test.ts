@@ -126,6 +126,49 @@ describe('validateUnitBody — lease_terms (moved off the landlord contact 2026-
   });
 });
 
+describe('validateUnitBody - tour_type (structured, clear-to-absent)', () => {
+  // A dedicated enum field: a value must be in the TourType union, and clearing
+  // it (''/null) maps to a null patch value so the repo REMOVEs the attribute
+  // (no stray empty-string enum). Applies to both create and update.
+  it('accepts each TourType union member (passes through unchanged)', () => {
+    for (const t of ['self_guided', 'landlord_led', 'pm_team']) {
+      expect(validateUnitBody({ tour_type: t }, 'update')).toEqual({
+        ok: true,
+        fields: { tour_type: t },
+      });
+    }
+  });
+
+  it('maps a "" clear to a null patch value (the repo REMOVE signal)', () => {
+    const res = validateUnitBody({ tour_type: '' }, 'update');
+    expect(res).toEqual({ ok: true, fields: { tour_type: null } });
+    // Explicit: it is null (the REMOVE signal), not '' or absent.
+    expect(res).toMatchObject({ ok: true });
+    if (res.ok) expect(res.fields.tour_type).toBeNull();
+  });
+
+  it('maps a null clear to a null patch value (the repo REMOVE signal)', () => {
+    const res = validateUnitBody({ tour_type: null }, 'update');
+    expect(res).toEqual({ ok: true, fields: { tour_type: null } });
+    if (res.ok) expect(res.fields.tour_type).toBeNull();
+  });
+
+  it('rejects a value outside the union with a 400 error object', () => {
+    for (const bad of ['pm', 'landlord', 'SELF_GUIDED', 42, true, {}]) {
+      expect(validateUnitBody({ tour_type: bad }, 'update')).toEqual({
+        ok: false,
+        error: 'tour_type must be one of: self_guided, landlord_led, pm_team',
+      });
+    }
+  });
+
+  it('accepts tour_type on create as well as update', () => {
+    expect(
+      validateUnitBody({ landlordId: 'contact-ll', tour_type: 'pm_team' }, 'create'),
+    ).toEqual({ ok: true, fields: { landlordId: 'contact-ll', tour_type: 'pm_team' } });
+  });
+});
+
 describe('toUnitFlyerDetails — the reveal allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
@@ -158,6 +201,9 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       pets: 'SECRET cats only',
       priority: 'SECRET high',
       tour_process: 'SECRET lockbox 9999',
+      // E3 pin: set on the fixture but NOT listed in the exact-shape expected
+      // object below, so the flyer test FAILS loudly if tour_type ever leaks.
+      tour_type: 'self_guided',
       application_process: 'SECRET portal',
       primary_voice_contact: 'contact-ll-agent',
       status_source: 'manual',
@@ -197,6 +243,7 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       'landlordId',
       'primary_voice_contact',
       'tour_process',
+      'tour_type',
       'application_process',
       'status',
       'status_source',

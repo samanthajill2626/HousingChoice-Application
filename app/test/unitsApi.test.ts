@@ -349,6 +349,48 @@ describe('PATCH /api/units/:unitId', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('PATCH sets tour_type, then a "" clear REMOVEs it (GET shows the key ABSENT)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-tt', { beds: 2 });
+
+    // Set a structured tour_type.
+    const set = await request(app)
+      .patch('/api/units/unit-tt')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ tour_type: 'landlord_led' });
+    expect(set.status).toBe(200);
+    expect(set.body.unit.tour_type).toBe('landlord_led');
+    expect(world.units.get('unit-tt')!.tour_type).toBe('landlord_led');
+
+    // Clear it with '' -> the attribute is REMOVED, not stored as ''.
+    const clear = await request(app)
+      .patch('/api/units/unit-tt')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ tour_type: '' });
+    expect(clear.status).toBe(200);
+
+    const got = await request(app)
+      .get('/api/units/unit-tt')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(got.status).toBe(200);
+    expect('tour_type' in got.body.unit).toBe(false); // ABSENT, not ''
+    expect(world.units.get('unit-tt')).not.toHaveProperty('tour_type');
+
+    // A value outside the union is a 400.
+    const bad = await request(app)
+      .patch('/api/units/unit-tt')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ tour_type: 'concierge' });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toEqual({
+      error: 'tour_type must be one of: self_guided, landlord_led, pm_team',
+    });
+  });
+
   it('REFUSES status via CRUD PATCH (§8: status routes through listing-status)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { status: 'available' });

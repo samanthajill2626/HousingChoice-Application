@@ -127,6 +127,12 @@ test.describe('Tours page', () => {
     const tourTypeSelect = dialog.getByRole('combobox', { name: 'Tour type' });
     await expect(tourTypeSelect).toHaveValue('landlord_led');
 
+    // Provenance (spec S3 / E1): unit-0001 has NO structured tour_type, only
+    // free-text tour_process, so the prefill is the keyword GUESS - caption #2.
+    await expect(dialog.locator('#schedule-tour-type-provenance')).toHaveText(
+      "Guessed from the property's tour notes - check it",
+    );
+
     // Schedule for a FIXED time solidly inside today — noon local, comfortably
     // future vs the pinned 09:00 and 12 h from both midnight boundaries.
     const futureTime = localDatetimeAt(base, 12, 0);
@@ -276,5 +282,91 @@ test.describe('Tours page', () => {
         name: new RegExp(`Tour for Tasha Nguyen at .*Joseph E\\. Boone`, 'i'),
       }),
     ).toBeVisible({ timeout: 10_000 });
+  });
+
+  // Structured tour_type provenance (spec S2/S3, edge notes E1). Drives the FULL
+  // round-trip against the real backend: set a property's Tour type via the edit
+  // form -> open Schedule a tour and pick it -> the modal prefills the value with
+  // the "From the property" caption; overriding the picker drops that caption
+  // (E1 - a manual pick must not keep a property-provenance claim); creating the
+  // tour carries the OVERRIDDEN type. Uses a FRESH unit (not a seeded one) so it
+  // is independent of the lean seed baseline and other specs.
+  test('tour type provenance: From the property, override drops the caption, create carries the override', async ({
+    page,
+  }) => {
+    await devLogin(page);
+
+    // -- Create a fresh available property with NO structured tour_type yet. --
+    // Run-unique street number so the Unit typeahead option is collision-free.
+    // page.request shares the dev-login session cookie (the /api/* writes need
+    // auth); the bare `request` fixture is unauthenticated -> 401.
+    const addressLine1 = `${`${Date.now()}`.slice(-5)}01 Provenance Way NW`;
+    const created = await page.request.post(`${NEXT}/api/units`, {
+      data: {
+        landlordId: 'contact-landlord-0001',
+        jurisdiction: 'atlanta_housing',
+        beds: 2,
+        rent_min: 1500,
+        rent_max: 1600,
+        address: { line1: addressLine1, city: 'Atlanta', state: 'GA', zip: '30314' },
+      },
+    });
+    expect(created.ok(), `create unit failed: ${created.status()} ${await created.text()}`).toBeTruthy();
+    const unitId = ((await created.json()) as { unit: { unitId: string } }).unit.unitId;
+    const published = await page.request.patch(`${NEXT}/api/units/${unitId}/listing-status`, {
+      data: { toStatus: 'available', source: 'manual' },
+    });
+    expect(published.ok()).toBeTruthy();
+
+    // -- Set its Tour type to Landlord-led via the property edit form. --
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /Edit property/i }).click();
+    const editDialog = page.getByRole('dialog', { name: /Edit property/i });
+    await editDialog.getByLabel('Tour type').selectOption('landlord_led');
+    await editDialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // -- Open Schedule a tour from the seeded tenant and pick this property. --
+    await page.goto(`${NEXT}/contacts/${TENANT_ID}`);
+    await expect(page.getByText('Tasha Nguyen').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Schedule a tour' }).click();
+    const dialog = page.getByRole('dialog', { name: /Schedule a tour/i });
+    await expect(dialog).toBeVisible();
+
+    // The unit side may arrive pre-committed (the last property sent); resolve it
+    // to OUR fresh unit either way (mirrors steps.ts teamCreatesTourFromInterest).
+    const unitBox = dialog.getByRole('combobox', { name: 'Unit' });
+    const clearUnit = dialog.getByRole('button', { name: 'Clear Unit' });
+    await expect(async () => {
+      if (await clearUnit.isVisible()) {
+        if ((await unitBox.inputValue()).includes(addressLine1)) return;
+        await clearUnit.click();
+      }
+      await unitBox.fill(addressLine1, { timeout: 2_000 });
+      await dialog.getByRole('option', { name: addressLine1 }).click({ timeout: 2_000 });
+    }).toPass({ timeout: 15_000 });
+
+    // 1. "From the property": the structured value prefills + the honest caption.
+    const tourTypeSelect = dialog.getByRole('combobox', { name: 'Tour type' });
+    await expect(tourTypeSelect).toHaveValue('landlord_led');
+    const provenance = dialog.locator('#schedule-tour-type-provenance');
+    await expect(provenance).toHaveText('From the property');
+
+    // 2. Override (E1): picking a different type drops the property-provenance
+    //    caption entirely (the component sets provenance -> null on manual pick).
+    await tourTypeSelect.selectOption('self_guided');
+    await expect(tourTypeSelect).toHaveValue('self_guided');
+    await expect(provenance).toHaveCount(0);
+
+    // 3. Create carries the override: submit timeless -> the tour is self_guided.
+    await dialog.getByRole('button', { name: 'Schedule', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/tours\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
+    const tourId = /\/tours\/([A-Za-z0-9_-]+)$/.exec(page.url())![1]!;
+    const tourRes = await page.request.get(`${NEXT}/api/tours/${tourId}`);
+    expect(tourRes.ok()).toBeTruthy();
+    const tour = ((await tourRes.json()) as { tour: { tourType: string } }).tour;
+    expect(tour.tourType).toBe('self_guided');
   });
 });

@@ -33,13 +33,15 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import type { TourType } from '../lib/toursModel.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** The three ways a tour can be conducted. */
-export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
+/** The three ways a tour can be conducted. Canonical home is lib/toursModel.ts;
+ *  re-exported here so existing importers keep resolving from this repo. */
+export type { TourType };
 
 /** Tour status — mirrors TOUR_STATUSES in lib/toursModel.ts. */
 export type TourStatus = string;

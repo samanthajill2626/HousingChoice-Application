@@ -45,17 +45,15 @@ import {
   canReschedule,
   isTourOutcome,
   isTourStatus,
+  isTourType,
   TOUR_STATUSES,
   TOUR_OUTCOMES,
+  TOUR_TYPES,
   type TourOutcome,
   type TourStatus,
-} from '../lib/toursModel.js';
-import {
-  createToursRepo,
-  type TourItem,
-  type ToursRepo,
   type TourType,
-} from '../repos/toursRepo.js';
+} from '../lib/toursModel.js';
+import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { armTourReminders, cancelTourReminders } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -83,14 +81,6 @@ import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
-
-/** The three valid tour types. */
-const TOUR_TYPES: readonly TourType[] = ['self_guided', 'landlord_led', 'pm_team'];
-const TOUR_TYPE_SET: ReadonlySet<string> = new Set(TOUR_TYPES);
-
-function isTourType(x: unknown): x is TourType {
-  return typeof x === 'string' && TOUR_TYPE_SET.has(x);
-}
 
 /**
  * Validate that a string is a parseable ISO 8601 datetime.

@@ -75,6 +75,30 @@ export function isTourOutcome(x: unknown): x is TourOutcome {
   return typeof x === 'string' && TOUR_OUTCOME_SET.has(x);
 }
 
+// --- Tour types --------------------------------------------------------------
+// The three ways a tour can be conducted. This is the CANONICAL home of the
+// TourType union (toursRepo re-exports it for existing importers). It lives
+// here, next to the other tour enums, so BOTH tours (routing) and units (the
+// per-unit structured tour_type) can share ONE union + label map WITHOUT a
+// repo->repo import. tour type is load-bearing: reminder ROUTING branches on
+// self_guided (routed 1:1 instead of via the group thread).
+export const TOUR_TYPES = ['self_guided', 'landlord_led', 'pm_team'] as const;
+
+export type TourType = (typeof TOUR_TYPES)[number];
+
+const TOUR_TYPE_SET: ReadonlySet<string> = new Set(TOUR_TYPES);
+
+export const TOUR_TYPE_LABELS: Readonly<Record<TourType, string>> = {
+  self_guided: 'Self-guided',
+  landlord_led: 'Landlord-led',
+  pm_team: 'PM team',
+};
+
+/** Is `x` a known tour type (route allowlist + unit-field validation)? */
+export function isTourType(x: unknown): x is TourType {
+  return typeof x === 'string' && TOUR_TYPE_SET.has(x);
+}
+
 // --- Reschedulability --------------------------------------------------------
 // A tour may be rescheduled (-> `scheduled`) from these statuses:
 //   - `requested`  - booking: the first time is set on a timeless tour

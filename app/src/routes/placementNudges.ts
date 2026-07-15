@@ -12,8 +12,9 @@
 // /:placementId (a single-segment match, never /:placementId/nudges), so the two
 // never collide — the same split tourReminders.ts uses under /api/tours.
 //
-// GET surfaces each armed application-nudge rung's state (upcoming|sent|canceled)
-// so the detail hub can show WHAT scheduled texts are queued and which fired.
+// GET surfaces each armed application-nudge rung's state
+// (upcoming|sent|canceled|skipped) so the detail hub can show WHAT scheduled
+// texts are queued, which fired, and which the poll retired unsent.
 // PATCH is the operator's per-rung cancel/un-cancel: atomic conditional writes
 // (repo cancel/uncancel), so a cancel racing the poll's send claim resolves to
 // exactly one outcome — a lost race 409s with the row's real state instead of
@@ -36,6 +37,7 @@ import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
 import {
   createPlacementNudgesRepo,
   type NudgeKind,
+  type NudgeSkipReason,
   type PlacementNudgeItem,
   type PlacementNudgesRepo,
 } from '../repos/placementNudgesRepo.js';
@@ -63,9 +65,14 @@ export interface PlacementNudgeView {
   recipient: 'tenant' | 'landlord';
   /** ISO 8601 — when the rung is/was scheduled to fire. */
   dueAt: string;
-  state: 'upcoming' | 'sent' | 'canceled';
+  /** 'skipped' = the poll retired the rung UNSENT (stale stage / undeliverable
+   *  recipient) — see skipReason. Distinct from 'sent' so the card never
+   *  reports a text the recipient did not get. */
+  state: 'upcoming' | 'sent' | 'canceled' | 'skipped';
   sentAt?: string;
   canceledAt?: string;
+  skippedAt?: string;
+  skipReason?: NudgeSkipReason;
 }
 
 // kind -> recipient, derived ONCE from the single-source nudge ladder so it can
@@ -82,9 +89,11 @@ const RECIPIENT_BY_KIND = Object.fromEntries(
 
 const recipientOf = (kind: NudgeKind): 'tenant' | 'landlord' => RECIPIENT_BY_KIND[kind] ?? 'tenant';
 
-/** canceledAt wins over sentAt (a row is only canceled while unsent, but be safe). */
+/** canceledAt wins over sentAt/skippedAt (terminal markers are mutually
+ *  exclusive by the repo's conditional writes, but be safe). */
 function stateOf(row: PlacementNudgeItem): PlacementNudgeView['state'] {
   if (row.canceledAt !== undefined) return 'canceled';
+  if (row.skippedAt !== undefined) return 'skipped';
   if (row.sentAt !== undefined) return 'sent';
   return 'upcoming';
 }
@@ -100,6 +109,8 @@ function viewOf(row: PlacementNudgeItem): PlacementNudgeView {
     state: stateOf(row),
     ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
     ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
+    ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
+    ...(row.skipReason !== undefined && { skipReason: row.skipReason }),
   };
 }
 

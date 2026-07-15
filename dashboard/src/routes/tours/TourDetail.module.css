@@ -76,6 +76,10 @@
   padding: var(--sp-2) var(--sp-3);
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
+  /* The pills are nowrap; a long channel label ("Landlord - <name>") at a
+   * phone width must scroll THIS rail, never the page (shared by the tour +
+   * placement conversation panes; placement-hub spec s7). */
+  overflow-x: auto;
 }
 
 .tab,

@@ -15,7 +15,7 @@
 // (tenant -> placement.tenantId; landlord -> unit.landlordId).
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import type { NudgeKind, PlacementNudgeItem } from '../src/repos/placementNudgesRepo.js';
+import type { NudgeKind, NudgeSkipReason, PlacementNudgeItem } from '../src/repos/placementNudgesRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -55,6 +55,8 @@ function seedNudge(
     dueAt: string;
     sentAt?: string;
     canceledAt?: string;
+    skippedAt?: string;
+    skipReason?: NudgeSkipReason;
   },
 ): void {
   const item: PlacementNudgeItem = {
@@ -66,6 +68,8 @@ function seedNudge(
     createdAt: '2026-07-13T00:00:00.000Z',
     ...(input.sentAt !== undefined && { sentAt: input.sentAt }),
     ...(input.canceledAt !== undefined && { canceledAt: input.canceledAt }),
+    ...(input.skippedAt !== undefined && { skippedAt: input.skippedAt }),
+    ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.placementNudgesMap.set(item.nudgeId, item);
 }
@@ -136,6 +140,30 @@ describe('GET /api/placements/:placementId/nudges', () => {
     // upcoming rung carries neither terminal stamp.
     expect(byId.get('nudge-approval')?.sentAt).toBeUndefined();
     expect(byId.get('nudge-approval')?.canceledAt).toBeUndefined();
+  });
+
+  it('surfaces a claim-skipped rung as state=skipped with its skipReason (never "sent")', async () => {
+    const { app, world } = makeWebhookHarness();
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-tenant-skip',
+      unitId: 'unit-nudge-skip',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-skipped',
+      placementId,
+      kind: 'approval_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+      skippedAt: '2026-07-14T08:01:00.000Z',
+      skipReason: 'no_landlord',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = (res.body as { nudges: { state: string; skippedAt?: string; skipReason?: string; sentAt?: string }[] }).nudges;
+    expect(nudge?.state).toBe('skipped');
+    expect(nudge?.skippedAt).toBe('2026-07-14T08:01:00.000Z');
+    expect(nudge?.skipReason).toBe('no_landlord');
+    expect(nudge?.sentAt).toBeUndefined();
   });
 
   it('returns 404 for an unknown placement id', async () => {
@@ -257,6 +285,36 @@ describe('PATCH /api/placements/:placementId/nudges/:nudgeId', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('nudge_not_restorable');
     expect(res.body.nudge.state).toBe('upcoming');
+  });
+
+  it('409s BOTH cancel and restore of a skipped rung (retired unsent is terminal)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-cancel-tenant-skip',
+      unitId: 'unit-cancel-skip',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-skip-terminal',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+      skippedAt: '2026-07-14T08:01:00.000Z',
+      skipReason: 'contact_no_phone',
+    });
+
+    const cancel = await authed(app)
+      .patch(`/api/placements/${placementId}/nudges/nudge-skip-terminal`)
+      .send({ canceled: true });
+    expect(cancel.status).toBe(409);
+    expect(cancel.body.error).toBe('nudge_not_cancelable');
+    expect(cancel.body.nudge.state).toBe('skipped');
+
+    const restore = await authed(app)
+      .patch(`/api/placements/${placementId}/nudges/nudge-skip-terminal`)
+      .send({ canceled: false });
+    expect(restore.status).toBe(409);
+    expect(restore.body.error).toBe('nudge_not_restorable');
+    expect(restore.body.nudge.state).toBe('skipped');
   });
 
   it('validates: 400 non-boolean, 404 unknown placement, 404 nudge of ANOTHER placement', async () => {

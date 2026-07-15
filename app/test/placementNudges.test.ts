@@ -69,30 +69,54 @@ function makeFakeNudgesRepo(seed: PlacementNudgeItem[] = []) {
     },
     async listDue(nowIso) {
       return rows.filter(
-        (r) => r.dueAt <= nowIso && r.sentAt === undefined && r.canceledAt === undefined,
+        (r) =>
+          r.dueAt <= nowIso &&
+          r.sentAt === undefined &&
+          r.canceledAt === undefined &&
+          r.skippedAt === undefined,
       );
     },
     async claimSend(nudgeId, nowIso) {
       const row = rows.find((r) => r.nudgeId === nudgeId);
-      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined) return false;
+      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
+        return false;
+      }
       row.sentAt = nowIso;
+      return true;
+    },
+    async claimSkip(nudgeId, skippedAt, reason) {
+      const row = rows.find((r) => r.nudgeId === nudgeId);
+      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
+        return false;
+      }
+      row.skippedAt = skippedAt;
+      row.skipReason = reason;
       return true;
     },
     async cancel(nudgeId, canceledAt) {
       const row = rows.find((r) => r.nudgeId === nudgeId);
-      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined) return false;
+      if (!row || row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
+        return false;
+      }
       row.canceledAt = canceledAt;
       return true;
     },
     async uncancel(nudgeId) {
       const row = rows.find((r) => r.nudgeId === nudgeId);
-      if (!row || row.canceledAt === undefined || row.sentAt !== undefined) return false;
+      if (!row || row.canceledAt === undefined || row.sentAt !== undefined || row.skippedAt !== undefined) {
+        return false;
+      }
       row.canceledAt = undefined;
       return true;
     },
     async cancelForPlacement(placementId) {
       for (const r of rows) {
-        if (r.placementId === placementId && r.sentAt === undefined && r.canceledAt === undefined) {
+        if (
+          r.placementId === placementId &&
+          r.sentAt === undefined &&
+          r.canceledAt === undefined &&
+          r.skippedAt === undefined
+        ) {
           r.canceledAt = FIXED_CREATED;
         }
       }
@@ -383,15 +407,18 @@ describe('runDuePlacementNudges', () => {
     expect(send.sent).toHaveLength(0);
   });
 
-  it('stale-stage row is claimed (retired) but NOT sent', async () => {
+  it('stale-stage row is claim-SKIPPED (retired unsent) — never reported as sent', async () => {
     // Row is a receipt_check (rung stage awaiting_receipt) but the placement has
     // already moved on to awaiting_completion.
     const { deps, send, repo, row } = tenantRig('awaiting_completion', 'receipt_check');
     await runDuePlacementNudges(NOW, deps);
     expect(send.sent).toHaveLength(0);
-    // The stale row was claimed so it won't reappear on the next poll.
-    expect(row.sentAt).toBeDefined();
-    // Nothing left due.
+    // Retired with skippedAt, NOT sentAt — stamping sentAt here would make the
+    // dashboard card claim "Sent" for a text the recipient never got.
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBe(NOW);
+    expect(row.skipReason).toBe('stage_moved');
+    // Nothing left due — the row leaves listDue exactly once.
     expect(await repo.listDue(NOW)).toHaveLength(0);
   });
 
@@ -426,9 +453,37 @@ describe('runDuePlacementNudges', () => {
     };
     await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
     expect(send.sent).toHaveLength(0);
-    // Missing placement is NOT claimed (row stays pending — a resurrected
-    // placement could still be nudged; mirrors tourReminders' warn+skip).
+    // Retired via claim-skip (skippedAt, never sentAt) so the row leaves
+    // listDue exactly once — a bare warn+return would re-list and re-warn it
+    // every poll tick forever (the perpetual "sending shortly" bug tour
+    // reminders already fixed; mirrors their claimSkipRow).
     expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBe(NOW);
+    expect(row.skipReason).toBe('placement_missing');
+    expect(await repo.listDue(NOW)).toHaveLength(0);
+  });
+
+  it('landlord rung on a unit with NO landlordId is claim-skipped (no_landlord) — not re-listed forever', async () => {
+    const row = landlordRow('nudge-nl-1', 'placement-nl', 'approval_check');
+    const { repo } = makeFakeNudgesRepo([row]);
+    const send = makeSendSpy();
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: repo,
+      placementsRepo: makeFakePlacementsRepo([
+        makePlacement({ placementId: 'placement-nl', stage: 'awaiting_approval', unitId: 'unit-nl' }),
+      ]),
+      contactsRepo: makeFakeContactsRepo([]),
+      // Unit exists but carries no landlordId — the in-scope degraded case.
+      unitsRepo: makeFakeUnitsRepo([{ unitId: 'unit-nl' } as UnitItem]),
+      conversationsRepo: makeFakeConversationsRepo([]),
+      sendMessageService: send.service,
+    };
+    await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBe(NOW);
+    expect(row.skipReason).toBe('no_landlord');
+    expect(await repo.listDue(NOW)).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

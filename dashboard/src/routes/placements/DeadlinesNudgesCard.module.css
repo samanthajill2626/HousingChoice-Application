@@ -157,6 +157,17 @@
   color: var(--c-text-muted);
 }
 
+/* Retired unsent by the poll (claim-skip) — the RemindersPanel skipped tone
+ * (amber bg + danger text), NOT muted: a nudge that never reached its
+ * recipient deserves attention, unlike a deliberate cancel, and must read
+ * differently from the amber "sends in Nh" upcoming chip. The reason text is
+ * a sentence, so this chip may wrap (mobile: never force horizontal scroll). */
+.skipped {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-danger);
+  white-space: normal;
+}
+
 .struck {
   text-decoration: line-through;
   color: var(--c-text-muted);

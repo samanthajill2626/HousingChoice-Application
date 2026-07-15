@@ -780,6 +780,16 @@ export type NudgeKind =
  * (GET /api/placements/:placementId/nudges). Mirrors the server's
  * PlacementNudgeView shape verbatim (app/src/routes/placementNudges.ts).
  */
+/** Why the poll retired a rung UNSENT (mirrors the server's NudgeSkipReason). */
+export type NudgeSkipReason =
+  | 'placement_missing'
+  | 'stage_moved'
+  | 'unknown_kind'
+  | 'unit_missing'
+  | 'no_landlord'
+  | 'contact_missing'
+  | 'contact_no_phone';
+
 export interface PlacementNudgeView {
   nudgeId: string;
   placementId: string;
@@ -788,11 +798,15 @@ export interface PlacementNudgeView {
   recipient: 'tenant' | 'landlord';
   /** ISO 8601 — when the rung is/was scheduled to fire. */
   dueAt: string;
-  state: 'upcoming' | 'sent' | 'canceled';
+  /** 'skipped' = retired UNSENT by the poll (stale stage / undeliverable). */
+  state: 'upcoming' | 'sent' | 'canceled' | 'skipped';
   /** ISO 8601 — when it was sent (present when state === 'sent'). */
   sentAt?: string;
   /** ISO 8601 — when it was canceled (present when state === 'canceled'). */
   canceledAt?: string;
+  /** ISO 8601 — when the poll retired it unsent (present when state === 'skipped'). */
+  skippedAt?: string;
+  skipReason?: NudgeSkipReason;
 }
 
 // --- SSE (legacy reuse — verbatim) ------------------------------------------

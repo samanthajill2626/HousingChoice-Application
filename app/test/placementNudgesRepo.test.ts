@@ -253,4 +253,90 @@ describe('placementNudgesRepo.uncancel', () => {
     expect(row!.sentAt).toBe('2026-07-04T00:00:00.000Z');
     expect(row!.canceledAt).toBe('2026-07-04T01:00:00.000Z');
   });
+
+  it('never resurrects a SKIPPED row (canceledAt+skippedAt stays skipped, false)', async () => {
+    const { doc, seed } = makeFakeDoc();
+    const repo = repoWith(doc);
+    seed(
+      forge({
+        nudgeId: 'nudge-cs',
+        placementId: 'p-1',
+        canceledAt: '2026-07-04T01:00:00.000Z',
+        skippedAt: '2026-07-04T02:00:00.000Z',
+        skipReason: 'stage_moved',
+      }),
+    );
+
+    expect(await repo.uncancel('nudge-cs')).toBe(false);
+    const [row] = await repo.listByPlacement('p-1');
+    expect(row!.skippedAt).toBe('2026-07-04T02:00:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// claimSkip (retire unsent — the terminal marker that keeps an undeliverable
+// row from being re-listed by listDue every poll tick forever)
+// ---------------------------------------------------------------------------
+
+describe('placementNudgesRepo.claimSkip', () => {
+  it('stamps skippedAt + skipReason on a pending row under the full no-terminal guard', async () => {
+    const { doc, lastUpdate } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const row = await repo.create({ placementId: 'p-1', kind: 'approval_check', dueAt: '2026-07-05T09:00:00.000Z' });
+
+    expect(await repo.claimSkip(row.nudgeId, '2026-07-05T09:01:00.000Z', 'no_landlord')).toBe(true);
+
+    const [after] = await repo.listByPlacement('p-1');
+    expect(after!.skippedAt).toBe('2026-07-05T09:01:00.000Z');
+    expect(after!.skipReason).toBe('no_landlord');
+    expect(after!.sentAt).toBeUndefined();
+    const cond = lastUpdate()!.input.ConditionExpression!;
+    expect(cond).toContain('attribute_not_exists(#sentAt)');
+    expect(cond).toContain('attribute_not_exists(#canceledAt)');
+    expect(cond).toContain('attribute_not_exists(#skippedAt)');
+  });
+
+  it('returns false against a sent row (a delivered nudge is never rewritten as skipped)', async () => {
+    const { doc, seed } = makeFakeDoc();
+    const repo = repoWith(doc);
+    seed(forge({ nudgeId: 'nudge-sent', placementId: 'p-1', sentAt: '2026-07-04T00:00:00.000Z' }));
+
+    expect(await repo.claimSkip('nudge-sent', '2026-07-05T09:01:00.000Z', 'stage_moved')).toBe(false);
+    const [row] = await repo.listByPlacement('p-1');
+    expect(row!.sentAt).toBe('2026-07-04T00:00:00.000Z');
+    expect(row!.skippedAt).toBeUndefined();
+  });
+
+  it('is idempotent: the second skip loses and the first reason is preserved', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const row = await repo.create({ placementId: 'p-1', kind: 'receipt_check', dueAt: '2026-07-05T09:00:00.000Z' });
+
+    expect(await repo.claimSkip(row.nudgeId, '2026-07-05T09:01:00.000Z', 'contact_missing')).toBe(true);
+    expect(await repo.claimSkip(row.nudgeId, '2026-07-05T09:02:00.000Z', 'stage_moved')).toBe(false);
+    const [after] = await repo.listByPlacement('p-1');
+    expect(after!.skippedAt).toBe('2026-07-05T09:01:00.000Z');
+    expect(after!.skipReason).toBe('contact_missing');
+  });
+
+  it('a skipped row can no longer be claimed for send, canceled, or restored', async () => {
+    const { doc, seed } = makeFakeDoc();
+    const repo = repoWith(doc);
+    seed(
+      forge({
+        nudgeId: 'nudge-skipped',
+        placementId: 'p-1',
+        skippedAt: '2026-07-05T09:01:00.000Z',
+        skipReason: 'contact_no_phone',
+      }),
+    );
+
+    expect(await repo.claimSend('nudge-skipped', '2026-07-05T09:02:00.000Z')).toBe(false);
+    expect(await repo.cancel('nudge-skipped', '2026-07-05T09:02:00.000Z')).toBe(false);
+    expect(await repo.uncancel('nudge-skipped')).toBe(false);
+    const [row] = await repo.listByPlacement('p-1');
+    expect(row!.sentAt).toBeUndefined();
+    expect(row!.canceledAt).toBeUndefined();
+    expect(row!.skippedAt).toBe('2026-07-05T09:01:00.000Z');
+  });
 });

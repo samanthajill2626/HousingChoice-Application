@@ -192,6 +192,35 @@ describe('DeadlinesNudgesCard - nudges', () => {
     expect(screen.queryByRole('button', { name: /Cancel|Restore/ })).toBeNull();
   });
 
+  it('a skipped nudge shows "Skipped - <reason>" (never Sent) and NO cancel/restore action', () => {
+    renderCard({
+      nudges: [
+        nudge({
+          nudgeId: 'n-sk',
+          kind: 'approval_check',
+          recipient: 'landlord',
+          state: 'skipped',
+          skippedAt: '2026-06-18T13:02:00Z',
+          skipReason: 'no_landlord',
+        }),
+      ],
+    });
+    // The poll retired the rung UNSENT - the chip must say so with the reason,
+    // and must NOT read as a delivered text.
+    expect(screen.getByText('Skipped - no landlord on the property')).toBeInTheDocument();
+    expect(screen.queryByText(/^Sent/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Cancel|Restore/ })).toBeNull();
+  });
+
+  it('a skipped nudge with no reason still shows a bare Skipped chip', () => {
+    renderCard({
+      nudges: [
+        nudge({ nudgeId: 'n-sk2', kind: 'receipt_check', state: 'skipped', skippedAt: '2026-06-18T13:02:00Z' }),
+      ],
+    });
+    expect(screen.getByText('Skipped')).toBeInTheDocument();
+  });
+
   it('surfaces a fetch error via role="alert"', () => {
     renderCard({ nudgesError: 'boom' });
     expect(screen.getByRole('alert')).toBeInTheDocument();

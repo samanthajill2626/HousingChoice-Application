@@ -26,6 +26,7 @@ import { useCallback, useState } from 'react';
 import {
   clearPlacementFollowUp,
   type NudgeKind,
+  type NudgeSkipReason,
   type PlacementNudgeView,
 } from '../../api/index.js';
 import { Card } from '../contact/Card.js';
@@ -41,6 +42,17 @@ const NUDGE_KIND_LABELS: Readonly<Record<NudgeKind, string>> = {
   rta_window_closing: 'RTA window closing',
 };
 
+/** Why the poll retired a rung UNSENT (staff-facing, plain-hyphen copy). */
+const NUDGE_SKIP_REASON_LABELS: Readonly<Record<NudgeSkipReason, string>> = {
+  placement_missing: 'placement no longer exists',
+  stage_moved: 'stage moved on before it fired',
+  unknown_kind: 'unrecognized nudge',
+  unit_missing: 'property no longer exists',
+  no_landlord: 'no landlord on the property',
+  contact_missing: 'recipient no longer exists',
+  contact_no_phone: 'recipient has no phone number',
+};
+
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */
 function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element {
   if (nudge.state === 'sent') {
@@ -51,6 +63,17 @@ function StateChip({ nudge }: { nudge: PlacementNudgeView }): React.JSX.Element 
   }
   if (nudge.state === 'canceled') {
     return <span className={`${styles.chip} ${styles.canceled}`}>Canceled</span>;
+  }
+  if (nudge.state === 'skipped') {
+    // The poll retired the rung UNSENT (claim-skip) - say why, so the chip is
+    // never a false "Sent" or a permanent "sending shortly" lie.
+    const reason =
+      nudge.skipReason !== undefined ? NUDGE_SKIP_REASON_LABELS[nudge.skipReason] : undefined;
+    return (
+      <span className={`${styles.chip} ${styles.skipped}`}>
+        {reason !== undefined ? `Skipped - ${reason}` : 'Skipped'}
+      </span>
+    );
   }
   // upcoming - amber, with the relative FIRE time ("sends in Nh" / "sending
   // shortly"), the same wording the tour reminder chip + the contact-timeline

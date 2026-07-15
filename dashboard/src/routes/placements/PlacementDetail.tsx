@@ -12,13 +12,10 @@
 // awaiting_rent_acceptance -> finalRent; OUT of awaiting_inspection ->
 // inspectionOutcome / inspectionDate; determine_rent -> rentDetermined; into
 // awaiting_move_in -> moveInReady). Right pane order (spec section 3): the Now
-// card + Deadlines-and-nudges slots (filled in Tasks 9 + 8), People and
-// provenance, Placement facts, History. Staff see "property" for the unit
-// (GLOSSARY).
-//
-// NOTE (Task 7): the in-place StageDataCard + PaperworkCard recorders still
-// render in the right pane. Task 9 ABSORBS them into the Now card; kept here for
-// now so their behavior (and tests) stay green.
+// card, Deadlines-and-nudges, People and provenance, Placement facts, History.
+// Staff see "property" for the unit (GLOSSARY). The old StageDataCard +
+// PaperworkCard recorders live INSIDE the Now card now (its stage-scoped
+// Record section) — they no longer render standalone here.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {

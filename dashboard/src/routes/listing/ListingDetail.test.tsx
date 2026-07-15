@@ -22,7 +22,10 @@ const getUnit = vi.fn();
 const getContacts = vi.fn();
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
-const uploadUnitPhotos = vi.fn();
+// Direct-upload trio (unit-photos direct-upload R4): presign -> raw S3 POST -> confirm.
+const presignUnitPhotos = vi.fn();
+const uploadToPresignedPost = vi.fn();
+const confirmUnitPhotos = vi.fn();
 const removeUnitPhoto = vi.fn();
 const setUnitPhotoCover = vi.fn();
 vi.mock('../../api/index.js', async () => {
@@ -38,7 +41,9 @@ vi.mock('../../api/index.js', async () => {
     getContacts: (...a: unknown[]) => getContacts(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
-    uploadUnitPhotos: (...a: unknown[]) => uploadUnitPhotos(...a),
+    presignUnitPhotos: (...a: unknown[]) => presignUnitPhotos(...a),
+    uploadToPresignedPost: (...a: unknown[]) => uploadToPresignedPost(...a),
+    confirmUnitPhotos: (...a: unknown[]) => confirmUnitPhotos(...a),
     removeUnitPhoto: (...a: unknown[]) => removeUnitPhoto(...a),
     setUnitPhotoCover: (...a: unknown[]) => setUnitPhotoCover(...a),
   };
@@ -521,72 +526,112 @@ describe('ListingDetail', () => {
     expect(hero).toHaveAttribute('src', 'https://cdn.example/p/cover.jpg?sig=1');
   });
 
-  it('the "+ Add" flow uploads the chosen files and applies the returned unit', async () => {
+  // A presign grant per file, in order (the server preserves order). The direct
+  // POST target is a stand-in MinIO endpoint the mock never actually hits.
+  function grantsFor(files: File[]): { key: string; post: { url: string; fields: Record<string, string> } }[] {
+    return files.map((_, i) => ({
+      key: `unit-media/u1/key-${i}`,
+      post: { url: 'https://minio.local/hc-media', fields: { key: `unit-media/u1/key-${i}` } },
+    }));
+  }
+
+  it('the "+ Add" flow presigns, POSTs the file directly to S3, then confirms and applies the returned unit', async () => {
     const setUnit = vi.fn();
     useListing.mockReturnValue({ ...READY, setUnit });
     const updated = {
       ...READY.unit!,
       mediaDisplay: [
         ...READY.unit!.mediaDisplay!,
-        { entry: 'units/u1/new.jpg', url: 'https://cdn.example/p/new.jpg?sig=9' },
+        { entry: 'unit-media/u1/key-0', url: 'https://cdn.example/p/new.jpg?sig=9' },
       ],
     };
-    uploadUnitPhotos.mockResolvedValue(updated);
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(updated);
     renderAt();
 
     const file = new File(['x'], 'porch.jpg', { type: 'image/jpeg' });
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() => expect(uploadUnitPhotos).toHaveBeenCalledWith('u1', [file]));
+    await waitFor(() => expect(presignUnitPhotos).toHaveBeenCalledWith('u1', [file]));
+    // The raw S3 POST carries the grant's post target + the File itself.
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(1));
+    expect(uploadToPresignedPost.mock.calls[0]![1]).toBe(file);
+    // Confirm records the uploaded key and the returned unit is applied in place.
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledWith('u1', ['unit-media/u1/key-0']));
     await waitFor(() => expect(setUnit).toHaveBeenCalledWith(updated));
   });
 
-  it('review F1: a large selection uploads in SEQUENTIAL batches of 10 (memory fence coupling)', async () => {
-    // The server buffers a request's whole batch behind a 60MB fence; the
-    // client keeps big drag-drops working by chunking into 10-file requests.
+  it('a multi-file selection POSTs every file directly then confirms all uploaded keys in ONE wave', async () => {
     const setUnit = vi.fn();
     useListing.mockReturnValue({ ...READY, setUnit });
-    uploadUnitPhotos.mockResolvedValue(READY.unit!);
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
     renderAt();
 
-    const files = Array.from(
-      { length: 25 },
-      (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }),
-    );
+    const files = Array.from({ length: 3 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files } });
 
-    await waitFor(() => expect(uploadUnitPhotos).toHaveBeenCalledTimes(3));
-    const batches = uploadUnitPhotos.mock.calls.map((c) => (c[1] as File[]).length);
-    expect(batches).toEqual([10, 10, 5]);
-    // The unit state applied after EACH batch (progressive rendering).
-    expect(setUnit).toHaveBeenCalledTimes(3);
-  });
-
-  it('review F1: a mid-batch failure keeps earlier batches and says how many uploaded', async () => {
-    const setUnit = vi.fn();
-    useListing.mockReturnValue({ ...READY, setUnit });
-    uploadUnitPhotos
-      .mockResolvedValueOnce(READY.unit!)
-      .mockRejectedValueOnce(new ApiError(502, 'upload_failed', 'upload_failed'));
-    renderAt();
-
-    const files = Array.from(
-      { length: 12 },
-      (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }),
-    );
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-    fireEvent.change(input, { target: { files } });
-
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Uploaded 10 of 12/));
-    // The first batch's unit state stuck (photos already stored server-side).
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(3));
+    // One wave (<= 20 files) -> one presign, one confirm carrying all three keys.
+    expect(presignUnitPhotos).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(1));
+    const confirmedKeys = (confirmUnitPhotos.mock.calls[0]![1] as string[]).slice().sort();
+    expect(confirmedKeys).toEqual(['unit-media/u1/key-0', 'unit-media/u1/key-1', 'unit-media/u1/key-2']);
     expect(setUnit).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces an honest inline error when an upload is rejected', async () => {
+  it('a selection larger than the wave size uploads in sequential 20-file waves', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from({ length: 25 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    // Two waves: 20 then 5 -> two presign calls, two confirm calls, 25 direct POSTs.
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(25));
+    expect(presignUnitPhotos).toHaveBeenCalledTimes(2);
+    const waveSizes = presignUnitPhotos.mock.calls.map((c) => (c[1] as File[]).length);
+    expect(waveSizes).toEqual([20, 5]);
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(2));
+    // The unit state applied after EACH wave (progressive rendering).
+    expect(setUnit).toHaveBeenCalledTimes(2);
+  });
+
+  it('a partial upload failure confirms the successes and reports "Uploaded N of M"', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    // The 2nd file's direct POST fails; the other two reach S3.
+    uploadToPresignedPost
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new ApiError(403, 's3_upload_failed', 's3_upload_failed'))
+      .mockResolvedValueOnce(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from({ length: 3 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Uploaded 2 of 3/));
+    // Confirm still recorded the two that made it; the returned unit is applied.
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(1));
+    expect(confirmUnitPhotos.mock.calls[0]![1] as string[]).toHaveLength(2);
+    expect(setUnit).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces the mapped server error when PRESIGN is rejected (nothing uploaded or confirmed)', async () => {
     useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
-    uploadUnitPhotos.mockRejectedValue(
+    presignUnitPhotos.mockRejectedValue(
       new ApiError(400, 'unsupported_media_type', 'unsupported_media_type'),
     );
     renderAt();
@@ -595,9 +640,25 @@ describe('ListingDetail', () => {
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent(/JPEG, PNG, GIF, or WebP/i),
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/JPEG, PNG, GIF, or WebP/i));
+    expect(uploadToPresignedPost).not.toHaveBeenCalled();
+    expect(confirmUnitPhotos).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the mapped server error when CONFIRM is rejected (cap re-guard race)', async () => {
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockRejectedValue(
+      new ApiError(400, 'photo_cap_exceeded', 'photo_cap_exceeded'),
     );
+    renderAt();
+
+    const file = new File(['x'], 'porch.jpg', { type: 'image/jpeg' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/past the 100-photo limit/i));
   });
 
   it('disables "+ Add" with a note at the 100-photo cap', () => {

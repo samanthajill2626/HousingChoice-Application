@@ -15,11 +15,13 @@ import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ApiError,
+  confirmUnitPhotos,
   deleteUnit,
+  presignUnitPhotos,
   removeUnitPhoto,
   restoreUnit,
   setUnitPhotoCover,
-  uploadUnitPhotos,
+  uploadToPresignedPost,
   type Contact,
   type UnitMediaDisplay,
 } from '../../api/index.js';
@@ -92,13 +94,18 @@ const UNIT_MEDIA_MAX = 100;
 // re-validates every file regardless.
 const PHOTO_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp';
 
-/** Files per upload REQUEST (review hardening, 2026-07-15). Large selections
- *  upload in sequential batches this size: 10 x 5MB sits well under the
- *  server's 60MB per-request memory fence (UNIT_PHOTO_MAX_REQUEST_BYTES) and
- *  one operator occupies one concurrency slot - so a 100-photo drag-drop
- *  works without ever tripping a fence. Keep this coupled to those server
- *  constants (app/src/lib/unitMedia.ts) if either changes. */
-const PHOTO_UPLOAD_BATCH_SIZE = 10;
+/** Files per presign WAVE (unit-photos direct-upload R4). Mirrors the server's
+ *  UNIT_PHOTO_PRESIGN_BATCH_MAX (a per-request politeness bound, NOT a memory
+ *  bound - the bytes go browser->S3 directly). A selection larger than this
+ *  uploads in sequential 20-file waves (presign -> parallel direct POSTs ->
+ *  confirm per wave), so a 100-photo drag-drop still works end to end. Keep it
+ *  coupled to that server constant if it changes. */
+const PHOTO_PRESIGN_WAVE_SIZE = 20;
+
+/** How many direct-to-S3 POSTs run concurrently within a wave. The bytes never
+ *  touch the app, so this is purely browser civility (avoid opening 20 sockets
+ *  at once); 5 keeps uploads brisk without hammering the connection pool. */
+const PHOTO_UPLOAD_CONCURRENCY = 5;
 
 /** An honest, staff-facing message for a photo-upload failure (the app 400 carries
  *  a machine `error` code on `ApiError.code`; map the known ones, else a generic
@@ -115,6 +122,8 @@ function photoUploadMessage(err: unknown): string {
     case 'no_files':
     case 'empty_file':
       return 'No photo was selected.';
+    case 'no_valid_photos':
+      return "None of the photos could be uploaded - please try again.";
     case 'media_storage_unavailable':
       return "Photo storage isn't available right now - please try again later.";
     default:
@@ -257,14 +266,17 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   // Photos: "+ Add" opens the hidden multi-select file input; the chosen files
-  // upload in SEQUENTIAL batches of PHOTO_UPLOAD_BATCH_SIZE files per multipart
-  // request (review hardening, 2026-07-15: the server buffers a request's whole
-  // batch in memory behind a 60MB per-request fence + a small concurrency gate;
-  // 10 x 5MB batches sit well under both, so a 100-photo drag-drop still works
-  // end to end). The unit state applies after EACH batch, so already-uploaded
-  // photos persist + render even if a later batch fails; a mid-way failure says
-  // honestly how many made it. Reset the input so re-picking the SAME file
-  // fires change again.
+  // upload DIRECTLY to S3 (unit-photos direct-upload R4). Per wave of up to
+  // PHOTO_PRESIGN_WAVE_SIZE files: (1) presign mints one grant per file;
+  // (2) the browser POSTs each file straight to its presigned S3/MinIO target,
+  // in parallel with a modest concurrency pool - the bytes never touch the app,
+  // so there is no memory concern; (3) confirm records the keys that uploaded
+  // OK and returns the updated unit, applied after EACH wave (already-stored
+  // photos persist + render even if a later wave fails). Honest partial handling:
+  // a single file that fails to reach S3 is dropped and the confirm records the
+  // rest; if fewer than all uploaded the inline alert says "Uploaded N of M".
+  // A presign/confirm failure surfaces the mapped server error. Reset the input
+  // so re-picking the SAME file fires change again.
   const onPickPhotos = (): void => photoInputRef.current?.click();
   const onFilesChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const input = e.currentTarget;
@@ -274,20 +286,51 @@ export function ListingDetail(): React.JSX.Element {
     setPhotoBusy(true);
     setPhotoError(null);
     void (async () => {
+      const total = chosen.length;
       let uploaded = 0;
       try {
-        for (let i = 0; i < chosen.length; i += PHOTO_UPLOAD_BATCH_SIZE) {
-          const batch = chosen.slice(i, i + PHOTO_UPLOAD_BATCH_SIZE);
-          const updated = await uploadUnitPhotos(unit.unitId, batch);
-          uploaded += batch.length;
-          setUnit(updated);
+        // Sequential 20-file waves keep each presign request within the server's
+        // per-request batch max; the direct POSTs inside a wave run in parallel.
+        for (let w = 0; w < chosen.length; w += PHOTO_PRESIGN_WAVE_SIZE) {
+          const wave = chosen.slice(w, w + PHOTO_PRESIGN_WAVE_SIZE);
+          const grants = await presignUnitPhotos(unit.unitId, wave);
+          // Simple concurrency pool: at most PHOTO_UPLOAD_CONCURRENCY direct
+          // POSTs in flight; each worker pulls the next index until the wave is
+          // drained. grants[i] pairs with wave[i] (the server keeps order).
+          const okKeys: string[] = [];
+          let next = 0;
+          const worker = async (): Promise<void> => {
+            while (next < wave.length) {
+              const i = next++;
+              const grant = grants[i];
+              const file = wave[i];
+              if (grant === undefined || file === undefined) continue;
+              try {
+                await uploadToPresignedPost(grant.post, file);
+                okKeys.push(grant.key);
+              } catch {
+                // A single file failed to reach S3 - drop it (honest partial).
+              }
+            }
+          };
+          await Promise.all(
+            Array.from({ length: Math.min(PHOTO_UPLOAD_CONCURRENCY, wave.length) }, () => worker()),
+          );
+          if (okKeys.length > 0) {
+            const updated = await confirmUnitPhotos(unit.unitId, okKeys);
+            uploaded += okKeys.length;
+            setUnit(updated);
+          }
+        }
+        if (uploaded < total) {
+          setPhotoError(
+            `Uploaded ${uploaded} of ${total} photos - some photos couldn't be uploaded. Please try again.`,
+          );
         }
       } catch (err) {
         const base = photoUploadMessage(err);
         setPhotoError(
-          uploaded > 0
-            ? `Uploaded ${uploaded} of ${chosen.length} photos - ${base}`
-            : base,
+          uploaded > 0 ? `Uploaded ${uploaded} of ${total} photos - ${base}` : base,
         );
       } finally {
         setPhotoBusy(false);

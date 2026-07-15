@@ -38,6 +38,7 @@ import type {
   Me,
   MeUser,
   Message,
+  PhotoPresignGrant,
   RelatedUnit,
   RelayGroupRow,
   SendMessageResult,
@@ -665,49 +666,87 @@ export async function getUnitActivity(
   return res.events;
 }
 
-/** POST /api/units/:id/photos - upload one-or-many image files (multipart). The
- *  server validates each file (jpeg/png/gif/webp, 5MB, the 100-photo cap) BEFORE
- *  storing any, stores them under a dedicated prefix, and returns the updated unit
- *  (WITH mediaDisplay). Like uploadMedia this CANNOT use request() (JSON-only): a
- *  multipart upload must send FormData and let the browser set the boundary, so we
- *  raw-fetch and replicate client.ts's ApiError parsing (the server's { error }
- *  code - e.g. unsupported_media_type / file_too_large / photo_cap_exceeded -
- *  surfaces on `.code`). The busboy parser keys files by content, not field name;
- *  every file is appended under 'files'. */
-export async function uploadUnitPhotos(unitId: string, files: File[]): Promise<UnitItem> {
+/** POST /api/units/:id/photos/presign { count, contentTypes[] } - mint one
+ *  direct-upload grant per chosen file (unit-photos direct-upload R4). The
+ *  browser derives count + content types from the Files; the server returns a
+ *  presigned S3/MinIO POST per file so the BYTES go browser->S3 directly, never
+ *  through the app. This CAN use request() (it is a plain JSON call). Throws
+ *  ApiError on the guards (400 unsupported_media_type / photo_cap_exceeded,
+ *  404 unit_not_found, 503 media_storage_unavailable). Grants come back in the
+ *  same order as `files`. */
+export async function presignUnitPhotos(
+  unitId: string,
+  files: File[],
+): Promise<PhotoPresignGrant[]> {
+  const res = await request<{ uploads: PhotoPresignGrant[] }>(
+    `/api/units/${encodeURIComponent(unitId)}/photos/presign`,
+    { method: 'POST', body: { count: files.length, contentTypes: files.map((f) => f.type) } },
+  );
+  return res.uploads;
+}
+
+/** POST a single file DIRECTLY to its presigned S3/MinIO target (unit-photos
+ *  direct-upload R4). This must NOT go through request() / a credentialed fetch:
+ *  it targets S3 CROSS-ORIGIN and must carry NO session cookie and NO CSRF
+ *  header (an extra signed-out header would break the POST policy). S3 requires
+ *  the policy `fields` FIRST and the File LAST, under the field name `file`
+ *  (S3 ignores any part after `file`). Resolves on 2xx (S3 returns 204 No
+ *  Content); rejects (ApiError) on any non-2xx or network error so the caller
+ *  can count per-file failures. When `onProgress` (0..1) is supplied the upload
+ *  runs via XHR to report real per-file progress; otherwise a plain fetch. */
+export async function uploadToPresignedPost(
+  post: { url: string; fields: Record<string, string> },
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<void> {
   const form = new FormData();
-  for (const file of files) form.append('files', file);
+  // Field order matters: every policy field precedes the file, and `file` is LAST.
+  for (const [k, v] of Object.entries(post.fields)) form.append(k, v);
+  form.append('file', file);
+
+  if (onProgress !== undefined) {
+    await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', post.url);
+      xhr.upload.addEventListener('progress', (ev) => {
+        if (ev.lengthComputable && ev.total > 0) onProgress(ev.loaded / ev.total);
+      });
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new ApiError(xhr.status, 's3_upload_failed', `S3 upload failed (${xhr.status})`));
+      });
+      xhr.addEventListener('error', () =>
+        reject(new ApiError(0, 'network_error', 'Network request failed')),
+      );
+      xhr.send(form);
+    });
+    return;
+  }
+
   let res: Response;
   try {
-    res = await fetch(`/api/units/${encodeURIComponent(unitId)}/photos`, {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json' },
-    });
+    // credentials 'omit': never leak the dashboard session cookie to S3.
+    res = await fetch(post.url, { method: 'POST', body: form, credentials: 'omit' });
   } catch {
     throw new ApiError(0, 'network_error', 'Network request failed');
   }
-
-  let parsed: unknown;
-  if ((res.headers.get('content-type') ?? '').includes('application/json')) {
-    try {
-      parsed = (await res.json()) as unknown;
-    } catch {
-      parsed = undefined;
-    }
-  }
-
   if (!res.ok) {
-    if (parsed !== null && typeof parsed === 'object') {
-      const b = parsed as Record<string, unknown>;
-      const code = typeof b['error'] === 'string' ? b['error'] : `http_${res.status}`;
-      const detail = typeof b['detail'] === 'string' ? ` (${b['detail']})` : '';
-      throw new ApiError(res.status, code, `${code}${detail}`, parsed);
-    }
-    throw new ApiError(res.status, `http_${res.status}`, `Request failed (${res.status})`, parsed);
+    throw new ApiError(res.status, 's3_upload_failed', `S3 upload failed (${res.status})`);
   }
-  return (parsed as { unit: UnitItem }).unit;
+}
+
+/** POST /api/units/:id/photos/confirm { keys[] } - record the keys that uploaded
+ *  OK to S3 (unit-photos direct-upload R4). The server re-verifies each key
+ *  (own-prefix scope + HeadObject type/size), drops the invalid, atomically
+ *  appends the survivors under the 100-cap re-guard, and returns the updated unit
+ *  (WITH mediaDisplay). A plain JSON call. Throws ApiError (400 no_valid_photos /
+ *  photo_cap_exceeded, 503 media_storage_unavailable). */
+export async function confirmUnitPhotos(unitId: string, keys: string[]): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/photos/confirm`,
+    { method: 'POST', body: { keys } },
+  );
+  return res.unit;
 }
 
 /** DELETE /api/units/:id/photos { entry } - drop one photo (the array entry only;

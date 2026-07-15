@@ -1109,6 +1109,15 @@ export interface UnitMediaDisplay {
   url?: string;
 }
 
+/** One direct-upload grant from POST /api/units/:id/photos/presign. The
+ *  server-minted opaque `key` (the browser never chooses one) plus the S3/MinIO
+ *  presigned POST target: `post.url` is the bucket endpoint, `post.fields` are
+ *  the policy fields that MUST be sent before the file part. */
+export interface PhotoPresignGrant {
+  key: string;
+  post: { url: string; fields: Record<string, string> };
+}
+
 /** A unit record (GET /api/units → { units }, GET /api/units/:id → { unit }).
  *  Flexible document; the landlord file reads landlordId/status/address/beds. */
 export interface UnitItem {

@@ -24,6 +24,23 @@ export const DEADLINE_TYPE_LABEL: Record<PlacementDeadlineType, string> = {
 };
 
 /**
+ * The single coarse relative-magnitude calculator for this file: a positive
+ * millisecond span rendered "Nm" (under an hour), "Nh" (under two days), else
+ * "Nd". Every relative-time phrase on the placements surface -- deadlineRelative,
+ * sendRelative, and the date-vocabulary formatters below -- composes from this
+ * ONE bucket function, so the units never drift between them. Callers guard the
+ * sign (ms > 0) themselves and add the lead/tail words ("in", "ago", "overdue").
+ */
+function coarseSpan(ms: number): string {
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.ceil(ms / 3_600_000);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.ceil(ms / 86_400_000);
+  return `${days}d`;
+}
+
+/**
  * A relative phrase for a deadline instant vs now: "overdue" once it's at/past,
  * else "due in Nm/Nh/Nd". Coarse buckets mirror the Today queue's urgency badge
  * (app/src/routes/today.ts urgencyOf) so the detail page and the queue agree.
@@ -36,12 +53,7 @@ export function deadlineRelative(
   if (Number.isNaN(at)) return { text: '', overdue: false };
   const ms = at - now;
   if (ms <= 0) return { text: 'overdue', overdue: true };
-  const minutes = Math.ceil(ms / 60_000);
-  if (minutes < 60) return { text: `due in ${minutes}m`, overdue: false };
-  const hours = Math.ceil(ms / 3_600_000);
-  if (hours < 48) return { text: `due in ${hours}h`, overdue: false };
-  const days = Math.ceil(ms / 86_400_000);
-  return { text: `due in ${days}d`, overdue: false };
+  return { text: `due in ${coarseSpan(ms)}`, overdue: false };
 }
 
 /**
@@ -81,21 +93,113 @@ export function listingAddress(units: Map<string, UnitItem>, unitId: string): st
   return formatAddress(u.address) || unitId;
 }
 
-/** A short "Jun 18" date label (the tour date / a deadline date), or "". Accepts a
- *  clean ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf). */
-export function shortDate(iso: string | undefined): string {
-  if (!iso) return '';
+/** Parse an ISO instant -- clean, a `<ISO>#<suffix>` audit sort key (normalised
+ *  via isoOf), or a date-only `YYYY-MM-DD` -- into a LOCAL Date, or null when
+ *  unparseable. Date-only strings have no time component, so `new Date(norm)`
+ *  parses them as UTC midnight -- which renders as the PREVIOUS day in
+ *  negative-offset US timezones. Build the date from its calendar parts in LOCAL
+ *  time instead so it never shifts. Shared by every date label in this file. */
+function toLocalDate(iso: string | undefined): Date | null {
+  if (!iso) return null;
   const norm = isoOf(iso);
-  // Date-only strings (e.g. placement.tour_date / inspection_date, "2026-07-16")
-  // have no time component, so `new Date(norm)` parses them as UTC midnight —
-  // which renders as the PREVIOUS day in negative-offset US timezones. Build the
-  // date from its calendar parts in LOCAL time instead so it never shifts.
   const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(norm);
   const d = dateOnlyMatch
     ? new Date(Number(dateOnlyMatch[1]), Number(dateOnlyMatch[2]) - 1, Number(dateOnlyMatch[3]))
     : new Date(norm);
-  if (Number.isNaN(d.getTime())) return norm.slice(0, 10);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** A short "Jun 18" date label (the tour date / a deadline date), or "". Accepts a
+ *  clean ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf). */
+export function shortDate(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = toLocalDate(iso);
+  if (!d) return isoOf(iso).slice(0, 10);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/** A weekday-prefixed short date, e.g. "Thu Jul 17" (an appointment / a due day).
+ *  Same LOCAL-date parsing as shortDate; falls back to shortDate when unparseable. */
+function weekdayDate(iso: string): string {
+  const d = toLocalDate(iso);
+  if (!d) return shortDate(iso);
+  // Compose the weekday onto shortDate (no comma) -> "Fri Jul 17", per the spec's
+  // date vocabulary; toLocaleDateString with all three parts would insert a comma.
+  return `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${shortDate(iso)}`;
+}
+
+// --- Date vocabulary (spec section 6) --------------------------------------
+// A date never stands alone: each kind of date rides its own verb phrase, with
+// the shared coarseSpan magnitude in parens -- "(in N)" for the future, "(N ago)"
+// / "(N overdue)" for the past. All compose from coarseSpan (no second relative-
+// time calculator) and the LOCAL-date label helpers above. `now` is injected as
+// the trailing arg, matching deadlineRelative/sendRelative.
+
+/** " (in Nd)" when `at` is in the future vs `now`; "" once at/past. */
+function futureParens(at: number, now: number): string {
+  const ms = at - now;
+  return ms > 0 ? ` (in ${coarseSpan(ms)})` : '';
+}
+
+/** " (Nd ago)" when `at` is in the past vs `now`; "" when future. */
+function agoParens(at: number, now: number): string {
+  const ms = now - at;
+  return ms > 0 ? ` (${coarseSpan(ms)} ago)` : '';
+}
+
+/** " (Nd overdue)" when `at` is in the past vs `now`; "" when future. */
+function overdueParens(at: number, now: number): string {
+  const ms = now - at;
+  return ms > 0 ? ` (${coarseSpan(ms)} overdue)` : '';
+}
+
+/** Future appointment (e.g. an inspection): "scheduled for Thu Jul 17 (in 2d)".
+ *  Drops the relative parens once the appointment is at/past. */
+export function scheduledFor(iso: string, now: number = Date.now()): string {
+  const d = toLocalDate(iso);
+  if (!d) return '';
+  return `scheduled for ${weekdayDate(iso)}${futureParens(d.getTime(), now)}`;
+}
+
+/** A deadline (e.g. voucher expiration): "expires Aug 2 (in 18d)" while future,
+ *  flipping to the past tense "expired Aug 2 (2d ago)" once it has passed. */
+export function expiresOn(iso: string, now: number = Date.now()): string {
+  const d = toLocalDate(iso);
+  if (!d) return '';
+  const at = d.getTime();
+  return at > now
+    ? `expires ${shortDate(iso)}${futureParens(at, now)}`
+    : `expired ${shortDate(iso)}${agoParens(at, now)}`;
+}
+
+/** An RTA-window (or similar) close deadline: "closes at Aug 2 (in 21h)" while
+ *  future, flipping to "closed at Aug 2 (2d ago)" once past. */
+export function closesAt(iso: string, now: number = Date.now()): string {
+  const d = toLocalDate(iso);
+  if (!d) return '';
+  const at = d.getTime();
+  return at > now
+    ? `closes at ${shortDate(iso)}${futureParens(at, now)}`
+    : `closed at ${shortDate(iso)}${agoParens(at, now)}`;
+}
+
+/** Elapsed / stuck time since a past instant: "since Jul 12 (3d ago)". Drops the
+ *  parens if the instant is somehow in the future. */
+export function sinceWhen(iso: string, now: number = Date.now()): string {
+  const d = toLocalDate(iso);
+  if (!d) return '';
+  return `since ${shortDate(iso)}${agoParens(d.getTime(), now)}`;
+}
+
+/** An overdue instant (e.g. a follow-up): "was due Mon Jul 13 (2d overdue)".
+ *  If not yet due it reads "due Mon Jul 13 (in Nd)". */
+export function wasDue(iso: string, now: number = Date.now()): string {
+  const d = toLocalDate(iso);
+  if (!d) return '';
+  const at = d.getTime();
+  return at <= now
+    ? `was due ${weekdayDate(iso)}${overdueParens(at, now)}`
+    : `due ${weekdayDate(iso)}${futureParens(at, now)}`;
 }
 
 /** A date-and-time label for a history row, e.g. "Jun 18, 1:02 PM". Accepts a clean

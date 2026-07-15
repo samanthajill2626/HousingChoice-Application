@@ -94,8 +94,8 @@
 **Interfaces:**
 - Produces: `scheduledFor(iso)`, `expiresOn(iso)`, `closesAt(iso)`, `sinceWhen(iso)`, `wasDue(iso)` - each returns the full verb phrase per spec section 6 (e.g. `scheduledFor` -> "scheduled for Thu Jul 17, 10am (in 2 days)"). Automated sends REUSE the existing shared `sendRelative` ("sends in Nh") - do not duplicate it.
 
-- [ ] **Step 1: Failing tests** with fixed `now` injection (every formatter takes an explicit `now: number` param or uses the file's existing now-injection idiom - check first): future, past-relative, and boundary (under 1h, under 1 day, multi-day) cases per formatter.
-- [ ] **Step 2: FAIL. Step 3: Implement (compose from the file's existing date helpers - DRY). Step 4: PASS. Step 5: Commit.**
+- [x] **Step 1: Failing tests** with fixed `now` injection (every formatter takes an explicit `now: number` param or uses the file's existing now-injection idiom - check first): future, past-relative, and boundary (under 1h, under 1 day, multi-day) cases per formatter.
+- [x] **Step 2: FAIL. Step 3: Implement (compose from the file's existing date helpers - DRY). Step 4: PASS. Step 5: Commit.**
 
 ### Task 5: Stage descriptor map
 

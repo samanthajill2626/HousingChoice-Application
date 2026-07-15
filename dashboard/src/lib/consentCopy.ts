@@ -59,9 +59,13 @@ export const HUMAN_CONSENT_METHOD_LABELS: Readonly<Record<HumanConsentMethod, st
   imported: 'Imported',
 };
 
-/** Today as YYYY-MM-DD, for the default `when` value on the consent date inputs. */
-export function todayISODate(): string {
-  return new Date().toISOString().slice(0, 10);
+/** Today as YYYY-MM-DD in LOCAL time, for the default `when` value on the
+ *  consent date inputs. Never via toISOString(): that is the UTC date, which
+ *  is TOMORROW every evening west of Greenwich (an 8pm EDT consent defaulted
+ *  to the next day — caught live 2026-07-14). */
+export function todayISODate(now: Date = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
 /** A YYYY-MM-DD date input value → an ISO 8601 instant (start of that day, UTC)

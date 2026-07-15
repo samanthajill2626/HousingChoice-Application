@@ -14,12 +14,14 @@ import { ApiError } from '../../api/index.js';
 import type { EventStreamHandlers, TourReminderView, TourRemindersPage } from '../../api/index.js';
 
 const getTourReminders = vi.fn();
+const patchTourReminder = vi.fn();
 let streamHandlers: EventStreamHandlers | null = null;
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     getTourReminders: (...a: unknown[]) => getTourReminders(...a),
+    patchTourReminder: (...a: unknown[]) => patchTourReminder(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers = h;
     },
@@ -278,5 +280,60 @@ describe('RemindersPanel — dueAt-anchored self-refetch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Operator cancel/restore (2026-07-14). mockReset (not just clearAllMocks —
+  // that leaves queued mockResolvedValueOnce values behind for the NEXT test).
+  it('Cancel on an upcoming rung PATCHes {canceled:true} and refetches; Restore reverses it', async () => {
+    getTourReminders.mockReset();
+    patchTourReminder.mockReset();
+    getTourReminders
+      .mockResolvedValueOnce({
+        reminders: [rung({ reminderId: 'r-c', kind: 'day_before', state: 'upcoming' })],
+      } satisfies TourRemindersPage)
+      .mockResolvedValueOnce({
+        reminders: [
+          rung({
+            reminderId: 'r-c',
+            kind: 'day_before',
+            state: 'canceled',
+            canceledAt: '2026-07-14T10:00:00Z',
+          }),
+        ],
+      } satisfies TourRemindersPage)
+      .mockResolvedValue({
+        reminders: [rung({ reminderId: 'r-c', kind: 'day_before', state: 'upcoming' })],
+      } satisfies TourRemindersPage);
+    patchTourReminder.mockResolvedValue(rung({ reminderId: 'r-c', state: 'canceled' }));
+
+    render(<RemindersPanel tourId="tour-1" />);
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel Day before reminder' });
+    cancelBtn.click();
+    await waitFor(() =>
+      expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'r-c', true),
+    );
+    // The post-PATCH refetch shows the canceled chip + a Restore action.
+    const restoreBtn = await screen.findByRole('button', { name: 'Restore Day before reminder' });
+    expect(screen.getByText('Canceled')).toBeInTheDocument();
+
+    patchTourReminder.mockClear();
+    patchTourReminder.mockResolvedValue(rung({ reminderId: 'r-c', state: 'upcoming' }));
+    restoreBtn.click();
+    await waitFor(() =>
+      expect(patchTourReminder).toHaveBeenCalledWith('tour-1', 'r-c', false),
+    );
+    await screen.findByRole('button', { name: 'Cancel Day before reminder' });
+  });
+
+  it('a sent rung offers NO cancel/restore action', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({ reminderId: 'r-s', kind: 'confirmation', state: 'sent', sentAt: '2026-06-18T13:02:00Z' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Confirmation')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /Cancel|Restore/ })).toBeNull();
   });
 });

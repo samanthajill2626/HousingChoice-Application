@@ -62,12 +62,11 @@ test.afterEach(async ({ page }) => {
 });
 
 /**
- * Shared precondition: drive the Tours flow to a CONVERTIBLE tour WITH a masked
- * relay group (the entry state this whole sequence picks up from). Returns the
- * cast so each test can diverge. The landlord-led-with-group shape is the one that
- * carries a group thread through to the placement.
+ * Shared precondition: drive the Tours flow through the YES exit gate, which
+ * AUTO-CONVERTS into the placement this whole sequence drives (with a masked
+ * relay group carried through). Returns the cast so each test can diverge.
  */
-async function reachConvertibleTour(
+async function reachConvertedPlacement(
   flow: Scenario,
   labels: { tenant: string; owner: string },
 ): Promise<{ tenant: Contact; owner: Contact; ownerId: string; unit: Unit }> {
@@ -88,15 +87,17 @@ async function reachConvertibleTour(
   });
   await flow.seedTenantSearching();
 
-  // Tour → group → booked → toured → exit gate YES → convertible (the Tours
-  // sequence's exit; proven verbs, reused).
+  // Tour → group → booked → toured → exit gate YES, which AUTO-CONVERTS
+  // (2026-07-15): the placement is born in the same step and becomes the
+  // scenario's active placement. QUIET — no announcement at convert time
+  // (founder 2026-07-02); the masked relay group survives, placement-owned.
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
   await flow.teamOpensTourGroup();
   await flow.teamBooksTour(tourSchedule());
   await flow.teamMarksToured();
   await flow.teamRecordsExitGate('yes');
-  await flow.expectTourConvertible();
+  await flow.expectTourAutoConverted();
   return { tenant, owner, ownerId, unit };
 }
 
@@ -106,7 +107,7 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
 }) => {
   test.slow(); // the packed no-skip walk — every stage, three ticks, board reads.
   const flow = new Scenario(page, request);
-  const { tenant, owner, unit } = await reachConvertibleTour(flow, { tenant: 'Mover', owner: 'Keys' });
+  const { tenant, owner, unit } = await reachConvertedPlacement(flow, { tenant: 'Mover', owner: 'Keys' });
 
   // Diagram-faithful: the "L->>A: Received — reviewing" arrow once the application
   // reaches the landlord. This is NOT a technical prerequisite for the landlord
@@ -116,9 +117,8 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   // — founder 2026-07-02.)
   await flow.landlordTexts(owner, 'Got the application — reviewing it now.');
 
-  // [MANUAL] Convert — QUIET. Placement born at Send application; tenant Searching
-  // → Placing; the masked relay group survives, now placement-owned.
-  await flow.teamConvertsTourToPlacement();
+  // The YES gate already converted (placement born at Send application; tenant
+  // Searching → Placing; the masked relay group survives, placement-owned).
   await flow.expectPlacementStage('Send application');
   // Conversion is finalized on BOTH sides: the tour closes as converted (back-links
   // to the placement) and the property reads Under application.
@@ -183,11 +183,10 @@ test('marked deviation — landlord denies at Awaiting approval → Lost (tenant
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, owner, unit } = await reachConvertibleTour(flow, { tenant: 'Denied', owner: 'Nope' });
+  const { tenant, owner, unit } = await reachConvertedPlacement(flow, { tenant: 'Denied', owner: 'Nope' });
   // Landlord 1:1 exists — so we can PROVE no approval nudge fires after Lost.
   await flow.landlordTexts(owner, 'Reviewing.');
 
-  await flow.teamConvertsTourToPlacement();
   await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.teamMovesPlacementTo('Awaiting completion');
   await flow.teamMovesPlacementTo('Awaiting approval');
@@ -212,13 +211,12 @@ test('marked deviation — 48h window BLOWN at Awaiting landlord submission → 
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { owner } = await reachConvertibleTour(flow, { tenant: 'Late', owner: 'Slow' });
+  const { owner } = await reachConvertedPlacement(flow, { tenant: 'Late', owner: 'Slow' });
   // NO manufactured landlord 1:1 here: this landlord's only prior traffic was the
   // masked pool number (the DESIGNED flow), so no landlord_1to1 exists yet. The
   // rta_window_closing nudge below exercises CREATE-ON-DEMAND end-to-end — the
   // poller mints the 1:1 on first send (resolves placement-nudge-needs-landlord-1to1).
 
-  await flow.teamConvertsTourToPlacement();
   // Walk to Awaiting landlord submission (no skip).
   await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
   await flow.teamMovesPlacementTo('Awaiting completion');
@@ -252,9 +250,8 @@ test('marked deviation — party backs out early at Awaiting receipt → Lost (b
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, unit } = await reachConvertibleTour(flow, { tenant: 'Quitter', owner: 'Host' });
+  const { tenant, unit } = await reachConvertedPlacement(flow, { tenant: 'Quitter', owner: 'Host' });
 
-  await flow.teamConvertsTourToPlacement();
   await flow.teamMovesPlacementTo('Awaiting receipt confirmation');
 
   // Party backs out (marked deviation) — Lost is reachable from ANY stage.
@@ -275,8 +272,7 @@ test('placement-deadline-model — voucher + rta_window coexist (soonest-wins on
 }) => {
   test.slow(); // full tour reach + a nine-stage walk + several board reads.
   const flow = new Scenario(page, request);
-  await reachConvertibleTour(flow, { tenant: 'Voucher', owner: 'Clock' });
-  await flow.teamConvertsTourToPlacement();
+  await reachConvertedPlacement(flow, { tenant: 'Voucher', owner: 'Clock' });
 
   // (1) VOUCHER CLOCK. Staff records a PAST (expired) voucher date through the real
   // contact form. The inline voucher sync (deadline-model §6) arms the

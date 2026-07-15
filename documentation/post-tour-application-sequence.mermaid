@@ -8,11 +8,11 @@ sequenceDiagram
     participant S as Team
     actor L as Landlord/PM
     Note over T,S: The app owns the phone number. Every call/text flows Tenant to Team and Landlord to Team THROUGH the app (both directions).<br/>Notes marked [AUTO] are app automation. [MANUAL] is a person (Team) acting.
-    Note over T,L: Picks up from the Tours exit gate — the tenant said YES, move forward (the tour is convertible). Ends when the landlord submits the RTA to the housing authority.
+    Note over T,L: Picks up from the Tours exit gate — the tenant said YES, move forward (since 2026-07-15 the gate converts in the same step, so the placement already exists). Ends when the landlord submits the RTA to the housing authority.
     Note over T,L: The placement is the spine. Stages name the NEXT outstanding action. EVERY stage transition in this span is stamped below — the tests must move the placement into and out of each stage without skipping any.
     Note over T,L: The masked RELAY group from the tour continues as the channel all the way through the placement. No new or unmasked group text is created.
 
-    Note over S,A: [MANUAL] Convert the tour into a placement — same tenant and unit, linked back to the tour. Quiet record-keeping: no announcement. The landlord first hears about it when the application starts moving.
+    Note over S,A: [MANUAL] Conversion happened AT the exit gate (recording move_forward converts in the same step, 2026-07-15) — same tenant and unit, linked back to the tour. Quiet record-keeping: no announcement. The landlord first hears about it when the application starts moving.
     Note over A: [AUTO] On conversion — the placement is born at stage Send application. Tenant moves Searching to Placing. The property reads Under application. The tour closes as converted and its masked relay thread now belongs to the placement.
 
     Note over T,L: APPLICATION. How the application moves follows the property application_process captured at landlord onboarding — never standardized. The diagram shows the uniform shape.

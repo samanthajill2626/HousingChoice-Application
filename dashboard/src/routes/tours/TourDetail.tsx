@@ -9,9 +9,13 @@
 // useTourActivity; mutations go through PATCH /api/tours/:id, POST /:id/relay, and
 // POST /api/placements/from-tour, applying the returned tour in place.
 //
-// Tours are SEPARATE from placements: the exit gate records the navigator's
-// decision; conversion (Start placement) is a downstream step. Audience: staff
-// see "property" for the unit (GLOSSARY).
+// Tours are SEPARATE from placements, but the exit gate is the handoff: a
+// move-forward outcome CONVERTS IMMEDIATELY (records the decision, POSTs
+// /placements/from-tour, lands on the new placement - one step, no second
+// click; Cameron 2026-07-15). The standalone "Start placement" CTA remains for
+// tours that are convertible but unconverted (an API-recorded outcome, or the
+// retry path when the chained conversion fails). Audience: staff see
+// "property" for the unit (GLOSSARY).
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
@@ -266,6 +270,21 @@ function TourDetailLoaded({
         ...(decision.moveForward === false && { status: 'closed' as const }),
       }),
     );
+    // Move-forward flows STRAIGHT into the placement: recording the decision
+    // IS the start-placement step. The outcome is already saved at this point,
+    // so a conversion failure must NOT re-open the modal (throwing would) -
+    // surface it in the header alert instead; the tour is convertible, so the
+    // "Start placement" CTA is the retry path.
+    if (decision.moveForward) {
+      try {
+        const { placement } = await createPlacementFromTour(tourId);
+        navigate(`/placements/${placement.placementId}`);
+      } catch (err) {
+        setActionError(
+          err instanceof ApiError ? err.message : 'Outcome saved, but starting the placement failed',
+        );
+      }
+    }
   };
   const confirmCancel = async (): Promise<void> => {
     setTour(await patchTour(tourId, { status: 'canceled' }));
@@ -492,7 +511,7 @@ function TourDetailLoaded({
             {/* --- Outcome --- */}
             <Card title="Outcome">
               {tour.outcome === undefined ? (
-                <PendingPanel note="Records after the tour: moving forward starts a placement; not a fit closes the tour." />
+                <PendingPanel note="Records after the tour: moving forward starts the placement right away; not a fit closes the tour." />
               ) : (
                 <>
                   <KV k="Outcome" v={TOUR_OUTCOME_LABELS[tour.outcome] ?? tour.outcome} />

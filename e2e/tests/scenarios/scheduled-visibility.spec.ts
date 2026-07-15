@@ -189,11 +189,11 @@ test('(e) tenant nudge: a placement at Awaiting receipt shows an Upcoming nudge 
   const flow = new Scenario(page, request);
   const { tenant, tenantId } = await bookedSelfGuidedTour(flow, 'Applicant');
 
-  // Toured → exit gate YES → convertible → placement (the Post-Tour spine's entry).
+  // Toured → exit gate YES, which auto-converts into the placement (the
+  // Post-Tour spine's entry) in the same step.
   await flow.teamMarksToured();
   await flow.teamRecordsExitGate('yes');
-  await flow.expectTourConvertible();
-  await flow.teamConvertsTourToPlacement();
+  await flow.expectTourAutoConverted();
 
   // Send application → Awaiting receipt arms the [AUTO] receipt-check nudge 1:1 to
   // the TENANT (~24h out) — it surfaces as a pinned Upcoming "Nudge" item.

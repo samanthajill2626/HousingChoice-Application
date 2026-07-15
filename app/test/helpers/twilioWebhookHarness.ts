@@ -1674,6 +1674,24 @@ export function createFakeWorld(): FakeWorld {
       tourRemindersMap.set(reminderId, r);
       return true;
     },
+    async cancel(reminderId, canceledAt) {
+      const r = tourRemindersMap.get(reminderId);
+      if (!r || r.sentAt !== undefined || r.canceledAt !== undefined || r.skippedAt !== undefined) {
+        return false;
+      }
+      r.canceledAt = canceledAt;
+      tourRemindersMap.set(reminderId, r);
+      return true;
+    },
+    async uncancel(reminderId) {
+      const r = tourRemindersMap.get(reminderId);
+      if (!r || r.canceledAt === undefined || r.sentAt !== undefined || r.skippedAt !== undefined) {
+        return false;
+      }
+      delete r.canceledAt;
+      tourRemindersMap.set(reminderId, r);
+      return true;
+    },
     async cancelForTour(tourId) {
       const now = new Date().toISOString();
       for (const r of tourRemindersMap.values()) {

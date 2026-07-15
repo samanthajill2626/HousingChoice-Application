@@ -11,11 +11,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getConversationMessages,
+  getConversationScheduled,
   useEventStream,
   type Message,
   type SendMessageResult,
   type TimelineItem,
   type TimelineMessage,
+  type TimelineScheduled,
 } from '../../api/index.js';
 
 export type RelayThreadStatus = 'loading' | 'ready' | 'error';
@@ -81,6 +83,12 @@ export function buildRelayItems(messages: Message[]): TimelineItem[] {
 export interface RelayThreadState {
   status: RelayThreadStatus;
   items: TimelineItem[];
+  /** Not-yet-sent scheduled messages routed to THIS group (the pinned
+   *  "Upcoming" section — the owner tour's pending reminder rungs). Empty for
+   *  1:1 conversations (their upcoming lives on the contact timeline) and
+   *  best-effort: a failed fetch leaves the bucket empty, never errors the
+   *  thread. */
+  upcoming: TimelineScheduled[];
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
   addOptimistic: (
@@ -98,6 +106,7 @@ export interface RelayThreadState {
 export function useRelayThread(conversationId: string): RelayThreadState {
   const [status, setStatus] = useState<RelayThreadStatus>('loading');
   const [serverItems, setServerItems] = useState<TimelineItem[]>([]);
+  const [upcoming, setUpcoming] = useState<TimelineScheduled[]>([]);
 
   // In-flight OPTIMISTIC sends, reconciled against the server thread by tsMsgId.
   const [pending, setPending] = useState<PendingSend[]>([]);
@@ -171,9 +180,17 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const messages = await getConversationMessages(conversationId, controller.signal);
+      // The scheduled bucket rides along BEST-EFFORT: a failure there must
+      // never blank a working thread (it just leaves Upcoming empty).
+      const [messages, scheduled] = await Promise.all([
+        getConversationMessages(conversationId, controller.signal),
+        getConversationScheduled(conversationId, controller.signal).catch(
+          (): TimelineScheduled[] => [],
+        ),
+      ]);
       if (controller.signal.aborted) return;
       setServerItems(buildRelayItems(messages));
+      setUpcoming(scheduled);
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -209,6 +226,9 @@ export function useRelayThread(conversationId: string): RelayThreadState {
   useEventStream({
     onMessagePersisted: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
+    // A reminder ladder was armed/fired/rescheduled/canceled — refetch so the
+    // pinned "Upcoming" section updates live (mirrors useContactTimeline).
+    onScheduledUpdated: scheduleRefetch,
   });
 
   // Merge server items with optimistic sends, dropping any optimistic bubble the
@@ -222,5 +242,5 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     return extra.length === 0 ? serverItems : [...serverItems, ...extra];
   }, [serverItems, pending]);
 
-  return { status, items, addOptimistic, resolveOptimistic, failOptimistic };
+  return { status, items, upcoming, addOptimistic, resolveOptimistic, failOptimistic };
 }

@@ -83,12 +83,12 @@ test.afterEach(async ({ page }) => {
 });
 
 /**
- * Shared precondition: drive the Tours flow to a CONVERTIBLE tour WITH a masked
- * relay group — the landlord-led-with-group shape that carries a group thread
- * through to the placement (so the backout deviation can prove the relay closes).
- * Returns the cast so each test can diverge. Mirrors the PTA spec's helper.
+ * Shared precondition: drive the Tours flow through the YES exit gate, which
+ * AUTO-CONVERTS into the placement (with a masked relay group carried through,
+ * so the backout deviation can prove the relay closes). Returns the cast so
+ * each test can diverge. Mirrors the PTA spec's helper.
  */
-async function reachConvertibleTour(
+async function reachConvertedPlacement(
   flow: Scenario,
   labels: { tenant: string; owner: string },
 ): Promise<{ tenant: Contact; owner: Contact; ownerId: string; unit: Unit }> {
@@ -114,24 +114,27 @@ async function reachConvertibleTour(
   await flow.teamOpensTourGroup();
   await flow.teamBooksTour(tourSchedule());
   await flow.teamMarksToured();
+  // The YES exit gate converts in the same step (2026-07-15): the placement is
+  // born and becomes the scenario's active placement.
   await flow.teamRecordsExitGate('yes');
-  await flow.expectTourConvertible();
+  await flow.expectTourAutoConverted();
   return { tenant, owner, ownerId, unit };
 }
 
 /**
- * Reach this sequence's ENTRY state: convert the convertible tour and walk the
- * application/RTA ladder to `Awaiting authority approval` (the exact Post-Tour &
- * Application handoff). Returns the cast plus the placement id and the tenant's
- * contact id (needed to flip lifEligible before the paperwork stage).
+ * Reach this sequence's ENTRY state: from the gate-converted placement, walk
+ * the application/RTA ladder to `Awaiting authority approval` (the exact
+ * Post-Tour & Application handoff). Returns the cast plus the placement id and
+ * the tenant's contact id (needed to flip lifEligible before the paperwork
+ * stage).
  */
 async function reachAwaitingAuthorityApproval(
   flow: Scenario,
   labels: { tenant: string; owner: string },
 ): Promise<{ tenant: Contact; owner: Contact; unit: Unit; placementId: string; tenantContactId: string }> {
-  const { tenant, owner, unit } = await reachConvertibleTour(flow, labels);
+  const { tenant, owner, unit } = await reachConvertedPlacement(flow, labels);
   const tenantContactId = flow.contactId(); // active contact is the tenant here
-  const placementId = await flow.teamConvertsTourToPlacement();
+  const placementId = flow.placementId();
   await flow.expectGroupThreadReboundToPlacement();
   for (const label of PTA_LADDER) {
     await flow.teamMovesPlacementTo(label);

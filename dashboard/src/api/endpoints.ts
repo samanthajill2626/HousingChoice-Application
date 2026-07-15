@@ -47,6 +47,7 @@ import type {
   SystemFlags,
   TenantStatus,
   TodayResponse,
+  TimelineScheduled,
   TransitionSource,
   Tour,
   TourActivityEvent,
@@ -55,6 +56,7 @@ import type {
   TourType,
   ToursPage,
   TourRemindersPage,
+  TourReminderView,
   UnitActivityEvent,
   UnitItem,
   UnitsPage,
@@ -355,6 +357,21 @@ export async function getConversationMessages(
     { ...(signal !== undefined && { signal }) },
   );
   return res.messages;
+}
+
+/** GET /api/conversations/:id/scheduled - the group thread's "Upcoming" bucket:
+ *  the not-yet-sent tour-reminder rungs that will route to this masked group
+ *  (same TimelineScheduled shape the contact timeline ships). Empty for 1:1
+ *  conversations (their upcoming lives on the contact timeline). */
+export async function getConversationScheduled(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<TimelineScheduled[]> {
+  const res = await request<{ scheduled: TimelineScheduled[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/scheduled`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.scheduled;
 }
 
 /** POST /api/conversations/:id/messages - a manual human send (the reply box).
@@ -1295,6 +1312,22 @@ export async function getTourReminders(
     `/api/tours/${encodeURIComponent(tourId)}/reminders`,
     { ...(signal !== undefined && { signal }) },
   );
+}
+
+/** PATCH /api/tours/:tourId/reminders/:reminderId { canceled } — cancel one
+ *  upcoming rung, or restore (un-cancel) a canceled one. 409 when the rung is
+ *  already sent/skipped or the transition raced the send poll — the response
+ *  carries the honest current state either way. */
+export async function patchTourReminder(
+  tourId: string,
+  reminderId: string,
+  canceled: boolean,
+): Promise<TourReminderView> {
+  const res = await request<{ reminder: TourReminderView }>(
+    `/api/tours/${encodeURIComponent(tourId)}/reminders/${encodeURIComponent(reminderId)}`,
+    { method: 'PATCH', body: { canceled } },
+  );
+  return res.reminder;
 }
 
 /** GET /api/tours/:tourId/activity?limit=&before= - the tour's OWN lifecycle

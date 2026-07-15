@@ -88,7 +88,7 @@ async function searchingTenantOwnerUnit(
   return { tenant, owner, ownerId, unit };
 }
 
-test('landlord-led: interest → group negotiation → booked → group reminders → toured → exit YES (convertible, no placement, still searching)', async ({
+test('landlord-led: interest → group negotiation → booked → group reminders → toured → exit YES (auto-converts into a placement)', async ({
   page,
   request,
 }) => {
@@ -141,12 +141,12 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   // feedback ask, so a loose /move forward/ would double-match (strict mode).
   await flow.expectInboundRelayedToTeam(/Loved it/i);
 
-  // Exit gate YES: convertible — and NOTHING else moves (no placement, tenant
-  // stays searching; conversion belongs to Post-Tour & Application).
+  // Exit gate YES converts in the same step (2026-07-15): the placement is
+  // born at Send application and the app lands on it; the tour back-links.
   await flow.teamRecordsExitGate('yes');
-  await flow.expectTourConvertible();
-  await flow.expectNoPlacement();
-  await flow.expectTenantStillSearching();
+  await flow.expectTourAutoConverted();
+  await flow.expectPlacementStage('Send application');
+  await flow.expectTenantPlacing();
 });
 
 test('PM-team: same shape with the PM in the landlord slot → exit NO (not a fit, closed, still searching)', async ({
@@ -312,8 +312,8 @@ test('activity coverage: a canceled tour pins on the tenant timeline', async ({ 
 // The page-driven arc: walk the WHOLE sequence THROUGH the rebuilt TourDetail
 // page (not just the API) - the two-pane conversation switcher (group send +
 // relay fan-out, tenant 1:1), the header CTA ladder (Book -> Mark toured ->
-// Record outcome -> Start placement), and the Outcome + Activity cards.
-test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -> toured -> outcome YES -> start placement -> Activity + placement link', async ({
+// Record outcome, which auto-converts), and the Outcome + Activity cards.
+test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -> toured -> outcome YES auto-converts -> Activity + placement link', async ({
   page,
   request,
 }) => {
@@ -338,14 +338,12 @@ test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -
   await flow.expectTenantTabShows1to1(/would like to tour/i);
 
   // Book via the header CTA modal -> Scheduled -> Mark toured (CTA) -> Record
-  // outcome YES (CTA modal) -> convertible.
+  // outcome YES (CTA modal) -> converts + lands on the new placement in the
+  // SAME step (2026-07-15); the tour then links back.
   await flow.teamBooksTour(tourSchedule());
   await flow.teamMarksToured();
   await flow.teamRecordsExitGate('yes');
-  await flow.expectTourConvertible();
-
-  // Start placement (CTA) navigates to the new placement; the tour then links back.
-  await flow.teamConvertsTourToPlacement();
+  await flow.expectTourAutoConverted();
   await flow.expectTourShowsPlacementLink();
 
   // The Activity card tells the whole story (group opened, booked, toured,

@@ -47,9 +47,10 @@ Notes on the app carry one of two tags:
   separate from placements**. A tenant can have many tours; **at most one** will
   later convert into a placement. During touring the tenant **stays `searching`** —
   no placement exists yet, and tours do not drive tenant status.
-- **Downstream:** the exit gate ("yes, move forward") marks a tour **convertible**
-  and hands off to **Post-Tour & Application**, where the placement is actually
-  created. That conversion is deliberately **not** part of this sequence.
+- **Downstream:** the exit gate ("yes, move forward") records `move_forward` and
+  **converts in the same step** (2026-07-15): the placement is created immediately
+  and the app lands on it — the entry of **Post-Tour & Application**. (Conversion
+  was originally a separate downstream click; the gate now IS the handoff.)
 
 ## The flow, stage by stage
 
@@ -140,10 +141,10 @@ The team asks, through the app: *what did you think — want to move forward?* T
 answer is relayed back and recorded. This is the **exit gate**, the boundary of
 this sequence:
 
-- **Yes — move forward.** Outcome `move_forward`; the tour becomes
-  **`convertible`**. **No placement is created here and the tenant stays
-  `searching`.** Hand off to **Post-Tour & Application**, where the placement is
-  created from the convertible tour and this masked tour thread carries over.
+- **Yes — move forward.** Outcome `move_forward`, and the app **converts in the
+  same step** (2026-07-15): the placement is created immediately (tenant
+  `searching → placing`), the tour closes as converted, and this masked tour
+  thread carries over — **Post-Tour & Application** begins right here.
 - **No — not a fit.** Outcome `not_a_fit`; the tour closes. The tenant stays
   `searching`; hand back to **Sending Unit** to share a new property and restart
   the loop.

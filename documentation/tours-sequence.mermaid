@@ -78,8 +78,8 @@ sequenceDiagram
     A->>S: Relay the feedback
     Note over A: [MANUAL] Record the feedback and the exit-gate decision on the tour record
     alt Yes — move forward
-        Note over A: [MANUAL] Exit gate — outcome move_forward. The tour becomes convertible. NO placement is created here and the tenant stays searching
-        Note over T,S: Hand off to Post-Tour and Application (separate) — the placement is created THERE from the convertible tour. This masked tour thread carries over on conversion. The REAL group text with visible phone numbers comes later, once the RTA is submitted (Track 6) — a different thing from this masked relay.
+        Note over A: [MANUAL] Exit gate — outcome move_forward. Recording the decision CONVERTS in the same step (2026-07-15): the placement is created immediately (tenant searching → placing) and the tour closes as converted
+        Note over T,S: Hand off to Post-Tour and Application — the placement already exists from the gate. This masked tour thread carries over on conversion. The REAL group text with visible phone numbers comes later, once the RTA is submitted (Track 6) — a different thing from this masked relay.
     else No — not a fit
         Note over A: [MANUAL] Exit gate — outcome not_a_fit. Close the tour
         Note over T,L: Re-match — the tenant stays searching. Hand back to Sending Unit (share a new property, restart the loop)

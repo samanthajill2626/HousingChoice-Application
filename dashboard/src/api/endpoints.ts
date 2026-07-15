@@ -47,6 +47,7 @@ import type {
   SystemFlags,
   TenantStatus,
   TodayResponse,
+  TimelineScheduled,
   TransitionSource,
   Tour,
   TourActivityEvent,
@@ -355,6 +356,21 @@ export async function getConversationMessages(
     { ...(signal !== undefined && { signal }) },
   );
   return res.messages;
+}
+
+/** GET /api/conversations/:id/scheduled - the group thread's "Upcoming" bucket:
+ *  the not-yet-sent tour-reminder rungs that will route to this masked group
+ *  (same TimelineScheduled shape the contact timeline ships). Empty for 1:1
+ *  conversations (their upcoming lives on the contact timeline). */
+export async function getConversationScheduled(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<TimelineScheduled[]> {
+  const res = await request<{ scheduled: TimelineScheduled[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/scheduled`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.scheduled;
 }
 
 /** POST /api/conversations/:id/messages - a manual human send (the reply box).

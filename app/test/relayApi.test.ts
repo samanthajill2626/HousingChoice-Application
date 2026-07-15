@@ -17,6 +17,7 @@ import {
   dispatchJob,
 } from '../src/jobs/jobs.js';
 import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
+import { armTourReminders } from '../src/jobs/tourReminders.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
 import {
@@ -624,5 +625,135 @@ describe('relay-group API (M1.7)', () => {
     });
     const res = await request(app).get('/api/conversations/conv-1to1/members').set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(404);
+  });
+
+  // --- GET /conversations/:id/scheduled — the group thread's "Upcoming" bucket
+  // (scheduled-message-visibility parity, 2026-07-14). Routing mirrors the
+  // reminder poller: rungs show here only when they WILL route to this group.
+  describe('GET /api/conversations/:conversationId/scheduled', () => {
+    const logger = createLogger({ destination: createLogCapture().stream });
+
+    /** Create a TOUR-OWNED open relay group + arm the reminder ladder. */
+    async function seedTourGroup(
+      app: Parameters<typeof request>[0],
+      tourType: 'landlord_led' | 'self_guided',
+    ) {
+      const tour = await world.toursRepo.create({
+        tenantId: 'c-tenant-1',
+        unitId: 'unit-1',
+        tourType,
+        scheduledAt: '2026-08-03T18:00:00.000Z',
+      });
+      const created = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+      const conversationId = created.body.conversation.conversationId as string;
+      await world.conversationsRepo.rebindOwner(conversationId, { type: 'tour', id: tour.tourId });
+      await world.toursRepo.patch(tour.tourId, { groupThreadId: conversationId });
+      await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
+        tourRemindersRepo: world.tourRemindersRepo,
+        logger,
+      });
+      return { tour, conversationId };
+    }
+
+    it('returns the group-routed upcoming rungs (dueAt order, resolved bodies); sent rungs drop out', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
+      // The full 5-rung ladder is upcoming (armed 2 days before the tour).
+      expect(scheduled).toHaveLength(5);
+      // dueAt ascending; each item is wire-parity TimelineScheduled.
+      const ats = scheduled.map((s) => s['at'] as string);
+      expect([...ats].sort()).toEqual(ats);
+      const first = scheduled[0]!;
+      expect(first['kind']).toBe('scheduled');
+      expect(first['source']).toBe('tour_reminder');
+      expect(first['reminderKind']).toBe('confirmation');
+      expect(first['body']).toContain('Your tour is confirmed');
+      expect(first['conversationId']).toBe(conversationId);
+      expect(first['refType']).toBe('tour');
+      expect(first['refId']).toBe(tour.tourId);
+
+      // Fire one rung (claim = sent) — it must drop out of the bucket.
+      const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
+      const confirmation = rows.find((r) => r.kind === 'confirmation')!;
+      await world.tourRemindersRepo.claimSend(confirmation.reminderId, '2026-08-01T10:01:00.000Z');
+      const after = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      expect(after.body.scheduled).toHaveLength(4);
+      expect(
+        (after.body.scheduled as Array<{ reminderKind: string }>).some(
+          (s) => s.reminderKind === 'confirmation',
+        ),
+      ).toBe(false);
+    });
+
+    it('a self_guided owner routes 1:1 — the group bucket stays empty', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { conversationId } = await seedTourGroup(app, 'self_guided');
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      expect(res.body.scheduled).toEqual([]);
+    });
+
+    it('a CLOSED group is unusable (rungs fall back 1:1) — empty bucket', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { conversationId } = await seedTourGroup(app, 'landlord_led');
+      await request(app)
+        .patch(`/api/conversations/${conversationId}/close`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ closed: true })
+        .expect(200);
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      expect(res.body.scheduled).toEqual([]);
+    });
+
+    it('a 1:1 conversation gets an EMPTY bucket (200, not 404 — its upcoming lives on the contact timeline)', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      world.conversations.set('conv-1to1-sched', {
+        conversationId: 'conv-1to1-sched',
+        participant_phone: ALICE,
+        status: 'open',
+        last_activity_at: new Date().toISOString(),
+        type: 'tenant_1to1',
+        ai_mode: 'auto',
+        created_at: new Date().toISOString(),
+      });
+      const res = await request(app)
+        .get('/api/conversations/conv-1to1-sched/scheduled')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+      expect(res.body.scheduled).toEqual([]);
+    });
+
+    it('404s an unknown conversation', async () => {
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      await request(app)
+        .get('/api/conversations/conv-ghost/scheduled')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(404);
+    });
   });
 });

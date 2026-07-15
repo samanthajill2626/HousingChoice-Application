@@ -407,6 +407,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           <Timeline
             status={thread.status}
             items={thread.items}
+            upcoming={thread.upcoming}
             source="server"
             canSend={canSend}
             {...(canSend && { onSend })}

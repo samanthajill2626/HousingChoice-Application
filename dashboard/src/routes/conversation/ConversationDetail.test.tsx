@@ -11,6 +11,7 @@ import type {
 const getConversation = vi.fn();
 const getConversationMembers = vi.fn();
 const getConversationMessages = vi.fn();
+const getConversationScheduled = vi.fn();
 const sendMessage = vi.fn();
 const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
@@ -25,6 +26,7 @@ vi.mock('../../api/index.js', async () => {
     getConversation: (...a: unknown[]) => getConversation(...a),
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
+    getConversationScheduled: (...a: unknown[]) => getConversationScheduled(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     addConversationMember: (...a: unknown[]) => addConversationMember(...a),
     removeConversationMember: (...a: unknown[]) => removeConversationMember(...a),
@@ -92,7 +94,9 @@ beforeEach(() => {
   closeConversation.mockReset();
   markConversationRead.mockReset();
   getContacts.mockReset();
+  getConversationScheduled.mockReset();
   getConversationMessages.mockResolvedValue([]);
+  getConversationScheduled.mockResolvedValue([]);
   getConversationMembers.mockResolvedValue([KEISHA, LARS]);
   markConversationRead.mockResolvedValue(undefined);
   // useContacts('all') fans out per type; return the candidate for tenants only
@@ -124,6 +128,27 @@ describe('ConversationDetail dispatch', () => {
     );
     // Marked read on view.
     await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('conv-g1'));
+  });
+
+  it('shows the pinned Upcoming section for group-routed scheduled reminders', async () => {
+    getConversation.mockResolvedValue(relayHeader());
+    getConversationScheduled.mockResolvedValue([
+      {
+        kind: 'scheduled',
+        id: 'sched#tour_reminder#rem-1',
+        at: '2026-08-03T18:00:00.000Z',
+        conversationId: 'conv-g1',
+        source: 'tour_reminder',
+        reminderKind: 'day_before',
+        body: 'Reminder: your property tour is tomorrow.',
+        refType: 'tour',
+        refId: 'tour-1',
+      },
+    ]);
+    renderAt('conv-g1');
+    const region = await screen.findByRole('region', { name: 'Upcoming scheduled messages' });
+    expect(within(region).getByText('Reminder: your property tour is tomorrow.')).toBeInTheDocument();
+    expect(getConversationScheduled).toHaveBeenCalledWith('conv-g1', expect.anything());
   });
 
   it('redirects a 1:1 conversation to its contact page', async () => {

@@ -34,8 +34,15 @@ import {
   type ConversationParticipant,
   createConversationsRepo,
   type ConversationsRepo,
+  getOwner,
   RosterConflictError,
 } from '../repos/conversationsRepo.js';
+import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import {
+  createTourRemindersRepo,
+  type TourRemindersRepo,
+} from '../repos/tourRemindersRepo.js';
+import { resolveMessage } from '../messages/index.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -55,6 +62,10 @@ export interface RelayGroupsRouterDeps {
   poolNumbersService?: PoolNumbersService;
   /** BE2/C2: emit added_to_group_text / removed_from_group_text milestones. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled):
+   *  resolve the owner tour + its not-yet-sent reminder rungs. */
+  toursRepo?: ToursRepo;
+  tourRemindersRepo?: TourRemindersRepo;
   events?: EventBus;
 }
 
@@ -116,8 +127,67 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const events = deps.events ?? appEvents;
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
 
   const router = Router();
+
+  // GET /api/conversations/:id/scheduled — the group thread's "Upcoming"
+  // bucket (scheduled-message-visibility parity, founder ask 2026-07-14): the
+  // not-yet-sent tour-reminder rungs that WILL route to this masked group,
+  // in the SAME TimelineScheduled wire shape the contact timeline ships, so
+  // the shared <Timeline> renders them identically. Routing mirrors the
+  // poller (jobs/tourReminders.ts) exactly: rungs land in the group only when
+  // the owner tour is landlord_led/pm_team AND the group is usable (open +
+  // pool number + roster); otherwise they fall back to the tenant 1:1 and
+  // surface on the CONTACT timeline instead — never both. A non-relay
+  // conversation gets an EMPTY bucket (200, unlike the siblings' 404): its
+  // upcoming lives on the contact timeline, and the shared thread hook can
+  // call this for every conversation without a special case.
+  // Suppression annotations are deliberately absent: member-level opt-out
+  // suppresses individual LEGS at send time, never the group send itself.
+  router.get('/conversations/:conversationId/scheduled', async (req, res) => {
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation) {
+      res.status(404).json({ error: 'conversation_not_found' });
+      return;
+    }
+    const owner = conversation.type === 'relay_group' ? getOwner(conversation) : { type: null };
+    const groupUsable =
+      conversation.status !== 'closed' &&
+      typeof conversation.pool_number === 'string' &&
+      conversation.pool_number.length > 0 &&
+      (conversation.participants ?? []).length > 0;
+    if (owner.type !== 'tour' || !groupUsable) {
+      res.json({ scheduled: [] });
+      return;
+    }
+    const tour = await tours.get(owner.id);
+    if (!tour || tour.groupThreadId !== conversationId || tour.tourType === 'self_guided') {
+      res.json({ scheduled: [] });
+      return;
+    }
+    const rows = await tourReminders.listByTour(tour.tourId);
+    const scheduled = rows
+      .filter(
+        (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
+      )
+      .sort((a, b) => a.dueAt.localeCompare(b.dueAt))
+      .map((row) => ({
+        kind: 'scheduled' as const,
+        id: `sched#tour_reminder#${row.reminderId}`,
+        at: row.dueAt,
+        source: 'tour_reminder' as const,
+        reminderKind: row.kind,
+        body: resolveMessage(`tour.${row.kind}`),
+        conversationId,
+        refType: 'tour' as const,
+        refId: tour.tourId,
+      }));
+    res.json({ scheduled });
+  });
 
   // POST /api/relay-groups — create a relay group + provision a pool number +
   // send the intro to each member (throttled), return the conversation.

@@ -358,6 +358,7 @@ function GroupChannel({
     <Timeline
       status={thread.status}
       items={items}
+      upcoming={thread.upcoming}
       source="server"
       canSend={canSend}
       {...(canSend && { onSend })}

@@ -25,6 +25,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { Address } from '../lib/address.js';
+import type { TourType } from '../lib/toursModel.js';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -189,6 +190,13 @@ export interface UnitItem {
   voucher_size_accepted?: number;
   /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
+  /**
+   * Structured, optional per-unit tour type (self_guided / landlord_led /
+   * pm_team) - the prefill source for the Schedule-a-tour modal. INTERNAL:
+   * NEVER exposed on the public flyer projection. Absent = unset (the modal's
+   * fallback chain covers it).
+   */
+  tour_type?: TourType;
   /** The never-standardized per-unit application process (free text). INTERNAL. */
   application_process?: string;
   /**

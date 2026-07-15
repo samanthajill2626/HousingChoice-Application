@@ -8,6 +8,7 @@
 // caller can never inject `tour_process` through an unexpected key or set a GSI
 // key (status/jurisdiction) to a non-string that would poison the index.
 import { type Address, validateAddress } from './address.js';
+import { isTourType } from './toursModel.js';
 import { type UnitItem } from '../repos/unitsRepo.js';
 
 /** Result of validating a units request body. */
@@ -15,7 +16,14 @@ export type UnitValidation =
   | { ok: true; fields: Record<string, unknown> }
   | { ok: false; error: string };
 
-type FieldKind = 'string' | 'number' | 'boolean' | 'string[]' | 'pets' | 'address';
+type FieldKind =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'string[]'
+  | 'pets'
+  | 'address'
+  | 'tour_type';
 
 /**
  * The writable unit fields and their kinds. `jurisdiction` is a GSI partition
@@ -78,6 +86,12 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // matching. INTERNAL for Phase-1 (NOT on the flyer projection).
   voucher_size_accepted: 'number',
   tour_process: 'string',
+  // Structured tour type (self_guided / landlord_led / pm_team). A DEDICATED
+  // kind (not plain 'string') because it must clear to ABSENT: ''/null map to
+  // a null patch value so the repo's null->REMOVE path fires (a plain 'string'
+  // would reject null and store a stray empty-string enum). INTERNAL - not on
+  // the flyer projections below.
+  tour_type: 'tour_type',
   application_process: 'string',
   primary_voice_contact: 'string',
   // BE3/C3: the PARENT property/building group id (byProperty GSI hash). WRITABLE
@@ -134,6 +148,22 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
           return { ok: false, error: 'pets must be a string or boolean' };
         }
         break;
+      case 'tour_type': {
+        // CLEAR-to-absent: '' or null -> null patch value so the repo REMOVEs
+        // the attribute (no stray empty-string enum left behind). A real value
+        // must be in the TourType union; anything else is a 400.
+        if (value === '' || value === null) {
+          fields[key] = null;
+          continue;
+        }
+        if (!isTourType(value)) {
+          return {
+            ok: false,
+            error: `${key} must be one of: self_guided, landlord_led, pm_team`,
+          };
+        }
+        break;
+      }
       case 'address': {
         // Structured Address object: only line1/line2/city/state/zip, each an
         // optional string within caps. Unknown keys / non-strings → 400. The

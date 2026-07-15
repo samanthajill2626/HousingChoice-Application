@@ -1,4 +1,7 @@
-/* PlacementDetail — placement detail + history. Tokens only. */
+/* PlacementDetail — the two-pane placement hub. Layout + breakpoint live in the
+ * shared ui/twoPaneShell.module.css (composed, never forked); this file styles
+ * only the placement-specific header decoration (back crumb, stage pill, facts
+ * line, error bar) + the right-pane read-only rows + history. Tokens only. */
 
 .page {
   display: flex;
@@ -12,36 +15,71 @@
   min-height: 240px;
 }
 
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-  margin-bottom: var(--sp-4);
-}
+/* --- Header band decoration (over ui/twoPaneShell .header) ----------------- */
 
-.title {
-  display: flex;
+/* Back crumb - mirrors TourDetail's back button on the dark header band. */
+.backBtn {
+  flex: 0 0 auto;
+  display: inline-flex;
   align-items: center;
-  gap: var(--sp-3);
-  margin: 0;
-  font-size: var(--fs-xl);
-  font-weight: var(--fw-bold);
-  color: var(--c-text);
-  line-height: var(--lh-tight);
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--c-header-btn-bg);
+  color: var(--c-text-inverse);
+  text-decoration: none;
+  font-size: var(--fs-lg);
 }
 
-.phase {
+.backBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The current-stage pill beside the title (read-only; moves happen via the
+ * kebab's "Move to..." picker). Wraps gracefully with long stage labels. */
+.stagePill {
+  flex: 0 0 auto;
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
-  background: var(--c-surface-2);
-  border: 1px solid var(--c-border);
-  color: var(--c-text-muted);
+  background: var(--c-header-btn-bg);
+  color: var(--c-text-inverse);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+/* The date-vocabulary facts line under the title. Wraps at narrow widths (long
+ * stage verbiage) rather than clipping - spec section 7. */
+.facts {
+  margin-top: 2px;
+  color: var(--c-header-facts);
+  font-size: var(--fs-xs);
+}
+
+/* A thin full-width error bar under the header (action failures). */
+.errorBar {
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+  border-bottom: 1px solid var(--c-evt-amber-border);
+  font-size: var(--fs-sm);
+}
+
+/* The "Move to..." stage picker sits as the first row inside the kebab popover;
+ * give it a little breathing room from the action items below. */
+.moveRow {
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  border-bottom: 1px solid var(--c-border);
+  margin-bottom: var(--sp-1);
+}
+
+.moveLabel {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  margin-bottom: var(--sp-1);
 }
 
 .error {

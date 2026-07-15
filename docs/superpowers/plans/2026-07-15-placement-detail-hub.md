@@ -167,9 +167,9 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: `dashboard/src/ui/twoPaneShell.module.css` (compose, do not fork), TourDetail.tsx as the structural template, Task 5 descriptors (next-stage lookup for the CTA label), Task 6 conversation, existing requestMove/gateFor pipeline + StatusMenu + modals.
 - Produces: header CTA `Advance to {nextStageLabel}` calling `requestMove(nextStage)` (existing gates fire untouched); kebab menu (mirror TourActionsMenu popover) = Move to... (existing StatusMenu content), Mark lost, Open group text (hidden when group_thread set), Set follow-up (opens Task 8's modal); facts line via Task 4 vocabulary; mobile segmented toggle defaulting to Details.
 
-- [ ] **Step 1: Failing tests**: header renders title + stage pill + facts line; CTA label = next ladder stage and absent at moved_in/lost; kebab exposes the four actions with correct gating; mobile toggle switches panes (match TourDetail.test.tsx's pattern).
-- [ ] **Step 2-4: FAIL -> rebuild the page -> PASS.** Right pane order: NowCard placeholder slot (Task 9), DeadlinesNudges placeholder slot (Task 8), People and provenance card (tenant/landlord/property Links + "converted from tour toured {date} ->" via fromTourId when present), Placement facts (today's read-only fields reworded with Task 4 vocabulary), HistoryPanel. Placeholders = render nothing yet, NOT dummy cards.
-- [ ] **Step 5: BARE typecheck + dashboard suite. Commit.**
+- [x] **Step 1: Failing tests**: header renders title + stage pill + facts line; CTA label = next ladder stage and absent at moved_in/lost; kebab exposes the four actions with correct gating; mobile toggle switches panes (match TourDetail.test.tsx's pattern).
+- [x] **Step 2-4: FAIL -> rebuild the page -> PASS.** Right pane order: NowCard placeholder slot (Task 9), DeadlinesNudges placeholder slot (Task 8), People and provenance card (tenant/landlord/property Links + "converted from tour toured {date} ->" via fromTourId when present), Placement facts (today's read-only fields reworded with Task 4 vocabulary), HistoryPanel. Placeholders = render nothing yet, NOT dummy cards.
+- [x] **Step 5: BARE typecheck + dashboard suite. Commit.**
 
 ### Task 8: Deadlines and nudges card
 

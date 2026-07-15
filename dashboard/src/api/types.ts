@@ -518,7 +518,7 @@ export type PlacementDeadlineType = 'rta_window' | 'voucher_expiration' | 'follo
 
 // --- First-class Tour entity (Tours feature) ---------------------------------
 
-/** The three valid tour types (mirrors app/src/repos/toursRepo.ts TourType). */
+/** The three valid tour types (mirrors app/src/lib/toursModel.ts TourType). */
 export type TourType = 'self_guided' | 'landlord_led' | 'pm_team';
 
 /** Human-readable labels for tour types (staff-facing). */
@@ -1150,6 +1150,9 @@ export interface UnitItem {
   contacts?: UnitContact[];
   /** Free-text "how to tour" copy (the property page's process card). */
   tour_process?: string;
+  /** Hand-mirror of app/src/repos/unitsRepo.ts UnitItem.tour_type. Structured
+   *  tour type; the prefill source for the Schedule-a-tour modal. */
+  tour_type?: TourType;
   /** Free-text "how to apply" copy (the property page's process card). */
   application_process?: string;
   primary_voice_contact?: string;

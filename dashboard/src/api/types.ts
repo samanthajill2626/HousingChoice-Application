@@ -1100,6 +1100,15 @@ export interface Address {
  *  so existing importers don't churn. */
 export type UnitStatus = ListingStatus;
 
+/** Hand-mirror of app/src/lib/unitMedia.ts UnitMediaDisplay. One resolved photo:
+ *  the raw `media` entry (the management handle for Remove / Make cover) plus its
+ *  display URL when resolvable (presigned for a stored key, pass-through for a
+ *  legacy URL). `url` absent = the photo is currently unresolvable. */
+export interface UnitMediaDisplay {
+  entry: string;
+  url?: string;
+}
+
 /** A unit record (GET /api/units → { units }, GET /api/units/:id → { unit }).
  *  Flexible document; the landlord file reads landlordId/status/address/beds. */
 export interface UnitItem {
@@ -1132,8 +1141,13 @@ export interface UnitItem {
   lease_terms?: string;
   /** Pet policy, e.g. "Cats only". */
   pets?: string;
-  /** S3 keys / URLs of property media (the Photos gallery + hero). */
+  /** S3 keys / URLs of property media (the Photos gallery + hero). The raw
+   *  management handle: the photo routes mutate this array (Remove / Make cover). */
   media?: string[];
+  /** Resolved display URLs for `media` (presign-per-read), attached ALONGSIDE the
+   *  raw `media` by GET /api/units/:id and the photo-mutating routes. Absent on the
+   *  units LIST (no gallery there) and on older backends. */
+  mediaDisplay?: UnitMediaDisplay[];
   listing_link?: string;
   /** Public flyer details (public-pages §3): a tour video link. */
   video_url?: string;

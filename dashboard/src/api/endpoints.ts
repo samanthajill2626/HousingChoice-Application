@@ -665,6 +665,74 @@ export async function getUnitActivity(
   return res.events;
 }
 
+/** POST /api/units/:id/photos - upload one-or-many image files (multipart). The
+ *  server validates each file (jpeg/png/gif/webp, 5MB, the 100-photo cap) BEFORE
+ *  storing any, stores them under a dedicated prefix, and returns the updated unit
+ *  (WITH mediaDisplay). Like uploadMedia this CANNOT use request() (JSON-only): a
+ *  multipart upload must send FormData and let the browser set the boundary, so we
+ *  raw-fetch and replicate client.ts's ApiError parsing (the server's { error }
+ *  code - e.g. unsupported_media_type / file_too_large / photo_cap_exceeded -
+ *  surfaces on `.code`). The busboy parser keys files by content, not field name;
+ *  every file is appended under 'files'. */
+export async function uploadUnitPhotos(unitId: string, files: File[]): Promise<UnitItem> {
+  const form = new FormData();
+  for (const file of files) form.append('files', file);
+  let res: Response;
+  try {
+    res = await fetch(`/api/units/${encodeURIComponent(unitId)}/photos`, {
+      method: 'POST',
+      body: form,
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+    });
+  } catch {
+    throw new ApiError(0, 'network_error', 'Network request failed');
+  }
+
+  let parsed: unknown;
+  if ((res.headers.get('content-type') ?? '').includes('application/json')) {
+    try {
+      parsed = (await res.json()) as unknown;
+    } catch {
+      parsed = undefined;
+    }
+  }
+
+  if (!res.ok) {
+    if (parsed !== null && typeof parsed === 'object') {
+      const b = parsed as Record<string, unknown>;
+      const code = typeof b['error'] === 'string' ? b['error'] : `http_${res.status}`;
+      const detail = typeof b['detail'] === 'string' ? ` (${b['detail']})` : '';
+      throw new ApiError(res.status, code, `${code}${detail}`, parsed);
+    }
+    throw new ApiError(res.status, `http_${res.status}`, `Request failed (${res.status})`, parsed);
+  }
+  return (parsed as { unit: UnitItem }).unit;
+}
+
+/** DELETE /api/units/:id/photos { entry } - drop one photo (the array entry only;
+ *  no S3 object deletion). 404 unit_or_photo_not_found on an unknown entry. Returns
+ *  the updated unit (WITH mediaDisplay), unwrapped from { unit }. */
+export async function removeUnitPhoto(unitId: string, entry: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/photos`,
+    { method: 'DELETE', body: { entry } },
+  );
+  return res.unit;
+}
+
+/** PUT /api/units/:id/photos/cover { entry } - make `entry` the cover (move to the
+ *  front = hero + flyer lead photo). No-op success when it is already the cover;
+ *  404 unit_or_photo_not_found on an unknown entry. Returns the updated unit (WITH
+ *  mediaDisplay), unwrapped from { unit }. */
+export async function setUnitPhotoCover(unitId: string, entry: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/photos/cover`,
+    { method: 'PUT', body: { entry } },
+  );
+  return res.unit;
+}
+
 // --- Contacts (/api/contacts) -----------------------------------------------
 // The contact detail page (B2 tenant / B3 landlord). getContact exists today
 // (legacy Contact, single `phone`); the timeline / listings-sent / media slices

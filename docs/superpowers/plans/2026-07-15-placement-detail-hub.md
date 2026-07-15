@@ -204,8 +204,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 **Files:**
 - Modify: `e2e/tests/dashboard-next/placements*.spec.ts` (find the exact spec name), `e2e/scenarios/steps.ts` (new steps only if the vocabulary lacks them)
 
-- [ ] **Step 1: Extend the e2e scenario:** from a seeded placement - open group text from the empty state (button disappears, thread mounts); advance a stage via the header CTA through a gate modal; armed nudge visible in the Deadlines and nudges card AND in the tenant 1:1 Upcoming bucket; cancel then restore it. Accessibility-first selectors.
-- [ ] **Step 2: Full gates BARE from the worktree root:** `npm run typecheck`, `npm test`, `npm run e2e`. All green on the CURRENT base.
+- [x] **Step 1: Extend the e2e scenario:** from a seeded placement - open group text from the empty state (button disappears, thread mounts); advance a stage via the header CTA through a gate modal; armed nudge visible in the Deadlines and nudges card AND in the tenant 1:1 Upcoming bucket; cancel then restore it. Accessibility-first selectors.
+- [x] **Step 2: Full gates BARE from the worktree root:** `npm run typecheck`, `npm test`, `npm run e2e`. All green on the CURRENT base.
 - [ ] **Step 3: Live QA on a hermetic lane** (`npm run e2e:session`, reseed profile=full, dev-login again after reseed): walk the page desktop-width, then `browser_resize` to phone width (390x844) and verify spec section 7 - header wraps with long stage names (put the placement in awaiting_landlord_submission), no horizontal scroll, pill rail scrolls, Now card lines wrap. Screenshots into .playwright-mcp/.
 - [ ] **Step 4: Commit any fixes; final gates if anything changed. Report with a where-to-test list.** Do NOT merge to main - the founder merges.
 

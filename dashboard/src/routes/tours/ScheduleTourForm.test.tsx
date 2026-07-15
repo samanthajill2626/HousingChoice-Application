@@ -503,7 +503,13 @@ describe('ScheduleTourForm', () => {
     expect(unitBox).toHaveAttribute('readonly');
     expect(screen.getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
     // Tour type derives from the pre-committed unit's tour_process ("landlord").
-    expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led');
+    // Wrapped in waitFor: the tour-type derivation reacts to the pre-committed
+    // unit a microtask AFTER the unit box commits (line above), so under
+    // full-suite CPU load the bare sync assert can lose that race (passes in
+    // isolation, flaked in-suite).
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led'),
+    );
     // Both sides resolved -> ready to submit straight away.
     expect(screen.getByRole('button', { name: /^Schedule$/ })).toBeEnabled();
   });

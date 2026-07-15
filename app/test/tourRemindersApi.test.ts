@@ -25,6 +25,8 @@ function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
   return {
     get: (path: string) =>
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    patch: (path: string) =>
+      request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
   };
 }
 
@@ -228,5 +230,110 @@ describe('GET /api/tours/:tourId/reminders', () => {
     const res = await authed(app).get('/api/tours/no-such-tour/reminders');
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'tour_not_found' });
+  });
+});
+
+// Operator cancel/restore of ONE rung (2026-07-14).
+describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
+  async function seedTourWithRung(world: FakeWorld) {
+    const created = await world.toursRepo.create({
+      tenantId: 'contact-cancel-1',
+      unitId: 'unit-cancel-1',
+      scheduledAt: '2026-07-20T10:00:00.000Z',
+      tourType: 'landlord_led',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-cancelable',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T10:00:00.000Z',
+    });
+    return created.tourId;
+  }
+
+  it('cancels an upcoming rung (emits scheduled.updated), then restores it', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    world.emitted.length = 0;
+
+    const canceled = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.reminder.state).toBe('canceled');
+    expect(typeof canceled.body.reminder.canceledAt).toBe('string');
+    // The panel + the timelines' Upcoming buckets refetch on this.
+    expect(
+      world.emitted.some(
+        (e) => e.event === 'scheduled.updated' && (e.payload as { contactId?: string }).contactId === 'contact-cancel-1',
+      ),
+    ).toBe(true);
+    // A canceled rung leaves listDue — the poll can never fire it.
+    expect(await world.tourRemindersRepo.listDue('2026-07-19T10:01:00.000Z')).toEqual([]);
+
+    const restored = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: false });
+    expect(restored.status).toBe(200);
+    expect(restored.body.reminder.state).toBe('upcoming');
+    expect(restored.body.reminder.canceledAt).toBeUndefined();
+    // Restored → back in listDue at its original dueAt.
+    expect(
+      (await world.tourRemindersRepo.listDue('2026-07-19T10:01:00.000Z')).map((r) => r.reminderId),
+    ).toEqual(['rem-cancelable']);
+  });
+
+  it('409s a cancel that lost to the send (honest state in the body)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+    // The poll fired the rung first.
+    await world.tourRemindersRepo.claimSend('rem-cancelable', '2026-07-19T10:00:05.000Z');
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('reminder_not_cancelable');
+    expect(res.body.reminder.state).toBe('sent');
+  });
+
+  it('409s restoring a rung that is not canceled', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: false });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('reminder_not_restorable');
+    expect(res.body.reminder.state).toBe('upcoming');
+  });
+
+  it('validates: 400 non-boolean, 404 unknown tour, 404 rung of ANOTHER tour', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await seedTourWithRung(world);
+
+    const bad = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/rem-cancelable`)
+      .send({ canceled: 'yes' });
+    expect(bad.status).toBe(400);
+
+    const ghostTour = await authed(app)
+      .patch('/api/tours/no-such-tour/reminders/rem-cancelable')
+      .send({ canceled: true });
+    expect(ghostTour.status).toBe(404);
+
+    // A real rung, but owned by a DIFFERENT tour — never mutable through this path.
+    const other = await world.toursRepo.create({
+      tenantId: 'contact-cancel-2',
+      unitId: 'unit-cancel-2',
+      scheduledAt: '2026-07-21T10:00:00.000Z',
+      tourType: 'landlord_led',
+    });
+    const cross = await authed(app)
+      .patch(`/api/tours/${other.tourId}/reminders/rem-cancelable`)
+      .send({ canceled: true });
+    expect(cross.status).toBe(404);
+    expect(cross.body).toEqual({ error: 'reminder_not_found' });
   });
 });

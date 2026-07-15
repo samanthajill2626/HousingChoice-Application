@@ -515,6 +515,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // PATCH cancel/restore emits scheduled.updated on this bus.
+      events,
     }),
   );
   // Relay groups (M1.7; requireAuth — VAs run relay threads, no admin gate).

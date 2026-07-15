@@ -84,6 +84,22 @@ export interface TourRemindersRepo {
    * be sent later. Returns `true` when this call won the claim.
    */
   claimSkip(reminderId: string, skippedAt: string, reason: ReminderSkipReason): Promise<boolean>;
+  /**
+   * Cancel ONE pending rung (operator action, 2026-07-14). Same atomic
+   * no-terminal condition as claimSend/claimSkip, so a cancel racing the
+   * poll's send claim resolves to exactly one outcome. Returns true when this
+   * call won (the rung is now canceled), false when it was already
+   * sent/canceled/skipped (benign — the caller reports the honest state).
+   */
+  cancel(reminderId: string, canceledAt: string): Promise<boolean>;
+  /**
+   * Restore ONE canceled rung to pending (operator un-cancel). Conditional on
+   * canceledAt existing AND no sentAt/skippedAt — restoring a sent or
+   * never-canceled rung is a benign false. A restored PAST-DUE rung fires on
+   * the next poll tick (the panel shows "sending shortly" — deliberate: an
+   * un-canceled confirmation means "send it after all").
+   */
+  uncancel(reminderId: string): Promise<boolean>;
   /** Cancel all pending (not yet sent, canceled, or skipped) reminders for this tour. */
   cancelForTour(tourId: string): Promise<void>;
 }
@@ -229,6 +245,66 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           log.debug({ reminderId }, 'tour reminder skip-claim lost (already terminal) — skipping');
+          return false;
+        }
+        throw err;
+      }
+    },
+
+    async cancel(reminderId, canceledAt) {
+      // The per-rung twin of cancelForTour's row update — same atomic
+      // no-terminal condition, so a race with claimSend/claimSkip resolves to
+      // exactly one outcome.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { reminderId },
+            UpdateExpression: 'SET #canceledAt = :canceledAt',
+            ConditionExpression:
+              'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
+            ExpressionAttributeNames: {
+              '#canceledAt': 'canceledAt',
+              '#sentAt': 'sentAt',
+              '#skippedAt': 'skippedAt',
+            },
+            ExpressionAttributeValues: { ':canceledAt': canceledAt },
+          }),
+        );
+        log.info({ reminderId, canceledAt }, 'tour reminder canceled (operator)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ reminderId }, 'tour reminder cancel lost (already terminal) — skipping');
+          return false;
+        }
+        throw err;
+      }
+    },
+
+    async uncancel(reminderId) {
+      // REMOVE canceledAt, conditional on the row actually being canceled and
+      // NOT sent/skipped — so an un-cancel can never resurrect a fired rung.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { reminderId },
+            UpdateExpression: 'REMOVE #canceledAt',
+            ConditionExpression:
+              'attribute_exists(#canceledAt) AND attribute_not_exists(#sentAt) AND attribute_not_exists(#skippedAt)',
+            ExpressionAttributeNames: {
+              '#canceledAt': 'canceledAt',
+              '#sentAt': 'sentAt',
+              '#skippedAt': 'skippedAt',
+            },
+          }),
+        );
+        log.info({ reminderId }, 'tour reminder restored (operator un-cancel)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ reminderId }, 'tour reminder un-cancel lost (not canceled / already terminal) — skipping');
           return false;
         }
         throw err;

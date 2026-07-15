@@ -41,6 +41,9 @@ function makeApp() {
     async head() {
       return undefined;
     },
+    async createPresignedPost(key, opts) {
+      return { url: 'unused', fields: { key, 'Content-Type': opts.contentType } };
+    },
   };
   const app = buildApp({
     config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),

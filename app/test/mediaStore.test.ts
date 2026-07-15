@@ -49,6 +49,40 @@ describe('S3MediaStore.presign', () => {
   });
 });
 
+describe('S3MediaStore.createPresignedPost', () => {
+  // createPresignedPost signs the POST policy LOCALLY (SigV4, no S3 round trip -
+  // spike Q1), so this is hermetic against the same local MinIO client.
+  const localClient = new S3Client({
+    region: 'us-east-1',
+    endpoint: 'http://localhost:9000',
+    forcePathStyle: true,
+    credentials: { accessKeyId: 'local', secretAccessKey: 'locallocal' },
+  });
+
+  it('mints { url, fields } with the exact key + content-type + size policy', async () => {
+    const store = new S3MediaStore('hc-local-media', localClient);
+    const key = 'unit-media/unit-1/abc-123';
+    const { url, fields } = await store.createPresignedPost(key, { contentType: 'image/png' });
+    // Path-style (forcePathStyle): the bucket appears in the URL path.
+    expect(url).toContain('hc-local-media');
+    expect(url.startsWith('http://localhost:9000')).toBe(true);
+    // The form carries the exact key, the content-type, and the signed policy.
+    expect(fields['key']).toBe(key);
+    expect(fields['Content-Type']).toBe('image/png');
+    expect(fields['Policy']).toBeDefined();
+    expect(fields['X-Amz-Signature']).toBeDefined();
+    // Decode the policy and assert the three edge-enforced conditions are pinned.
+    const policy = JSON.parse(Buffer.from(fields['Policy']!, 'base64').toString('utf8'));
+    const conds: unknown[] = policy.conditions;
+    const stringified = conds.map((c) => JSON.stringify(c));
+    // Exact key match (the SDK adds { key: <key> }); content-type exact match;
+    // content-length-range 1..5MB.
+    expect(stringified).toContain(JSON.stringify({ key }));
+    expect(stringified).toContain(JSON.stringify({ 'Content-Type': 'image/png' }));
+    expect(stringified).toContain(JSON.stringify(['content-length-range', 1, 5 * 1024 * 1024]));
+  });
+});
+
 describe('S3MediaStore.head', () => {
   it('returns contentType + size from HeadObject metadata', async () => {
     const fakeClient = {

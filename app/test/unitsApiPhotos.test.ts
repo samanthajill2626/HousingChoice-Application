@@ -1,9 +1,10 @@
-// unit-photos S2/S3/S4 route tests: POST /api/units/:unitId/photos (multipart
-// image upload), DELETE /api/units/:unitId/photos, PUT /api/units/:unitId/photos/cover,
-// and the mediaDisplay presign-per-read resolution on GET /api/units/:unitId.
-// Drives the real routers through makeWebhookHarness with the world's fake
-// MediaStore (which consumes the streamed body and mints a UNIQUE presigned URL
-// per call, so the presign-per-read pin is exercised for real).
+// unit-photos direct-upload route tests: POST /api/units/:unitId/photos/presign
+// (mint presigned-POST grants), POST /api/units/:unitId/photos/confirm (record
+// the keys the browser uploaded directly to S3), DELETE /api/units/:unitId/photos,
+// PUT /api/units/:unitId/photos/cover, and the mediaDisplay presign-per-read
+// resolution on GET /api/units/:unitId. Drives the real routers through
+// makeWebhookHarness with the world's fake MediaStore (which records each minted
+// grant into world.presignPosts and reads back stored objects via head()).
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
@@ -32,276 +33,252 @@ function seedUnit(
   return item;
 }
 
-function photoPost(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+/** Seed a stored object into the fake store so confirm's HeadObject re-check sees it. */
+function storeObject(
+  world: ReturnType<typeof createFakeWorld>,
+  key: string,
+  opts: { contentType?: string; size?: number } = {},
+): void {
+  const size = opts.size ?? 64;
+  world.mediaObjects.set(key, {
+    body: Buffer.alloc(size, 0x61),
+    ...(opts.contentType !== undefined && { contentType: opts.contentType }),
+  });
+}
+
+function presign(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
   return request(app)
-    .post(`/api/units/${unitId}/photos`)
+    .post(`/api/units/${unitId}/photos/presign`)
     .set('x-origin-verify', SECRET)
     .set('cookie', TEST_SESSION_COOKIE);
 }
 
-const png = (name = 'a.png') => ({ buf: Buffer.from(`pretend-${name}`), name });
+function confirm(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+  return request(app)
+    .post(`/api/units/${unitId}/photos/confirm`)
+    .set('x-origin-verify', SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
 
-describe('POST /api/units/:unitId/photos - upload', () => {
-  it('stores a single image, appends ONE key, audits count-only, returns mediaDisplay', async () => {
+const KEY_RE = /^unit-media\/unit-1\/[0-9a-f-]+$/;
+
+describe('POST /api/units/:unitId/photos/presign', () => {
+  it('mints ONE grant per file, each under the unit prefix with its content-type policy', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
+    const res = await presign(app, 'unit-1').send({
+      count: 2,
+      contentTypes: ['image/png', 'image/jpeg'],
     });
     expect(res.status).toBe(200);
-    const media: string[] = res.body.unit.media;
-    expect(media).toHaveLength(1);
-    expect(media[0]).toMatch(/^unit-media\/unit-1\/[0-9a-f-]+$/);
-    // mediaDisplay resolves the stored key to a presigned URL alongside the raw entry.
-    expect(res.body.unit.mediaDisplay).toHaveLength(1);
-    expect(res.body.unit.mediaDisplay[0].entry).toBe(media[0]);
-    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
-    // Exactly one object stored; the audit carries COUNT only (no filename/key).
-    expect(world.mediaPuts).toHaveLength(1);
-    const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
-    expect(added).toBeDefined();
-    expect(added?.payload).toMatchObject({ count: 1 });
-    expect(JSON.stringify(added?.payload)).not.toContain('unit-media/');
-  });
-
-  it('stores MANY images in one request via ONE atomic append (order preserved; first = cover)', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1', { media: ['unit-media/unit-1/existing'] });
-    const res = await photoPost(app, 'unit-1')
-      .attach('file', png('one').buf, { filename: 'one.png', contentType: 'image/png' })
-      .attach('file', png('two').buf, { filename: 'two.jpg', contentType: 'image/jpeg' });
-    expect(res.status).toBe(200);
-    const media: string[] = res.body.unit.media;
-    expect(media).toHaveLength(3);
-    // The pre-existing cover stays first; the two new keys append after it.
-    expect(media[0]).toBe('unit-media/unit-1/existing');
-    expect(world.mediaPuts).toHaveLength(2);
+    const uploads: { key: string; post: { url: string; fields: Record<string, string> } }[] =
+      res.body.uploads;
+    expect(uploads).toHaveLength(2);
+    for (const u of uploads) {
+      expect(u.key).toMatch(KEY_RE);
+      expect(u.post.url).toBeTruthy();
+      expect(u.post.fields['key']).toBe(u.key);
+    }
+    // The two keys are distinct (server-minted uuids).
+    expect(uploads[0]!.key).not.toBe(uploads[1]!.key);
+    // The policy content-type is surfaced per file (via the fake's record).
+    expect(uploads[0]!.post.fields['Content-Type']).toBe('image/png');
+    expect(uploads[1]!.post.fields['Content-Type']).toBe('image/jpeg');
+    // Exactly two grants minted, each pinned to its file's key + content type.
+    expect(world.presignPosts).toHaveLength(2);
+    expect(world.presignPosts.map((p) => p.contentType)).toEqual(['image/png', 'image/jpeg']);
+    expect(world.presignPosts[0]!.key).toMatch(KEY_RE);
+    // No bytes touched the app: nothing was put through the store.
+    expect(world.mediaPuts).toHaveLength(0);
   });
 
   it('503s when the media store is unconfigured', async () => {
     const { app, world } = makeWebhookHarness({ withoutMediaStore: true });
     seedUnit(world, 'unit-1');
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
+    const res = await presign(app, 'unit-1').send({ count: 1, contentTypes: ['image/png'] });
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'media_storage_unavailable' });
   });
 
-  it('rejects a non-image type (400) BEFORE any put - E3 validate-then-store (half 1)', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // A valid image FIRST then an invalid one: NOTHING is stored and NOTHING appended.
-    const res = await photoPost(app, 'unit-1')
-      .attach('file', png().buf, { filename: 'ok.png', contentType: 'image/png' })
-      .attach('file', Buffer.from('%PDF-'), { filename: 'doc.pdf', contentType: 'application/pdf' });
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'unsupported_media_type' });
-    expect(world.mediaPuts).toHaveLength(0);
-    expect(world.units.get('unit-1')?.media).toBeUndefined();
-  });
-
-  it('rejects a file past the 5MB cap (413) and stores/appends nothing', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    const tooBig = Buffer.alloc(OUTBOUND_MMS_MAX_FILE_BYTES + 1024, 0x61);
-    const res = await photoPost(app, 'unit-1').attach('file', tooBig, {
-      filename: 'big.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(413);
-    expect(res.body).toEqual({ error: 'file_too_large' });
-    expect(world.mediaPuts).toHaveLength(0);
-    expect(world.units.get('unit-1')?.media).toBeUndefined();
-  });
-
-  it('a mid-batch PUT failure appends NOTHING (5xx) - E3 (half 2)', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // Fail the SECOND put: the first object is stored (an orphan), but the single
-    // appendMedia never runs, so unit.media stays unchanged.
-    let putCalls = 0;
-    const origPut = world.mediaStore.put.bind(world.mediaStore);
-    world.mediaStore.put = async (key, body, contentType) => {
-      putCalls += 1;
-      if (putCalls === 2) throw new Error('boom');
-      return origPut(key, body, contentType);
-    };
-    const res = await photoPost(app, 'unit-1')
-      .attach('file', png('one').buf, { filename: 'one.png', contentType: 'image/png' })
-      .attach('file', png('two').buf, { filename: 'two.png', contentType: 'image/png' });
-    expect(res.status).toBe(502);
-    expect(res.body).toEqual({ error: 'upload_failed' });
-    expect(world.units.get('unit-1')?.media).toBeUndefined(); // no partial append
-    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
-  });
-
-  it('rejects the request when existing + incoming would exceed the 100 cap (400)', async () => {
-    const { app, world } = makeWebhookHarness();
-    const full = Array.from({ length: UNIT_MEDIA_MAX }, (_v, i) => `unit-media/unit-1/k${i}`);
-    seedUnit(world, 'unit-1', { media: full });
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
-    expect(world.mediaPuts).toHaveLength(0);
-  });
-
-  it('SF1: a transient appendMedia rejection returns 500 (no hang), no partial state', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // The success tail runs from bb.on('close') - OUTSIDE Express async-error
-    // capture. A rejecting append MUST be mapped to a response, not hang the
-    // request (supertest would time out on a hang).
-    world.unitsRepo.appendMedia = async () => {
-      throw new Error('dynamo throttled');
-    };
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ error: 'internal server error' });
-    // Object stored (orphan), but no append committed and no audit trail.
-    expect(world.units.get('unit-1')?.media).toBeUndefined();
-    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
-  });
-
-  it('SF1: an appendMedia cap-race (ConditionalCheckFailed) maps to the 400 cap shape', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // A concurrent append filled the unit past the cap after our pre-check: the
-    // atomic re-guard throws ConditionalCheckFailedException -> same 400 shape.
-    world.unitsRepo.appendMedia = async () => {
-      throw new ConditionalCheckFailedException({ message: 'cap race', $metadata: {} });
-    };
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
-    expect(world.units.get('unit-1')?.media).toBeUndefined();
-  });
-
-  it('SF1: a rejecting audit is best-effort - photos stored, request still 200', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // The append commits; the trail write blips. The photos are stored, so the
-    // request must NOT hang or 500 (which would tempt a duplicate-append retry).
-    world.auditRepo.append = async () => {
-      throw new Error('audit table throttled');
-    };
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(200);
-    expect(res.body.unit.media).toHaveLength(1);
-    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
-    // The append DID commit despite the missing audit event.
-    expect(world.units.get('unit-1')?.media).toHaveLength(1);
-    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
-  });
-
-  it('review F3: a rejecting pre-store getById returns 500 (no hang) and stores nothing', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedUnit(world, 'unit-1');
-    // finish() runs from bb.on('close') OUTSIDE Express async-error capture.
-    // The SF1 fix guarded the success tail; this pins the PRE-STORE read too
-    // (the conformance-review deviation): a rejecting getById must map to a
-    // 500 via the finish() catch-all, never an unhandled rejection + hang.
-    world.unitsRepo.getById = async () => {
-      throw new Error('dynamo throttled');
-    };
-    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ error: 'internal server error' });
-    expect(world.mediaPuts).toHaveLength(0);
-  });
-
-  it('review F1: the per-request aggregate byte fence 413s the whole batch (nothing stored)', async () => {
-    // Inject a tiny fence so two ordinary files overflow it: total buffered
-    // bytes across the REQUEST is what the fence bounds (each file is well
-    // under the per-file cap).
-    const { app, world } = makeWebhookHarness({ photoUploadLimits: { maxRequestBytes: 10 } });
-    seedUnit(world, 'unit-1');
-    const res = await photoPost(app, 'unit-1')
-      .attach('file', Buffer.alloc(8, 1), { filename: 'a.png', contentType: 'image/png' })
-      .attach('file', Buffer.alloc(8, 2), { filename: 'b.png', contentType: 'image/png' });
-    expect(res.status).toBe(413);
-    expect(res.body).toEqual({ error: 'request_too_large' });
-    expect(world.mediaPuts).toHaveLength(0);
-    expect(world.units.get('unit-1')?.media).toBeUndefined();
-  });
-
-  it('review F1: the concurrency gate 429s past the in-flight cap and RELEASES per request', async () => {
-    // maxConcurrent 0: every upload is rejected before any body buffers.
-    const zero = makeWebhookHarness({ photoUploadLimits: { maxConcurrent: 0 } });
-    seedUnit(zero.world, 'unit-1');
-    const rejected = await photoPost(zero.app, 'unit-1').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
-    expect(rejected.status).toBe(429);
-    expect(rejected.body).toEqual({ error: 'too_many_concurrent_uploads' });
-    expect(zero.world.mediaPuts).toHaveLength(0);
-
-    // maxConcurrent 1: two SEQUENTIAL uploads both succeed - the slot releases
-    // when the response closes (res 'close'), so the gate never leaks.
-    const one = makeWebhookHarness({ photoUploadLimits: { maxConcurrent: 1 } });
-    seedUnit(one.world, 'unit-1');
-    for (const name of ['a.png', 'b.png']) {
-      const ok = await photoPost(one.app, 'unit-1').attach('file', png(name).buf, {
-        filename: name,
-        contentType: 'image/png',
-      });
-      expect(ok.status).toBe(200);
-    }
-    expect(one.world.units.get('unit-1')?.media).toHaveLength(2);
-  });
-
-  it('404s an unknown unit and a soft-deleted unit', async () => {
+  it('404s an unknown unit and a soft-deleted unit (nothing minted)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-del', { deleted_at: '2026-07-01T00:00:00.000Z' });
-    const missing = await photoPost(app, 'nope').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
+    const missing = await presign(app, 'nope').send({ count: 1, contentTypes: ['image/png'] });
     expect(missing.status).toBe(404);
-    const deleted = await photoPost(app, 'unit-del').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
+    const deleted = await presign(app, 'unit-del').send({ count: 1, contentTypes: ['image/png'] });
     expect(deleted.status).toBe(404);
-    expect(world.mediaPuts).toHaveLength(0);
+    expect(world.presignPosts).toHaveLength(0);
   });
 
-  it('meters the D4 per-user limiter: 429 past 30 uploads in a minute', async () => {
+  it('400s a non-image content type BEFORE any mint', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const res = await presign(app, 'unit-1').send({
+      count: 2,
+      contentTypes: ['image/png', 'application/pdf'],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'unsupported_media_type' });
+    expect(world.presignPosts).toHaveLength(0);
+  });
+
+  it('400s a count over the per-request batch max (20)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const res = await presign(app, 'unit-1').send({
+      count: 21,
+      contentTypes: Array.from({ length: 21 }, () => 'image/png'),
+    });
+    expect(res.status).toBe(400);
+    expect(world.presignPosts).toHaveLength(0);
+  });
+
+  it('400s when count is not a positive integer or contentTypes length mismatches', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const zero = await presign(app, 'unit-1').send({ count: 0, contentTypes: [] });
+    expect(zero.status).toBe(400);
+    const mismatch = await presign(app, 'unit-1').send({ count: 2, contentTypes: ['image/png'] });
+    expect(mismatch.status).toBe(400);
+    expect(world.presignPosts).toHaveLength(0);
+  });
+
+  it('400s photo_cap_exceeded when existing + count would exceed the 100 cap', async () => {
+    const { app, world } = makeWebhookHarness();
+    const full = Array.from({ length: UNIT_MEDIA_MAX - 1 }, (_v, i) => `unit-media/unit-1/k${i}`);
+    seedUnit(world, 'unit-1', { media: full });
+    const res = await presign(app, 'unit-1').send({
+      count: 5,
+      contentTypes: Array.from({ length: 5 }, () => 'image/png'),
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
+    expect(world.presignPosts).toHaveLength(0);
+  });
+
+  it('meters the per-user presign limiter: 429 past 30 mints in a minute', async () => {
     const { app } = makeWebhookHarness();
     // All to a ghost unit: the limiter runs BEFORE the handler, so the first 30
     // are admitted (each 404s at the handler) and the 31st is limited.
     for (let i = 0; i < 30; i += 1) {
-      const res = await photoPost(app, 'ghost').attach('file', png().buf, {
-        filename: 'a.png',
-        contentType: 'image/png',
-      });
+      const res = await presign(app, 'ghost').send({ count: 1, contentTypes: ['image/png'] });
       expect(res.status).toBe(404);
     }
-    const limited = await photoPost(app, 'ghost').attach('file', png().buf, {
-      filename: 'a.png',
-      contentType: 'image/png',
-    });
+    const limited = await presign(app, 'ghost').send({ count: 1, contentTypes: ['image/png'] });
     expect(limited.status).toBe(429);
     expect(limited.body).toEqual({ error: 'rate_limited' });
     expect(Number(limited.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('POST /api/units/:unitId/photos/confirm', () => {
+  it('appends the surviving keys, audits count-only, returns mediaDisplay', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const k1 = 'unit-media/unit-1/aaa';
+    const k2 = 'unit-media/unit-1/bbb';
+    storeObject(world, k1, { contentType: 'image/png' });
+    storeObject(world, k2, { contentType: 'image/jpeg' });
+    const res = await confirm(app, 'unit-1').send({ keys: [k1, k2] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([k1, k2]);
+    // mediaDisplay resolves each stored key to a presigned URL alongside the raw entry.
+    expect(res.body.unit.mediaDisplay).toHaveLength(2);
+    expect(res.body.unit.mediaDisplay[0].entry).toBe(k1);
+    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
+    // The audit carries COUNT only (no key/filename).
+    const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
+    expect(added?.payload).toMatchObject({ count: 2 });
+    expect(JSON.stringify(added?.payload)).not.toContain('unit-media/');
+  });
+
+  it('503s when the media store is unconfigured', async () => {
+    const { app, world } = makeWebhookHarness({ withoutMediaStore: true });
+    seedUnit(world, 'unit-1');
+    const res = await confirm(app, 'unit-1').send({ keys: ['unit-media/unit-1/aaa'] });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'media_storage_unavailable' });
+  });
+
+  it('drops a foreign / cross-unit / uploads key (prefix scope), keeping only own-namespace keys', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const own = 'unit-media/unit-1/own';
+    storeObject(world, own, { contentType: 'image/png' });
+    // These three would each resolve to a real object, but the prefix scope
+    // rejects them before any head() so a crafted body cannot append a foreign key.
+    storeObject(world, 'uploads/mms-attachment', { contentType: 'image/png' });
+    storeObject(world, 'unit-media/unit-OTHER/theirs', { contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({
+      keys: ['uploads/mms-attachment', 'unit-media/unit-OTHER/theirs', own],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([own]);
+  });
+
+  it('drops a key whose object is missing (never uploaded)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const good = 'unit-media/unit-1/good';
+    storeObject(world, good, { contentType: 'image/png' });
+    // 'ghost' is under the prefix but was never uploaded -> head() undefined -> dropped.
+    const res = await confirm(app, 'unit-1').send({
+      keys: ['unit-media/unit-1/ghost', good],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([good]);
+  });
+
+  it('drops a key that failed the stored type / size re-check', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const good = 'unit-media/unit-1/good';
+    const badType = 'unit-media/unit-1/badtype';
+    const tooBig = 'unit-media/unit-1/toobig';
+    storeObject(world, good, { contentType: 'image/png' });
+    storeObject(world, badType, { contentType: 'application/pdf' });
+    storeObject(world, tooBig, { contentType: 'image/png', size: OUTBOUND_MMS_MAX_FILE_BYTES + 1 });
+    const res = await confirm(app, 'unit-1').send({ keys: [good, badType, tooBig] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([good]);
+  });
+
+  it('400s when NO key survives the drops', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // A foreign key + a missing key: both dropped, nothing to append.
+    storeObject(world, 'uploads/mms', { contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({
+      keys: ['uploads/mms', 'unit-media/unit-1/never-uploaded'],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'no_valid_photos' });
+    expect(world.units.get('unit-1')?.media).toBeUndefined();
+  });
+
+  it('400s an empty / missing keys array', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const empty = await confirm(app, 'unit-1').send({ keys: [] });
+    expect(empty.status).toBe(400);
+    const missing = await confirm(app, 'unit-1').send({});
+    expect(missing.status).toBe(400);
+  });
+
+  it('maps an appendMedia cap-race (ConditionalCheckFailed) to the 400 cap shape', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const good = 'unit-media/unit-1/good';
+    storeObject(world, good, { contentType: 'image/png' });
+    // A concurrent confirm filled the unit past the cap after the survivors were
+    // validated: the atomic re-guard throws ConditionalCheckFailed -> same 400.
+    world.unitsRepo.appendMedia = async () => {
+      throw new ConditionalCheckFailedException({ message: 'cap race', $metadata: {} });
+    };
+    const res = await confirm(app, 'unit-1').send({ keys: [good] });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
+    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
   });
 });
 

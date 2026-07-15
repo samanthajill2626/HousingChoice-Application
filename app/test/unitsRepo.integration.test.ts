@@ -36,6 +36,31 @@ if (!reachable) {
   );
 }
 
+// The appendMedia batch bound is a pure in-process guard (it throws BEFORE any
+// DynamoDB write), so it is testable without Docker: a stub doc client proves
+// the over-cap batch never reaches doc.send.
+describe('unitsRepo.appendMedia batch bound (no DynamoDB needed)', () => {
+  it('rejects a batch larger than the cap before any write', async () => {
+    let sends = 0;
+    const stubDoc = {
+      send: async () => {
+        sends += 1;
+        throw new Error('should not reach DynamoDB');
+      },
+    };
+    const logger = createLogger({ destination: createLogCapture().stream });
+    const repo = createUnitsRepo({
+      doc: stubDoc as unknown as NonNullable<Parameters<typeof createUnitsRepo>[0]>['doc'],
+      env: { TABLE_PREFIX: 'hc-stub-' },
+      logger,
+    });
+    await expect(repo.appendMedia('unit-x', ['k1', 'k2', 'k3', 'k4'], 3)).rejects.toBeInstanceOf(
+      ConditionalCheckFailedException,
+    );
+    expect(sends).toBe(0);
+  });
+});
+
 describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });
@@ -172,6 +197,19 @@ describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)
     // The rejected append wrote NOTHING - the array is unchanged.
     const read = await units.getById(unit.unitId);
     expect(read?.media).toEqual(['unit-media/y/k1', 'unit-media/y/k2']);
+  });
+
+  it('appendMedia rejects a FIRST batch larger than the cap (the media-absent branch is bounded too)', async () => {
+    // The size() ConditionExpression cannot guard an ABSENT media attribute
+    // (if_not_exists is UpdateExpression-only), so the repo bounds the batch
+    // in-process before the write. A fresh unit's first over-cap append must
+    // reject and leave `media` unset.
+    const unit = await units.create({ landlordId: 'contact-ll-first', status: 'available' });
+    await expect(
+      units.appendMedia(unit.unitId, ['unit-media/z/k1', 'unit-media/z/k2', 'unit-media/z/k3', 'unit-media/z/k4'], 3),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    const read = await units.getById(unit.unitId);
+    expect(read?.media).toBeUndefined();
   });
 
   it('removeMedia drops the entry (404-signal when absent); makeCover moves to front (no-op when already cover)', async () => {

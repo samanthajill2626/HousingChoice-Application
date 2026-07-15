@@ -265,6 +265,105 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     expect(missing.status).toBe(400);
   });
 
+  it('404s an unknown unit and a soft-deleted unit (mirrors presign; nothing appended)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-del', { deleted_at: '2026-07-01T00:00:00.000Z' });
+    const key = 'unit-media/unit-del/aaa';
+    storeObject(world, key, { contentType: 'image/png' });
+    const missing = await confirm(app, 'ghost').send({ keys: ['unit-media/ghost/aaa'] });
+    expect(missing.status).toBe(404);
+    expect(missing.body).toEqual({ error: 'unit_not_found' });
+    const deleted = await confirm(app, 'unit-del').send({ keys: [key] });
+    expect(deleted.status).toBe(404);
+    expect(deleted.body).toEqual({ error: 'unit_not_found' });
+    expect(world.units.get('unit-del')?.media).toBeUndefined();
+  });
+
+  it('MF1: 400s photo_cap_exceeded UP FRONT when the body carries more keys than the whole-unit cap', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // 200 keys on a FRESH (media-absent) unit: rejected before any HeadObject,
+    // so none of the keys need stored objects - the 100-cap backstop holds even
+    // on the first append.
+    const keys = Array.from({ length: 200 }, (_v, i) => `unit-media/unit-1/k${i}`);
+    const res = await confirm(app, 'unit-1').send({ keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
+    expect(world.units.get('unit-1')?.media).toBeUndefined();
+  });
+
+  it('MF1: 400s photo_cap_exceeded when existing + survivors would exceed the cap', async () => {
+    const { app, world } = makeWebhookHarness();
+    const existing = Array.from({ length: UNIT_MEDIA_MAX - 4 }, (_v, i) => `unit-media/unit-1/old${i}`);
+    seedUnit(world, 'unit-1', { media: existing });
+    // 5 valid new uploads against 4 remaining slots -> the route pre-check
+    // rejects before appendMedia; the array is untouched.
+    const keys = Array.from({ length: 5 }, (_v, i) => `unit-media/unit-1/new${i}`);
+    for (const k of keys) storeObject(world, k, { contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({ keys });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
+    expect(world.units.get('unit-1')?.media).toHaveLength(UNIT_MEDIA_MAX - 4);
+  });
+
+  it('SF2: a key repeated within the body appends ONCE', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const k = 'unit-media/unit-1/dup';
+    storeObject(world, k, { contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({ keys: [k, k] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([k]);
+    const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
+    expect(added?.payload).toMatchObject({ count: 1 });
+  });
+
+  it('SF2: re-confirming already-present keys is an idempotent 200 (no dup, no second audit)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const k = 'unit-media/unit-1/once';
+    storeObject(world, k, { contentType: 'image/png' });
+    const first = await confirm(app, 'unit-1').send({ keys: [k] });
+    expect(first.status).toBe(200);
+    expect(first.body.unit.media).toEqual([k]);
+    // The replay (client retry after a lost response): success with the
+    // CURRENT unit, media unchanged, no duplicate append, no second audit.
+    const replay = await confirm(app, 'unit-1').send({ keys: [k] });
+    expect(replay.status).toBe(200);
+    expect(replay.body.unit.media).toEqual([k]);
+    expect(replay.body.unit.mediaDisplay).toHaveLength(1);
+    expect(world.units.get('unit-1')?.media).toEqual([k]);
+    const audits = world.auditEvents.filter((e) => e.event_type === 'unit_photos_added');
+    expect(audits).toHaveLength(1);
+  });
+
+  it('SF2: a mixed body appends only the NEW key (already-present key skipped)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const present = 'unit-media/unit-1/present';
+    seedUnit(world, 'unit-1', { media: [present] });
+    const fresh = 'unit-media/unit-1/fresh';
+    storeObject(world, fresh, { contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({ keys: [present, fresh] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([present, fresh]);
+    const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
+    expect(added?.payload).toMatchObject({ count: 1 });
+  });
+
+  it('SF3: a rejecting audit is best-effort - photos stored, request still 200', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const k = 'unit-media/unit-1/audited';
+    storeObject(world, k, { contentType: 'image/png' });
+    world.auditRepo.append = async () => {
+      throw new Error('audit outage');
+    };
+    const res = await confirm(app, 'unit-1').send({ keys: [k] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([k]);
+    expect(world.units.get('unit-1')?.media).toEqual([k]);
+  });
+
   it('maps an appendMedia cap-race (ConditionalCheckFailed) to the 400 cap shape', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');

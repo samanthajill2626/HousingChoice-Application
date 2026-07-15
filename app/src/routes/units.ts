@@ -494,18 +494,29 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // POST /api/units/:unitId/photos/confirm  body { keys[] } (unit-photos
   // direct-upload R2). Records the keys the browser uploaded directly to S3.
-  // For EACH key, defense in depth: (a) it MUST start with the unit's own
-  // `unit-media/<unitId>/` prefix (rejects a foreign / cross-unit / uploads/
-  // key even though keys are server-minted); (b) HeadObject succeeds (the object
-  // was actually uploaded); (c) the stored Content-Type is an allowed image type
-  // AND the size <= 5MB (re-verify what S3 stored). A key failing any check is
-  // DROPPED with a logged warn (key + unitId only); if NO key survives -> 400.
-  // Survivors are committed via ONE atomic appendMedia - the 100-cap
-  // ConditionExpression re-guards under a race (ConditionalCheckFailed -> 400
-  // photo_cap_exceeded, same shape). Audit unit_photos_added COUNT only. Returns
-  // the updated unit (with mediaDisplay). An ordinary async handler - no busboy,
-  // no callback outside Express's async-error capture, so the F3 hang class
-  // simply does not exist here. 503 when the store is unconfigured.
+  // Order of guards: body shape -> keys[] bounded 1..UNIT_MEDIA_MAX (a body
+  // with more keys than the WHOLE-unit cap can never fit, and bounding it up
+  // front means an oversized body never costs one HeadObject per key) -> the
+  // unit exists and is not soft-deleted (404, mirroring presign - never append
+  // photos to a phantom or deleted property). Then, for EACH key, defense in
+  // depth: (a) it MUST start with the unit's own `unit-media/<unitId>/` prefix
+  // (rejects a foreign / cross-unit / uploads/ key even though keys are
+  // server-minted); (b) it is not a duplicate within the body and not ALREADY
+  // on the unit (idempotent retries - see below); (c) HeadObject succeeds (the
+  // object was actually uploaded); (d) the stored Content-Type is an allowed
+  // image type AND the size <= 5MB (re-verify what S3 stored). A key failing
+  // (a)/(c)/(d) is DROPPED with a logged warn (key + unitId only); if NO key
+  // survives -> 400, UNLESS every valid key was already present (a replayed
+  // confirm) -> 200 with the current unit. Survivors pass a friendly cap
+  // pre-check (existing + new <= 100 -> else 400 photo_cap_exceeded) and are
+  // committed via ONE atomic appendMedia - its ConditionExpression + batch
+  // bound re-guard the cap under a race (ConditionalCheckFailed -> same 400).
+  // Audit unit_photos_added COUNT only, BEST-EFFORT (the media append has
+  // already committed; a transient audit failure must not 500 a confirm whose
+  // photos are stored). Returns the updated unit (with mediaDisplay). An
+  // ordinary async handler - no busboy, no callback outside Express's
+  // async-error capture, so the F3 hang class simply does not exist here.
+  // 503 when the store is unconfigured.
   router.post('/:unitId/photos/confirm', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     if (!mediaStore) {
@@ -522,9 +533,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: 'keys must be a non-empty array' });
       return;
     }
+    // Bound the raw body BEFORE any per-key S3 work: more keys than the cap
+    // can never fit on the unit, so reject up front (same shape as the cap
+    // checks below) instead of doing thousands of HeadObjects first.
+    if (rawKeys.length > UNIT_MEDIA_MAX) {
+      res.status(400).json({ error: 'photo_cap_exceeded' });
+      return;
+    }
+
+    // Mirror presign: the unit must exist and not be soft-deleted (404) -
+    // appendMedia's attribute_exists(unitId) alone would happily append to a
+    // SOFT-deleted unit (the item still exists) and would surface a HARD-deleted
+    // one as a misleading photo_cap_exceeded. Also gives us the current media
+    // for the dedup + cap pre-checks below.
+    const unit = await units.getById(unitId);
+    if (!unit || isDeleted(unit)) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const existingMedia = Array.isArray(unit.media)
+      ? unit.media.filter((e): e is string => typeof e === 'string')
+      : [];
+    const existingSet = new Set(existingMedia);
 
     const ownPrefix = unitMediaPrefix(unitId);
+    const seen = new Set<string>();
     const survivors: string[] = [];
+    let alreadyPresent = 0;
     for (const raw of rawKeys) {
       const key = typeof raw === 'string' ? raw : '';
       // (a) prefix scope - defense in depth beyond the minted-key design.
@@ -532,7 +567,17 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         log.warn({ unitId }, 'unit photos confirm: key outside the unit namespace - dropped');
         continue;
       }
-      // (b) the object was actually uploaded; (c) re-check the stored type + size.
+      // (b) idempotency: a key repeated within the body appends ONCE, and a key
+      // ALREADY on the unit (a replayed confirm after a lost response) is
+      // skipped rather than double-appended. Already-present keys skip the
+      // HeadObject too - they were verified when first confirmed.
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (existingSet.has(key)) {
+        alreadyPresent += 1;
+        continue;
+      }
+      // (c) the object was actually uploaded; (d) re-check the stored type + size.
       let head;
       try {
         head = await mediaStore.head(key);
@@ -552,7 +597,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     if (survivors.length === 0) {
+      // Idempotent retry semantics: when every valid key is ALREADY on the
+      // unit this is a replayed confirm - succeed with the current unit (no
+      // append, no audit) so a client retry after a lost response is safe.
+      // Only a body with no valid key AT ALL is an error.
+      if (alreadyPresent > 0) {
+        const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+        res.json({ unit: { ...unit, mediaDisplay } });
+        return;
+      }
       res.status(400).json({ error: 'no_valid_photos' });
+      return;
+    }
+
+    // Friendly cap pre-check mirroring presign's - and the route-level guard
+    // that (with appendMedia's own batch bound) closes the first-append cap
+    // bypass. appendMedia re-guards atomically under a race.
+    if (existingMedia.length + survivors.length > UNIT_MEDIA_MAX) {
+      res.status(400).json({ error: 'photo_cap_exceeded' });
       return;
     }
 
@@ -571,10 +633,17 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       throw err; // Express 5 forwards async throws to the error handler.
     }
     // PII / doc: COUNT only - never filenames or keys in the audit payload.
-    await audit.append(`units#${unitId}`, 'unit_photos_added', {
-      actor: req.user?.userId,
-      count: survivors.length,
-    });
+    // BEST-EFFORT by design: the media append above has already committed, so
+    // a transient audit failure logs and continues - it must never 500 a
+    // confirm whose photos are stored (the client would drop the fresh unit).
+    try {
+      await audit.append(`units#${unitId}`, 'unit_photos_added', {
+        actor: req.user?.userId,
+        count: survivors.length,
+      });
+    } catch (err) {
+      log.warn({ err, unitId }, 'unit photos confirm: audit append failed - continuing (best-effort)');
+    }
     log.info({ unitId, count: survivors.length, actor: req.user?.userId }, 'unit photos confirmed via api');
     const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
     res.json({ unit: { ...updated, mediaDisplay } });

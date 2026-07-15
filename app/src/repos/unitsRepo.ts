@@ -663,17 +663,28 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     },
 
     async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {
+      // The ConditionExpression's size() guard below only covers a PRESENT
+      // `media` attribute - `if_not_exists` is an UpdateExpression-only
+      // function, so a `size(if_not_exists(#media, :empty)) <= :room` condition
+      // is NOT expressible and DynamoDB cannot size-guard the attribute-absent
+      // (first-append) branch itself. Close that branch HERE: a batch larger
+      // than the cap can never fit whatever the current size, so reject it
+      // before the write (same exception type the condition throws, so callers
+      // map it identically). Combined with the size() condition this makes the
+      // cap invariant race-free: concurrent first appends serialize at
+      // DynamoDB - the loser sees #media present and hits the size() guard.
+      if (keys.length > cap) {
+        throw new ConditionalCheckFailedException({
+          message: `appendMedia: batch of ${keys.length} exceeds cap ${cap}`,
+          $metadata: {},
+        });
+      }
       // ATOMIC append: one UpdateItem with list_append over if_not_exists (seeds
       // a missing `media`). The cap guard is a ConditionExpression on the CURRENT
       // size so the array can never exceed the cap even under a concurrent
-      // append - `media` absent, OR its size <= cap - keys.length. A violation
-      // (or a missing unit) throws ConditionalCheckFailedException.
-      // N3 COUPLING: the `attribute_not_exists(#media)` disjunct BYPASSES the
-      // size guard on the very first (media-absent) append, so a first batch is
-      // bounded ONLY by the caller's file-count limit. Safe today because the
-      // route's busboy `files` limit == UNIT_MEDIA_MAX == default cap. If you
-      // raise UNIT_MEDIA_MAX, the route's busboy `files` limit must move with it,
-      // or a first batch larger than the cap would slip past this condition.
+      // append - `media` absent (safe: the batch bound above caps a first
+      // append), OR its size <= cap - keys.length. A violation (or a missing
+      // unit) throws ConditionalCheckFailedException.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,

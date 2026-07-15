@@ -96,6 +96,20 @@ In the regenerated `tables.auto.tfvars.json` files. **Online** operations, but t
 
 Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add → backfill 4 rows → re-run skipped 4 → GSI drops → dashboard verified team-wide). **Local stacks:** a persisted DynamoDB Local table predating this change lacks `byCreated` (`db:create` never retrofits GSIs — docs/issues/e2e-lane-tables-stale-schema.md) and the Broadcasts list 500s; either redo the dev-stack sequence above by hand (as rehearsed) or just delete the stale `hc-local-…-broadcasts` table and reboot the stack (recreate + reseed). Mind the lane-key trap: e2e lane tables are namespaced by ACCESS KEY (no `-sharedDb`), so aws-cli must use the lane's `accessKeyId=hclane<L>` (printed at boot) or the table is invisible — this cost two red e2e runs on 2026-07-08.
 
+### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
+
+**Infra change (as of 2026-07-15; feature branch `feat/unit-photos` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+
+Property photos upload **directly from the browser to the media S3 bucket** via a presigned POST (the EC2 app never touches the bytes). A cross-origin browser POST to S3 is blocked until the bucket carries a CORS rule allowing it. That rule is IaC in `infra/modules/s3_media` (`aws_s3_bucket_cors_configuration`, method POST only, `ExposeHeaders ["ETag"]`), guarded by the new `dashboard_origins` module variable.
+
+| Change | Resource | Kind | Powers |
+|--------|----------|------|--------|
+| Direct-upload CORS | `hc-<env>-media-<account>` bucket | **CORS rule add** - method POST from `dashboard_origins`, `ExposeHeaders ["ETag"]` | browser -> S3 presigned-POST photo upload (no bytes through EC2) |
+
+`local.dashboard_origins` is wired to the deployed dashboard origin (`https://${local.custom_domain}`) in `infra/envs/{dev,prod}/main.tf`; add any additional deployed origins there. **The upload path is BROKEN in a deployed env until this rule is applied** - the browser POST to S3 is CORS-blocked, so photos never store and the gallery shows an inline error. This is IaC applied via **`npm run plan -- <env>` + `npm run apply -- <env>`** (NOT `deploy:<env>`, which only rolls the app image). **Online** operation - no recreate, no data migration; the rule attaches to the existing bucket. On **dev** after merge: `npm run plan -- dev` (review the `aws_s3_bucket_cors_configuration` add) -> `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover). GET is deliberately absent from the rule: image reads are `<img src>` (presign-per-read), not fetch, so they are not CORS-gated; the public-access-block is untouched (a presigned POST is authenticated).
+
+**Local dev needs NOTHING here** - the harness MinIO allows all CORS origins by default (spike-verified 2026-07-15, `.superpowers/spike/phase0-results.md`), so `s3-create.ts` adds no CORS step and no local config is required. The new app-workspace dep (`@aws-sdk/s3-presigned-post`) rides `npm install` on deploy.
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

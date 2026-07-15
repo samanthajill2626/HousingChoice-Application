@@ -39,6 +39,21 @@ vi.mock('./useTours.js', () => ({
 vi.mock('../contacts/useContacts.js', () => ({ useContacts: () => contactsState }));
 vi.mock('../listings/useListings.js', () => ({ useListings: () => unitsState }));
 
+// The "+ New tour" dialog (ScheduleTourForm) fetches its own typeahead
+// candidates from the api barrel - stub those so opening it stays offline.
+const getContacts = vi.fn(() => Promise.resolve({ contacts: [], nextCursor: null }));
+const getUnits = vi.fn(() => Promise.resolve({ units: [], nextCursor: null }));
+const createTour = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    getContacts: (...a: unknown[]) => getContacts(...(a as [])),
+    getUnits: (...a: unknown[]) => getUnits(...(a as [])),
+    createTour: (...a: unknown[]) => createTour(...(a as [])),
+  };
+});
+
 import { ToursPage } from './ToursPage.js';
 
 // ---------------------------------------------------------------------------
@@ -432,6 +447,31 @@ describe('ToursPage', () => {
     renderPage('/tours/closed');
     expect(screen.getByRole('alert').textContent).toMatch(/couldn.t load|try again/i);
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
+  });
+
+  // --- "+ New tour" (Active-view header action) ---
+
+  it('"+ New tour" opens the Schedule-a-tour dialog with BOTH sides as free typeaheads', async () => {
+    const user = userEvent.setup();
+    readyAll([], []);
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: '+ New tour' }));
+    expect(await screen.findByRole('dialog', { name: 'Schedule a tour' })).toBeInTheDocument();
+    // No locked tenant here (unlike the tenant file's entry): both typeaheads.
+    expect(screen.getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Unit' })).toBeInTheDocument();
+    // Cancel closes it without creating anything.
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(createTour).not.toHaveBeenCalled();
+  });
+
+  it('the Closed view has NO "+ New tour" action', () => {
+    readyAll([], []);
+    closedState = { status: 'ready', closed: [] };
+    renderPage('/tours/closed');
+    expect(screen.queryByRole('button', { name: '+ New tour' })).not.toBeInTheDocument();
   });
 
   // --- Rendering order (component respects hook-provided order) ---

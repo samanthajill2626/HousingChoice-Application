@@ -13,12 +13,16 @@
 //                 (fetched only on this view). Rows show the tour DATE (not
 //                 time-of-day - these can be months old).
 //
+// The Active view's header carries "+ New tour" (Cameron 2026-07-15): the SAME
+// Schedule-a-tour dialog the tenant file opens, with both sides free typeaheads;
+// a 201 navigates to the new tour (mirrors the properties "+ New property").
+//
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference
 // pattern used by PlacementsBoard / TenantFile). Staff-facing vocabulary: "property"
 // for the unit (per GLOSSARY.md).
-import { useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   TOUR_STATUS_LABELS,
   TOUR_TYPE_LABELS,
@@ -26,8 +30,9 @@ import {
   type Contact,
   type UnitItem,
 } from '../../api/index.js';
-import { Spinner } from '../../ui/index.js';
+import { Button, Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { ScheduleTourForm } from './ScheduleTourForm.js';
 import { useClosedTours, useTours } from './useTours.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { useListings } from '../listings/useListings.js';
@@ -167,9 +172,15 @@ const VIEW_TABS: { closed: boolean; label: string; to: string }[] = [
 ];
 
 export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element {
+  const navigate = useNavigate();
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
+
+  // The "+ New tour" dialog (Active view only) - the SAME Schedule-a-tour form
+  // the tenant file opens, here with BOTH sides as free typeaheads (no locked
+  // tenant, no pre-committed unit). On create, jump to the new tour.
+  const [creating, setCreating] = useState(false);
 
   // Closed tours are fetched only when the Closed view is showing.
   const { status: closedStatus, closed: closedTours } = useClosedTours(closed);
@@ -218,6 +229,11 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
     <div className={styles.page}>
       <div className={styles.header}>
         <h1 className={styles.title}>{closed ? 'Closed tours' : 'Tours'}</h1>
+        {!closed ? (
+          <Button variant="primary" size="sm" type="button" onClick={() => setCreating(true)}>
+            + New tour
+          </Button>
+        ) : null}
       </div>
       <p className={styles.sub}>
         {closed
@@ -321,6 +337,16 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
             </ul>
           )}
         </section>
+      ) : null}
+
+      {creating ? (
+        <ScheduleTourForm
+          onClose={() => setCreating(false)}
+          onCreated={(t) => {
+            setCreating(false);
+            void navigate('/tours/' + t.tourId);
+          }}
+        />
       ) : null}
     </div>
   );

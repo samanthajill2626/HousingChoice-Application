@@ -424,4 +424,30 @@ test.describe('Tours page', () => {
     await expect(page).toHaveURL(/\/tours$/);
     await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
   });
+
+  // The Tours page's own create entry (Cameron 2026-07-15): "+ New tour" opens
+  // the same Schedule-a-tour dialog with BOTH sides as free typeaheads; a
+  // timeless create lands on the new tour's detail page.
+  test('"+ New tour": the header button creates a tour from the tours page itself', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    await page.goto(`${NEXT}/tours`);
+    await page.getByRole('button', { name: '+ New tour' }).click();
+    const dialog = page.getByRole('dialog', { name: /Schedule a tour/i });
+    await expect(dialog).toBeVisible();
+
+    // Both sides are free typeaheads on this entry - pick tenant + unit.
+    await dialog.getByRole('combobox', { name: 'Tenant' }).fill('Tasha');
+    await dialog.getByRole('option', { name: /Tasha Nguyen/ }).click();
+    await dialog.getByRole('combobox', { name: 'Unit' }).fill('Joseph');
+    await dialog.getByRole('option', { name: /Joseph E\. Boone/ }).click();
+
+    // Timeless create -> lands on the new tour (requested, not booked).
+    await dialog.getByRole('button', { name: 'Schedule', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/tours\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });
+    const header = page.locator('header').filter({ hasText: 'Tour -' });
+    await expect(header.getByText('Requested', { exact: true })).toBeVisible();
+  });
 });

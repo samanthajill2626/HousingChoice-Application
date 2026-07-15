@@ -668,6 +668,12 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       // size so the array can never exceed the cap even under a concurrent
       // append - `media` absent, OR its size <= cap - keys.length. A violation
       // (or a missing unit) throws ConditionalCheckFailedException.
+      // N3 COUPLING: the `attribute_not_exists(#media)` disjunct BYPASSES the
+      // size guard on the very first (media-absent) append, so a first batch is
+      // bounded ONLY by the caller's file-count limit. Safe today because the
+      // route's busboy `files` limit == UNIT_MEDIA_MAX == default cap. If you
+      // raise UNIT_MEDIA_MAX, the route's busboy `files` limit must move with it,
+      // or a first batch larger than the cap would slip past this condition.
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,

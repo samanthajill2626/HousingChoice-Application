@@ -6,6 +6,7 @@
 // per call, so the presign-per-read pin is exercised for real).
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../src/lib/outboundMediaLimits.js';
@@ -148,6 +149,63 @@ describe('POST /api/units/:unitId/photos - upload', () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
     expect(world.mediaPuts).toHaveLength(0);
+  });
+
+  it('SF1: a transient appendMedia rejection returns 500 (no hang), no partial state', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // The success tail runs from bb.on('close') - OUTSIDE Express async-error
+    // capture. A rejecting append MUST be mapped to a response, not hang the
+    // request (supertest would time out on a hang).
+    world.unitsRepo.appendMedia = async () => {
+      throw new Error('dynamo throttled');
+    };
+    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
+      filename: 'a.png',
+      contentType: 'image/png',
+    });
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+    // Object stored (orphan), but no append committed and no audit trail.
+    expect(world.units.get('unit-1')?.media).toBeUndefined();
+    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
+  });
+
+  it('SF1: an appendMedia cap-race (ConditionalCheckFailed) maps to the 400 cap shape', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // A concurrent append filled the unit past the cap after our pre-check: the
+    // atomic re-guard throws ConditionalCheckFailedException -> same 400 shape.
+    world.unitsRepo.appendMedia = async () => {
+      throw new ConditionalCheckFailedException({ message: 'cap race', $metadata: {} });
+    };
+    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
+      filename: 'a.png',
+      contentType: 'image/png',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
+    expect(world.units.get('unit-1')?.media).toBeUndefined();
+  });
+
+  it('SF1: a rejecting audit is best-effort - photos stored, request still 200', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // The append commits; the trail write blips. The photos are stored, so the
+    // request must NOT hang or 500 (which would tempt a duplicate-append retry).
+    world.auditRepo.append = async () => {
+      throw new Error('audit table throttled');
+    };
+    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
+      filename: 'a.png',
+      contentType: 'image/png',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toHaveLength(1);
+    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
+    // The append DID commit despite the missing audit event.
+    expect(world.units.get('unit-1')?.media).toHaveLength(1);
+    expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
   });
 
   it('404s an unknown unit and a soft-deleted unit', async () => {

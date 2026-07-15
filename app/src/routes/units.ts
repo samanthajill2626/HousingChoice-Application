@@ -433,6 +433,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         // Per-file 5MB cap (ONE source of truth with the MMS upload); a hard
         // ceiling on file COUNT at the abuse cap so a runaway request can't
         // buffer unboundedly (the real existing+incoming cap is re-checked below).
+        // N3 COUPLING: this `files` ceiling is deliberately UNIT_MEDIA_MAX so a
+        // first (media-absent) batch can never exceed the cap - appendMedia's
+        // ConditionExpression short-circuits its size guard when `media` is
+        // absent, so the first batch is bounded ONLY by this limit. Keep them the
+        // same constant; do not lower `files` below the cap.
         limits: { fileSize: OUTBOUND_MMS_MAX_FILE_BYTES, files: UNIT_MEDIA_MAX },
       });
     } catch {
@@ -500,15 +505,45 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
 
-      const updated = await units.appendMedia(unitId, keys);
-      // PII / doc: COUNT only - never filenames or keys in the audit payload.
-      await audit.append(`units#${unitId}`, 'unit_photos_added', {
-        actor: req.user?.userId,
-        count: keys.length,
-      });
-      log.info({ unitId, count: keys.length, actor: req.user?.userId }, 'unit photos added via api');
-      const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
-      res.json({ unit: { ...updated, mediaDisplay } });
+      // SF1: this success tail runs from `bb.on('close', () => void finish())`,
+      // OUTSIDE Express 5's async-error capture, so any rejection here would hang
+      // the request (no response) rather than 500. Guard it explicitly. The store
+      // puts already committed, so the audit write is BEST-EFFORT (log-and-
+      // continue): a failed trail write must not 500 a request whose photos are
+      // stored (that would tempt a duplicate-append retry). appendMedia + resolve
+      // + json are covered by the outer try: a cap re-guard race throws
+      // ConditionalCheckFailedException (mapped to the same 400 shape the
+      // pre-check uses), anything else is a 500.
+      try {
+        const updated = await units.appendMedia(unitId, keys);
+        try {
+          // PII / doc: COUNT only - never filenames or keys in the audit payload.
+          await audit.append(`units#${unitId}`, 'unit_photos_added', {
+            actor: req.user?.userId,
+            count: keys.length,
+          });
+        } catch (auditErr) {
+          log.error(
+            { err: auditErr, unitId, count: keys.length },
+            'unit photos: audit append failed (best-effort, photos stored)',
+          );
+        }
+        log.info({ unitId, count: keys.length, actor: req.user?.userId }, 'unit photos added via api');
+        const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+        res.json({ unit: { ...updated, mediaDisplay } });
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // The atomic cap re-guard lost a race (a concurrent append filled the
+          // unit past the cap) or the unit vanished mid-request. Same shape/copy
+          // as the pre-check 400. Photos may have decayed as orphans (never
+          // appended); no partial state reaches the client.
+          log.warn({ err, unitId, count: keys.length }, 'unit photos: append cap re-guard rejected');
+          res.status(400).json({ error: 'photo_cap_exceeded' });
+          return;
+        }
+        log.error({ err, unitId, count: keys.length }, 'unit photos: append failed after store');
+        res.status(500).json({ error: 'internal server error' });
+      }
     };
 
     bb.on('file', (_name, fileStream, info) => {

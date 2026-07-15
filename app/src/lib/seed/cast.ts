@@ -429,6 +429,7 @@ const searchingTenant = {
     deposit: 1500,
     pets: 'No pets',
     tour_process: 'Landlord-led; text to schedule an appointment.',
+    tour_type: 'landlord_led',
     listing_link: 'https://example.com/listing/350-boulevard',
     created_at: CK,
   },

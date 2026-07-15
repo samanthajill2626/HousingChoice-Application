@@ -704,6 +704,7 @@ function buildUnitsMatrix(placementGroups: PlacementGroup[]): UnitGroup[] {
         deposit: 1150 + i * 75,
         pets: i % 2 === 0 ? 'No pets' : 'Cats & small dogs OK',
         tour_process: TOURL_PROCESSES_BY_TYPE[spec.processType],
+        tour_type: spec.processType,
         created_at: pastDate(counter),
       },
     });

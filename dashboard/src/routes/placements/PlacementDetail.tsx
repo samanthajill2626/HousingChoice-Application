@@ -31,6 +31,7 @@ import {
   getContact,
   getUnit,
   provisionPlacementRelay,
+  setPlacementFollowUp,
   transitionPlacement,
   updatePlacement,
   updateUnit,
@@ -61,6 +62,8 @@ import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { PlacementConversation } from './PlacementConversation.js';
+import { DeadlinesNudgesCard } from './DeadlinesNudgesCard.js';
+import { FollowUpModal } from './FollowUpModal.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import menuStyles from '../tours/TourActionsMenu.module.css';
 import styles from './PlacementDetail.module.css';
@@ -104,8 +107,8 @@ export function PlacementDetail(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   // Mobile pane: DETAILS first on narrow widths (matches the tour page).
   const [pane, setPane] = useState<'details' | 'conversation'>('details');
-  // TODO(Task 8): the "Set follow-up" kebab action opens this; the FollowUpModal
-  // is built in Task 8. For now it is a local open-state placeholder only.
+  // The "Set follow-up" kebab action + the Deadlines-and-nudges card's Set/Change
+  // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
 
   // Track the in-flight load so a refetch (SSE-driven or placementId change)
@@ -305,6 +308,14 @@ export function PlacementDetail(): React.JSX.Element {
   // voucher deadline, and the source-tour provenance - each a verb phrase, joined
   // by plain hyphens; empties dropped so the line never shows dangling separators.
   const voucherIso = typeof tenant?.voucher_expiration_date === 'string' ? tenant.voucher_expiration_date : undefined;
+  // The Deadlines-and-nudges card's read-only deadline rows. The placement carries
+  // only the COMPUTED soonest deadline (next_deadline_type/at), so the RTA window +
+  // follow-up rows show whichever of the two is currently that soonest; the voucher
+  // rides its own always-available date on the tenant contact.
+  const rtaWindowAt =
+    placement.next_deadline_type === 'rta_window' ? placement.next_deadline_at : undefined;
+  const followUpAt =
+    placement.next_deadline_type === 'follow_up' ? placement.next_deadline_at : undefined;
   const factsLine = [
     `${phase} phase`,
     placement.stage_entered_at ? `in stage ${sinceWhen(placement.stage_entered_at)}` : '',
@@ -401,7 +412,17 @@ export function PlacementDetail(): React.JSX.Element {
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
           <div className={shell.rightInner}>
             {/* 1. Now card slot - filled in Task 9 (renders nothing yet). */}
-            {/* 2. Deadlines and nudges slot - filled in Task 8 (renders nothing yet). */}
+
+            {/* 2. Deadlines and nudges */}
+            <DeadlinesNudgesCard
+              placementId={placementId}
+              tenantName={tenantLabel}
+              landlordName={landlordLabel}
+              {...(voucherIso !== undefined && { voucherExpiration: voucherIso })}
+              {...(rtaWindowAt !== undefined && { rtaWindowAt })}
+              {...(followUpAt !== undefined && { followUpAt })}
+              onEditFollowUp={() => setFollowUpOpen(true)}
+            />
 
             {/* 3. People and provenance */}
             <Card title="People">
@@ -475,9 +496,20 @@ export function PlacementDetail(): React.JSX.Element {
         </div>
       </div>
 
-      {/* TODO(Task 8): the follow-up modal opens from followUpOpen. Placeholder
-          only this task - the FollowUpModal is built in Task 8. */}
-      {followUpOpen ? null : null}
+      {/* The manual follow-up date/time modal - opened from the header kebab's
+          "Set follow-up" AND the Deadlines-and-nudges card's Set/Change controls.
+          Confirm POSTs the follow-up deadline; the load() refetch (plus the
+          server's placement.updated) reconciles the card's follow-up row. */}
+      {followUpOpen ? (
+        <FollowUpModal
+          {...(followUpAt !== undefined && { initial: followUpAt })}
+          onClose={() => setFollowUpOpen(false)}
+          onConfirm={async (iso) => {
+            await setPlacementFollowUp(placementId, iso);
+            void load();
+          }}
+        />
+      ) : null}
 
       {pending !== null && pending.gate === 'lost' ? (
         <LostReasonModal

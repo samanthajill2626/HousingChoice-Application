@@ -1,0 +1,176 @@
+/* DeadlinesNudgesCard - the placement hub's Deadlines and nudges card. Tokens
+ * only (tokens.css), never hard-coded colours. State chips mirror the tour
+ * RemindersPanel: upcoming = amber, sent = green, canceled = muted. */
+
+.muted {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.section {
+  margin: 0 0 var(--sp-4);
+}
+
+.section:last-child {
+  margin-bottom: 0;
+}
+
+.sectionLabel {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+}
+
+/* --- Deadlines block ------------------------------------------------------- */
+
+.deadlines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.deadline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.deadlineKind {
+  flex: 0 0 auto;
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.deadlineValue {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* Follow-up controls pushed to the row's right edge. */
+.followUpActions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  gap: var(--sp-2);
+}
+
+.action {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+  cursor: pointer;
+}
+
+.action:hover {
+  color: var(--c-text);
+  text-decoration: underline;
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
+.action:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* --- Nudges block ---------------------------------------------------------- */
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.row {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.kind {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.recipient {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- State chips (mirror RemindersPanel tone) ----------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.upcoming {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+}
+
+.sent {
+  background: var(--c-evt-green-bg);
+  color: var(--c-evt-green-text);
+}
+
+.canceled {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
+.struck {
+  text-decoration: line-through;
+  color: var(--c-text-muted);
+}
+
+/* The row's Cancel/Restore action, following the chip. */
+.rowAction {
+  flex: 0 0 auto;
+}
+
+/* --- Re-arm caveat -------------------------------------------------------- */
+
+.caveat {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}

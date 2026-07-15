@@ -33,6 +33,12 @@ const getPlacementHistory = vi.fn();
 const getConversations = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
+// Deadlines-and-nudges card deps: quiet the nudge fetch so the card renders its
+// empty ladder (this suite exercises the header + right-pane structure; the card
+// has its own tests in DeadlinesNudgesCard.test.tsx).
+const getPlacementNudges = vi.fn();
+const setPlacementFollowUp = vi.fn();
+const clearPlacementFollowUp = vi.fn();
 // Capture the SSE handlers the page (and its History panel) register so a test
 // can fire a placement.updated event.
 let streamHandlers: EventStreamHandlers[] = [];
@@ -51,6 +57,9 @@ vi.mock('../../api/index.js', async () => {
     getConversations: (...a: unknown[]) => getConversations(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
+    getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
+    setPlacementFollowUp: (...a: unknown[]) => setPlacementFollowUp(...a),
+    clearPlacementFollowUp: (...a: unknown[]) => clearPlacementFollowUp(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers.push(h);
     },
@@ -115,6 +124,9 @@ beforeEach(() => {
   getConversations.mockReset().mockResolvedValue({ conversations: [], nextCursor: null });
   markConversationRead.mockReset().mockResolvedValue(undefined);
   provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
+  getPlacementNudges.mockReset().mockResolvedValue([]);
+  setPlacementFollowUp.mockReset().mockResolvedValue(undefined);
+  clearPlacementFollowUp.mockReset().mockResolvedValue(undefined);
   streamHandlers = [];
 });
 afterEach(() => vi.restoreAllMocks());

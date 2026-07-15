@@ -182,8 +182,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: Task 3 bindings; `RemindersPanel.tsx` as the template - REUSE its exported `nextReminderRefetchDelay` for the dueAt-anchored self-refetch (import it; do not copy).
 - Produces: `<DeadlinesNudgesCard placementId tenantName landlordName />` - deadlines block (voucher expiration + RTA window read-only via Task 4 vocabulary; follow-up row with Set/Change/Clear) + nudges block (rows with kind label, recipient, "sends ..." chip, Cancel/Restore buttons, busyId single-flight, 409 -> silent refetch).
 
-- [ ] **Step 1: Failing tests** mirroring RemindersPanel.test.tsx: rows render states; Cancel PATCHes {canceled:true} then refetches; Restore likewise; busy disables both; scheduled.updated triggers refetch; UI copy includes the re-arm caveat ("A stage move re-arms this stage's nudge").
-- [ ] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.**
+- [x] **Step 1: Failing tests** mirroring RemindersPanel.test.tsx: rows render states; Cancel PATCHes {canceled:true} then refetches; Restore likewise; busy disables both; scheduled.updated triggers refetch; UI copy includes the re-arm caveat ("A stage move re-arms this stage's nudge").
+- [x] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.**
 
 ### Task 9: Now card
 

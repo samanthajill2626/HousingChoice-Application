@@ -13,18 +13,35 @@
 // trade-off since the bytes are already authed-staff-only. SVG / HTML / XHTML stay
 // DELIBERATELY EXCLUDED — they DO run script on top-level navigation. Pure, no I/O.
 
-/** Content-Types served inline (everything else → octet-stream download). */
-export const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+/**
+ * The raster image Content-Types (the single source of truth for "is an image").
+ * Property-photo uploads (routes/units.ts) allow EXACTLY these - narrower than
+ * the inline allowlist below, which also tolerates PDF for inbound MMS.
+ */
+export const IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
   'image/jpeg',
   'image/png',
   'image/gif',
   'image/webp',
+]);
+
+/** Content-Types served inline (everything else -> octet-stream download). */
+export const INLINE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  ...IMAGE_MEDIA_TYPES,
   'application/pdf',
 ]);
 
 /** True when `type` is an allowlisted inline type (case-insensitive). */
 export function isInlineMediaType(type: string | undefined): boolean {
   return typeof type === 'string' && INLINE_MEDIA_TYPES.has(type.trim().toLowerCase());
+}
+
+/**
+ * True when `type` is an allowlisted raster IMAGE (case-insensitive) - the
+ * property-photo upload guard (images only: jpeg/png/gif/webp, no PDF).
+ */
+export function isImageMediaType(type: string | undefined): boolean {
+  return typeof type === 'string' && IMAGE_MEDIA_TYPES.has(type.trim().toLowerCase());
 }
 
 /**

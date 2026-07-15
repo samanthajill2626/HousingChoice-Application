@@ -10,7 +10,7 @@
 //
 // Pattern mirrors PlacementDetail.test / the old TourDetail.test: mock the api
 // barrel, import after mocking, assert accessibility-first.
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -378,7 +378,9 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     const at = localDatetime(2 * DAY);
     await userEvent.click(screen.getByRole('button', { name: 'Schedule tour' }));
     expect(screen.getByRole('form', { name: 'Schedule tour form' })).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('Date and time'), at);
+    // REPLACE the value (the input is pre-seeded with the current hour now —
+    // typing would merge into the prefill).
+    fireEvent.change(screen.getByLabelText('Date and time'), { target: { value: at } });
     await userEvent.click(screen.getByRole('button', { name: 'Confirm schedule' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',
@@ -393,7 +395,7 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     await waitLoaded();
     const past = localDatetime(-1 * DAY);
     await userEvent.click(screen.getByRole('button', { name: 'Schedule tour' }));
-    await userEvent.type(screen.getByLabelText('Date and time'), past);
+    fireEvent.change(screen.getByLabelText('Date and time'), { target: { value: past } });
     await userEvent.click(screen.getByRole('button', { name: 'Confirm schedule' }));
     // First submit: the odd-time warning, NO patch, button re-labeled.
     expect(screen.getByRole('alert')).toHaveTextContent(/in the past/i);
@@ -415,7 +417,7 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     // The Schedule card exposes a Reschedule action (aria-label "Reschedule tour").
     await userEvent.click(screen.getByRole('button', { name: 'Reschedule tour' }));
     expect(screen.getByRole('form', { name: 'Reschedule tour form' })).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('New date and time'), at);
+    fireEvent.change(screen.getByLabelText('New date and time'), { target: { value: at } });
     await userEvent.click(screen.getByRole('button', { name: 'Confirm reschedule' }));
     expect(patchTour).toHaveBeenCalledWith(
       'tour-abc',

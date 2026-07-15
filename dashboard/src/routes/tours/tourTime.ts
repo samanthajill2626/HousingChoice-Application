@@ -9,6 +9,17 @@
 export const FAR_FUTURE_DAYS = 14;
 
 /**
+ * The datetime-local value for "today at the current hour, minutes 00" — the
+ * datetime pickers' starting value (Cameron, 2026-07-14: anchor the picker on
+ * the whole hour, never the live minute). Local time, minute precision, no
+ * seconds — exactly the format datetime-local inputs round-trip.
+ */
+export function currentHourLocal(now: Date = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}T${p(now.getHours())}:00`;
+}
+
+/**
  * The confirmable warning for a datetime-local value, or null when the time
  * needs no confirmation. Empty (a timeless tour) and unparseable values return
  * null — required/native input validation owns those, not this check.

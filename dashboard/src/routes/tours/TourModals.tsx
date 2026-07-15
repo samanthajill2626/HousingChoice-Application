@@ -19,7 +19,7 @@ import { useState } from 'react';
 import { type TourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
-import { tourTimeWarning } from './tourTime.js';
+import { currentHourLocal, tourTimeWarning } from './tourTime.js';
 import styles from './TourDetail.module.css';
 
 /** Normalize a zoneless datetime-local value to a full ISO instant. */
@@ -56,7 +56,9 @@ function DateTimeModal({
   errorText: string;
   inputId: string;
 }): React.JSX.Element {
-  const [value, setValue] = useState('');
+  // Seeded with today at the current WHOLE hour (:00) so the native picker
+  // opens anchored there instead of the live minute (Cameron, 2026-07-14).
+  const [value, setValue] = useState(() => currentHourLocal());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The pending confirmable time warning (past / >14 days out) — the first

@@ -2,7 +2,7 @@
 // share: past and >14-days-out values warn (the dialogs then require a second
 // submit); empty (timeless) and unparseable values are not this check's job.
 import { describe, expect, it } from 'vitest';
-import { FAR_FUTURE_DAYS, tourTimeWarning } from './tourTime.js';
+import { currentHourLocal, FAR_FUTURE_DAYS, tourTimeWarning } from './tourTime.js';
 
 /** A datetime-local value `msFromNow` relative to `now`, in host-local time
  *  (mirrors how the dialogs' values parse back via `new Date(local)`). */
@@ -42,5 +42,16 @@ describe('tourTimeWarning', () => {
 
   it(`warns beyond ${FAR_FUTURE_DAYS} days out`, () => {
     expect(tourTimeWarning(localDatetime(NOW, 15 * DAY), NOW)).toMatch(/more than 14 days/);
+  });
+});
+
+describe('currentHourLocal', () => {
+  it('anchors on the current LOCAL hour with minutes 00 (never the live minute)', () => {
+    // 12:34:56 local -> 12:00 (same date, same hour, zeroed minutes).
+    expect(currentHourLocal(new Date(2026, 6, 9, 12, 34, 56))).toBe('2026-07-09T12:00');
+  });
+
+  it('zero-pads single-digit months, days, and hours', () => {
+    expect(currentHourLocal(new Date(2026, 0, 5, 8, 59))).toBe('2026-01-05T08:00');
   });
 });

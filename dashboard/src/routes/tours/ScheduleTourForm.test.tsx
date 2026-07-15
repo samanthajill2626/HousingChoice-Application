@@ -52,6 +52,23 @@ const UNITS: UnitItem[] = [
     // tour_process mentions "self" → deriveTourType → 'self_guided'.
     tour_process: 'Self-guided via lockbox, weekdays 9-5.',
   },
+  {
+    unitId: 'unit-0003',
+    landlordId: 'contact-landlord-0001',
+    status: 'available',
+    address: { line1: '12 Peachtree Way', city: 'Atlanta', state: 'GA' },
+    // Structured tour_type set -> "From the property" wins over the free-text
+    // guess (the tour_process DISAGREES, proving the structured field is used).
+    tour_type: 'pm_team',
+    tour_process: 'Self-guided via lockbox.',
+  },
+  {
+    unitId: 'unit-0004',
+    landlordId: 'contact-landlord-0001',
+    status: 'available',
+    address: { line1: '400 Edgewood Ave', city: 'Atlanta', state: 'GA' },
+    // No tour_type AND no tour_process -> the labeled self_guided default.
+  },
 ];
 
 function newTour(over: Partial<Tour> = {}): Tour {
@@ -259,6 +276,118 @@ describe('ScheduleTourForm', () => {
     // Override to landlord_led — the manual pick must persist (no re-derive).
     await user.selectOptions(screen.getByRole('combobox', { name: 'Tour type' }), 'landlord_led');
     expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led');
+  });
+
+  // -- 7f: branch 1 - a structured tour_type prefills with "From the property" --
+  it('prefills from the structured tour_type with a "From the property" provenance caption', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    // unit-0003 has tour_type: 'pm_team' (its free text says "self" - structured wins).
+    await pickUnit(user, 'Peachtree', /12 Peachtree Way/);
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('pm_team'),
+    );
+    expect(screen.getByText('From the property')).toBeInTheDocument();
+    // The free-text tour_process shows read-only as context.
+    expect(screen.getByLabelText('Property tour notes')).toHaveTextContent('Self-guided via lockbox.');
+  });
+
+  // -- 7g: branch 2 - the keyword guess is captioned "Guessed from ..." --
+  it('prefills the guess path with a "Guessed from the property tour notes" caption', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    await pickUnit(user, 'Joseph', /1450 Joseph E\. Boone Blvd NW/);
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led'),
+    );
+    expect(
+      screen.getByText("Guessed from the property's tour notes - check it"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Property tour notes')).toBeInTheDocument();
+  });
+
+  // -- 7h: branch 3 - no property tour info is captioned "Default ..." + no notes block --
+  it('falls back to the self_guided default with a "Default" caption and no notes block', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    // unit-0004 has neither tour_type nor tour_process.
+    await pickUnit(user, 'Edgewood', /400 Edgewood Ave/);
+
+    await waitFor(() =>
+      expect(screen.getByText('Default - no tour info on the property')).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('self_guided');
+    // No tour_process -> no read-only notes block.
+    expect(screen.queryByLabelText('Property tour notes')).toBeNull();
+  });
+
+  // -- 7i: E1 - a manual override drops the property-provenance caption --
+  it('drops the property-provenance caption once staff override the Tour type (E1)', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    // Pick the structured unit -> "From the property".
+    await pickUnit(user, 'Peachtree', /12 Peachtree Way/);
+    await waitFor(() => expect(screen.getByText('From the property')).toBeInTheDocument());
+
+    // Override the type -> the caption must no longer claim property provenance.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Tour type' }), 'self_guided');
+    expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('self_guided');
+    expect(screen.queryByText('From the property')).toBeNull();
+  });
+
+  // -- 7j: re-deriving across a unit change updates both the value and the caption --
+  it('re-derives the type + caption when a different unit is picked', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    // First: a guess-path unit.
+    await pickUnit(user, 'Joseph', /1450 Joseph E\. Boone Blvd NW/);
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led'),
+    );
+
+    // Clear + pick the structured unit -> caption + value switch.
+    await user.click(screen.getByRole('button', { name: 'Clear Unit' }));
+    await pickUnit(user, 'Peachtree', /12 Peachtree Way/);
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('pm_team'),
+    );
+    expect(screen.getByText('From the property')).toBeInTheDocument();
+    expect(screen.queryByText("Guessed from the property's tour notes - check it")).toBeNull();
+  });
+
+  // -- 7k: E2 - clearing the unit resets type + caption + notes block --
+  it('resets type, caption, and notes block when the unit is cleared (E2)', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001' });
+    await screen.findByRole('dialog', { name: 'Schedule a tour' });
+
+    // Pick the structured unit -> pm_team + caption + notes block.
+    await pickUnit(user, 'Peachtree', /12 Peachtree Way/);
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('pm_team'),
+    );
+    expect(screen.getByText('From the property')).toBeInTheDocument();
+    expect(screen.getByLabelText('Property tour notes')).toBeInTheDocument();
+
+    // Clear -> the no-unit state: default type, no caption, no notes block.
+    await user.click(screen.getByRole('button', { name: 'Clear Unit' }));
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('self_guided'),
+    );
+    expect(screen.queryByText('From the property')).toBeNull();
+    expect(screen.queryByLabelText('Property tour notes')).toBeNull();
   });
 
   // ── 7d: a PAST datetime warns on the first submit; a second submit confirms ──

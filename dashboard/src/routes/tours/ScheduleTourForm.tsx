@@ -17,9 +17,15 @@
 // Audience vocabulary: this is a staff-only dialog, so copy says "property"
 // and "tour" (never "listing"/"home"); code says `unit`.
 //
-// Tour-type is PREFILLED from the picked unit's `tour_process` free-text field
-// (best-effort keyword match; staff can override — a manual pick sticks until a
-// NEW unit is picked). An odd-looking date (in the past, or more than 14 days
+// Tour-type PREFILLS from the picked unit with VISIBLE PROVENANCE, in three
+// branches: (1) the unit's structured tour_type -> caption "From the property";
+// (2) else a keyword guess over the unit's tour_process free text -> caption
+// "Guessed from the property's tour notes - check it"; (3) else the self_guided
+// default -> caption "Default - no tour info on the property". Staff can
+// override the picker (the caption then drops its property claim); a manual pick
+// sticks until a NEW unit is picked, and clearing the unit resets type +
+// caption + the read-only tour_process block back to the no-unit state.
+// An odd-looking date (in the past, or more than 14 days
 // out — usually a typo, occasionally intended) shows a confirmable warning:
 // the first submit stops with the warning and the button becomes "Schedule
 // anyway"; submitting again confirms. Editing the date clears the warning.
@@ -61,6 +67,12 @@ export interface ScheduleTourFormProps {
 
 const FORM_ID = 'schedule-tour-form';
 const DEFAULT_TOUR_TYPE: TourType = 'self_guided';
+
+// Provenance captions for the prefilled Tour type (spec S3 / edge notes E1).
+// EXACT strings (plain ASCII hyphens) the tests + e2e assert on.
+const PROVENANCE_FROM_PROPERTY = 'From the property';
+const PROVENANCE_GUESSED = "Guessed from the property's tour notes - check it";
+const PROVENANCE_DEFAULT = 'Default - no tour info on the property';
 
 /** The tour-type options, in TOUR_TYPE_LABELS order. */
 const TOUR_TYPES = Object.keys(TOUR_TYPE_LABELS) as TourType[];
@@ -134,6 +146,10 @@ export function ScheduleTourForm({
   // re-derives; while set, a unit re-pick must NOT clobber the staff choice.
   const [tourTypeOverridden, setTourTypeOverridden] = useState(false);
 
+  // The provenance caption for the current prefill (null = no unit picked, or a
+  // manual override that no longer claims a source). Set alongside setTourType.
+  const [provenance, setProvenance] = useState<string | null>(null);
+
   // The pending confirmable date warning (past / >14 days out). Non-null means
   // the LAST submit stopped on it — the next submit with the same odd time is
   // the confirmation and proceeds. Editing the date clears it.
@@ -206,13 +222,33 @@ export function ScheduleTourForm({
     return () => ac.abort();
   }, [tenantId, initialUnitId]);
 
-  // ── Prefill tourType from the picked unit's tour_process. ──
+  // -- Prefill tourType from the picked unit, with VISIBLE PROVENANCE. --
   //    Only auto-derive when the staff member hasn't manually overridden.
+  //    Three branches (E1 - honest provenance): structured tour_type >
+  //    keyword guess over tour_process > self_guided default. Clearing the
+  //    unit (resolvedUnitId undefined) resets to the no-unit state (E2).
   useEffect(() => {
-    if (resolvedUnitId === undefined) return;
     if (tourTypeOverridden) return;
+    if (resolvedUnitId === undefined) {
+      // E2: no unit picked -> reset type + caption (the text block hides too).
+      setTourType(DEFAULT_TOUR_TYPE);
+      setProvenance(null);
+      return;
+    }
     const unit = units.find((u) => u.unitId === resolvedUnitId);
-    setTourType(deriveTourType(unit?.tour_process));
+    if (unit?.tour_type) {
+      // 1. Structured field set -> use it verbatim.
+      setTourType(unit.tour_type);
+      setProvenance(PROVENANCE_FROM_PROPERTY);
+    } else if (unit?.tour_process && unit.tour_process.trim() !== '') {
+      // 2. Non-empty free text -> best-effort keyword guess.
+      setTourType(deriveTourType(unit.tour_process));
+      setProvenance(PROVENANCE_GUESSED);
+    } else {
+      // 3. No property tour info -> the labeled default.
+      setTourType(DEFAULT_TOUR_TYPE);
+      setProvenance(PROVENANCE_DEFAULT);
+    }
   }, [resolvedUnitId, units, tourTypeOverridden]);
 
   // Reset the override flag when a NEW unit is picked so the next pick re-derives;
@@ -227,6 +263,8 @@ export function ScheduleTourForm({
   function handleTourTypeChange(e: React.ChangeEvent<HTMLSelectElement>): void {
     setTourType(e.target.value as TourType);
     setTourTypeOverridden(true);
+    // E1: a manual pick must never keep a stale property-provenance caption.
+    setProvenance(null);
   }
 
   // Editing the date withdraws a pending warning — the next submit re-checks.
@@ -236,6 +274,15 @@ export function ScheduleTourForm({
   }
 
   const canCreate = resolvedTenantId !== undefined && resolvedUnitId !== undefined && !busy;
+
+  // The picked unit's free-text tour_process, shown read-only as context beneath
+  // the picker (G3). null when no unit is picked or its tour_process is empty.
+  const pickedUnit =
+    resolvedUnitId !== undefined ? units.find((u) => u.unitId === resolvedUnitId) : undefined;
+  const pickedTourProcess =
+    typeof pickedUnit?.tour_process === 'string' && pickedUnit.tour_process.trim() !== ''
+      ? pickedUnit.tour_process
+      : null;
 
   async function onSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -319,12 +366,16 @@ export function ScheduleTourForm({
           />
         </div>
 
-        {/* 3 — Tour type (required; defaults to self-guided) */}
-        <label className={styles.field}>
+        {/* 3 - Tour type (required) with the visible prefill provenance caption
+             and the picked unit's read-only tour_process for context. */}
+        <div className={styles.field}>
           <span className={styles.label}>Tour type</span>
           <select
             className={styles.input}
             aria-label="Tour type"
+            aria-describedby={
+              provenance !== null ? 'schedule-tour-type-provenance' : undefined
+            }
             value={tourType}
             onChange={handleTourTypeChange}
           >
@@ -334,7 +385,21 @@ export function ScheduleTourForm({
               </option>
             ))}
           </select>
-        </label>
+          {provenance !== null ? (
+            <p id="schedule-tour-type-provenance" className={styles.provenance}>
+              {provenance}
+            </p>
+          ) : null}
+          {pickedTourProcess !== null ? (
+            <p
+              className={styles.tourNotes}
+              title={pickedTourProcess}
+              aria-label="Property tour notes"
+            >
+              {pickedTourProcess}
+            </p>
+          ) : null}
+        </div>
 
         {/* 4 — Date and time (OPTIONAL — empty creates a timeless 'requested' tour) */}
         <div className={styles.field}>

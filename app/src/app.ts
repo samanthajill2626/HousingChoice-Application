@@ -21,6 +21,7 @@ import { correlationMiddleware } from './middleware/correlation.js';
 import { csrfOriginMiddleware } from './middleware/csrfOrigin.js';
 import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
+import { trimJsonBody } from './middleware/trimStrings.js';
 import { createRateLimit } from './middleware/rateLimit.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
@@ -88,6 +89,11 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   };
   app.use(express.json({ verify: captureRawBody }));
   app.use(express.urlencoded({ extended: false, verify: captureRawBody }));
+  // (3b) sanitize: deep-trim every string value in a JSON body (dashboard +
+  // public intake input fields) so padded text like "Cameron   " can never
+  // persist. Urlencoded bodies (Twilio webhooks) are deliberately untouched —
+  // provider payloads keep byte fidelity (middleware/trimStrings.ts).
+  app.use(trimJsonBody());
 
   // (4) routes
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));

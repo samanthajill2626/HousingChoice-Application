@@ -94,13 +94,16 @@ export function contactStatusLabel(type: string | undefined, status: string): st
   return humanize(status);
 }
 
-/** The display name for a contact, falling back to the phone, then "Unknown". */
+/** The display name for a contact, falling back to the phone, then "Unknown".
+ *  Parts are trimmed BEFORE the join so a legacy padded part ("Cameron   ")
+ *  never renders an interior gap ("Cameron   Abt") — new writes arrive trimmed
+ *  server-side (trimJsonBody). */
 export function contactDisplayName(
   firstName: string | undefined,
   lastName: string | undefined,
   phone: string | undefined,
 ): string {
-  const name = [firstName, lastName].filter(Boolean).join(' ').trim();
+  const name = [firstName?.trim(), lastName?.trim()].filter(Boolean).join(' ');
   if (name) return name;
   if (phone) return formatPhone(phone);
   return 'Unknown contact';

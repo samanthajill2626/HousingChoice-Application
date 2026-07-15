@@ -90,4 +90,12 @@ describe('contactDisplayName', () => {
     expect(contactDisplayName(undefined, undefined, '+14040100007')).toBe('(404) 010-0007');
     expect(contactDisplayName(undefined, undefined, undefined)).toBe('Unknown contact');
   });
+
+  it('trims legacy padded parts so the join has no interior gap', () => {
+    // New writes arrive trimmed server-side (trimJsonBody); stored data
+    // predating that must still render "Cameron Abt", never "Cameron   Abt".
+    expect(contactDisplayName('Cameron   ', ' Abt ', undefined)).toBe('Cameron Abt');
+    // A whitespace-only part contributes nothing (falls through to the phone).
+    expect(contactDisplayName('   ', '  ', '+14040100007')).toBe('(404) 010-0007');
+  });
 });

@@ -23,6 +23,7 @@ import { originSecretMiddleware } from './middleware/originSecret.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 import { trimJsonBody } from './middleware/trimStrings.js';
 import { createRateLimit } from './middleware/rateLimit.js';
+import { createMediaStore } from './adapters/mediaStore.js';
 import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
@@ -105,6 +106,11 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // /api requireAuth gate below. A per-IP rate limiter fronts ALL /public
   // routes (the abuse fence on an unauthenticated, SMS-spending surface); the
   // router itself re-validates everything and never logs PII.
+  // unit-photos (D1): the public flyer resolves stored photo keys to render-time
+  // presigned URLs, so the /public router needs the media store. Built from
+  // config (undefined when MEDIA_BUCKET is unset); a test-injected deps.public
+  // (which may carry its own fake store) still overrides via the spread.
+  const publicMediaStore = createMediaStore({ config });
   app.use(
     '/public',
     createRateLimit({
@@ -112,7 +118,11 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       windowMs: config.publicRateLimitWindowMs,
       logger: log,
     }),
-    createPublicRouter({ logger: log, ...deps.public }),
+    createPublicRouter({
+      logger: log,
+      ...(publicMediaStore !== undefined && { mediaStore: publicMediaStore }),
+      ...deps.public,
+    }),
   );
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by

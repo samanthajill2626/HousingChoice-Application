@@ -15,17 +15,26 @@
 //
 // PII (doc §9): responses carry full unit docs to the authenticated client;
 // LOG LINES are IDs/counts only.
+import { createHash, randomUUID } from 'node:crypto';
+import { PassThrough, Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import busboy from 'busboy';
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
+import { isImageMediaType } from '../lib/mediaTypes.js';
+import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
+import { resolveUnitMedia, UNIT_MEDIA_MAX } from '../lib/unitMedia.js';
+import type { MediaStore } from '../adapters/mediaStore.js';
+import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   CannotRemovePrimaryLandlordError,
   createUnitsRepo,
+  isDeleted,
   unitContacts,
   UNIT_CONTACT_ROLES,
   type ListUnitsOpts,
@@ -62,6 +71,13 @@ export interface UnitsRouterDeps {
    * degrades to chipless rows, never a 500.
    */
   toursRepo?: ToursRepo;
+  /**
+   * unit-photos: the media bucket store for photo upload (PUT) + display
+   * resolution (presign-per-read). Undefined when MEDIA_BUCKET is unset - the
+   * upload/manage routes then answer 503 and reads resolve stored keys to
+   * url-absent (only legacy absolute URLs carry through).
+   */
+  mediaStore?: MediaStore;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -229,8 +245,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const mediaStore = deps.mediaStore;
 
   const router = Router();
+
+  // Photo-upload spend/abuse fence (unit-photos D4): the SAME per-user limiter
+  // class as the MMS upload endpoint, 30/min. A cost/abuse backstop on S3 PUTs
+  // (Twilio is uninvolved - uploads only touch S3; A2P pacing applies to sends).
+  // ONE request carries MANY files, so staff never feel it. ONE instance per
+  // router (per-request creation would reset the window). The manage routes
+  // (remove/cover) match the unit PATCH posture: no limiter (design S4).
+  const photoUploadLimiter = createUserRateLimit({
+    routeKey: 'unit_photo_upload',
+    max: 30,
+    windowMs: 60_000,
+    logger: log,
+  });
+
+  /** sha256-prefix marker for an entry - audit trails record this, NEVER the key/URL. */
+  const entryHash = (entry: string): string =>
+    createHash('sha256').update(entry).digest('hex').slice(0, 12);
 
   /**
    * BE3/C3 FIX: enrich a unit's roster at READ time. For each UnitContact (incl.
@@ -370,7 +404,222 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    res.json({ unit: { ...unit, contacts: await enrichRoster(unit) } });
+    // unit-photos S3: resolve stored media keys to short-lived display URLs
+    // (presign-per-read) ALONGSIDE the raw `media` (the management handle).
+    const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+    res.json({ unit: { ...unit, contacts: await enrichRoster(unit), mediaDisplay } });
+  });
+
+  // POST /api/units/:unitId/photos - multipart image upload (one or many files;
+  // unit-photos S2). busboy STREAMING with the per-file 5MB cap (busboy truncates
+  // + emits 'limit'); images only (jpeg/png/gif/webp - NO pdf). VALIDATE-THEN-
+  // STORE (E3): every file's type + size + emptiness is checked BEFORE any S3
+  // put, so an invalid file 400s with nothing stored. Then each valid file is
+  // put under a dedicated `unit-media/<unitId>/<uuid>` key (NEVER the MMS
+  // `uploads/` namespace) and ONE atomic appendMedia commits all new keys - a
+  // mid-batch put failure appends NOTHING (stored objects decay as orphans, the
+  // MMS posture), never a partial append. Behind the D4 per-user limiter.
+  router.post('/:unitId/photos', photoUploadLimiter, (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    if (!mediaStore) {
+      res.status(503).json({ error: 'media_storage_unavailable' });
+      return;
+    }
+
+    let bb: busboy.Busboy;
+    try {
+      bb = busboy({
+        headers: req.headers,
+        // Per-file 5MB cap (ONE source of truth with the MMS upload); a hard
+        // ceiling on file COUNT at the abuse cap so a runaway request can't
+        // buffer unboundedly (the real existing+incoming cap is re-checked below).
+        limits: { fileSize: OUTBOUND_MMS_MAX_FILE_BYTES, files: UNIT_MEDIA_MAX },
+      });
+    } catch {
+      res.status(400).json({ error: 'expected_multipart' });
+      return;
+    }
+
+    // Buffer each accepted file so the WHOLE batch is validated before any put
+    // (E3 "before any put"): the per-file cap bounds each buffer to 5MB, and the
+    // count ceiling above bounds the batch.
+    const files: { chunks: Buffer[]; contentType: string; bytes: number }[] = [];
+    let typeRejected = false;
+    let limitHit = false;
+    let responded = false;
+
+    const finish = async (): Promise<void> => {
+      if (responded) return;
+      responded = true;
+      // (E3) Validation gate - reject the whole request BEFORE any S3 put.
+      if (typeRejected) {
+        res.status(400).json({ error: 'unsupported_media_type' });
+        return;
+      }
+      if (limitHit) {
+        res.status(413).json({ error: 'file_too_large' });
+        return;
+      }
+      if (files.length === 0) {
+        res.status(400).json({ error: 'no_files' });
+        return;
+      }
+      if (files.some((f) => f.bytes === 0)) {
+        res.status(400).json({ error: 'empty_file' });
+        return;
+      }
+      // The unit must exist and not be deleted (404) - checked after parsing (we
+      // must drain the multipart body regardless); nothing is stored on a miss.
+      const unit = await units.getById(unitId);
+      if (!unit || isDeleted(unit)) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      // 100-photo cap (D3: an abuse/runaway BACKSTOP, not a product limit - keys
+      // are ~60B against a 400KB item and presigning is local SigV4; raise it
+      // freely the day someone legitimately hits it). Server-side pre-check for a
+      // clear 400; the atomic appendMedia re-guards it under a race.
+      const existing = Array.isArray(unit.media) ? unit.media.length : 0;
+      if (existing + files.length > UNIT_MEDIA_MAX) {
+        res.status(400).json({ error: 'photo_cap_exceeded' });
+        return;
+      }
+
+      // Store each file, then ONE atomic append (E3: a put failure -> 5xx, no
+      // append; already-stored objects decay as orphans).
+      const keys: string[] = [];
+      try {
+        for (const f of files) {
+          const key = `unit-media/${unitId}/${randomUUID()}`;
+          await mediaStore.put(key, Readable.from(Buffer.concat(f.chunks)), f.contentType);
+          keys.push(key);
+        }
+      } catch (err) {
+        log.error({ unitId, err, stored: keys.length }, 'unit photos: store put failed (nothing appended)');
+        res.status(502).json({ error: 'upload_failed' });
+        return;
+      }
+
+      const updated = await units.appendMedia(unitId, keys);
+      // PII / doc: COUNT only - never filenames or keys in the audit payload.
+      await audit.append(`units#${unitId}`, 'unit_photos_added', {
+        actor: req.user?.userId,
+        count: keys.length,
+      });
+      log.info({ unitId, count: keys.length, actor: req.user?.userId }, 'unit photos added via api');
+      const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+      res.json({ unit: { ...updated, mediaDisplay } });
+    };
+
+    bb.on('file', (_name, fileStream, info) => {
+      const type = typeof info.mimeType === 'string' ? info.mimeType.trim().toLowerCase() : '';
+      if (!isImageMediaType(type)) {
+        typeRejected = true;
+        fileStream.resume(); // drain so busboy reaches 'close'
+        return;
+      }
+      const rec = { chunks: [] as Buffer[], contentType: type, bytes: 0 };
+      files.push(rec);
+      // A PassThrough WE own would only matter for streaming-to-store; here we
+      // buffer, so read the file stream directly and stop on the size cap.
+      fileStream.on('data', (chunk: Buffer) => {
+        rec.bytes += chunk.length;
+        rec.chunks.push(chunk);
+      });
+      fileStream.on('limit', () => {
+        // Past the 5MB cap (busboy truncates at fileSize + emits this): mark the
+        // whole request rejected and drain the remainder so busboy reaches 'close'.
+        limitHit = true;
+        fileStream.resume();
+      });
+    });
+
+    bb.on('error', (err) => {
+      log.error({ err, unitId }, 'unit photos: multipart parse error');
+      if (!responded) {
+        responded = true;
+        res.status(400).json({ error: 'upload_parse_error' });
+      }
+    });
+
+    bb.on('close', () => {
+      void finish();
+    });
+
+    req.pipe(bb);
+  });
+
+  // DELETE /api/units/:unitId/photos  body { entry } - drop one media entry
+  // (unit-photos S4). Removes the array entry only (NO S3 object deletion; the
+  // object decays as an accepted orphan, the MMS posture). 404 on unknown unit
+  // or unknown entry; audits unit_photo_removed (entry-HASH + count only, never
+  // the key/URL). Returns the updated unit (with mediaDisplay).
+  router.delete('/:unitId/photos', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const entry = (body as Record<string, unknown>)['entry'];
+    if (typeof entry !== 'string' || entry.length === 0) {
+      res.status(400).json({ error: 'entry is required' });
+      return;
+    }
+    let updated: UnitItem;
+    try {
+      updated = await units.removeMedia(unitId, entry);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        // Unknown unit OR entry-not-on-unit - both 404 (no existence oracle).
+        res.status(404).json({ error: 'unit_or_photo_not_found' });
+        return;
+      }
+      throw err;
+    }
+    await audit.append(`units#${unitId}`, 'unit_photo_removed', {
+      actor: req.user?.userId,
+      entryHash: entryHash(entry),
+      remaining: Array.isArray(updated.media) ? updated.media.length : 0,
+    });
+    log.info({ unitId, actor: req.user?.userId }, 'unit photo removed via api');
+    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    res.json({ unit: { ...updated, mediaDisplay } });
+  });
+
+  // PUT /api/units/:unitId/photos/cover  body { entry } - make `entry` the cover
+  // (move to front = hero + flyer lead photo; unit-photos S4). No-op success when
+  // it is already the cover. 404 on unknown unit or unknown entry; audits
+  // unit_photo_cover_set (entry-HASH only). Returns the updated unit.
+  router.put('/:unitId/photos/cover', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const entry = (body as Record<string, unknown>)['entry'];
+    if (typeof entry !== 'string' || entry.length === 0) {
+      res.status(400).json({ error: 'entry is required' });
+      return;
+    }
+    let updated: UnitItem;
+    try {
+      updated = await units.makeCover(unitId, entry);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'unit_or_photo_not_found' });
+        return;
+      }
+      throw err;
+    }
+    await audit.append(`units#${unitId}`, 'unit_photo_cover_set', {
+      actor: req.user?.userId,
+      entryHash: entryHash(entry),
+    });
+    log.info({ unitId, actor: req.user?.userId }, 'unit photo cover set via api');
+    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    res.json({ unit: { ...updated, mediaDisplay } });
   });
 
   // Individual flyer sends are the SEEDED broadcast-pipeline flow (see

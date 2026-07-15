@@ -141,6 +141,23 @@ describe('UnitCreateForm', () => {
     expect(body).toEqual({ landlordId: 'contact-landlord-0001' });
   });
 
+  // -- 5b: a chosen Tour type rides the create body; "Not set" is omitted --
+  it('sends a chosen Tour type in the create body', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+
+    await screen.findByRole('dialog', { name: 'New property' });
+    const select = screen.getByLabelText('Tour type');
+    expect(select).toHaveValue(''); // defaults to "Not set"
+    await user.selectOptions(select, 'pm_team');
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    const body = createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toEqual({ landlordId: 'contact-landlord-0001', tour_type: 'pm_team' });
+  });
+
   // ── 6: an invalid (below-minimum) number blocks creation ──
   // Beds has min=0; a negative value fails the input's constraint validation so the
   // form does not submit — no property is created and the dialog stays open. (The

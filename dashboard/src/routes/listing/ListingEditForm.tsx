@@ -4,7 +4,13 @@
 // success the parent applies the returned unit in place (no refetch). The field
 // set + types match the backend allowlist (app/src/lib/unitFields.ts).
 import { useState } from 'react';
-import { updateUnit, type Address, type UnitItem } from '../../api/index.js';
+import {
+  updateUnit,
+  TOUR_TYPE_LABELS,
+  type Address,
+  type TourType,
+  type UnitItem,
+} from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import styles from './ListingEditForm.module.css';
@@ -48,6 +54,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const initialPrograms = (unit.accepted_programs ?? []).join(', ');
   const [programs, setPrograms] = useState(initialPrograms);
   const [tourProcess, setTourProcess] = useState(str(unit.tour_process));
+  const [tourType, setTourType] = useState<string>(str(unit.tour_type));
   const [applicationProcess, setApplicationProcess] = useState(str(unit.application_process));
   const [listingLink, setListingLink] = useState(str(unit.listing_link));
   // Public flyer details (public-pages §5): tenants see these on the post-intake
@@ -110,6 +117,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     if (leaseTerms !== str(unit.lease_terms)) patch['lease_terms'] = leaseTerms;
     if (listingLink !== str(unit.listing_link)) patch['listing_link'] = listingLink;
     if (tourProcess !== str(unit.tour_process)) patch['tour_process'] = tourProcess;
+    // Sends '' on clear -> the backend tour_type FieldKind maps ''->null->REMOVE.
+    if (tourType !== str(unit.tour_type)) patch['tour_type'] = tourType;
     if (applicationProcess !== str(unit.application_process)) {
       patch['application_process'] = applicationProcess;
     }
@@ -466,6 +475,23 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             onChange={(e) => setSameDayRta(e.target.checked)}
           />
           <span className={styles.label}>Same-day RTA</span>
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Tour type</span>
+          <select
+            className={styles.input}
+            aria-label="Tour type"
+            value={tourType}
+            onChange={(e) => setTourType(e.target.value)}
+          >
+            <option value="">Not set</option>
+            {(Object.keys(TOUR_TYPE_LABELS) as TourType[]).map((t) => (
+              <option key={t} value={t}>
+                {TOUR_TYPE_LABELS[t]}
+              </option>
+            ))}
+          </select>
         </label>
 
         <label className={styles.field}>

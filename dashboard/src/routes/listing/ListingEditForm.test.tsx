@@ -160,6 +160,33 @@ describe('ListingEditForm', () => {
     expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: 3 });
   });
 
+  it('sets the Tour type from Not set and PATCHes the chosen value', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    const select = screen.getByLabelText('Tour type');
+    expect(select).toHaveValue(''); // unset -> "Not set"
+    await user.selectOptions(select, 'landlord_led');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { tour_type: 'landlord_led' });
+  });
+
+  it('clears the Tour type back to Not set and PATCHes an empty string (backend removes it)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withType: UnitItem = { ...UNIT, tour_type: 'pm_team' };
+    render(<ListingEditForm unit={withType} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    const select = screen.getByLabelText('Tour type');
+    expect(select).toHaveValue('pm_team');
+    await user.selectOptions(select, '');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { tour_type: '' });
+  });
+
   it('surfaces a save failure and stays open', async () => {
     const user = userEvent.setup();
     updateUnit.mockRejectedValue(new Error('boom'));

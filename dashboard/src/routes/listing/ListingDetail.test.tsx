@@ -229,6 +229,23 @@ describe('ListingDetail', () => {
     expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
   });
 
+  it('renders a Tour type row (placeholder when unset)', () => {
+    // The READY fixture has no tour_type -> the row still renders with a placeholder.
+    useListing.mockReturnValue(READY);
+    renderAt();
+    expect(screen.getByText('Tour type')).toBeInTheDocument();
+  });
+
+  it('renders the structured Tour type label when the unit carries one', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit, tour_type: 'landlord_led' },
+    } as ListingState);
+    renderAt();
+    expect(screen.getByText('Tour type')).toBeInTheDocument();
+    expect(screen.getByText('Landlord-led')).toBeInTheDocument();
+  });
+
   it('renders the Notes card: property notes when present, an empty state with "+ Add" otherwise', () => {
     // No notes (the READY fixture) → empty state, and the action reads "+ Add".
     useListing.mockReturnValue(READY);

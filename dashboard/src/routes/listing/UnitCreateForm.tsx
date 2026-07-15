@@ -14,7 +14,9 @@ import {
   createUnit,
   getContact,
   getContacts,
+  TOUR_TYPE_LABELS,
   type Contact,
+  type TourType,
   type UnitItem,
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
@@ -68,6 +70,7 @@ export function UnitCreateForm({
   const [voucherSize, setVoucherSize] = useState('');
   const [sameDayRta, setSameDayRta] = useState(false);
   const [tourProcess, setTourProcess] = useState('');
+  const [tourType, setTourType] = useState('');
   const [applicationProcess, setApplicationProcess] = useState('');
 
   // Address parts.
@@ -153,6 +156,8 @@ export function UnitCreateForm({
     addStr('video_url', videoUrl);
     addStr('tour_process', tourProcess);
     addStr('application_process', applicationProcess);
+    // Only send a real type; "Not set" -> omit (absent = unset on create).
+    if (tourType) body['tour_type'] = tourType;
     if (sameDayRta) body['same_day_rta'] = true;
 
     if (!addNumber(body, 'beds', beds, 'Beds')) return null;
@@ -496,6 +501,23 @@ export function UnitCreateForm({
             onChange={(e) => setSameDayRta(e.target.checked)}
           />
           <span className={styles.label}>Same-day RTA</span>
+        </label>
+
+        <label className={styles.field}>
+          <span className={styles.label}>Tour type</span>
+          <select
+            className={styles.input}
+            aria-label="Tour type"
+            value={tourType}
+            onChange={(e) => setTourType(e.target.value)}
+          >
+            <option value="">Not set</option>
+            {(Object.keys(TOUR_TYPE_LABELS) as TourType[]).map((t) => (
+              <option key={t} value={t}>
+                {TOUR_TYPE_LABELS[t]}
+              </option>
+            ))}
+          </select>
         </label>
 
         <label className={styles.field}>

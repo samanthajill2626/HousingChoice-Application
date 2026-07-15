@@ -20,6 +20,7 @@ import {
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
   TOUR_STATUS_LABELS,
+  TOUR_TYPE_LABELS,
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
@@ -368,6 +369,10 @@ export function ListingDetail(): React.JSX.Element {
               )
             }
           >
+            {/* Structured tour type reads together with the free-form process
+                copy below (spec S2). Em-dash placeholder when unset, matching
+                the Property details KV rows. */}
+            <KV k="Tour type" v={unit.tour_type ? TOUR_TYPE_LABELS[unit.tour_type] : '—'} />
             {unit.tour_process || unit.application_process ? (
               <div className={styles.process}>
                 {unit.tour_process ? <p>{unit.tour_process}</p> : null}

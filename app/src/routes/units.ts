@@ -75,9 +75,11 @@ function isUnitContactRole(value: unknown): value is UnitContact['role'] {
  * known (never invents one); the roster row then has no `name`.
  */
 function displayNameOfContact(contact: ContactItem): string | undefined {
-  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
-  const joined = `${first} ${last}`.trim();
+  // Part-wise trim BEFORE the join (legacy padded parts must not render an
+  // interior gap; new writes arrive trimmed via trimJsonBody).
+  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
+  const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : undefined;
 }
 

@@ -339,9 +339,12 @@ function conversationTypeFor(contactType: ContactType): ConversationType | undef
  * logged here.
  */
 function displayNameOf(contact: ContactItem): string | null {
-  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
-  const joined = `${first} ${last}`.trim();
+  // Part-wise trim BEFORE the join: a legacy padded part ("Cameron   ") must
+  // never render an interior gap ("Cameron   Abt"). New writes arrive trimmed
+  // (trimJsonBody), but stored data predating it may not be.
+  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
+  const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : null;
 }
 

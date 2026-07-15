@@ -62,9 +62,11 @@ export interface RelayGroupsRouterDeps {
  *  Exported for the tour relay route (tours.ts), which auto-resolves rosters. */
 export function nameFromContact(contact: ContactItem | undefined): string | undefined {
   if (!contact) return undefined;
-  const first = typeof contact.firstName === 'string' ? contact.firstName : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName : '';
-  const joined = `${first} ${last}`.trim();
+  // Part-wise trim BEFORE the join (legacy padded parts must not render an
+  // interior gap; new writes arrive trimmed via trimJsonBody).
+  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
+  const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : undefined;
 }
 

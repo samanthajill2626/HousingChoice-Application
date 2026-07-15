@@ -208,6 +208,66 @@ describe('POST /api/units/:unitId/photos - upload', () => {
     expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
   });
 
+  it('review F3: a rejecting pre-store getById returns 500 (no hang) and stores nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // finish() runs from bb.on('close') OUTSIDE Express async-error capture.
+    // The SF1 fix guarded the success tail; this pins the PRE-STORE read too
+    // (the conformance-review deviation): a rejecting getById must map to a
+    // 500 via the finish() catch-all, never an unhandled rejection + hang.
+    world.unitsRepo.getById = async () => {
+      throw new Error('dynamo throttled');
+    };
+    const res = await photoPost(app, 'unit-1').attach('file', png().buf, {
+      filename: 'a.png',
+      contentType: 'image/png',
+    });
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+    expect(world.mediaPuts).toHaveLength(0);
+  });
+
+  it('review F1: the per-request aggregate byte fence 413s the whole batch (nothing stored)', async () => {
+    // Inject a tiny fence so two ordinary files overflow it: total buffered
+    // bytes across the REQUEST is what the fence bounds (each file is well
+    // under the per-file cap).
+    const { app, world } = makeWebhookHarness({ photoUploadLimits: { maxRequestBytes: 10 } });
+    seedUnit(world, 'unit-1');
+    const res = await photoPost(app, 'unit-1')
+      .attach('file', Buffer.alloc(8, 1), { filename: 'a.png', contentType: 'image/png' })
+      .attach('file', Buffer.alloc(8, 2), { filename: 'b.png', contentType: 'image/png' });
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'request_too_large' });
+    expect(world.mediaPuts).toHaveLength(0);
+    expect(world.units.get('unit-1')?.media).toBeUndefined();
+  });
+
+  it('review F1: the concurrency gate 429s past the in-flight cap and RELEASES per request', async () => {
+    // maxConcurrent 0: every upload is rejected before any body buffers.
+    const zero = makeWebhookHarness({ photoUploadLimits: { maxConcurrent: 0 } });
+    seedUnit(zero.world, 'unit-1');
+    const rejected = await photoPost(zero.app, 'unit-1').attach('file', png().buf, {
+      filename: 'a.png',
+      contentType: 'image/png',
+    });
+    expect(rejected.status).toBe(429);
+    expect(rejected.body).toEqual({ error: 'too_many_concurrent_uploads' });
+    expect(zero.world.mediaPuts).toHaveLength(0);
+
+    // maxConcurrent 1: two SEQUENTIAL uploads both succeed - the slot releases
+    // when the response closes (res 'close'), so the gate never leaks.
+    const one = makeWebhookHarness({ photoUploadLimits: { maxConcurrent: 1 } });
+    seedUnit(one.world, 'unit-1');
+    for (const name of ['a.png', 'b.png']) {
+      const ok = await photoPost(one.app, 'unit-1').attach('file', png(name).buf, {
+        filename: name,
+        contentType: 'image/png',
+      });
+      expect(ok.status).toBe(200);
+    }
+    expect(one.world.units.get('unit-1')?.media).toHaveLength(2);
+  });
+
   it('404s an unknown unit and a soft-deleted unit', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-del', { deleted_at: '2026-07-01T00:00:00.000Z' });
@@ -360,5 +420,32 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
       entry: 'https://legacy.example/photo.jpg',
       url: 'https://legacy.example/photo.jpg',
     });
+  });
+
+  it('review F2: presigns ONLY keys under this unit\'s own namespace (foreign keys degrade)', async () => {
+    // `media` stays PATCH-writable (E5) and the bucket is shared with the MMS
+    // namespaces - a foreign key pasted into media (an uploads/ MMS attachment,
+    // or ANOTHER unit's photo) must NEVER presign (else the public flyer would
+    // expose a private object). Legacy URLs still pass through.
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', {
+      media: [
+        'unit-media/unit-1/own-photo',
+        'uploads/some-mms-attachment',
+        'unit-media/unit-OTHER/their-photo',
+        'https://legacy.example/photo.jpg',
+      ],
+    });
+    const res = await request(app)
+      .get('/api/units/unit-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const display: { entry: string; url?: string }[] = res.body.unit.mediaDisplay;
+    expect(display).toHaveLength(4);
+    expect(display[0]!.url).toMatch(/^https:\/\/fake-s3\.local\//); // own key: presigned
+    expect(display[1]!).toEqual({ entry: 'uploads/some-mms-attachment' }); // foreign: NO url
+    expect(display[2]!).toEqual({ entry: 'unit-media/unit-OTHER/their-photo' }); // cross-unit: NO url
+    expect(display[3]!.url).toBe('https://legacy.example/photo.jpg'); // legacy URL: pass-through
   });
 });

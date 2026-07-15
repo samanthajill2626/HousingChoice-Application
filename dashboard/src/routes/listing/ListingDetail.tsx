@@ -92,6 +92,14 @@ const UNIT_MEDIA_MAX = 100;
 // re-validates every file regardless.
 const PHOTO_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp';
 
+/** Files per upload REQUEST (review hardening, 2026-07-15). Large selections
+ *  upload in sequential batches this size: 10 x 5MB sits well under the
+ *  server's 60MB per-request memory fence (UNIT_PHOTO_MAX_REQUEST_BYTES) and
+ *  one operator occupies one concurrency slot - so a 100-photo drag-drop
+ *  works without ever tripping a fence. Keep this coupled to those server
+ *  constants (app/src/lib/unitMedia.ts) if either changes. */
+const PHOTO_UPLOAD_BATCH_SIZE = 10;
+
 /** An honest, staff-facing message for a photo-upload failure (the app 400 carries
  *  a machine `error` code on `ApiError.code`; map the known ones, else a generic
  *  retry). GLOSSARY: staff copy says "property" / "photo". */
@@ -249,9 +257,14 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   // Photos: "+ Add" opens the hidden multi-select file input; the chosen files
-  // upload in ONE multipart request. On success apply the returned unit in place
-  // (its mediaDisplay drives the gallery + hero); on failure surface an honest
-  // inline error. Reset the input so re-picking the SAME file fires change again.
+  // upload in SEQUENTIAL batches of PHOTO_UPLOAD_BATCH_SIZE files per multipart
+  // request (review hardening, 2026-07-15: the server buffers a request's whole
+  // batch in memory behind a 60MB per-request fence + a small concurrency gate;
+  // 10 x 5MB batches sit well under both, so a 100-photo drag-drop still works
+  // end to end). The unit state applies after EACH batch, so already-uploaded
+  // photos persist + render even if a later batch fails; a mid-way failure says
+  // honestly how many made it. Reset the input so re-picking the SAME file
+  // fires change again.
   const onPickPhotos = (): void => photoInputRef.current?.click();
   const onFilesChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const input = e.currentTarget;
@@ -260,10 +273,26 @@ export function ListingDetail(): React.JSX.Element {
     if (chosen.length === 0 || photoBusy) return;
     setPhotoBusy(true);
     setPhotoError(null);
-    void uploadUnitPhotos(unit.unitId, chosen)
-      .then((updated) => setUnit(updated))
-      .catch((err) => setPhotoError(photoUploadMessage(err)))
-      .finally(() => setPhotoBusy(false));
+    void (async () => {
+      let uploaded = 0;
+      try {
+        for (let i = 0; i < chosen.length; i += PHOTO_UPLOAD_BATCH_SIZE) {
+          const batch = chosen.slice(i, i + PHOTO_UPLOAD_BATCH_SIZE);
+          const updated = await uploadUnitPhotos(unit.unitId, batch);
+          uploaded += batch.length;
+          setUnit(updated);
+        }
+      } catch (err) {
+        const base = photoUploadMessage(err);
+        setPhotoError(
+          uploaded > 0
+            ? `Uploaded ${uploaded} of ${chosen.length} photos - ${base}`
+            : base,
+        );
+      } finally {
+        setPhotoBusy(false);
+      }
+    })();
   };
   const onMakeCover = (entry: string): void => {
     if (photoBusy) return;

@@ -542,6 +542,48 @@ describe('ListingDetail', () => {
     await waitFor(() => expect(setUnit).toHaveBeenCalledWith(updated));
   });
 
+  it('review F1: a large selection uploads in SEQUENTIAL batches of 10 (memory fence coupling)', async () => {
+    // The server buffers a request's whole batch behind a 60MB fence; the
+    // client keeps big drag-drops working by chunking into 10-file requests.
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    uploadUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from(
+      { length: 25 },
+      (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }),
+    );
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(uploadUnitPhotos).toHaveBeenCalledTimes(3));
+    const batches = uploadUnitPhotos.mock.calls.map((c) => (c[1] as File[]).length);
+    expect(batches).toEqual([10, 10, 5]);
+    // The unit state applied after EACH batch (progressive rendering).
+    expect(setUnit).toHaveBeenCalledTimes(3);
+  });
+
+  it('review F1: a mid-batch failure keeps earlier batches and says how many uploaded', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    uploadUnitPhotos
+      .mockResolvedValueOnce(READY.unit!)
+      .mockRejectedValueOnce(new ApiError(502, 'upload_failed', 'upload_failed'));
+    renderAt();
+
+    const files = Array.from(
+      { length: 12 },
+      (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }),
+    );
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Uploaded 10 of 12/));
+    // The first batch's unit state stuck (photos already stored server-side).
+    expect(setUnit).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces an honest inline error when an upload is rejected', async () => {
     useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
     uploadUnitPhotos.mockRejectedValue(

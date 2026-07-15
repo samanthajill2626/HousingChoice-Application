@@ -276,7 +276,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       payment_standard: 1700,
       deposit: 1400,
       lif: 500,
-      media: ['s3://photo1.jpg', 's3://photo2.jpg'],
+      // Own-namespace keys (review F2: only `unit-media/<thisUnit>/` presigns).
+      media: ['unit-media/unit-1/photo1', 'unit-media/unit-1/photo2'],
       listing_link: 'https://example.com/listing/1',
       tour_process: 'SECRET lockbox 9999',
       application_process: 'SECRET portal',
@@ -346,6 +347,28 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     ]) {
       expect(serialized, secret).not.toContain(secret);
     }
+  });
+
+  it('review F2: a foreign media key never reaches the PUBLIC flyer (omitted, not presigned)', async () => {
+    // The private bucket is shared with the MMS namespaces; `media` stays
+    // PATCH-writable. A foreign entry (an uploads/ MMS attachment or another
+    // unit's key) must be OMITTED from the public flyer's resolved url list -
+    // never presigned onto an unauthenticated page.
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, {
+      media: [
+        'unit-media/unit-1/own-photo',
+        'uploads/private-mms-attachment',
+        'unit-media/unit-OTHER/their-photo',
+      ],
+    });
+    const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    const media: string[] = res.body.flyer.media;
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatch(/^https:\/\/fake-s3\.local\//);
+    expect(JSON.stringify(res.body)).not.toContain('private-mms-attachment');
+    expect(JSON.stringify(res.body)).not.toContain('unit-OTHER');
   });
 
   it('404s a missing unit and a non-shareable (placed/inactive) unit — no existence oracle', async () => {
@@ -497,7 +520,8 @@ describe('GET /public/units/:unitId/details — the post-intake reveal', () => {
       payment_standard: 1700,
       deposit: 1400,
       lif: 500,
-      media: ['s3://photo1.jpg'],
+      // Own-namespace key (review F2: only `unit-media/<thisUnit>/` presigns).
+      media: ['unit-media/unit-1/photo1'],
       listing_link: 'https://example.com/listing/1',
       utilities: 'Tenant-paid',
       video_url: 'https://v.example/tour1',

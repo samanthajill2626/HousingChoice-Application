@@ -26,7 +26,12 @@ import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
-import { resolveUnitMedia, UNIT_MEDIA_MAX } from '../lib/unitMedia.js';
+import {
+  resolveUnitMedia,
+  UNIT_MEDIA_MAX,
+  UNIT_PHOTO_MAX_CONCURRENT_UPLOADS,
+  UNIT_PHOTO_MAX_REQUEST_BYTES,
+} from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -78,6 +83,13 @@ export interface UnitsRouterDeps {
    * url-absent (only legacy absolute URLs carry through).
    */
   mediaStore?: MediaStore;
+  /**
+   * TEST SEAM ONLY (review hardening, 2026-07-15): override the photo-upload
+   * memory fences (defaults: UNIT_PHOTO_MAX_REQUEST_BYTES /
+   * UNIT_PHOTO_MAX_CONCURRENT_UPLOADS) so tests can exercise the 413/429 paths
+   * with tiny values. Production always uses the defaults.
+   */
+  photoUploadLimits?: { maxRequestBytes?: number; maxConcurrent?: number };
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -262,6 +274,18 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     logger: log,
   });
 
+  // Photo-upload MEMORY fences (review hardening, 2026-07-15). The route
+  // buffers each request's whole batch in memory (E3 validate-then-store), and
+  // the per-minute limiter above gates COUNT, not CONCURRENCY - so without
+  // these two bounds ~30 buffering requests could hold ~500MB each on the one
+  // 2GB app process. See the constants' doc comments for the arithmetic.
+  // Injectable for tests only.
+  const maxRequestBytes = deps.photoUploadLimits?.maxRequestBytes ?? UNIT_PHOTO_MAX_REQUEST_BYTES;
+  const maxConcurrentUploads =
+    deps.photoUploadLimits?.maxConcurrent ?? UNIT_PHOTO_MAX_CONCURRENT_UPLOADS;
+  /** In-flight photo-upload requests on THIS process (released on res close). */
+  let inFlightPhotoUploads = 0;
+
   /** sha256-prefix marker for an entry - audit trails record this, NEVER the key/URL. */
   const entryHash = (entry: string): string =>
     createHash('sha256').update(entry).digest('hex').slice(0, 12);
@@ -425,6 +449,19 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(503).json({ error: 'media_storage_unavailable' });
       return;
     }
+    // Concurrency gate (memory fence): reject the request BEFORE any body is
+    // buffered when the process already has maxConcurrentUploads in flight.
+    // Released exactly once via res 'close' (fires on success, error, and
+    // client abort alike - leak-proof).
+    if (inFlightPhotoUploads >= maxConcurrentUploads) {
+      log.warn({ unitId, inFlight: inFlightPhotoUploads }, 'unit photos: concurrent-upload gate rejected');
+      res.status(429).json({ error: 'too_many_concurrent_uploads' });
+      return;
+    }
+    inFlightPhotoUploads += 1;
+    res.once('close', () => {
+      inFlightPhotoUploads -= 1;
+    });
 
     let bb: busboy.Busboy;
     try {
@@ -451,11 +488,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const files: { chunks: Buffer[]; contentType: string; bytes: number }[] = [];
     let typeRejected = false;
     let limitHit = false;
+    // Aggregate memory fence: total buffered bytes across the WHOLE request.
+    // Past maxRequestBytes we stop buffering (drain only) and 413 - the
+    // per-file 5MB cap bounds each file, this bounds the batch.
+    let totalBytes = 0;
+    let aggregateHit = false;
     let responded = false;
 
+    // F3 (review hardening, 2026-07-15): finish() is invoked from busboy's
+    // 'close' callback, OUTSIDE Express 5's async-error capture - ANY uncaught
+    // rejection in it (incl. the pre-store units.getById) would write no
+    // response and hang the client (the SF1 class). The inner body keeps its
+    // specific handlers; this wrapper is the catch-all: log + 500 when nothing
+    // has responded yet.
     const finish = async (): Promise<void> => {
       if (responded) return;
       responded = true;
+      try {
+        await finishInner();
+      } catch (err) {
+        log.error({ err, unitId }, 'unit photos: upload finish failed (catch-all)');
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'internal server error' });
+        }
+      }
+    };
+
+    const finishInner = async (): Promise<void> => {
       // (E3) Validation gate - reject the whole request BEFORE any S3 put.
       if (typeRejected) {
         res.status(400).json({ error: 'unsupported_media_type' });
@@ -463,6 +522,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       if (limitHit) {
         res.status(413).json({ error: 'file_too_large' });
+        return;
+      }
+      if (aggregateHit) {
+        // The batch as a whole exceeded the per-request memory fence (the
+        // dashboard's 10-file batches sit well under it - reaching this means
+        // a raw-API caller or a runaway request).
+        res.status(413).json({ error: 'request_too_large' });
         return;
       }
       if (files.length === 0) {
@@ -558,6 +624,16 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // A PassThrough WE own would only matter for streaming-to-store; here we
       // buffer, so read the file stream directly and stop on the size cap.
       fileStream.on('data', (chunk: Buffer) => {
+        // Aggregate memory fence: once the request-wide cap is hit, stop
+        // BUFFERING entirely (keep draining so busboy reaches 'close'); the
+        // request 413s in finish(). Chunk-granularity overshoot is bounded by
+        // one highWaterMark read - negligible against the 60MB cap.
+        totalBytes += chunk.length;
+        if (aggregateHit) return;
+        if (totalBytes > maxRequestBytes) {
+          aggregateHit = true;
+          return;
+        }
         rec.bytes += chunk.length;
         rec.chunks.push(chunk);
       });

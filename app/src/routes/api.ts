@@ -151,6 +151,8 @@ export interface ApiRouterDeps {
    * then answers 404 (nothing is stored locally).
    */
   mediaStore?: MediaStore;
+  /** TEST SEAM: photo-upload memory-fence overrides (units router passthrough). */
+  photoUploadLimits?: { maxRequestBytes?: number; maxConcurrent?: number };
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
   settingsRepo?: SettingsRepo;
@@ -481,6 +483,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       // unit-photos: photo upload (PUT) + display resolution (presign-per-read).
       ...(mediaStore !== undefined && { mediaStore }),
+      // TEST SEAM: override the photo-upload memory fences (413/429 paths).
+      ...(deps.photoUploadLimits !== undefined && { photoUploadLimits: deps.photoUploadLimits }),
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).

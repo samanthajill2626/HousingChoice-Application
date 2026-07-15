@@ -215,3 +215,26 @@ Nothing required (no deps, no schema/GSI, no terraform - the bucket + IAM
 PutObject/GetObject already exist from MMS). Dev-stack restart picks it up.
 Follow-up note added to docs/issues/mms-attach-unit-photos.md (prerequisite
 now exists; its external-URL caveat is obsolete).
+
+## 8. Review hardening ADDENDUM (2026-07-15, independent review)
+
+Three hardenings added during the merge review; the spec text above predates
+them:
+
+- F1 MEMORY FENCES: the E3 validate-then-store buffering this spec mandated
+  bounded ONE request at 5MB x 100 files (~500MB), and the D4 limiter counts
+  per MINUTE, not concurrency - ~30 in-flight requests could hold ~15GB on a
+  2GB box. Added: UNIT_PHOTO_MAX_REQUEST_BYTES (60MB aggregate per request ->
+  413 request_too_large) + UNIT_PHOTO_MAX_CONCURRENT_UPLOADS (3 in flight ->
+  429 too_many_concurrent_uploads, slot released on response close). The
+  dashboard uploads large selections in SEQUENTIAL 10-file batches (each unit
+  state applies per batch; a mid-way failure reports how many uploaded), so a
+  100-photo drag-drop still works end to end.
+- F2 NAMESPACE SCOPING: resolveUnitMedia presigns ONLY keys under the unit's
+  own `unit-media/<unitId>/` prefix; a foreign key (an MMS uploads/ attachment
+  or another unit's photo) pasted into the PATCH-writable `media` degrades to
+  url-absent instead of being presigned onto the PUBLIC flyer.
+- F3 HANG-CLASS CLOSURE: the whole upload finish() body is wrapped in a
+  catch-all (500 when nothing responded) - the builder's SF1 fix guarded the
+  success tail but left the pre-store getById unguarded in the same
+  non-Express-captured callback.

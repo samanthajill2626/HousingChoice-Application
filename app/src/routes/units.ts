@@ -16,9 +16,7 @@
 // PII (doc §9): responses carry full unit docs to the authenticated client;
 // LOG LINES are IDs/counts only.
 import { createHash, randomUUID } from 'node:crypto';
-import { PassThrough, Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import busboy from 'busboy';
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -26,12 +24,7 @@ import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
-import {
-  resolveUnitMedia,
-  UNIT_MEDIA_MAX,
-  UNIT_PHOTO_MAX_CONCURRENT_UPLOADS,
-  UNIT_PHOTO_MAX_REQUEST_BYTES,
-} from '../lib/unitMedia.js';
+import { resolveUnitMedia, UNIT_MEDIA_MAX, unitMediaPrefix } from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -83,13 +76,6 @@ export interface UnitsRouterDeps {
    * url-absent (only legacy absolute URLs carry through).
    */
   mediaStore?: MediaStore;
-  /**
-   * TEST SEAM ONLY (review hardening, 2026-07-15): override the photo-upload
-   * memory fences (defaults: UNIT_PHOTO_MAX_REQUEST_BYTES /
-   * UNIT_PHOTO_MAX_CONCURRENT_UPLOADS) so tests can exercise the 413/429 paths
-   * with tiny values. Production always uses the defaults.
-   */
-  photoUploadLimits?: { maxRequestBytes?: number; maxConcurrent?: number };
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -199,6 +185,15 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
+ * Max presigned-POST grants one /photos/presign request may mint. A UX /
+ * politeness bound (a human picks a handful of files at a time), NOT a memory
+ * bound - the bytes go browser->S3 directly, so the app never buffers them. The
+ * 100-per-unit cap (UNIT_MEDIA_MAX) is the real abuse backstop; this just keeps
+ * a single mint request civil.
+ */
+const UNIT_PHOTO_PRESIGN_BATCH_MAX = 20;
+
+/**
  * BE5/C6: the cap on how many `available` units the similar-properties endpoint
  * will sweep before ranking. The ranker is O(candidates) and the result is a
  * top-N panel, so 500 is a generous bound on a single jurisdiction's open
@@ -261,30 +256,20 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Photo-upload spend/abuse fence (unit-photos D4): the SAME per-user limiter
-  // class as the MMS upload endpoint, 30/min. A cost/abuse backstop on S3 PUTs
-  // (Twilio is uninvolved - uploads only touch S3; A2P pacing applies to sends).
-  // ONE request carries MANY files, so staff never feel it. ONE instance per
-  // router (per-request creation would reset the window). The manage routes
-  // (remove/cover) match the unit PATCH posture: no limiter (design S4).
-  const photoUploadLimiter = createUserRateLimit({
-    routeKey: 'unit_photo_upload',
+  // Presign-mint spend/abuse fence (unit-photos direct-upload R2): the SAME
+  // per-user limiter class as the MMS upload endpoint, 30/min. A cheap fence on
+  // presigned-POST minting (local SigV4, no S3 round trip; the bytes go
+  // browser->S3, never through here - so there is NO memory concern and no
+  // concurrency gate). ONE request mints MANY grants, so staff never feel it.
+  // ONE instance per router (per-request creation would reset the window). The
+  // confirm + manage routes (remove/cover) match the unit PATCH posture: no
+  // limiter (design S4).
+  const photoPresignLimiter = createUserRateLimit({
+    routeKey: 'unit_photo_presign',
     max: 30,
     windowMs: 60_000,
     logger: log,
   });
-
-  // Photo-upload MEMORY fences (review hardening, 2026-07-15). The route
-  // buffers each request's whole batch in memory (E3 validate-then-store), and
-  // the per-minute limiter above gates COUNT, not CONCURRENCY - so without
-  // these two bounds ~30 buffering requests could hold ~500MB each on the one
-  // 2GB app process. See the constants' doc comments for the arithmetic.
-  // Injectable for tests only.
-  const maxRequestBytes = deps.photoUploadLimits?.maxRequestBytes ?? UNIT_PHOTO_MAX_REQUEST_BYTES;
-  const maxConcurrentUploads =
-    deps.photoUploadLimits?.maxConcurrent ?? UNIT_PHOTO_MAX_CONCURRENT_UPLOADS;
-  /** In-flight photo-upload requests on THIS process (released on res close). */
-  let inFlightPhotoUploads = 0;
 
   /** sha256-prefix marker for an entry - audit trails record this, NEVER the key/URL. */
   const entryHash = (entry: string): string =>
@@ -434,230 +419,165 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     res.json({ unit: { ...unit, contacts: await enrichRoster(unit), mediaDisplay } });
   });
 
-  // POST /api/units/:unitId/photos - multipart image upload (one or many files;
-  // unit-photos S2). busboy STREAMING with the per-file 5MB cap (busboy truncates
-  // + emits 'limit'); images only (jpeg/png/gif/webp - NO pdf). VALIDATE-THEN-
-  // STORE (E3): every file's type + size + emptiness is checked BEFORE any S3
-  // put, so an invalid file 400s with nothing stored. Then each valid file is
-  // put under a dedicated `unit-media/<unitId>/<uuid>` key (NEVER the MMS
-  // `uploads/` namespace) and ONE atomic appendMedia commits all new keys - a
-  // mid-batch put failure appends NOTHING (stored objects decay as orphans, the
-  // MMS posture), never a partial append. Behind the D4 per-user limiter.
-  router.post('/:unitId/photos', photoUploadLimiter, (req: AuthedRequest, res) => {
+  // POST /api/units/:unitId/photos/presign  body { count, contentTypes[] }
+  // (unit-photos direct-upload R2). Mints `count` presigned-POST grants so the
+  // BROWSER uploads each file DIRECTLY to S3 - the bytes never touch this
+  // process, so there is no memory fence and no concurrency gate (that whole
+  // class dissolves). Each grant is keyed `unit-media/<unitId>/<uuid>` (a
+  // server-minted uuid; the browser never chooses a key) with a policy pinned
+  // to that file's image Content-Type + the 1..5MB size range. VALIDATE first:
+  // the unit exists + is not deleted (404); count is 1..batch-max; every
+  // contentType is an allowed image type (400); existing + count <= the 100 cap
+  // (400 photo_cap_exceeded - a friendly pre-check; confirm re-guards
+  // atomically). 503 when the store is unconfigured. Behind the presign limiter.
+  router.post('/:unitId/photos/presign', photoPresignLimiter, async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     if (!mediaStore) {
       res.status(503).json({ error: 'media_storage_unavailable' });
       return;
     }
-    // Concurrency gate (memory fence): reject the request BEFORE any body is
-    // buffered when the process already has maxConcurrentUploads in flight.
-    // Released exactly once via res 'close' (fires on success, error, and
-    // client abort alike - leak-proof).
-    if (inFlightPhotoUploads >= maxConcurrentUploads) {
-      log.warn({ unitId, inFlight: inFlightPhotoUploads }, 'unit photos: concurrent-upload gate rejected');
-      res.status(429).json({ error: 'too_many_concurrent_uploads' });
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
       return;
     }
-    inFlightPhotoUploads += 1;
-    res.once('close', () => {
-      inFlightPhotoUploads -= 1;
-    });
-
-    let bb: busboy.Busboy;
-    try {
-      bb = busboy({
-        headers: req.headers,
-        // Per-file 5MB cap (ONE source of truth with the MMS upload); a hard
-        // ceiling on file COUNT at the abuse cap so a runaway request can't
-        // buffer unboundedly (the real existing+incoming cap is re-checked below).
-        // N3 COUPLING: this `files` ceiling is deliberately UNIT_MEDIA_MAX so a
-        // first (media-absent) batch can never exceed the cap - appendMedia's
-        // ConditionExpression short-circuits its size guard when `media` is
-        // absent, so the first batch is bounded ONLY by this limit. Keep them the
-        // same constant; do not lower `files` below the cap.
-        limits: { fileSize: OUTBOUND_MMS_MAX_FILE_BYTES, files: UNIT_MEDIA_MAX },
-      });
-    } catch {
-      res.status(400).json({ error: 'expected_multipart' });
+    const b = body as Record<string, unknown>;
+    const count = b['count'];
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > UNIT_PHOTO_PRESIGN_BATCH_MAX) {
+      res.status(400).json({ error: `count must be an integer 1..${UNIT_PHOTO_PRESIGN_BATCH_MAX}` });
       return;
     }
-
-    // Buffer each accepted file so the WHOLE batch is validated before any put
-    // (E3 "before any put"): the per-file cap bounds each buffer to 5MB, and the
-    // count ceiling above bounds the batch.
-    const files: { chunks: Buffer[]; contentType: string; bytes: number }[] = [];
-    let typeRejected = false;
-    let limitHit = false;
-    // Aggregate memory fence: total buffered bytes across the WHOLE request.
-    // Past maxRequestBytes we stop buffering (drain only) and 413 - the
-    // per-file 5MB cap bounds each file, this bounds the batch.
-    let totalBytes = 0;
-    let aggregateHit = false;
-    let responded = false;
-
-    // F3 (review hardening, 2026-07-15): finish() is invoked from busboy's
-    // 'close' callback, OUTSIDE Express 5's async-error capture - ANY uncaught
-    // rejection in it (incl. the pre-store units.getById) would write no
-    // response and hang the client (the SF1 class). The inner body keeps its
-    // specific handlers; this wrapper is the catch-all: log + 500 when nothing
-    // has responded yet.
-    const finish = async (): Promise<void> => {
-      if (responded) return;
-      responded = true;
-      try {
-        await finishInner();
-      } catch (err) {
-        log.error({ err, unitId }, 'unit photos: upload finish failed (catch-all)');
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'internal server error' });
-        }
-      }
-    };
-
-    const finishInner = async (): Promise<void> => {
-      // (E3) Validation gate - reject the whole request BEFORE any S3 put.
-      if (typeRejected) {
+    const contentTypes = b['contentTypes'];
+    if (!Array.isArray(contentTypes) || contentTypes.length !== count) {
+      res.status(400).json({ error: 'contentTypes must be an array of length count' });
+      return;
+    }
+    // Every requested type must be an allowed image type (jpeg/png/gif/webp) -
+    // the SAME allowlist the display resolution + confirm re-check use.
+    const normalized: string[] = [];
+    for (const ct of contentTypes) {
+      const type = typeof ct === 'string' ? ct.trim().toLowerCase() : '';
+      if (!isImageMediaType(type)) {
         res.status(400).json({ error: 'unsupported_media_type' });
         return;
       }
-      if (limitHit) {
-        res.status(413).json({ error: 'file_too_large' });
-        return;
+      normalized.push(type);
+    }
+
+    // The unit must exist and not be deleted (404) - never mint a grant for a
+    // phantom or a soft-deleted property.
+    const unit = await units.getById(unitId);
+    if (!unit || isDeleted(unit)) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    // 100-photo cap pre-check (D3 abuse backstop). A friendly 400 here; confirm's
+    // atomic appendMedia re-guards it under a race.
+    const existing = Array.isArray(unit.media) ? unit.media.length : 0;
+    if (existing + count > UNIT_MEDIA_MAX) {
+      res.status(400).json({ error: 'photo_cap_exceeded' });
+      return;
+    }
+
+    // Mint one grant per file, each under a fresh server-minted key with the
+    // file's own content-type policy. Minting is local SigV4 - no S3 round trip.
+    const uploads = await Promise.all(
+      normalized.map(async (contentType) => {
+        const key = `${unitMediaPrefix(unitId)}${randomUUID()}`;
+        const post = await mediaStore.createPresignedPost(key, { contentType });
+        return { key, post };
+      }),
+    );
+    log.info({ unitId, count, actor: req.user?.userId }, 'unit photo presign grants minted');
+    res.json({ uploads });
+  });
+
+  // POST /api/units/:unitId/photos/confirm  body { keys[] } (unit-photos
+  // direct-upload R2). Records the keys the browser uploaded directly to S3.
+  // For EACH key, defense in depth: (a) it MUST start with the unit's own
+  // `unit-media/<unitId>/` prefix (rejects a foreign / cross-unit / uploads/
+  // key even though keys are server-minted); (b) HeadObject succeeds (the object
+  // was actually uploaded); (c) the stored Content-Type is an allowed image type
+  // AND the size <= 5MB (re-verify what S3 stored). A key failing any check is
+  // DROPPED with a logged warn (key + unitId only); if NO key survives -> 400.
+  // Survivors are committed via ONE atomic appendMedia - the 100-cap
+  // ConditionExpression re-guards under a race (ConditionalCheckFailed -> 400
+  // photo_cap_exceeded, same shape). Audit unit_photos_added COUNT only. Returns
+  // the updated unit (with mediaDisplay). An ordinary async handler - no busboy,
+  // no callback outside Express's async-error capture, so the F3 hang class
+  // simply does not exist here. 503 when the store is unconfigured.
+  router.post('/:unitId/photos/confirm', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    if (!mediaStore) {
+      res.status(503).json({ error: 'media_storage_unavailable' });
+      return;
+    }
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const rawKeys = (body as Record<string, unknown>)['keys'];
+    if (!Array.isArray(rawKeys) || rawKeys.length === 0) {
+      res.status(400).json({ error: 'keys must be a non-empty array' });
+      return;
+    }
+
+    const ownPrefix = unitMediaPrefix(unitId);
+    const survivors: string[] = [];
+    for (const raw of rawKeys) {
+      const key = typeof raw === 'string' ? raw : '';
+      // (a) prefix scope - defense in depth beyond the minted-key design.
+      if (!key.startsWith(ownPrefix)) {
+        log.warn({ unitId }, 'unit photos confirm: key outside the unit namespace - dropped');
+        continue;
       }
-      if (aggregateHit) {
-        // The batch as a whole exceeded the per-request memory fence (the
-        // dashboard's 10-file batches sit well under it - reaching this means
-        // a raw-API caller or a runaway request).
-        res.status(413).json({ error: 'request_too_large' });
-        return;
+      // (b) the object was actually uploaded; (c) re-check the stored type + size.
+      let head;
+      try {
+        head = await mediaStore.head(key);
+      } catch (err) {
+        log.warn({ err, unitId }, 'unit photos confirm: head failed - key dropped');
+        continue;
       }
-      if (files.length === 0) {
-        res.status(400).json({ error: 'no_files' });
-        return;
+      if (!head) {
+        log.warn({ unitId }, 'unit photos confirm: object missing - key dropped');
+        continue;
       }
-      if (files.some((f) => f.bytes === 0)) {
-        res.status(400).json({ error: 'empty_file' });
-        return;
+      if (!isImageMediaType(head.contentType) || (head.size ?? Infinity) > OUTBOUND_MMS_MAX_FILE_BYTES) {
+        log.warn({ unitId }, 'unit photos confirm: stored type/size re-check failed - key dropped');
+        continue;
       }
-      // The unit must exist and not be deleted (404) - checked after parsing (we
-      // must drain the multipart body regardless); nothing is stored on a miss.
-      const unit = await units.getById(unitId);
-      if (!unit || isDeleted(unit)) {
-        res.status(404).json({ error: 'unit_not_found' });
-        return;
-      }
-      // 100-photo cap (D3: an abuse/runaway BACKSTOP, not a product limit - keys
-      // are ~60B against a 400KB item and presigning is local SigV4; raise it
-      // freely the day someone legitimately hits it). Server-side pre-check for a
-      // clear 400; the atomic appendMedia re-guards it under a race.
-      const existing = Array.isArray(unit.media) ? unit.media.length : 0;
-      if (existing + files.length > UNIT_MEDIA_MAX) {
+      survivors.push(key);
+    }
+
+    if (survivors.length === 0) {
+      res.status(400).json({ error: 'no_valid_photos' });
+      return;
+    }
+
+    let updated: UnitItem;
+    try {
+      updated = await units.appendMedia(unitId, survivors);
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        // The atomic cap re-guard lost a race (a concurrent confirm filled the
+        // unit) or the unit vanished mid-request. Same shape/copy as the
+        // presign pre-check. Nothing partial reaches the client.
+        log.warn({ err, unitId, count: survivors.length }, 'unit photos confirm: append cap re-guard rejected');
         res.status(400).json({ error: 'photo_cap_exceeded' });
         return;
       }
-
-      // Store each file, then ONE atomic append (E3: a put failure -> 5xx, no
-      // append; already-stored objects decay as orphans).
-      const keys: string[] = [];
-      try {
-        for (const f of files) {
-          const key = `unit-media/${unitId}/${randomUUID()}`;
-          await mediaStore.put(key, Readable.from(Buffer.concat(f.chunks)), f.contentType);
-          keys.push(key);
-        }
-      } catch (err) {
-        log.error({ unitId, err, stored: keys.length }, 'unit photos: store put failed (nothing appended)');
-        res.status(502).json({ error: 'upload_failed' });
-        return;
-      }
-
-      // SF1: this success tail runs from `bb.on('close', () => void finish())`,
-      // OUTSIDE Express 5's async-error capture, so any rejection here would hang
-      // the request (no response) rather than 500. Guard it explicitly. The store
-      // puts already committed, so the audit write is BEST-EFFORT (log-and-
-      // continue): a failed trail write must not 500 a request whose photos are
-      // stored (that would tempt a duplicate-append retry). appendMedia + resolve
-      // + json are covered by the outer try: a cap re-guard race throws
-      // ConditionalCheckFailedException (mapped to the same 400 shape the
-      // pre-check uses), anything else is a 500.
-      try {
-        const updated = await units.appendMedia(unitId, keys);
-        try {
-          // PII / doc: COUNT only - never filenames or keys in the audit payload.
-          await audit.append(`units#${unitId}`, 'unit_photos_added', {
-            actor: req.user?.userId,
-            count: keys.length,
-          });
-        } catch (auditErr) {
-          log.error(
-            { err: auditErr, unitId, count: keys.length },
-            'unit photos: audit append failed (best-effort, photos stored)',
-          );
-        }
-        log.info({ unitId, count: keys.length, actor: req.user?.userId }, 'unit photos added via api');
-        const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
-        res.json({ unit: { ...updated, mediaDisplay } });
-      } catch (err) {
-        if (err instanceof ConditionalCheckFailedException) {
-          // The atomic cap re-guard lost a race (a concurrent append filled the
-          // unit past the cap) or the unit vanished mid-request. Same shape/copy
-          // as the pre-check 400. Photos may have decayed as orphans (never
-          // appended); no partial state reaches the client.
-          log.warn({ err, unitId, count: keys.length }, 'unit photos: append cap re-guard rejected');
-          res.status(400).json({ error: 'photo_cap_exceeded' });
-          return;
-        }
-        log.error({ err, unitId, count: keys.length }, 'unit photos: append failed after store');
-        res.status(500).json({ error: 'internal server error' });
-      }
-    };
-
-    bb.on('file', (_name, fileStream, info) => {
-      const type = typeof info.mimeType === 'string' ? info.mimeType.trim().toLowerCase() : '';
-      if (!isImageMediaType(type)) {
-        typeRejected = true;
-        fileStream.resume(); // drain so busboy reaches 'close'
-        return;
-      }
-      const rec = { chunks: [] as Buffer[], contentType: type, bytes: 0 };
-      files.push(rec);
-      // A PassThrough WE own would only matter for streaming-to-store; here we
-      // buffer, so read the file stream directly and stop on the size cap.
-      fileStream.on('data', (chunk: Buffer) => {
-        // Aggregate memory fence: once the request-wide cap is hit, stop
-        // BUFFERING entirely (keep draining so busboy reaches 'close'); the
-        // request 413s in finish(). Chunk-granularity overshoot is bounded by
-        // one highWaterMark read - negligible against the 60MB cap.
-        totalBytes += chunk.length;
-        if (aggregateHit) return;
-        if (totalBytes > maxRequestBytes) {
-          aggregateHit = true;
-          return;
-        }
-        rec.bytes += chunk.length;
-        rec.chunks.push(chunk);
-      });
-      fileStream.on('limit', () => {
-        // Past the 5MB cap (busboy truncates at fileSize + emits this): mark the
-        // whole request rejected and drain the remainder so busboy reaches 'close'.
-        limitHit = true;
-        fileStream.resume();
-      });
+      throw err; // Express 5 forwards async throws to the error handler.
+    }
+    // PII / doc: COUNT only - never filenames or keys in the audit payload.
+    await audit.append(`units#${unitId}`, 'unit_photos_added', {
+      actor: req.user?.userId,
+      count: survivors.length,
     });
-
-    bb.on('error', (err) => {
-      log.error({ err, unitId }, 'unit photos: multipart parse error');
-      if (!responded) {
-        responded = true;
-        res.status(400).json({ error: 'upload_parse_error' });
-      }
-    });
-
-    bb.on('close', () => {
-      void finish();
-    });
-
-    req.pipe(bb);
+    log.info({ unitId, count: survivors.length, actor: req.user?.userId }, 'unit photos confirmed via api');
+    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    res.json({ unit: { ...updated, mediaDisplay } });
   });
 
   // DELETE /api/units/:unitId/photos  body { entry } - drop one media entry

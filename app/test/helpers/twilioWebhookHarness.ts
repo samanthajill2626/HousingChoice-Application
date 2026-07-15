@@ -1964,8 +1964,6 @@ export interface HarnessOptions {
   world?: FakeWorld;
   /** Omit the media store (simulates MEDIA_BUCKET unset). */
   withoutMediaStore?: boolean;
-  /** Photo-upload memory-fence overrides (units router test seam). */
-  photoUploadLimits?: { maxRequestBytes?: number; maxConcurrent?: number };
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
   /** SSE heartbeat override for /api/events tests (default 25s). */
@@ -2087,7 +2085,6 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // streams the stored recording back out of the SAME media store the voice
       // recording callback wrote it into.
       ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
-      ...(opts.photoUploadLimits !== undefined && { photoUploadLimits: opts.photoUploadLimits }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

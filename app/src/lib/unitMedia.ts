@@ -26,26 +26,6 @@ export const UNIT_MEDIA_MAX = 100;
  */
 export const UNIT_MEDIA_PRESIGN_TTL_SECONDS = 3600;
 
-/**
- * Aggregate in-memory bytes ONE photo-upload request may buffer (review
- * hardening, 2026-07-15). The route buffers the whole validated batch before
- * any S3 put (E3), so per-request memory = sum of file sizes; without this cap
- * the bound was 5MB x 100 files = ~500MB per request on a 2GB single-process
- * box. 60MB comfortably fits the dashboard's 10-file upload batches (10 x 5MB
- * = 50MB) while keeping the per-request worst case small.
- */
-export const UNIT_PHOTO_MAX_REQUEST_BYTES = 60 * 1024 * 1024;
-
-/**
- * Concurrent photo-upload REQUESTS the app process admits (review hardening,
- * 2026-07-15). The 30/min per-user limiter counts requests per MINUTE, not
- * concurrency - without this gate ~30 buffering uploads could be in flight at
- * once (30 x 60MB = 1.8GB, i.e. the whole t4g.small). 3 concurrent x 60MB caps
- * photo-upload memory at ~180MB while never queueing a human (the dashboard
- * uploads batches SEQUENTIALLY, so one operator occupies one slot).
- */
-export const UNIT_PHOTO_MAX_CONCURRENT_UPLOADS = 3;
-
 /** The prefix all stored (non-URL) media entries for a unit must live under. */
 export function unitMediaPrefix(unitId: string): string {
   return `unit-media/${unitId}/`;

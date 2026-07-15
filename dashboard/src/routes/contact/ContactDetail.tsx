@@ -650,6 +650,11 @@ export function ContactDetail(): React.JSX.Element {
       {schedulingTour ? (
         <ScheduleTourForm
           tenantId={contact.contactId}
+          // Continue from the latest send: pre-commit the unit side to the most
+          // recent "Properties sent" row (rows arrive newest-first by sentAt).
+          initialUnitId={
+            file.listingsSent.status === 'ready' ? file.listingsSent.rows[0]?.unitId : undefined
+          }
           onClose={() => setSchedulingTour(false)}
           onCreated={(t) => {
             setSchedulingTour(false);

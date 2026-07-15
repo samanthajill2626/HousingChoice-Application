@@ -6,7 +6,9 @@
 //
 // A pre-filled tenant side (tenantId prop set) renders LOCKED read-only (the
 // caller already knows the tenant — the tenant file's Tours card sets it); the
-// unit side stays an editable typeahead. Mirrors PlacementCreateForm.
+// unit side stays an editable typeahead. Mirrors PlacementCreateForm. The unit
+// side can be pre-COMMITTED via initialUnitId (the tenant file passes the last
+// property SENT) — one Clear click returns it to free search.
 //
 // Navigation lives in the entry points: on a 201 the form calls onCreated and
 // the caller closes + navigates (parity with PlacementCreateForm). The form
@@ -39,7 +41,7 @@ import {
   ContactSearchField,
   type ContactSearchValue,
 } from '../contact/ContactSearchField.js';
-import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
+import { UnitSearchField, unitLabel, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
 import { tourTimeWarning } from './tourTime.js';
 import styles from './ScheduleTourForm.module.css';
@@ -47,6 +49,12 @@ import styles from './ScheduleTourForm.module.css';
 export interface ScheduleTourFormProps {
   /** Pre-fill + lock the tenant side. */
   tenantId?: string;
+  /** Pre-COMMIT the unit side to this unit once the roster loads (the tenant
+   *  file passes the LAST property sent to this tenant, so scheduling continues
+   *  the conversation). Same committed state as a hand pick — Clear is one
+   *  click. Ignored when the unit is missing from the roster or the staff
+   *  member already typed/picked. */
+  initialUnitId?: string;
   onClose: () => void;
   onCreated: (tour: Tour) => void;
 }
@@ -101,6 +109,7 @@ function tenantLabel(c: Contact): string {
 
 export function ScheduleTourForm({
   tenantId,
+  initialUnitId,
   onClose,
   onCreated,
 }: ScheduleTourFormProps): React.JSX.Element {
@@ -164,6 +173,19 @@ export function ScheduleTourForm({
         const page = await getUnits({}, ac.signal);
         if (ac.signal.aborted) return;
         setUnits(page.units);
+        // Pre-commit the unit side to the caller's suggestion — but only while
+        // the field is still untouched (the functional update guards against a
+        // pick/typing that landed before this fetch resolved).
+        if (initialUnitId !== undefined) {
+          const hit = page.units.find((u) => u.unitId === initialUnitId);
+          if (hit !== undefined) {
+            setUnitPick((prev) =>
+              prev.label === '' && prev.unitId === undefined
+                ? { label: unitLabel(hit), unitId: hit.unitId }
+                : prev,
+            );
+          }
+        }
       } catch {
         // Non-fatal.
       }
@@ -182,7 +204,7 @@ export function ScheduleTourForm({
     }
 
     return () => ac.abort();
-  }, [tenantId]);
+  }, [tenantId, initialUnitId]);
 
   // ── Prefill tourType from the picked unit's tour_process. ──
   //    Only auto-derive when the staff member hasn't manually overridden.

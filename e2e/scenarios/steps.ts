@@ -1440,10 +1440,25 @@ export class Scenario {
       // The tenant side is pre-filled + LOCKED (the dialog was opened from the
       // tenant's file); the unit side is a typeahead over the property roster.
       await expect(dialog.getByRole('group', { name: 'Tenant' })).toBeVisible();
-      await dialog.getByRole('combobox', { name: 'Unit' }).fill(unit.addressLine1);
-      await dialog
-        .getByRole('option', { name: new RegExp(escapeRegExp(unit.addressLine1)) })
-        .click();
+      // The unit side may arrive PRE-COMMITTED to the last property sent to
+      // this tenant (the continue-the-conversation prefill) - in the Sending
+      // Unit scenario that's exactly the unit being toured. The commit lands
+      // async (after the dialog's roster fetch), so a bare fill() races it:
+      // retry the whole resolve block until the field is settled either way.
+      const unitBox = dialog.getByRole('combobox', { name: 'Unit' });
+      const clearUnit = dialog.getByRole('button', { name: 'Clear Unit' });
+      await expect(async () => {
+        if (await clearUnit.isVisible()) {
+          // Pre-committed. Keep it when it already names this unit (the
+          // prefill working as designed); otherwise clear to free search.
+          if ((await unitBox.inputValue()).includes(unit.addressLine1)) return;
+          await clearUnit.click();
+        }
+        await unitBox.fill(unit.addressLine1, { timeout: 2_000 });
+        await dialog
+          .getByRole('option', { name: new RegExp(escapeRegExp(unit.addressLine1)) })
+          .click({ timeout: 2_000 });
+      }).toPass({ timeout: 15_000 });
       await dialog.getByLabel('Tour type').selectOption({ label: tourType });
       // 'Date and time' stays EMPTY — "Leave empty to create the tour without a
       // time — book it later." (the diagram's timeless create).

@@ -358,6 +358,36 @@ describe('ContactDetail', () => {
     expect(within(dialog).getByRole('combobox', { name: 'Tour type' })).toBeInTheDocument();
   });
 
+  it('the Schedule-a-tour dialog pre-commits the Unit to the LAST property sent', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getUnits.mockResolvedValue({
+      nextCursor: null,
+      units: [
+        { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
+        { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
+      ],
+    });
+    // The listings-sent wire order is newest-first by sentAt: u2 is the most
+    // recent send, so the dialog should pre-commit to u2's address.
+    getContactListingsSent.mockResolvedValue([
+      { contactId: 'k1', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast' },
+      { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast' },
+    ]);
+    renderAt('k1');
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Schedule a tour' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() =>
+      expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toHaveValue('88 Sycamore St'),
+    );
+    // Committed like a hand pick — one Clear click returns to free search.
+    expect(within(dialog).getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
+  });
+
   it('the "Schedule a tour" action is NOT shown for a landlord contact', async () => {
     getContact.mockResolvedValue(LANDLORD);
     renderAt('L1');

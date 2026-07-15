@@ -364,7 +364,66 @@ describe('ScheduleTourForm', () => {
     expect(screen.getByRole('button', { name: /^Schedule$/ })).toBeEnabled();
   });
 
-  // ── 11: Cancel closes without creating ──
+  // ── 11: initialUnitId pre-commits the unit side once the roster loads ──
+  it('initialUnitId pre-commits the Unit typeahead (read-only + Clear) and derives the tour type', async () => {
+    setup({ tenantId: 'contact-tenant-0001', initialUnitId: 'unit-0001' });
+
+    const unitBox = screen.getByRole('combobox', { name: 'Unit' });
+    await waitFor(() => expect(unitBox).toHaveValue('1450 Joseph E. Boone Blvd NW, Atlanta, GA'));
+    // Committed like a hand pick: read-only + a Clear affordance.
+    expect(unitBox).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
+    // Tour type derives from the pre-committed unit's tour_process ("landlord").
+    expect(screen.getByRole('combobox', { name: 'Tour type' })).toHaveValue('landlord_led');
+    // Both sides resolved -> ready to submit straight away.
+    expect(screen.getByRole('button', { name: /^Schedule$/ })).toBeEnabled();
+  });
+
+  // ── 11a: the pre-committed unit rides the create body without any typing ──
+  it('a pre-committed unit rides the create body without any typing', async () => {
+    const user = userEvent.setup();
+    createTour.mockResolvedValue(newTour({ unitId: 'unit-0001', tourType: 'landlord_led' }));
+    setup({ tenantId: 'contact-tenant-0001', initialUnitId: 'unit-0001' });
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue(
+        '1450 Joseph E. Boone Blvd NW, Atlanta, GA',
+      ),
+    );
+    await user.click(screen.getByRole('button', { name: /^Schedule$/ }));
+    await waitFor(() =>
+      expect(createTour).toHaveBeenCalledWith(
+        expect.objectContaining({ unitId: 'unit-0001', tourType: 'landlord_led' }),
+      ),
+    );
+  });
+
+  // ── 11b: Clear returns the pre-committed unit to free search ──
+  it('Clear returns the pre-committed unit to free search (a different unit can be picked)', async () => {
+    const user = userEvent.setup();
+    setup({ tenantId: 'contact-tenant-0001', initialUnitId: 'unit-0001' });
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue(
+        '1450 Joseph E. Boone Blvd NW, Atlanta, GA',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Clear Unit' }));
+    expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue('');
+    await pickUnit(user, 'Sycamore', /88 Sycamore St/);
+    expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue('88 Sycamore St, Decatur, GA');
+  });
+
+  // ── 11c: an initialUnitId missing from the roster is ignored ──
+  it('an initialUnitId missing from the roster is ignored (field stays free-typing empty)', async () => {
+    setup({ tenantId: 'contact-tenant-0001', initialUnitId: 'unit-gone' });
+    // Wait on the locked tenant label so the mount fetches have settled.
+    expect(await screen.findByRole('group', { name: 'Tenant' })).toHaveTextContent('Tasha Nguyen');
+    expect(screen.getByRole('combobox', { name: 'Unit' })).toHaveValue('');
+    expect(screen.queryByRole('button', { name: 'Clear Unit' })).toBeNull();
+  });
+
+  // ── 12: Cancel closes without creating ──
   it('Cancel calls onClose without creating anything', async () => {
     const user = userEvent.setup();
     const { onClose } = setup({ tenantId: 'contact-tenant-0001' });

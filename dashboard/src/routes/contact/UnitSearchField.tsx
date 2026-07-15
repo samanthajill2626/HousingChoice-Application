@@ -25,8 +25,10 @@ export interface UnitSearchFieldProps {
 }
 
 /** The display label for a unit — its formatted address, falling back to the
- *  unitId when the address is empty (so an option is never blank). */
-function unitLabel(u: UnitItem): string {
+ *  unitId when the address is empty (so an option is never blank). Exported so
+ *  callers pre-committing a pick (ScheduleTourForm's initialUnitId) produce the
+ *  EXACT label a hand pick would. */
+export function unitLabel(u: UnitItem): string {
   const addr = formatAddress(u.address);
   return addr || u.unitId;
 }

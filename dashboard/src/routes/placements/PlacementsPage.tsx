@@ -156,7 +156,7 @@ export function PlacementsPage(): React.JSX.Element {
       <div className={styles.header}>
         <h1 className={styles.title}>Placements</h1>
         <Button variant="primary" size="sm" type="button" onClick={() => setCreateOpen(true)}>
-          New placement
+          + New placement
         </Button>
       </div>
 

@@ -49,13 +49,14 @@ export function filterSearch(filter: LedgerFilter): string {
 }
 
 /** One placement, resolved for display. tenant/listing are the same strings the
- *  row renders, so search matches exactly what staff see. */
+ *  row renders, so search matches exactly what staff see. (The old board's
+ *  tenant-status badge was DROPPED 2026-07-15 - on active rows the tenant is
+ *  always 'placing', so it read as a stuck duplicate of the page itself.) */
 export interface LedgerRow {
   placement: PlacementItem;
   tenant: string;
   listing: string;
   porting: boolean;
-  tenantStatus?: string;
 }
 
 /** A renderable section: phase is set (with a heading) only in the all-view;
@@ -78,13 +79,11 @@ function isClosedRow(c: PlacementItem): boolean {
 }
 
 function rowOf(c: PlacementItem, contacts: Map<string, Contact>, units: Map<string, UnitItem>): LedgerRow {
-  const status = contacts.get(c.tenantId)?.status;
   return {
     placement: c,
     tenant: tenantName(contacts, c.tenantId),
     listing: listingAddress(units, c.unitId),
     porting: isPorting(contacts, c.tenantId),
-    ...(status !== undefined && { tenantStatus: status }),
   };
 }
 

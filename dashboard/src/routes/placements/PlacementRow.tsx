@@ -7,7 +7,6 @@
 // retired on this page.
 import { Link } from 'react-router-dom';
 import { STAGE_LABELS } from '../../api/index.js';
-import { StatusBadge } from '../../ui/index.js';
 import { DeadlineChip } from './DeadlineChip.js';
 import { shortDate } from './placementsFormat.js';
 import type { LedgerRow } from './pageModel.js';
@@ -52,7 +51,6 @@ export function PlacementRow({ row, pending = false, menu }: PlacementRowProps):
         <span className={styles.stage}>{stageLabel}</span>
         {tourDate ? <span className={styles.metaItem}>Tour {tourDate}</span> : null}
         <DeadlineChip placement={placement} />
-        {row.tenantStatus ? <StatusBadge kind="tenant" status={row.tenantStatus} /> : null}
       </div>
       {menu !== undefined && menu !== null ? <div className={styles.actions}>{menu}</div> : null}
     </li>

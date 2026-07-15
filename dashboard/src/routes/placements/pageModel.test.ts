@@ -75,7 +75,6 @@ describe('buildLedger', () => {
     expect(groups[0]!.rows.map((r) => r.placement.placementId)).toEqual(['a']);
     expect(groups[0]!.rows[0]!.tenant).toBe('Tasha Nguyen');
     expect(groups[0]!.rows[0]!.listing).toBe('12 Oak St');
-    expect(groups[0]!.rows[0]!.tenantStatus).toBe('placing');
     expect(groups[1]!.rows[0]!.porting).toBe(true);
   });
 

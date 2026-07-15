@@ -959,6 +959,13 @@ export function createFakeWorld(): FakeWorld {
         created_at: typeof input.created_at === 'string' ? input.created_at : now,
         updated_at: now,
       };
+      // null -> attribute ABSENT on create (mirror the real repo's create strip;
+      // keeps create/update clear semantics symmetric).
+      for (const key of Object.keys(item)) {
+        if ((item as Record<string, unknown>)[key] === null) {
+          delete (item as Record<string, unknown>)[key];
+        }
+      }
       units.set(item.unitId, item);
       return item;
     },

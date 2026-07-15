@@ -391,6 +391,30 @@ describe('PATCH /api/units/:unitId', () => {
     });
   });
 
+  it('CREATE stores a valid tour_type, and a "" clear-on-create leaves it ABSENT (not null)', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    // A real tour_type on create is stored.
+    const withType = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-9', tour_type: 'pm_team' });
+    expect(withType.status).toBe(201);
+    expect(withType.body.unit.tour_type).toBe('pm_team');
+
+    // A cleared tour_type on create (raw-API edge) is ABSENT, never a null
+    // attribute -> create/update clear semantics stay symmetric.
+    const cleared = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-9', tour_type: '' });
+    expect(cleared.status).toBe(201);
+    expect('tour_type' in cleared.body.unit).toBe(false);
+    expect(world.units.get(cleared.body.unit.unitId)).not.toHaveProperty('tour_type');
+  });
+
   it('REFUSES status via CRUD PATCH (§8: status routes through listing-status)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { status: 'available' });

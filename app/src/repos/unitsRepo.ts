@@ -400,6 +400,15 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         created_at: createdAt,
         updated_at: now,
       };
+      // A null field value is the "clear" sentinel (see update's REMOVE below);
+      // on create it means the attribute is simply absent, so drop it rather
+      // than storing a literal NULL. Keeps create/update clear semantics
+      // symmetric (a cleared optional field is ABSENT, never a null attribute).
+      for (const key of Object.keys(item)) {
+        if ((item as Record<string, unknown>)[key] === null) {
+          delete (item as Record<string, unknown>)[key];
+        }
+      }
       await doc.send(
         new PutCommand({
           TableName: table,

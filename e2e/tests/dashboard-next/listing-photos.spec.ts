@@ -77,6 +77,20 @@ async function uploadPhoto(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: '+ Add' })).toBeEnabled({ timeout: 20_000 });
 }
 
+/**
+ * Activate a per-thumbnail hover-action button (Make cover / Remove) via the
+ * KEYBOARD path. The action bar reveals on `:hover` OR `:focus-within` and, once
+ * revealed, overlaps the thumbnail center with `pointer-events: none` until
+ * shown - so a mouse `.click()` hits a hit-test catch-22 (the img intercepts).
+ * Focusing the button (which `:focus-within` reveals, unblocked by opacity/
+ * pointer-events) then pressing Enter is what a keyboard user does and avoids the
+ * pointer hit-test entirely - honest AND stable.
+ */
+async function activateThumbAction(button: Locator): Promise<void> {
+  await button.focus();
+  await button.press('Enter');
+}
+
 /** Poll an <img> until it has actually decoded bytes (naturalWidth > 0). */
 async function expectLoadedBytes(img: Locator, message: string): Promise<void> {
   await expect(img).toBeVisible({ timeout: 20_000 });
@@ -122,7 +136,7 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
       page.getByRole('img', { name: 'Property photo 2' }),
       'the second thumbnail never loaded bytes',
     );
-    await page.getByRole('button', { name: 'Make property photo 2 the cover' }).click();
+    await activateThumbAction(page.getByRole('button', { name: 'Make property photo 2 the cover' }));
     await expect
       .poll(async () => srcKeyPath(hero), {
         timeout: 20_000,
@@ -134,7 +148,7 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
 
     // (3) Remove one photo (confirmed) -> the gallery drops from 2 thumbs to 1.
     await expect(page.getByRole('img', { name: /^Property photo \d+$/ })).toHaveCount(2);
-    await page.getByRole('button', { name: 'Remove property photo 2' }).click();
+    await activateThumbAction(page.getByRole('button', { name: 'Remove property photo 2' }));
     const removeDialog = page.getByRole('dialog', { name: 'Remove photo?' });
     await expect(removeDialog).toBeVisible();
     await removeDialog.getByRole('button', { name: 'Remove', exact: true }).click();

@@ -214,7 +214,8 @@ export class Scenario {
    *  group fields fill in when teamOpensTourGroup provisions the masked relay. */
   private activeTour: { tourId: string; poolNumber?: string; groupThreadId?: string } | null = null;
   /** The placement the Post-Tour & Application scenario is driving (set by
-   *  teamConvertsTourToPlacement — the conversion of the active tour). */
+   *  teamRecordsExitGate('yes') — the exit gate converts the active tour and
+   *  lands on the new placement in the same step). */
   private activePlacementId: string | null = null;
   private readonly registered = new Set<string>();
 
@@ -1910,11 +1911,14 @@ export class Scenario {
 
   /** [Team, MANUAL] Record the exit-gate decision on the toured tour via the
    *  header 'Record outcome' primary CTA -> the Record-outcome modal. The radio
-   *  labels are ASCII hyphen ('Yes - move forward' / 'No - not a fit'). */
+   *  labels are ASCII hyphen ('Yes - move forward' / 'No - not a fit').
+   *  YES flows STRAIGHT into the placement (2026-07-15): the app records the
+   *  outcome, converts via POST /placements/from-tour in the same step, and
+   *  lands on the NEW placement - captured as the scenario's active placement.
+   *  NO stays on the tour page (outcome recorded + tour closed, one PATCH). */
   teamRecordsExitGate(decision: 'yes' | 'no'): Promise<void> {
     const tour = this.requireActiveTour();
     const radio = decision === 'yes' ? 'Yes - move forward' : 'No - not a fit';
-    const outcomeLabel = decision === 'yes' ? 'Move forward' : 'Not a fit';
     return step(`Team records the exit gate -> ${radio}`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
       await this.page.getByRole('button', { name: 'Record outcome' }).click();
@@ -1923,10 +1927,18 @@ export class Scenario {
       await form.getByRole('radio', { name: radio }).check();
       // Save sits in the modal FOOTER (outside the <form>), so scope to the page.
       await this.page.getByRole('button', { name: 'Save decision' }).click();
-      // Wait for the modal to CLOSE first (it closes only on a successful PATCH);
-      // getByText substring-matches, so reading the outcome label while the modal
-      // is still open would match the radio's own text and pass BEFORE the save
-      // landed (a race seen live on the old page).
+      if (decision === 'yes') {
+        // Move forward = record + convert + land on the placement, one step.
+        await this.page.waitForURL(/\/placements\/[^/?#]+$/, { timeout: 10_000 });
+        const m = /\/placements\/([^/?#]+)/.exec(this.page.url());
+        if (!m) throw new Error('teamRecordsExitGate: expected a /placements/:id URL after a YES gate');
+        this.activePlacementId = decodeURIComponent(m[1]!);
+        return;
+      }
+      // NO: wait for the modal to CLOSE first (it closes only on a successful
+      // PATCH); getByText substring-matches, so reading the outcome label while
+      // the modal is still open would match the radio's own text and pass BEFORE
+      // the save landed (a race seen live on the old page).
       await expect(this.page.getByRole('form', { name: 'Record outcome form' })).toHaveCount(0, {
         timeout: 10_000,
       });
@@ -1934,32 +1946,34 @@ export class Scenario {
       const outcomeCard = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Outcome' }) });
-      await expect(outcomeCard.getByText(outcomeLabel)).toBeVisible();
+      await expect(outcomeCard.getByText('Not a fit')).toBeVisible();
     });
   }
 
-  /** [App] Exit gate YES: the tour is CONVERTIBLE (API) and Team SEES the
-   *  convertible row — and NOTHING ELSE moved (no placement, tenant untouched
-   *  — asserted separately via expectNoPlacement/expectTenantStillSearching). */
-  expectTourConvertible(): Promise<void> {
+  /** [App] Exit gate YES auto-converted: the tour records move_forward AND is
+   *  ALREADY converted (convertedPlacementId = the placement the gate landed
+   *  on) - recording the decision IS the start-placement step. Team SEES the
+   *  converted state on the tour page: the Outcome card shows Move forward +
+   *  the "View the placement" link (no Start placement button remains). */
+  expectTourAutoConverted(): Promise<void> {
     const tour = this.requireActiveTour();
-    return step('App: the tour is convertible (ready for Post-Tour & Application)', async () => {
+    const placementId = this.requireActivePlacementId();
+    return step('App: the YES gate converted the tour into the placement', async () => {
       const res = await this.page.request.get(`${NEXT}/api/tours/${tour.tourId}`);
       expect(res.ok()).toBeTruthy();
       const { tour: t } = (await res.json()) as {
-        tour: { convertible?: boolean; outcome?: string; moveForward?: boolean };
+        tour: { outcome?: string; moveForward?: boolean; convertedPlacementId?: string };
       };
       expect(t.outcome).toBe('move_forward');
       expect(t.moveForward).toBe(true);
-      expect(t.convertible).toBe(true);
-      // Team SEES the convertible state on the page: the Outcome card shows the
-      // move-forward outcome + a [Start placement] action (not yet converted).
+      expect(t.convertedPlacementId).toBe(placementId);
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
       const outcomeCard = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Outcome' }) });
       await expect(outcomeCard.getByText('Move forward')).toBeVisible();
-      await expect(outcomeCard.getByRole('button', { name: 'Start placement' })).toBeVisible();
+      await expect(outcomeCard.getByRole('link', { name: 'View the placement' })).toBeVisible();
+      await expect(outcomeCard.getByRole('button', { name: 'Start placement' })).toHaveCount(0);
     });
   }
 
@@ -1998,8 +2012,9 @@ export class Scenario {
     });
   }
 
-  /** [App] NO placement was created by any tour move (conversion belongs to
-   *  Post-Tour & Application, a separate downstream sequence). */
+  /** [App] NO placement exists for the tenant. (Pre-conversion moves never
+   *  create one; since 2026-07-15 the YES exit gate DOES convert, so this
+   *  only holds before the gate or after a NO gate.) */
   expectNoPlacement(): Promise<void> {
     const id = this.requireActiveContactId();
     return step('App: no placement exists for the tenant', async () => {
@@ -2168,32 +2183,10 @@ export class Scenario {
   //     placement-nudge tick (POST /__dev/placement-nudges/tick) is GLOBAL — like
   //     the tour tick, assertions scope to THIS scenario's phones.
 
-  /**
-   * [Team, MANUAL] Convert the active CONVERTIBLE tour into a placement — drives
-   * the REAL TourDetail "Start placement" button, which POSTs
-   * /api/placements/from-tour and navigates to the new placement. QUIET: the
-   * server sends no announcement at convert time (founder 2026-07-02). Captures
-   * the new placementId (from the URL) as the scenario's active placement.
-   */
-  teamConvertsTourToPlacement(): Promise<string> {
-    const tour = this.requireActiveTour();
-    return step('Team converts the tour into a placement (Start placement)', async () => {
-      await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      // A convertible tour shows TWO "Start placement" buttons (header CTA + the
-      // Outcome-card action); both call the same convert handler. .first() = the
-      // header CTA.
-      await this.page
-        .getByRole('button', { name: 'Start placement' })
-        .first()
-        .click();
-      await this.page.waitForURL(/\/placements\/[^/?#]+$/, { timeout: 10_000 });
-      const m = /\/placements\/([^/?#]+)/.exec(this.page.url());
-      if (!m) throw new Error('teamConvertsTourToPlacement: expected a /placements/:id URL after convert');
-      const placementId = decodeURIComponent(m[1]!);
-      this.activePlacementId = placementId;
-      return placementId;
-    });
-  }
+  // (teamConvertsTourToPlacement was RETIRED 2026-07-15: the YES exit gate
+  // converts in the same step - teamRecordsExitGate('yes') captures the new
+  // placement. The standalone "Start placement" CTA still exists in the app
+  // for API-recorded outcomes / conversion-retry, but no scenario reaches it.)
 
   /**
    * [Team, MANUAL] Move the placement to `stageLabel` (the STAGE_LABELS display
@@ -2939,6 +2932,12 @@ export class Scenario {
     return this.requireActiveContactId();
   }
 
+  /** The active placement's id (captured by teamRecordsExitGate('yes') — the
+   *  exit gate converts the tour and lands on the new placement). */
+  placementId(): string {
+    return this.requireActivePlacementId();
+  }
+
   /**
    * [App→Team] A not-yet-sent scheduled send is PINNED in the contact's "Upcoming
    * scheduled messages" region: exactly one card whose body contains
@@ -3186,7 +3185,7 @@ export class Scenario {
 
   private requireActivePlacementId(): string {
     if (!this.activePlacementId)
-      throw new Error('no active placement — call teamConvertsTourToPlacement first');
+      throw new Error("no active placement — call teamRecordsExitGate('yes') first");
     return this.activePlacementId;
   }
 

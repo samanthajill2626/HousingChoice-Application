@@ -35,8 +35,9 @@ text — is **deferred**; the relay continues for now, per founder 2026-07-02.)
 
 ## Where this sits
 
-- **Upstream:** the **Tours** sequence ends at the exit gate — a tour marked
-  `move_forward` / convertible. That is this sequence's entry.
+- **Upstream:** the **Tours** sequence ends at the exit gate — which (since
+  2026-07-15) converts in the same step, so this sequence's entry state is the
+  freshly created placement (born at `Send application`).
 - **The spine:** the placement and its stage ladder (`statusModel.ts`,
   `documentation/STATUS-MODEL.md`). Stages name the *next outstanding action*.
   This sequence walks the **Application** block (`Send application` →

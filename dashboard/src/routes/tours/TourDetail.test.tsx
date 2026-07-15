@@ -425,11 +425,15 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     );
   });
 
-  it('Record outcome "Yes - move forward" PATCHes { outcome, moveForward }', async () => {
+  it('Record outcome "Yes - move forward" PATCHes the decision then flows STRAIGHT into the placement', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'toured' }));
     patchTour.mockResolvedValue(
       makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
     );
+    createPlacementFromTour.mockResolvedValue({
+      placement: { placementId: 'plc-auto' },
+      tour: makeTour({ status: 'closed', convertedPlacementId: 'plc-auto' }),
+    });
     renderDetail();
     await waitLoaded();
     await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
@@ -437,9 +441,33 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
     await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { outcome: 'move_forward', moveForward: true });
+    // Recording move-forward IS the start-placement step - no second click.
+    await waitFor(() => expect(createPlacementFromTour).toHaveBeenCalledWith('tour-abc'));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-auto'));
   });
 
-  it('Record outcome "No - not a fit" ALSO closes the tour', async () => {
+  it('move-forward with a failing conversion: outcome saved, modal closes, alert shows, no navigation', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockRejectedValue(new ApiError(500, 'convert_failed', 'convert_failed'));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    // The outcome PATCH landed and the modal closed (the decision IS saved) -
+    // a conversion failure must not re-open it.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The failure surfaces in the header alert; no navigation. The tour is
+    // convertible, so "Start placement" remains as the retry path.
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/convert_failed/i));
+    expect(navigateSpy).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('button', { name: 'Start placement' }).length).toBeGreaterThan(0);
+  });
+
+  it('Record outcome "No - not a fit" ALSO closes the tour and never converts', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'toured' }));
     patchTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
     renderDetail();
@@ -452,6 +480,7 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
       moveForward: false,
       status: 'closed',
     });
+    expect(createPlacementFromTour).not.toHaveBeenCalled();
   });
 });
 

@@ -235,7 +235,7 @@ export function RecordOutcomeModal({
           </label>
         </fieldset>
         <p className={styles.modalHint}>
-          Moving forward starts a placement; not a fit closes the tour.
+          Moving forward starts the placement right away; not a fit closes the tour.
         </p>
         {error !== null ? (
           <p role="alert" className={styles.modalError}>

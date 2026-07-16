@@ -13,6 +13,8 @@
 // trade-off since the bytes are already authed-staff-only. SVG / HTML / XHTML stay
 // DELIBERATELY EXCLUDED — they DO run script on top-level navigation. Pure, no I/O.
 
+import { PASSTHROUGH_MAX_BYTES } from './outboundMediaLimits.js';
+
 /**
  * The raster image Content-Types (the single source of truth for "is an image").
  * Property-photo uploads (routes/units.ts) allow EXACTLY these - narrower than
@@ -53,4 +55,44 @@ export function isImageMediaType(type: string | undefined): boolean {
  */
 export function normalizeStoredMediaType(raw: string | undefined): string {
   return isInlineMediaType(raw) ? raw!.trim().toLowerCase() : 'application/octet-stream';
+}
+
+/**
+ * The Twilio-carrier-deliverable MMS image types. Narrower than IMAGE_MEDIA_TYPES
+ * (which includes webp): Twilio rejects a non-deliverable Content-Type with error
+ * 12300. Everything sent to Twilio must be in THIS set.
+ */
+export const TWILIO_DELIVERABLE_MMS_TYPES: ReadonlySet<string> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+]);
+
+/** True when `type` is a Twilio-deliverable MMS type (case-insensitive). */
+export function isTwilioDeliverableType(type: string | undefined): boolean {
+  return typeof type === 'string' && TWILIO_DELIVERABLE_MMS_TYPES.has(type.trim().toLowerCase());
+}
+
+/** What confirm must do with an uploaded source file to make it MMS-deliverable. */
+export type MmsMediaPlan = 'deliver' | 'transcode-image' | 'transcode-pdf' | 'reject';
+
+/**
+ * Decide an uploaded file's fate from its Content-Type + size ALONE (no download):
+ *  - pdf                      -> rasterize page 1 (transcode-pdf)
+ *  - gif                      -> pass through (preserves animation; gif is deliverable)
+ *  - small jpeg/png           -> pass through (no needless re-encode)
+ *  - webp / oversized jpeg-png-> transcode-image (auto-fit to a deliverable jpeg)
+ *  - anything else            -> reject (unreachable; the upload allowlist gates first)
+ * The GUARDRAIL test pins that every uploadable type maps to a non-reject plan, so a
+ * future uploadable type that Twilio cannot carry fails CI until given a branch.
+ */
+export function planMmsMedia(sourceType: string, sizeBytes: number): MmsMediaPlan {
+  const t = sourceType.trim().toLowerCase();
+  if (t === 'application/pdf') return 'transcode-pdf';
+  if (t === 'image/gif') return 'deliver';
+  if (t === 'image/webp') return 'transcode-image';
+  if (t === 'image/jpeg' || t === 'image/png') {
+    return sizeBytes <= PASSTHROUGH_MAX_BYTES ? 'deliver' : 'transcode-image';
+  }
+  return 'reject';
 }

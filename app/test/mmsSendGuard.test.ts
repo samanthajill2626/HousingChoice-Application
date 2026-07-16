@@ -17,10 +17,30 @@ describe('resolveAttachmentKeys deliverable guard', () => {
     const s = store({ 'uploads/bbbbbbbb-0000-0000-0000-000000000000': { contentType: 'image/jpeg', size: 100 } });
     const out = await resolveAttachmentKeys(
       ['uploads/bbbbbbbb-0000-0000-0000-000000000000'],
-      ['uploads/orig-0000-0000-0000-000000000000'],
+      ['uploads/0e161000-0000-0000-0000-000000000000'],
       s,
     );
     expect(out.ok).toBe(true);
-    if (out.ok) expect(out.attachments[0]).toMatchObject({ s3Key: 'uploads/bbbbbbbb-0000-0000-0000-000000000000', contentType: 'image/jpeg', originalKey: 'uploads/orig-0000-0000-0000-000000000000' });
+    if (out.ok) expect(out.attachments[0]).toMatchObject({ s3Key: 'uploads/bbbbbbbb-0000-0000-0000-000000000000', contentType: 'image/jpeg', originalKey: 'uploads/0e161000-0000-0000-0000-000000000000' });
+  });
+  it('rejects a forged originalKey outside the own uploads/ prefix', async () => {
+    const s = store({ 'uploads/bbbbbbbb-0000-0000-0000-000000000000': { contentType: 'image/jpeg', size: 100 } });
+    const out = await resolveAttachmentKeys(
+      ['uploads/bbbbbbbb-0000-0000-0000-000000000000'],
+      ['media/other-conversation/SMx/0'],
+      s,
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toBe('invalid_attachment_key');
+  });
+  it('rejects originalKeys that are not index-aligned with keys', async () => {
+    const s = store({ 'uploads/bbbbbbbb-0000-0000-0000-000000000000': { contentType: 'image/jpeg', size: 100 } });
+    const out = await resolveAttachmentKeys(
+      ['uploads/bbbbbbbb-0000-0000-0000-000000000000'],
+      ['uploads/0e161000-0000-0000-0000-000000000000', 'uploads/0e161000-0000-0000-0000-000000000001'],
+      s,
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toBe('invalid_attachment_key');
   });
 });

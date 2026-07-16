@@ -288,6 +288,15 @@ export async function resolveAttachmentKeys(
   if (!keys.every((k) => UPLOAD_KEY_PATTERN.test(k))) {
     return { ok: false, status: 400, error: 'invalid_attachment_key' };
   }
+  // originalKeys are client input too, and get PERSISTED (a future RCS channel
+  // presigns them): same own-prefix rule, and index alignment must hold so the
+  // pairing cannot be desynchronized.
+  if (
+    originalKeys !== undefined &&
+    (originalKeys.length !== keys.length || !originalKeys.every((k) => UPLOAD_KEY_PATTERN.test(k)))
+  ) {
+    return { ok: false, status: 400, error: 'invalid_attachment_key' };
+  }
   if (!mediaStore) {
     return { ok: false, status: 503, error: 'media_storage_unavailable' };
   }

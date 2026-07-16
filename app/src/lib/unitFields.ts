@@ -56,27 +56,31 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // enforces finite & >= 0.
   final_rent: 'number',
   payment_standard: 'number',
+  // Security deposit in dollars. PUBLIC on the flyer projection (flyer-full-info).
   deposit: 'number',
   lif: 'number',
   // TENANT-PAID utilities (which utilities the tenant must pay) — free-form.
   utilities: 'string',
+  // Accessibility notes (tenant-useful). PUBLIC on the flyer projection (flyer-full-info).
   accessibility: 'string',
   // Internal staff notes ("In-unit washer/dryer", "No dishwasher"). NEVER on
-  // the flyer projections below — internal only.
+  // the flyer projection below - internal only.
   notes: 'string',
-  // Lease terms — free-form per-unit fact ("12-month minimum, month-to-month
+  // Lease terms - free-form per-unit fact ("12-month minimum, month-to-month
   // after"). Moved OFF the landlord contact 2026-07-10 (with pet policy /
-  // accepted programs / expected rent — see GLOSSARY). Internal only, NEVER on
-  // the flyer projections below.
+  // accepted programs / expected rent - see GLOSSARY). PUBLIC on the flyer
+  // projection below (flyer-full-info 2026-07-16).
   lease_terms: 'string',
+  // Pet policy - a free-form string or a bare boolean. PUBLIC on the flyer
+  // projection below (flyer-full-info 2026-07-16).
   pets: 'pets',
   priority: 'string',
   media: 'string[]',
   listing_link: 'string',
-  // Public flyer details (public-pages §3): the richer reveal fields a flyer's
-  // post-intake "full details" exposes. video_url is a tour video link;
-  // application_fee is a dollar amount (the 'number' kind already enforces >= 0);
-  // same_day_rta is a boolean badge ("same-day RTA available").
+  // Public flyer fields (flyer-full-info): tenant-useful facts shown upfront on
+  // the flyer projection. video_url is a tour video link; application_fee is a
+  // dollar amount (the 'number' kind already enforces >= 0); same_day_rta is a
+  // boolean badge ("same-day RTA available").
   video_url: 'string',
   application_fee: 'number',
   same_day_rta: 'boolean',
@@ -190,12 +194,13 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
 }
 
 /**
- * The shareable flyer view of a unit — ONLY the default-safe fields a flyer
- * link is allowed to expose. This is an allowlist (build up), never a denylist
- * (strip down): a future internal field added to UnitItem can NEVER leak,
- * because it simply won't be copied here. NEVER include tour_process,
- * application_process, primary_voice_contact, landlordId, notes, lease_terms,
- * internal status, deposit/LIF, or payment_standard.
+ * The public flyer projection - EVERYTHING a flyer link exposes, shown upfront
+ * (flyer-full-info 2026-07-16: the teaser/reveal split is gone). This is an
+ * allowlist (build up), never a denylist (strip down): a future internal field
+ * added to UnitItem can NEVER leak, because it simply won't be copied here.
+ * NEVER include tour_process, tour_type, application_process, landlordId,
+ * primary_voice_contact, notes, internal status/status_source, payment_standard,
+ * lif, priority, propertyId, jurisdiction, final_rent, voucher_size_accepted.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -204,30 +209,15 @@ export interface UnitFlyer {
   baths: number | null;
   area: string | null;
   subzone: string | null;
-  /** Voucher size the unit is sized for — derived from beds (shareable). */
+  /** Voucher size the unit is sized for - derived from beds (shareable). */
   voucher_size: number | null;
   accepted_programs: string[];
   listing_link: string | null;
-  /** Asking rent range — shareable (it's on the public listing anyway). */
   rent_min: number | null;
   rent_max: number | null;
-}
-
-/**
- * The post-intake "full details" reveal projection (public-pages §4) — the
- * teaser fields PLUS the richer set a tenant sees AFTER expressing interest:
- * address, utilities, video tour, application fee, same-day RTA. Still a STRICT
- * allowlist built UP from the teaser (never strip-down): a future internal field
- * on UnitItem can NEVER leak because it is simply not copied here. NEVER include
- * landlord/contact/internal fields (landlordId, primary_voice_contact,
- * tour_process, application_process, status, status_source, notes, lease_terms,
- * payment_standard, deposit, lif, propertyId, jurisdiction, priority,
- * accessibility, pets).
- */
-export interface UnitFlyerDetails extends UnitFlyer {
   /** The structured postal address (allowlisted sub-fields only). */
   address: Address;
-  /** Tenant-paid utilities (which utilities the tenant pays, e.g. "Electric and gas"). */
+  /** Tenant-paid utilities (which utilities the tenant pays). */
   utilities: string | null;
   /** Tour video link. */
   video_url: string | null;
@@ -235,13 +225,22 @@ export interface UnitFlyerDetails extends UnitFlyer {
   application_fee: number | null;
   /** Same-day RTA available. */
   same_day_rta: boolean | null;
+  /** Pet policy - free-form string, or a bare boolean (allowed / not allowed). */
+  pets: string | boolean | null;
+  /** Accessibility notes (tenant-useful, staff-authored). */
+  accessibility: string | null;
+  /** Security deposit in dollars. */
+  deposit: number | null;
+  /** Lease terms - free-form ("12-month minimum, month-to-month after"). */
+  lease_terms: string | null;
 }
 
 export function toUnitFlyer(unit: UnitItem): UnitFlyer {
-  // voucher_size: a unit's bedroom count IS the voucher size it serves (the
-  // share-broadcast filters tenants by bedroom size). Derived from beds; null
-  // when beds is unknown. accepted_programs is shareable (it's match criteria).
+  // voucher_size: a unit's bedroom count IS the voucher size it serves. The
+  // address is re-validated through the SAME write-surface validator so the
+  // projection carries ONLY allowlisted sub-fields, never a legacy string blob.
   const beds = isFiniteNumber(unit.beds) ? unit.beds : null;
+  const addr = validateAddress(unit.address, 'address');
   return {
     unitId: unit.unitId,
     media: isStringArray(unit.media) ? unit.media : [],
@@ -254,21 +253,14 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
     listing_link: typeof unit.listing_link === 'string' ? unit.listing_link : null,
     rent_min: isFiniteNumber(unit.rent_min) ? unit.rent_min : null,
     rent_max: isFiniteNumber(unit.rent_max) ? unit.rent_max : null,
-  };
-}
-
-export function toUnitFlyerDetails(unit: UnitItem): UnitFlyerDetails {
-  // Build UP from the teaser, then add ONLY the 5 reveal fields — never strip
-  // down. The address is re-validated through the SAME write-surface validator
-  // so the projection can carry ONLY the allowlisted sub-fields (line1/line2/
-  // city/state/zip), never a stray key or a legacy plain-string blob.
-  const addr = validateAddress(unit.address, 'address');
-  return {
-    ...toUnitFlyer(unit),
     address: addr.ok ? addr.address : {},
     utilities: typeof unit.utilities === 'string' ? unit.utilities : null,
     video_url: typeof unit.video_url === 'string' ? unit.video_url : null,
     application_fee: isFiniteNumber(unit.application_fee) ? unit.application_fee : null,
     same_day_rta: typeof unit.same_day_rta === 'boolean' ? unit.same_day_rta : null,
+    pets: typeof unit.pets === 'string' || typeof unit.pets === 'boolean' ? unit.pets : null,
+    accessibility: typeof unit.accessibility === 'string' ? unit.accessibility : null,
+    deposit: isFiniteNumber(unit.deposit) ? unit.deposit : null,
+    lease_terms: typeof unit.lease_terms === 'string' ? unit.lease_terms : null,
   };
 }

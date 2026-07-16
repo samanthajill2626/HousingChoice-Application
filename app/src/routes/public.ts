@@ -16,21 +16,21 @@
 //          present + shareable unitId stamps capture_source:'flyer' +
 //          unit_of_interest on the CREATED contact instead of 'housing_fair'.)
 //   GET  /public/units/:unitId/flyer
-//        → 200 { flyer }      (ONLY the shareable teaser field set) | 404
-//   GET  /public/units/:unitId/details
-//        → 200 { details }    (the richer post-intake reveal allowlist) | 404
+//        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
+//        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
+//           flyer-full-info: the teaser/reveal split + the /details route are gone)
 //
 // Money note: housing-fair sends an SMS (real cost in prod). Idempotency +
 // rate limiting are what keep this from being an SMS-spend abuse vector.
 import { createHash } from 'node:crypto';
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
-import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
+import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -158,11 +158,18 @@ export interface PublicRouterDeps {
   settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
   /**
-   * unit-photos: the media bucket store - the flyer/details resolve stored photo
-   * keys to short-lived presigned URLs at render time (D1: the bucket stays
-   * private). Undefined when MEDIA_BUCKET is unset - stored keys then resolve to
-   * url-absent and are omitted from the public url list (only legacy absolute
-   * URLs carry through).
+   * flyer-full-info: the public-facing texting number shown on the flyer (the
+   * "I'm interested - text us" CTA) - config.ourPhoneNumbers[0], the SAME main
+   * number all 1:1 Twilio traffic uses. Absent -> the page degrades to
+   * reply-prompt copy (never a broken button).
+   */
+  contactNumber?: string;
+  /**
+   * unit-photos: the media bucket store - the flyer resolves stored photo keys
+   * to short-lived presigned URLs at render time (D1: the bucket stays private).
+   * Undefined when MEDIA_BUCKET is unset - stored keys then resolve to url-absent
+   * and are omitted from the public url list (only legacy absolute URLs carry
+   * through).
    */
   mediaStore?: MediaStore;
 }
@@ -175,6 +182,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
+  // flyer-full-info: config.ourPhoneNumbers[0] (or null when unconfigured). Rides
+  // on the flyer payload AND every opaque 404 so the page's unavailable state can
+  // still offer the text-us CTA (there is no flyer payload to read it from there).
+  const contactNumber = deps.contactNumber ?? null;
   const sendMessage =
     deps.sendMessageService ??
     createSendMessageService({
@@ -185,6 +196,13 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     });
 
   const router = Router();
+
+  // The opaque 404 - IDENTICAL for missing, soft-deleted, and not-shareable (no
+  // existence oracle). It carries contact_number (config, not unit data) so the
+  // public page's "unavailable" state can still offer the text-us CTA.
+  function sendNotFound(res: Response): void {
+    res.status(404).json({ error: 'not_found', contact_number: contactNumber });
+  }
 
   // unit-photos S3 (D1): resolve the unit's photos to render-time presigned URLs
   // for the PUBLIC surface. The wire shape stays string[] (a url list, so
@@ -225,8 +243,8 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     if (unitId !== undefined) {
       const flyerUnit = await units.getById(unitId);
       // A soft-deleted unit is not publicly shareable (it's hidden everywhere),
-      // so it must not earn flyer attribution either — mirror the flyer/details
-      // gate exactly.
+      // so it must not earn flyer attribution either - mirror the flyer gate
+      // exactly.
       if (flyerUnit && !isDeleted(flyerUnit) && SHAREABLE_STATUSES.has(flyerUnit.status)) {
         viaFlyer = true;
       }
@@ -329,41 +347,24 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     res.json({ ok: true });
   });
 
-  // GET /public/units/:unitId/flyer — the shareable flyer view (M1.5).
+  // GET /public/units/:unitId/flyer - the public flyer view (flyer-full-info).
   // 404 when the unit is missing, soft-deleted, OR not in a shareable status
-  // (the public must never learn a non-available unit even exists). Returns ONLY
-  // the allowlisted flyer fields (lib/unitFields.toUnitFlyer) — no internal leak.
+  // (the public must never learn a non-available unit even exists). Returns the
+  // FULL public payload upfront (lib/unitFields.toUnitFlyer) + contact_number -
+  // no internal leak. The teaser/reveal split (and the /details route) are gone.
   router.get('/units/:unitId/flyer', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
     if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
-      res.status(404).json({ error: 'not_found' });
+      // Same 404 for missing, deleted, and not-shareable - no existence oracle.
+      sendNotFound(res);
       return;
     }
     // unit-photos: replace the raw media pass-through with render-time presigned
-    // URLs (unresolvable entries omitted).
+    // URLs (unresolvable entries omitted). contact_number is config (the main
+    // 1:1 business number), added here like media - NOT part of the projection.
     const media = await resolvePublicMedia(unit, unitId);
-    res.json({ flyer: { ...toUnitFlyer(unit), media } });
-  });
-
-  // GET /public/units/:unitId/details — the post-intake "full details" reveal.
-  // SAME gate + opaque 404 as the flyer (soft reveal, NO token): missing,
-  // soft-deleted, or not-shareable all 404 identically. Returns ONLY the richer
-  // allowlist (lib/unitFields.toUnitFlyerDetails): the teaser fields +
-  // address/utilities/video/app-fee/same-day-RTA. Internal and landlord/contact
-  // fields can never leak (the allowlist IS the wall).
-  router.get('/units/:unitId/details', async (req, res) => {
-    const unitId = String(req.params['unitId'] ?? '');
-    const unit = await units.getById(unitId);
-    if (!unit || isDeleted(unit) || !SHAREABLE_STATUSES.has(unit.status)) {
-      // Same 404 for missing, deleted, and not-shareable — no existence oracle.
-      res.status(404).json({ error: 'not_found' });
-      return;
-    }
-    // unit-photos: same render-time presigned URLs on the details reveal.
-    const media = await resolvePublicMedia(unit, unitId);
-    res.json({ details: { ...toUnitFlyerDetails(unit), media } });
+    res.json({ flyer: { ...toUnitFlyer(unit), media, contact_number: contactNumber } });
   });
 
   return router;

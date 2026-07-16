@@ -370,54 +370,71 @@ test.describe('Tours page', () => {
     expect(tour.tourType).toBe('self_guided');
   });
 
-  // Closed tours live behind the Active | Closed view tabs (URL-backed, like
-  // the properties list's Active/Deleted tabs; Cameron 2026-07-15) - off the
-  // default view. Builds a CLOSED tour via the API - booked YESTERDAY (outside
-  // the Upcoming window, so it can't leak into the other tests' sections),
-  // toured, then exit-gated not-a-fit (the same PATCH shape the Record-outcome
-  // modal sends; closes in the same PATCH).
-  test('closed tours: absent from the Active view, listed on the Closed tab (/tours/closed)', async ({
+  // Closed + canceled tours live behind the Active | Closed view tabs
+  // (URL-backed, like the properties list's Active/Deleted tabs; Cameron
+  // 2026-07-15). Both fixtures are booked TOMORROW - INSIDE the Upcoming
+  // window - to pin the leak this fixed: the window query matches scheduledAt
+  // alone and canceling/closing never clears it, so without the
+  // status='scheduled' filter both rows surfaced under Upcoming.
+  test('closed + canceled tours: never under Upcoming, listed on the Closed tab (/tours/closed)', async ({
     page,
   }) => {
     await devLogin(page); // page.request needs the session cookie for /api writes
 
-    const yesterday = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const tomorrow = new Date(Date.now() + 24 * 3_600_000).toISOString();
+    // A CLOSED tour: created scheduled -> toured -> exit-gated not-a-fit (the
+    // same PATCH shape the Record-outcome modal sends; closes in one PATCH).
     const created = await page.request.post(`${NEXT}/api/tours`, {
-      data: { tenantId: TENANT_ID, unitId: 'unit-0002', scheduledAt: yesterday, tourType: 'self_guided' },
+      data: { tenantId: TENANT_ID, unitId: 'unit-0002', scheduledAt: tomorrow, tourType: 'self_guided' },
     });
     expect(created.ok(), await created.text()).toBeTruthy();
-    const tourId = ((await created.json()) as { tour: { tourId: string } }).tour.tourId;
-    const toured = await page.request.patch(`${NEXT}/api/tours/${tourId}`, {
+    const closedTourId = ((await created.json()) as { tour: { tourId: string } }).tour.tourId;
+    const toured = await page.request.patch(`${NEXT}/api/tours/${closedTourId}`, {
       data: { status: 'toured' },
     });
     expect(toured.ok(), await toured.text()).toBeTruthy();
-    const closed = await page.request.patch(`${NEXT}/api/tours/${tourId}`, {
+    const closed = await page.request.patch(`${NEXT}/api/tours/${closedTourId}`, {
       data: { outcome: 'not_a_fit', moveForward: false, status: 'closed' },
     });
     expect(closed.ok(), await closed.text()).toBeTruthy();
 
+    // A CANCELED tour: created scheduled -> canceled (revivable, not live).
+    const created2 = await page.request.post(`${NEXT}/api/tours`, {
+      data: { tenantId: TENANT_ID, unitId: 'unit-0001', scheduledAt: tomorrow, tourType: 'self_guided' },
+    });
+    expect(created2.ok(), await created2.text()).toBeTruthy();
+    const canceledTourId = ((await created2.json()) as { tour: { tourId: string } }).tour.tourId;
+    const canceled = await page.request.patch(`${NEXT}/api/tours/${canceledTourId}`, {
+      data: { status: 'canceled' },
+    });
+    expect(canceled.ok(), await canceled.text()).toBeTruthy();
+
     await page.goto(`${NEXT}/tours`);
     await expect(page.getByRole('heading', { name: 'Tours' })).toBeVisible();
 
-    // The Active view carries the tabs but no closed rows.
+    // The Active view: tabs render, Active is current, and NEITHER tour leaks
+    // into Upcoming despite tomorrow's scheduledAt (the regression this pins).
     const tabs = page.getByRole('navigation', { name: 'Tours view' });
     await expect(tabs.getByRole('link', { name: 'Active' })).toHaveAttribute(
       'aria-current',
       'page',
     );
     await expect(page.getByRole('region', { name: 'Closed tours' })).toHaveCount(0);
-    await expect(page.locator(`a[href="/tours/${tourId}"]`)).toHaveCount(0);
+    await expect(page.locator(`a[href="/tours/${closedTourId}"]`)).toHaveCount(0);
+    await expect(page.locator(`a[href="/tours/${canceledTourId}"]`)).toHaveCount(0);
 
-    // The Closed tab navigates to /tours/closed and lists the tour.
+    // The Closed tab navigates to /tours/closed and lists BOTH, with the
+    // status badges telling them apart.
     await tabs.getByRole('link', { name: 'Closed' }).click();
     await expect(page).toHaveURL(/\/tours\/closed$/);
     await expect(page.getByRole('heading', { name: 'Closed tours' })).toBeVisible();
     const region = page.getByRole('region', { name: 'Closed tours' });
-    const row = region.getByRole('link', {
-      name: new RegExp(`Tour for Tasha Nguyen at .*Sycamore`, 'i'),
-    });
-    await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toHaveAttribute('href', `/tours/${tourId}`);
+    const closedRow = region.locator(`a[href="/tours/${closedTourId}"]`);
+    await expect(closedRow).toBeVisible({ timeout: 10_000 });
+    await expect(closedRow.getByText('Closed', { exact: true })).toBeVisible();
+    const canceledRow = region.locator(`a[href="/tours/${canceledTourId}"]`);
+    await expect(canceledRow).toBeVisible();
+    await expect(canceledRow.getByText('Canceled', { exact: true })).toBeVisible();
 
     // The Active tab returns to the default view.
     await page.getByRole('navigation', { name: 'Tours view' }).getByRole('link', { name: 'Active' }).click();

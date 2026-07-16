@@ -1,12 +1,16 @@
 // useTours — the /tours page data hook. Fetches:
 //   1. Upcoming tours: GET /api/tours?from=<start-of-today>&to=<+30 days>
 //      (scheduled future window, grouped by local date on the view layer).
+//      The window query matches on scheduledAt ALONE - canceled/closed/no-show
+//      tours keep their scheduledAt, so the hook filters to status='scheduled'
+//      (Upcoming = live future appointments; same status set as the Today
+//      board's TOURS_TODAY_STATUSES - the leak Cameron caught 2026-07-15).
 //   2. Needs-booking tours: GET /api/tours?status=requested
 //      (time-less tours awaiting a scheduled time, oldest first).
-// Plus useClosedTours(enabled) — the opt-in Closed section's LAZY fetch:
-// GET /api/tours?status=closed, newest first. Nothing is fetched until the
-// staff member flips the "Show closed" toggle (closed tours are off the page
-// by default and only grow over time).
+// Plus useClosedTours(enabled) — the Closed view's fetch: closed + canceled
+// tours (the two "not live" states staff may need to find - closed is
+// terminal, canceled is revivable from its detail page), newest first.
+// Nothing is fetched until the Closed view shows.
 //
 // Both fetches run in parallel, each with its own AbortController so the caller
 // (useEffect cleanup) can cancel both together. Mirrors useContacts / useListings:
@@ -58,8 +62,14 @@ export function useTours(): ToursPageState {
         ]);
         if (signal.aborted) return;
 
+        // Upcoming = LIVE future appointments only. The window query returns
+        // every tour whose scheduledAt is in range regardless of status, and
+        // canceling/closing never clears scheduledAt - unfiltered, a canceled
+        // or early-closed tour leaked into Upcoming.
+        const scheduledUpcoming = upcoming.filter((t) => t.status === 'scheduled');
+
         // Sort upcoming ascending by scheduledAt (soonest first).
-        const sortedUpcoming = [...upcoming].sort((a, b) => {
+        const sortedUpcoming = [...scheduledUpcoming].sort((a, b) => {
           const aAt = a.scheduledAt ?? '';
           const bAt = b.scheduledAt ?? '';
           return aAt < bAt ? -1 : aAt > bAt ? 1 : 0;
@@ -86,15 +96,16 @@ export function useTours(): ToursPageState {
 }
 
 export interface ClosedToursState {
-  /** 'idle' until the toggle enables the fetch (nothing loads by default). */
+  /** 'idle' until the Closed view enables the fetch (nothing loads by default). */
   status: 'idle' | 'loading' | 'ready' | 'error';
-  /** Closed tours, newest activity first (updatedAt desc — the close is the
-   *  last write in practice — falling back to createdAt). */
+  /** Closed + canceled tours, newest activity first (updatedAt desc — the
+   *  close/cancel is the last write in practice — falling back to createdAt). */
   closed: Tour[];
 }
 
-/** LAZY closed-tours fetch for the opt-in "Show closed" toggle: fetches only
- *  while `enabled` is true (re-fetching fresh each time it flips on). */
+/** LAZY fetch for the Closed view: the "not live" tours — status closed
+ *  (terminal) AND canceled (revivable) — fetched only while `enabled` is true
+ *  (re-fetching fresh each time the view shows). */
 export function useClosedTours(enabled: boolean): ClosedToursState {
   const [state, setState] = useState<ClosedToursState>({ status: 'idle', closed: [] });
 
@@ -106,9 +117,12 @@ export function useClosedTours(enabled: boolean): ClosedToursState {
 
     (async () => {
       try {
-        const closed = await getTours({ status: 'closed' }, signal);
+        const [closedRows, canceledRows] = await Promise.all([
+          getTours({ status: 'closed' }, signal),
+          getTours({ status: 'canceled' }, signal),
+        ]);
         if (signal.aborted) return;
-        const sorted = [...closed].sort((a, b) => {
+        const sorted = [...closedRows, ...canceledRows].sort((a, b) => {
           const aAt = a.updatedAt ?? a.createdAt ?? '';
           const bAt = b.updatedAt ?? b.createdAt ?? '';
           return aAt > bAt ? -1 : aAt < bAt ? 1 : 0;

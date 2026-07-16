@@ -105,6 +105,24 @@ describe('useTours', () => {
     expect(ids).toEqual(['t1', 't2']);
   });
 
+  it("upcoming keeps ONLY status='scheduled' - canceled/closed tours keep their scheduledAt and must not leak", async () => {
+    // The window query matches on scheduledAt alone; these all fall in range.
+    const windowRows = [
+      { tourId: 'ok', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-07-20T14:00:00Z', tourType: 'self_guided', status: 'scheduled' },
+      { tourId: 'cx', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-07-21T14:00:00Z', tourType: 'self_guided', status: 'canceled' },
+      { tourId: 'cl', tenantId: 'c2', unitId: 'u2', scheduledAt: '2026-07-22T14:00:00Z', tourType: 'self_guided', status: 'closed' },
+      { tourId: 'ns', tenantId: 'c2', unitId: 'u2', scheduledAt: '2026-07-23T14:00:00Z', tourType: 'self_guided', status: 'no_show' },
+    ];
+    getToursMock.mockImplementation(async (params: Record<string, string>) => {
+      if (params['status'] === 'requested') return [];
+      return windowRows;
+    });
+    const { result } = renderHook(() => useTours());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(result.current.upcoming.map((t) => t.tourId)).toEqual(['ok']);
+  });
+
   it('sorts needs-booking tours by createdAt ascending (oldest first) — real camelCase wire field', async () => {
     // NEEDS_BOOKING arrives newest-first (r2 Jun 20, r1 Jun 10).
     // The sort must reorder to oldest-first (r1 Jun 10, r2 Jun 20).
@@ -143,11 +161,15 @@ describe('useClosedTours', () => {
     vi.restoreAllMocks();
   });
 
-  // Arrives OLDEST-first so the newest-first sort assertion below proves the
-  // comparator reorders. x2's close (updatedAt) is newer than x1's.
+  // The closed fixtures arrive OLDEST-first so the newest-first sort assertion
+  // below proves the comparator reorders; the canceled row's cancel (updatedAt)
+  // falls BETWEEN them, proving the two status lists interleave by recency.
   const CLOSED = [
     { tourId: 'x1', tenantId: 'c1', unitId: 'u1', scheduledAt: '2026-06-02T18:00:00Z', tourType: 'self_guided', status: 'closed', createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-02T19:00:00Z' },
     { tourId: 'x2', tenantId: 'c2', unitId: 'u2', scheduledAt: '2026-07-14T18:00:00Z', tourType: 'landlord_led', status: 'closed', createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-14T20:00:00Z' },
+  ];
+  const CANCELED = [
+    { tourId: 'k1', tenantId: 'c1', unitId: 'u2', scheduledAt: '2026-06-20T18:00:00Z', tourType: 'self_guided', status: 'canceled', createdAt: '2026-06-15T00:00:00Z', updatedAt: '2026-06-20T10:00:00Z' },
   ];
 
   it('stays idle and fetches NOTHING while disabled (the default page load)', () => {
@@ -156,8 +178,10 @@ describe('useClosedTours', () => {
     expect(getToursMock).not.toHaveBeenCalled();
   });
 
-  it('fetches status=closed once enabled and sorts newest first (updatedAt desc)', async () => {
-    getToursMock.mockResolvedValue(CLOSED);
+  it('fetches closed AND canceled once enabled, interleaved newest first (updatedAt desc)', async () => {
+    getToursMock.mockImplementation(async (params: Record<string, string>) =>
+      params['status'] === 'closed' ? CLOSED : params['status'] === 'canceled' ? CANCELED : [],
+    );
     const { result, rerender } = renderHook(({ enabled }) => useClosedTours(enabled), {
       initialProps: { enabled: false },
     });
@@ -166,8 +190,9 @@ describe('useClosedTours', () => {
     rerender({ enabled: true });
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(getToursMock).toHaveBeenCalledWith({ status: 'closed' }, expect.anything());
-    // x2 (closed Jul 14) before x1 (closed Jun 2).
-    expect(result.current.closed.map((t) => t.tourId)).toEqual(['x2', 'x1']);
+    expect(getToursMock).toHaveBeenCalledWith({ status: 'canceled' }, expect.anything());
+    // x2 (Jul 14) > k1 (canceled Jun 20) > x1 (Jun 2) - one recency order.
+    expect(result.current.closed.map((t) => t.tourId)).toEqual(['x2', 'k1', 'x1']);
   });
 
   it('sets status=error when the closed fetch fails', async () => {

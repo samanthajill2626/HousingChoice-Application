@@ -9,9 +9,11 @@
 //     Needs booking — time-less tours (status='requested'), oldest first.
 //                 Row: tenant name - property - status - type (no time column).
 //
-//   Closed (/tours/closed) — terminal status='closed' tours, newest first
+//   Closed (/tours/closed) — the "not live" tours: status closed (terminal)
+//                 AND canceled (revivable - Cameron 2026-07-15), newest first
 //                 (fetched only on this view). Rows show the tour DATE (not
-//                 time-of-day - these can be months old).
+//                 time-of-day - these can be months old); the status badge
+//                 tells Closed and Canceled apart.
 //
 // The Active view's header carries "+ New tour" (Cameron 2026-07-15): the SAME
 // Schedule-a-tour dialog the tenant file opens, with both sides free typeaheads;
@@ -237,7 +239,7 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
       </div>
       <p className={styles.sub}>
         {closed
-          ? 'Tours that reached their exit - converted into a placement or closed as not a fit.'
+          ? 'Tours that ended - converted into a placement, closed as not a fit, or canceled.'
           : 'Upcoming scheduled tours and unbooked tour requests.'}
       </p>
 
@@ -321,7 +323,7 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
         <section className={styles.section} aria-label="Closed tours">
           {closedTours.length === 0 ? (
             <div className={styles.empty}>
-              <p className={styles.emptyText}>No closed tours yet.</p>
+              <p className={styles.emptyText}>No closed or canceled tours yet.</p>
             </div>
           ) : (
             <ul className={styles.rows} aria-label="Closed tours list">

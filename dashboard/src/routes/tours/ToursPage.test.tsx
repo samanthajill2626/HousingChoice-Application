@@ -378,6 +378,19 @@ describe('ToursPage', () => {
     updatedAt: '2026-06-02T19:00:00Z',
   };
 
+  /** A CANCELED tour — the Closed view lists these too (revivable, but not
+   *  live; the badge tells it apart from a terminal closed tour). */
+  const TOUR_CANCELED: Tour = {
+    tourId: 'k1',
+    tenantId: 'c1',
+    unitId: 'u2',
+    scheduledAt: '2026-06-20T18:00:00Z',
+    tourType: 'self_guided',
+    status: 'canceled',
+    createdAt: '2026-06-15T10:00:00Z',
+    updatedAt: '2026-06-20T10:00:00Z',
+  };
+
   it('Active view: renders the view tabs with Active current, no Closed section, closed fetch OFF', () => {
     readyAll([TOUR_TODAY], []);
     renderPage();
@@ -397,7 +410,8 @@ describe('ToursPage', () => {
   it('clicking the Closed tab switches views: title, rows with tenant, property, DATE, and badges', async () => {
     const user = userEvent.setup();
     readyAll([], []);
-    closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW, TOUR_CLOSED_OLD] };
+    // Hook order (newest first): closed x1 > canceled k1 > closed x2.
+    closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW, TOUR_CANCELED, TOUR_CLOSED_OLD] };
     renderPage();
 
     await user.click(screen.getByRole('link', { name: 'Closed' }));
@@ -409,7 +423,7 @@ describe('ToursPage', () => {
 
     const region = screen.getByRole('region', { name: 'Closed tours' });
     const items = within(region).getAllByRole('listitem');
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(3);
     // Newest first (the hook's order is respected).
     const first = within(items[0]!).getByRole('link');
     expect(first).toHaveAttribute('href', '/tours/x1');
@@ -417,7 +431,10 @@ describe('ToursPage', () => {
     // The lead meta column shows the tour DATE, not a bare time-of-day.
     expect(within(items[0]!).getByText(/Jul 14, 2026/)).toBeInTheDocument();
     expect(within(items[0]!).getByText('Closed')).toBeInTheDocument();
-    expect(within(items[1]!).getByRole('link')).toHaveAttribute('href', '/tours/x2');
+    // A canceled tour lists here too, its badge telling it apart.
+    expect(within(items[1]!).getByRole('link')).toHaveAttribute('href', '/tours/k1');
+    expect(within(items[1]!).getByText('Canceled')).toBeInTheDocument();
+    expect(within(items[2]!).getByRole('link')).toHaveAttribute('href', '/tours/x2');
   });
 
   it('clicking Active from the Closed view returns to the two main sections', async () => {
@@ -438,7 +455,7 @@ describe('ToursPage', () => {
     closedState = { status: 'ready', closed: [] };
     renderPage('/tours/closed');
     const region = screen.getByRole('region', { name: 'Closed tours' });
-    expect(within(region).getByText(/no closed tours/i)).toBeInTheDocument();
+    expect(within(region).getByText(/no closed or canceled tours/i)).toBeInTheDocument();
   });
 
   it('shows the page alert when the closed fetch fails on the Closed view', () => {

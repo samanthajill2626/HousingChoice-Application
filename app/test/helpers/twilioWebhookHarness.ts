@@ -1906,6 +1906,10 @@ export function createFakeWorld(): FakeWorld {
         contentLength: obj.body.length,
       };
     },
+    async getBytes(key) {
+      const obj = mediaObjects.get(key);
+      return obj ? obj.body : undefined;
+    },
     async presign(key, ttlSeconds) {
       // A UNIQUE URL per call (presignCounter) that DERIVES from the s3Key, so
       // the retry-re-presign test can assert a fresh URL differs from the

@@ -35,6 +35,9 @@ function makeApp() {
     async getStream() {
       return undefined;
     },
+    async getBytes() {
+      return undefined;
+    },
     async presign() {
       return 'unused';
     },

@@ -52,6 +52,12 @@ export interface MediaStore {
    */
   getStream(key: string): Promise<MediaObject | undefined>;
   /**
+   * Read an object fully into a Buffer (outbound MMS transcode: confirm needs the
+   * bytes to decode). Bounded by the presign source cap upstream. Returns undefined
+   * when the key does not exist (same absent-object contract as getStream).
+   */
+  getBytes(key: string): Promise<Buffer | undefined>;
+  /**
    * A time-limited, unauthenticated GET URL for `key` (outbound MMS: Twilio
    * fetches the media over the public internet). Presigned URLs are BEARER
    * TOKENS: never log them, never persist them as the source of truth. Signed
@@ -135,6 +141,16 @@ export class S3MediaStore implements MediaStore {
       }
       throw err;
     }
+  }
+
+  async getBytes(key: string): Promise<Buffer | undefined> {
+    const obj = await this.getStream(key);
+    if (obj === undefined) return undefined;
+    const chunks: Buffer[] = [];
+    for await (const chunk of obj.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    }
+    return Buffer.concat(chunks);
   }
 
   async presign(key: string, ttlSeconds: number): Promise<string> {

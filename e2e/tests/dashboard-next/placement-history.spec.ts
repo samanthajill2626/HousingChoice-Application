@@ -30,14 +30,20 @@ test('Placement detail: shows placement facts + history, and a transition adds a
   await page.goto(`${NEXT}/placements`);
   await page.getByRole('link', { name: 'Tasha Nguyen - Awaiting inspection' }).click();
 
-  // Detail header: the stage label + the History panel.
-  await expect(page.getByRole('heading', { name: /Awaiting inspection/ })).toBeVisible();
+  // Detail header: the stage pill (the rebuilt hub uses a name span + a stage
+  // pill, not an h1) + the History panel. Scope the stage to the header band (the
+  // Now card repeats the label) via the back crumb.
+  const banner = page
+    .locator('header')
+    .filter({ has: page.getByRole('link', { name: 'Back to placements' }) });
+  await expect(banner.getByText('Awaiting inspection', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: /History/ })).toBeVisible();
 
-  // Move out of awaiting_inspection via the stage pill (menu items carry the
-  // stage LABELS) → the outcome prompt → confirm. This records a transition the
-  // history then reflects.
-  await page.getByRole('button', { name: /^Placement stage:/ }).click();
+  // Move out of awaiting_inspection via the header kebab's "Move to..." picker
+  // (menu items carry the stage LABELS) -> the outcome prompt -> confirm. This
+  // records a transition the history then reflects.
+  await page.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('button', { name: /^Placement stage/ }).click();
   await page.getByRole('menuitemradio', { name: 'Determine rent', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Record inspection outcome' })).toBeVisible();
   // Scope to the move dialog — the in-place inspection recorder card (shown at
@@ -46,8 +52,9 @@ test('Placement detail: shows placement facts + history, and a transition adds a
   await outcomeDialog.getByRole('radio', { name: 'Pass' }).click();
   await outcomeDialog.getByRole('button', { name: 'Confirm move' }).click();
 
-  // The stage advanced and the history list shows at least one row (newest-first).
-  await expect(page.getByRole('heading', { name: /Determine rent/ })).toBeVisible();
+  // The stage advanced (header pill re-labels) and the history list shows at least
+  // one row (newest-first).
+  await expect(banner.getByText('Determine rent', { exact: true })).toBeVisible();
   const history = page.getByRole('list', { name: 'Placement history' });
   await expect(history.getByRole('listitem').first()).toBeVisible();
 

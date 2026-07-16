@@ -18,8 +18,11 @@
 //   exists yet — thread existence is not consent, the send gates still apply) →
 //   CLAIM the row BEFORE sending →
 //   sendMessageService. SendRefusedError ⇒ claim kept, warn, no retry. Missing
-//   entities ⇒ warn + skip. Mirrors tourReminders' processReminderRow EXACTLY for
-//   the claim/error semantics.
+//   entities and stale/unknown rows ⇒ CLAIM-SKIP (stamp skippedAt + skipReason)
+//   so the row leaves listDue exactly once — never a bare warn+return, which
+//   would re-list the row every poll tick forever (the perpetual "sending
+//   shortly" bug tour reminders already fixed). Mirrors tourReminders'
+//   processReminderRow for the claim/skip/error semantics.
 //
 // PII (doc §9): NEVER log a phone number/name/body. Log only
 // nudgeId/placementId/tenantId/unitId/kind/stage.
@@ -31,6 +34,7 @@ import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type {
   NudgeKind,
+  NudgeSkipReason,
   PlacementNudgeItem,
   PlacementNudgesRepo,
 } from '../repos/placementNudgesRepo.js';
@@ -189,7 +193,37 @@ export interface RunDuePlacementNudgesDeps {
   unitsRepo: UnitsRepo;
   conversationsRepo: ConversationsRepo;
   sendMessageService: SendMessageService;
+  /** Live-update bus: a claim-skip retires a rung the panels show as upcoming,
+   *  so poke them to refetch (best-effort; mirrors tourReminders' claimSkipRow).
+   *  Optional — the worker's emits never reach app SSE clients anyway (the
+   *  lib/events single-instance seam); this matters for the dev tick seam. */
+  events?: EventBus;
   logger?: Logger;
+}
+
+/**
+ * Retire a rung the poll cannot deliver (claim-skip): stamps skippedAt +
+ * skipReason so the row leaves listDue exactly once (instead of being re-listed
+ * and re-warned every poll tick forever), and tells live surfaces to refetch so
+ * the Deadlines-and-nudges card flips to its "Skipped" chip.
+ */
+async function claimSkipRow(
+  row: PlacementNudgeItem,
+  reason: NudgeSkipReason,
+  nowIso: string,
+  deps: RunDuePlacementNudgesDeps,
+  tenantId?: string,
+): Promise<void> {
+  const claimed = await deps.placementNudgesRepo.claimSkip(row.nudgeId, nowIso, reason);
+  if (claimed && deps.events !== undefined) {
+    try {
+      deps.events.emit('scheduled.updated', {
+        ...(tenantId !== undefined && { contactId: tenantId }),
+      });
+    } catch {
+      // Best-effort poke only — never let a broken emit fail the poll row.
+    }
+  }
 }
 
 /**
@@ -200,11 +234,14 @@ export interface RunDuePlacementNudgesDeps {
  * Idempotent: listDue filters out sentAt/canceledAt rows; claimSend atomically
  * stamps sentAt BEFORE the send (and blocks canceledAt rows) → exactly-once.
  *
- * Error handling (mirrors jobs/tourReminders.ts EXACTLY):
+ * Error handling (mirrors jobs/tourReminders.ts):
  * - SendRefusedError → warn + return (claim already stamped — no retry).
  * - Other send error → error + rethrow into the per-row catch (claim stamped).
- * - Missing placement/unit/contact/phone → warn + skip. A missing 1:1
- *   conversation is NOT a skip — it is created on demand and the send proceeds.
+ * - Missing placement/unit/landlord/contact/phone and stale/unknown rows →
+ *   CLAIM-SKIP (skippedAt + skipReason), so the row retires exactly once and
+ *   the dashboard card shows an honest "Skipped" instead of a perpetual
+ *   "upcoming" (or a false "Sent"). A missing 1:1 conversation is NOT a skip —
+ *   it is created on demand and the send proceeds.
  * Designed to be called by a setInterval in worker.ts.
  */
 export async function runDuePlacementNudges(
@@ -243,8 +280,9 @@ async function processNudgeRow(
   if (!placement) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId },
-      'placement nudge: placement not found — skipping',
+      'placement nudge: placement not found — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'placement_missing', nowIso, deps);
     return;
   }
 
@@ -254,20 +292,22 @@ async function processNudgeRow(
     // A row with an unknown kind (no rung) — retire it so it never reappears.
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
-      'placement nudge: no rung for kind — retiring row (claimed, not sent)',
+      'placement nudge: no rung for kind — retiring (claim-skipped)',
     );
-    await deps.placementNudgesRepo.claimSend(row.nudgeId, nowIso);
+    await claimSkipRow(row, 'unknown_kind', nowIso, deps, placement.tenantId);
     return;
   }
 
-  // STALE-STAGE GUARD: the placement already LEFT the stage this row chases. Claim
-  // the row to retire it (so it never reappears) and do NOT send — a late row for
-  // a stage the placement has moved past is canceled, not delivered.
+  // STALE-STAGE GUARD: the placement already LEFT the stage this row chases.
+  // Claim-skip retires it (so it never reappears) WITHOUT sending — and without
+  // stamping sentAt, which would make the card report "Sent" for a text the
+  // recipient never got. A late row for a stage the placement has moved past is
+  // skipped, not delivered.
   if (placement.stage !== rungStage) {
-    await deps.placementNudgesRepo.claimSend(row.nudgeId, nowIso);
+    await claimSkipRow(row, 'stage_moved', nowIso, deps, placement.tenantId);
     log.info(
       { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind, currentStage: placement.stage, rungStage },
-      'placement nudge: stage moved on — stale row retired (claimed, not sent)',
+      'placement nudge: stage moved on — stale row retired (claim-skipped)',
     );
     return;
   }
@@ -282,15 +322,17 @@ async function processNudgeRow(
     if (!unit) {
       log.warn(
         { nudgeId: row.nudgeId, placementId: row.placementId, unitId: placement.unitId, kind: row.kind },
-        'placement nudge: unit not found — skipping',
+        'placement nudge: unit not found — retiring (claim-skipped)',
       );
+      await claimSkipRow(row, 'unit_missing', nowIso, deps, placement.tenantId);
       return;
     }
     if (typeof unit.landlordId !== 'string' || unit.landlordId.length === 0) {
       log.warn(
         { nudgeId: row.nudgeId, placementId: row.placementId, unitId: placement.unitId, kind: row.kind },
-        'placement nudge: unit has no landlordId — skipping',
+        'placement nudge: unit has no landlordId — retiring (claim-skipped)',
       );
+      await claimSkipRow(row, 'no_landlord', nowIso, deps, placement.tenantId);
       return;
     }
     contactId = unit.landlordId;
@@ -300,8 +342,9 @@ async function processNudgeRow(
   if (!contact) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
-      'placement nudge: recipient contact not found — skipping',
+      'placement nudge: recipient contact not found — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'contact_missing', nowIso, deps, placement.tenantId);
     return;
   }
 
@@ -310,8 +353,9 @@ async function processNudgeRow(
   if (typeof phone !== 'string' || phone.length === 0) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
-      'placement nudge: recipient contact has no phone — skipping',
+      'placement nudge: recipient contact has no phone — retiring (claim-skipped)',
     );
+    await claimSkipRow(row, 'contact_no_phone', nowIso, deps, placement.tenantId);
     return;
   }
 

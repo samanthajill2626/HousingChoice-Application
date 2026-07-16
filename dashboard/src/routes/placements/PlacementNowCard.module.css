@@ -1,0 +1,161 @@
+/* PlacementNowCard - the placement hub's Now card (spec 3.1). Tokens only
+ * (tokens.css), never hard-coded colours. The gate line carries a tone hook
+ * (data-tone): "them" = amber (someone else holds the ball), "us" = blue accent
+ * (our move). Everything wraps cleanly at the twoPaneShell narrow width. */
+
+/* --- Stage + phase (always present) --------------------------------------- */
+.stageLine {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--sp-3);
+}
+
+.stage {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.phase {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-subtle);
+}
+
+/* --- Gate line ------------------------------------------------------------- */
+.gate {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+}
+
+/* Someone else holds the ball -> amber. */
+.gate[data-tone='them'] {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+}
+
+.gate[data-tone='them'] .gateText {
+  color: var(--c-evt-amber-text);
+}
+
+/* Our move -> blue accent (brand-soft surface). */
+.gate[data-tone='us'] {
+  background: var(--c-brand-soft);
+  border-color: var(--c-brand);
+}
+
+.gate[data-tone='us'] .gateText {
+  color: var(--c-brand-hover);
+}
+
+.gateText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.gateDate {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* --- Safety-net line ------------------------------------------------------- */
+.safety {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* --- Record block ---------------------------------------------------------- */
+.record {
+  margin: 0 0 var(--sp-3);
+}
+
+.recordLabel {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-muted);
+}
+
+.recordNone {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-subtle);
+}
+
+/* --- Terminal summary ------------------------------------------------------ */
+.terminal {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- Advance -------------------------------------------------------------- */
+.advance {
+  margin-top: var(--sp-2);
+}
+
+/* --- Absorbed recorder controls (moved verbatim from PlacementDetail) ------ */
+/* Paperwork checklist (complete_paperwork): a stack of checkbox rows. */
+.checkRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.checkRow input {
+  margin-top: 2px;
+}
+
+.checkText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.checkHint {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.checkNa {
+  margin: 0;
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-subtle);
+}
+
+/* In-place stage-data recorders (inspection date / outcome / rent). */
+.stageDataLabel {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  margin-bottom: var(--sp-1);
+}
+
+.stageDataInput {
+  display: block;
+  width: 100%;
+  max-width: 16rem;
+  margin-bottom: var(--sp-3);
+}
+
+.stageDataFieldset {
+  border: 0;
+  margin: 0 0 var(--sp-2);
+  padding: 0;
+}

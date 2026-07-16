@@ -115,6 +115,24 @@ describe.skipIf(!reachable)('placementNudgesRepo against DynamoDB Local (throwaw
     expect(due.map((r) => r.nudgeId)).not.toContain(row.nudgeId);
   });
 
+  it('a claim-skipped row leaves listDue exactly once (real byDueAt FilterExpression)', async () => {
+    const placementId = `placement-skip-${randomUUID().slice(0, 6)}`;
+    const row = await nudges.create({ placementId, kind: 'approval_check', dueAt: '2026-07-01T00:00:00.000Z' });
+
+    expect(await nudges.claimSkip(row.nudgeId, '2026-07-02T00:00:00.000Z', 'no_landlord')).toBe(true);
+
+    // The retired row never re-surfaces as due — the perpetual re-list bug guard.
+    const due = await nudges.listDue('2026-07-02T00:00:00.000Z');
+    expect(due.map((r) => r.nudgeId)).not.toContain(row.nudgeId);
+
+    // And it can no longer be sent or canceled.
+    expect(await nudges.claimSend(row.nudgeId, '2026-07-02T01:00:00.000Z')).toBe(false);
+    expect(await nudges.cancel(row.nudgeId, '2026-07-02T01:00:00.000Z')).toBe(false);
+    const stored = (await nudges.listByPlacement(placementId)).find((r) => r.nudgeId === row.nudgeId);
+    expect(stored?.skippedAt).toBe('2026-07-02T00:00:00.000Z');
+    expect(stored?.skipReason).toBe('no_landlord');
+  });
+
   it('a canceled row loses the claim (claimSend returns false)', async () => {
     const placementId = `placement-cancel-claim-${randomUUID().slice(0, 6)}`;
     const row = await nudges.create({ placementId, kind: 'receipt_check', dueAt: '2026-07-01T00:00:00.000Z' });

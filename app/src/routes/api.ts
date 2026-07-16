@@ -84,6 +84,7 @@ import { createAdminUsersRouter } from './adminUsers.js';
 import { createUsersMeRouter, createVoiceCallRouter } from './voiceApi.js';
 import { createBroadcastsRouter } from './broadcasts.js';
 import { createPlacementsRouter } from './placements.js';
+import { createPlacementNudgesRouter } from './placementNudges.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
@@ -584,6 +585,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
+      events,
+    }),
+  );
+  // Placement nudges read + cancel/restore (placement-detail-hub). Mounted at
+  // /placements too — its only paths are /:placementId/nudges*, DISTINCT segments
+  // from the placements CRUD router's /:placementId routes above (a single-
+  // segment match never captures /:placementId/nudges), so the two never
+  // collide. Shares the process placements/units repos + nudge repo + bus.
+  router.use(
+    '/placements',
+    createPlacementNudgesRouter({
+      logger: deps.logger,
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementNudgesRepo: placementNudges,
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
   );

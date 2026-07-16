@@ -89,6 +89,7 @@ import {
 import { type TourReminderItem, type TourRemindersRepo } from '../../src/repos/tourRemindersRepo.js';
 import {
   type NudgeKind,
+  type NudgeSkipReason,
   type PlacementNudgeItem,
   type PlacementNudgesRepo,
 } from '../../src/repos/placementNudgesRepo.js';
@@ -1741,20 +1742,61 @@ export function createFakeWorld(): FakeWorld {
     },
     async listDue(now: string) {
       return [...placementNudgesMap.values()]
-        .filter((n) => n.dueAt <= now && n.sentAt === undefined && n.canceledAt === undefined)
+        .filter(
+          (n) =>
+            n.dueAt <= now &&
+            n.sentAt === undefined &&
+            n.canceledAt === undefined &&
+            n.skippedAt === undefined,
+        )
         .map((n) => ({ ...n }));
     },
     async claimSend(nudgeId: string, claimedAt: string) {
       const n = placementNudgesMap.get(nudgeId);
-      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined) return false;
+      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined || n.skippedAt !== undefined) {
+        return false;
+      }
       n.sentAt = claimedAt;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
+    async claimSkip(nudgeId: string, skippedAt: string, reason: NudgeSkipReason) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined || n.skippedAt !== undefined) {
+        return false;
+      }
+      n.skippedAt = skippedAt;
+      n.skipReason = reason;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
+    async cancel(nudgeId: string, canceledAt: string) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.sentAt !== undefined || n.canceledAt !== undefined || n.skippedAt !== undefined) {
+        return false;
+      }
+      n.canceledAt = canceledAt;
+      placementNudgesMap.set(nudgeId, n);
+      return true;
+    },
+    async uncancel(nudgeId: string) {
+      const n = placementNudgesMap.get(nudgeId);
+      if (!n || n.canceledAt === undefined || n.sentAt !== undefined || n.skippedAt !== undefined) {
+        return false;
+      }
+      delete n.canceledAt;
       placementNudgesMap.set(nudgeId, n);
       return true;
     },
     async cancelForPlacement(placementId: string) {
       const now = new Date().toISOString();
       for (const n of placementNudgesMap.values()) {
-        if (n.placementId === placementId && n.sentAt === undefined && n.canceledAt === undefined) {
+        if (
+          n.placementId === placementId &&
+          n.sentAt === undefined &&
+          n.canceledAt === undefined &&
+          n.skippedAt === undefined
+        ) {
           n.canceledAt = now;
           placementNudgesMap.set(n.nudgeId, n);
         }

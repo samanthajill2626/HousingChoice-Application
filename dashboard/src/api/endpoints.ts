@@ -38,6 +38,7 @@ import type {
   Me,
   MeUser,
   Message,
+  PlacementNudgeView,
   RelatedUnit,
   RelayGroupRow,
   SendMessageResult,
@@ -283,6 +284,77 @@ export async function getPlacementHistory(
     },
   );
   return res.history;
+}
+
+/** GET /api/placements/:placementId/nudges — the armed application-nudge rungs
+ *  (receipt/completion/approval checks + rta_window_closing), each with its state
+ *  (upcoming - sent - canceled) and derived recipient. The server wraps the list
+ *  under { nudges }; unwrapped here so callers get a plain PlacementNudgeView[]. */
+export async function getPlacementNudges(
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<PlacementNudgeView[]> {
+  const res = await request<{ nudges: PlacementNudgeView[] }>(
+    `/api/placements/${encodeURIComponent(placementId)}/nudges`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.nudges;
+}
+
+/** PATCH /api/placements/:placementId/nudges/:nudgeId { canceled } — cancel one
+ *  upcoming nudge, or restore (un-cancel) a canceled one. 409 when the rung is
+ *  already sent or the transition raced the send poll — the response carries the
+ *  honest current state either way. Returns the updated nudge (unwrapped from
+ *  { nudge }). */
+export async function patchPlacementNudge(
+  placementId: string,
+  nudgeId: string,
+  canceled: boolean,
+): Promise<PlacementNudgeView> {
+  const res = await request<{ nudge: PlacementNudgeView }>(
+    `/api/placements/${encodeURIComponent(placementId)}/nudges/${encodeURIComponent(nudgeId)}`,
+    { method: 'PATCH', body: { canceled } },
+  );
+  return res.nudge;
+}
+
+/** POST /api/placements/:placementId/relay — provision the placement's masked
+ *  relay group thread (tenant + the unit's landlord, by their SMS numbers) and
+ *  link placement.group_thread. Idempotent: 409 relay_exists when an OPEN relay
+ *  already fronts the placement; 503 relay_provisioning_disabled (kill-switch) /
+ *  pool_number_unavailable; 400 tenant_unreachable / landlord_unreachable /
+ *  unit_not_found; 404 placement_not_found. The server responds 201
+ *  { conversation, placement }; we unwrap the new thread's id. */
+export async function provisionPlacementRelay(
+  placementId: string,
+): Promise<{ conversationId: string }> {
+  const res = await request<{ conversation: { conversationId: string }; placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}/relay`,
+    { method: 'POST' },
+  );
+  return { conversationId: res.conversation.conversationId };
+}
+
+/** POST /api/placements/:placementId/deadline { type:'follow_up', at } — arm the
+ *  placement's MANUAL follow-up deadline (a first-class placementDeadlines item;
+ *  system-managed rta_window/voucher_expiration are off-limits here). The server
+ *  returns { placement }; we ignore it (callers refetch on placement.updated).
+ *  404 placement_not_found; 400 on a bad/missing `at`. */
+export async function setPlacementFollowUp(placementId: string, at: string): Promise<void> {
+  await request<{ placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}/deadline`,
+    { method: 'POST', body: { type: 'follow_up', at } },
+  );
+}
+
+/** POST /api/placements/:placementId/deadline { clear:true } — retire the
+ *  placement's manual follow-up deadline. The server returns { placement }; we
+ *  ignore it (callers refetch on placement.updated). 404 placement_not_found. */
+export async function clearPlacementFollowUp(placementId: string): Promise<void> {
+  await request<{ placement: PlacementItem }>(
+    `/api/placements/${encodeURIComponent(placementId)}/deadline`,
+    { method: 'POST', body: { clear: true } },
+  );
 }
 
 /** PATCH /api/contacts/:contactId/tenant-status - set a contact's lifecycle

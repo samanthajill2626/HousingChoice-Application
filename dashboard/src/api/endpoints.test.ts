@@ -17,6 +17,11 @@ import {
   getPlacement,
   getContactVocabulary,
   getPlacementHistory,
+  getPlacementNudges,
+  patchPlacementNudge,
+  provisionPlacementRelay,
+  setPlacementFollowUp,
+  clearPlacementFollowUp,
   setListingStatus,
   setTenantStatus,
   transitionPlacement,
@@ -116,6 +121,64 @@ it('getPlacementHistory GETs with query and unwraps { history }', async () => {
     query: { limit: 10, before: 'cur' },
   });
   expect(rows).toHaveLength(1);
+});
+
+// --- Placement nudges + relay + deadline ------------------------------------
+
+it('getPlacementNudges GETs and unwraps { nudges }', async () => {
+  const nudges = [
+    { nudgeId: 'n1', placementId: 'k1', kind: 'receipt_check', recipient: 'tenant', dueAt: 't', state: 'upcoming' },
+  ];
+  vi.mocked(request).mockResolvedValueOnce({ nudges });
+  const res = await getPlacementNudges('k1');
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/nudges', {});
+  expect(res).toEqual(nudges);
+});
+
+it('getPlacementNudges forwards signal when provided', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ nudges: [] });
+  const controller = new AbortController();
+  await getPlacementNudges('k1', controller.signal);
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/nudges', { signal: controller.signal });
+});
+
+it('patchPlacementNudge PATCHes { canceled } and unwraps { nudge }', async () => {
+  const nudge = { nudgeId: 'n1', placementId: 'k1', kind: 'receipt_check', recipient: 'tenant', dueAt: 't', state: 'canceled' };
+  vi.mocked(request).mockResolvedValueOnce({ nudge });
+  const res = await patchPlacementNudge('k1', 'n1', true);
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/nudges/n1', {
+    method: 'PATCH',
+    body: { canceled: true },
+  });
+  expect(res).toEqual(nudge);
+});
+
+it('provisionPlacementRelay POSTs and unwraps the new conversationId', async () => {
+  vi.mocked(request).mockResolvedValueOnce({
+    conversation: { conversationId: 'conv-9' },
+    placement: { placementId: 'k1', group_thread: 'conv-9' },
+  });
+  const res = await provisionPlacementRelay('k1');
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/relay', { method: 'POST' });
+  expect(res).toEqual({ conversationId: 'conv-9' });
+});
+
+it('setPlacementFollowUp POSTs { type:"follow_up", at }', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1' } });
+  await setPlacementFollowUp('k1', '2026-07-20T10:00:00.000Z');
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/deadline', {
+    method: 'POST',
+    body: { type: 'follow_up', at: '2026-07-20T10:00:00.000Z' },
+  });
+});
+
+it('clearPlacementFollowUp POSTs { clear:true }', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ placement: { placementId: 'k1' } });
+  await clearPlacementFollowUp('k1');
+  expect(request).toHaveBeenCalledWith('/api/placements/k1/deadline', {
+    method: 'POST',
+    body: { clear: true },
+  });
 });
 
 it('setTenantStatus PATCHes tenant-status and unwraps { contact }', async () => {

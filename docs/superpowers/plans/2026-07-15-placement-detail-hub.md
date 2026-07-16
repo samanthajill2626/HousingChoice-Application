@@ -44,11 +44,11 @@
   - `cancel(nudgeId: string, canceledAt: string): Promise<boolean>`
   - `uncancel(nudgeId: string): Promise<boolean>`
 
-- [ ] **Step 1: Failing tests.** Mirror `app/test` coverage of tourRemindersRepo cancel/uncancel: cancel succeeds on a pending row; cancel returns false when sentAt already set (lost race) and when already canceled; uncancel removes canceledAt only when present and never resurrects a sent row; listByPlacement returns only that placement's rows.
-- [ ] **Step 2: Run to verify FAIL** (`cd /w/tmp/placement-hub && npm test --workspace app -- placementNudgesRepo`).
-- [ ] **Step 3: Implement.** Copy the conditional-write idiom from `tourRemindersRepo.cancel/uncancel` verbatim, renamed to nudge fields: cancel = UpdateCommand SET canceledAt with `attribute_not_exists(sentAt) AND attribute_not_exists(canceledAt)`; uncancel = REMOVE canceledAt with `attribute_exists(canceledAt) AND attribute_not_exists(sentAt)`; ConditionalCheckFailedException -> return false.
-- [ ] **Step 4: Run to PASS.**
-- [ ] **Step 5: Commit** (explicit paths, gating `git status` first).
+- [x] **Step 1: Failing tests.** Mirror `app/test` coverage of tourRemindersRepo cancel/uncancel: cancel succeeds on a pending row; cancel returns false when sentAt already set (lost race) and when already canceled; uncancel removes canceledAt only when present and never resurrects a sent row; listByPlacement returns only that placement's rows.
+- [x] **Step 2: Run to verify FAIL** (`cd /w/tmp/placement-hub && npm test --workspace app -- placementNudgesRepo`).
+- [x] **Step 3: Implement.** Copy the conditional-write idiom from `tourRemindersRepo.cancel/uncancel` verbatim, renamed to nudge fields: cancel = UpdateCommand SET canceledAt with `attribute_not_exists(sentAt) AND attribute_not_exists(canceledAt)`; uncancel = REMOVE canceledAt with `attribute_exists(canceledAt) AND attribute_not_exists(sentAt)`; ConditionalCheckFailedException -> return false.
+- [x] **Step 4: Run to PASS.**
+- [x] **Step 5: Commit** (explicit paths, gating `git status` first).
 
 ### Task 2: Routes - GET nudges + PATCH cancel/restore
 
@@ -63,11 +63,11 @@
   - `PATCH /api/placements/:placementId/nudges/:nudgeId` body `{canceled: boolean}` -> 200 `{nudge}`; 400 non-boolean; 404 unknown placement / nudge-not-of-this-placement; 409 `{error: 'nudge_not_cancelable' | 'nudge_not_restorable', nudge}` with the honestly re-read row.
   - `PlacementNudgeView = {nudgeId, placementId, kind, recipient: 'tenant'|'landlord', dueAt, state: 'upcoming'|'sent'|'canceled', sentAt?, canceledAt?}`. recipient derives from kind: approval_check + rta_window_closing -> landlord, else tenant (matches NUDGE_RUNGS routing in `app/src/jobs/placementNudges.ts` - verify there, do not trust this line).
 
-- [ ] **Step 1: Failing tests.** Mirror `app/test/tourRemindersApi.test.ts` case-for-case: cancel happy path (200 + canceledAt + scheduled.updated emitted), restore happy path, 409 lost-race (pre-stamp sentAt), 400/404 taxonomy, GET returns views with recipient mapping.
-- [ ] **Step 2: Run to verify FAIL.**
-- [ ] **Step 3: Implement.** Mirror `app/src/routes/tourReminders.ts` PATCH structure. scheduled.updated emit keys on the RECIPIENT's contactId: tenant kinds -> placement.tenantId; landlord kinds -> unit.landlordId (best-effort lookup; if unresolvable, emit with tenantId - the dashboard panels refetch on any scheduled.updated anyway).
-- [ ] **Step 4: Run to PASS**, then `npm run typecheck` BARE.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Failing tests.** Mirror `app/test/tourRemindersApi.test.ts` case-for-case: cancel happy path (200 + canceledAt + scheduled.updated emitted), restore happy path, 409 lost-race (pre-stamp sentAt), 400/404 taxonomy, GET returns views with recipient mapping.
+- [x] **Step 2: Run to verify FAIL.**
+- [x] **Step 3: Implement.** Mirror `app/src/routes/tourReminders.ts` PATCH structure. scheduled.updated emit keys on the RECIPIENT's contactId: tenant kinds -> placement.tenantId; landlord kinds -> unit.landlordId (best-effort lookup; if unresolvable, emit with tenantId - the dashboard panels refetch on any scheduled.updated anyway).
+- [x] **Step 4: Run to PASS**, then `npm run typecheck` BARE.
+- [x] **Step 5: Commit.**
 
 ### Task 3: Dashboard API bindings + types
 
@@ -83,7 +83,7 @@
   - `provisionPlacementRelay(placementId): Promise<{conversationId: string}>` (verify the route's actual response shape in placements.ts and unwrap accordingly)
   - `setPlacementFollowUp(placementId, at: string): Promise<void>` and `clearPlacementFollowUp(placementId): Promise<void>`
 
-- [ ] Steps: write bindings mirroring `getTourReminders`/`patchTourReminder` in the same file; `npm run typecheck` BARE; commit.
+- [x] Steps: write bindings mirroring `getTourReminders`/`patchTourReminder` in the same file; `npm run typecheck` BARE; commit.
 
 ### Task 4: Date vocabulary formatters
 
@@ -94,8 +94,8 @@
 **Interfaces:**
 - Produces: `scheduledFor(iso)`, `expiresOn(iso)`, `closesAt(iso)`, `sinceWhen(iso)`, `wasDue(iso)` - each returns the full verb phrase per spec section 6 (e.g. `scheduledFor` -> "scheduled for Thu Jul 17, 10am (in 2 days)"). Automated sends REUSE the existing shared `sendRelative` ("sends in Nh") - do not duplicate it.
 
-- [ ] **Step 1: Failing tests** with fixed `now` injection (every formatter takes an explicit `now: number` param or uses the file's existing now-injection idiom - check first): future, past-relative, and boundary (under 1h, under 1 day, multi-day) cases per formatter.
-- [ ] **Step 2: FAIL. Step 3: Implement (compose from the file's existing date helpers - DRY). Step 4: PASS. Step 5: Commit.**
+- [x] **Step 1: Failing tests** with fixed `now` injection (every formatter takes an explicit `now: number` param or uses the file's existing now-injection idiom - check first): future, past-relative, and boundary (under 1h, under 1 day, multi-day) cases per formatter.
+- [x] **Step 2: FAIL. Step 3: Implement (compose from the file's existing date helpers - DRY). Step 4: PASS. Step 5: Commit.**
 
 ### Task 5: Stage descriptor map
 
@@ -139,8 +139,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 | moved_in | terminal | - | none | none |
 | lost | terminal | - | none | none |
 
-- [ ] **Step 1: Failing completeness test**: `Object.keys(STAGE_DESCRIPTORS)` set-equals the full stage ladder; every 'them' gate has non-empty waitingOn; recording stages match today's StageDataCard/PaperworkCard set (the five above).
-- [ ] **Steps 2-5: FAIL -> implement the table -> PASS -> commit.**
+- [x] **Step 1: Failing completeness test**: `Object.keys(STAGE_DESCRIPTORS)` set-equals the full stage ladder; every 'them' gate has non-empty waitingOn; recording stages match today's StageDataCard/PaperworkCard set (the five above).
+- [x] **Steps 2-5: FAIL -> implement the table -> PASS -> commit.**
 
 ### Task 6: usePlacementChannels + PlacementConversation
 
@@ -153,9 +153,9 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: `useTourChannels.ts` + `TourConversation.tsx` as line-for-line templates; `placement.group_thread`, `placement.tenantId`, `unit.landlordId`; Task 3's `provisionPlacementRelay`.
 - Produces: `usePlacementChannels(placement, landlordId)` returning the same channel-state shape as useTourChannels (group/tenant/landlord, unread, markRead, setConversationId); `<PlacementConversation placement unit tenant landlord channels onConsentRefused/>` mirroring TourConversation's props pattern.
 
-- [ ] **Step 1: Failing hook tests** mirroring useTourChannels.test.tsx: group from group_thread, tenant/landlord resolved to most-recent non-relay 1:1, setConversationId injection survives refetch.
-- [ ] **Step 2-4: FAIL -> implement as mirrors -> PASS.** Differences from the tour versions, and ONLY these: channel source fields (group_thread), no pm_team label branch (labels: "Group text" / "Tenant - {first}" / "Landlord - {first}"), group empty-state button calls provisionPlacementRelay then setConversationId('group', id). Everything else (lazy single mount, remount on switch, per-tab markRead, unread dots, consent-refusal bubble-up) copies the template.
-- [ ] **Step 5: Commit.**
+- [x] **Step 1: Failing hook tests** mirroring useTourChannels.test.tsx: group from group_thread, tenant/landlord resolved to most-recent non-relay 1:1, setConversationId injection survives refetch.
+- [x] **Step 2-4: FAIL -> implement as mirrors -> PASS.** Differences from the tour versions, and ONLY these: channel source fields (group_thread), no pm_team label branch (labels: "Group text" / "Tenant - {first}" / "Landlord - {first}"), group empty-state button calls provisionPlacementRelay then setConversationId('group', id). Everything else (lazy single mount, remount on switch, per-tab markRead, unread dots, consent-refusal bubble-up) copies the template.
+- [x] **Step 5: Commit.**
 
 ### Task 7: Page rebuild - twoPaneShell, header, right-pane assembly
 
@@ -167,9 +167,9 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: `dashboard/src/ui/twoPaneShell.module.css` (compose, do not fork), TourDetail.tsx as the structural template, Task 5 descriptors (next-stage lookup for the CTA label), Task 6 conversation, existing requestMove/gateFor pipeline + StatusMenu + modals.
 - Produces: header CTA `Advance to {nextStageLabel}` calling `requestMove(nextStage)` (existing gates fire untouched); kebab menu (mirror TourActionsMenu popover) = Move to... (existing StatusMenu content), Mark lost, Open group text (hidden when group_thread set), Set follow-up (opens Task 8's modal); facts line via Task 4 vocabulary; mobile segmented toggle defaulting to Details.
 
-- [ ] **Step 1: Failing tests**: header renders title + stage pill + facts line; CTA label = next ladder stage and absent at moved_in/lost; kebab exposes the four actions with correct gating; mobile toggle switches panes (match TourDetail.test.tsx's pattern).
-- [ ] **Step 2-4: FAIL -> rebuild the page -> PASS.** Right pane order: NowCard placeholder slot (Task 9), DeadlinesNudges placeholder slot (Task 8), People and provenance card (tenant/landlord/property Links + "converted from tour toured {date} ->" via fromTourId when present), Placement facts (today's read-only fields reworded with Task 4 vocabulary), HistoryPanel. Placeholders = render nothing yet, NOT dummy cards.
-- [ ] **Step 5: BARE typecheck + dashboard suite. Commit.**
+- [x] **Step 1: Failing tests**: header renders title + stage pill + facts line; CTA label = next ladder stage and absent at moved_in/lost; kebab exposes the four actions with correct gating; mobile toggle switches panes (match TourDetail.test.tsx's pattern).
+- [x] **Step 2-4: FAIL -> rebuild the page -> PASS.** Right pane order: NowCard placeholder slot (Task 9), DeadlinesNudges placeholder slot (Task 8), People and provenance card (tenant/landlord/property Links + "converted from tour toured {date} ->" via fromTourId when present), Placement facts (today's read-only fields reworded with Task 4 vocabulary), HistoryPanel. Placeholders = render nothing yet, NOT dummy cards.
+- [x] **Step 5: BARE typecheck + dashboard suite. Commit.**
 
 ### Task 8: Deadlines and nudges card
 
@@ -182,8 +182,8 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: Task 3 bindings; `RemindersPanel.tsx` as the template - REUSE its exported `nextReminderRefetchDelay` for the dueAt-anchored self-refetch (import it; do not copy).
 - Produces: `<DeadlinesNudgesCard placementId tenantName landlordName />` - deadlines block (voucher expiration + RTA window read-only via Task 4 vocabulary; follow-up row with Set/Change/Clear) + nudges block (rows with kind label, recipient, "sends ..." chip, Cancel/Restore buttons, busyId single-flight, 409 -> silent refetch).
 
-- [ ] **Step 1: Failing tests** mirroring RemindersPanel.test.tsx: rows render states; Cancel PATCHes {canceled:true} then refetches; Restore likewise; busy disables both; scheduled.updated triggers refetch; UI copy includes the re-arm caveat ("A stage move re-arms this stage's nudge").
-- [ ] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.**
+- [x] **Step 1: Failing tests** mirroring RemindersPanel.test.tsx: rows render states; Cancel PATCHes {canceled:true} then refetches; Restore likewise; busy disables both; scheduled.updated triggers refetch; UI copy includes the re-arm caveat ("A stage move re-arms this stage's nudge").
+- [x] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.**
 
 ### Task 9: Now card
 
@@ -196,16 +196,16 @@ export const STAGE_DESCRIPTORS: Record<PlacementStage, StageDescriptor>;
 - Consumes: Task 5 descriptors, Task 4 formatters, Task 8's nudge data (lift the nudges fetch into PlacementDetail or a small shared hook so NowCard's safety-net line and DeadlinesNudgesCard share ONE fetch - do not fetch twice), existing StageDataCard/PaperworkCard recorder logic (move, do not rewrite).
 - Produces: `<PlacementNowCard placement unit tenant landlord nudges onAdvance />` rendering the spec's 5-part anatomy; gate line amber for 'them' / blue accent for 'us' (tokens only); "Record: nothing at this stage" when record === 'none'; missing expected gate date renders "no date recorded".
 
-- [ ] **Step 1: Failing tests** for the three shapes: waiting stage (awaiting_inspection with and without inspection_date), our-move stage (send_application), recording stage (complete_paperwork checklist incl. LIF gating on tenant.lifEligible); terminal stages render completed/lost summary and NO Advance.
-- [ ] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.** Then run the FULL dashboard suite BARE - the StageDataCard/PaperworkCard migration must leave zero orphaned tests.
+- [x] **Step 1: Failing tests** for the three shapes: waiting stage (awaiting_inspection with and without inspection_date), our-move stage (send_application), recording stage (complete_paperwork checklist incl. LIF gating on tenant.lifEligible); terminal stages render completed/lost summary and NO Advance.
+- [x] **Step 2-4: FAIL -> implement -> PASS. Step 5: Commit.** Then run the FULL dashboard suite BARE - the StageDataCard/PaperworkCard migration must leave zero orphaned tests.
 
 ### Task 10: E2e + mobile pass + full gates
 
 **Files:**
 - Modify: `e2e/tests/dashboard-next/placements*.spec.ts` (find the exact spec name), `e2e/scenarios/steps.ts` (new steps only if the vocabulary lacks them)
 
-- [ ] **Step 1: Extend the e2e scenario:** from a seeded placement - open group text from the empty state (button disappears, thread mounts); advance a stage via the header CTA through a gate modal; armed nudge visible in the Deadlines and nudges card AND in the tenant 1:1 Upcoming bucket; cancel then restore it. Accessibility-first selectors.
-- [ ] **Step 2: Full gates BARE from the worktree root:** `npm run typecheck`, `npm test`, `npm run e2e`. All green on the CURRENT base.
+- [x] **Step 1: Extend the e2e scenario:** from a seeded placement - open group text from the empty state (button disappears, thread mounts); advance a stage via the header CTA through a gate modal; armed nudge visible in the Deadlines and nudges card AND in the tenant 1:1 Upcoming bucket; cancel then restore it. Accessibility-first selectors.
+- [x] **Step 2: Full gates BARE from the worktree root:** `npm run typecheck`, `npm test`, `npm run e2e`. All green on the CURRENT base.
 - [ ] **Step 3: Live QA on a hermetic lane** (`npm run e2e:session`, reseed profile=full, dev-login again after reseed): walk the page desktop-width, then `browser_resize` to phone width (390x844) and verify spec section 7 - header wraps with long stage names (put the placement in awaiting_landlord_submission), no horizontal scroll, pill rail scrolls, Now card lines wrap. Screenshots into .playwright-mcp/.
 - [ ] **Step 4: Commit any fixes; final gates if anything changed. Report with a where-to-test list.** Do NOT merge to main - the founder merges.
 

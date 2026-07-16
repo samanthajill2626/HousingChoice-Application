@@ -2190,20 +2190,17 @@ export class Scenario {
 
   /**
    * [Team, MANUAL] Move the placement to `stageLabel` (the STAGE_LABELS display
-   * string) via the PlacementDetail stage pill (an interactive menu-button whose
-   * accessible name is "Placement stage: <current>") — the SAME gated pipeline
-   * the board uses. When the target is 'Lost' the reason modal opens: pick the
-   * `lostReason` category (its visible label) and confirm. Asserts the new stage
-   * renders before returning.
+   * string) via the rebuilt PlacementDetail hub: the gated stage picker now lives
+   * inside the header kebab ("More actions" -> "Move to..." StatusMenu), driving
+   * the SAME gated pipeline the board uses. When the target is 'Lost' the reason
+   * modal opens: pick the `lostReason` category (its visible label) and confirm.
+   * Asserts the new stage renders (the header stage pill) before returning.
    */
   teamMovesPlacementTo(stageLabel: string, opts?: { lostReason?: string }): Promise<void> {
     const id = this.requireActivePlacementId();
     return step(`Team moves the placement → ${stageLabel}`, async () => {
       await this.page.goto(`${NEXT}/placements/${id}`);
-      const stagePill = this.page.getByRole('button', { name: /^Placement stage:/ });
-      await expect(stagePill).toBeVisible({ timeout: 10_000 });
-      await stagePill.click();
-      await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();
+      await this.pickPlacementStage(stageLabel);
 
       if (stageLabel === 'Lost') {
         const dialog = this.page.getByRole('dialog', { name: 'Mark placement lost' });
@@ -2214,10 +2211,10 @@ export class Scenario {
         await expect(dialog).toHaveCount(0, { timeout: 10_000 });
       }
 
-      // The header h1 renders the new stage LABEL (stageLabel + phase span) once
-      // the transition lands. Substring match tolerates the trailing phase text.
+      // The header stage pill re-labels to the new stage once the transition
+      // lands (the hub dropped the h1 title for a name span + a stage pill).
       await expect(
-        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(stageLabel)) }),
+        this.placementBanner().getByText(stageLabel, { exact: true }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2229,7 +2226,7 @@ export class Scenario {
     return step(`App: placement is at '${stageLabel}'`, async () => {
       await this.page.goto(`${NEXT}/placements/${id}`);
       await expect(
-        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(stageLabel)) }),
+        this.placementBanner().getByText(stageLabel, { exact: true }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2544,7 +2541,7 @@ export class Scenario {
       expect(placement.stage).toBe('lost');
       await this.page.goto(`${NEXT}/placements/${id}`);
       await expect(
-        this.page.getByRole('heading', { level: 1, name: /Lost/ }),
+        this.placementBanner().getByText('Lost', { exact: true }),
       ).toBeVisible({ timeout: 10_000 });
     });
   }
@@ -2838,7 +2835,7 @@ export class Scenario {
    * [App] The complete-paperwork checklist renders on PlacementDetail: "Lease
    * signed" + "Move-in details shared" checkboxes are always present; the LIF row
    * is a checkbox only when the tenant is LIF-eligible (`lif:true`), otherwise the
-   * honest "LIF — not applicable for this tenant." line (no checkbox). Scoped to
+   * honest "LIF - not applicable for this tenant." line (no checkbox). Scoped to
    * the Paperwork card.
    */
   expectPaperworkChecklist(opts: { lif: boolean }): Promise<void> {
@@ -2854,7 +2851,7 @@ export class Scenario {
         await expect(card.getByRole('checkbox', { name: /LIF/ })).toBeVisible();
       } else {
         await expect(card.getByRole('checkbox', { name: /LIF/ })).toHaveCount(0);
-        await expect(card.getByText(/LIF — not applicable/)).toBeVisible();
+        await expect(card.getByText(/LIF - not applicable/)).toBeVisible();
       }
     });
   }
@@ -3124,7 +3121,28 @@ export class Scenario {
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
   }
 
-  /** Open the PlacementDetail stage pill on the active placement, pick
+  /** The rebuilt PlacementDetail header band, scoped via its back crumb (the Now
+   *  card repeats the stage label + an "Advance" button, so header-specific
+   *  assertions scope HERE to disambiguate). The stage pill + facts line live in
+   *  this band. */
+  private placementBanner(): import('@playwright/test').Locator {
+    return this.page
+      .locator('header')
+      .filter({ has: this.page.getByRole('link', { name: 'Back to placements' }) });
+  }
+
+  /** Open the PlacementDetail header kebab ("More actions") -> the "Move to..."
+   *  stage StatusMenu, then pick `stageLabel` (a STAGE_LABELS display string). The
+   *  rebuilt hub hosts the gated stage picker inside the kebab (no bare stage-pill
+   *  button); a pick runs the SAME gated requestMove pipeline. Assumes the caller
+   *  has already navigated to the placement. */
+  private async pickPlacementStage(stageLabel: string): Promise<void> {
+    await this.page.getByRole('button', { name: 'More actions' }).click();
+    await this.page.getByRole('button', { name: /^Placement stage/ }).click();
+    await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();
+  }
+
+  /** Open the PlacementDetail stage picker on the active placement, pick
    *  `stageLabel` (a STAGE_LABELS display string) — which opens the gated
    *  MovePromptModal — and return the modal (a role="dialog" named `dialogName`,
    *  its title). Navigates to the placement first, mirroring teamMovesPlacementTo. */
@@ -3134,18 +3152,15 @@ export class Scenario {
   ): Promise<import('@playwright/test').Locator> {
     const id = this.requireActivePlacementId();
     await this.page.goto(`${NEXT}/placements/${id}`);
-    const stagePill = this.page.getByRole('button', { name: /^Placement stage:/ });
-    await expect(stagePill).toBeVisible({ timeout: 10_000 });
-    await stagePill.click();
-    await this.page.getByRole('menuitemradio', { name: stageLabel, exact: true }).click();
+    await this.pickPlacementStage(stageLabel);
     const dialog = this.page.getByRole('dialog', { name: dialogName });
     await expect(dialog).toBeVisible();
     return dialog;
   }
 
   /** Confirm a MovePromptModal ("Confirm move") and wait for it to close. When
-   *  `expectedStageLabel` is given, assert the PlacementDetail h1 renders that
-   *  destination stage (substring — the h1 carries a trailing phase span). */
+   *  `expectedStageLabel` is given, assert the PlacementDetail header stage pill
+   *  re-labels to that destination stage. */
   private async confirmMovePrompt(
     dialog: import('@playwright/test').Locator,
     expectedStageLabel?: string,
@@ -3154,7 +3169,7 @@ export class Scenario {
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
     if (expectedStageLabel !== undefined) {
       await expect(
-        this.page.getByRole('heading', { level: 1, name: new RegExp(escapeRegExp(expectedStageLabel)) }),
+        this.placementBanner().getByText(expectedStageLabel, { exact: true }),
       ).toBeVisible({ timeout: 10_000 });
     }
   }

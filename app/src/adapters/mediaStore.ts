@@ -77,13 +77,15 @@ export interface MediaStore {
    * Mint a presigned POST grant so the BROWSER uploads one file DIRECTLY to the
    * media bucket (unit-photos direct-upload revision) - the bytes never touch
    * the app process. The returned policy pins the upload to EXACTLY `key`,
-   * `contentType`, and the 1..OUTBOUND_MMS_MAX_FILE_BYTES size range, and
+   * `contentType`, and the 1..maxBytes size range (default
+   * OUTBOUND_MMS_MAX_FILE_BYTES = 5MB, the unit-photo cap; outbound MMS passes
+   * the 20MB source ceiling so big originals can upload then auto-fit down), and
    * expires in UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS. S3/MinIO enforces every
    * condition at the edge (spike Q2): an over-size, zero-byte, wrong-type, or
    * tampered-key POST is rejected and stores nothing. Signed with the store's
    * OWN client so endpoint/forcePathStyle/creds/region are inherited.
    */
-  createPresignedPost(key: string, opts: { contentType: string }): Promise<PresignedPost>;
+  createPresignedPost(key: string, opts: { contentType: string; maxBytes?: number }): Promise<PresignedPost>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -190,7 +192,7 @@ export class S3MediaStore implements MediaStore {
 
   async createPresignedPost(
     key: string,
-    opts: { contentType: string },
+    opts: { contentType: string; maxBytes?: number },
   ): Promise<PresignedPost> {
     // Policy conditions (all edge-enforced by S3/MinIO, spike Q2):
     //   - key EXACTLY the server-minted key - the SDK adds `{ key: Key }` (an
@@ -198,11 +200,13 @@ export class S3MediaStore implements MediaStore {
     //   - Content-Type EXACTLY this grant's allowed image type - the SDK turns
     //     each `Fields` entry into an exact-match condition, so the Content-Type
     //     field both seeds the form AND pins the policy (spike Q2b);
-    //   - content-length-range 1 .. 5MB - rejects a zero-byte or over-size POST.
+    //   - content-length-range 1 .. maxBytes - rejects a zero-byte or over-size
+    //     POST (default 5MB; MMS sources pass 20MB and auto-fit at confirm).
+    const maxBytes = opts.maxBytes ?? OUTBOUND_MMS_MAX_FILE_BYTES;
     const { url, fields } = await createPresignedPost(this.client, {
       Bucket: this.bucket,
       Key: key,
-      Conditions: [['content-length-range', 1, OUTBOUND_MMS_MAX_FILE_BYTES]],
+      Conditions: [['content-length-range', 1, maxBytes]],
       Fields: { 'Content-Type': opts.contentType },
       Expires: UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS,
     });

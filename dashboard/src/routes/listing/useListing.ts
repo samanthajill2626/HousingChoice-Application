@@ -30,6 +30,14 @@ import {
 } from '../../api/index.js';
 import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
 
+/** Same `media` array (order-sensitive; undefined treated as empty)? Used to
+ *  decide whether a prior unit's resolved `mediaDisplay` still applies. */
+function sameMedia(a: string[] | undefined, b: string[] | undefined): boolean {
+  const x = a ?? [];
+  const y = b ?? [];
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
 /** A slice that may not be live yet: 'loading' → 'pending' (404) | rows (ready). */
 export type Slice<T> =
   | { status: 'loading' }
@@ -128,7 +136,26 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
   // Keeps the rest of the committed state; no refetch.
   const setUnit = useCallback(
     (unit: UnitItem) => {
-      setState((prev) => ({ ...prev, status: 'ready', unit, forId: unitId }));
+      setState((prev) => {
+        // Preserve the resolved gallery URLs (`mediaDisplay`) across a mutation
+        // that omits them: the detail GET + the photo routes resolve
+        // mediaDisplay, but the listing-status + generic PATCH routes return the
+        // unit WITHOUT it. Applying such a response raw would blank the gallery
+        // (the fallback maps stored keys to url-less "unavailable" tiles) until
+        // the next photo action re-resolved it. Safe to reuse the prior URLs
+        // because only the photo routes change `media`, and they always include
+        // mediaDisplay - so when the incoming unit has no mediaDisplay and its
+        // `media` is unchanged, the prior resolved URLs still apply. If `media`
+        // differs, we do NOT preserve (fall to the tile fallback, self-heals on
+        // the next detail load).
+        const applied =
+          unit.mediaDisplay === undefined &&
+          prev.unit?.mediaDisplay !== undefined &&
+          sameMedia(prev.unit.media, unit.media)
+            ? { ...unit, mediaDisplay: prev.unit.mediaDisplay }
+            : unit;
+        return { ...prev, status: 'ready', unit: applied, forId: unitId };
+      });
     },
     [unitId],
   );

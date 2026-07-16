@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { PlacementsPage, Contact, UnitItem, UnitsPage } from '../../api/index.js';
@@ -151,6 +151,63 @@ describe('useListing', () => {
     expect(getTours).toHaveBeenCalledWith({ unitId: 'u1' }, expect.anything());
     expect(screen.getByTestId('tours').textContent).toBe('ready');
     expect(screen.getByTestId('tours-rows').textContent).toBe('2');
+  });
+
+  it('setUnit preserves the prior mediaDisplay when a mutation response omits it (media unchanged)', async () => {
+    // REGRESSION (2026-07-16): the listing-status + generic-PATCH routes return
+    // the unit WITHOUT mediaDisplay. Applying such a response raw blanked the
+    // gallery until the next photo action re-resolved it (add photos -> flip to
+    // Available -> photos vanish; a cover change brought them back). setUnit now
+    // keeps the prior resolved URLs when the incoming unit omits mediaDisplay
+    // AND its media array is unchanged.
+    const withPhotos: UnitItem = {
+      unitId: 'u1',
+      landlordId: 'll1',
+      status: 'available',
+      media: ['unit-media/u1/a', 'unit-media/u1/b'],
+      mediaDisplay: [
+        { entry: 'unit-media/u1/a', url: 'https://s3.local/a?sig=1' },
+        { entry: 'unit-media/u1/b', url: 'https://s3.local/b?sig=2' },
+      ],
+    };
+    getUnit.mockResolvedValue(withPhotos);
+    getUnits.mockResolvedValue(UNITS);
+    getPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.unit?.mediaDisplay).toHaveLength(2);
+
+    // A status-change / edit-form response: SAME media, NO mediaDisplay.
+    act(() =>
+      result.current.setUnit({
+        unitId: 'u1',
+        landlordId: 'll1',
+        status: 'occupied',
+        media: ['unit-media/u1/a', 'unit-media/u1/b'],
+      }),
+    );
+    // Preserved - the gallery keeps its resolved URLs (no blank-out); the
+    // status change still applied.
+    expect(result.current.unit?.mediaDisplay).toEqual(withPhotos.mediaDisplay);
+    expect(result.current.unit?.status).toBe('occupied');
+
+    // But when media CHANGES and mediaDisplay is omitted, the prior URLs are
+    // stale - do NOT preserve them (falls to the tile fallback, self-heals).
+    act(() =>
+      result.current.setUnit({
+        unitId: 'u1',
+        landlordId: 'll1',
+        status: 'occupied',
+        media: ['unit-media/u1/a'],
+      }),
+    );
+    expect(result.current.unit?.mediaDisplay).toBeUndefined();
   });
 
   it('sortToursForPanel: unbooked requests lead, then booked tours newest-first', () => {

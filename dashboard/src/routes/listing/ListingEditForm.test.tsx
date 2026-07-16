@@ -196,4 +196,9 @@ describe('ListingEditForm', () => {
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t save/i));
   });
+
+  it('tells staff which facts are publicly visible on the flyer', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByText(/shown on the public flyer/i)).toBeInTheDocument();
+  });
 });

@@ -87,6 +87,11 @@ the public flyer".
   `{ flyer: { ...toUnitFlyer(unit), media, contact_number } }` where media is
   the existing presign-resolved list and contact_number is
   `config.ourPhoneNumbers[0] ?? null`.
+- The 404 body becomes `{ error: 'not_found', contact_number }` - the SAME
+  body for missing, deleted, and not-shareable (still no existence oracle;
+  the number is config, identical on every 404). This feeds the
+  unavailable-state text-us CTA (section 4.1), which otherwise has no flyer
+  payload to read the number from.
 - DELETE the GET /public/units/:unitId/details route entirely (no vestigial
   endpoint, no alias). The dashboard is the only client.
 - POST /public/housing-fair: completely unchanged (consent gate, dedupe,
@@ -124,12 +129,30 @@ Page layout (single scroll, mobile-first - these links arrive by SMS):
 Tenant-facing copy: the dwelling is always "home" (never unit/property/
 listing) - GLOSSARY rule, unchanged.
 
-The unavailable state (opaque 404 -> "This home is no longer available" +
-link to /join) and the loading state are unchanged.
+The loading state is unchanged. The unavailable state ("This home is no
+longer available") becomes variant-aware so neither path dead-ends:
+- Public variant: unchanged - the existing "See other homes" link to /join
+  is its CTA.
+- Known-tenant variant: a tap-to-text button (same sms: mechanics as 4.2)
+  with prefill "The home I was looking at is no longer available - I'm
+  interested in similar homes."; when contact_number is null, the same
+  reply-prompt degrade copy as 4.2. The number comes from the 404 body
+  (section 3.2) since there is no flyer payload in this state.
 
 ### 4.2 CTA variants
-Variant selection: `?cta=text` query param (react-router useSearchParams).
-Any other value or absence = public variant.
+Variant selection: `?cta=text` query param. Any other value or absence =
+public variant.
+
+Flag stripping + persistence: on mount, read the param, persist the variant
+in sessionStorage (key includes the unitId), then strip the param from the
+URL (react-router setSearchParams with replace: true - no history entry, no
+remount loop). Copying the URL from the address bar or the native share
+sheet therefore never propagates the flag to a friend. A refresh in the same
+tab KEEPS the known-tenant variant via sessionStorage (without this, a
+reload would dump the known tenant onto the signup form - the exact
+confusion this feature removes). Known limitation, accepted: forwarding the
+original SMS forwards the flagged link; the friend sees the text-us CTA and
+reaches us on the thread anyway.
 
 Public variant (bare /p/:unitId):
 - Heading: "Interested in this home?" + the existing IntakeForm component
@@ -184,7 +207,9 @@ App (vitest):
   boolean; legacy string address -> {}.
 - publicIntake.test.ts / apiRoutes.test.ts: /flyer returns the full payload
   incl. contact_number from config; /details now 404s at the router level
-  (route gone - assert 404 for the path); shareability gate unchanged.
+  (route gone - assert 404 for the path); shareability gate unchanged; the
+  flyer 404 body carries contact_number and is byte-identical across
+  missing / deleted / not-shareable units.
 - mergeFields.test.ts: [FlyerLink] resolves to `${base}/p/<id>?cta=text`.
 
 Dashboard (vitest):
@@ -192,14 +217,18 @@ Dashboard (vitest):
   form, submit swaps ONLY the CTA to thank-you, info remains; known variant
   renders sms: link with encoded prefill and NO form; contact_number-null
   known variant renders the reply-prompt copy; javascript: video/listing
-  URLs are not rendered as links; unavailable state unchanged.
+  URLs are not rendered as links; ?cta=text is stripped from the URL on
+  mount and the variant survives a remount via sessionStorage; unavailable
+  state renders the /join link (public) vs the text-us CTA fed by the 404
+  body (known).
 - listingLinks.test.ts: flyerPath -> /p/:unitId.
 
 E2e (playwright, e2e/tests/dashboard-next/public-pages.spec.ts):
 - Rework: bare flyer link shows address/deposit/fee/etc with NO gate; form
   submit produces thank-you + dev-outbox welcome text (existing helpers);
   ?cta=text shows the text-us CTA (assert href, do NOT click - sms: has no
-  page to land on) and asserts the form is absent. Accessibility-first
+  page to land on), asserts the form is absent, and asserts the URL was
+  stripped clean of the cta param after load. Accessibility-first
   selectors per e2e/support/selectors.md.
 
 Gates: npm run typecheck + npm test + npm run e2e, bare, from the worktree.

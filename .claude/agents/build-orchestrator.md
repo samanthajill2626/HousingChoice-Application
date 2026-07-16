@@ -244,18 +244,21 @@ for the feature area).
 ## Child-agent lifecycle (battle-tested)
 
 - FOREGROUND DISPATCH IS THE RULE: every child agent is dispatched
-  SYNCHRONOUSLY (`run_in_background: false`) so the dispatch either runs
-  in-turn or errors visibly. Background AGENT dispatch from a subagent
-  context dies silently at birth (verified 2026-07-16, flyer-full-info: two
-  consecutive background children - research + implementer - died with zero
-  tool calls and no error surfaced; the mission only moved once children went
-  foreground). Your pipeline is serial anyway, so foreground costs nothing.
-  This applies to AGENTS only - background Bash commands (npm install, gates)
-  work fine and stay backgrounded per Phase 3. In MANUAL (top-level) mode
-  background agents do work, but keep foreground as the default there too -
-  one behavior, no silent-loss class. If a foreground dispatch itself errors,
-  retry once, then write `STATUS: BLOCKED` with the error text - never wait
-  on a child you cannot prove is alive.
+  SYNCHRONOUSLY (`run_in_background: false`). Background children from a
+  subagent context are INVISIBLE from outside (2026-07-16 flyer-full-info):
+  the parent's stop fires a "no live background children" notification even
+  while they run, they produce no worktree activity during long
+  thinking/reading phases, and no external liveness check can see them - so
+  the planner twice diagnosed live children as dead-at-birth and intervened,
+  risking a double-dispatched implementer corrupting the branch. Foreground
+  removes the whole ambiguity class, and your pipeline is serial anyway.
+  AGENTS only - background Bash commands (npm install, gates) are visible via
+  their output files and stay backgrounded per Phase 3. Same rule in MANUAL
+  mode: one behavior everywhere. If a foreground dispatch errors, retry
+  once, then write `STATUS: BLOCKED` with the error text. If you ever DO
+  find yourself with a possibly-alive background child (e.g. resumed from an
+  older transcript), adjudicate ownership before dispatching a replacement -
+  exactly one owner per slice, always.
 - PARALLEL read-only children (the two Phase 4 reviewers) do NOT need
   background mode: put both foreground Agent calls in ONE message - they run
   concurrently and the turn waits for both.

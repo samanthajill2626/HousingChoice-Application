@@ -69,7 +69,7 @@ WT="/w/tmp/<name>"; LEDGER="$WT/.superpowers/sdd/progress.md"; t0=$(date +%s)
 while true; do
   tail -1 "$LEDGER" 2>/dev/null | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
   newest=$(find "$WT" -path '*/node_modules' -prune -o -type f -newermt '-25 minutes' -print -quit 2>/dev/null)
-  [ -z "$newest" ] && exit 1
+  [ -z "$newest" ] && [ $(( $(date +%s) - t0 )) -ge 1500 ] && exit 1
   [ $(( $(date +%s) - t0 )) -ge 600 ] && exit 2
   sleep 60
 done
@@ -86,6 +86,11 @@ fresh watchdog at EVERY wake that produces one (TaskStop the stale
 watchdog first - exactly one watchdog per mission at any moment). Also re-arm if you are woken by the
 orchestrator finishing while a watchdog is still running (TaskStop the
 stale watchdog).
+
+The stall exit is gated on the watchdog's own age (t0) because a re-armed
+watchdog inherits an already-quiet window - without the gate it trips
+instantly right after the nudge/resume it was re-armed behind. Checkpoints
+(10 min) cover the visibility gap while the gate matures.
 
 The 25-minute quiet threshold assumes the orchestrator's heartbeat contract
 (it appends to `.superpowers/sdd/heartbeat.log` on every action). A healthy

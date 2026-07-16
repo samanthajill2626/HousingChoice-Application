@@ -1088,15 +1088,21 @@ async function rollIntoBroadcast(
   errorCode: string | undefined,
   statusRetryDelayMs: number,
 ): Promise<void> {
-  // Only terminal delivery outcomes roll up; intermediate (sent/queued)
-  // callbacks for a broadcast message are already reflected by the send job.
+  // Terminal outcomes (delivered/failed) transition the slot + stats. The
+  // carrier's NON-terminal 'sent' instead stamps the carrierSentAt marker: the
+  // fan-out's dispatch already claimed the slot as status 'sent' (its
+  // idempotency claim - it must NOT start at 'queued', a continuation pass
+  // re-sends queued slots), but until the carrier confirms, every read surface
+  // presents that slot as in-flight ("Sending...") so the recipient row agrees
+  // with the message's own 1:1 bubble at every instant. Other intermediates
+  // (queued) have nothing to add.
   const next: 'delivered' | 'failed' | undefined =
     deliveryStatus === 'delivered'
       ? 'delivered'
       : deliveryStatus === 'failed' || deliveryStatus === 'undelivered'
         ? 'failed'
         : undefined;
-  if (next === undefined) return;
+  if (next === undefined && deliveryStatus !== 'sent') return;
 
   const broadcast = await broadcasts.getById(broadcastId);
   if (!broadcast) {
@@ -1130,6 +1136,34 @@ async function rollIntoBroadcast(
   if (!broadcastSlotMayTransition(slot.status)) {
     // Forward-only: a terminal slot never regresses (out-of-order/duplicate
     // callbacks). No stat change, no emit.
+    return;
+  }
+
+  if (next === undefined) {
+    // deliveryStatus === 'sent': stamp the carrier-confirmed marker. No stats
+    // bump (the persisted counters keep their dispatch semantics - the fan-out
+    // already counted this leg); the emit's DERIVED stats move the slot from
+    // the in-flight bucket to `sent`, flipping the row "Sending..." -> "Sent"
+    // live. The message state machine gates redeliveries upstream
+    // (`transitioned`), and the marker guard below makes a late duplicate a
+    // silent no-op rather than a re-stamp.
+    if (slot.status !== 'sent' || slot.carrierSentAt !== undefined) return;
+    const applied = await broadcasts.setRecipient(
+      broadcastId,
+      contactKey,
+      { ...slot, carrierSentAt: new Date().toISOString() },
+      ['sent'],
+    );
+    if (!applied) return;
+    const item = await broadcasts.getById(broadcastId);
+    if (item) {
+      events.emit('broadcast.updated', {
+        broadcastId,
+        status: item.status,
+        stats: deriveBroadcastStats(item),
+      });
+    }
+    log.info({ broadcastId }, 'broadcast recipient carrier-sent marker rolled in');
     return;
   }
 

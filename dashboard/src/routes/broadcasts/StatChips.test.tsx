@@ -36,7 +36,7 @@ describe('StatChips', () => {
     expect(within(within(list).getByText('Recipients').closest('div') as HTMLElement).getByText('5')).toBeInTheDocument();
     expect(within(within(list).getByText('Delivered').closest('div') as HTMLElement).getByText('3')).toBeInTheDocument();
     expect(within(within(list).getByText('Sent').closest('div') as HTMLElement).getByText('4')).toBeInTheDocument();
-    expect(within(within(list).getByText('Queued').closest('div') as HTMLElement).getByText('1')).toBeInTheDocument();
+    expect(within(within(list).getByText('Sending').closest('div') as HTMLElement).getByText('1')).toBeInTheDocument();
     expect(within(within(list).getByText('Failed').closest('div') as HTMLElement).getByText('2')).toBeInTheDocument();
   });
 
@@ -66,18 +66,21 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Recipients')).toContain('11');
     expect(chipValue(list, 'Delivered')).toContain('11');
     expect(chipValue(list, 'Sent')).toContain('0');
-    expect(chipValue(list, 'Queued')).toContain('0');
+    expect(chipValue(list, 'Sending')).toContain('0');
     expect(chipValue(list, 'Failed')).toContain('0');
     expect(chipValue(list, 'Skipped')).toContain('0');
   });
 
-  it('orders chips Recipients, Delivered, Sent, Queued, Failed, Skipped', () => {
+  it('orders chips Recipients, Delivered, Sent, Sending, Failed, Skipped', () => {
     render(<StatChips stats={stats()} />);
     const list = screen.getByLabelText('Delivery stats');
     const labels = within(list)
       .getAllByRole('term')
       .map((dt) => dt.textContent);
-    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Queued', 'Failed', 'Skipped']);
+    // "Sending" renders the stats.queued bucket (in-flight legs: dispatched-
+    // unconfirmed + deferred retries) - "Queued" read as already-counted-sent
+    // to nobody, and "Sent" must mean carrier-confirmed.
+    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Sending', 'Failed', 'Skipped']);
   });
 });
 
@@ -85,7 +88,12 @@ describe('DeliveryBadge', () => {
   it('renders the queued/sent/delivered status as text', () => {
     const { rerender } = render(<DeliveryBadge status="queued" />);
     expect(screen.getByText('Sending…')).toBeInTheDocument();
+    // Dispatched only ('sent' with NO carrierSentAt) is still in flight - the
+    // 1:1 bubble for the same message reads "Sending…", so this badge must too.
     rerender(<DeliveryBadge status="sent" />);
+    expect(screen.getByText('Sending…')).toBeInTheDocument();
+    // The carrier's own sent callback (carrierSentAt) is what flips it to Sent.
+    rerender(<DeliveryBadge status="sent" carrierSentAt="2026-07-16T00:00:01.000Z" />);
     expect(screen.getByText('Sent')).toBeInTheDocument();
     rerender(<DeliveryBadge status="delivered" />);
     expect(screen.getByText('Delivered')).toBeInTheDocument();

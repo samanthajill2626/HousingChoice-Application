@@ -684,12 +684,16 @@ describe('broadcast.send (M1.8a)', () => {
       expect(u.stats.audience).toBe(2);
       expect(bucketsSumToAudience(u.stats)).toBe(true);
     }
-    // The first tick is the live mid-send state: one sent, one still queued.
+    // DERIVED stats count a dispatched slot ('sent', no carrierSentAt) as IN
+    // FLIGHT (queued bucket): the carrier hasn't confirmed, so the chips must
+    // not outrun the per-recipient "Sending..." rows. No webhook runs in this
+    // rig, so no carrierSentAt ever lands and both legs stay in flight even
+    // after the job finalizes (status 'sent' = the JOB finished dispatching).
     expect(updates[0]!.status).toBe('sending');
-    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
-    // The terminal emit: both sent, none queued.
+    expect(updates[0]!.stats).toMatchObject({ sent: 0, queued: 2 });
+    // The terminal emit: job done ('sent'), legs awaiting carrier confirmation.
     expect(updates.at(-1)!.status).toBe('sent');
-    expect(updates.at(-1)!.stats).toMatchObject({ sent: 2, queued: 0 });
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 0, queued: 2 });
   });
 
   it('S2: the transient-defer path (slot stays queued, no bumpStats) emits NOTHING for that recipient', async () => {
@@ -713,7 +717,10 @@ describe('broadcast.send (M1.8a)', () => {
     // continuation is pending so finalize (its terminal emit) does NOT run.
     expect(updates).toHaveLength(1);
     expect(updates[0]!.status).toBe('sending');
-    expect(updates[0]!.stats).toMatchObject({ sent: 1, queued: 1 });
+    // Both legs derive IN FLIGHT: Alice dispatched (awaiting carrier
+    // confirmation), Bob literally queued (deferred retry) - the "Sending"
+    // chip covers both honestly.
+    expect(updates[0]!.stats).toMatchObject({ sent: 0, queued: 2 });
     expect(bucketsSumToAudience(updates[0]!.stats)).toBe(true);
   });
 
@@ -731,7 +738,8 @@ describe('broadcast.send (M1.8a)', () => {
     // A tick for the skip + a tick for the send + the finalize emit.
     expect(updates.length).toBeGreaterThanOrEqual(2);
     for (const u of updates) expect(bucketsSumToAudience(u.stats)).toBe(true);
-    // Terminal: one sent, one skipped (opted-out), disjoint.
-    expect(updates.at(-1)!.stats).toMatchObject({ sent: 1, skipped_opted_out: 1, queued: 0 });
+    // Terminal: one dispatched (in flight until the carrier confirms - no
+    // webhook runs in this rig), one skipped (opted-out), disjoint.
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 0, queued: 1, skipped_opted_out: 1 });
   });
 });

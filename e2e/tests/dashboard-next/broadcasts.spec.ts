@@ -285,7 +285,7 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
       .getByText(label, { exact: true });
   }
 
-  test('curated send: land while Sending, chips tick, terminal Delivered=N/Sent=0/Queued=0, rows show names + formatted phones + contact links', async ({
+  test('curated send: land while Sending, chips tick, terminal Delivered=N/Sent=0/Sending=0, rows show names + formatted phones + contact links', async ({
     page,
     request,
   }) => {
@@ -339,13 +339,15 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     await expect(statusPill(page, 'Sending')).toBeVisible({ timeout: 10_000 });
 
     // (2) The chips TICK during the run, observed live on a page we never reload:
-    //   - Queued falls below the full audience as the paced fan-out drains it;
+    //   - Sending (the in-flight bucket: dispatched-but-unconfirmed + literal
+    //     queued) falls below the full audience as the fake's carrier callbacks
+    //     confirm each paced leg;
     //   - Sent + Delivered rises above zero.
     // Both are monotonic, so polling is race-free (they become true and stay true).
     await expect
-      .poll(async () => statValue(page, 'Queued'), {
+      .poll(async () => statValue(page, 'Sending'), {
         timeout: 15_000,
-        message: 'Queued should tick down below the audience during the send',
+        message: 'Sending should tick down below the audience during the send',
       })
       .toBeLessThan(N);
     await expect
@@ -356,18 +358,18 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
       .toBeGreaterThan(0);
 
     // (3) Terminal state - the fake's DLRs drive every slot to delivered. Disjoint
-    // buckets: Delivered = N, Sent = 0, Queued = 0 (no double-counting). Read the
+    // buckets: Delivered = N, Sent = 0, Sending = 0 (no double-counting). Read the
     // three chips together so the assertion reflects one consistent snapshot.
     await expect
       .poll(
         async () => ({
           delivered: await statValue(page, 'Delivered'),
           sent: await statValue(page, 'Sent'),
-          queued: await statValue(page, 'Queued'),
+          sending: await statValue(page, 'Sending'),
         }),
-        { timeout: 20_000, message: 'buckets should finalize to Delivered=N, Sent=0, Queued=0' },
+        { timeout: 20_000, message: 'buckets should finalize to Delivered=N, Sent=0, Sending=0' },
       )
-      .toEqual({ delivered: N, sent: 0, queued: 0 });
+      .toEqual({ delivered: N, sent: 0, sending: 0 });
 
     // The lifecycle pill live-updated to the terminal "Sent" (no manual reload).
     // MUST be the scoped pill: the "Sent" chip <dt> always exists, so an unscoped

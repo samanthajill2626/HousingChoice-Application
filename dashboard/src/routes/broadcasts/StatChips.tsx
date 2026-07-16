@@ -1,10 +1,16 @@
 // StatChips — the broadcast delivery rollup as a row of labeled count chips
-// (Recipients / Delivered / Sent / Queued / Failed / Skipped). One job: present
+// (Recipients / Delivered / Sent / Sending / Failed / Skipped). One job: present
 // BroadcastStats as accessible text (label + count), colour as reinforcement
 // only. "Recipients" is the resolved audience (stats.audience); the remaining
-// buckets are disjoint and sum to it (Queued + Sent + Delivered + Failed +
+// buckets are disjoint and sum to it (Sending + Sent + Delivered + Failed +
 // Skipped == Recipients), so the row visibly balances. "Skipped" folds both
 // skip reasons (opted out + no consent) into one neutral count.
+//
+// "Sending" is the stats.queued bucket: legs in flight — dispatched but not
+// yet carrier-confirmed (no carrierSentAt), plus deferred transient retries.
+// "Sent" counts only carrier-confirmed legs, so this row can never claim
+// "Sent" while the recipient rows / the messages' own 1:1 bubbles still read
+// "Sending…".
 import type { BroadcastStats } from '../../api/index.js';
 import styles from './StatChips.module.css';
 
@@ -19,7 +25,7 @@ export function StatChips({ stats }: { stats: BroadcastStats }): React.JSX.Eleme
     { label: 'Recipients', value: stats.audience },
     { label: 'Delivered', value: stats.delivered, tone: 'success' },
     { label: 'Sent', value: stats.sent },
-    { label: 'Queued', value: stats.queued },
+    { label: 'Sending', value: stats.queued },
     { label: 'Failed', value: stats.failed, tone: 'danger' },
     { label: 'Skipped', value: stats.skipped_opted_out + stats.skipped_no_consent },
   ];

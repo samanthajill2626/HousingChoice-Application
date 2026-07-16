@@ -18,13 +18,16 @@ const TONE_CLASS: Record<DeliveryTone, string> = {
 
 export interface DeliveryBadgeProps {
   status: BroadcastRecipient['status'];
+  /** Carrier-confirmed instant; a status-'sent' slot WITHOUT it renders
+   *  "Sending…" (dispatched, awaiting the carrier — same as the 1:1 bubble). */
+  carrierSentAt?: string;
   /** The Twilio error class on a failure → a human reason (rendered as a title +
    *  appended text). Absent → just the status label. */
   errorCode?: string;
 }
 
-export function DeliveryBadge({ status, errorCode }: DeliveryBadgeProps): React.JSX.Element {
-  const pres = presentRecipientStatus(status);
+export function DeliveryBadge({ status, carrierSentAt, errorCode }: DeliveryBadgeProps): React.JSX.Element {
+  const pres = presentRecipientStatus(status, carrierSentAt);
   const reason = pres.isFailure ? deliveryReason(errorCode) : undefined;
   return (
     <span className={`${styles.badge} ${TONE_CLASS[pres.tone]}`} {...(reason && { title: reason })}>

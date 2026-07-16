@@ -181,8 +181,12 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
     getBroadcastResults.mockResolvedValueOnce(results());
     renderResults();
     await screen.findByRole('list', { name: 'Recipients' });
-    // The header pill starts at "Sending".
-    expect(screen.getByText('Sending')).toBeInTheDocument();
+    // The header pill starts at "Sending" — scope OUTSIDE the stats dl, where
+    // "Sending" now also appears as the in-flight chip's label.
+    const chipsEl = screen.getByLabelText('Delivery stats');
+    expect(
+      screen.getAllByText('Sending').filter((el) => !chipsEl.contains(el)).length,
+    ).toBeGreaterThan(0);
 
     // The refetch the SSE triggers returns the SENT rollup with c2 now delivered.
     getBroadcastResults.mockResolvedValueOnce(
@@ -229,8 +233,12 @@ describe('BroadcastResults — live broadcast.updated SSE', () => {
         stats: { audience: 1, sent: 0, delivered: 1, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
       }),
     );
-    // No overlay, no refetch.
-    expect(screen.getByText('Sending')).toBeInTheDocument();
+    // No overlay, no refetch. (The pill lives outside the stats dl, where
+    // "Sending" also appears as the in-flight chip's label.)
+    const chipsEl = screen.getByLabelText('Delivery stats');
+    expect(
+      screen.getAllByText('Sending').filter((el) => !chipsEl.contains(el)).length,
+    ).toBeGreaterThan(0);
     await new Promise((r) => setTimeout(r, 50));
     expect(getBroadcastResults).toHaveBeenCalledTimes(1);
   });

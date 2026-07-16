@@ -228,13 +228,17 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550100001', '+15550100002'].sort());
     expect(world.broadcasts.get(id)!.status).toBe('sent');
 
-    // Results endpoint reflects the rolled-up stats.
+    // Results endpoint reflects the rolled-up DERIVED stats: both legs are
+    // dispatched ('sent' slots) but no carrier callback ran in this rig, so
+    // they derive IN FLIGHT (queued bucket) - the SENT bucket is reserved for
+    // carrier-confirmed legs (carrierSentAt).
     const results = await request(app)
       .get(`/api/broadcasts/${id}/results`)
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(results.status).toBe(200);
-    expect(results.body.stats.sent).toBe(2);
+    expect(results.body.stats.queued).toBe(2);
+    expect(results.body.stats.sent).toBe(0);
     expect(results.body.status).toBe('sent');
   });
 
@@ -1126,7 +1130,9 @@ describe('share-broadcast API (M1.8a)', () => {
     row.audience_mode = 'seeds_only'; // Matching sends: mode rides the wire
     row.recipients = {
       'c-1': { status: 'delivered' },
-      'c-2': { status: 'sent' },
+      // carrier-confirmed -> the SENT bucket (a bare 'sent' slot would derive
+      // as in-flight/queued until the carrier's callback stamps the marker).
+      'c-2': { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' },
       'c-3': { status: 'skipped', errorCode: 'no_consent' },
       'c-4': { status: 'skipped' },
     };

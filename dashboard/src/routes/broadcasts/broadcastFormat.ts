@@ -83,12 +83,25 @@ export const BROADCAST_STATUS_TONE: Readonly<Record<BroadcastStatus, BroadcastSt
 /** The recipient-status → comms DeliveryPresentation map. `skipped` has no comms
  *  equivalent (opted out between resolve + send) — present it explicitly; every
  *  other recipient status maps onto the shared delivery model (queued → sent →
- *  delivered | failed). */
+ *  delivered | failed).
+ *
+ *  The 'sent' nuance: the fan-out stamps a slot 'sent' at DISPATCH (its
+ *  idempotency claim), which is EARLIER than the message's own queued → sent
+ *  carrier transition. Until the carrier's sent callback lands (carrierSentAt,
+ *  webhook rollup), that slot's message still reads "Sending…" on its 1:1
+ *  bubble — so the recipient row must too, or the two surfaces disagree about
+ *  the same message at the same instant. */
 export function presentRecipientStatus(
   status: BroadcastRecipient['status'],
+  carrierSentAt?: string,
 ): DeliveryPresentation {
   if (status === 'skipped') {
     return { label: 'Skipped', tone: 'neutral', isFailure: false };
+  }
+  if (status === 'sent' && carrierSentAt === undefined) {
+    // Dispatched, carrier not yet confirmed — the same instant the 1:1 bubble
+    // presents as queued/"Sending…".
+    return { label: 'Sending…', tone: 'neutral', isFailure: false };
   }
   // queued / sent / delivered / failed all exist in the comms DeliveryStatus.
   return (
@@ -133,6 +146,7 @@ export function toRecipientViews(
       ...(name !== undefined && { name }),
       ...(phone !== undefined && { phone }),
       status: slot.status,
+      ...(slot.carrierSentAt !== undefined && { carrierSentAt: slot.carrierSentAt }),
       ...(slot.errorCode !== undefined && { errorCode: slot.errorCode }),
       ...(slot.conversationId !== undefined && { conversationId: slot.conversationId }),
     };

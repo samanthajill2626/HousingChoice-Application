@@ -28,7 +28,7 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
   it('computes every bucket from the map (disjoint), audience = map size', () => {
     const recipients = recips([
       ['c-q', { status: 'queued' }],
-      ['c-s', { status: 'sent' }],
+      ['c-s', { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' }],
       ['c-d', { status: 'delivered' }],
       ['c-f', { status: 'failed', errorCode: '30007' }],
       ['c-opt', { status: 'skipped' }], // opted-out (no errorCode)
@@ -49,6 +49,22 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
       skipped_opted_out: 1,
       skipped_no_consent: 1,
     });
+  });
+
+  it("a dispatched slot ('sent', no carrierSentAt) counts as IN FLIGHT (queued bucket) until the carrier confirms", () => {
+    // The fan-out stamps 'sent' at dispatch as its idempotency claim; the
+    // carrier's own sent callback stamps carrierSentAt. Deriving the SENT
+    // bucket from the marker (not the claim) keeps the stat chips telling the
+    // same story as the per-recipient "Sending..." rows and the 1:1 bubble.
+    const recipients = recips([
+      ['c-dispatched', { status: 'sent' }],
+      ['c-confirmed', { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' }],
+      ['c-deferred', { status: 'queued', errorCode: '429' }],
+    ]);
+    const out = deriveBroadcastStats({ recipients, stats: zeroStats() });
+    expect(out.queued).toBe(2); // dispatched-unconfirmed + deferred-retry: both in flight
+    expect(out.sent).toBe(1); // only the carrier-confirmed one
+    expect(out.audience).toBe(3);
   });
 
   it('skipped split: only errorCode "no_consent" is skipped_no_consent; every other skip is opted_out', () => {

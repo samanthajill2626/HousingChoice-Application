@@ -109,8 +109,21 @@ export interface BroadcastRecipient {
   conversationId?: string;
   /** The persisted message's SK (delivery-callback rollup target). */
   tsMsgId?: string;
+  /**
+   * 'sent' is stamped at DISPATCH (the fan-out's idempotency claim - a
+   * continuation pass never re-sends it), which is EARLIER than the carrier's
+   * own "sent". See carrierSentAt for the carrier-confirmed instant.
+   */
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
   errorCode?: string;
+  /**
+   * ISO - set when the CARRIER's non-terminal 'sent' status callback lands
+   * (webhook rollup). Until then a status-'sent' slot is only dispatched, and
+   * every read surface presents it as in-flight ("Sending...") so the
+   * recipient row can never claim "Sent" while the same message's 1:1 bubble
+   * still reads "Sending...".
+   */
+  carrierSentAt?: string;
 }
 
 export interface BroadcastItem {
@@ -170,8 +183,10 @@ export interface ListBroadcastsOpts {
  *   behavior). Same object reference - a pure passthrough.
  * - NON-EMPTY map: compute every field from the slots:
  *     audience  = number of slots
- *     queued    = slots with status 'queued'
- *     sent      = slots with status 'sent'
+ *     queued    = IN FLIGHT: status 'queued' (deferred retry) PLUS status
+ *                 'sent' without carrierSentAt (dispatched, carrier not yet
+ *                 confirmed) - the dashboard renders this bucket "Sending"
+ *     sent      = slots with status 'sent' AND carrierSentAt (carrier-confirmed)
  *     delivered = slots with status 'delivered'
  *     failed    = slots with status 'failed'
  *     skipped_no_consent = 'skipped' slots with errorCode 'no_consent'
@@ -199,7 +214,12 @@ export function deriveBroadcastStats(
         queued += 1;
         break;
       case 'sent':
-        sent += 1;
+        // Dispatched-but-carrier-unconfirmed is IN FLIGHT (the queued bucket -
+        // rendered "Sending"), not Sent: the SENT chip must never outrun the
+        // per-recipient rows or the message's own 1:1 delivery badge. The
+        // carrier's sent callback stamps carrierSentAt and moves it over.
+        if (slot.carrierSentAt !== undefined) sent += 1;
+        else queued += 1;
         break;
       case 'delivered':
         delivered += 1;

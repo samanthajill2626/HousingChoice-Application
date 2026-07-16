@@ -49,6 +49,7 @@ interface PendingConsentSend {
   conversationId: string | null;
   body: string;
   attachmentKeys?: string[];
+  attachmentOriginalKeys?: string[];
 }
 
 export interface TourConversationProps {
@@ -180,6 +181,10 @@ export function TourConversation({
         body: retry.body,
         ...(retry.attachmentKeys !== undefined &&
           retry.attachmentKeys.length > 0 && { attachmentKeys: retry.attachmentKeys }),
+        ...(retry.attachmentOriginalKeys !== undefined &&
+          retry.attachmentOriginalKeys.length > 0 && {
+            attachmentOriginalKeys: retry.attachmentOriginalKeys,
+          }),
       });
       if (retry.conversationId === null) channels.setConversationId(retry.key, convId);
       setClearSignals((s) => ({ ...s, [retry.key]: s[retry.key] + 1 }));
@@ -257,7 +262,7 @@ export function TourConversation({
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
             clearDraftSignal={clearSignals[oneToOneKey]}
-            onConsentRefused={(body, attachmentKeys) =>
+            onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({
                 key: oneToOneKey,
                 contactId: oneToOneContactId,
@@ -266,6 +271,8 @@ export function TourConversation({
                 body,
                 ...(attachmentKeys !== undefined &&
                   attachmentKeys.length > 0 && { attachmentKeys }),
+                ...(attachmentOriginalKeys !== undefined &&
+                  attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
               })
             }
           />
@@ -280,7 +287,7 @@ export function TourConversation({
             {...(tourMilestones !== undefined && { tourMilestones })}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
             clearDraftSignal={clearSignals[oneToOneKey]}
-            onConsentRefused={(body, attachmentKeys) =>
+            onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({
                 key: oneToOneKey,
                 contactId: oneToOneContactId,
@@ -289,6 +296,8 @@ export function TourConversation({
                 body,
                 ...(attachmentKeys !== undefined &&
                   attachmentKeys.length > 0 && { attachmentKeys }),
+                ...(attachmentOriginalKeys !== undefined &&
+                  attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
               })
             }
           />
@@ -341,11 +350,17 @@ function GroupChannel({
   }, [conversationId]);
 
   const canSend = !closed;
-  const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
+  const onSend = (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ): Promise<void> => {
     const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
     return sendMessage(conversationId, {
       body,
       ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+      ...(attachmentOriginalKeys !== undefined &&
+        attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
     })
       .then((result) => thread.resolveOptimistic(tempId, result))
       .catch((err: unknown) => {
@@ -393,23 +408,33 @@ function ContactThread({
   /** The consent gate refused this send (409 contact_no_consent) — the parent
    *  opens the capture modal holding it. Still rethrown so the composer restores
    *  the draft (the modal shows WHY; no inline error — ContactDetail parity). */
-  onConsentRefused?: (body: string, attachmentKeys?: string[]) => void;
+  onConsentRefused?: (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ) => void;
 }): React.JSX.Element {
   const thread = useRelayThread(conversationId);
   const items = useMemo(
     () => withMilestones(thread.items, tourMilestones),
     [thread.items, tourMilestones],
   );
-  const onSend = (body: string, attachmentKeys?: string[]): Promise<void> => {
+  const onSend = (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ): Promise<void> => {
     const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
     return sendMessage(conversationId, {
       body,
       ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+      ...(attachmentOriginalKeys !== undefined &&
+        attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
     })
       .then((result) => thread.resolveOptimistic(tempId, result))
       .catch((err: unknown) => {
         thread.failOptimistic(tempId);
-        if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys);
+        if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys, attachmentOriginalKeys);
         throw err;
       });
   };
@@ -449,17 +474,27 @@ function NewContactThread({
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
   /** The consent gate refused this send — see ContactThread. */
-  onConsentRefused?: (body: string, attachmentKeys?: string[]) => void;
+  onConsentRefused?: (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ) => void;
 }): React.JSX.Element {
-  const onSend = async (body: string, attachmentKeys?: string[]): Promise<void> => {
+  const onSend = async (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ): Promise<void> => {
     const conversationId = await ensureContactConversation(contactId);
     try {
       await sendMessage(conversationId, {
         body,
         ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+        ...(attachmentOriginalKeys !== undefined &&
+          attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
       });
     } catch (err) {
-      if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys);
+      if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys, attachmentOriginalKeys);
       throw err;
     }
     onCreated(conversationId);

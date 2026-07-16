@@ -1420,15 +1420,6 @@ export interface SendMessageResult {
   status: DeliveryStatus;
 }
 
-/** Result of POST /api/media/uploads - one uploaded attachment. `key` is the
- *  server-minted `uploads/<uuid>` object key the composer passes back to the
- *  send route as an attachmentKey; the raw presigned URL is never exposed. */
-export interface UploadMediaResult {
-  key: string;
-  contentType: string;
-  size: number;
-}
-
 /** One outbound MMS attachment after presign+confirm (server transcoded/validated). */
 export interface MmsMediaAttachment {
   /** The deliverable rendition (jpeg/png/gif) the send route receives. */

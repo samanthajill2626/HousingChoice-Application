@@ -19,7 +19,7 @@ import type {
   TimelineMilestoneType,
   TimelineScheduled,
 } from '../../api/index.js';
-import { ApiError, uploadMedia } from '../../api/index.js';
+import { ApiError, confirmMmsMedia, presignMmsMedia, uploadToPresignedPost } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
@@ -62,7 +62,9 @@ function sendFailureMessage(err: unknown): string {
 // Outbound MMS composer limits - MIRROR the server caps (spec Sec 9) so a file
 // that would be rejected server-side never uploads. The server re-validates.
 const MMS_MAX_MEDIA = 10;
-const MMS_MAX_FILE_BYTES = 5 * 1024 * 1024;
+// Per-file SOURCE ceiling (the presign policy cap): big photos upload at full
+// size and the server auto-fits them into the MMS budget at confirm.
+const MMS_MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const MMS_MAX_TOTAL_BYTES = 5 * 1024 * 1024;
 const MMS_ALLOWED_TYPES = [
   'image/jpeg',
@@ -86,8 +88,12 @@ interface ComposerAttachment {
   size: number;
   contentType: string;
   status: 'uploading' | 'done' | 'error';
-  /** The uploads/<uuid> key, present once the upload succeeds. */
+  /** The deliverable rendition key confirm returned; sent as an attachmentKey. */
   key?: string;
+  /** The pristine uploaded original (RCS-forward); rides attachmentOriginalKeys. */
+  originalKey?: string;
+  /** Set when a PDF was rasterized - > 1 drives the page-1-only note. */
+  pdfPageCount?: number;
   /** Inline error when the upload fails (retry by re-picking the file). */
   error?: string;
   /** Object URL for an image thumbnail; revoked on remove / send / unmount. */
@@ -109,24 +115,35 @@ function attachmentReject(file: File, existing: ComposerAttachment[]): string | 
   if (!MMS_ALLOWED_TYPES.includes(file.type)) {
     return `${file.name}: unsupported file type. Attach a JPEG, PNG, GIF, WEBP, or PDF.`;
   }
-  if (file.size > MMS_MAX_FILE_BYTES) {
-    return `${file.name} is too large (max 5 MB per file).`;
+  if (file.size > MMS_MAX_SOURCE_BYTES) {
+    return `${file.name} is too large (max 20 MB per file).`;
   }
   if (existing.length >= MMS_MAX_MEDIA) {
     return `You can attach at most ${MMS_MAX_MEDIA} files.`;
   }
-  const total = existing.reduce((n, a) => n + a.size, 0) + file.size;
+  // Total budget over the CONFIRMED (deliverable) sizes only - a picked file's
+  // source bytes shrink at confirm (auto-fit), so counting them would falsely
+  // reject big photos the server can fit. The send route's total cap backstops.
+  const total = existing.filter((a) => a.status === 'done').reduce((n, a) => n + a.size, 0);
   if (total > MMS_MAX_TOTAL_BYTES) {
     return 'Attachments exceed the 5 MB total limit. Remove one and try again.';
   }
   return null;
 }
 
-/** An upload failure -> a short, human chip message. */
+/** An upload failure -> a short, human chip message. The confirm route's
+ *  transcode_failed carries the library diagnostic in `detail` (spec Sec 11) -
+ *  surface it verbatim so the operator (and a bug report) sees the real cause. */
 function uploadFailureMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 413) return 'Too large (max 5 MB).';
-    if (err.status === 415) return 'Unsupported file type.';
+    if (err.code === 'transcode_failed' && err.detail !== undefined) {
+      return `Couldn't process this file: ${err.detail}`;
+    }
+    if (err.code === 'transcode_failed') return "Couldn't process this file.";
+    if (err.code === 'transcode_busy') return 'Server busy - remove and re-add to retry.';
+    if (err.code === 'file_too_large_after_fit') return 'Too large even after fitting (max 5 MB).';
+    if (err.code === 'unsupported_media_type' || err.status === 415) return 'Unsupported file type.';
+    if (err.status === 413) return 'Too large (max 20 MB).';
     if (err.code === 'rate_limited') return 'Uploading too fast - wait a moment.';
   }
   return 'Upload failed - remove and try again.';
@@ -162,8 +179,10 @@ export interface TimelineProps {
    *  keys) when the operator sends. Returns a promise so the reply box can show an
    *  in-flight state and restore the draft + chips on failure. `attachmentKeys` is
    *  passed only when at least one attachment uploaded (a text-only send calls
-   *  onSend(body) exactly as before). */
-  onSend?: (body: string, attachmentKeys?: string[]) => Promise<void>;
+   *  onSend(body) exactly as before). `attachmentOriginalKeys` (index-aligned)
+   *  carries each attachment's pristine original for the send POST (RCS-forward,
+   *  spec Sec 5); providers thread it to sendMessage the same way as the keys. */
+  onSend?: (body: string, attachmentKeys?: string[], attachmentOriginalKeys?: string[]) => Promise<void>;
   /** Retry a failed outbound message — resends its body to its own conversation.
    *  May return the send promise: a rejection (e.g. 429 rate_limited — the retry
    *  shares the manual-send budget) is surfaced in the composer's error slot. */
@@ -588,18 +607,26 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   }, [clearDraftSignal]);
 
   // Upload ONE picked file, reconciling its chip by localId as it completes.
+  // Direct-to-S3 flow (spec Sec 4): presign mints a grant, the browser POSTs the
+  // bytes straight to S3 (never through the app), then confirm validates or
+  // transcodes the original into a deliverable rendition. The chip stays
+  // 'uploading' through confirm (a transcode takes a beat).
   const uploadOne = async (localId: string, file: File): Promise<void> => {
     try {
-      const result = await uploadMedia(file);
+      const { key, post } = await presignMmsMedia(file.type);
+      await uploadToPresignedPost(post, file);
+      const att = await confirmMmsMedia(key);
       setAttachments((prev) =>
         prev.map((a) =>
           a.localId === localId
             ? {
                 ...a,
                 status: 'done',
-                key: result.key,
-                contentType: result.contentType,
-                size: result.size,
+                key: att.s3Key,
+                contentType: att.contentType,
+                size: att.size,
+                ...(att.originalKey !== undefined && { originalKey: att.originalKey }),
+                ...(att.pdfPageCount !== undefined && { pdfPageCount: att.pdfPageCount }),
               }
             : a,
         ),
@@ -659,10 +686,12 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   };
 
   // Keys ready to send (uploads that finished); an in-flight upload blocks Send so
-  // a still-uploading attachment is never silently dropped from the message.
-  const uploadedKeys = attachments
-    .filter((a) => a.status === 'done' && a.key !== undefined)
-    .map((a) => a.key as string);
+  // a still-uploading attachment is never silently dropped from the message. The
+  // rendition keys go as attachmentKeys; the index-aligned originals (falling back
+  // to the rendition key on flow-through) go as attachmentOriginalKeys.
+  const doneAttachments = attachments.filter((a) => a.status === 'done' && a.key !== undefined);
+  const uploadedKeys = doneAttachments.map((a) => a.key as string);
+  const uploadedOriginalKeys = doneAttachments.map((a) => a.originalKey ?? (a.key as string));
   const hasUploading = attachments.some((a) => a.status === 'uploading');
   // An errored chip is neither 'done' (so it's excluded from uploadedKeys) nor
   // 'uploading' (so hasUploading doesn't block) - without this guard a send with
@@ -819,7 +848,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     try {
       // Pass attachmentKeys only when present, so a text-only send stays a plain
       // onSend(body) call (unchanged contract for the no-attachment path).
-      if (keys.length > 0) await onSend?.(text, keys);
+      if (keys.length > 0) await onSend?.(text, keys, uploadedOriginalKeys);
       else await onSend?.(text);
       // Success: release the sent chips' image object URLs.
       for (const a of sentAttachments) {
@@ -981,6 +1010,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                       ? a.error ?? 'Upload failed'
                       : formatBytes(a.size)}
                 </span>
+                {a.status === 'done' && (a.pdfPageCount ?? 0) > 1 ? (
+                  <span className={styles.chipMeta}>
+                    PDF - only the first page will be sent as an image.
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className={styles.chipRemove}

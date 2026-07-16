@@ -37,9 +37,12 @@ direct line to the human. Your channels are:
   `<worktree>/.superpowers/sdd/heartbeat.log` every time you act (phase
   change, child dispatched/returned, gate started/finished, check performed).
   A watchdog watches worktree activity; a silent stall wakes the planner.
-- WAITING lines are mandatory: before ending a turn to wait on a background
-  child or long command, write the WAITING status with an expected duration.
-  That timebox is what the planner checks against.
+- WAITING lines are mandatory: before ending a turn to wait on a long
+  background COMMAND (npm install, a gate run), write the WAITING status with
+  an expected duration. That timebox is what the planner checks against.
+  Child AGENTS are dispatched foreground (see child-agent lifecycle), so you
+  never end a turn to wait on one - instead write a heartbeat line with the
+  child's timebox immediately BEFORE each dispatch.
 - QUESTIONS: a genuinely-new product decision (a real scope fork the human
   must own) -> write `STATUS: QUESTION ...` in the ledger, end your turn with
   the question as your final text. The planner relays to the human and
@@ -84,7 +87,8 @@ for the feature area).
 ## Phase 1 - research (+ spike when infra risk)  [1 read-only opus child]
 
 - Skip only if the plan already carries verified file:line anchors.
-- One read-only opus agent produces a byte-exact file:line WORKLIST written
+- One read-only opus agent (FOREGROUND, like every child) produces a
+  byte-exact file:line WORKLIST written
   to `.superpowers/sdd/` (or docs/research/ if the mission says to commit it):
   locate everything by NAME (spec line numbers drift), quote unions/field
   lists byte-for-byte, list EVERY importer of any symbol being moved (the
@@ -239,6 +243,22 @@ for the feature area).
 
 ## Child-agent lifecycle (battle-tested)
 
+- FOREGROUND DISPATCH IS THE RULE: every child agent is dispatched
+  SYNCHRONOUSLY (`run_in_background: false`) so the dispatch either runs
+  in-turn or errors visibly. Background AGENT dispatch from a subagent
+  context dies silently at birth (verified 2026-07-16, flyer-full-info: two
+  consecutive background children - research + implementer - died with zero
+  tool calls and no error surfaced; the mission only moved once children went
+  foreground). Your pipeline is serial anyway, so foreground costs nothing.
+  This applies to AGENTS only - background Bash commands (npm install, gates)
+  work fine and stay backgrounded per Phase 3. In MANUAL (top-level) mode
+  background agents do work, but keep foreground as the default there too -
+  one behavior, no silent-loss class. If a foreground dispatch itself errors,
+  retry once, then write `STATUS: BLOCKED` with the error text - never wait
+  on a child you cannot prove is alive.
+- PARALLEL read-only children (the two Phase 4 reviewers) do NOT need
+  background mode: put both foreground Agent calls in ONE message - they run
+  concurrently and the turn waits for both.
 - COLD-DISPATCH MISFIRE (fresh dispatch returns boilerplate, ZERO tool
   calls): verify the tree is untouched, then SendMessage the SAME agent -
   "your reply had zero tool calls, begin now per your dispatch" + compressed
@@ -247,8 +267,9 @@ for the feature area).
   usually survive uncommitted; SendMessage-resume with "here is exactly
   where you stopped; your edits are intact; finish these items, gate,
   commit." Resuming beats restarting; zero work lost when handled this way.
-- PARKED-ON-BACKGROUND-CHILD: an agent whose background command finished is
-  not reliably re-woken. On suspicious silence: check liveness YOURSELF
+- PARKED-ON-BACKGROUND-WORK: an agent whose background COMMAND finished is
+  not reliably re-woken (and a background AGENT may never have started - see
+  the foreground rule above). On suspicious silence: check liveness YOURSELF
   (worktree-filtered process list, output-file mtime, git log), then
   SendMessage it the result it was waiting for.
 - NO SILENT WAITS: every child dispatch and long command gets a timebox
@@ -264,8 +285,9 @@ for the feature area).
 - An agent that ends its turn with background work in flight: collect its
   committed artifacts, take over the remaining steps yourself (its
   in-flight logs are unreachable; your merged-base rerun is authoritative).
-- Parallel dispatch ONLY for read-only children (review, research, audit).
-  Anything that writes or commits: sequential.
+- Parallel dispatch ONLY for read-only children (review, research, audit) -
+  and parallel means multiple FOREGROUND calls in one message, never
+  background mode. Anything that writes or commits: sequential.
 - Expect and WELCOME good divergences from the plan (trusting the file over
   the plan); require children to report them, surface the substantive ones
   in the handback. Surface judgment-call divergences proactively, even

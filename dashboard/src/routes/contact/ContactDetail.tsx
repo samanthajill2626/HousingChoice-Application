@@ -108,7 +108,13 @@ export function ContactDetail(): React.JSX.Element {
   // `contact_no_consent`, we hold the pending send here + open the hard-block
   // modal. On confirm we PATCH consent then RETRY this exact send.
   const [pendingConsentSend, setPendingConsentSend] = useState<
-    { conversationId: string; body: string; replyToPhone?: string; attachmentKeys?: string[] } | null
+    {
+      conversationId: string;
+      body: string;
+      replyToPhone?: string;
+      attachmentKeys?: string[];
+      attachmentOriginalKeys?: string[];
+    } | null
   >(null);
   // Bumped by deferredSend when an out-of-band send (the post-consent retry) lands,
   // so the Timeline composer clears the draft it restored on the 409 refusal.
@@ -213,11 +219,14 @@ export function ContactDetail(): React.JSX.Element {
     body: string,
     toPhone?: string,
     attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
   ): Promise<void> => {
     const tempId = timeline.addOptimistic(conversationId, body, toPhone, attachmentKeys);
     return sendMessage(conversationId, {
       body,
       ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+      ...(attachmentOriginalKeys !== undefined &&
+        attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
     })
       .then((result) => {
         timeline.resolveOptimistic(tempId, result);
@@ -241,11 +250,16 @@ export function ContactDetail(): React.JSX.Element {
     body: string,
     toPhone?: string,
     attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
   ): Promise<void> =>
-    postSend(conversationId, body, toPhone, attachmentKeys).then(() => {
+    postSend(conversationId, body, toPhone, attachmentKeys, attachmentOriginalKeys).then(() => {
       setClearDraftSignal((n) => n + 1);
     });
-  const onSend = async (body: string, attachmentKeys?: string[]): Promise<void> => {
+  const onSend = async (
+    body: string,
+    attachmentKeys?: string[],
+    attachmentOriginalKeys?: string[],
+  ): Promise<void> => {
     // No thread yet (a brand-new contact who has never messaged us): create-or-get
     // the primary number's 1:1 conversation first, THEN send into it. Idempotent —
     // a racing inbound resolves to the same thread. An ensure failure throws before
@@ -257,7 +271,7 @@ export function ContactDetail(): React.JSX.Element {
     }
     const convId = resolvedId;
     const toPhone = replyToPhone;
-    return postSend(convId, body, toPhone, attachmentKeys).catch((err: unknown) => {
+    return postSend(convId, body, toPhone, attachmentKeys, attachmentOriginalKeys).catch((err: unknown) => {
       // A2P/CTIA just-in-time gate: a proactive send to a no-consent contact is
       // refused with 409 `contact_no_consent`. Open the hard-block consent modal
       // (holding the pending send) instead of surfacing a generic error, and
@@ -269,6 +283,8 @@ export function ContactDetail(): React.JSX.Element {
           body,
           ...(toPhone !== undefined && { replyToPhone: toPhone }),
           ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
+          ...(attachmentOriginalKeys !== undefined &&
+            attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
         });
       }
       throw err;
@@ -694,6 +710,7 @@ export function ContactDetail(): React.JSX.Element {
                 retry.body,
                 retry.replyToPhone,
                 retry.attachmentKeys,
+                retry.attachmentOriginalKeys,
               ).catch(() => {});
             }
           }}

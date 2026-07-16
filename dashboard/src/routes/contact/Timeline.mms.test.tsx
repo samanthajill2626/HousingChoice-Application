@@ -3,17 +3,37 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Timeline } from './Timeline.js';
 import { ApiError } from '../../api/index.js';
-import type { TimelineItem } from '../../api/index.js';
+import type { MmsMediaAttachment, TimelineItem } from '../../api/index.js';
 
-// Mock ONLY uploadMedia; everything else in the api barrel stays real (ApiError,
-// types) so the composer's error mapping and the render side are exercised for real.
+// Mock ONLY the three upload-flow fns; everything else in the api barrel stays
+// real (ApiError, types) so the composer's error mapping and the render side are
+// exercised for real.
 vi.mock('../../api/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/index.js')>();
-  return { ...actual, uploadMedia: vi.fn() };
+  return {
+    ...actual,
+    presignMmsMedia: vi.fn(),
+    uploadToPresignedPost: vi.fn(),
+    confirmMmsMedia: vi.fn(),
+  };
 });
-import { uploadMedia } from '../../api/index.js';
+import { presignMmsMedia, uploadToPresignedPost, confirmMmsMedia } from '../../api/index.js';
 
-const mockedUpload = vi.mocked(uploadMedia);
+const mockedPresign = vi.mocked(presignMmsMedia);
+const mockedS3Post = vi.mocked(uploadToPresignedPost);
+const mockedConfirm = vi.mocked(confirmMmsMedia);
+
+/** Wire the happy-path presign -> S3 POST -> confirm flow returning `att`. */
+function mockUploadFlow(att: Partial<MmsMediaAttachment> & { s3Key: string }): void {
+  mockedPresign.mockResolvedValue({ key: att.originalKey ?? att.s3Key, post: { url: 'https://s3.local/b', fields: {} } });
+  mockedS3Post.mockResolvedValue(undefined);
+  mockedConfirm.mockResolvedValue({
+    contentType: 'image/png',
+    size: 2048,
+    originalKey: att.originalKey ?? att.s3Key,
+    ...att,
+  } as MmsMediaAttachment);
+}
 
 /** A valid (allowlisted) image file of a given byte size. */
 function imageFile(name = 'photo.png', size = 2048, type = 'image/png'): File {
@@ -43,54 +63,125 @@ const fileInput = (): HTMLInputElement =>
 // jsdom has no URL.createObjectURL/revokeObjectURL; add them for the image chip
 // preview path. (This file's jsdom global is isolated, so the stubs never leak.)
 beforeEach(() => {
-  mockedUpload.mockReset();
+  mockedPresign.mockReset();
+  mockedS3Post.mockReset();
+  mockedConfirm.mockReset();
   URL.createObjectURL = vi.fn(() => 'blob:preview');
   URL.revokeObjectURL = vi.fn();
 });
 
 describe('Timeline outbound MMS composer', () => {
-  it('uploads a picked file on select and shows a chip with the filename', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+  it('uploads a picked file via presign -> S3 -> confirm and shows a chip', async () => {
+    mockUploadFlow({ s3Key: 'uploads/abc' });
     renderComposer();
     fireEvent.change(fileInput(), { target: { files: [imageFile('room.png')] } });
     // The chip appears immediately in the "Attachments" list...
     const list = screen.getByRole('list', { name: 'Attachments' });
     expect(list).toHaveTextContent('room.png');
-    expect(mockedUpload).toHaveBeenCalledTimes(1);
-    // ...and once the upload resolves the removal control is available.
+    expect(mockedPresign).toHaveBeenCalledWith('image/png');
+    // ...and once the flow resolves the removal control is available.
     await screen.findByRole('button', { name: 'Remove room.png' });
+    expect(mockedS3Post).toHaveBeenCalledTimes(1);
+    expect(mockedConfirm).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('Uploading...')).not.toBeInTheDocument();
   });
 
-  it('shows an uploading state and BLOCKS Send until the upload finishes', async () => {
-    let resolveUpload!: (v: { key: string; contentType: string; size: number }) => void;
-    mockedUpload.mockReturnValue(
+  it('shows an uploading state and BLOCKS Send until confirm finishes', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/x', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    let resolveConfirm!: (v: MmsMediaAttachment) => void;
+    mockedConfirm.mockReturnValue(
       new Promise((res) => {
-        resolveUpload = res;
+        resolveConfirm = res;
       }),
     );
     renderComposer();
     fireEvent.change(fileInput(), { target: { files: [imageFile()] } });
-    // In-flight: progress text + Send disabled (a still-uploading attachment must
-    // not be silently dropped from the message).
+    // In-flight (upload or server transcode): progress text + Send disabled (a
+    // still-uploading attachment must not be silently dropped from the message).
     expect(screen.getByText('Uploading...')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    resolveUpload({ key: 'uploads/x', contentType: 'image/png', size: 2048 });
+    resolveConfirm({ s3Key: 'uploads/x', contentType: 'image/png', size: 2048, originalKey: 'uploads/x' });
     // Once done, an attachment alone enables Send (body OR attachments).
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
   });
 
-  it('surfaces an inline error on the chip when the upload fails', async () => {
-    mockedUpload.mockRejectedValue(new ApiError(413, 'file_too_large', 'file_too_large'));
+  it('surfaces an inline error on the chip when the S3 upload fails', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/x', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockRejectedValue(new ApiError(400, 's3_upload_failed', 'S3 upload failed (400)'));
     renderComposer();
     fireEvent.change(fileInput(), { target: { files: [imageFile()] } });
-    expect(await screen.findByText(/Too large/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Upload failed/i)).toBeInTheDocument();
     // A failed upload contributes no key, so with an empty body Send stays disabled.
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
+  });
+
+  it('multi-page pdf shows the page-1-only note and stays sendable', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/o', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm.mockResolvedValue({
+      s3Key: 'uploads/d',
+      contentType: 'image/jpeg',
+      size: 10,
+      originalKey: 'uploads/o',
+      transcodedFrom: 'application/pdf',
+      pdfPageCount: 3,
+    });
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderComposer({ onSend });
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(['%PDF'], 'lease.pdf', { type: 'application/pdf' })] },
+    });
+    await screen.findByRole('button', { name: 'Remove lease.pdf' });
+    expect(screen.getByText(/only the first page/i)).toBeInTheDocument();
+    // Soft note only - Send stays enabled and carries the rendition + original.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onSend).toHaveBeenCalledWith('', ['uploads/d'], ['uploads/o']);
+    await waitFor(() =>
+      expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('single-page pdf shows NO page note', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/o', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm.mockResolvedValue({
+      s3Key: 'uploads/d',
+      contentType: 'image/jpeg',
+      size: 10,
+      originalKey: 'uploads/o',
+      transcodedFrom: 'application/pdf',
+      pdfPageCount: 1,
+    });
+    renderComposer();
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(['%PDF'], 'flyer.pdf', { type: 'application/pdf' })] },
+    });
+    await screen.findByRole('button', { name: 'Remove flyer.pdf' });
+    expect(screen.queryByText(/only the first page/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the transcode_failed detail on the chip', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/o', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm.mockRejectedValue(
+      new ApiError(400, 'transcode_failed', 'transcode_failed', {
+        error: 'transcode_failed',
+        detail: 'Input buffer contains unsupported image format',
+      }),
+    );
+    renderComposer();
+    fireEvent.change(fileInput(), { target: { files: [imageFile('broken.webp', 64, 'image/webp')] } });
+    expect(
+      await screen.findByText(/Couldn't process this file: Input buffer/i),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
   it('removes a chip when its remove control is clicked', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+    mockUploadFlow({ s3Key: 'uploads/abc' });
     renderComposer();
     fireEvent.change(fileInput(), { target: { files: [imageFile('doc.png')] } });
     const remove = await screen.findByRole('button', { name: 'Remove doc.png' });
@@ -105,53 +196,76 @@ describe('Timeline outbound MMS composer', () => {
       target: { files: [new File(['x'], 'archive.zip', { type: 'application/zip' })] },
     });
     expect(screen.getByRole('alert')).toHaveTextContent(/unsupported file type/i);
-    expect(mockedUpload).not.toHaveBeenCalled();
+    expect(mockedPresign).not.toHaveBeenCalled();
     expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument();
   });
 
-  it('rejects a file over 5MB WITHOUT uploading it', () => {
+  it('rejects a file over the 20MB source cap WITHOUT uploading it', () => {
+    // Auto-fit raised the per-file SOURCE ceiling to 20MB (the server shrinks
+    // oversized images at confirm); over that, the presign policy would reject
+    // the POST anyway, so the pick is refused up front.
     renderComposer();
     fireEvent.change(fileInput(), {
-      target: { files: [imageFile('big.png', 5 * 1024 * 1024 + 1)] },
+      target: { files: [imageFile('big.png', 20 * 1024 * 1024 + 1)] },
     });
     expect(screen.getByRole('alert')).toHaveTextContent(/too large/i);
-    expect(mockedUpload).not.toHaveBeenCalled();
+    expect(mockedPresign).not.toHaveBeenCalled();
   });
 
   it('rejects the 11th file (max 10) WITHOUT uploading it', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/k', contentType: 'image/png', size: 16 });
+    mockUploadFlow({ s3Key: 'uploads/k' });
     renderComposer();
     const eleven = Array.from({ length: 11 }, (_, i) => imageFile(`f${i}.png`, 16));
     fireEvent.change(fileInput(), { target: { files: eleven } });
     expect(screen.getByRole('alert')).toHaveTextContent(/at most 10 files/i);
     // Only the first 10 were accepted + uploaded.
-    expect(mockedUpload).toHaveBeenCalledTimes(10);
+    expect(mockedPresign).toHaveBeenCalledTimes(10);
     await waitFor(() =>
       expect(screen.getAllByRole('button', { name: /^Remove/ })).toHaveLength(10),
     );
   });
 
-  it('rejects a file that would exceed the 5MB total WITHOUT uploading it', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/k', contentType: 'image/png', size: 16 });
+  it('rejects another file when the CONFIRMED deliverables already exceed the 5MB send total', async () => {
+    // The total pre-check runs over confirmed (deliverable) sizes - source sizes
+    // shrink at confirm, so counting a picked file's source bytes would falsely
+    // reject auto-fit candidates. Two confirmed 3MB deliverables = 6MB > 5MB, so
+    // the NEXT pick is refused (the server's send-time cap stays the backstop).
+    mockedPresign.mockResolvedValue({ key: 'uploads/k', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm.mockResolvedValue({
+      s3Key: 'uploads/k',
+      contentType: 'image/png',
+      size: 3 * 1024 * 1024,
+      originalKey: 'uploads/k',
+    });
     renderComposer();
-    // 3MB accepted; a second 3MB pushes the total over 5MB and is rejected.
-    fireEvent.change(fileInput(), { target: { files: [imageFile('a.png', 3 * 1024 * 1024)] } });
-    fireEvent.change(fileInput(), { target: { files: [imageFile('b.png', 3 * 1024 * 1024)] } });
-    expect(screen.getByRole('alert')).toHaveTextContent(/5 MB total limit/i);
-    expect(mockedUpload).toHaveBeenCalledTimes(1); // only the first file uploaded
+    fireEvent.change(fileInput(), { target: { files: [imageFile('a.png', 1024)] } });
     await screen.findByRole('button', { name: 'Remove a.png' });
+    fireEvent.change(fileInput(), { target: { files: [imageFile('b.png', 1024)] } });
+    await screen.findByRole('button', { name: 'Remove b.png' });
+    fireEvent.change(fileInput(), { target: { files: [imageFile('c.png', 1024)] } });
+    expect(screen.getByRole('alert')).toHaveTextContent(/5 MB total limit/i);
+    expect(mockedPresign).toHaveBeenCalledTimes(2); // c.png never uploaded
   });
 
-  it('carries the uploaded attachmentKeys to onSend alongside the body', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+  it('carries the rendition keys AND original keys to onSend alongside the body', async () => {
+    mockedPresign.mockResolvedValue({ key: 'uploads/orig1', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm.mockResolvedValue({
+      s3Key: 'uploads/deliv1',
+      contentType: 'image/jpeg',
+      size: 900,
+      originalKey: 'uploads/orig1',
+      transcodedFrom: 'image/webp',
+    });
     const onSend = vi.fn().mockResolvedValue(undefined);
     renderComposer({ onSend });
-    fireEvent.change(fileInput(), { target: { files: [imageFile()] } });
+    fireEvent.change(fileInput(), { target: { files: [imageFile('pic.webp', 2048, 'image/webp')] } });
     await screen.findByRole('button', { name: /Remove/ });
     const box = screen.getByRole('textbox', { name: /reply/i });
     fireEvent.change(box, { target: { value: 'see attached' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(onSend).toHaveBeenCalledWith('see attached', ['uploads/abc']);
+    expect(onSend).toHaveBeenCalledWith('see attached', ['uploads/deliv1'], ['uploads/orig1']);
     // Chips clear after a successful send.
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument(),
@@ -159,7 +273,7 @@ describe('Timeline outbound MMS composer', () => {
   });
 
   it('enables Send with an attachment and NO body (body OR attachments)', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+    mockUploadFlow({ s3Key: 'uploads/abc' });
     const onSend = vi.fn().mockResolvedValue(undefined);
     renderComposer({ onSend });
     // Empty body, no attachment -> disabled.
@@ -167,8 +281,9 @@ describe('Timeline outbound MMS composer', () => {
     fireEvent.change(fileInput(), { target: { files: [imageFile()] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    // Attachment-only send: onSend gets an empty body + the keys.
-    expect(onSend).toHaveBeenCalledWith('', ['uploads/abc']);
+    // Attachment-only send: onSend gets an empty body + the keys (flow-through:
+    // original IS the rendition).
+    expect(onSend).toHaveBeenCalledWith('', ['uploads/abc'], ['uploads/abc']);
     // Let the send resolve (chips clear) so no state update escapes act().
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument(),
@@ -176,7 +291,7 @@ describe('Timeline outbound MMS composer', () => {
   });
 
   it('restores the chips when an attachment send fails (nothing lost)', async () => {
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+    mockUploadFlow({ s3Key: 'uploads/abc' });
     const onSend = vi.fn().mockRejectedValue(new ApiError(409, 'contact_opted_out', 'x'));
     renderComposer({ onSend });
     fireEvent.change(fileInput(), { target: { files: [imageFile('keep.png')] } });
@@ -191,9 +306,11 @@ describe('Timeline outbound MMS composer', () => {
     // First upload succeeds (a good chip), the second fails (an errored chip).
     // A send with text + the good chip + the errored chip must NOT go out
     // silently omitting the failed file: Send is blocked with an inline warning.
-    mockedUpload
-      .mockResolvedValueOnce({ key: 'uploads/good', contentType: 'image/png', size: 2048 })
-      .mockRejectedValueOnce(new ApiError(413, 'file_too_large', 'file_too_large'));
+    mockedPresign.mockResolvedValue({ key: 'uploads/good', post: { url: 'u', fields: {} } });
+    mockedS3Post.mockResolvedValue(undefined);
+    mockedConfirm
+      .mockResolvedValueOnce({ s3Key: 'uploads/good', contentType: 'image/png', size: 2048, originalKey: 'uploads/good' })
+      .mockRejectedValueOnce(new ApiError(400, 'transcode_failed', 'transcode_failed'));
     const onSend = vi.fn().mockResolvedValue(undefined);
     renderComposer({ onSend });
 
@@ -215,7 +332,7 @@ describe('Timeline outbound MMS composer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove bad.png' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(onSend).toHaveBeenCalledWith('see attached', ['uploads/good']);
+    expect(onSend).toHaveBeenCalledWith('see attached', ['uploads/good'], ['uploads/good']);
     // Let the send resolve (chips clear) so no state update escapes act().
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Attachments' })).not.toBeInTheDocument(),
@@ -246,7 +363,7 @@ describe('Timeline outbound MMS composer', () => {
     // The tour page keys each channel by conversationId; switching channels
     // REMOUNTS the Timeline. Attachment chips are component-local useState, so the
     // remounted composer starts empty - chips can never leak across tabs.
-    mockedUpload.mockResolvedValue({ key: 'uploads/abc', contentType: 'image/png', size: 2048 });
+    mockUploadFlow({ s3Key: 'uploads/abc' });
     const { rerender } = render(
       <MemoryRouter>
         <Timeline

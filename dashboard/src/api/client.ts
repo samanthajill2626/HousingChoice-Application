@@ -13,6 +13,9 @@ export class ApiError extends Error {
   readonly code: string;
   /** The parsed response body, when JSON (for endpoint-specific extra fields). */
   readonly body: unknown;
+  /** The server's { detail } diagnostic string, when present (e.g. the library
+   *  error behind a 400 transcode_failed) - structured access for UI copy. */
+  readonly detail?: string;
 
   constructor(status: number, code: string, message: string, body?: unknown) {
     super(message);
@@ -20,6 +23,10 @@ export class ApiError extends Error {
     this.status = status;
     this.code = code;
     this.body = body;
+    if (body !== null && typeof body === 'object') {
+      const d = (body as Record<string, unknown>)['detail'];
+      if (typeof d === 'string') this.detail = d;
+    }
   }
 }
 

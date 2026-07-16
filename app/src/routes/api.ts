@@ -14,7 +14,8 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
-import { isInlineMediaType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
+import { isInlineMediaType, isTwilioDeliverableType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
+import { renditionFor } from '../lib/mmsRenditions.js';
 import {
   OUTBOUND_MMS_MAX_MEDIA,
   OUTBOUND_MMS_MAX_TOTAL_BYTES,
@@ -88,7 +89,7 @@ import { createPlacementNudgesRouter } from './placementNudges.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
-import { createMediaUploadsRouter } from './mediaUploads.js';
+import { createMmsMediaRouter } from './mmsMedia.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -261,6 +262,67 @@ function toConversationSummary(item: ConversationItem): Record<string, unknown> 
   };
 }
 
+/**
+ * Validate client-supplied `attachmentKeys` (outbound MMS, design Sec 4) and
+ * resolve them to durable MediaAttachment records. Each key must be one our
+ * OWN upload endpoint minted (UPLOAD_KEY_PATTERN - the client can never point
+ * us at an arbitrary bucket key); at most OUTBOUND_MMS_MAX_MEDIA; each
+ * HeadObject'd (missing -> unknown_attachment) with its stored type checked
+ * against TWILIO_DELIVERABLE_MMS_TYPES (the 12300 root-cause guard: only
+ * jpeg/png/gif may reach Twilio, even if confirm was bypassed) and sizes
+ * summed under the carrier total cap - measured over the DELIVERABLE rendition
+ * objects, exactly what goes to Twilio. `originalKeys` (index-aligned, from
+ * confirm) ride onto each attachment as `originalKey` (RCS-forward, spec Sec
+ * 5). Returns the attachments on success, or a {status, error} the caller maps
+ * straight to the HTTP response. Presigning is the caller's job (per-attempt):
+ * 1:1 presigns now; relay presigns per leg in the fan-out. Exported for tests.
+ */
+export async function resolveAttachmentKeys(
+  keys: string[],
+  originalKeys: string[] | undefined,
+  mediaStore: MediaStore | undefined,
+): Promise<{ ok: true; attachments: MediaAttachment[] } | { ok: false; status: number; error: string }> {
+  if (keys.length > OUTBOUND_MMS_MAX_MEDIA) {
+    return { ok: false, status: 400, error: 'too_many_attachments' };
+  }
+  if (!keys.every((k) => UPLOAD_KEY_PATTERN.test(k))) {
+    return { ok: false, status: 400, error: 'invalid_attachment_key' };
+  }
+  // originalKeys are client input too, and get PERSISTED (a future RCS channel
+  // presigns them): same own-prefix rule, and index alignment must hold so the
+  // pairing cannot be desynchronized.
+  if (
+    originalKeys !== undefined &&
+    (originalKeys.length !== keys.length || !originalKeys.every((k) => UPLOAD_KEY_PATTERN.test(k)))
+  ) {
+    return { ok: false, status: 400, error: 'invalid_attachment_key' };
+  }
+  if (!mediaStore) {
+    return { ok: false, status: 503, error: 'media_storage_unavailable' };
+  }
+  const attachments: MediaAttachment[] = [];
+  let totalBytes = 0;
+  for (let i = 0; i < keys.length; i++) {
+    const s3Key = keys[i]!;
+    const meta = await mediaStore.head(s3Key);
+    if (!meta) {
+      return { ok: false, status: 400, error: 'unknown_attachment' };
+    }
+    const contentType = (meta.contentType ?? '').trim().toLowerCase();
+    // Deliverable-type guard: only jpeg/png/gif may reach Twilio (12300 fix).
+    if (!isTwilioDeliverableType(contentType)) {
+      return { ok: false, status: 400, error: 'unsupported_attachment_type' };
+    }
+    totalBytes += meta.size ?? 0;
+    const originalKey = originalKeys?.[i];
+    attachments.push({ s3Key, contentType, ...(originalKey !== undefined && { originalKey }) });
+  }
+  if (totalBytes > OUTBOUND_MMS_MAX_TOTAL_BYTES) {
+    return { ok: false, status: 400, error: 'attachments_too_large' };
+  }
+  return { ok: true, attachments };
+}
+
 export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const config = deps.config ?? loadConfig();
@@ -337,11 +399,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.pushService !== undefined && { pushService: deps.pushService }),
     }),
   );
-  // Outbound MMS uploads (POST /api/media/uploads) - streams one file into the
-  // private media bucket at uploads/<uuid>; the send route later presigns it.
+  // Outbound MMS media (POST /api/media/presign + /confirm) - the browser
+  // uploads the original DIRECTLY to S3 via a presigned POST, then confirm
+  // validates/transcodes it into a Twilio-deliverable rendition the send route
+  // later presigns. Replaces the busboy through-EC2 /media/uploads endpoint.
   router.use(
     '/media',
-    createMediaUploadsRouter({
+    createMmsMediaRouter({
       config,
       logger: deps.logger,
       ...(mediaStore !== undefined && { mediaStore }),
@@ -675,49 +739,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // per attempt (send / each relay leg / retry) and NEVER persisted as truth.
   const PRESIGN_TTL_SECONDS = 3600;
 
-  /**
-   * Validate client-supplied `attachmentKeys` (outbound MMS, design Sec 4) and
-   * resolve them to durable {s3Key, contentType} attachments. Each key must be
-   * one our OWN upload endpoint minted (UPLOAD_KEY_PATTERN - the client can
-   * never point us at an arbitrary bucket key); at most OUTBOUND_MMS_MAX_MEDIA;
-   * each HeadObject'd (missing -> unknown_attachment) with its stored type
-   * re-checked against the inline allowlist and sizes summed under the carrier
-   * total cap. Returns the attachments on success, or a {status, error} the
-   * caller maps straight to the HTTP response. Presigning is the caller's job
-   * (per-attempt): 1:1 presigns now; relay presigns per leg in the fan-out.
-   */
-  async function resolveAttachmentKeys(
-    keys: string[],
-  ): Promise<{ ok: true; attachments: MediaAttachment[] } | { ok: false; status: number; error: string }> {
-    if (keys.length > OUTBOUND_MMS_MAX_MEDIA) {
-      return { ok: false, status: 400, error: 'too_many_attachments' };
-    }
-    if (!keys.every((k) => UPLOAD_KEY_PATTERN.test(k))) {
-      return { ok: false, status: 400, error: 'invalid_attachment_key' };
-    }
-    if (!mediaStore) {
-      return { ok: false, status: 503, error: 'media_storage_unavailable' };
-    }
-    const attachments: MediaAttachment[] = [];
-    let totalBytes = 0;
-    for (const s3Key of keys) {
-      const meta = await mediaStore.head(s3Key);
-      if (!meta) {
-        return { ok: false, status: 400, error: 'unknown_attachment' };
-      }
-      const contentType = normalizeStoredMediaType(meta.contentType);
-      if (!isInlineMediaType(contentType)) {
-        return { ok: false, status: 400, error: 'unsupported_attachment_type' };
-      }
-      totalBytes += meta.size ?? 0;
-      attachments.push({ s3Key, contentType });
-    }
-    if (totalBytes > OUTBOUND_MMS_MAX_TOTAL_BYTES) {
-      return { ok: false, status: 400, error: 'attachments_too_large' };
-    }
-    return { ok: true, attachments };
-  }
-
   // POST /api/conversations/:conversationId/messages  { body?, mediaUrls?, attachmentKeys? }
   // A manual human send (automated sends come from jobs, not this route).
   //
@@ -741,7 +762,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     // narrow req.params from the path literal — coerce like voiceApi.ts does.
     const conversationId = String(req.params['conversationId'] ?? '');
     mergeContext({ conversationId });
-    const payload = (req.body ?? {}) as { body?: unknown; mediaUrls?: unknown; attachmentKeys?: unknown };
+    const payload = (req.body ?? {}) as {
+      body?: unknown;
+      mediaUrls?: unknown;
+      attachmentKeys?: unknown;
+      attachmentOriginalKeys?: unknown;
+    };
 
     const body = typeof payload.body === 'string' && payload.body.length > 0 ? payload.body : undefined;
     // Legacy raw mediaUrls: the INTERNAL/e2e seam (the dashboard never uses it).
@@ -752,25 +778,33 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       payload.mediaUrls.every((u): u is string => typeof u === 'string')
         ? payload.mediaUrls
         : undefined;
-    // Outbound MMS (design Sec 4): the dashboard uploads via /api/media/uploads
-    // then sends the returned keys here. Reject a non-string-array outright.
+    // Outbound MMS (design Sec 4): the dashboard uploads via presign/confirm
+    // then sends the returned rendition keys here. Reject a non-string-array
+    // outright. `attachmentOriginalKeys` (optional, index-aligned) carries the
+    // pristine originals confirm returned (RCS-forward, spec Sec 5).
     const attachmentKeys =
       Array.isArray(payload.attachmentKeys) &&
       payload.attachmentKeys.length > 0 &&
       payload.attachmentKeys.every((k): k is string => typeof k === 'string')
         ? payload.attachmentKeys
         : undefined;
+    const attachmentOriginalKeys =
+      Array.isArray(payload.attachmentOriginalKeys) &&
+      payload.attachmentOriginalKeys.length > 0 &&
+      payload.attachmentOriginalKeys.every((k): k is string => typeof k === 'string')
+        ? payload.attachmentOriginalKeys
+        : undefined;
     if (body === undefined && mediaUrls === undefined && attachmentKeys === undefined) {
       res.status(400).json({ error: 'body, attachmentKeys, or mediaUrls is required' });
       return;
     }
 
-    // Validate + resolve uploaded attachments to durable {s3Key, contentType}
-    // (HeadObject each, type re-check, total-size cap). Presign happens per
-    // attempt below (1:1 now; relay per leg in the fan-out).
+    // Validate + resolve uploaded attachments to durable MediaAttachment records
+    // (HeadObject each, deliverable-type guard, total-size cap). Presign happens
+    // per attempt below (1:1 now; relay per leg in the fan-out).
     let attachments: MediaAttachment[] | undefined;
     if (attachmentKeys !== undefined) {
-      const resolved = await resolveAttachmentKeys(attachmentKeys);
+      const resolved = await resolveAttachmentKeys(attachmentKeys, attachmentOriginalKeys, mediaStore);
       if (!resolved.ok) {
         res.status(resolved.status).json({ error: resolved.error });
         return;
@@ -795,7 +829,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     let outboundMediaUrls = mediaUrls;
     if (attachments !== undefined && mediaStore) {
       const presigned = await Promise.all(
-        attachments.map((a) => mediaStore.presign(a.s3Key, PRESIGN_TTL_SECONDS)),
+        attachments.map((a) => mediaStore.presign(renditionFor('mms', a).s3Key, PRESIGN_TTL_SECONDS)),
       );
       outboundMediaUrls = [...presigned, ...(mediaUrls ?? [])];
       log.info(

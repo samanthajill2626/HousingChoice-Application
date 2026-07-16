@@ -62,7 +62,7 @@ import type {
   UnitActivityEvent,
   UnitItem,
   UnitsPage,
-  UploadMediaResult,
+  MmsMediaAttachment,
 } from './types.js';
 
 // --- Auth (/auth) -----------------------------------------------------------
@@ -448,12 +448,18 @@ export async function getConversationScheduled(
 }
 
 /** POST /api/conversations/:id/messages - a manual human send (the reply box).
- *  `attachmentKeys` are `uploads/<uuid>` object keys minted by uploadMedia(); the
- *  server presigns + persists them as media_attachments (the dashboard never
+ *  `attachmentKeys` are the deliverable rendition keys confirmMmsMedia() returned;
+ *  `attachmentOriginalKeys` (index-aligned) are the pristine uploads (RCS-forward).
+ *  The server presigns + persists them as media_attachments (the dashboard never
  *  passes raw mediaUrls - that seam stays internal/e2e-only). */
 export function sendMessage(
   conversationId: string,
-  body: { body?: string; mediaUrls?: string[]; attachmentKeys?: string[] },
+  body: {
+    body?: string;
+    mediaUrls?: string[];
+    attachmentKeys?: string[];
+    attachmentOriginalKeys?: string[];
+  },
 ): Promise<SendMessageResult> {
   return request<SendMessageResult>(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -461,48 +467,28 @@ export function sendMessage(
   );
 }
 
-/** POST /api/media/uploads - upload ONE attachment for an outbound MMS. Returns
- *  the server-minted `uploads/<uuid>` key the composer hands back to sendMessage.
- *
- *  This CANNOT use the shared request() helper: that helper is JSON-only (it
- *  forces Content-Type application/json + JSON.stringify). A multipart upload
- *  must send a FormData body and let the browser set the multipart boundary, so
- *  we do a raw fetch here and replicate client.ts's ApiError parsing convention
- *  so callers see the same error shape (code from the server's { error } body). */
-export async function uploadMedia(file: File): Promise<UploadMediaResult> {
-  const form = new FormData();
-  form.append('file', file);
-  let res: Response;
-  try {
-    res = await fetch('/api/media/uploads', {
-      method: 'POST',
-      body: form,
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json' },
-    });
-  } catch {
-    throw new ApiError(0, 'network_error', 'Network request failed');
-  }
+/** POST /api/media/presign { contentType } - mint a direct-to-S3 grant for one MMS
+ *  attachment. The browser then uploadToPresignedPost()s the file, then confirms.
+ *  Throws ApiError (400 unsupported_media_type, 503 media_storage_unavailable). */
+export function presignMmsMedia(
+  contentType: string,
+): Promise<{ key: string; post: { url: string; fields: Record<string, string> } }> {
+  return request<{ key: string; post: { url: string; fields: Record<string, string> } }>(
+    '/api/media/presign',
+    { method: 'POST', body: { contentType } },
+  );
+}
 
-  let parsed: unknown;
-  if ((res.headers.get('content-type') ?? '').includes('application/json')) {
-    try {
-      parsed = (await res.json()) as unknown;
-    } catch {
-      parsed = undefined;
-    }
-  }
-
-  if (!res.ok) {
-    if (parsed !== null && typeof parsed === 'object') {
-      const b = parsed as Record<string, unknown>;
-      const code = typeof b['error'] === 'string' ? b['error'] : `http_${res.status}`;
-      const detail = typeof b['detail'] === 'string' ? ` (${b['detail']})` : '';
-      throw new ApiError(res.status, code, `${code}${detail}`, parsed);
-    }
-    throw new ApiError(res.status, `http_${res.status}`, `Request failed (${res.status})`, parsed);
-  }
-  return parsed as UploadMediaResult;
+/** POST /api/media/confirm { key } - server validates/transcodes the uploaded
+ *  original and returns the deliverable MMS attachment (jpeg for webp/pdf/oversized;
+ *  the original for gif/small jpeg-png). Throws ApiError (400 transcode_failed with
+ *  a `detail`, unknown_attachment, file_too_large_after_fit; 503 transcode_busy). */
+export async function confirmMmsMedia(key: string): Promise<MmsMediaAttachment> {
+  const res = await request<{ attachment: MmsMediaAttachment }>(
+    '/api/media/confirm',
+    { method: 'POST', body: { key } },
+  );
+  return res.attachment;
 }
 
 /** POST /api/conversations/:id/messages/:providerSid/retry - re-send a FAILED

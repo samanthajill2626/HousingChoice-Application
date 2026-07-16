@@ -110,6 +110,14 @@ Property photos upload **directly from the browser to the media S3 bucket** via 
 
 **Local dev needs NOTHING here** - the harness MinIO allows all CORS origins by default (spike-verified 2026-07-15, `.superpowers/spike/phase0-results.md`), so `s3-create.ts` adds no CORS step and no local config is required. The new app-workspace dep (`@aws-sdk/s3-presigned-post`) rides `npm install` on deploy.
 
+### Outbound MMS media transcoding (2026-07-16): npm install owed; NO new infra
+
+The MMS composer upload moved to the same direct-to-S3 presign/confirm pattern, and confirm now transcodes webp/pdf/oversized images into a Twilio-deliverable JPEG (fixes Twilio error 12300). Post-merge:
+
+- **`npm install` is owed on merge** - new app-workspace runtime deps `sharp` + `@hyzyla/pdfium` (the arm64 `npm ci --workspace app --omit=dev` was container-proven on the branch; the lockfile carries `@img/sharp-linux-arm64`).
+- **No new Terraform.** The MMS upload uses the SAME media bucket + the SAME `s3_media` CORS rule as unit photos (already applied on dev); prod CORS rides the M1.11 cutover apply above. Reads/writes use the existing EC2 role `s3:GetObject`/`s3:PutObject` on `MEDIA_BUCKET`.
+- The busboy `POST /api/media/uploads` endpoint is REMOVED (superseded by `/api/media/presign` + `/api/media/confirm`); nothing operational referenced it.
+
 ### Promote to prod — never rebuild for prod
 
 ```powershell

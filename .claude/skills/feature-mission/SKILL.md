@@ -73,7 +73,12 @@ manual at .claude/agents/build-orchestrator.md and follow it; you are
 running as a TOP-LEVEL session (manual mode) - see the manual's manual-mode
 section", (2) the mission block verbatim, (3) any resume context (ledger
 state, decisions already made). He pastes it into his own fresh window and
-supervises it himself - no watchdog, no mirror, no relay needed. BEFORE
+supervises it himself - no watchdog, no mirror, no relay needed. The
+handover message MUST remind him: the manual window runs his session's
+default model (the agent definition's fable/max frontmatter does NOT apply
+in manual mode) - set `/model` first, fable or opus for orchestrator work
+(the haiku dry run produced mis-narrated handback numbers and an
+unadjudicated deviation). BEFORE
 handing over: TaskStop the watchdog and stop resuming the subagent - ONE
 orchestrator per worktree, never both modes at once. Re-entry: when Cameron
 says the manual run finished, read `<worktree>/.superpowers/sdd/handback.md`

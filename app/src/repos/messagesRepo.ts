@@ -225,6 +225,13 @@ export interface NewMessage {
 export interface MediaAttachment {
   s3Key: string;
   contentType: string;
+  /**
+   * The pristine uploaded original (RCS-forward, spec Sec 5). `s3Key` is the
+   * MMS-deliverable rendition actually sent; `originalKey` is the full-fidelity
+   * asset a future RCS channel can send instead. Absent on inbound-mirrored and
+   * legacy attachments (they carry only the delivered key).
+   */
+  originalKey?: string;
 }
 
 export interface MessageItem {

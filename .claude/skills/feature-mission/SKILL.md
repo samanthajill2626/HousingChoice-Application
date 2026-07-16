@@ -65,11 +65,12 @@ exits when the worktree goes quiet too long OR the orchestrator writes a
 terminal status - either way its exit wakes you:
 
 ```bash
-WT="/w/tmp/<name>"; LEDGER="$WT/.superpowers/sdd/progress.md"
+WT="/w/tmp/<name>"; LEDGER="$WT/.superpowers/sdd/progress.md"; t0=$(date +%s)
 while true; do
   tail -1 "$LEDGER" 2>/dev/null | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
   newest=$(find "$WT" -path '*/node_modules' -prune -o -type f -newermt '-25 minutes' -print -quit 2>/dev/null)
   [ -z "$newest" ] && exit 1
+  [ $(( $(date +%s) - t0 )) -ge 1200 ] && exit 2
   sleep 120
 done
 ```
@@ -77,7 +78,10 @@ done
 Exit 0 = terminal status: read the ledger tail and act (DONE -> review;
 QUESTION -> relay to Cameron via AskUserQuestion, SendMessage the answer
 back, re-arm; BLOCKED -> investigate). Exit 1 = STALL: escalate below, and
-re-arm the watchdog after resolving. Also re-arm if you are woken by the
+re-arm the watchdog after resolving. Exit 2 = HEALTHY CHECKPOINT (20 min):
+read the ledger tail, give Cameron the one-line status, re-arm - this
+guarantees he is never more than ~20 minutes from a status line, and that
+"quiet because healthy" never looks like "quiet because dead". Also re-arm if you are woken by the
 orchestrator finishing while a watchdog is still running (TaskStop the
 stale watchdog).
 

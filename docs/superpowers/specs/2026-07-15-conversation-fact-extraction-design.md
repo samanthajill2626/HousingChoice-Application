@@ -87,9 +87,9 @@ it came from:
 
 - When an inbound message is stored for a contact of type tenant or unknown,
   the app UPSERTS an extraction-due item keyed by conversation with
-  due = now + 60s.
+  due = now + 30s.
 - Every subsequent inbound message re-upserts the same item, pushing due
-  back to now + 60s. The timer therefore slides: extraction runs 60 seconds
+  back to now + 30s. The timer therefore slides: extraction runs 30 seconds
   after the LAST message of a burst, and a whole burst is covered by one
   call. A long continuous exchange keeps sliding and gets one extraction at
   the end - intended behavior.
@@ -235,7 +235,8 @@ The server appends them as, e.g.:
   workflows' in-prompt API keys are the cautionary tale; those OpenPhone
   keys were also flagged to the founder for rotation).
 - Env: AI_EXTRACTION_ENABLED (kill switch), AI_EXTRACTION_MODEL,
-  AI_EXTRACTION_DEBOUNCE_MS (default 60000).
+  AI_EXTRACTION_DEBOUNCE_MS (default 30000; starting value to test - it is
+  an env knob precisely so we can tune without a code change).
 - Cost: order of $1/day at current volume on claude-opus-4-8; revisit model
   choice if volume grows 10x.
 - Privacy/PII: conversation text (tenant PII) flows to the Anthropic API.

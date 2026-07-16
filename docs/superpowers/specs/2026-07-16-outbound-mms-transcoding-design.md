@@ -38,8 +38,14 @@ Goals:
   transcode what ISN'T -- now and in the future").
 - Auto-fit: a user can attach large photos and they are downscaled/compressed to
   stay within the MMS budget, instead of being rejected.
+- **Small already-deliverable images flow through untouched** (a small
+  jpeg/png/gif is never re-encoded -- no needless generation loss or CPU).
 - A multi-page PDF sends page 1 as an image, with a soft warning that only page 1
   will be sent.
+- **Preserve the original at full fidelity as the durable asset.** All MMS
+  degradations (jpeg-only, 5 MB, 1600px) apply ONLY to a derived MMS *rendition*,
+  never to the stored original -- so RCS (on the roadmap) can later send the
+  pristine original as an additive feature, without rewriting this. See Section 5.
 - EC2 memory stays bounded on the 2 GB t4g.small host.
 
 Non-goals (explicit):
@@ -52,7 +58,9 @@ Non-goals (explicit):
   are added) is deferred (design Approach B). Approach A (auto-fit each file) is
   built; the 5 MB total remains a send-time backstop with a clear message.
 - Preserving multi-page PDFs as multi-page (only page 1 is sent).
-- Moving transcoding to a Lambda now (see Section 12: the design keeps a clean
+- **Building the RCS channel now.** This spec only lays the seams (Section 5) so
+  RCS is additive later; it does not implement RCS.
+- Moving transcoding to a Lambda now (see Section 14: the design keeps a clean
   seam to do this later).
 
 ## 3. The deliverable-type registry (core principle)
@@ -64,29 +72,31 @@ TWILIO_DELIVERABLE_MMS_TYPES = { image/jpeg, image/png, image/gif }
 ```
 
 The MMS *uploadable* allowlist stays the existing image+pdf set
-(`jpeg, png, gif, webp, pdf` = INLINE_MEDIA_TYPES minus nothing relevant; pdf
-included).
+(`jpeg, png, gif, webp, pdf`, i.e. INLINE_MEDIA_TYPES; pdf included).
 
-One pure function decides every source file's fate:
+One pure function decides every source file's fate, using ONLY the HeadObject
+metadata (Content-Type + size) so the pass-through paths need no download:
 
 ```
 plan(sourceType, sizeBytes) ->
   | 'transcode-pdf'    when sourceType == application/pdf
-  | 'deliver'          when sourceType == image/gif           (pass through; preserves animation; gif is deliverable)
-  | 'transcode-image'  when sourceType in { image/webp, image/jpeg, image/png }   (normalize + auto-fit)
-  | 'reject'           otherwise                              (never reached; the upload allowlist gates first)
+  | 'deliver'          when sourceType == image/gif                             (always; preserves animation)
+  | 'deliver'          when sourceType in { image/jpeg, image/png }
+                            AND sizeBytes <= PASSTHROUGH_MAX_BYTES               (flow-through: small + deliverable)
+  | 'transcode-image'  when sourceType == image/webp
+                            OR (sourceType in { image/jpeg, image/png } AND sizeBytes > PASSTHROUGH_MAX_BYTES)
+  | 'reject'           otherwise                                                (never reached; upload allowlist gates first)
 ```
 
 Notes:
 
-- `image/webp/jpeg/png` ALL transcode-image. We deliberately re-encode even
-  already-deliverable jpeg/png so auto-fit (downscale + quality ladder) applies,
-  which best serves the "help fit within the 5 MB budget, per-file AND total"
-  goal. Accepted trade-off: minor generation loss re-encoding an already-small
-  JPEG; bounded CPU (Section 8).
-- `image/gif` is pass-through (NOT sharp-transcoded) so animated gifs are not
-  flattened to a single frame. gif is deliverable, so pass-through is safe. A
-  pathological oversize gif is caught by the send-time total/per-file cap.
+- **Flow-through** covers gif (any size, to preserve animation) and small
+  jpeg/png (<= PASSTHROUGH_MAX_BYTES): confirm returns the original key as the MMS
+  rendition, with NO S3 download and NO re-encode. This is the cheap path and the
+  common case (a phone photo is usually a jpeg).
+- `image/webp` ALWAYS transcodes (not deliverable). A jpeg/png over the
+  pass-through threshold transcodes for auto-fit (downscale + quality ladder,
+  Section 8).
 - The **guardrail test**: every type in the uploadable allowlist must map to a
   non-`reject` plan. Adding a future uploadable type that is neither deliverable,
   a transcodable image, nor pdf fails CI until it is given a branch. This is the
@@ -107,7 +117,9 @@ Flow, per attachment:
    server-minted key `uploads/<uuid>`. Policy pins: Content-Type in the uploadable
    allowlist, content-length-range `1 .. MMS_UPLOAD_SOURCE_MAX_BYTES` (~20 MB, so
    big phone photos can be uploaded then auto-fit down), short TTL (reuse the
-   unit-photo 300s grant TTL). Reuses `MediaStore.createPresignedPost`.
+   unit-photo 300s grant TTL). Reuses `MediaStore.createPresignedPost`. The 20 MB
+   cap is an MMS-era ceiling (Section 5): it bounds the ORIGINAL only and can be
+   raised for RCS later without touching anything else.
 2. **Browser uploads the original directly to S3.** Unbounded client-side; EC2
    never sees the bytes. Reuses the same origin-scoped `s3_media` CORS rule the
    unit-photo direct upload already applied (already in effect on dev).
@@ -117,27 +129,70 @@ Flow, per attachment:
    - HeadObject the original: absent -> 400 `unknown_attachment`; read
      Content-Type + size.
    - `plan(type, size)`:
-     - `deliver` (gif) -> return the original key as the deliverable; NO download,
-       NO rewrite.
+     - `deliver` (gif, or small jpeg/png) -> the MMS rendition IS the original key;
+       NO download, NO rewrite.
      - `transcode-pdf` / `transcode-image` -> acquire a transcode semaphore slot
-       (Section 8), GET the original bytes from S3, run mediaTranscode (Section 5),
+       (Section 9), GET the original bytes from S3, run mediaTranscode (Section 6),
        PUT the deliverable JPEG to a FRESH key `uploads/<uuid2>` (matches the
        existing `UPLOAD_KEY_PATTERN`, so no send-route pattern change), release the
-       slot. The ORIGINAL `uploads/<uuid>` is retained (original + converted both
-       stored).
-   - Return `{ deliverableKey, contentType, size, transcodedFrom?, pdfPageCount? }`.
-4. **Send** -- the composer sends `attachmentKeys: [deliverableKey, ...]` to the
-   existing `POST /api/conversations/:id/messages`. `resolveAttachmentKeys`
-   HeadObjects each key (now a JPEG or a pass-through gif) and presigns per attempt
-   as today. The send path is otherwise UNCHANGED.
+       slot.
+   - The ORIGINAL `uploads/<uuid>` is ALWAYS retained (Section 5 invariant).
+   - Return the attachment record (Section 5): `{ originalKey, mms: { key,
+     contentType, size }, transcodedFrom?, pdfPageCount? }`.
+4. **Send** -- the composer sends the attachment(s). The send/channel layer picks
+   the rendition for the channel via `renditionFor` (Section 5); today that is
+   always the `mms` rendition, so `attachmentKeys` carries the MMS rendition keys
+   to the existing `POST /api/conversations/:id/messages`. `resolveAttachmentKeys`
+   HeadObjects each key (a JPEG or a pass-through jpeg/png/gif) and presigns per
+   attempt as today. The send path is otherwise UNCHANGED.
 
 Storage keys:
 
-- Original (browser-uploaded): `uploads/<uuid>` -- retained.
-- Deliverable (transcode path): `uploads/<uuid2>` (fresh uuid, `image/jpeg`).
-- Deliverable (gif pass-through): the original key itself.
+- Original (browser-uploaded): `uploads/<uuid>` -- always retained.
+- MMS rendition (transcode path): `uploads/<uuid2>` (fresh uuid, `image/jpeg`).
+- MMS rendition (flow-through gif / small jpeg-png): the original key itself.
 
-## 5. The transcode adapter (mediaTranscode.ts)
+## 5. Channel renditions / RCS-forward architecture
+
+RCS (Rich Communication Services) is on the roadmap. RCS carries far larger and
+higher-fidelity media than MMS. The risk: if the MMS-shrunk JPEG becomes THE stored
+representation, then when RCS ships we would send that degraded version over RCS too,
+and gaining RCS's benefits would require a rewrite. Three structural commitments --
+cheap to make now, no RCS build -- prevent that:
+
+1. **The original is the asset; keep it at full fidelity, always.** Confirm always
+   retains `uploads/<uuid>` (the browser upload) untouched. Every MMS degradation
+   (jpeg-only, 1600px, 5 MB, quality ladder) applies ONLY to the derived MMS
+   rendition -- never to the original. The presign source cap (~20 MB) bounds the
+   original and is an MMS-era ceiling that can be raised for RCS with a one-constant
+   change.
+
+2. **Model an attachment as `original + per-channel renditions`, not one flattened
+   deliverable key.** The durable `media_attachments` record persisted on the
+   message carries the `originalKey` AND the `mms` rendition `{ key, contentType,
+   size }`. Today there is exactly one rendition (mms). RCS later either sends
+   `originalKey` directly or adds its own `rcs` rendition -- purely additive to the
+   data model; no field is repurposed.
+
+3. **Send through a thin "pick rendition for channel" seam.** A single function
+   `renditionFor(channel, attachment)` returns the key(s) to send for a channel.
+   Today it always returns the `mms` rendition. When RCS ships, the send/channel
+   dispatch (which already must choose RCS-vs-MMS-fallback per recipient capability)
+   calls this seam and the RCS branch returns the original (or an rcs rendition).
+   Transcoding stays behind `mediaTranscode.ts`; rendition SELECTION stays behind
+   `renditionFor`. RCS becomes a new branch in one function plus a new channel
+   sender -- not a rewrite. MMS remains the permanent fallback.
+
+Concrete additions to THIS build (only): persist `originalKey` alongside the `mms`
+rendition on the attachment record, and route the (single, MMS-only today) send
+through `renditionFor`. Nothing else about RCS is built.
+
+Future note (not owed now): when RCS is built, MMS-rendition computation MAY move to
+lazy/on-fallback (transcode only when MMS is actually the chosen channel). The
+`mediaTranscode.ts` adapter + the `renditionFor` seam already allow that move without
+disturbing callers.
+
+## 6. The transcode adapter (mediaTranscode.ts)
 
 New adapter `app/src/adapters/mediaTranscode.ts` -- the ONLY place `sharp` and
 `@hyzyla/pdfium` are imported (mirrors the MediaStore adapter rule). Single entry:
@@ -154,10 +209,10 @@ transcodeForMms(bytes: Buffer, sourceType: string): Promise<{
 Verified pipeline (spike-proven 2026-07-16; the published docs were wrong -- see
 "gotchas" below):
 
-- transcode-image (webp/jpeg/png):
+- transcode-image (webp / oversized jpeg-png):
   `sharp(bytes).rotate()` (honor EXIF orientation before stripping metadata)
   `.resize({ width: MAX_EDGE, height: MAX_EDGE, fit: 'inside', withoutEnlargement: true })`
-  then the quality ladder (Section 7) -> `image/jpeg`.
+  then the quality ladder (Section 8) -> `image/jpeg`.
 - transcode-pdf:
   `const lib = await PDFiumLibrary.init()` (module singleton, init once);
   `const doc = await lib.loadDocument(bytes)`; `pdfPageCount = doc.getPageCount()`;
@@ -182,7 +237,7 @@ sharp hardening: call `sharp.concurrency(1)` and set `limitInputPixels`
 (~24 MP = `SHARP_MAX_INPUT_PIXELS`) so an absurd-dimension image is rejected before
 a full raster decode. A too-large-dimension input throws -> confirm 400.
 
-## 6. Send-route defense-in-depth (belt-and-suspenders root-cause guard)
+## 7. Send-route defense-in-depth (belt-and-suspenders root-cause guard)
 
 Independently of transcoding, tighten the send path so 12300 can NEVER happen even
 if confirm is bypassed:
@@ -194,16 +249,20 @@ if confirm is bypassed:
   root-cause fix; transcoding is what makes legitimate webp/pdf sends succeed.
 - Relay fan-out (jobs/relayFanOut.ts) inherits the deliverable keys from the hub
   message's durable `media_attachments` and re-presigns per leg as today -- no
-  change needed; the keys are already JPEGs.
+  change needed; the keys are already deliverable (jpeg, or a pass-through
+  jpeg/png/gif).
 
-## 7. Auto-fit (quality ladder)
+## 8. Auto-fit (quality ladder)
 
 Constants (lib/outboundMediaLimits.ts or a new sibling):
 
+- `PASSTHROUGH_MAX_BYTES = 1_000_000` (a deliverable jpeg/png at or under this flows
+  through untouched; over it, auto-fit).
 - `TRANSCODE_TARGET_MAX_EDGE = 1600` px (longest edge; MMS-friendly).
 - `TRANSCODE_TARGET_MAX_BYTES = 1_500_000` (per-file soft target the ladder aims
   for).
 - `TRANSCODE_JPEG_QUALITY_LADDER = [82, 72, 62, 52, 42]`.
+- `MMS_UPLOAD_SOURCE_MAX_BYTES = 20 * 1024 * 1024` (presign cap on the original).
 
 Algorithm: resize to <= MAX_EDGE, then encode at the first ladder quality whose
 output is <= TARGET_MAX_BYTES; if none qualifies, use the lowest quality result.
@@ -216,15 +275,17 @@ and the 5 MB total comfortably holds several photos. Cross-image budgeting for t
 extreme many-photo case stays deferred (Approach B); the send-time total cap is the
 backstop with a "remove one" message.
 
-## 8. Memory / concurrency safety (2 GB t4g.small: app + worker one box)
+## 9. Memory / concurrency safety (2 GB t4g.small: app + worker one box)
 
 The 2 GB host runs app + worker as compose containers on one box; there is no
 memory isolation between them, so transcode memory must be bounded.
 
 - **Client upload concurrency is a non-issue** (browser -> S3 direct).
-- The only EC2 cost is confirm-time `S3 GET + transcode`, gated by a process-wide
-  semaphore `MMS_TRANSCODE_MAX_CONCURRENT = 2`. A confirm past the cap WAITS for a
-  slot (bounded by `MMS_TRANSCODE_WAIT_TIMEOUT_MS = 20_000` -> 503 on timeout).
+- The pass-through paths (gif, small jpeg/png) do NO download and NO decode.
+- The only EC2 cost is confirm-time `S3 GET + transcode` on the transcode paths
+  (webp / oversized jpeg-png / pdf), gated by a process-wide semaphore
+  `MMS_TRANSCODE_MAX_CONCURRENT = 2`. A confirm past the cap WAITS for a slot
+  (bounded by `MMS_TRANSCODE_WAIT_TIMEOUT_MS = 20_000` -> 503 on timeout).
 - **Queued confirms hold only the S3 key, not the bytes** -- EC2 fetches the object
   only after winning a slot. So N confirms firing at once cause zero source-byte
   pile-up (the failure mode the busboy approach had).
@@ -237,17 +298,18 @@ memory isolation between them, so transcode memory must be bounded.
 - This is the F1 lesson from unit-photos: a per-minute rate limiter is NOT a
   concurrency bound. The semaphore is the concurrency bound.
 
-## 9. MMS limit alignment (unchanged, inherited)
+## 10. MMS limit alignment (unchanged, inherited)
 
 - `OUTBOUND_MMS_MAX_MEDIA = 10` == Twilio API max media/message. Enforced
   client-side (attachmentReject) and server-side (resolveAttachmentKeys).
 - `OUTBOUND_MMS_MAX_TOTAL_BYTES = 5 MB` == Twilio total ceiling, summed at send over
-  the DELIVERABLE (transcoded) object sizes -- so the budget is measured against
+  the DELIVERABLE (rendition) object sizes -- so the budget is measured against
   exactly what goes to Twilio. Over -> `attachments_too_large`.
 - Transcoding adds no new send-count/size behavior; it only makes each attachment
-  carrier-deliverable, and (via auto-fit) smaller, which helps the total hold.
+  carrier-deliverable, and (via auto-fit) smaller, which helps the total hold. These
+  are MMS-channel limits; RCS will not inherit them (Section 5).
 
-## 10. Dashboard behavior + error handling
+## 11. Dashboard behavior + error handling
 
 Composer (routes/contact/Timeline.tsx and the relay/tour composers that share the
 attachment machinery): repoint the per-attachment upload from the busboy
@@ -255,7 +317,8 @@ attachment machinery): repoint the per-attachment upload from the busboy
 per-chip `uploading` / `ready` / `error` state machine.
 
 - While confirm runs, the chip shows a spinner (transcode takes a beat), then flips
-  to ready using the returned `deliverableKey`.
+  to ready using the returned rendition key. (Flow-through confirms return fast --
+  no transcode.)
 - Multi-page PDF: when confirm returns `pdfPageCount > 1`, the chip shows a soft
   inline note "PDF - only page 1 will be sent as an image." Send stays enabled.
   Single-page PDF and images show no note. (Per decision: soft/informational, no
@@ -271,7 +334,7 @@ Error handling by layer:
 | Semaphore full | confirm | waits for a slot; on timeout 503; chip offers retry |
 | Transcoded result still over per-file cap after the ladder | confirm | 400 `file_too_large_after_fit` (pathological) |
 | Total > 5 MB across attachments | send route (existing) | `attachments_too_large` -> "remove one" message |
-| Non-deliverable key reaches send (confirm bypassed) | send route guard (Section 6) | `unsupported_attachment_type` |
+| Non-deliverable key reaches send (confirm bypassed) | send route guard (Section 7) | `unsupported_attachment_type` |
 
 Diagnostics: the `transcode_failed` response includes the library error string
 (sharp: "Input buffer contains unsupported image format"; pdfium: the load error).
@@ -283,7 +346,7 @@ the log line correlate on the same key.
 PII/logging discipline (existing rule): log s3Key + byte counts + transcodedFrom
 only, never filenames or bytes; presigned URLs remain bearer tokens (never logged).
 
-## 11. Dependencies + deployment
+## 12. Dependencies + deployment
 
 New runtime deps in **app/package.json** (NOT root -- the Dockerfile runtime stage
 runs `npm ci --workspace app --omit=dev`, which omits root):
@@ -309,7 +372,7 @@ or equivalent), and PROVE it with a real arm64 `npm ci --workspace app --omit=de
 (buildx), same discipline as the @aws-sdk/s3-presigned-post dep. `npm install` is
 owed on merge.
 
-## 12. Infra
+## 13. Infra
 
 - The `s3_media` CORS rule (origin-scoped: dashboard origin + the media bucket) is
   ALREADY applied on dev and covers this direct-upload path as-is -- MMS uses the
@@ -321,30 +384,37 @@ owed on merge.
   remaining apply is the prod CORS at cutover, already tracked for unit-photos; this
   feature rides it. If the build surfaces a genuine infra need, flag it explicitly.
 
-## 13. Lambda future seam (deferred, recorded)
+## 14. Lambda future seam (deferred, recorded)
 
 The confirm-time transcode is a clean lift-out point. Later, an S3 `ObjectCreated`
-event on the original key can trigger a Lambda that writes the deliverable; confirm
-then just polls for the derivative. All transcode logic lives behind
-`mediaTranscode.ts`, so it can be moved into a Lambda without touching callers. Not
-built now; recorded as the designated move if transcode volume ever pressures the
-box.
+event on the original key can trigger a Lambda that writes the deliverable rendition;
+confirm then just polls for it. All transcode logic lives behind `mediaTranscode.ts`,
+so it can be moved into a Lambda without touching callers. Not built now; recorded as
+the designated move if transcode volume ever pressures the box. (Independent of the
+RCS seam in Section 5, though the two compose cleanly.)
 
-## 14. Rollout / migration
+## 15. Rollout / migration
 
 - Replace the composer's use of the busboy `POST /api/media/uploads` with
   presign + confirm. Remove the busboy endpoint (routes/mediaUploads.ts) and its
   tests, OR keep it dormant only if an internal/e2e seam still needs it -- prefer
   removal to avoid a second, un-transcoded upload path that could reintroduce 12300.
+- Extend the durable `media_attachments` shape to carry `originalKey` alongside the
+  `mms` rendition (Section 5). Existing persisted messages predate MMS attachments
+  or carry the old `{ s3Key, contentType }` shape; the reader must tolerate the old
+  shape (treat a bare `s3Key` as both original and mms rendition) so historical
+  timelines still render.
 - The legacy raw `mediaUrls` send seam (internal/e2e only) is separate and
   unaffected.
 - Update the dashboard api client (`uploadMedia`) to the presign/confirm calls and
   the composer chip flow.
 
-## 15. Testing
+## 16. Testing
 
-Unit -- mediaTypes registry (guardrail): `plan()` returns the right branch per type;
-the loud test that every uploadable type maps to a non-reject plan.
+Unit -- mediaTypes registry (guardrail): `plan()` returns the right branch per type
+AND size (gif/small-jpeg/small-png -> deliver; big jpeg/png + webp -> transcode-image;
+pdf -> transcode-pdf); the loud test that every uploadable type maps to a non-reject
+plan.
 
 Unit -- mediaTranscode (real bytes, ported from the spike, no mocks):
 
@@ -357,29 +427,34 @@ Unit -- mediaTranscode (real bytes, ported from the spike, no mocks):
 - corrupt pdf / non-image bytes -> throws (so confirm can 400 with detail).
 
 Integration -- presign/confirm routes: presign rejects bad type/oversize; confirm
-transcodes + stores original AND derivative + returns metadata (incl. pdfPageCount);
-own-prefix + absent-key rejection; the semaphore bound (N+1 concurrent confirms ->
-the extra waits, none error/OOM); confirm idempotent on replay. Send route: the
-deliverable-type guard rejects a non-jpeg/png/gif key.
+FLOW-THROUGH path (small jpeg/png/gif) returns the original key with no rewrite and no
+extra S3 object; confirm TRANSCODE path stores original AND derivative + returns
+metadata (incl. pdfPageCount) + the `originalKey`; own-prefix + absent-key rejection;
+the semaphore bound (N+1 concurrent confirms -> the extra waits, none error/OOM);
+confirm idempotent on replay. Send route: `renditionFor` returns the mms rendition;
+the deliverable-type guard rejects a non-jpeg/png/gif key.
 
 e2e (Playwright, hermetic MinIO): attach a webp in the composer -> send -> assert the
 sent/persisted media is image/jpeg and NO multipart bytes hit the app (extend the
-existing no-multipart-to-app assertion); attach a multi-page pdf -> assert the
-page-1 warning renders and the send carries one deliverable jpeg. This is the
-real path that would have thrown 12300, proven green.
+existing no-multipart-to-app assertion); attach a small png -> assert it flows through
+unchanged (same key, image/png); attach a multi-page pdf -> assert the page-1 warning
+renders and the send carries one deliverable jpeg. This is the real path that would
+have thrown 12300, proven green.
 
-Live self-QA (reviewer): drive the real dashboard -- upload a genuine .webp and a
-real multi-page .pdf; confirm the network shows browser->S3 direct + a bounded
-confirm; the sent attachment is a jpeg; in --mock the dev outbox shows a deliverable
-media URL.
+Live self-QA (reviewer): drive the real dashboard -- upload a genuine .webp, a small
+.png, and a real multi-page .pdf; confirm the network shows browser->S3 direct + a
+bounded confirm (and NO confirm-download for the small png); the sent attachment is a
+jpeg (webp/pdf) or unchanged png; in --mock the dev outbox shows a deliverable media
+URL.
 
-## 16. Accepted trade-offs
+## 17. Accepted trade-offs
 
-- Re-encoding already-deliverable jpeg/png incurs minor generation loss; chosen so
-  auto-fit applies uniformly and best serves the "help fit the total" goal. Bounded
-  CPU via the semaphore.
+- Small deliverable jpeg/png (<= PASSTHROUGH_MAX_BYTES) and gif flow through
+  untouched -- no generation loss. Only webp, oversized jpeg/png, and pdf are
+  re-encoded. Bounded CPU via the semaphore.
 - Animated gif is pass-through (not fitted); a pathological oversize gif is caught
   by the send-time cap.
 - Multi-page PDFs lose pages 2+ (only page 1 sent), with a soft warning.
 - HEIC unsupported (Section 2).
 - Cross-image dynamic total-budget fit deferred (Approach B).
+- RCS is not built; only its seams (Section 5) are laid.

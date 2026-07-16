@@ -91,9 +91,14 @@ Immediately after dispatch, start the transcript mirror (background Bash):
 
 ```
 node "<repo>/.claude/skills/feature-mission/transcript-tail.mjs" \
-  "<task output_file from the Agent dispatch result>" \
+  "C:\Users\Cameron\.claude\projects\<project-slug>\<sessionId>\subagents\agent-<agentId>.jsonl" \
   "<worktree>/.superpowers/sdd/live.log"
 ```
+
+Source the LIVE transcript at `<session>/subagents/agent-<agentId>.jsonl`
+(agentId from the dispatch result; sessionId is in the task output_file
+path). Do NOT mirror the tasks/<id>.output file - it is lazily linked and
+can stay 0 bytes while the agent runs (verified in the dry run).
 
 Tell Cameron to open `<worktree>/.superpowers/sdd/live.log` in the editor -
 it streams the orchestrator's narration, tool calls, and truncated results

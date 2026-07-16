@@ -70,20 +70,38 @@ while true; do
   tail -1 "$LEDGER" 2>/dev/null | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
   newest=$(find "$WT" -path '*/node_modules' -prune -o -type f -newermt '-25 minutes' -print -quit 2>/dev/null)
   [ -z "$newest" ] && [ $(( $(date +%s) - t0 )) -ge 1500 ] && exit 1
-  [ $(( $(date +%s) - t0 )) -ge 600 ] && exit 2
-  sleep 60
+  [ $(( $(date +%s) - t0 )) -ge 300 ] && exit 2
+  sleep 30
 done
 ```
 
 Exit 0 = terminal status: read the ledger tail and act (DONE -> review;
 QUESTION -> relay to Cameron via AskUserQuestion, SendMessage the answer
 back, re-arm; BLOCKED -> investigate). Exit 1 = STALL: escalate below, and
-re-arm the watchdog after resolving. Exit 2 = HEALTHY CHECKPOINT (10 min):
+re-arm the watchdog after resolving. Exit 2 = HEALTHY CHECKPOINT (5 min):
 read the ledger tail, give Cameron the one-line status, re-arm. HARD
-GUARANTEE: never more than 10 minutes between status lines to Cameron. The
+GUARANTEE: never more than 5 minutes between status lines to Cameron. The
 checkpoint clock measures time since his LAST status line, so re-arm a
 fresh watchdog at EVERY wake that produces one (TaskStop the stale
-watchdog first - exactly one watchdog per mission at any moment). Also re-arm if you are woken by the
+watchdog first - exactly one watchdog per mission at any moment).
+
+## Live mirror (Cameron's window into the orchestrator)
+
+Immediately after dispatch, start the transcript mirror (background Bash):
+
+```
+node "<repo>/.claude/skills/feature-mission/transcript-tail.mjs" \
+  "<task output_file from the Agent dispatch result>" \
+  "<worktree>/.superpowers/sdd/live.log"
+```
+
+Tell Cameron to open `<worktree>/.superpowers/sdd/live.log` in the editor -
+it streams the orchestrator's narration, tool calls, and truncated results
+in real time, replacing the visibility of the old two-window setup. On a
+FRESH re-dispatch (new task id -> new output file), TaskStop the old mirror
+and start a new one pointed at the new file, appending to the SAME live.log.
+The mirror shows the orchestrator (level 2); its children appear as TOOL>
+Agent dispatches and RESULT> handbacks within it. Also re-arm if you are woken by the
 orchestrator finishing while a watchdog is still running (TaskStop the
 stale watchdog).
 

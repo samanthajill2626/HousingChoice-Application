@@ -32,4 +32,16 @@ describe('createSemaphore', () => {
     expect(typeof second).toBe('function');
     second();
   });
+
+  it('release is idempotent: a double-call cannot admit extra concurrency', async () => {
+    const sem = createSemaphore(1);
+    const first = await sem.acquire(1000);
+    first();
+    first(); // second call must be a no-op, NOT free a phantom slot
+    // With a buggy shared release, inUse would be -1 and BOTH acquires below
+    // would resolve immediately (concurrency 2). Idempotent release keeps max 1.
+    const a = await sem.acquire(1000);
+    await expect(sem.acquire(30)).rejects.toThrow('semaphore_timeout');
+    a();
+  });
 });

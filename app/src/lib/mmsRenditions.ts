@@ -6,6 +6,9 @@ import type { MediaAttachment } from '../repos/messagesRepo.js';
 
 export type SendChannel = 'mms';
 
+// TODO(mms-originalkey-unvalidated-pre-rcs): before an 'rcs' channel returns
+// attachment.originalKey here, HeadObject-validate it (existence + own-prefix) -
+// today only s3Key is validated/presigned, so originalKey is persisted but inert.
 export function renditionFor(channel: SendChannel, attachment: MediaAttachment): { s3Key: string } {
   switch (channel) {
     case 'mms':

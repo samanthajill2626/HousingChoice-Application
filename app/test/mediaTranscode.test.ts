@@ -1,8 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import sharp from 'sharp';
 import { PDFDocument, rgb } from 'pdf-lib';
-import { transcodeForMms } from '../src/adapters/mediaTranscode.js';
+import { transcodeForMms, pdfRenderScale } from '../src/adapters/mediaTranscode.js';
 import { TRANSCODE_TARGET_MAX_EDGE, TRANSCODE_TARGET_MAX_BYTES } from '../src/lib/outboundMediaLimits.js';
+
+describe('pdfRenderScale (memory bound: large pages must scale BELOW 1)', () => {
+  it('caps upscale at 3x for a tiny page', () => {
+    expect(pdfRenderScale(100)).toBe(3);
+  });
+  it('renders a Letter page near the target edge', () => {
+    expect(pdfRenderScale(792)).toBeCloseTo(TRANSCODE_TARGET_MAX_EDGE / 792, 5);
+  });
+  it('DOWNSCALES a large/hostile page below 1 so the raster stays ~target px (no OOM)', () => {
+    // A 14400pt max-mediabox page at scale 1 would be a ~830MB raster. The scale
+    // must drop below 1 and keep the rendered long edge near the target.
+    const scale = pdfRenderScale(14400);
+    expect(scale).toBeLessThan(1);
+    expect(14400 * scale).toBeCloseTo(TRANSCODE_TARGET_MAX_EDGE, 0);
+  });
+  it('falls back to Letter for degenerate zero dims', () => {
+    expect(pdfRenderScale(0)).toBeCloseTo(TRANSCODE_TARGET_MAX_EDGE / 792, 5);
+  });
+});
 
 async function makePdf(nPages: number, fill?: { r: number; g: number; b: number }): Promise<Buffer> {
   const doc = await PDFDocument.create();

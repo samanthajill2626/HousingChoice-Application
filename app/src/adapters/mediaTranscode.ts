@@ -51,22 +51,36 @@ async function transcodeImage(bytes: Buffer, transcodedFrom: string): Promise<Tr
   return { bytes: await encodeJpeg(pipeline), contentType: 'image/jpeg', transcodedFrom };
 }
 
+/**
+ * Points-to-pixels render scale for a PDF page whose longest edge is `longestPoints`.
+ * Targets a raster ~TRANSCODE_TARGET_MAX_EDGE px on the long edge, capped at 3x so a
+ * tiny page never balloons. CRITICAL: there is NO lower floor - a large page (poster /
+ * hostile 14400pt mediabox) MUST scale BELOW 1 so pdfium allocates a ~1600px raster,
+ * not the page's full point dimensions (a 14400pt page at scale 1 is a ~830MB raster
+ * that OOMs the 2GB box before sharp's limitInputPixels can catch it). Degenerate/zero
+ * dims fall back to Letter.
+ */
+export function pdfRenderScale(longestPoints: number): number {
+  const longest = longestPoints > 0 ? longestPoints : 792;
+  return Math.min(3, TRANSCODE_TARGET_MAX_EDGE / longest);
+}
+
 async function transcodePdf(bytes: Buffer): Promise<TranscodeResult> {
   const lib = await getPdfium();
   const doc = await lib.loadDocument(bytes); // throws on a corrupt pdf
   try {
     const pdfPageCount = doc.getPageCount();
     const page = doc.getPage(0);
-    // Render page 1 near the target edge; clamp the scale to [1, 3].
-    // getOriginalSize() is the PUBLIC size accessor in 2.1.13 (points; getSize
-    // is private and takes render options). Fall back to Letter if degenerate.
+    // getOriginalSize() is the PUBLIC size accessor in 2.1.13 (points; getSize is
+    // private and takes render options). Fall back to Letter if degenerate.
     const { originalWidth, originalHeight } = page.getOriginalSize();
-    const longest = Math.max(originalWidth || 612, originalHeight || 792);
-    const scale = Math.min(3, Math.max(1, TRANSCODE_TARGET_MAX_EDGE / longest));
+    const scale = pdfRenderScale(Math.max(originalWidth || 612, originalHeight || 792));
     const r = await page.render({ scale, render: 'bitmap' });
     const pipeline = sharp(Buffer.from(r.data), { raw: { width: r.width, height: r.height, channels: 4 }, limitInputPixels: SHARP_MAX_INPUT_PIXELS });
     return { bytes: await encodeJpeg(pipeline), contentType: 'image/jpeg', pdfPageCount, transcodedFrom: 'application/pdf' };
   } finally {
+    // doc.destroy() frees the whole document incl. its pages (PDFiumPage has no
+    // own destroy in 2.1.13) - this is the complete cleanup.
     doc.destroy();
   }
 }

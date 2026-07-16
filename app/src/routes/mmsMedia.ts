@@ -56,6 +56,18 @@ export function createMmsMediaRouter(deps: MmsMediaRouterDeps = {}): Router {
     logger: log,
   });
 
+  // Confirm is the EXPENSIVE endpoint (downloads up to the source cap + burns CPU
+  // in sharp/pdfium behind the 2-slot semaphore). The semaphore bounds memory but
+  // is the only backpressure - without a per-user fence one caller can keep both
+  // slots + both cores pinned and 503 everyone else. A low per-user ceiling caps
+  // that cross-user DoS. ONE instance per router.
+  const confirmLimiter = createUserRateLimit({
+    routeKey: 'mms_media_confirm',
+    max: 20,
+    windowMs: 60_000,
+    logger: log,
+  });
+
   // POST /api/media/presign { contentType } -> { key, post }
   router.post('/presign', presignLimiter, async (req, res) => {
     if (!mediaStore) {
@@ -78,7 +90,7 @@ export function createMmsMediaRouter(deps: MmsMediaRouterDeps = {}): Router {
   });
 
   // POST /api/media/confirm { key } -> { attachment }
-  router.post('/confirm', async (req, res) => {
+  router.post('/confirm', confirmLimiter, async (req, res) => {
     if (!mediaStore) {
       res.status(503).json({ error: 'media_storage_unavailable' });
       return;

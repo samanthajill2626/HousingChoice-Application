@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { submitHousingFair, type HousingFairInput } from './publicApi.js';
 import { IntakeForm } from './IntakeForm.js';
-import styles from './FlyerFunnel.module.css';
+import styles from './FlyerPage.module.css';
 
 export function HousingFairIntake(): React.JSX.Element {
   const [done, setDone] = useState(false);

@@ -55,6 +55,15 @@ If a nudge arrives ("your reply had zero tool calls" / "the child you were
 waiting on finished") - re-orient from the ledger and continue; do not restart
 work that is already committed.
 
+MANUAL MODE: if your dispatch prompt says you are running as a TOP-LEVEL
+session (the human pasted the mission into his own window), everything above
+still applies EXCEPT the question flow: you have the human directly, so ask
+scope forks via AskUserQuestion instead of the STATUS: QUESTION turn-end
+dance (still record the fork + answer in the ledger). Keep the ledger,
+heartbeat, and WAITING lines regardless - they are crash recovery, not
+subagent ceremony. The handback still goes to .superpowers/sdd/handback.md
+(the planner session reads it from there) AND is shown to the human.
+
 ## Read first, every mission
 
 `.claude/CLAUDE.md`, the mission's spec and plan (APPROVED specs are

@@ -54,11 +54,24 @@ Gates: typecheck + npm test + timeout 1500 e2e, bare, from the worktree.
 Post-merge obligations already known: <deps/infra or "none expected">
 ```
 
-## Dispatch + watchdog
+## Dispatch modes: AUTO (default) and MANUAL (fallback)
 
-Dispatch: `Agent` tool, `subagent_type: "build-orchestrator"` (model/effort
+AUTO: `Agent` tool, `subagent_type: "build-orchestrator"` (model/effort
 come from its definition - do not override), `run_in_background: true`,
 prompt = the mission block verbatim.
+
+MANUAL: when Cameron asks for it, or when AUTO keeps dying (repeated API
+errors across several checkpoint retries), hand Cameron the orchestration
+prompt instead: a fenced code block containing (1) "Read your operating
+manual at .claude/agents/build-orchestrator.md and follow it; you are
+running as a TOP-LEVEL session (manual mode) - see the manual's manual-mode
+section", (2) the mission block verbatim, (3) any resume context (ledger
+state, decisions already made). He pastes it into his own fresh window and
+supervises it himself - no watchdog, no mirror, no relay needed. BEFORE
+handing over: TaskStop the watchdog and stop resuming the subagent - ONE
+orchestrator per worktree, never both modes at once. Re-entry: when Cameron
+says the manual run finished, read `<worktree>/.superpowers/sdd/handback.md`
+and run the independent review exactly as in AUTO.
 
 Arm the watchdog immediately after (Bash, `run_in_background: true`). It
 exits when the worktree goes quiet too long OR the orchestrator writes a

@@ -28,7 +28,7 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
   it('computes every bucket from the map (disjoint), audience = map size', () => {
     const recipients = recips([
       ['c-q', { status: 'queued' }],
-      ['c-s', { status: 'sent' }],
+      ['c-s', { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' }],
       ['c-d', { status: 'delivered' }],
       ['c-f', { status: 'failed', errorCode: '30007' }],
       ['c-opt', { status: 'skipped' }], // opted-out (no errorCode)
@@ -43,12 +43,32 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
     expect(out).toEqual({
       audience: 6,
       queued: 1,
+      sending: 0,
       sent: 1,
       delivered: 1,
       failed: 1,
       skipped_opted_out: 1,
       skipped_no_consent: 1,
     });
+  });
+
+  it("splits the in-flight states: on-our-box 'queued' vs dispatched-unconfirmed 'sending' vs carrier-confirmed 'sent'", () => {
+    // The fan-out stamps 'sent' at dispatch as its idempotency claim; the
+    // carrier's own sent callback stamps carrierSentAt. The two in-flight
+    // buckets stay SEPARATE (founder ask 2026-07-16): a stuck send must be
+    // diagnosable as stuck-on-our-box (queued) vs stuck-at-the-carrier
+    // (sending) - different failures, different fixes.
+    const recipients = recips([
+      ['c-dispatched', { status: 'sent' }],
+      ['c-confirmed', { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' }],
+      ['c-deferred', { status: 'queued', errorCode: '429' }],
+      ['c-unsent', { status: 'queued' }],
+    ]);
+    const out = deriveBroadcastStats({ recipients, stats: zeroStats() });
+    expect(out.queued).toBe(2); // deferred-retry + awaiting-fan-out: on our box
+    expect(out.sending).toBe(1); // dispatched, carrier not yet confirmed
+    expect(out.sent).toBe(1); // only the carrier-confirmed one
+    expect(out.audience).toBe(4);
   });
 
   it('skipped split: only errorCode "no_consent" is skipped_no_consent; every other skip is opted_out', () => {
@@ -83,6 +103,7 @@ describe('deriveBroadcastStats (S4 disjoint buckets)', () => {
     const out = deriveBroadcastStats({ recipients, stats: zeroStats() });
     const sum =
       out.queued +
+      (out.sending ?? 0) +
       out.sent +
       out.delivered +
       out.failed +

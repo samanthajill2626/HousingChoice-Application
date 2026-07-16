@@ -1581,7 +1581,11 @@ export interface BroadcastStats {
   skipped_opted_out: number;
   /** Recipients fenced out for missing SMS consent (staff can record consent). */
   skipped_no_consent: number;
+  /** Still on OUR box: awaiting the paced fan-out or a deferred retry. */
   queued: number;
+  /** Dispatched to Twilio, carrier not yet confirmed (no carrierSentAt).
+   *  Optional: legacy persisted stats predate the field - default to 0. */
+  sending?: number;
 }
 
 /** GET /api/broadcasts → one list-row summary (no recipients map). */
@@ -1616,9 +1620,14 @@ export interface BroadcastsPage {
  *  contact is deleted/unresolvable (the row falls back to "Tenant"). MIRRORS the
  *  app results-route projection (app/src/routes/broadcasts.ts enrichRecipients). */
 export interface BroadcastRecipient {
+  /** 'sent' = DISPATCHED (the fan-out's idempotency claim); carrier-confirmed
+   *  only when carrierSentAt is also present - render a bare 'sent' as
+   *  in-flight ("Sending...") so the row never outruns the 1:1 bubble. */
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
   conversationId?: string;
   tsMsgId?: string;
+  /** ISO - when the carrier's own 'sent' status callback landed (webhook rollup). */
+  carrierSentAt?: string;
   /** Twilio error class on a failure (mapped to a reason for display). */
   errorCode?: string;
   /** Resolved contact first name (absent for phone-only / deleted contacts). */
@@ -1661,6 +1670,8 @@ export interface BroadcastRecipientView {
   /** Preferred E.164 phone (server-provided, else the `phone#<E164>` key). */
   phone?: string;
   status: BroadcastRecipient['status'];
+  /** Carrier-confirmed instant; a status-'sent' row without it renders "Sending...". */
+  carrierSentAt?: string;
   errorCode?: string;
   conversationId?: string;
 }

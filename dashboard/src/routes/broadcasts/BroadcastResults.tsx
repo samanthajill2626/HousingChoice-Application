@@ -55,7 +55,11 @@ function RecipientRow({ row }: { row: BroadcastRecipientView }): React.JSX.Eleme
           <span className={styles.recipientPhone}>{secondary}</span>
         ) : null}
       </span>
-      <DeliveryBadge status={row.status} {...(row.errorCode !== undefined && { errorCode: row.errorCode })} />
+      <DeliveryBadge
+        status={row.status}
+        {...(row.carrierSentAt !== undefined && { carrierSentAt: row.carrierSentAt })}
+        {...(row.errorCode !== undefined && { errorCode: row.errorCode })}
+      />
       {failed && row.contactId !== undefined ? (
         // NOT aria-hidden: the hint contributes to the link's accessible name so
         // a role+name lookup for "open conversation to retry" resolves the link.

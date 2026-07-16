@@ -66,18 +66,32 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Recipients')).toContain('11');
     expect(chipValue(list, 'Delivered')).toContain('11');
     expect(chipValue(list, 'Sent')).toContain('0');
+    expect(chipValue(list, 'Sending')).toContain('0');
     expect(chipValue(list, 'Queued')).toContain('0');
     expect(chipValue(list, 'Failed')).toContain('0');
     expect(chipValue(list, 'Skipped')).toContain('0');
   });
 
-  it('orders chips Recipients, Delivered, Sent, Queued, Failed, Skipped', () => {
+  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Skipped', () => {
     render(<StatChips stats={stats()} />);
     const list = screen.getByLabelText('Delivery stats');
     const labels = within(list)
       .getAllByRole('term')
       .map((dt) => dt.textContent);
-    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Queued', 'Failed', 'Skipped']);
+    // Two SEPARATE in-flight chips (founder ask, proving out Twilio infra):
+    // "Queued" = still on our box (paced fan-out / deferred retry);
+    // "Sending" = with the carrier (dispatched, awaiting its sent callback);
+    // "Sent" = carrier-confirmed only.
+    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Sending', 'Queued', 'Failed', 'Skipped']);
+  });
+
+  it('renders the Sending chip from stats.sending, defaulting 0 for legacy rows without it', () => {
+    render(<StatChips stats={{ ...stats({ queued: 3 }) }} />);
+    const list = screen.getByLabelText('Delivery stats');
+    // stats() fixture has no `sending` -> the chip defaults to 0 while Queued
+    // still shows its own bucket (legacy persisted rows predate the field).
+    expect(chipValue(list, 'Sending')).toContain('0');
+    expect(chipValue(list, 'Queued')).toContain('3');
   });
 });
 
@@ -85,7 +99,12 @@ describe('DeliveryBadge', () => {
   it('renders the queued/sent/delivered status as text', () => {
     const { rerender } = render(<DeliveryBadge status="queued" />);
     expect(screen.getByText('Sending…')).toBeInTheDocument();
+    // Dispatched only ('sent' with NO carrierSentAt) is still in flight - the
+    // 1:1 bubble for the same message reads "Sending…", so this badge must too.
     rerender(<DeliveryBadge status="sent" />);
+    expect(screen.getByText('Sending…')).toBeInTheDocument();
+    // The carrier's own sent callback (carrierSentAt) is what flips it to Sent.
+    rerender(<DeliveryBadge status="sent" carrierSentAt="2026-07-16T00:00:01.000Z" />);
     expect(screen.getByText('Sent')).toBeInTheDocument();
     rerender(<DeliveryBadge status="delivered" />);
     expect(screen.getByText('Delivered')).toBeInTheDocument();

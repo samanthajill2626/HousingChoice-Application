@@ -101,4 +101,28 @@ describe('presentRecipientStatus', () => {
     expect(presentRecipientStatus('failed').isFailure).toBe(true);
     expect(presentRecipientStatus('skipped').label).toBe('Skipped');
   });
+
+  it("a status-'sent' slot is 'Sending…' until carrierSentAt lands, then 'Sent'", () => {
+    // Dispatched-but-carrier-unconfirmed must read exactly like the same
+    // message's 1:1 bubble (still at queued/"Sending…") - the two surfaces may
+    // never disagree about one message at one instant.
+    const dispatched = presentRecipientStatus('sent');
+    expect(dispatched.label).toBe('Sending…');
+    expect(dispatched.tone).toBe('neutral');
+    expect(dispatched.isFailure).toBe(false);
+
+    const confirmed = presentRecipientStatus('sent', '2026-07-16T00:00:01.000Z');
+    expect(confirmed.label).toBe('Sent');
+    expect(confirmed.tone).toBe('info');
+  });
+
+  it('toRecipientViews carries carrierSentAt through to the row', () => {
+    const views = toRecipientViews({
+      'c-1': { status: 'sent', carrierSentAt: '2026-07-16T00:00:01.000Z' },
+      'c-2': { status: 'sent' },
+    });
+    const byKey = new Map(views.map((v) => [v.contactKey, v]));
+    expect(byKey.get('c-1')?.carrierSentAt).toBe('2026-07-16T00:00:01.000Z');
+    expect(byKey.get('c-2')?.carrierSentAt).toBeUndefined();
+  });
 });

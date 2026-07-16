@@ -170,6 +170,84 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(reads).toBeGreaterThanOrEqual(2); // the retry actually happened
   });
 
+  it("broadcast rollup: the carrier's non-terminal 'sent' stamps carrierSentAt on the slot (status/stats untouched) + emits broadcast.updated", async () => {
+    // The fan-out stamps the slot 'sent' at DISPATCH (its idempotency claim), so
+    // between dispatch and the carrier's sent callback the recipient row must
+    // read "Sending..." like the 1:1 bubble does. The carrierSentAt marker is
+    // what flips it to "Sent" - without it the two surfaces disagree.
+    const { app, world } = makeWebhookHarness();
+    const seeded = await seedOutbound(world, 'SMbcastsent', { broadcast_id: 'bcast-carrier' });
+
+    const now = new Date().toISOString();
+    world.broadcasts.set('bcast-carrier', {
+      broadcastId: 'bcast-carrier',
+      created_by: 'usr_test',
+      created_at: now,
+      status: 'sent',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 1, sent: 1, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: {
+        'c-1': { status: 'sent', conversationId: seeded.conversationId, tsMsgId: seeded.tsMsgId },
+      },
+      updated_at: now,
+    } satisfies BroadcastItem);
+
+    const res = await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: 'SMbcastsent', MessageStatus: 'sent' }),
+    );
+    expect(res.status).toBe(200);
+
+    const bcast = world.broadcasts.get('bcast-carrier')!;
+    const slot = bcast.recipients['c-1']!;
+    // The marker landed; the slot's claim status and the stored counters did not move.
+    expect(slot.carrierSentAt).toBeDefined();
+    expect(slot.status).toBe('sent');
+    expect(bcast.stats.sent).toBe(1);
+    expect(bcast.stats.delivered).toBe(0);
+    // Live surfaces get poked so the row flips Sending... -> Sent without a reload.
+    const emit = world.emitted.find((e) => e.event === 'broadcast.updated');
+    expect(emit).toBeDefined();
+    const stats = (emit!.payload as { stats: { sent: number; sending?: number; queued: number } })
+      .stats;
+    // Derived stats now count this slot as carrier-confirmed sent, not in-flight.
+    expect(stats.sent).toBe(1);
+    expect(stats.sending).toBe(0);
+    expect(stats.queued).toBe(0);
+  });
+
+  it("broadcast rollup: a REDELIVERED 'sent' callback is a no-op (message transition gates the side effects)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const seeded = await seedOutbound(world, 'SMbcastdup', { broadcast_id: 'bcast-dup' });
+    const now = new Date().toISOString();
+    world.broadcasts.set('bcast-dup', {
+      broadcastId: 'bcast-dup',
+      created_by: 'usr_test',
+      created_at: now,
+      status: 'sent',
+      audience_filter: { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
+      body_template: 'hi',
+      stats: { audience: 1, sent: 1, delivered: 0, failed: 0, skipped_opted_out: 0, skipped_no_consent: 0, queued: 0 },
+      recipients: {
+        'c-1': { status: 'sent', conversationId: seeded.conversationId, tsMsgId: seeded.tsMsgId },
+      },
+      updated_at: now,
+    } satisfies BroadcastItem);
+
+    const params = statusParams({ MessageSid: 'SMbcastdup', MessageStatus: 'sent' });
+    await signedTwilioPost(app, STATUS_PATH, params);
+    const stamped = world.broadcasts.get('bcast-dup')!.recipients['c-1']!.carrierSentAt;
+    expect(stamped).toBeDefined();
+    const emitsAfterFirst = world.emitted.filter((e) => e.event === 'broadcast.updated').length;
+
+    await signedTwilioPost(app, STATUS_PATH, params); // Twilio redelivery
+    const after = world.broadcasts.get('bcast-dup')!.recipients['c-1']!;
+    expect(after.carrierSentAt).toBe(stamped); // never re-stamped
+    expect(world.emitted.filter((e) => e.event === 'broadcast.updated').length).toBe(emitsAfterFirst);
+  });
+
   it('PERSISTENT unknown SID → one retried lookup, then ERROR (level 50, alarmed) + 200 ack, never a 500', async () => {
     const { app, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 10 });
     const res = await signedTwilioPost(

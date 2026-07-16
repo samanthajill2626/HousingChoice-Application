@@ -99,8 +99,18 @@ export interface BroadcastStats {
    * (which re-includes them on a re-send).
    */
   skipped_no_consent: number;
-  /** Recipients still queued (pre-send seed / transient deferral). */
+  /** Recipients still queued ON OUR BOX (pre-send seed / awaiting the paced
+   *  fan-out / transient deferral awaiting a retry continuation). */
   queued: number;
+  /**
+   * Recipients dispatched to Twilio but not yet carrier-confirmed (slot status
+   * 'sent' with no carrierSentAt). Kept SEPARATE from `queued` so a stuck send
+   * is diagnosable at a glance: stuck-on-our-box (queued) vs stuck-at-the-
+   * carrier (sending) are different failures with different fixes. DERIVED
+   * only - optional because legacy persisted stats rows predate the field
+   * (readers default it to 0).
+   */
+  sending?: number;
 }
 
 /** Per-recipient delivery slot on the broadcast (keyed by contactKey). */
@@ -109,8 +119,21 @@ export interface BroadcastRecipient {
   conversationId?: string;
   /** The persisted message's SK (delivery-callback rollup target). */
   tsMsgId?: string;
+  /**
+   * 'sent' is stamped at DISPATCH (the fan-out's idempotency claim - a
+   * continuation pass never re-sends it), which is EARLIER than the carrier's
+   * own "sent". See carrierSentAt for the carrier-confirmed instant.
+   */
   status: 'queued' | 'sent' | 'delivered' | 'failed' | 'skipped';
   errorCode?: string;
+  /**
+   * ISO - set when the CARRIER's non-terminal 'sent' status callback lands
+   * (webhook rollup). Until then a status-'sent' slot is only dispatched, and
+   * every read surface presents it as in-flight ("Sending...") so the
+   * recipient row can never claim "Sent" while the same message's 1:1 bubble
+   * still reads "Sending...".
+   */
+  carrierSentAt?: string;
 }
 
 export interface BroadcastItem {
@@ -170,12 +193,17 @@ export interface ListBroadcastsOpts {
  *   behavior). Same object reference - a pure passthrough.
  * - NON-EMPTY map: compute every field from the slots:
  *     audience  = number of slots
- *     queued    = slots with status 'queued'
- *     sent      = slots with status 'sent'
+ *     queued    = status 'queued': still on OUR box (awaiting the paced
+ *                 fan-out, or deferred for a rate-limit retry)
+ *     sending   = status 'sent' WITHOUT carrierSentAt: dispatched to Twilio,
+ *                 carrier not yet confirmed
+ *     sent      = status 'sent' AND carrierSentAt (carrier-confirmed)
  *     delivered = slots with status 'delivered'
  *     failed    = slots with status 'failed'
  *     skipped_no_consent = 'skipped' slots with errorCode 'no_consent'
  *     skipped_opted_out  = every remaining 'skipped' slot
+ *   queued/sending stay separate so a stuck send is diagnosable: stuck on our
+ *   box vs stuck at the carrier are different failures.
  *   Legacy cumulative persisted stats are IGNORED when the map is present, so
  *   historical broadcasts (whose persisted counters double-counted delivered)
  *   still DISPLAY correctly. Same BroadcastStats shape as the persisted counters.
@@ -187,6 +215,7 @@ export function deriveBroadcastStats(
   const keys = Object.keys(recipients);
   if (keys.length === 0) return b.stats;
   let queued = 0;
+  let sending = 0;
   let sent = 0;
   let delivered = 0;
   let failed = 0;
@@ -199,7 +228,12 @@ export function deriveBroadcastStats(
         queued += 1;
         break;
       case 'sent':
-        sent += 1;
+        // Dispatched-but-carrier-unconfirmed is `sending`, not Sent: the SENT
+        // chip must never outrun the per-recipient rows or the message's own
+        // 1:1 delivery badge. The carrier's sent callback stamps carrierSentAt
+        // and moves it over.
+        if (slot.carrierSentAt !== undefined) sent += 1;
+        else sending += 1;
         break;
       case 'delivered':
         delivered += 1;
@@ -216,6 +250,7 @@ export function deriveBroadcastStats(
   return {
     audience: keys.length,
     queued,
+    sending,
     sent,
     delivered,
     failed,
@@ -234,6 +269,7 @@ export function zeroStats(): BroadcastStats {
     skipped_opted_out: 0,
     skipped_no_consent: 0,
     queued: 0,
+    sending: 0,
   };
 }
 

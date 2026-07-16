@@ -66,8 +66,10 @@ terminal status - either way its exit wakes you:
 
 ```bash
 WT="/w/tmp/<name>"; LEDGER="$WT/.superpowers/sdd/progress.md"; t0=$(date +%s)
+base=$(tail -1 "$LEDGER" 2>/dev/null)   # ignore an already-handled status
 while true; do
-  tail -1 "$LEDGER" 2>/dev/null | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
+  cur=$(tail -1 "$LEDGER" 2>/dev/null)
+  [ "$cur" != "$base" ] && echo "$cur" | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
   newest=$(find "$WT" -path '*/node_modules' -prune -o -type f -newermt '-25 minutes' -print -quit 2>/dev/null)
   [ -z "$newest" ] && [ $(( $(date +%s) - t0 )) -ge 1500 ] && exit 1
   [ $(( $(date +%s) - t0 )) -ge 300 ] && exit 2
@@ -110,6 +112,9 @@ Agent dispatches and RESULT> handbacks within it. Also re-arm if you are woken b
 orchestrator finishing while a watchdog is still running (TaskStop the
 stale watchdog).
 
+The terminal-status exit compares against the last line captured at arm
+time (base) because a watchdog re-armed right after relaying a QUESTION
+answer would otherwise fire instantly on the stale, already-handled status.
 The stall exit is gated on the watchdog's own age (t0) because a re-armed
 watchdog inherits an already-quiet window - without the gate it trips
 instantly right after the nudge/resume it was re-armed behind. Checkpoints

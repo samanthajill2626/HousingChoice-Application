@@ -63,6 +63,7 @@ import type {
   UnitItem,
   UnitsPage,
   UploadMediaResult,
+  MmsMediaAttachment,
 } from './types.js';
 
 // --- Auth (/auth) -----------------------------------------------------------
@@ -503,6 +504,30 @@ export async function uploadMedia(file: File): Promise<UploadMediaResult> {
     throw new ApiError(res.status, `http_${res.status}`, `Request failed (${res.status})`, parsed);
   }
   return parsed as UploadMediaResult;
+}
+
+/** POST /api/media/presign { contentType } - mint a direct-to-S3 grant for one MMS
+ *  attachment. The browser then uploadToPresignedPost()s the file, then confirms.
+ *  Throws ApiError (400 unsupported_media_type, 503 media_storage_unavailable). */
+export function presignMmsMedia(
+  contentType: string,
+): Promise<{ key: string; post: { url: string; fields: Record<string, string> } }> {
+  return request<{ key: string; post: { url: string; fields: Record<string, string> } }>(
+    '/api/media/presign',
+    { method: 'POST', body: { contentType } },
+  );
+}
+
+/** POST /api/media/confirm { key } - server validates/transcodes the uploaded
+ *  original and returns the deliverable MMS attachment (jpeg for webp/pdf/oversized;
+ *  the original for gif/small jpeg-png). Throws ApiError (400 transcode_failed with
+ *  a `detail`, unknown_attachment, file_too_large_after_fit; 503 transcode_busy). */
+export async function confirmMmsMedia(key: string): Promise<MmsMediaAttachment> {
+  const res = await request<{ attachment: MmsMediaAttachment }>(
+    '/api/media/confirm',
+    { method: 'POST', body: { key } },
+  );
+  return res.attachment;
 }
 
 /** POST /api/conversations/:id/messages/:providerSid/retry - re-send a FAILED

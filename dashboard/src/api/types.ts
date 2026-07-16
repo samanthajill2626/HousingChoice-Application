@@ -1429,6 +1429,18 @@ export interface UploadMediaResult {
   size: number;
 }
 
+/** One outbound MMS attachment after presign+confirm (server transcoded/validated). */
+export interface MmsMediaAttachment {
+  /** The deliverable rendition (jpeg/png/gif) the send route receives. */
+  s3Key: string;
+  contentType: string;
+  size: number;
+  /** Pristine upload (RCS-forward); the send also carries it as attachmentOriginalKeys. */
+  originalKey?: string;
+  transcodedFrom?: string;
+  pdfPageCount?: number;
+}
+
 // --- C5: Media aggregation (§API Contract C5) -------------------------------
 // Copied verbatim from the build plan §C5. The "Media from comms" card.
 

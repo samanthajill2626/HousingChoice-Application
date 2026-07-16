@@ -27,9 +27,15 @@ supplies the issue.
    spike-verify any new dependency (license / platform / real API / arm64
    install) -> ASCII spec in a fresh worktree + Cameron's review gate ->
    TDD plan (superpowers:writing-plans). All per workflow doc Sections 3-5.
-3. MISSION BLOCK: write it (template below), show it to Cameron, get his go
-   BEFORE dispatching. This preserves the launch checkpoint he used to get
-   by carrying the prompt himself.
+3. MISSION BLOCK: write it (template below), show it to Cameron, then ask
+   the LAUNCH GATE question via AskUserQuestion with exactly these options:
+   (a) "Go - AUTO dispatch" (I dispatch and supervise), (b) "Go - MANUAL"
+   (I hand him the orchestration prompt for his own window), (c) "Revise"
+   (change the mission block first). Never dispatch without this gate; the
+   mode is ALWAYS his explicit pick, never a silent default. He can also
+   switch AUTO -> MANUAL mid-mission at any time ("switch to manual"):
+   stop the auto loop per the MANUAL rules below and hand over a prompt
+   with resume context from the ledger.
 4. DISPATCH + ARM WATCHDOG (below).
 5. SUPERVISE: wake protocol + escalation ladder (below).
 6. HANDBACK -> independent review (workflow doc Section 3.5: own bare gates

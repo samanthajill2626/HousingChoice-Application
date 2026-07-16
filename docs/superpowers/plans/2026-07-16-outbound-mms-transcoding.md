@@ -58,7 +58,7 @@ Deleted files:
 **Interfaces:**
 - Produces: `sharp` and `@hyzyla/pdfium` importable in `app`; `pdf-lib` importable in tests.
 
-- [ ] **Step 1: Install the deps into the app workspace**
+- [x] **Step 1: Install the deps into the app workspace**
 
 Run (from repo root):
 ```bash
@@ -66,7 +66,7 @@ npm install --workspace app sharp @hyzyla/pdfium
 npm install --workspace app --save-dev pdf-lib
 ```
 
-- [ ] **Step 2: Ensure the lockfile carries the linux-arm64 sharp binary**
+- [x] **Step 2: Ensure the lockfile carries the linux-arm64 sharp binary**
 
 sharp's platform binary is an OPTIONAL dep; the lockfile must contain `@img/sharp-linux-arm64` or the arm64 runtime `npm ci` skips it (boot crash). Populate it:
 ```bash
@@ -75,7 +75,7 @@ grep -q "@img/sharp-linux-arm64" package-lock.json && echo "arm64 sharp present 
 ```
 Expected: `arm64 sharp present in lockfile`.
 
-- [ ] **Step 3: Write a smoke test that imports both libs**
+- [x] **Step 3: Write a smoke test that imports both libs**
 
 ```typescript
 // app/test/deps-smoke.test.ts
@@ -100,12 +100,12 @@ describe('transcode deps load', () => {
 });
 ```
 
-- [ ] **Step 4: Run the smoke test**
+- [x] **Step 4: Run the smoke test**
 
 Run: `cd app && npx vitest run test/deps-smoke.test.ts`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Prove the arm64 runtime install (the boot-crash gate)**
+- [x] **Step 5: Prove the arm64 runtime install (the boot-crash gate)**
 
 Run (from repo root; requires Docker):
 ```bash
@@ -114,7 +114,7 @@ docker run --rm --platform linux/arm64 -v "$PWD":/w -w /w node:24-slim \
 ```
 Expected: `arm64 runtime deps OK`. If it fails with "Could not load the sharp module", the lockfile is missing the arm64 variant -- redo Step 2.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/package.json package-lock.json app/test/deps-smoke.test.ts
@@ -138,7 +138,7 @@ git commit -m "build(mms): add sharp + @hyzyla/pdfium (arm64-proven) for MMS tra
   - `planMmsMedia(sourceType: string, sizeBytes: number): MmsMediaPlan`
   - Constants from Global Constraints in `outboundMediaLimits.ts`.
 
-- [ ] **Step 1: Add the constants**
+- [x] **Step 1: Add the constants**
 
 Append to `app/src/lib/outboundMediaLimits.ts`:
 ```typescript
@@ -167,7 +167,7 @@ export const MMS_TRANSCODE_WAIT_TIMEOUT_MS = 20_000;
 export const SHARP_MAX_INPUT_PIXELS = 24_000_000;
 ```
 
-- [ ] **Step 2: Write the failing registry/plan test**
+- [x] **Step 2: Write the failing registry/plan test**
 
 ```typescript
 // app/test/mediaTypes.plan.test.ts
@@ -220,12 +220,12 @@ describe('planMmsMedia', () => {
 });
 ```
 
-- [ ] **Step 3: Run it (fails: not exported)**
+- [x] **Step 3: Run it (fails: not exported)**
 
 Run: `cd app && npx vitest run test/mediaTypes.plan.test.ts`
 Expected: FAIL (imports undefined).
 
-- [ ] **Step 4: Implement in `app/src/lib/mediaTypes.ts`**
+- [x] **Step 4: Implement in `app/src/lib/mediaTypes.ts`**
 
 Append (after the existing exports):
 ```typescript
@@ -274,12 +274,12 @@ export function planMmsMedia(sourceType: string, sizeBytes: number): MmsMediaPla
 }
 ```
 
-- [ ] **Step 5: Run tests to verify pass + typecheck**
+- [x] **Step 5: Run tests to verify pass + typecheck**
 
 Run: `cd app && npx vitest run test/mediaTypes.plan.test.ts && cd .. && npm run typecheck`
 Expected: PASS; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/lib/mediaTypes.ts app/src/lib/outboundMediaLimits.ts app/test/mediaTypes.plan.test.ts
@@ -297,7 +297,7 @@ git commit -m "feat(mms): Twilio-deliverable registry + planMmsMedia + transcode
 **Interfaces:**
 - Produces: `createSemaphore(max: number)` -> `{ acquire(timeoutMs: number): Promise<() => void> }`. `acquire` resolves with a release function when a slot is free; rejects with `Error('semaphore_timeout')` if none frees within `timeoutMs`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // app/test/semaphore.test.ts
@@ -338,12 +338,12 @@ describe('createSemaphore', () => {
 });
 ```
 
-- [ ] **Step 2: Run it (fails)**
+- [x] **Step 2: Run it (fails)**
 
 Run: `cd app && npx vitest run test/semaphore.test.ts`
 Expected: FAIL (module not found).
 
-- [ ] **Step 3: Implement `app/src/lib/semaphore.ts`**
+- [x] **Step 3: Implement `app/src/lib/semaphore.ts`**
 
 ```typescript
 // A tiny in-process async concurrency gate. acquire() resolves with a release fn
@@ -391,12 +391,12 @@ export function createSemaphore(max: number): Semaphore {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [x] **Step 4: Run tests to verify pass**
 
 Run: `cd app && npx vitest run test/semaphore.test.ts`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/lib/semaphore.ts app/test/semaphore.test.ts
@@ -415,7 +415,7 @@ git commit -m "feat(lib): in-process concurrency semaphore with acquire timeout"
 - Consumes: existing `S3MediaStore.getStream` (returns `{ body: Readable } | undefined`).
 - Produces: `MediaStore.getBytes(key: string): Promise<Buffer | undefined>` -- the whole object as a Buffer, or undefined if absent.
 
-- [ ] **Step 1: Write the failing test (fake client via getStream)**
+- [x] **Step 1: Write the failing test (fake client via getStream)**
 
 ```typescript
 // app/test/mediaStore.getBytes.test.ts
@@ -445,12 +445,12 @@ describe('S3MediaStore.getBytes', () => {
 });
 ```
 
-- [ ] **Step 2: Run it (fails: getBytes undefined)**
+- [x] **Step 2: Run it (fails: getBytes undefined)**
 
 Run: `cd app && npx vitest run test/mediaStore.getBytes.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Add `getBytes` to the interface and `S3MediaStore`**
+- [x] **Step 3: Add `getBytes` to the interface and `S3MediaStore`**
 
 In `app/src/adapters/mediaStore.ts`, add to the `MediaStore` interface (after `getStream`):
 ```typescript
@@ -474,12 +474,12 @@ Add to `S3MediaStore` (after `getStream`):
   }
 ```
 
-- [ ] **Step 4: Run tests + typecheck**
+- [x] **Step 4: Run tests + typecheck**
 
 Run: `cd app && npx vitest run test/mediaStore.getBytes.test.ts && cd .. && npm run typecheck`
 Expected: PASS; typecheck clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/adapters/mediaStore.ts app/test/mediaStore.getBytes.test.ts
@@ -498,7 +498,7 @@ git commit -m "feat(media): MediaStore.getBytes(key) to buffer an object for tra
 - Consumes: constants from Task 2; `sharp`, `@hyzyla/pdfium` from Task 1.
 - Produces: `transcodeForMms(bytes: Buffer, sourceType: string): Promise<{ bytes: Buffer; contentType: 'image/jpeg'; pdfPageCount?: number; transcodedFrom: string }>`. Throws on a corrupt/undecodable input.
 
-- [ ] **Step 1: Write the failing test (real bytes, ported from the spike)**
+- [x] **Step 1: Write the failing test (real bytes, ported from the spike)**
 
 ```typescript
 // app/test/mediaTranscode.test.ts
@@ -562,12 +562,12 @@ describe('transcodeForMms', () => {
 });
 ```
 
-- [ ] **Step 2: Run it (fails: module missing)**
+- [x] **Step 2: Run it (fails: module missing)**
 
 Run: `cd app && npx vitest run test/mediaTranscode.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `app/src/adapters/mediaTranscode.ts`**
+- [x] **Step 3: Implement `app/src/adapters/mediaTranscode.ts`**
 
 ```typescript
 // MediaTranscode -- the ONLY place sharp and @hyzyla/pdfium are imported (adapter
@@ -652,12 +652,12 @@ export async function transcodeForMms(bytes: Buffer, sourceType: string): Promis
 
 Note: if `page.getSize` is unavailable in the installed pdfium version, the `?? { width: 612, height: 792 }` fallback keeps a sane Letter-sized scale; the sharp resize caps the edge regardless.
 
-- [ ] **Step 4: Run tests + typecheck**
+- [x] **Step 4: Run tests + typecheck**
 
 Run: `cd app && npx vitest run test/mediaTranscode.test.ts && cd .. && npm run typecheck`
 Expected: PASS (6 tests); typecheck clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/adapters/mediaTranscode.ts app/test/mediaTranscode.test.ts
@@ -678,7 +678,7 @@ git commit -m "feat(mms): mediaTranscode adapter (sharp images + pdfium pdf page
   - `MediaAttachment` gains `originalKey?: string` (the pristine asset; `s3Key` is the deliverable MMS rendition).
   - `renditionFor(channel: 'mms', attachment: MediaAttachment): { s3Key: string }`.
 
-- [ ] **Step 1: Add `originalKey?` to `MediaAttachment`**
+- [x] **Step 1: Add `originalKey?` to `MediaAttachment`**
 
 In `app/src/repos/messagesRepo.ts`, extend the interface (around line 225):
 ```typescript
@@ -695,7 +695,7 @@ export interface MediaAttachment {
 }
 ```
 
-- [ ] **Step 2: Write the failing renditionFor test**
+- [x] **Step 2: Write the failing renditionFor test**
 
 ```typescript
 // app/test/mmsRenditions.test.ts
@@ -714,12 +714,12 @@ describe('renditionFor', () => {
 });
 ```
 
-- [ ] **Step 3: Run it (fails)**
+- [x] **Step 3: Run it (fails)**
 
 Run: `cd app && npx vitest run test/mmsRenditions.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 4: Implement `app/src/lib/mmsRenditions.ts`**
+- [x] **Step 4: Implement `app/src/lib/mmsRenditions.ts`**
 
 ```typescript
 // renditionFor -- the seam that picks which stored key to send for a channel
@@ -742,12 +742,12 @@ export function renditionFor(channel: SendChannel, attachment: MediaAttachment):
 }
 ```
 
-- [ ] **Step 5: Run tests + typecheck**
+- [x] **Step 5: Run tests + typecheck**
 
 Run: `cd app && npx vitest run test/mmsRenditions.test.ts && cd .. && npm run typecheck`
 Expected: PASS; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/repos/messagesRepo.ts app/src/lib/mmsRenditions.ts app/test/mmsRenditions.test.ts
@@ -769,7 +769,7 @@ git commit -m "feat(mms): originalKey on MediaAttachment + renditionFor channel 
   - `POST /confirm` body `{ key: string }` -> `{ attachment: { s3Key, contentType, size, originalKey?, transcodedFrom?, pdfPageCount? } }`.
 - Factory: `createMmsMediaRouter(deps?: { config?; logger?; mediaStore? }): Router`.
 
-- [ ] **Step 1: Write the failing route tests (fake MediaStore)**
+- [x] **Step 1: Write the failing route tests (fake MediaStore)**
 
 ```typescript
 // app/test/mmsMedia.test.ts
@@ -865,12 +865,12 @@ describe('POST /api/media/confirm', () => {
 
 Note: `supertest` -- if not already an app devDependency, install it: `npm install --workspace app --save-dev supertest @types/supertest`. Check `app/package.json` first; many suites here use it.
 
-- [ ] **Step 2: Run it (fails: module missing)**
+- [x] **Step 2: Run it (fails: module missing)**
 
 Run: `cd app && npx vitest run test/mmsMedia.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `app/src/routes/mmsMedia.ts`**
+- [x] **Step 3: Implement `app/src/routes/mmsMedia.ts`**
 
 ```typescript
 // Outbound MMS media: direct-to-S3 presign + confirm-transcode (spec 2026-07-16).
@@ -1022,12 +1022,12 @@ function bufferToStream(buf: Buffer): Readable {
 
 Note: `createPresignedPost` currently takes only `{ contentType }` with a hard-coded 5MB range. Task 8 widens it to accept an optional `maxBytes`. If you build this task first, temporarily call `createPresignedPost(key, { contentType })` and wire `maxBytes` in Task 8; otherwise do Task 8's signature change first. Move the `import { Readable }` to the top of the file per lint; shown inline only for locality.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cd app && npx vitest run test/mmsMedia.test.ts`
 Expected: PASS (all cases).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/routes/mmsMedia.ts app/test/mmsMedia.test.ts
@@ -1045,7 +1045,7 @@ git commit -m "feat(mms): presign + confirm-transcode router (direct-to-S3, sema
 **Interfaces:**
 - Changes: `createPresignedPost(key, opts: { contentType: string; maxBytes?: number }): Promise<PresignedPost>` -- `maxBytes` defaults to `OUTBOUND_MMS_MAX_FILE_BYTES` (preserves the unit-photo 5MB behavior when omitted).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // app/test/mediaStore.presignPost.test.ts
@@ -1073,12 +1073,12 @@ describe('createPresignedPost maxBytes', () => {
 });
 ```
 
-- [ ] **Step 2: Run it (fails: maxBytes ignored)**
+- [x] **Step 2: Run it (fails: maxBytes ignored)**
 
 Run: `cd app && npx vitest run test/mediaStore.presignPost.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Update `createPresignedPost` in `app/src/adapters/mediaStore.ts`**
+- [x] **Step 3: Update `createPresignedPost` in `app/src/adapters/mediaStore.ts`**
 
 Replace the method body's `Conditions` line and signature:
 ```typescript
@@ -1099,12 +1099,12 @@ Replace the method body's `Conditions` line and signature:
 ```
 Update the `MediaStore` interface method signature to match (`opts: { contentType: string; maxBytes?: number }`). Ensure `OUTBOUND_MMS_MAX_FILE_BYTES` is imported (it already is).
 
-- [ ] **Step 4: Run the new test + the existing mediaStore tests + typecheck**
+- [x] **Step 4: Run the new test + the existing mediaStore tests + typecheck**
 
 Run: `cd app && npx vitest run test/mediaStore.presignPost.test.ts test/mediaStore.test.ts && cd .. && npm run typecheck`
 Expected: PASS; unit-photo presign callers still compile (maxBytes optional).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/adapters/mediaStore.ts app/test/mediaStore.presignPost.test.ts
@@ -1127,7 +1127,7 @@ git commit -m "feat(media): createPresignedPost accepts maxBytes (MMS 20MB sourc
   - Presign loop uses `renditionFor('mms', a).s3Key` instead of `a.s3Key` directly.
   - Mount `createMmsMediaRouter` at `/media` (replacing `createMediaUploadsRouter`).
 
-- [ ] **Step 1: Write the failing guard test**
+- [x] **Step 1: Write the failing guard test**
 
 ```typescript
 // app/test/mmsSendGuard.test.ts
@@ -1159,12 +1159,12 @@ describe('resolveAttachmentKeys deliverable guard', () => {
 });
 ```
 
-- [ ] **Step 2: Run it (fails: not exported / signature differs)**
+- [x] **Step 2: Run it (fails: not exported / signature differs)**
 
 Run: `cd app && npx vitest run test/mmsSendGuard.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Refactor `resolveAttachmentKeys` in `app/src/routes/api.ts`**
+- [x] **Step 3: Refactor `resolveAttachmentKeys` in `app/src/routes/api.ts`**
 
 Extract it to a module-level exported function (currently an inner closure) taking the store + optional originalKeys, and swap the content-type check. Replace the inner function with:
 ```typescript
@@ -1207,7 +1207,7 @@ export async function resolveAttachmentKeys(
 ```
 Add the import `import { isTwilioDeliverableType, ... } from '../lib/mediaTypes.js';` (extend the existing mediaTypes import) and `import { renditionFor } from '../lib/mmsRenditions.js';`. In the send handler, parse `attachmentOriginalKeys` the same way `attachmentKeys` is parsed, and call `resolveAttachmentKeys(attachmentKeys, attachmentOriginalKeys, mediaStore)`.
 
-- [ ] **Step 4: Route the presign loop through renditionFor**
+- [x] **Step 4: Route the presign loop through renditionFor**
 
 In the 1:1 send branch, change the presign map (api.ts ~798) to:
 ```typescript
@@ -1216,16 +1216,16 @@ In the 1:1 send branch, change the presign map (api.ts ~798) to:
       );
 ```
 
-- [ ] **Step 5: Swap the router mount**
+- [x] **Step 5: Swap the router mount**
 
 At api.ts ~343, replace `createMediaUploadsRouter(...)` with `createMmsMediaRouter({ logger: deps.logger, ...(mediaStore configured as before) })` and update the import at the top (`import { createMmsMediaRouter } from './mmsMedia.js';`, remove the `createMediaUploadsRouter` import).
 
-- [ ] **Step 6: Run the guard test + typecheck + the api route suite**
+- [x] **Step 6: Run the guard test + typecheck + the api route suite**
 
 Run: `cd app && npx vitest run test/mmsSendGuard.test.ts test/apiRoutes.test.ts && cd .. && npm run typecheck`
 Expected: PASS. If `apiRoutes.test.ts` asserted the old `/media/uploads` busboy behavior, update those assertions to the presign/confirm shape (or move them to `mmsMedia.test.ts`).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/src/routes/api.ts app/test/mmsSendGuard.test.ts
@@ -1240,23 +1240,23 @@ git commit -m "feat(mms): send-route deliverable-type guard + originalKey passth
 - Delete: `app/src/routes/mediaUploads.ts`, `app/test/mediaUploads.test.ts`
 - Verify: no remaining importers.
 
-- [ ] **Step 1: Confirm nothing else imports it**
+- [x] **Step 1: Confirm nothing else imports it**
 
 Run: `cd .. && grep -rn "mediaUploads\|/media/uploads\|createMediaUploadsRouter" app/src e2e --include=*.ts | grep -v "mmsMedia"`
 Expected: no matches (Task 9 already swapped the mount). If any remain, update them to presign/confirm.
 
-- [ ] **Step 2: Delete the files**
+- [x] **Step 2: Delete the files**
 
 ```bash
 git rm app/src/routes/mediaUploads.ts app/test/mediaUploads.test.ts
 ```
 
-- [ ] **Step 3: Typecheck + full app suite**
+- [x] **Step 3: Typecheck + full app suite**
 
 Run: `npm run typecheck && npm test --workspace app`
 Expected: green (0 tsc errors; app suite passes).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "refactor(mms): remove busboy /media/uploads endpoint (superseded by presign/confirm)"
@@ -1278,7 +1278,7 @@ git commit -m "refactor(mms): remove busboy /media/uploads endpoint (superseded 
   - `confirmMmsMedia(key: string): Promise<MmsMediaAttachment>`
   - reuse existing `uploadToPresignedPost(post, file)`.
 
-- [ ] **Step 1: Write the failing client test**
+- [x] **Step 1: Write the failing client test**
 
 ```typescript
 // dashboard/src/api/mmsMedia.client.test.ts
@@ -1306,12 +1306,12 @@ describe('mms media client', () => {
 
 Note: match the exact `request()` helper convention in `endpoints.ts` (it wraps `{ method, body }` and unwraps JSON). Adjust the mock if `request()` sets extra headers; mirror `confirmUnitPhotos` which uses `request(...)`.
 
-- [ ] **Step 2: Run it (fails)**
+- [x] **Step 2: Run it (fails)**
 
 Run: `cd dashboard && npx vitest run src/api/mmsMedia.client.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Add types + client fns**
+- [x] **Step 3: Add types + client fns**
 
 In `dashboard/src/api/types.ts`:
 ```typescript
@@ -1352,12 +1352,12 @@ export async function confirmMmsMedia(key: string): Promise<MmsMediaAttachment> 
 ```
 Remove `uploadMedia` and `UploadMediaResult` (retire the busboy client). If `request()` does not surface the server's `detail` field into `ApiError`, extend the shared `request()`/`ApiError` construction to carry `detail` (mirror the raw-fetch `detail` handling already in `uploadMedia`), so the composer can show it.
 
-- [ ] **Step 4: Run tests + typecheck**
+- [x] **Step 4: Run tests + typecheck**
 
 Run: `cd dashboard && npx vitest run src/api/mmsMedia.client.test.ts && cd .. && npm run typecheck`
 Expected: PASS; typecheck clean (fix any now-dangling `uploadMedia` importers -- Task 12 covers the composer).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/api/mmsMedia.client.test.ts
@@ -1376,7 +1376,7 @@ git commit -m "feat(mms): dashboard presignMmsMedia + confirmMmsMedia client (re
 - Consumes: `presignMmsMedia`, `uploadToPresignedPost`, `confirmMmsMedia`, `MmsMediaAttachment`.
 - Changes: `ComposerAttachment` gains `originalKey?`, `pdfPageCount?`; `uploadOne` runs presign -> S3 POST -> confirm; the chip shows a "page 1 only" note when `pdfPageCount > 1` and the error detail on failure; the send passes `attachmentKeys` (rendition keys) + `attachmentOriginalKeys`.
 
-- [ ] **Step 1: Write/extend the failing composer test**
+- [x] **Step 1: Write/extend the failing composer test**
 
 ```typescript
 // dashboard/src/routes/contact/Timeline.mms.test.tsx  (add cases)
@@ -1408,12 +1408,12 @@ it('shows the transcode_failed detail on the chip', async () => {
 ```
 Adapt selectors to the existing Timeline.mms.test.tsx helpers (file input, chip query). Keep the existing passing cases.
 
-- [ ] **Step 2: Run it (fails)**
+- [x] **Step 2: Run it (fails)**
 
 Run: `cd dashboard && npx vitest run src/routes/contact/Timeline.mms.test.tsx`
 Expected: FAIL on the new cases.
 
-- [ ] **Step 3: Update `ComposerAttachment` + `uploadOne`**
+- [x] **Step 3: Update `ComposerAttachment` + `uploadOne`**
 
 Extend the interface (Timeline.tsx ~82):
 ```typescript
@@ -1463,7 +1463,7 @@ Replace `uploadOne` (Timeline.tsx ~591) with the presign/confirm flow:
 ```
 Ensure `uploadFailureMessage` surfaces the `detail` for `transcode_failed` (return `Couldn't process this file: ${detail}` when `err.code === 'transcode_failed'` and `err.detail` is present).
 
-- [ ] **Step 4: Render the page-1 note + pass both key arrays on send**
+- [x] **Step 4: Render the page-1 note + pass both key arrays on send**
 
 In the chip render, when `a.status === 'done' && (a.pdfPageCount ?? 0) > 1`, show a small note: `PDF - only the first page will be sent as an image.` In the send call (`onSend`/wherever `attachmentKeys` is assembled), build:
 ```typescript
@@ -1473,12 +1473,12 @@ In the chip render, when `a.status === 'done' && (a.pdfPageCount ?? 0) > 1`, sho
 ```
 and include `attachmentOriginalKeys` in the POST body (the api client `sendMessage`/`postMessage` call gains the optional field; thread it through the same way `attachmentKeys` is threaded).
 
-- [ ] **Step 5: Run tests + typecheck**
+- [x] **Step 5: Run tests + typecheck**
 
 Run: `cd dashboard && npx vitest run src/routes/contact/Timeline.mms.test.tsx && cd .. && npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/Timeline.mms.test.tsx dashboard/src/api
@@ -1496,7 +1496,7 @@ git commit -m "feat(mms): composer presign/confirm upload + page-1 pdf note + tr
 **Interfaces:**
 - Consumes: the hermetic stack (`npm run e2e`), `POST /auth/dev-login`, `GET /__dev/outbox`.
 
-- [ ] **Step 1: Write the e2e spec**
+- [x] **Step 1: Write the e2e spec**
 
 ```typescript
 // e2e/tests/mms-transcode.spec.ts
@@ -1535,12 +1535,12 @@ test('small png flows through unchanged; multi-page pdf warns and sends one jpeg
 ```
 Create the fixtures: a small real `.webp`, a small `.png` (< 1MB), a 3-page `.pdf` (generate with pdf-lib in a one-off script or check them in under `e2e/fixtures/`). Align the outbox media shape with what `GET /__dev/outbox` returns (extend the mock/outbox to expose per-media contentType if it does not already).
 
-- [ ] **Step 2: Run the e2e suite (hermetic; from the e2e workspace)**
+- [x] **Step 2: Run the e2e suite (hermetic; from the e2e workspace)**
 
 Run (from repo root; Docker required): `timeout 1500 npm run e2e`
 Expected: the new spec passes; the existing suite stays green. NEVER run playwright from the repo root outside `npm run e2e` (it would hit the live :5174 stack).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add e2e/tests/mms-transcode.spec.ts e2e/fixtures e2e/support
@@ -1554,7 +1554,7 @@ git commit -m "test(e2e): webp->jpeg, png passthrough, multi-page pdf warning; n
 **Files:**
 - Modify: `RUNBOOK.md` (operator note)
 
-- [ ] **Step 1: Sync main once (branch hygiene) and re-run all gates**
+- [x] **Step 1: Sync main once (branch hygiene) and re-run all gates**
 
 ```bash
 git fetch origin && git merge origin/main   # resolve conflicts keeping both intents
@@ -1564,11 +1564,11 @@ timeout 1500 npm run e2e
 ```
 Expected: all green on the synced base. (Run e2e from the repo root via `npm run e2e` only.)
 
-- [ ] **Step 2: Add the RUNBOOK operator note**
+- [x] **Step 2: Add the RUNBOOK operator note**
 
 Under the deploy/post-merge section, add: on merge, `npm install` is owed (new deps `sharp` + `@hyzyla/pdfium`); the `s3_media` CORS is already applied on dev and needs no new dev apply; prod CORS rides the unit-photos cutover apply. No new IAM/terraform for this feature.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add RUNBOOK.md

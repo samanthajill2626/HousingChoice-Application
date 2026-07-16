@@ -11,9 +11,20 @@
 // contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" serves the unit
 // audit trail (pending only on an older backend). Nothing is fabricated.
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { deleteUnit, restoreUnit, type Contact } from '../../api/index.js';
+import {
+  ApiError,
+  confirmUnitPhotos,
+  deleteUnit,
+  presignUnitPhotos,
+  removeUnitPhoto,
+  restoreUnit,
+  setUnitPhotoCover,
+  uploadToPresignedPost,
+  type Contact,
+  type UnitMediaDisplay,
+} from '../../api/index.js';
 import { Button, Spinner, StatusBadge, StatusMenu, type StatusTone } from '../../ui/index.js';
 import {
   LISTING_STATUSES,
@@ -73,6 +84,48 @@ const STATUS_DOT: Record<ListingStatus, string> = {
 /** How many rows the Related / Similar property lists show before collapsing. */
 const RELATED_LIMIT = 4;
 
+// Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
+// path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in
+// sync if the server cap changes.
+const UNIT_MEDIA_MAX = 100;
+
+// The image types the upload endpoint accepts (mirror of the app's
+// IMAGE_MEDIA_TYPES: jpeg/png/gif/webp). Hints the OS file picker; the server
+// re-validates every file regardless.
+const PHOTO_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp';
+
+/** Files per presign WAVE (unit-photos direct-upload R4). Mirrors the server's
+ *  UNIT_PHOTO_PRESIGN_BATCH_MAX (a per-request politeness bound, NOT a memory
+ *  bound - the bytes go browser->S3 directly). A selection larger than this
+ *  uploads in sequential 20-file waves (presign -> parallel direct POSTs ->
+ *  confirm per wave), so a 100-photo drag-drop still works end to end. Keep it
+ *  coupled to that server constant if it changes. */
+const PHOTO_PRESIGN_WAVE_SIZE = 20;
+
+/** How many direct-to-S3 POSTs run concurrently within a wave. The bytes never
+ *  touch the app, so this is purely browser civility (avoid opening 20 sockets
+ *  at once); 5 keeps uploads brisk without hammering the connection pool. */
+const PHOTO_UPLOAD_CONCURRENCY = 5;
+
+/** An honest, staff-facing message for a photo-upload failure (the app 400 carries
+ *  a machine `error` code on `ApiError.code`; map the known ones, else a generic
+ *  retry). GLOSSARY: staff copy says "property" / "photo". */
+function photoUploadMessage(err: unknown): string {
+  const code = err instanceof ApiError ? err.code : '';
+  switch (code) {
+    case 'unsupported_media_type':
+      return "That file type isn't supported - add JPEG, PNG, GIF, or WebP photos.";
+    case 'photo_cap_exceeded':
+      return 'That would go past the 100-photo limit for this property.';
+    case 'no_valid_photos':
+      return "None of the photos could be uploaded - please try again.";
+    case 'media_storage_unavailable':
+      return "Photo storage isn't available right now - please try again later.";
+    default:
+      return "Couldn't upload the photos - please try again.";
+  }
+}
+
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
@@ -96,6 +149,14 @@ export function ListingDetail(): React.JSX.Element {
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
+  // Photos: the hidden file input, upload/cover busy + inline error, and the
+  // per-photo Remove confirm (the entry being confirmed; modal open while non-null).
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [removingEntry, setRemovingEntry] = useState<string | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   // Property-status write - goes through the transition service (status is NOT
   // writable via a plain unit PATCH). On success apply the returned unit in
@@ -139,7 +200,16 @@ export function ListingDetail(): React.JSX.Element {
   const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   const programs = unit.accepted_programs ?? [];
-  const media = unit.media ?? [];
+  // The gallery renders resolved display media (presign-per-read). The server
+  // attaches `mediaDisplay` alongside the raw `media`; on an older response with
+  // only `media`, derive it (legacy absolute URLs pass through, bare keys become
+  // url-absent "unavailable" tiles - E2).
+  const mediaDisplay: UnitMediaDisplay[] =
+    unit.mediaDisplay ??
+    (unit.media ?? []).map((entry) => (isMediaUrl(entry) ? { entry, url: entry } : { entry }));
+  // Hero = the COVER (first entry) when it has a display URL, else today's fallback.
+  const coverUrl = mediaDisplay[0]?.url;
+  const atPhotoCap = mediaDisplay.length >= UNIT_MEDIA_MAX;
   // Only an http(s) video link becomes clickable (never javascript:/data:/… — XSS).
   const videoUrl = safeHttpUrl(unit.video_url);
   // Public flyer: live only for a shareable (available) unit, at the same-origin
@@ -188,6 +258,100 @@ export function ListingDetail(): React.JSX.Element {
         /* leave it deleted; the action re-enables for a retry */
       })
       .finally(() => setDeleteBusy(false));
+  };
+
+  // Photos: "+ Add" opens the hidden multi-select file input; the chosen files
+  // upload DIRECTLY to S3 (unit-photos direct-upload R4). Per wave of up to
+  // PHOTO_PRESIGN_WAVE_SIZE files: (1) presign mints one grant per file;
+  // (2) the browser POSTs each file straight to its presigned S3/MinIO target,
+  // in parallel with a modest concurrency pool - the bytes never touch the app,
+  // so there is no memory concern; (3) confirm records the keys that uploaded
+  // OK and returns the updated unit, applied after EACH wave (already-stored
+  // photos persist + render even if a later wave fails). Honest partial handling:
+  // a single file that fails to reach S3 is dropped and the confirm records the
+  // rest; if fewer than all uploaded the inline alert says "Uploaded N of M".
+  // A presign/confirm failure surfaces the mapped server error. Reset the input
+  // so re-picking the SAME file fires change again.
+  const onPickPhotos = (): void => photoInputRef.current?.click();
+  const onFilesChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const input = e.currentTarget;
+    const chosen = input.files ? Array.from(input.files) : [];
+    input.value = '';
+    if (chosen.length === 0 || photoBusy) return;
+    setPhotoBusy(true);
+    setPhotoError(null);
+    void (async () => {
+      const total = chosen.length;
+      let uploaded = 0;
+      try {
+        // Sequential 20-file waves keep each presign request within the server's
+        // per-request batch max; the direct POSTs inside a wave run in parallel.
+        for (let w = 0; w < chosen.length; w += PHOTO_PRESIGN_WAVE_SIZE) {
+          const wave = chosen.slice(w, w + PHOTO_PRESIGN_WAVE_SIZE);
+          const grants = await presignUnitPhotos(unit.unitId, wave);
+          // Simple concurrency pool: at most PHOTO_UPLOAD_CONCURRENCY direct
+          // POSTs in flight; each worker pulls the next index until the wave is
+          // drained. grants[i] pairs with wave[i] (the server keeps order).
+          const okKeys: string[] = [];
+          let next = 0;
+          const worker = async (): Promise<void> => {
+            while (next < wave.length) {
+              const i = next++;
+              const grant = grants[i];
+              const file = wave[i];
+              if (grant === undefined || file === undefined) continue;
+              try {
+                await uploadToPresignedPost(grant.post, file);
+                okKeys.push(grant.key);
+              } catch {
+                // A single file failed to reach S3 - drop it (honest partial).
+              }
+            }
+          };
+          await Promise.all(
+            Array.from({ length: Math.min(PHOTO_UPLOAD_CONCURRENCY, wave.length) }, () => worker()),
+          );
+          if (okKeys.length > 0) {
+            const updated = await confirmUnitPhotos(unit.unitId, okKeys);
+            uploaded += okKeys.length;
+            setUnit(updated);
+          }
+        }
+        if (uploaded < total) {
+          setPhotoError(
+            `Uploaded ${uploaded} of ${total} photos - some photos couldn't be uploaded. Please try again.`,
+          );
+        }
+      } catch (err) {
+        const base = photoUploadMessage(err);
+        setPhotoError(
+          uploaded > 0 ? `Uploaded ${uploaded} of ${total} photos - ${base}` : base,
+        );
+      } finally {
+        setPhotoBusy(false);
+      }
+    })();
+  };
+  const onMakeCover = (entry: string): void => {
+    if (photoBusy) return;
+    setPhotoBusy(true);
+    setPhotoError(null);
+    void setUnitPhotoCover(unit.unitId, entry)
+      .then((updated) => setUnit(updated))
+      .catch(() => setPhotoError("Couldn't update the cover photo - please try again."))
+      .finally(() => setPhotoBusy(false));
+  };
+  const onConfirmRemove = (): void => {
+    if (removingEntry === null || removeBusy) return;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    void removeUnitPhoto(unit.unitId, removingEntry)
+      .then((updated) => {
+        setUnit(updated);
+        setRemovingEntry(null);
+      })
+      .catch(() => setRemoveError("Couldn't remove the photo - please try again."))
+      .finally(() => setRemoveBusy(false));
   };
 
   return (
@@ -251,8 +415,8 @@ export function ListingDetail(): React.JSX.Element {
       <div className={styles.cols}>
         {/* LEFT column */}
         <div className={styles.left}>
-          {media.length > 0 && isMediaUrl(media[0] ?? '') ? (
-            <img className={styles.hero} src={media[0]} alt={`${address} hero`} />
+          {coverUrl ? (
+            <img className={styles.hero} src={coverUrl} alt={`${address} hero`} />
           ) : (
             <div className={styles.hero} aria-hidden="true" />
           )}
@@ -598,29 +762,84 @@ export function ListingDetail(): React.JSX.Element {
         </div>
       </div>
 
-      {/* BOTTOM - full-width Photos */}
+      {/* BOTTOM - full-width Photos. The gallery renders the resolved display
+          media; a bare entry with no URL shows an honest "unavailable" tile. Each
+          thumbnail reveals its actions on hover/focus (focus-within): Make cover
+          (hidden on the first/cover entry) and Remove (confirmed). "+ Add" opens a
+          hidden multi-select file input. Management is hidden on a deleted property. */}
       <section className={styles.photos}>
         <h2 className={styles.photosHeading}>Photos</h2>
         <div className={styles.gallery}>
-          {media.map((m, i) =>
-            isMediaUrl(m) ? (
-              <img key={`${m}:${i}`} className={styles.thumb} src={m} alt={`Photo ${i + 1}`} />
-            ) : (
-              <div
-                key={`${m}:${i}`}
-                className={styles.thumb}
-                title="Stored image (preview arrives with media URLs)"
-                aria-label={`Photo ${i + 1} (stored, no preview)`}
-              />
-            ),
-          )}
-          <button type="button" className={styles.addPhoto}>
-            + Add
-          </button>
+          {mediaDisplay.map((m, i) => (
+            <div key={`${m.entry}:${i}`} className={styles.thumbWrap}>
+              {m.url ? (
+                <img className={styles.thumb} src={m.url} alt={`Property photo ${i + 1}`} />
+              ) : (
+                <div
+                  className={styles.thumbUnavailable}
+                  aria-label={`Property photo ${i + 1} (unavailable)`}
+                >
+                  Unavailable
+                </div>
+              )}
+              {!deleted ? (
+                <div className={styles.thumbActions}>
+                  {i !== 0 ? (
+                    <button
+                      type="button"
+                      className={styles.thumbBtn}
+                      aria-label={`Make property photo ${i + 1} the cover`}
+                      onClick={() => onMakeCover(m.entry)}
+                      disabled={photoBusy}
+                    >
+                      Make cover
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={styles.thumbBtn}
+                    aria-label={`Remove property photo ${i + 1}`}
+                    onClick={() => {
+                      setRemoveError(null);
+                      setRemovingEntry(m.entry);
+                    }}
+                    disabled={photoBusy}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ))}
+          {!deleted ? (
+            <button
+              type="button"
+              className={styles.addPhoto}
+              onClick={onPickPhotos}
+              disabled={photoBusy || atPhotoCap}
+            >
+              {photoBusy ? 'Uploading...' : '+ Add'}
+            </button>
+          ) : null}
+          {/* Hidden multi-select input; the OS picker is hinted to the image types
+              (the server re-validates every file regardless). */}
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept={PHOTO_ACCEPT}
+            multiple
+            hidden
+            onChange={onFilesChosen}
+          />
         </div>
-        {media.some((m) => !isMediaUrl(m)) ? (
+        {!deleted && atPhotoCap ? (
           <p className={styles.photosNote}>
-            Some photos are stored references; previews arrive when the backend serves media URLs.
+            This property has the maximum of {UNIT_MEDIA_MAX} photos. Remove one to add more.
+          </p>
+        ) : null}
+        {photoError !== null ? (
+          <p role="alert" className={styles.photosError}>
+            {photoError}
           </p>
         ) : null}
       </section>
@@ -680,6 +899,44 @@ export function ListingDetail(): React.JSX.Element {
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>
               {deleteError}
+            </p>
+          ) : null}
+        </Modal>
+      ) : null}
+
+      {removingEntry !== null ? (
+        <Modal
+          title="Remove photo?"
+          onClose={() => {
+            if (!removeBusy) {
+              setRemovingEntry(null);
+              setRemoveError(null);
+            }
+          }}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setRemovingEntry(null)}
+                disabled={removeBusy}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" type="button" onClick={onConfirmRemove} disabled={removeBusy}>
+                {removeBusy ? 'Removing...' : 'Remove'}
+              </Button>
+            </>
+          }
+        >
+          <p>
+            This photo will be removed from this property - it won&apos;t show on the property page
+            or the public flyer.
+          </p>
+          {removeError !== null ? (
+            <p role="alert" className={styles.error}>
+              {removeError}
             </p>
           ) : null}
         </Modal>

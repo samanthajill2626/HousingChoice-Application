@@ -59,4 +59,11 @@ locals {
   #      redeploy so the app re-hydrates it; re-point OAuth + Twilio in the same step.
   custom_domain       = "dev.app.housingchoice.org"
   custom_domain_phase = 2
+
+  # Origins allowed to direct-POST photo uploads to the media bucket (unit-photos
+  # R3). The dashboard is served from the canonical app origin, so this is the
+  # custom domain once cut over (phase 2). Add any additional deployed origins
+  # here. Applying this (via the s3_media CORS rule) is what unblocks the upload
+  # path in the deployed env - see RUNBOOK "Unit photos: direct-upload CORS".
+  dashboard_origins = ["https://${local.custom_domain}"]
 }

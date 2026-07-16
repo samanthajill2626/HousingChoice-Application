@@ -35,6 +35,7 @@ import {
   type ListingStatus,
   type TransitionSource,
 } from '../lib/statusModel.js';
+import { UNIT_MEDIA_MAX } from '../lib/unitMedia.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
@@ -346,6 +347,31 @@ export interface UnitsRepo {
    */
   removeContact(unitId: string, contactId: string): Promise<UnitItem>;
   /**
+   * Property photos (unit-photos S1): ATOMIC append of new media keys onto
+   * `media[]`. ONE UpdateItem - `list_append(if_not_exists(media, []), keys)` -
+   * so concurrent appends never lose an entry (no read-modify-write). The write
+   * is cap-guarded by a ConditionExpression on the CURRENT size (attribute
+   * absent, or size <= cap - keys.length), so it can never push the array past
+   * the cap even under a race; a violation throws
+   * ConditionalCheckFailedException. `cap` defaults to UNIT_MEDIA_MAX. Returns
+   * ALL_NEW. First array entry is the cover.
+   */
+  appendMedia(unitId: string, keys: string[], cap?: number): Promise<UnitItem>;
+  /**
+   * Property photos (unit-photos S1): remove one entry (an S3 key or legacy URL)
+   * from `media[]`. Read-modify-write (single-operator action) conditioned on the
+   * entry being present - an absent entry (or unknown unit) throws
+   * ConditionalCheckFailedException (route 404). Returns ALL_NEW.
+   */
+  removeMedia(unitId: string, entry: string): Promise<UnitItem>;
+  /**
+   * Property photos (unit-photos S1): move `entry` to the FRONT of `media[]` (the
+   * cover = hero + flyer lead photo). Read-modify-write. A no-op success when the
+   * entry is already the cover (returns the unit unchanged). An absent entry (or
+   * unknown unit) throws ConditionalCheckFailedException (route 404). ALL_NEW.
+   */
+  makeCover(unitId: string, entry: string): Promise<UnitItem>;
+  /**
    * Unfiltered list — a paginated Scan. ACCEPTED at this scale (doc §5.1: the
    * whole active-units working set is hundreds to low thousands of small
    * items). When a status filter is supplied the route uses listByStatus (a
@@ -633,6 +659,89 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         { unitId, contactId, rosterSize: next.length, removedPrimaryVoice: removedWasPrimaryVoice },
         'unit contact removed',
       );
+      return updated;
+    },
+
+    async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {
+      // The ConditionExpression's size() guard below only covers a PRESENT
+      // `media` attribute - `if_not_exists` is an UpdateExpression-only
+      // function, so a `size(if_not_exists(#media, :empty)) <= :room` condition
+      // is NOT expressible and DynamoDB cannot size-guard the attribute-absent
+      // (first-append) branch itself. Close that branch HERE: a batch larger
+      // than the cap can never fit whatever the current size, so reject it
+      // before the write (same exception type the condition throws, so callers
+      // map it identically). Combined with the size() condition this makes the
+      // cap invariant race-free: concurrent first appends serialize at
+      // DynamoDB - the loser sees #media present and hits the size() guard.
+      if (keys.length > cap) {
+        throw new ConditionalCheckFailedException({
+          message: `appendMedia: batch of ${keys.length} exceeds cap ${cap}`,
+          $metadata: {},
+        });
+      }
+      // ATOMIC append: one UpdateItem with list_append over if_not_exists (seeds
+      // a missing `media`). The cap guard is a ConditionExpression on the CURRENT
+      // size so the array can never exceed the cap even under a concurrent
+      // append - `media` absent (safe: the batch bound above caps a first
+      // append), OR its size <= cap - keys.length. A violation (or a missing
+      // unit) throws ConditionalCheckFailedException.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { unitId },
+          UpdateExpression:
+            'SET #media = list_append(if_not_exists(#media, :empty), :new), #updatedAt = :now',
+          ConditionExpression:
+            'attribute_exists(unitId) AND (attribute_not_exists(#media) OR size(#media) <= :room)',
+          ExpressionAttributeNames: { '#media': 'media', '#updatedAt': 'updated_at' },
+          ExpressionAttributeValues: {
+            ':empty': [] as string[],
+            ':new': keys,
+            ':room': cap - keys.length,
+            ':now': new Date().toISOString(),
+          },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      log.info({ unitId, added: keys.length }, 'unit media appended');
+      return Attributes as UnitItem;
+    },
+
+    async removeMedia(unitId, entry) {
+      const unit = await this.getById(unitId);
+      if (!unit) {
+        throw new ConditionalCheckFailedException({ message: `unit ${unitId} not found`, $metadata: {} });
+      }
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) {
+        throw new ConditionalCheckFailedException({
+          message: `unit ${unitId} has no media entry`,
+          $metadata: {},
+        });
+      }
+      const next = media.filter((e) => e !== entry);
+      const updated = await this.update(unitId, { media: next });
+      log.info({ unitId, remaining: next.length }, 'unit media removed');
+      return updated;
+    },
+
+    async makeCover(unitId, entry) {
+      const unit = await this.getById(unitId);
+      if (!unit) {
+        throw new ConditionalCheckFailedException({ message: `unit ${unitId} not found`, $metadata: {} });
+      }
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) {
+        throw new ConditionalCheckFailedException({
+          message: `unit ${unitId} has no media entry`,
+          $metadata: {},
+        });
+      }
+      // Already the cover -> no-op success (return the unit unchanged, no write).
+      if (media[0] === entry) return unit;
+      const next = [entry, ...media.filter((e) => e !== entry)];
+      const updated = await this.update(unitId, { media: next });
+      log.info({ unitId }, 'unit media cover set');
       return updated;
     },
 

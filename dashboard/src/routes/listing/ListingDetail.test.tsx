@@ -1,7 +1,8 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { ApiError } from '../../api/index.js';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
@@ -21,6 +22,12 @@ const getUnit = vi.fn();
 const getContacts = vi.fn();
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
+// Direct-upload trio (unit-photos direct-upload R4): presign -> raw S3 POST -> confirm.
+const presignUnitPhotos = vi.fn();
+const uploadToPresignedPost = vi.fn();
+const confirmUnitPhotos = vi.fn();
+const removeUnitPhoto = vi.fn();
+const setUnitPhotoCover = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -34,6 +41,11 @@ vi.mock('../../api/index.js', async () => {
     getContacts: (...a: unknown[]) => getContacts(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
+    presignUnitPhotos: (...a: unknown[]) => presignUnitPhotos(...a),
+    uploadToPresignedPost: (...a: unknown[]) => uploadToPresignedPost(...a),
+    confirmUnitPhotos: (...a: unknown[]) => confirmUnitPhotos(...a),
+    removeUnitPhoto: (...a: unknown[]) => removeUnitPhoto(...a),
+    setUnitPhotoCover: (...a: unknown[]) => setUnitPhotoCover(...a),
   };
 });
 
@@ -84,7 +96,13 @@ const READY: ListingState = {
     accepted_programs: ['Housing Choice Voucher (HCV)', 'Section 8', 'VASH'],
     tour_process: 'Text the landlord to arrange access.',
     application_process: 'Apply via the property portal.',
-    media: ['https://example.com/photo-1.jpg', 'units/u1/photo-2.jpg'],
+    media: ['units/u1/cover.jpg', 'units/u1/photo-2.jpg'],
+    // Resolved display media (presign-per-read): the cover resolves to a URL, the
+    // second entry is currently UNRESOLVABLE (no url -> "unavailable" tile).
+    mediaDisplay: [
+      { entry: 'units/u1/cover.jpg', url: 'https://cdn.example/p/cover.jpg?sig=1' },
+      { entry: 'units/u1/photo-2.jpg' },
+    ],
   },
   landlord: { contactId: 'll1', type: 'landlord', firstName: 'James', lastName: 'Porter' } as never,
   roster: [
@@ -488,16 +506,205 @@ describe('ListingDetail', () => {
     expect(screen.getByText(/couldn.t load activity/i)).toBeInTheDocument();
   });
 
-  it('renders photos from media, with a placeholder for bare S3 keys', () => {
+  it('renders the gallery from mediaDisplay: a resolved entry as an image, an unresolved one as an "unavailable" tile', () => {
     useListing.mockReturnValue(READY);
     renderAt();
-    // The URL media renders an <img>; the bare S3 key renders a placeholder (no img src).
-    const imgs = screen.getAllByRole('img');
-    expect(imgs.some((i) => i.getAttribute('src') === 'https://example.com/photo-1.jpg')).toBe(true);
-    // Two "+ Add" affordances exist now (Photos + the empty Notes card) — assert
-    // the photos one specifically.
-    const photos = screen.getByRole('heading', { name: 'Photos' }).closest('section');
-    expect(within(photos as HTMLElement).getByText(/Add/)).toBeInTheDocument();
+    const photos = screen.getByRole('heading', { name: 'Photos' }).closest('section') as HTMLElement;
+    // The resolved entry renders an <img> with its (presigned) display URL.
+    const imgs = within(photos).getAllByRole('img');
+    expect(imgs.some((i) => i.getAttribute('src') === 'https://cdn.example/p/cover.jpg?sig=1')).toBe(true);
+    // The unresolved entry renders an honest "unavailable" tile (no img).
+    expect(within(photos).getByLabelText(/Property photo 2 \(unavailable\)/)).toBeInTheDocument();
+    // The "+ Add" affordance is present (and enabled below the cap).
+    expect(within(photos).getByRole('button', { name: /Add/ })).toBeEnabled();
+  });
+
+  it('uses the cover (first mediaDisplay url) as the hero image', () => {
+    useListing.mockReturnValue(READY);
+    renderAt();
+    const hero = screen.getByRole('img', { name: /hero/ });
+    expect(hero).toHaveAttribute('src', 'https://cdn.example/p/cover.jpg?sig=1');
+  });
+
+  // A presign grant per file, in order (the server preserves order). The direct
+  // POST target is a stand-in MinIO endpoint the mock never actually hits.
+  function grantsFor(files: File[]): { key: string; post: { url: string; fields: Record<string, string> } }[] {
+    return files.map((_, i) => ({
+      key: `unit-media/u1/key-${i}`,
+      post: { url: 'https://minio.local/hc-media', fields: { key: `unit-media/u1/key-${i}` } },
+    }));
+  }
+
+  it('the "+ Add" flow presigns, POSTs the file directly to S3, then confirms and applies the returned unit', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    const updated = {
+      ...READY.unit!,
+      mediaDisplay: [
+        ...READY.unit!.mediaDisplay!,
+        { entry: 'unit-media/u1/key-0', url: 'https://cdn.example/p/new.jpg?sig=9' },
+      ],
+    };
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(updated);
+    renderAt();
+
+    const file = new File(['x'], 'porch.jpg', { type: 'image/jpeg' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(presignUnitPhotos).toHaveBeenCalledWith('u1', [file]));
+    // The raw S3 POST carries the grant's post target + the File itself.
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(1));
+    expect(uploadToPresignedPost.mock.calls[0]![1]).toBe(file);
+    // Confirm records the uploaded key and the returned unit is applied in place.
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledWith('u1', ['unit-media/u1/key-0']));
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(updated));
+  });
+
+  it('a multi-file selection POSTs every file directly then confirms all uploaded keys in ONE wave', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from({ length: 3 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(3));
+    // One wave (<= 20 files) -> one presign, one confirm carrying all three keys.
+    expect(presignUnitPhotos).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(1));
+    const confirmedKeys = (confirmUnitPhotos.mock.calls[0]![1] as string[]).slice().sort();
+    expect(confirmedKeys).toEqual(['unit-media/u1/key-0', 'unit-media/u1/key-1', 'unit-media/u1/key-2']);
+    expect(setUnit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a selection larger than the wave size uploads in sequential 20-file waves', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from({ length: 25 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    // Two waves: 20 then 5 -> two presign calls, two confirm calls, 25 direct POSTs.
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(25));
+    expect(presignUnitPhotos).toHaveBeenCalledTimes(2);
+    const waveSizes = presignUnitPhotos.mock.calls.map((c) => (c[1] as File[]).length);
+    expect(waveSizes).toEqual([20, 5]);
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(2));
+    // The unit state applied after EACH wave (progressive rendering).
+    expect(setUnit).toHaveBeenCalledTimes(2);
+  });
+
+  it('a partial upload failure confirms the successes and reports "Uploaded N of M"', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    // The 2nd file's direct POST fails; the other two reach S3.
+    uploadToPresignedPost
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new ApiError(403, 's3_upload_failed', 's3_upload_failed'))
+      .mockResolvedValueOnce(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = Array.from({ length: 3 }, (_, i) => new File(['x'], `p-${i}.jpg`, { type: 'image/jpeg' }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Uploaded 2 of 3/));
+    // Confirm still recorded the two that made it; the returned unit is applied.
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(1));
+    expect(confirmUnitPhotos.mock.calls[0]![1] as string[]).toHaveLength(2);
+    expect(setUnit).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces the mapped server error when PRESIGN is rejected (nothing uploaded or confirmed)', async () => {
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    presignUnitPhotos.mockRejectedValue(
+      new ApiError(400, 'unsupported_media_type', 'unsupported_media_type'),
+    );
+    renderAt();
+
+    const file = new File(['x'], 'note.txt', { type: 'text/plain' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/JPEG, PNG, GIF, or WebP/i));
+    expect(uploadToPresignedPost).not.toHaveBeenCalled();
+    expect(confirmUnitPhotos).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the mapped server error when CONFIRM is rejected (cap re-guard race)', async () => {
+    useListing.mockReturnValue({ ...READY, setUnit: vi.fn() });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockRejectedValue(
+      new ApiError(400, 'photo_cap_exceeded', 'photo_cap_exceeded'),
+    );
+    renderAt();
+
+    const file = new File(['x'], 'porch.jpg', { type: 'image/jpeg' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/past the 100-photo limit/i));
+  });
+
+  it('disables "+ Add" with a note at the 100-photo cap', () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({
+      entry: `units/u1/p-${i}.jpg`,
+      url: `https://cdn.example/p/p-${i}.jpg?sig=${i}`,
+    }));
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, mediaDisplay: full } });
+    renderAt();
+    const photos = screen.getByRole('heading', { name: 'Photos' }).closest('section') as HTMLElement;
+    expect(within(photos).getByRole('button', { name: /Add/ })).toBeDisabled();
+    expect(within(photos).getByText(/maximum of 100 photos/i)).toBeInTheDocument();
+  });
+
+  it('makes a non-cover photo the cover (Make cover hidden on the first entry)', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    setUnitPhotoCover.mockResolvedValue({ ...READY.unit! });
+    renderAt();
+
+    // The cover (first) entry has NO "Make cover" action; the 2nd does.
+    expect(
+      screen.queryByRole('button', { name: /Make property photo 1 the cover/ }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Make property photo 2 the cover/ }));
+
+    expect(setUnitPhotoCover).toHaveBeenCalledWith('u1', 'units/u1/photo-2.jpg');
+    await waitFor(() => expect(setUnit).toHaveBeenCalled());
+  });
+
+  it('removes a photo through a confirm dialog', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    removeUnitPhoto.mockResolvedValue({ ...READY.unit! });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: /Remove property photo 2/ }));
+    // A confirm dialog appears - nothing removed yet.
+    expect(screen.getByRole('dialog', { name: /Remove photo\?/ })).toBeInTheDocument();
+    expect(removeUnitPhoto).not.toHaveBeenCalled();
+
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^Remove$/ }));
+    expect(removeUnitPhoto).toHaveBeenCalledWith('u1', 'units/u1/photo-2.jpg');
+    await waitFor(() => expect(setUnit).toHaveBeenCalled());
   });
 
   it('the status pill calls setListingStatus and applies the returned unit (pill updates)', async () => {

@@ -28,6 +28,10 @@ module "s3_media" {
   source = "../../modules/s3_media"
 
   name_prefix = local.name_prefix
+  # Origins allowed to direct-POST photo uploads (unit-photos R3). Empty until
+  # the operator sets local.dashboard_origins - the upload path is CORS-blocked
+  # in a deployed env until this CORS rule is applied.
+  dashboard_origins = local.dashboard_origins
 }
 
 module "ecr" {

@@ -55,6 +55,7 @@ import {
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
+import { UNIT_MEDIA_MAX } from '../../src/lib/unitMedia.js';
 import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   deadlineIdFor,
@@ -156,6 +157,8 @@ export interface FakeWorld {
   /** Outbound calls initiated via adapter.initiateCall (M1.9a), in order. */
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
+  /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
+  presignPosts: { key: string; contentType: string }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -230,6 +233,7 @@ export function createFakeWorld(): FakeWorld {
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
   const mediaPuts: FakeWorld['mediaPuts'] = [];
+  const presignPosts: FakeWorld['presignPosts'] = [];
   const failMediaUrls = new Set<string>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
@@ -1122,6 +1126,38 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
+    // Property photos (unit-photos S1): mirror the real repo's atomic append +
+    // cap guard, entry-conditioned remove, and move-to-front cover.
+    async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`appendMedia: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (media.length > cap - keys.length) {
+        throw conditionalCheckFailed(`appendMedia: unit ${unitId} media cap ${cap} exceeded`);
+      }
+      unit.media = [...media, ...keys];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async removeMedia(unitId, entry) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`removeMedia: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) throw conditionalCheckFailed(`removeMedia: unit ${unitId} has no media entry`);
+      unit.media = media.filter((e) => e !== entry);
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    async makeCover(unitId, entry) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`makeCover: no unit ${unitId}`);
+      const media = Array.isArray(unit.media) ? unit.media.filter((e): e is string => typeof e === 'string') : [];
+      if (!media.includes(entry)) throw conditionalCheckFailed(`makeCover: unit ${unitId} has no media entry`);
+      if (media[0] === entry) return unit; // already the cover -> no-op success
+      unit.media = [entry, ...media.filter((e) => e !== entry)];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
   };
 
   // In-memory placements (M1.10): mirror the repo's contractual semantics —
@@ -1887,6 +1923,23 @@ export function createFakeWorld(): FakeWorld {
         size: obj.body.length,
       };
     },
+    async createPresignedPost(key, opts) {
+      // Mirror the real store's contract: record the mint (so presign-route
+      // tests can assert the key + content-type policy WITHOUT a live S3), and
+      // return a plausible { url, fields } shape. The `key` + `Content-Type`
+      // fields stand in for the SDK's policy-pinned form fields.
+      presignPosts.push({ key, contentType: opts.contentType });
+      return {
+        url: 'https://fake-s3.local/hc-local-media',
+        fields: {
+          key,
+          'Content-Type': opts.contentType,
+          bucket: 'hc-local-media',
+          Policy: `fakepolicy-${key}`,
+          'X-Amz-Signature': `fakesig-${key}`,
+        },
+      };
+    },
   };
 
   return {
@@ -1904,6 +1957,7 @@ export function createFakeWorld(): FakeWorld {
     sent,
     initiatedCalls,
     mediaPuts,
+    presignPosts,
     failMediaUrls,
     failRecordingUrls,
     mediaObjects,
@@ -2090,6 +2144,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // unit-photos: the flyer/details resolve stored photo keys to presigned
+      // URLs through the SAME fake media store the authed API + webhooks use.
+      ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
       // The housing-fair welcome reads the operator's welcomeText override (with
       // a constant fallback) — share the world's fake settings repo so a
       // welcomeText edit is reflected without touching DynamoDB.

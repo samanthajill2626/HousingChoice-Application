@@ -480,6 +480,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       toursRepo: tours,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      // unit-photos: presign/confirm direct-upload + display resolution
+      // (presign-per-read).
+      ...(mediaStore !== undefined && { mediaStore }),
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).

@@ -27,3 +27,13 @@ store it under uploads/<uuid> (or a units/ namespace), then send via the existin
 presign-per-attempt attachmentKeys path. Alternatively, accept the flakiness and hotlink
 directly -- NOT recommended (breaks the private-bucket + no-arbitrary-fetch guarantees and
 delivers unreliably). Document whichever is chosen; the mirror step is the clean answer.
+
+**Update 2026-07-15 (unit-photos prerequisite now exists).** The property-photos feature
+(docs/superpowers/specs/2026-07-15-unit-photos-design.md) landed the missing piece: staff
+now UPLOAD unit photos into our OWN private media bucket under the dedicated
+`unit-media/<unitId>/<uuid>` prefix, so a unit's photos are durable S3 keys -- not external
+URLs. The external-URL / hotlink caveat above is now OBSOLETE for uploaded photos: attaching
+one to an outbound MMS no longer needs a mirror step, just a presign-per-attempt of the
+existing key (the same path device uploads already use). Legacy absolute-URL `unit.media`
+entries (the vestigial mockup-era case) still carry the caveat, but new photos do not.
+This issue stays open for the pick-and-attach UI + send wiring; the storage blocker is gone.

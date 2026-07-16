@@ -8,7 +8,17 @@ import { Readable } from 'node:stream';
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
+import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+
+/**
+ * Presigned-POST grant expiry: 5 minutes. Long enough for a person to pick a
+ * file and the browser to upload it, short enough that a leaked grant (the
+ * signed policy is a bearer WRITE token) expires quickly. The read presign uses
+ * a longer TTL (a page renders for an hour); a WRITE grant needs no such life.
+ */
+export const UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS = 300;
 
 /** A streamed object read back from the media bucket (M1.9c recording serving). */
 export interface MediaObject {
@@ -21,6 +31,12 @@ export interface MediaObject {
 export interface MediaHead {
   contentType?: string;
   size?: number;
+}
+
+/** A minted presigned POST: the form target URL + the policy fields to send. */
+export interface PresignedPost {
+  url: string;
+  fields: Record<string, string>;
 }
 
 export interface MediaStore {
@@ -51,6 +67,17 @@ export interface MediaStore {
    * getStream's absent-object contract.
    */
   head(key: string): Promise<MediaHead | undefined>;
+  /**
+   * Mint a presigned POST grant so the BROWSER uploads one file DIRECTLY to the
+   * media bucket (unit-photos direct-upload revision) - the bytes never touch
+   * the app process. The returned policy pins the upload to EXACTLY `key`,
+   * `contentType`, and the 1..OUTBOUND_MMS_MAX_FILE_BYTES size range, and
+   * expires in UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS. S3/MinIO enforces every
+   * condition at the edge (spike Q2): an over-size, zero-byte, wrong-type, or
+   * tampered-key POST is rejected and stores nothing. Signed with the store's
+   * OWN client so endpoint/forcePathStyle/creds/region are inherited.
+   */
+  createPresignedPost(key: string, opts: { contentType: string }): Promise<PresignedPost>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -143,6 +170,27 @@ export class S3MediaStore implements MediaStore {
       }
       throw err;
     }
+  }
+
+  async createPresignedPost(
+    key: string,
+    opts: { contentType: string },
+  ): Promise<PresignedPost> {
+    // Policy conditions (all edge-enforced by S3/MinIO, spike Q2):
+    //   - key EXACTLY the server-minted key - the SDK adds `{ key: Key }` (an
+    //     exact-match condition) automatically because Key has no ${filename};
+    //   - Content-Type EXACTLY this grant's allowed image type - the SDK turns
+    //     each `Fields` entry into an exact-match condition, so the Content-Type
+    //     field both seeds the form AND pins the policy (spike Q2b);
+    //   - content-length-range 1 .. 5MB - rejects a zero-byte or over-size POST.
+    const { url, fields } = await createPresignedPost(this.client, {
+      Bucket: this.bucket,
+      Key: key,
+      Conditions: [['content-length-range', 1, OUTBOUND_MMS_MAX_FILE_BYTES]],
+      Fields: { 'Content-Type': opts.contentType },
+      Expires: UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS,
+    });
+    return { url, fields };
   }
 }
 

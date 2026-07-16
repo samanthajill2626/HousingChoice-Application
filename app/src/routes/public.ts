@@ -31,11 +31,13 @@ import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer, toUnitFlyerDetails } from '../lib/unitFields.js';
+import { resolveUnitMedia } from '../lib/unitMedia.js';
+import type { MediaStore } from '../adapters/mediaStore.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
@@ -155,6 +157,14 @@ export interface PublicRouterDeps {
   auditRepo?: AuditRepo;
   settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
+  /**
+   * unit-photos: the media bucket store - the flyer/details resolve stored photo
+   * keys to short-lived presigned URLs at render time (D1: the bucket stays
+   * private). Undefined when MEDIA_BUCKET is unset - stored keys then resolve to
+   * url-absent and are omitted from the public url list (only legacy absolute
+   * URLs carry through).
+   */
+  mediaStore?: MediaStore;
 }
 
 export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
@@ -164,6 +174,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const mediaStore = deps.mediaStore;
   const sendMessage =
     deps.sendMessageService ??
     createSendMessageService({
@@ -174,6 +185,18 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     });
 
   const router = Router();
+
+  // unit-photos S3 (D1): resolve the unit's photos to render-time presigned URLs
+  // for the PUBLIC surface. The wire shape stays string[] (a url list, so
+  // FlyerFunnel changes minimally); entries that fail to resolve (stored key with
+  // no store / a presign failure) are OMITTED - the private bucket is never
+  // exposed and a degraded photo simply doesn't appear.
+  async function resolvePublicMedia(unit: UnitItem, unitId: string): Promise<string[]> {
+    const display = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+    return display
+      .map((d) => d.url)
+      .filter((u): u is string => typeof u === 'string');
+  }
 
   // POST /public/housing-fair — public intake → auto welcome text (§11.3).
   router.post('/housing-fair', async (req, res) => {
@@ -318,7 +341,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       res.status(404).json({ error: 'not_found' });
       return;
     }
-    res.json({ flyer: toUnitFlyer(unit) });
+    // unit-photos: replace the raw media pass-through with render-time presigned
+    // URLs (unresolvable entries omitted).
+    const media = await resolvePublicMedia(unit, unitId);
+    res.json({ flyer: { ...toUnitFlyer(unit), media } });
   });
 
   // GET /public/units/:unitId/details — the post-intake "full details" reveal.
@@ -335,7 +361,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       res.status(404).json({ error: 'not_found' });
       return;
     }
-    res.json({ details: toUnitFlyerDetails(unit) });
+    // unit-photos: same render-time presigned URLs on the details reveal.
+    const media = await resolvePublicMedia(unit, unitId);
+    res.json({ details: { ...toUnitFlyerDetails(unit), media } });
   });
 
   return router;

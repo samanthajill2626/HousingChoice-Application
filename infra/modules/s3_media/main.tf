@@ -32,3 +32,28 @@ resource "aws_s3_bucket_public_access_block" "media" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
+
+# CORS for direct browser-to-S3 photo uploads (unit-photos revision, spec R3).
+# The browser POSTs each file straight to the bucket with a presigned POST grant;
+# EC2 never touches the bytes. Only the deployed dashboard origin(s) may do so.
+#
+# - Method POST only: the sole cross-origin call is the direct upload. GET is
+#   deliberately ABSENT - image reads are <img src> (presign-per-read, spec D5),
+#   not fetch/XHR, so they are not CORS-gated.
+# - ExposeHeaders ["ETag"]: lets the uploading JS read the stored object's ETag.
+# - Guarded on dashboard_origins: with the default [] no resource is created
+#   (an empty AllowedOrigins would be invalid). The public-access-block above is
+#   untouched - a presigned POST is an authenticated request, unaffected by it.
+resource "aws_s3_bucket_cors_configuration" "media" {
+  count = length(var.dashboard_origins) > 0 ? 1 : 0
+
+  bucket = aws_s3_bucket.media.id
+
+  cors_rule {
+    allowed_methods = ["POST"]
+    allowed_origins = var.dashboard_origins
+    allowed_headers = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
+}

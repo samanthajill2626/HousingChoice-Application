@@ -36,7 +36,7 @@ describe('StatChips', () => {
     expect(within(within(list).getByText('Recipients').closest('div') as HTMLElement).getByText('5')).toBeInTheDocument();
     expect(within(within(list).getByText('Delivered').closest('div') as HTMLElement).getByText('3')).toBeInTheDocument();
     expect(within(within(list).getByText('Sent').closest('div') as HTMLElement).getByText('4')).toBeInTheDocument();
-    expect(within(within(list).getByText('Sending').closest('div') as HTMLElement).getByText('1')).toBeInTheDocument();
+    expect(within(within(list).getByText('Queued').closest('div') as HTMLElement).getByText('1')).toBeInTheDocument();
     expect(within(within(list).getByText('Failed').closest('div') as HTMLElement).getByText('2')).toBeInTheDocument();
   });
 
@@ -67,20 +67,31 @@ describe('StatChips', () => {
     expect(chipValue(list, 'Delivered')).toContain('11');
     expect(chipValue(list, 'Sent')).toContain('0');
     expect(chipValue(list, 'Sending')).toContain('0');
+    expect(chipValue(list, 'Queued')).toContain('0');
     expect(chipValue(list, 'Failed')).toContain('0');
     expect(chipValue(list, 'Skipped')).toContain('0');
   });
 
-  it('orders chips Recipients, Delivered, Sent, Sending, Failed, Skipped', () => {
+  it('orders chips Recipients, Delivered, Sent, Sending, Queued, Failed, Skipped', () => {
     render(<StatChips stats={stats()} />);
     const list = screen.getByLabelText('Delivery stats');
     const labels = within(list)
       .getAllByRole('term')
       .map((dt) => dt.textContent);
-    // "Sending" renders the stats.queued bucket (in-flight legs: dispatched-
-    // unconfirmed + deferred retries) - "Queued" read as already-counted-sent
-    // to nobody, and "Sent" must mean carrier-confirmed.
-    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Sending', 'Failed', 'Skipped']);
+    // Two SEPARATE in-flight chips (founder ask, proving out Twilio infra):
+    // "Queued" = still on our box (paced fan-out / deferred retry);
+    // "Sending" = with the carrier (dispatched, awaiting its sent callback);
+    // "Sent" = carrier-confirmed only.
+    expect(labels).toEqual(['Recipients', 'Delivered', 'Sent', 'Sending', 'Queued', 'Failed', 'Skipped']);
+  });
+
+  it('renders the Sending chip from stats.sending, defaulting 0 for legacy rows without it', () => {
+    render(<StatChips stats={{ ...stats({ queued: 3 }) }} />);
+    const list = screen.getByLabelText('Delivery stats');
+    // stats() fixture has no `sending` -> the chip defaults to 0 while Queued
+    // still shows its own bucket (legacy persisted rows predate the field).
+    expect(chipValue(list, 'Sending')).toContain('0');
+    expect(chipValue(list, 'Queued')).toContain('3');
   });
 });
 

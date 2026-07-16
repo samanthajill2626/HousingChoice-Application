@@ -661,7 +661,13 @@ describe('broadcast.send (M1.8a)', () => {
   }
   function bucketsSumToAudience(s: BroadcastStats): boolean {
     return (
-      s.queued + s.sent + s.delivered + s.failed + s.skipped_opted_out + s.skipped_no_consent ===
+      s.queued +
+        (s.sending ?? 0) +
+        s.sent +
+        s.delivered +
+        s.failed +
+        s.skipped_opted_out +
+        s.skipped_no_consent ===
       s.audience
     );
   }
@@ -684,16 +690,16 @@ describe('broadcast.send (M1.8a)', () => {
       expect(u.stats.audience).toBe(2);
       expect(bucketsSumToAudience(u.stats)).toBe(true);
     }
-    // DERIVED stats count a dispatched slot ('sent', no carrierSentAt) as IN
-    // FLIGHT (queued bucket): the carrier hasn't confirmed, so the chips must
-    // not outrun the per-recipient "Sending..." rows. No webhook runs in this
-    // rig, so no carrierSentAt ever lands and both legs stay in flight even
-    // after the job finalizes (status 'sent' = the JOB finished dispatching).
+    // DERIVED stats: a dispatched slot ('sent', no carrierSentAt) counts as
+    // `sending` (with the carrier) - distinct from `queued` (on our box) and
+    // from carrier-confirmed `sent`. No webhook runs in this rig, so no
+    // carrierSentAt ever lands: dispatched legs sit in `sending` even after
+    // the job finalizes (status 'sent' = the JOB finished dispatching).
     expect(updates[0]!.status).toBe('sending');
-    expect(updates[0]!.stats).toMatchObject({ sent: 0, queued: 2 });
-    // The terminal emit: job done ('sent'), legs awaiting carrier confirmation.
+    expect(updates[0]!.stats).toMatchObject({ sent: 0, sending: 1, queued: 1 });
+    // The terminal emit: job done ('sent'), both legs awaiting the carrier.
     expect(updates.at(-1)!.status).toBe('sent');
-    expect(updates.at(-1)!.stats).toMatchObject({ sent: 0, queued: 2 });
+    expect(updates.at(-1)!.stats).toMatchObject({ sent: 0, sending: 2, queued: 0 });
   });
 
   it('S2: the transient-defer path (slot stays queued, no bumpStats) emits NOTHING for that recipient', async () => {
@@ -717,10 +723,9 @@ describe('broadcast.send (M1.8a)', () => {
     // continuation is pending so finalize (its terminal emit) does NOT run.
     expect(updates).toHaveLength(1);
     expect(updates[0]!.status).toBe('sending');
-    // Both legs derive IN FLIGHT: Alice dispatched (awaiting carrier
-    // confirmation), Bob literally queued (deferred retry) - the "Sending"
-    // chip covers both honestly.
-    expect(updates[0]!.stats).toMatchObject({ sent: 0, queued: 2 });
+    // The two in-flight states split: Alice dispatched -> `sending` (with the
+    // carrier), Bob deferred-retry -> `queued` (still on our box).
+    expect(updates[0]!.stats).toMatchObject({ sent: 0, sending: 1, queued: 1 });
     expect(bucketsSumToAudience(updates[0]!.stats)).toBe(true);
   });
 
@@ -738,8 +743,13 @@ describe('broadcast.send (M1.8a)', () => {
     // A tick for the skip + a tick for the send + the finalize emit.
     expect(updates.length).toBeGreaterThanOrEqual(2);
     for (const u of updates) expect(bucketsSumToAudience(u.stats)).toBe(true);
-    // Terminal: one dispatched (in flight until the carrier confirms - no
+    // Terminal: one dispatched (`sending` until the carrier confirms - no
     // webhook runs in this rig), one skipped (opted-out), disjoint.
-    expect(updates.at(-1)!.stats).toMatchObject({ sent: 0, queued: 1, skipped_opted_out: 1 });
+    expect(updates.at(-1)!.stats).toMatchObject({
+      sent: 0,
+      sending: 1,
+      queued: 0,
+      skipped_opted_out: 1,
+    });
   });
 });

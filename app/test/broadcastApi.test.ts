@@ -230,14 +230,16 @@ describe('share-broadcast API (M1.8a)', () => {
 
     // Results endpoint reflects the rolled-up DERIVED stats: both legs are
     // dispatched ('sent' slots) but no carrier callback ran in this rig, so
-    // they derive IN FLIGHT (queued bucket) - the SENT bucket is reserved for
-    // carrier-confirmed legs (carrierSentAt).
+    // they derive `sending` (with the carrier) - the SENT bucket is reserved
+    // for carrier-confirmed legs (carrierSentAt), and `queued` for legs still
+    // on our box.
     const results = await request(app)
       .get(`/api/broadcasts/${id}/results`)
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(results.status).toBe(200);
-    expect(results.body.stats.queued).toBe(2);
+    expect(results.body.stats.sending).toBe(2);
+    expect(results.body.stats.queued).toBe(0);
     expect(results.body.stats.sent).toBe(0);
     expect(results.body.status).toBe('sent');
   });
@@ -1154,6 +1156,7 @@ describe('share-broadcast API (M1.8a)', () => {
       skipped_no_consent: 1,
       skipped_opted_out: 1,
       queued: 0,
+      sending: 0,
     });
   });
 

@@ -210,9 +210,11 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     // Live surfaces get poked so the row flips Sending... -> Sent without a reload.
     const emit = world.emitted.find((e) => e.event === 'broadcast.updated');
     expect(emit).toBeDefined();
-    const stats = (emit!.payload as { stats: { sent: number; queued: number } }).stats;
+    const stats = (emit!.payload as { stats: { sent: number; sending?: number; queued: number } })
+      .stats;
     // Derived stats now count this slot as carrier-confirmed sent, not in-flight.
     expect(stats.sent).toBe(1);
+    expect(stats.sending).toBe(0);
     expect(stats.queued).toBe(0);
   });
 

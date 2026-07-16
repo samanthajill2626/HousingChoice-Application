@@ -1578,7 +1578,11 @@ export interface BroadcastStats {
   skipped_opted_out: number;
   /** Recipients fenced out for missing SMS consent (staff can record consent). */
   skipped_no_consent: number;
+  /** Still on OUR box: awaiting the paced fan-out or a deferred retry. */
   queued: number;
+  /** Dispatched to Twilio, carrier not yet confirmed (no carrierSentAt).
+   *  Optional: legacy persisted stats predate the field - default to 0. */
+  sending?: number;
 }
 
 /** GET /api/broadcasts → one list-row summary (no recipients map). */

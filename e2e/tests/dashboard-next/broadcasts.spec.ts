@@ -285,7 +285,7 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
       .getByText(label, { exact: true });
   }
 
-  test('curated send: land while Sending, chips tick, terminal Delivered=N/Sent=0/Sending=0, rows show names + formatted phones + contact links', async ({
+  test('curated send: land while Sending, chips tick, terminal Delivered=N with all in-flight buckets drained, rows show names + formatted phones + contact links', async ({
     page,
     request,
   }) => {
@@ -339,15 +339,15 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
     await expect(statusPill(page, 'Sending')).toBeVisible({ timeout: 10_000 });
 
     // (2) The chips TICK during the run, observed live on a page we never reload:
-    //   - Sending (the in-flight bucket: dispatched-but-unconfirmed + literal
-    //     queued) falls below the full audience as the fake's carrier callbacks
-    //     confirm each paced leg;
+    //   - Queued (still on OUR box) falls below the full audience as the paced
+    //     fan-out dispatches each leg (it moves to Sending, then the fake's
+    //     carrier callbacks walk it Sent -> Delivered);
     //   - Sent + Delivered rises above zero.
     // Both are monotonic, so polling is race-free (they become true and stay true).
     await expect
-      .poll(async () => statValue(page, 'Sending'), {
+      .poll(async () => statValue(page, 'Queued'), {
         timeout: 15_000,
-        message: 'Sending should tick down below the audience during the send',
+        message: 'Queued should tick down below the audience during the send',
       })
       .toBeLessThan(N);
     await expect
@@ -358,18 +358,22 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
       .toBeGreaterThan(0);
 
     // (3) Terminal state - the fake's DLRs drive every slot to delivered. Disjoint
-    // buckets: Delivered = N, Sent = 0, Sending = 0 (no double-counting). Read the
-    // three chips together so the assertion reflects one consistent snapshot.
+    // buckets: Delivered = N, Sent = 0, Sending = 0, Queued = 0 (no double-
+    // counting). Read the chips together so the assertion reflects one snapshot.
     await expect
       .poll(
         async () => ({
           delivered: await statValue(page, 'Delivered'),
           sent: await statValue(page, 'Sent'),
           sending: await statValue(page, 'Sending'),
+          queued: await statValue(page, 'Queued'),
         }),
-        { timeout: 20_000, message: 'buckets should finalize to Delivered=N, Sent=0, Sending=0' },
+        {
+          timeout: 20_000,
+          message: 'buckets should finalize to Delivered=N, Sent=0, Sending=0, Queued=0',
+        },
       )
-      .toEqual({ delivered: N, sent: 0, sending: 0 });
+      .toEqual({ delivered: N, sent: 0, sending: 0, queued: 0 });
 
     // The lifecycle pill live-updated to the terminal "Sent" (no manual reload).
     // MUST be the scoped pill: the "Sent" chip <dt> always exists, so an unscoped

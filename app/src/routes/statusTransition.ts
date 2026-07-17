@@ -33,6 +33,7 @@ import {
 } from '../repos/placementDeadlinesRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import {
   createStatusTransitionService,
   EntityNotFoundError,
@@ -51,6 +52,8 @@ export interface StatusTransitionRouterDeps {
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   activityEventsRepo?: ActivityEventsRepo;
+  /** Relay-group repo for the D5 close-nag safety net (AF-1/CF-1). */
+  conversationsRepo?: ConversationsRepo;
   events?: EventBus;
   /**
    * Post-Tour & Application choke-point hook (optional, best-effort). Forwarded
@@ -75,6 +78,7 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const service =
     deps.service ??
@@ -85,6 +89,8 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       contactsRepo: contacts,
       auditRepo: audit,
       activityEventsRepo: activityEvents,
+      // D5 close-nag safety net (AF-1/CF-1): the terminal placement arm.
+      conversationsRepo: conversations,
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
       ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),

@@ -262,6 +262,58 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(res.body.tour.convertible).toBe(false);
   });
 
+  // D5 close-nag safety net (relay-number-lifecycle AF-1/CF-1): a terminal tour
+  // event (canceled or exit-gate not-a-fit) whose linked relay group is still
+  // OPEN arms the 28-day close-nag (set-if-absent). A move-forward exit does NOT
+  // (it continues into a placement and keeps the thread). Backend arm.
+  async function seedTouredTourWithOpenGroup(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    world: FakeWorld,
+    poolNumber: string,
+  ): Promise<{ tourId: string; groupId: string }> {
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    // Link the group to the tour, then move the tour to 'toured' (exit-gate ready).
+    world.toursMap.get(tourId)!.groupThreadId = group.conversationId;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    return { tourId, groupId: group.conversationId };
+  }
+
+  it('exit-gate "not a fit" (moveForward:false) arms the close-nag on the linked OPEN group (AF-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, groupId } = await seedTouredTourWithOpenGroup(app, world, '+15550100080');
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false, status: 'closed' });
+    expect((await world.conversationsRepo.getById(groupId))!.close_nag_next_at).toBeDefined();
+  });
+
+  it('a move-forward exit gate does NOT arm the close-nag (thread continues into the placement)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, groupId } = await seedTouredTourWithOpenGroup(app, world, '+15550100082');
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect((await world.conversationsRepo.getById(groupId))!.close_nag_next_at).toBeUndefined();
+  });
+
+  it('canceling a tour arms the close-nag on its linked OPEN group (AF-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550100081',
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    world.toursMap.get(tourId)!.groupThreadId = group.conversationId;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect((await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at).toBeDefined();
+  });
+
   it('rejects illegal transition: closed → scheduled (409)', async () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);

@@ -990,3 +990,118 @@ describe('statusTransition — placement stage milestone', () => {
     expect(ev[0]!.label).not.toContain('secret note');
   });
 });
+
+// D5 close-nag safety net (relay-number-lifecycle AF-1/CF-1): a terminal
+// placement move (lost / moved_in) whose linked relay group is still OPEN arms
+// the 28-day close-nag (SET-IF-ABSENT) so a group left open past the terminal
+// event surfaces on Today - a backend arm, independent of the dashboard dialog.
+// Arming a nag is NOT closing (spec D4 "nothing auto-closes" is intact).
+describe('statusTransition - D5 relay close-nag arm on terminal moves (AF-1/CF-1)', () => {
+  const CLOSE_NAG_INTERVAL_MS = 28 * 24 * 60 * 60 * 1000;
+  let world: FakeWorld;
+
+  function svcWithConversations(w: FakeWorld): StatusTransitionService {
+    return createStatusTransitionService({
+      placementsRepo: w.placementsRepo,
+      placementDeadlinesRepo: w.placementDeadlinesRepo,
+      unitsRepo: w.unitsRepo,
+      contactsRepo: w.contactsRepo,
+      auditRepo: w.auditRepo,
+      events: w.events,
+      conversationsRepo: w.conversationsRepo,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+  }
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  async function seedLinkedGroup(poolNumber = '+15550100070') {
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'awaiting_approval',
+      group_thread: group.conversationId,
+    });
+    return { group, placement };
+  }
+
+  it('a lost move arms the 28-day close-nag on the linked OPEN group (and does NOT close it)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    const before = Date.now();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    const conv = (await world.conversationsRepo.getById(group.conversationId))!;
+    expect(conv.close_nag_next_at).toBeDefined();
+    expect(Math.abs(Date.parse(conv.close_nag_next_at!) - (before + CLOSE_NAG_INTERVAL_MS))).toBeLessThan(60_000);
+    expect(conv.status).toBe('open'); // arming a nag is not closing (D4 intact)
+  });
+
+  it('a moved_in move arms the close-nag on the linked OPEN group', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'moved_in',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeDefined();
+  });
+
+  it('a NON-terminal move does NOT arm the close-nag', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'awaiting_inspection',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeUndefined();
+  });
+
+  it('a CLOSED linked group is never armed (nag stays absent)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await world.conversationsRepo.setRelayStatus(group.conversationId, 'closed', 'open');
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeUndefined();
+  });
+
+  it('an already-set nag is left UNTOUCHED (set-if-absent, never shortened/extended)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    const existing = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+    await world.conversationsRepo.setCloseNagNextAt(group.conversationId, existing);
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBe(existing);
+  });
+
+  it('a nag-arm failure NEVER fails the transition (best-effort)', async () => {
+    const { placement } = await seedLinkedGroup();
+    world.conversationsRepo.setCloseNagNextAt = async () => {
+      throw new Error('nag boom');
+    };
+    const updated = await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(updated.stage).toBe('lost'); // the transition still committed
+  });
+});
